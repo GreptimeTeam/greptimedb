@@ -19,7 +19,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Duration;
 
 use common_telemetry::debug;
-use common_telemetry::tracing::warn;
 use common_time::Timestamp;
 use datatypes::value::Value;
 use session::context::QueryContextRef;
@@ -47,6 +46,8 @@ pub struct TaskState {
     last_query_duration: Duration,
     /// Last successful execution time in unix timestamp milliseconds.
     last_exec_time_millis: Option<i64>,
+    /// First execution time in unix timestamp milliseconds, set once.
+    start_time_millis: Option<i64>,
     /// Dirty Time windows need to be updated
     /// mapping of `start -> end` and non-overlapping
     pub(crate) dirty_time_windows: DirtyTimeWindows,
@@ -80,6 +81,7 @@ impl TaskState {
             last_update_time: Instant::now(),
             last_query_duration: Duration::from_secs(0),
             last_exec_time_millis: None,
+            start_time_millis: None,
             dirty_time_windows,
             checkpoint_mode: CheckpointMode::FullSnapshot,
             pending_fenced_repair: None,
@@ -91,8 +93,18 @@ impl TaskState {
         }
     }
 
-    /// called after last query is done
-    /// `is_succ` indicate whether the last query is successful
+    /// Record the first-execution start time. Call this once, just before
+    /// the first frontend query is dispatched, not after it completes.
+    pub fn record_start_time_if_first(&mut self) {
+        if self.start_time_millis.is_none() {
+            // start_time is recorded just before the first frontend query is dispatched
+            // (pre-execution), so it may be marginally earlier than the streaming engine's
+            // start_time which is set post-execution. Both are valid approximations of
+            // "when this flow first ran".
+            self.start_time_millis = Some(common_time::util::current_time_millis());
+        }
+    }
+
     pub fn after_query_exec(&mut self, elapsed: Duration, is_succ: bool) {
         self.exec_state = ExecState::Idle;
         self.last_query_duration = elapsed;
@@ -106,12 +118,22 @@ impl TaskState {
         self.last_exec_time_millis
     }
 
+    /// First execution time in unix timestamp milliseconds, set once.
+    pub fn start_time_millis(&self) -> Option<i64> {
+        self.start_time_millis
+    }
+
     pub fn checkpoint_mode(&self) -> CheckpointMode {
         self.checkpoint_mode
     }
 
     pub fn checkpoints(&self) -> &BTreeMap<u64, u64> {
         &self.checkpoints
+    }
+
+    /// Read the live dirty-window queue without exposing TaskState internals to execution owners.
+    pub fn dirty_time_windows(&self) -> &DirtyTimeWindows {
+        &self.dirty_time_windows
     }
 
     /// Returns the in-progress fenced repair, if the task is repairing dirty
@@ -186,6 +208,25 @@ impl TaskState {
         self.pending_fenced_repair.as_ref()
     }
 
+    /// Start repairing explicit bounded windows under a frozen high `H`.
+    ///
+    /// The caller supplies the complete repair scope. Live dirty windows are
+    /// left unchanged so signals received after `H` remain separate.
+    pub fn start_fenced_repair_windows(
+        &mut self,
+        high: BTreeMap<u64, u64>,
+        windows: Vec<(Timestamp, Timestamp)>,
+    ) {
+        let mut pending_windows = self.dirty_time_windows.clone();
+        pending_windows.clean();
+        pending_windows.add_windows(windows);
+        self.pending_fenced_repair = Some(FencedRepair {
+            high,
+            pending_windows,
+        });
+        self.checkpoint_mode = CheckpointMode::FullSnapshot;
+    }
+
     /// Finish the fenced repair and promote the frozen high watermark to the
     /// checkpoint map. Incremental-disabled flows stay in FullSnapshot mode.
     pub fn finish_fenced_repair(&mut self) -> Option<BTreeMap<u64, u64>> {
@@ -237,22 +278,18 @@ impl TaskState {
         task_ctx: Option<&BatchingTask>,
     ) -> Result<Option<FilterExprInfo>, Error> {
         if let Some(repair) = self.pending_fenced_repair.as_mut() {
-            let expr = repair.pending_windows.gen_filter_exprs(
+            // Fenced windows are an explicit frozen repair scope. They must not
+            // be pruned by the moving live-data expiration boundary, and an
+            // empty repair must remain active until its high watermark is
+            // explicitly finished.
+            return repair.pending_windows.gen_filter_exprs(
                 col_name,
-                expire_lower_bound,
+                None,
                 window_size,
                 window_cnt,
                 flow_id,
                 task_ctx,
-            )?;
-            if expr.is_some() || !repair.pending_windows.is_empty() {
-                return Ok(expr);
-            }
-
-            // All pending repair windows may have expired during merge. Clear
-            // the empty repair so this call can fall back to live dirty windows
-            // instead of routing future executions to an empty queue forever.
-            self.pending_fenced_repair = None;
+            );
         }
 
         self.dirty_time_windows.gen_filter_exprs(
@@ -529,6 +566,15 @@ impl DirtyTimeWindows {
         }
     }
 
+    /// Detach all dirty windows while retaining this queue's configured limits.
+    pub(crate) fn detach(&mut self) -> Self {
+        Self {
+            windows: std::mem::take(&mut self.windows),
+            max_filter_num_per_query: self.max_filter_num_per_query,
+            time_window_merge_threshold: self.time_window_merge_threshold,
+        }
+    }
+
     /// Clean all dirty time windows, useful when can't found time window expr
     pub fn clean(&mut self) {
         self.windows.clear();
@@ -609,7 +655,7 @@ impl DirtyTimeWindows {
             let last_time_window = self.windows.last_key_value();
 
             if let Some(task_ctx) = task_ctx {
-                warn!(
+                debug!(
                     "Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. Time window expr={:?}, expire_after={:?}, first_time_window={:?}, last_time_window={:?}, the original query: {:?}",
                     task_ctx.config.flow_id,
                     self.windows.len(),
@@ -621,7 +667,7 @@ impl DirtyTimeWindows {
                     task_ctx.config.query
                 );
             } else {
-                warn!(
+                debug!(
                     "Flow id = {:?}, too many time windows: {}, only the first {} are taken for this query, the group by expression might be wrong. first_time_window={:?}, last_time_window={:?}",
                     flow_id,
                     self.windows.len(),
@@ -738,7 +784,7 @@ impl DirtyTimeWindows {
                     }
                     .fail()?
                 };
-                self.align_time_window(start, end, time_window_expr)?
+                Self::align_time_window(start, end, time_window_expr)?
             } else {
                 (start, end)
             };
@@ -769,8 +815,9 @@ impl DirtyTimeWindows {
         Ok(ret)
     }
 
-    fn align_time_window(
-        &self,
+    /// Align a time range `[start, end)` (end is optional and exclusive) to
+    /// time window boundaries defined by the time window expr.
+    pub(crate) fn align_time_window(
         start: Timestamp,
         end: Option<Timestamp>,
         time_window_expr: &TimeWindowExpr,
@@ -816,12 +863,24 @@ impl DirtyTimeWindows {
 
         // previous time window
         let mut prev_tw = None;
-        for (lower_bound, upper_bound) in std::mem::take(&mut self.windows) {
+        for (mut lower_bound, upper_bound) in std::mem::take(&mut self.windows) {
             // filter out expired time window
-            if let Some(expire_lower_bound) = expire_lower_bound
-                && lower_bound < expire_lower_bound
-            {
-                continue;
+            if let Some(expire_lower_bound) = expire_lower_bound {
+                match upper_bound {
+                    // A bounded range ending at or before the expire bound is
+                    // fully expired, drop it.
+                    Some(upper_bound) if upper_bound <= expire_lower_bound => continue,
+                    // A bounded range crossing the expire bound keeps its
+                    // still-live suffix. The expire bound is aligned to the
+                    // time window boundary by the caller, so the clipped start
+                    // stays aligned.
+                    Some(_) if lower_bound < expire_lower_bound => {
+                        lower_bound = expire_lower_bound;
+                    }
+                    // Unbounded windows keep the start-based behavior.
+                    None if lower_bound < expire_lower_bound => continue,
+                    _ => {}
+                }
             }
 
             let Some(prev_tw) = &mut prev_tw else {
@@ -847,7 +906,9 @@ impl DirtyTimeWindows {
                 .map(|dist| dist <= window_size * self.time_window_merge_threshold as i32)
                 .unwrap_or(false)
             {
-                prev_tw.1 = Some(cur_upper);
+                // Union the two windows: the current window may be contained
+                // in the previous one, so keep the larger upper bound.
+                prev_tw.1 = Some(prev_upper.max(cur_upper));
             } else {
                 new_windows.insert(prev_tw.0, prev_tw.1);
                 *prev_tw = (lower_bound, Some(cur_upper));
@@ -1135,6 +1196,105 @@ mod test {
         }
     }
 
+    #[test]
+    fn test_merge_dirty_time_windows_with_bounded_ranges() {
+        let window_size = chrono::Duration::seconds(5);
+        let testcases = vec![
+            // A contained bounded range must not shrink the containing window:
+            // [0s, 15s) merged with nested [5s, 10s) stays [0s, 15s).
+            (
+                vec![
+                    (Timestamp::new_second(0), Some(Timestamp::new_second(15))),
+                    (Timestamp::new_second(5), Some(Timestamp::new_second(10))),
+                ],
+                BTreeMap::from([(Timestamp::new_second(0), Some(Timestamp::new_second(15)))]),
+            ),
+            // An unbounded dirty window nested in a bounded range must not
+            // shrink the range either: [0s, 15s) merged with 3s (window end
+            // 8s) stays [0s, 15s).
+            (
+                vec![
+                    (Timestamp::new_second(0), Some(Timestamp::new_second(15))),
+                    (Timestamp::new_second(3), None),
+                ],
+                BTreeMap::from([(Timestamp::new_second(0), Some(Timestamp::new_second(15)))]),
+            ),
+            // Disjoint bounded ranges far apart are kept separate.
+            (
+                vec![
+                    (Timestamp::new_second(0), Some(Timestamp::new_second(5))),
+                    (Timestamp::new_second(100), Some(Timestamp::new_second(110))),
+                ],
+                BTreeMap::from([
+                    (Timestamp::new_second(0), Some(Timestamp::new_second(5))),
+                    (Timestamp::new_second(100), Some(Timestamp::new_second(110))),
+                ]),
+            ),
+            // Overlapping bounded ranges are unioned: [0s, 10s) and [5s, 20s)
+            // become [0s, 20s).
+            (
+                vec![
+                    (Timestamp::new_second(0), Some(Timestamp::new_second(10))),
+                    (Timestamp::new_second(5), Some(Timestamp::new_second(20))),
+                ],
+                BTreeMap::from([(Timestamp::new_second(0), Some(Timestamp::new_second(20)))]),
+            ),
+        ];
+
+        for (windows, expected) in testcases {
+            let mut dirty = DirtyTimeWindows::default();
+            for (start, end) in windows {
+                dirty.add_window(start, end);
+            }
+            dirty.merge_dirty_time_windows(window_size, None).unwrap();
+            assert_eq!(expected, dirty.windows);
+        }
+
+        // Expire bound handling for bounded ranges vs unbounded windows.
+        let expire_testcases = vec![
+            // A bounded range ending at the expire bound is fully expired.
+            (
+                vec![(Timestamp::new_second(0), Some(Timestamp::new_second(10)))],
+                BTreeMap::from([]),
+            ),
+            // A bounded range ending before the expire bound is fully expired.
+            (
+                vec![(Timestamp::new_second(0), Some(Timestamp::new_second(5)))],
+                BTreeMap::from([]),
+            ),
+            // A bounded range crossing the expire bound keeps its live
+            // suffix: [0s, 15s) with expire 10s becomes [10s, 15s).
+            (
+                vec![(Timestamp::new_second(0), Some(Timestamp::new_second(15)))],
+                BTreeMap::from([(Timestamp::new_second(10), Some(Timestamp::new_second(15)))]),
+            ),
+            // A bounded range starting at the expire bound is kept intact.
+            (
+                vec![(Timestamp::new_second(10), Some(Timestamp::new_second(15)))],
+                BTreeMap::from([(Timestamp::new_second(10), Some(Timestamp::new_second(15)))]),
+            ),
+            // An unbounded window starting before the expire bound is
+            // dropped, preserving the existing start-based behavior.
+            (vec![(Timestamp::new_second(5), None)], BTreeMap::from([])),
+            // An unbounded window starting at the expire bound is kept.
+            (
+                vec![(Timestamp::new_second(10), None)],
+                BTreeMap::from([(Timestamp::new_second(10), None)]),
+            ),
+        ];
+
+        for (windows, expected) in expire_testcases {
+            let mut dirty = DirtyTimeWindows::default();
+            for (start, end) in windows {
+                dirty.add_window(start, end);
+            }
+            dirty
+                .merge_dirty_time_windows(window_size, Some(Timestamp::new_second(10)))
+                .unwrap();
+            assert_eq!(expected, dirty.windows);
+        }
+    }
+
     #[tokio::test]
     async fn test_align_time_window() {
         type TimeWindow = (Timestamp, Option<Timestamp>);
@@ -1180,11 +1340,13 @@ mod test {
                 .unwrap()
                 .unwrap();
 
-            let dirty = DirtyTimeWindows::default();
             for (before_align, expected_after_align) in aligns {
-                let after_align = dirty
-                    .align_time_window(before_align.0, before_align.1, &time_window_expr)
-                    .unwrap();
+                let after_align = DirtyTimeWindows::align_time_window(
+                    before_align.0,
+                    before_align.1,
+                    &time_window_expr,
+                )
+                .unwrap();
                 assert_eq!(expected_after_align, after_align);
             }
         }
@@ -1244,6 +1406,108 @@ mod test {
         assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
         assert!(state.pending_fenced_repair().is_none());
         assert_eq!(state.dirty_time_windows.len(), 2);
+    }
+
+    #[test]
+    fn test_explicit_fenced_repair_windows_keep_live_windows_separate() {
+        let mut state = state_with_past_update(Duration::from_secs(1));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(1_000)));
+        let high = BTreeMap::from([(1, 10)]);
+        state.start_fenced_repair_windows(
+            high.clone(),
+            vec![(Timestamp::new_second(10), Timestamp::new_second(15))],
+        );
+
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert_eq!(state.pending_fenced_repair().unwrap().high(), &high);
+        assert_eq!(
+            state
+                .pending_fenced_repair()
+                .unwrap()
+                .pending_windows()
+                .len(),
+            1
+        );
+        assert_eq!(state.dirty_time_windows.len(), 1);
+
+        let filter = state
+            .gen_scoped_filter_exprs(
+                "ts",
+                Some(Timestamp::new_second(100)),
+                chrono::Duration::seconds(5),
+                1,
+                1,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            filter.time_ranges,
+            vec![(Timestamp::new_second(10), Timestamp::new_second(15))]
+        );
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(20), Some(Timestamp::new_second(25)));
+        state.restore_scoped_windows(&filter);
+
+        assert_eq!(
+            state
+                .pending_fenced_repair()
+                .unwrap()
+                .pending_windows()
+                .len(),
+            1
+        );
+        assert_eq!(state.dirty_time_windows.len(), 2);
+    }
+
+    #[test]
+    fn test_explicit_fenced_repair_keeps_empty_high_and_old_windows() {
+        let mut state = state_with_past_update(Duration::from_secs(1));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(1_000)));
+        let high = BTreeMap::from([(1, 10)]);
+        state.start_fenced_repair_windows(high.clone(), Vec::new());
+
+        assert!(
+            state
+                .gen_scoped_filter_exprs(
+                    "ts",
+                    Some(Timestamp::new_second(100)),
+                    chrono::Duration::seconds(5),
+                    1,
+                    1,
+                    None,
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(state.pending_fenced_repair().unwrap().high(), &high);
+        assert_eq!(state.dirty_time_windows.len(), 1);
+        assert_eq!(state.finish_fenced_repair(), Some(high));
+
+        state.start_fenced_repair_windows(
+            BTreeMap::from([(1, 11)]),
+            vec![(Timestamp::new_second(-20), Timestamp::new_second(-15))],
+        );
+        let filter = state
+            .gen_scoped_filter_exprs(
+                "ts",
+                Some(Timestamp::new_second(100)),
+                chrono::Duration::seconds(5),
+                1,
+                1,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            filter.time_ranges,
+            vec![(Timestamp::new_second(-20), Timestamp::new_second(-15))]
+        );
     }
 
     #[test]

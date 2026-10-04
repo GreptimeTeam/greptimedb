@@ -20,13 +20,17 @@ use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use datafusion::common::ScalarValue;
-use datafusion::physical_optimizer::pruning::PruningPredicate;
+use datafusion::physical_optimizer::pruning::PruningPredicateBuilder;
 use datafusion_common::ToDFSchema;
 use datafusion_common::pruning::PruningStatistics;
+use datafusion_common::tree_node::TreeNode;
 use datafusion_expr::expr::{Expr, InList};
+use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion_expr::{Between, BinaryExpr, Operator};
 use datafusion_physical_expr::execution_props::ExecutionProps;
-use datafusion_physical_expr::expressions::DynamicFilterPhysicalExpr;
+use datafusion_physical_expr::expressions::{
+    BinaryExpr as PhysicalBinaryExpr, DynamicFilterPhysicalExpr, is_null,
+};
 use datafusion_physical_expr::{PhysicalExpr, create_physical_expr};
 use datatypes::arrow;
 use datatypes::value::scalar_value_to_timestamp;
@@ -105,6 +109,11 @@ impl Predicate {
         });
     }
 
+    /// Removes dynamic filters while preserving the static logical expressions.
+    pub fn clear_dyn_filters(&self) {
+        self.dyn_filters.store(Arc::new(vec![]));
+    }
+
     /// Returns the logical exprs.
     pub fn exprs(&self) -> &[Expr] {
         &self.exprs
@@ -122,7 +131,18 @@ impl Predicate {
         self.dyn_filters
             .load()
             .iter()
-            .map(|e| e.current())
+            .map(|e| {
+                // Pruning must preserve NULL inputs just like decoded dynamic filtering.
+                e.children()
+                    .into_iter()
+                    .try_fold(e.current()?, |expr, child| {
+                        Ok(Arc::new(PhysicalBinaryExpr::new(
+                            expr,
+                            Operator::Or,
+                            is_null(child.clone())?,
+                        )) as Arc<dyn PhysicalExpr>)
+                    })
+            })
             .collect::<Result<Vec<_>, _>>()
             .context(error::DatafusionSnafu)
     }
@@ -142,8 +162,13 @@ impl Predicate {
         // registering variables.
         let execution_props = &ExecutionProps::new();
 
-        create_physical_expr(expr, df_schema.as_ref(), execution_props)
-            .context(error::DatafusionSnafu)
+        create_physical_expr(
+            expr,
+            df_schema.as_ref(),
+            execution_props,
+            &PhysicalPlanningContext::default(),
+        )
+        .context(error::DatafusionSnafu)
     }
 
     /// Builds physical exprs according to provided schema.
@@ -178,7 +203,10 @@ impl Predicate {
         };
 
         for expr in &physical_exprs {
-            match PruningPredicate::try_new(expr.clone(), schema.clone()) {
+            match PruningPredicateBuilder::new()
+                .with_file_schema(schema.clone())
+                .try_build(expr.clone())
+            {
                 Ok(p) => match p.prune(stats) {
                     Ok(r) => {
                         for (curr_val, res) in r.into_iter().zip(res.iter_mut()) {
@@ -190,7 +218,7 @@ impl Predicate {
                     }
                 },
                 Err(e) => {
-                    // since dynamic filter exprs could be complex, it's possible that `PruningPredicate::try_new` fails to prove anything from it. In that case, we just log it and skip pruning with this expr.
+                    // since dynamic filter exprs could be complex, it's possible that the pruning predicate builder fails to prove anything from it. In that case, we just log it and skip pruning with this expr.
                     debug!("Failed to create pruning predicate for expr: {e:?}");
                 }
             }
@@ -215,6 +243,83 @@ pub fn build_time_range_predicate(
         }
     }
     res
+}
+
+/// The outcome of strictly extracting the time range of `ts_col_name` from a
+/// scan's filters. Unlike [`build_time_range_predicate`], which quietly widens
+/// to `min_to_max` on anything it cannot parse (fine for pruning), this
+/// distinguishes "the column is not filtered at all" from "it is filtered in a
+/// way that cannot be safely turned into a range" — for callers whose contract
+/// forbids silently falling back to a default window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimeRangeExtraction {
+    /// No filter references the column.
+    Absent,
+    /// Every filter referencing the column was folded into this range, which
+    /// over-approximates the filters' satisfying set.
+    Extracted(TimestampRange),
+    /// At least one filter references the column in a shape that cannot be
+    /// safely extracted (e.g. under `OR`/`NOT`, or compared to a non-literal).
+    Unsupported,
+}
+
+/// Strictly extracts the time range of `ts_col_name` from the (implicitly
+/// AND-ed) scan filters. See [`TimeRangeExtraction`].
+pub fn extract_time_range_strict(
+    ts_col_name: &str,
+    ts_col_unit: TimeUnit,
+    filters: &[Expr],
+) -> TimeRangeExtraction {
+    let mut range: Option<TimestampRange> = None;
+    for expr in filters {
+        if !expr
+            .column_refs()
+            .iter()
+            .any(|column| column.name == ts_col_name)
+        {
+            continue;
+        }
+        // Disjunctive shapes (`OR`, `IN`) collapse disjoint ranges into their
+        // convex hull, which is not exactly representable as one contiguous
+        // range; callers deriving synthetic timestamps from the bounds would
+        // emit points inside the gaps.
+        if contains_disjunction_over_column(expr, ts_col_name) {
+            return TimeRangeExtraction::Unsupported;
+        }
+        // `Some` from the lenient extractor over-approximates the expression's
+        // satisfying set (an `AND` side it cannot parse is dropped, which only
+        // widens), so intersecting extracted conjuncts stays an
+        // over-approximation.
+        match extract_time_range_from_expr(ts_col_name, ts_col_unit, expr) {
+            Some(extracted) => {
+                range = Some(match range {
+                    Some(acc) => acc.and(&extracted),
+                    None => extracted,
+                });
+            }
+            None => return TimeRangeExtraction::Unsupported,
+        }
+    }
+    match range {
+        Some(range) => TimeRangeExtraction::Extracted(range),
+        None => TimeRangeExtraction::Absent,
+    }
+}
+
+fn contains_disjunction_over_column(expr: &Expr, ts_col_name: &str) -> bool {
+    let is_disjunction = |expr: &Expr| {
+        matches!(
+            expr,
+            Expr::BinaryExpr(BinaryExpr {
+                op: Operator::Or,
+                ..
+            }) | Expr::InList(_)
+        ) && expr
+            .column_refs()
+            .iter()
+            .any(|column| column.name == ts_col_name)
+    };
+    expr.exists(|expr| Ok(is_disjunction(expr))).unwrap_or(true)
 }
 
 /// Extract time range filter from `WHERE`/`IN (...)`/`BETWEEN` clauses.
@@ -593,6 +698,99 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_extract_time_range_strict() {
+        fn ts_lit(ms: i64) -> Expr {
+            lit(ScalarValue::TimestampMillisecond(Some(ms), None))
+        }
+        let extract =
+            |filters: &[Expr]| extract_time_range_strict("ts", TimeUnit::Millisecond, filters);
+        let range = |start: i64, end: i64| {
+            TimestampRange::new(
+                Timestamp::new_millisecond(start),
+                Timestamp::new_millisecond(end),
+            )
+            .unwrap()
+        };
+
+        // No filter references the column.
+        assert_eq!(extract(&[]), TimeRangeExtraction::Absent);
+        assert_eq!(
+            extract(&[col("host").eq(lit("a"))]),
+            TimeRangeExtraction::Absent
+        );
+
+        // Both bounds across conjuncts; unrelated filters are ignored.
+        assert_eq!(
+            extract(&[
+                col("ts").gt_eq(ts_lit(1000)),
+                col("ts").lt(ts_lit(2000)),
+                col("host").eq(lit("a")),
+            ]),
+            TimeRangeExtraction::Extracted(range(1000, 2000))
+        );
+
+        // Lower bound only / upper bound only.
+        assert_eq!(
+            extract(&[col("ts").gt_eq(ts_lit(1000))]),
+            TimeRangeExtraction::Extracted(TimestampRange::from_start(Timestamp::new_millisecond(
+                1000
+            )))
+        );
+        assert_eq!(
+            extract(&[col("ts").lt(ts_lit(2000))]),
+            TimeRangeExtraction::Extracted(TimestampRange::until_end(
+                Timestamp::new_millisecond(2000),
+                false
+            ))
+        );
+
+        // BETWEEN is inclusive on both ends.
+        assert_eq!(
+            extract(&[col("ts").between(ts_lit(1000), ts_lit(2000))]),
+            TimeRangeExtraction::Extracted(range(1000, 2001))
+        );
+
+        // Equality pins a single point.
+        assert_eq!(
+            extract(&[col("ts").eq(ts_lit(1500))]),
+            TimeRangeExtraction::Extracted(TimestampRange::single(Timestamp::new_millisecond(
+                1500
+            )))
+        );
+
+        // An unparsable side under AND only widens; the extraction stays safe.
+        assert_eq!(
+            extract(&[col("ts").gt_eq(ts_lit(1000)).and(col("ts").lt(col("t2")))]),
+            TimeRangeExtraction::Extracted(TimestampRange::from_start(Timestamp::new_millisecond(
+                1000
+            )))
+        );
+
+        // Contradictory bounds collapse to the empty range, not an error.
+        let TimeRangeExtraction::Extracted(empty) =
+            extract(&[col("ts").gt_eq(ts_lit(2000)), col("ts").lt(ts_lit(1000))])
+        else {
+            panic!("expected an extraction");
+        };
+        assert!(empty.is_empty());
+
+        // Shapes that could widen the satisfying set beyond what is extractable
+        // must be refused: OR with an unparsable side, NOT, non-literal bounds.
+        assert_eq!(
+            extract(&[col("ts").gt(ts_lit(1000)).or(col("host").eq(lit("a")))]),
+            TimeRangeExtraction::Unsupported
+        );
+        assert_eq!(
+            extract(&[!col("ts").gt(ts_lit(1000))]),
+            TimeRangeExtraction::Unsupported
+        );
+        assert_eq!(
+            extract(&[col("ts").gt_eq(col("t2"))]),
+            TimeRangeExtraction::Unsupported
+        );
+    }
+
     async fn gen_test_parquet_file(dir: &TempDir, cnt: usize) -> (String, Arc<Schema>) {
         let path = dir
             .path()
@@ -652,6 +850,118 @@ mod tests {
         let stats = RowGroupPruningStatistics::new(row_groups, &schema);
         let res = arrow_predicate.prune_with_stats(&stats, &arrow_schema);
         assert_eq!(expect, res);
+    }
+
+    #[test]
+    fn test_clear_dyn_filters_preserves_static_predicates() {
+        use datafusion_physical_expr::expressions::lit as physical_lit;
+
+        let static_exprs = vec![col("a").eq(lit(1_i32))];
+        let dynamic_filter = Arc::new(DynamicFilterPhysicalExpr::new(vec![], physical_lit(true)));
+        let predicate =
+            Predicate::with_dyn_filters(static_exprs.clone(), vec![dynamic_filter.clone()]);
+
+        predicate.clear_dyn_filters();
+        // An update from the old producer must not put its wrapper back into this execution.
+        dynamic_filter.update(physical_lit(false)).unwrap();
+
+        assert_eq!(predicate.exprs(), static_exprs);
+        assert!(predicate.dyn_filters().is_empty());
+        assert!(predicate.dyn_filter_phy_exprs().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_pruning_keeps_null_row_group() {
+        use datafusion_physical_expr::expressions::{
+            Column as PhysicalColumn, lit as physical_lit,
+        };
+
+        let dir = create_temp_dir("dynamic_pruning_nulls");
+        let path = dir.path().join("nullable.parquet");
+        let arrow_schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, true)]));
+        let file = std::fs::File::create(&path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, arrow_schema.clone(), None).unwrap();
+        for values in [[None, Some(1)], [Some(1), Some(1)], [None, None]] {
+            let batch = RecordBatch::try_new(
+                arrow_schema.clone(),
+                vec![Arc::new(Int32Array::from(values.to_vec()))],
+            )
+            .unwrap();
+            writer.write(&batch).unwrap();
+            writer.flush().unwrap();
+        }
+        writer.close().unwrap();
+        let builder =
+            ParquetRecordBatchStreamBuilder::new(tokio::fs::File::open(path).await.unwrap())
+                .await
+                .unwrap();
+        let schema = Arc::new(datatypes::schema::Schema::try_from(arrow_schema.clone()).unwrap());
+        let stats = RowGroupPruningStatistics::new(builder.metadata().row_groups(), &schema);
+        let filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(PhysicalColumn::new("a", 0))],
+            physical_lit(true),
+        ));
+        let predicate = Predicate::with_dyn_filters(vec![], vec![filter.clone()]);
+        assert_eq!(
+            predicate.prune_with_stats(&stats, &arrow_schema),
+            vec![true; 3]
+        );
+        filter
+            .update(
+                Predicate::to_physical_expr(
+                    &col("a").gt_eq(lit(10_i32)).and(col("a").lt_eq(lit(10_i32))),
+                    &arrow_schema,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        // NULL inputs must reach decoded filtering; non-NULL misses can still be pruned.
+        assert_eq!(
+            predicate.prune_with_stats(&stats, &arrow_schema),
+            vec![true, false, true],
+        );
+    }
+
+    #[tokio::test]
+    async fn test_clear_dyn_filters_restores_static_row_group_pruning() {
+        use datafusion_physical_expr::expressions::{
+            Column as PhysicalColumn, lit as physical_lit,
+        };
+
+        let dir = create_temp_dir("dynamic_pruning_reset");
+        let (path, arrow_schema) = gen_test_parquet_file(&dir, 30).await;
+        let schema = Arc::new(datatypes::schema::Schema::try_from(arrow_schema.clone()).unwrap());
+        let builder =
+            ParquetRecordBatchStreamBuilder::new(tokio::fs::File::open(path).await.unwrap())
+                .await
+                .unwrap();
+        let stats = RowGroupPruningStatistics::new(builder.metadata().row_groups(), &schema);
+        let dynamic_filter = Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(PhysicalColumn::new("cnt", 1))],
+            physical_lit(true),
+        ));
+        let predicate = Predicate::with_dyn_filters(
+            vec![col("cnt").gt_eq(lit(10_i32))],
+            vec![dynamic_filter.clone()],
+        );
+
+        dynamic_filter
+            .update(
+                Predicate::to_physical_expr(&col("cnt").gt(lit(100_i32)), &arrow_schema).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            predicate.prune_with_stats(&stats, &arrow_schema),
+            vec![false; 3]
+        );
+
+        // Reset after the prior stream is dropped: no dynamic filter remains, while the
+        // static predicate still excludes only the first row group.
+        predicate.clear_dyn_filters();
+        assert_eq!(
+            predicate.prune_with_stats(&stats, &arrow_schema),
+            vec![false, true, true]
+        );
     }
 
     fn gen_predicate(max_val: i32, op: Operator) -> Vec<Expr> {

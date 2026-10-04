@@ -287,6 +287,44 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "GC configuration mismatch: metasrv.gc.enable={}, datanode.region_engine.mito.gc.enable={}",
+        metasrv_gc_enabled,
+        datanode_gc_enabled,
+    ))]
+    GcConfigMismatch {
+        metasrv_gc_enabled: bool,
+        datanode_gc_enabled: bool,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Duplicate region engine config '{engine}' at region_engine[{first_index}] and region_engine[{duplicate_index}] (indices are zero-based); each engine type may be configured only once"
+    ))]
+    DuplicateRegionEngineConfig {
+        engine: &'static str,
+        first_index: usize,
+        duplicate_index: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid object store WAL config, {} = {:?}: {}", field, value, reason))]
+    InvalidObjectStoreWalConfig {
+        field: &'static str,
+        value: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Object store WAL is only supported in standalone mode"))]
+    ObjectStoreWalNotStandalone {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unsupported output type, expected: {}", expected))]
     UnsupportedOutput {
         expected: String,
@@ -456,8 +494,12 @@ impl ErrorExt for Error {
             | ColumnNoneDefaultValue { .. }
             | MissingRequiredField { .. }
             | RegionEngineNotFound { .. }
+            | GcConfigMismatch { .. }
             | ParseAddr { .. }
             | TomlFormat { .. }
+            | DuplicateRegionEngineConfig { .. }
+            | InvalidObjectStoreWalConfig { .. }
+            | ObjectStoreWalNotStandalone { .. }
             | BuildDatanode { .. } => StatusCode::InvalidArguments,
 
             PayloadNotExist { .. }

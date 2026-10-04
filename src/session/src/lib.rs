@@ -34,7 +34,7 @@ use common_time::timezone::get_timezone;
 use context::{ConfigurationVariables, QueryContextBuilder};
 use derive_more::Debug;
 
-use crate::context::{Channel, ConnInfo, QueryContextRef};
+use crate::context::{Channel, ConnInfo, QueryContextRef, dialect_for_channel};
 
 /// Maximum number of warnings to store per session (similar to MySQL's max_error_count)
 const MAX_WARNINGS: usize = 64;
@@ -53,13 +53,15 @@ pub struct Session {
 pub type SessionRef = Arc<Session>;
 
 /// A container for mutable items in query context
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct MutableInner {
     schema: String,
     user_info: UserInfoRef,
     timezone: Timezone,
     query_timeout: Option<Duration>,
     read_preference: ReadPreference,
+    /// Request-level WAL policy for ordinary inserts.
+    skip_wal: bool,
     #[debug(skip)]
     pub(crate) cursors: HashMap<String, Arc<RecordBatchStreamCursor>>,
     /// Warning messages for MySQL SHOW WARNINGS support
@@ -74,6 +76,7 @@ impl Default for MutableInner {
             timezone: get_timezone(None).clone(),
             query_timeout: None,
             read_preference: ReadPreference::Leader,
+            skip_wal: false,
             cursors: HashMap::with_capacity(0),
             warnings: VecDeque::new(),
         }
@@ -102,13 +105,19 @@ impl Session {
             // string here
             .current_catalog(self.catalog.read().unwrap().clone())
             .mutable_session_data(self.mutable_inner.clone())
-            .sql_dialect(self.conn_info.channel.dialect())
+            .sql_dialect(dialect_for_channel(self.conn_info.channel))
             .configuration_parameter(self.configuration_variables.clone())
             .channel(self.conn_info.channel)
             .process_id(self.process_id)
             .conn_info(self.conn_info.clone())
             .build()
             .into()
+    }
+
+    /// Cursors are shared across query contexts created from this session.
+    pub fn get_cursor(&self, name: &str) -> Option<Arc<RecordBatchStreamCursor>> {
+        let guard = self.mutable_inner.read().unwrap();
+        guard.cursors.get(name).cloned()
     }
 
     pub fn conn_info(&self) -> &ConnInfo {

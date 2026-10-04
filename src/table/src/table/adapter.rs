@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::sync::{Arc, Mutex};
 
-use common_query::stream::StreamScanAdapter;
+use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
+use common_query::stream::{StreamFactoryRef, StreamScanAdapter};
 use common_recordbatch::OrderOption;
-use datafusion::arrow::datatypes::SchemaRef as DfSchemaRef;
+use datafusion::arrow::datatypes::{DataType, Schema, SchemaRef as DfSchemaRef};
 use datafusion::catalog::Session;
 use datafusion::datasource::{TableProvider, TableType as DfTableType};
 use datafusion::error::Result as DfResult;
@@ -27,8 +27,11 @@ use datafusion_expr::TableProviderFilterPushDown as DfTableProviderFilterPushDow
 use datafusion_expr::expr::Expr;
 use datafusion_physical_expr::PhysicalSortExpr;
 use datafusion_physical_expr::expressions::Column;
-use store_api::storage::{ScanRequest, VectorSearchRequest};
+use datatypes::types::json_type::JsonNativeType;
+use snafu::ResultExt;
+use store_api::storage::ScanRequest;
 
+use crate::error::TablesRecordBatchSnafu;
 use crate::table::{TableRef, TableType};
 
 /// Adapt greptime's [TableRef] to DataFusion's [TableProvider].
@@ -39,9 +42,14 @@ pub struct DfTableProviderAdapter {
 
 impl DfTableProviderAdapter {
     pub fn new(table: TableRef) -> Self {
+        let preserve_pk_dictionary_encoding =
+            supports_pk_dictionary_encoding(&table.table_info().meta.engine);
         Self {
             table,
-            scan_req: Arc::default(),
+            scan_req: Arc::new(Mutex::new(ScanRequest {
+                preserve_pk_dictionary_encoding,
+                ..Default::default()
+            })),
         }
     }
 
@@ -53,17 +61,48 @@ impl DfTableProviderAdapter {
         self.scan_req.lock().unwrap().output_ordering = Some(order_opts.to_vec());
     }
 
-    pub fn with_vector_search_hint(&self, hint: VectorSearchRequest) {
-        self.scan_req.lock().unwrap().vector_search = Some(hint);
-    }
-
-    pub fn get_vector_search_hint(&self) -> Option<VectorSearchRequest> {
-        self.scan_req.lock().unwrap().vector_search.clone()
+    pub fn with_json_type_hint(&self, hint: std::collections::HashMap<String, JsonNativeType>) {
+        self.scan_req.lock().unwrap().json_type_hint = hint;
     }
 
     #[cfg(feature = "testing")]
     pub fn get_scan_req(&self) -> ScanRequest {
         self.scan_req.lock().unwrap().clone()
+    }
+}
+
+/// Returns whether the engine can expose its primary-key strings as dictionaries during scans.
+pub fn supports_pk_dictionary_encoding(engine: &str) -> bool {
+    matches!(engine, MITO_ENGINE | MITO2_ENGINE | METRIC_ENGINE)
+}
+
+/// Returns a schema that dictionary encodes selected UTF-8 columns.
+pub fn dictionary_encode_string_columns(
+    schema: &DfSchemaRef,
+    mut should_encode: impl FnMut(usize) -> bool,
+) -> DfSchemaRef {
+    let mut changed = false;
+    let fields = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(index, field)| {
+            if should_encode(index) && field.data_type() == &DataType::Utf8 {
+                changed = true;
+                Arc::new(field.as_ref().clone().with_data_type(DataType::Dictionary(
+                    Box::new(DataType::UInt32),
+                    Box::new(DataType::Utf8),
+                )))
+            } else {
+                field.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if changed {
+        Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
+    } else {
+        schema.clone()
     }
 }
 
@@ -77,12 +116,14 @@ impl std::fmt::Debug for DfTableProviderAdapter {
 
 #[async_trait::async_trait]
 impl TableProvider for DfTableProviderAdapter {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> DfSchemaRef {
-        self.table.schema().arrow_schema().clone()
+        let table_info = self.table.table_info();
+        let schema = self.table.schema().arrow_schema().clone();
+        if !supports_pk_dictionary_encoding(&table_info.meta.engine) {
+            return schema;
+        }
+        let primary_keys = &table_info.meta.primary_key_indices;
+        dictionary_encode_string_columns(&schema, |index| primary_keys.contains(&index))
     }
 
     fn table_type(&self) -> DfTableType {
@@ -105,11 +146,10 @@ impl TableProvider for DfTableProviderAdapter {
         limit: Option<usize>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         let filters: Vec<Expr> = filters.iter().map(Clone::clone).collect();
-        let projection_input = projection.map(|p| p.clone().into());
         let request = {
             let mut request = self.scan_req.lock().unwrap();
             request.filters = filters;
-            request.projection_input = projection_input;
+            request.projection = projection.cloned();
             request.limit = limit;
             request.clone()
         };
@@ -118,7 +158,7 @@ impl TableProvider for DfTableProviderAdapter {
             return Ok(plan);
         }
 
-        let stream = self.table.scan_to_stream(request).await?;
+        let stream = self.table.scan_to_stream(request.clone()).await?;
 
         // build sort physical expr
         let schema = stream.schema();
@@ -136,8 +176,20 @@ impl TableProvider for DfTableProviderAdapter {
                 .collect::<Vec<_>>()
         });
 
+        // The stream above is single-use, and a recursive CTE re-executes its
+        // recursive term on every iteration.
+        let data_source = self.table.data_source();
+        let stream_factory: StreamFactoryRef = Arc::new(move || {
+            data_source
+                .get_stream(request.clone())
+                .context(TablesRecordBatchSnafu)
+                .map_err(Into::into)
+        });
+
         Ok(Arc::new(
-            StreamScanAdapter::new(stream).with_output_ordering(sort_expr),
+            StreamScanAdapter::new(stream)
+                .with_output_ordering(sort_expr)
+                .with_stream_factory(stream_factory),
         ))
     }
 

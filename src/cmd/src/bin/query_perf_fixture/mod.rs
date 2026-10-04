@@ -95,9 +95,9 @@ pub async fn run() {
         Some(Command::PromRemoteWrite(rw)) => run_prom_remote_write(rw)
             .await
             .expect("prom remote write failed"),
-        Some(Command::InspectFooter(inspect)) => {
-            run_inspect_footer(inspect).expect("inspect footer failed")
-        }
+        Some(Command::InspectFooter(inspect)) => run_inspect_footer(inspect)
+            .await
+            .expect("inspect footer failed"),
         Some(Command::Plan(plan)) => run_plan(plan).expect("plan failed"),
         None => run_direct_sst(args.legacy).await,
     }
@@ -123,6 +123,28 @@ fn run_plan(args: PlanArgs) -> Result<(), Box<dyn std::error::Error>> {
             .is_some_and(|rb| rb.enabled)
         {
             return Err("scenario.remote_write.read_bench requires scenario.remote_write.storage.inspect = true".into());
+        }
+    }
+    if let Scenario::OtlpTraceLoad(s) = &case.scenario {
+        if s.load.warmup_seconds >= s.load.duration_seconds.get() {
+            return Err("scenario.load.warmup_seconds must be less than duration_seconds".into());
+        }
+        for (name, value) in [
+            (
+                "max_candidate_throughput_regression_pct",
+                s.load.thresholds.max_candidate_throughput_regression_pct,
+            ),
+            (
+                "max_candidate_mean_latency_regression_pct",
+                s.load.thresholds.max_candidate_mean_latency_regression_pct,
+            ),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(format!(
+                    "scenario.load.thresholds.{name} must be a finite non-negative number"
+                )
+                .into());
+            }
         }
     }
     println!(

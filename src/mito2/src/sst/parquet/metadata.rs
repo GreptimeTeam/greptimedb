@@ -81,7 +81,10 @@ impl<'a> MetadataLoader<'a> {
         let file_size = self.get_file_size().await?;
         let reader = ParquetMetaDataReader::new()
             .with_prefetch_hint(Some(DEFAULT_PREFETCH_SIZE as usize))
-            .with_page_index_policy(self.page_index_policy);
+            // Mito uses offset indexes to translate row selections into byte ranges. It does not
+            // consume Parquet column indexes, so decoding them only bloats the metadata cache.
+            .with_column_index_policy(PageIndexPolicy::Skip)
+            .with_offset_index_policy(self.page_index_policy);
 
         let num_reads = AtomicUsize::new(0);
         let bytes_read = AtomicU64::new(0);
@@ -141,6 +144,11 @@ pub(crate) fn extract_primary_key_range(
             return None;
         };
 
+        // Truncated bounds can end at a field boundary and masquerade as an
+        // older Dense schema. Only complete endpoints can be schema-normalized.
+        if !stats.min_is_exact() || !stats.max_is_exact() {
+            return None;
+        }
         let row_group_min = Bytes::copy_from_slice(stats.min_bytes_opt()?);
         let row_group_max = Bytes::copy_from_slice(stats.max_bytes_opt()?);
         min = Some(match min {
@@ -190,6 +198,7 @@ mod tests {
     };
     use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema};
     use datatypes::arrow::record_batch::RecordBatch;
+    use object_store::services::Memory;
     use parquet::arrow::ArrowWriter;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use parquet::file::metadata::{KeyValue, ParquetMetaData};
@@ -199,12 +208,12 @@ mod tests {
     use crate::sst::parquet::PARQUET_METADATA_KEY;
     use crate::test_util::sst_util::sst_region_metadata;
 
-    fn build_test_metadata(
+    fn build_test_parquet_bytes(
         include_primary_key: bool,
         primary_keys: &[&[u8]],
         row_group_sizes: &[usize],
         stats_enabled: EnabledStatistics,
-    ) -> ParquetMetaData {
+    ) -> Vec<u8> {
         let total_rows = row_group_sizes.iter().sum::<usize>();
         let mut fields = vec![Field::new("field", ArrowDataType::Int64, true)];
         let mut columns: Vec<ArrayRef> =
@@ -253,11 +262,44 @@ mod tests {
         }
         writer.close().unwrap();
 
-        ParquetRecordBatchReaderBuilder::try_new(Bytes::from(parquet_bytes))
-            .unwrap()
-            .metadata()
-            .as_ref()
-            .clone()
+        parquet_bytes
+    }
+
+    fn build_test_metadata(
+        include_primary_key: bool,
+        primary_keys: &[&[u8]],
+        row_group_sizes: &[usize],
+        stats_enabled: EnabledStatistics,
+    ) -> ParquetMetaData {
+        ParquetRecordBatchReaderBuilder::try_new(Bytes::from(build_test_parquet_bytes(
+            include_primary_key,
+            primary_keys,
+            row_group_sizes,
+            stats_enabled,
+        )))
+        .unwrap()
+        .metadata()
+        .as_ref()
+        .clone()
+    }
+
+    #[tokio::test]
+    async fn test_metadata_loader_only_loads_offset_indexes() {
+        let parquet_bytes = build_test_parquet_bytes(false, &[], &[4], EnabledStatistics::Page);
+        let file_size = parquet_bytes.len() as u64;
+        let file_path = "test.parquet";
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
+        object_store.write(file_path, parquet_bytes).await.unwrap();
+
+        let mut loader = MetadataLoader::new(object_store, file_path, file_size);
+        loader.with_page_index_policy(PageIndexPolicy::Required);
+        let metadata = loader
+            .load(&mut MetadataCacheMetrics::default())
+            .await
+            .unwrap();
+
+        assert!(metadata.column_index().is_none());
+        assert!(metadata.offset_index().is_some());
     }
 
     #[test]
@@ -281,6 +323,16 @@ mod tests {
         assert_eq!(
             Some((Bytes::from_static(b"aaa"), Bytes::from_static(b"zzz"))),
             extract_primary_key_range(&metadata, &region_metadata)
+        );
+    }
+
+    #[test]
+    fn test_extract_primary_key_range_rejects_truncated_statistics() {
+        let key = vec![b'a'; 1024];
+        let metadata = build_test_metadata(true, &[&key], &[1], EnabledStatistics::Page);
+        assert_eq!(
+            None,
+            extract_primary_key_range(&metadata, &sst_region_metadata())
         );
     }
 

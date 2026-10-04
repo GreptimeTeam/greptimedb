@@ -15,6 +15,8 @@
 use std::sync::Arc;
 
 use api::prom_store::remote::ReadRequest;
+use api::v1::RowInsertRequests;
+use async_trait::async_trait;
 use axum::Extension;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
@@ -30,32 +32,34 @@ use pipeline::{ContextReq, PipelineDefinition};
 use prometheus::HistogramTimer;
 use prost::Message;
 use serde::{Deserialize, Serialize};
-use session::context::{Channel, QueryContext};
+use session::context::{Channel, QueryContext, QueryContextRef};
 use snafu::prelude::*;
 use table::requests::{
-    METADATA_QUALITY_INFERRED, SEMANTIC_METRIC_METADATA_QUALITY, SEMANTIC_SIGNAL_TYPE,
-    SEMANTIC_SOURCE, SEMANTIC_SOURCE_VERSION, SIGNAL_TYPE_METRIC, SOURCE_PROMETHEUS,
+    METADATA_QUALITY_INFERRED, SEMANTIC_METRIC_METADATA_QUALITY, SEMANTIC_PER_TABLE_INDEX_KEY,
+    SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SEMANTIC_SOURCE_VERSION, SIGNAL_TYPE_METRIC,
+    SOURCE_PROMETHEUS,
 };
 
+use crate::batcher::logical_table::LogicalTablePendingRowsBatcher;
 use crate::error::{self, InternalSnafu, PipelineSnafu, Result};
 use crate::http::extractor::PipelineInfo;
 use crate::http::header::{
     CONTENT_TYPE_PROTOBUF_STR, GREPTIME_DB_HEADER_METRICS, write_cost_header_map,
 };
-use crate::pending_rows_batcher::PendingRowsBatcher;
 use crate::prom_remote_write::decode::PromSeriesProcessor;
-use crate::prom_remote_write::decode_remote_write_request;
-use crate::prom_remote_write::v2::{decode_remote_write_v2_request, into_write_requests};
+use crate::prom_remote_write::v2::decode_remote_write_v2;
 use crate::prom_remote_write::validation::PromValidationMode;
-use crate::prom_store::{extract_schema_from_read_request, snappy_decompress};
+use crate::prom_remote_write::{
+    REMOTE_WRITE_V1_VERSION, REMOTE_WRITE_V2_VERSION, decode_remote_write_request,
+};
+use crate::prom_store::{MAX_DECOMPRESSED_REQUEST_SIZE, snappy_decompress_limited};
 use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, PromStoreResponse};
+use crate::request_memory_limiter::ServerMemoryLimiter;
 
 pub const PHYSICAL_TABLE_PARAM: &str = "physical_table";
 pub const DEFAULT_ENCODING: &str = "snappy";
 pub const VM_ENCODING: &str = "zstd";
 pub const VM_PROTO_VERSION: &str = "1";
-const REMOTE_WRITE_V1_VERSION: &str = "1.0";
-const REMOTE_WRITE_V2_VERSION: &str = "2.0";
 const REMOTE_WRITE_V1_PROTO: &str = "prometheus.WriteRequest";
 const REMOTE_WRITE_V2_PROTO: &str = "io.prometheus.write.v2.Request";
 const CONTENT_TYPE_PROTO_PARAM: &str = "proto";
@@ -71,8 +75,10 @@ pub struct PromStoreState {
     pub pipeline_handler: Option<PipelineHandlerRef>,
     pub prom_store_with_metric_engine: bool,
     pub prom_validation_mode: PromValidationMode,
-    pub experimental_enable_prometheus_native_histogram: bool,
-    pub pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
+    pub pending_rows_batcher: Option<Arc<LogicalTablePendingRowsBatcher>>,
+    /// Shared request-memory limiter used to charge decompressed remote
+    /// read/write bodies against the aggregate quota.
+    pub memory_limiter: ServerMemoryLimiter,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -143,8 +149,8 @@ async fn remote_write_v1(
         pipeline_handler,
         prom_store_with_metric_engine,
         prom_validation_mode,
-        experimental_enable_prometheus_native_histogram: _,
         pending_rows_batcher,
+        memory_limiter,
     } = state;
 
     if let Some(response) = vm_proto_version_response(&params) {
@@ -153,6 +159,7 @@ async fn remote_write_v1(
 
     let (db, query_ctx, _timer) =
         prepare_remote_write_context(&params, query_ctx, REMOTE_WRITE_V1_VERSION);
+    let query_ctx = Arc::new(query_ctx);
 
     let mut processor = PromSeriesProcessor::default_processor();
 
@@ -171,30 +178,48 @@ async fn remote_write_v1(
         processor.set_pipeline(pipeline_handler, query_ctx.clone(), pipeline_def);
     }
 
-    let mut req = decode_remote_write_request(is_zstd, body, prom_validation_mode, &mut processor)?;
+    // Keep the decode guards alive until the batches are built: the
+    // `TablesBuilder` retains the decompressed buffer as its raw data.
+    let (mut decoded, decode_guards) = decode_remote_write_request(
+        is_zstd,
+        body,
+        prom_validation_mode,
+        &mut processor,
+        &memory_limiter,
+    )
+    .await?;
 
+    // Parsing borrows the decode buffer, but row building copies out of it: tag
+    // values through `decode_string`, column names through `to_owned`, and the
+    // borrowing `col_indexes` dies inside `as_insert_requests`. Nothing below
+    // references the buffer, so it need not span the write — the same goes for
+    // the decode guards charged against the aggregate memory quota.
     let req = if processor.use_pipeline {
+        drop(decoded);
         processor.exec_pipeline().await?
     } else {
-        req.as_insert_requests()
+        let req = decoded.as_insert_requests();
+        drop(decoded);
+        req
     };
+    drop(decode_guards);
+    let batches = into_prom_write_batches(req, query_ctx);
 
     let outcome = match write_prometheus_rows_with_progress(
         prom_store_handler,
         pending_rows_batcher,
         prom_store_with_metric_engine,
-        query_ctx,
-        req,
+        batches,
     )
     .await
     {
         Ok(outcome) => outcome,
         Err(error) => {
-            record_remote_write_samples(&db, error.rows_written);
+            record_remote_write_samples(&db, REMOTE_WRITE_V1_VERSION, error.rows_written);
             return Err(error.error);
         }
     };
-    record_remote_write_samples(&db, outcome.rows_written);
+    record_remote_write_samples(&db, REMOTE_WRITE_V1_VERSION, outcome.rows_written);
 
     Ok((
         StatusCode::NO_CONTENT,
@@ -216,8 +241,8 @@ async fn remote_write_v2(
         pipeline_handler: _,
         prom_store_with_metric_engine,
         prom_validation_mode: _,
-        experimental_enable_prometheus_native_histogram,
         pending_rows_batcher,
+        memory_limiter,
     } = state;
 
     if let Some(response) = vm_proto_version_response(&params) {
@@ -228,101 +253,58 @@ async fn remote_write_v2(
     // optional pipeline parameter and ingest samples directly.
     let _ = pipeline_info;
 
-    let (db, query_ctx, _timer) =
+    let (db, mut query_ctx, _timer) =
         prepare_remote_write_context(&params, query_ctx, REMOTE_WRITE_V2_VERSION);
 
-    let request = match decode_remote_write_v2_request(is_zstd, body) {
-        Ok(request) => request,
-        Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
-    };
-    if !experimental_enable_prometheus_native_histogram && request_has_native_histograms(&request) {
-        return Ok(remote_write_v2_error_response(
-            error::InvalidPromRemoteRequestSnafu {
-                msg: "prometheus remote write v2 native histogram ingestion is experimental; set http.experimental_enable_prometheus_native_histogram = true to enable it"
-                    .to_string(),
-            }
-            .build(),
-            0,
-            0,
-            0,
-        ));
-    }
-    let req = match into_write_requests(request) {
+    let req = match decode_remote_write_v2(is_zstd, body, &memory_limiter).await {
         Ok(req) => req,
         Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
     };
-
-    let outcome = if req.sample_count > 0 {
-        match write_prometheus_rows_with_progress(
-            prom_store_handler.clone(),
-            pending_rows_batcher.clone(),
-            prom_store_with_metric_engine,
-            query_ctx.clone(),
-            req.samples,
-        )
-        .await
-        {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                record_remote_write_samples(&db, error.rows_written);
-                return Ok(remote_write_v2_error_response(
-                    error.error,
-                    error.rows_written,
-                    0,
-                    0,
-                ));
-            }
-        }
-    } else {
-        PromWriteOutcome {
-            write_cost: 0,
-            rows_written: 0,
+    // The v2 per-series metadata upgrades the written tables' semantic options
+    // (metric type/unit, declared quality) at auto-create time.
+    if let Some(index) = req.semantic_index.encode(&query_ctx.current_schema()) {
+        query_ctx.set_extension(SEMANTIC_PER_TABLE_INDEX_KEY, index);
+    }
+    let query_ctx = Arc::new(query_ctx);
+    let sample_count = req.sample_count;
+    let histogram_count = req.histogram_count;
+    let sample_batches = into_prom_write_batches(req.samples, query_ctx.clone());
+    let histogram_batches = into_prom_write_batches(req.histograms, query_ctx);
+    let outcome = match write_prometheus_v2_rows_with_progress(
+        prom_store_handler,
+        pending_rows_batcher,
+        prom_store_with_metric_engine,
+        sample_batches,
+        histogram_batches,
+    )
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            record_remote_write_samples(&db, REMOTE_WRITE_V2_VERSION, error.samples_written);
+            record_remote_write_histograms(&db, REMOTE_WRITE_V2_VERSION, error.histograms_written);
+            return Ok(remote_write_v2_error_response(
+                error.error,
+                error.samples_written,
+                error.histograms_written,
+                0,
+            ));
         }
     };
-    let samples_written = outcome.rows_written;
-    record_remote_write_samples(&db, samples_written);
-    let mut histograms_written = 0;
-    let mut write_cost = outcome.write_cost;
+    debug_assert_eq!(outcome.samples_written, sample_count);
+    debug_assert_eq!(outcome.histograms_written, histogram_count);
+    record_remote_write_samples(&db, REMOTE_WRITE_V2_VERSION, outcome.samples_written);
+    record_remote_write_histograms(&db, REMOTE_WRITE_V2_VERSION, outcome.histograms_written);
 
-    if req.histogram_count > 0 {
-        let outcome = match write_prometheus_rows_with_progress(
-            prom_store_handler,
-            None,
-            prom_store_with_metric_engine,
-            query_ctx,
-            req.histograms,
-        )
-        .await
-        {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                record_remote_write_histograms(&db, error.rows_written);
-                return Ok(remote_write_v2_error_response(
-                    error.error,
-                    samples_written,
-                    error.rows_written,
-                    0,
-                ));
-            }
-        };
-        histograms_written = outcome.rows_written;
-        record_remote_write_histograms(&db, histograms_written);
-        write_cost += outcome.write_cost;
-    }
-
-    let mut headers = write_cost_header_map(write_cost);
-    append_remote_write_v2_written_headers(&mut headers, samples_written, histograms_written, 0);
+    let mut headers = write_cost_header_map(outcome.write_cost);
+    append_remote_write_v2_written_headers(
+        &mut headers,
+        outcome.samples_written,
+        outcome.histograms_written,
+        0,
+    );
 
     Ok((StatusCode::NO_CONTENT, headers).into_response())
-}
-
-fn request_has_native_histograms(
-    request: &api::greptime_proto::io::prometheus::write::v2::Request,
-) -> bool {
-    request
-        .timeseries
-        .iter()
-        .any(|series| !series.histograms.is_empty())
 }
 
 fn vm_proto_version_response(params: &RemoteWriteQuery) -> Option<axum::response::Response> {
@@ -332,11 +314,14 @@ fn vm_proto_version_response(params: &RemoteWriteQuery) -> Option<axum::response
         .map(|_| VM_PROTO_VERSION.into_response())
 }
 
+/// Returns the context still un-shared so the caller can attach
+/// request-derived extensions (the v2 per-table metadata index) before
+/// wrapping it in an `Arc`.
 fn prepare_remote_write_context(
     params: &RemoteWriteQuery,
     mut query_ctx: QueryContext,
     remote_write_version: &str,
-) -> (String, Arc<QueryContext>, HistogramTimer) {
+) -> (String, QueryContext, HistogramTimer) {
     let db = params.db.clone().unwrap_or_default();
     query_ctx.set_channel(Channel::Prometheus);
     let physical_table = params
@@ -347,14 +332,14 @@ fn prepare_remote_write_context(
     // Stamp the Prometheus metric identity here, before `as_req_iter` splits into the
     // batched and direct write paths, so both inherit it (the batched path bypasses
     // `PromStoreProtocolHandler::write`). Prometheus remote-write metadata is weak
-    // here, so the type is inferred from naming.
+    // here, so the type is inferred from naming; v2 upgrades tables whose series
+    // carry inline metadata via the per-table index.
     query_ctx.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC);
     query_ctx.set_extension(SEMANTIC_SOURCE, SOURCE_PROMETHEUS);
     query_ctx.set_extension(SEMANTIC_SOURCE_VERSION, remote_write_version);
     query_ctx.set_extension(SEMANTIC_METRIC_METADATA_QUALITY, METADATA_QUALITY_INFERRED);
-    let query_ctx = Arc::new(query_ctx);
     let timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
-        .with_label_values(&[db.as_str()])
+        .with_label_values(&[db.as_str(), remote_write_version])
         .start_timer();
 
     (db, query_ctx, timer)
@@ -370,59 +355,133 @@ struct PromWriteError {
     rows_written: u64,
 }
 
-/// Writes one decoded PRW batch and keeps the number of persisted rows on error.
+struct PromWriteV2Outcome {
+    write_cost: usize,
+    samples_written: u64,
+    histograms_written: u64,
+}
+
+struct PromWriteV2Error {
+    error: error::Error,
+    samples_written: u64,
+    histograms_written: u64,
+}
+
+type PromWriteBatch = (QueryContextRef, RowInsertRequests);
+
+#[async_trait]
+trait PromWriteBatcher: Send + Sync {
+    async fn submit(&self, requests: RowInsertRequests, ctx: QueryContextRef) -> Result<u64>;
+}
+
+#[async_trait]
+impl PromWriteBatcher for LogicalTablePendingRowsBatcher {
+    async fn submit(&self, requests: RowInsertRequests, ctx: QueryContextRef) -> Result<u64> {
+        LogicalTablePendingRowsBatcher::submit(self, requests, ctx).await
+    }
+}
+
+fn into_prom_write_batches(req: ContextReq, query_ctx: QueryContextRef) -> Vec<PromWriteBatch> {
+    req.as_req_iter(query_ctx).collect()
+}
+
+async fn preflight_prometheus_rows(
+    prom_store_handler: &PromStoreProtocolHandlerRef,
+    batches: &mut [PromWriteBatch],
+) -> Result<()> {
+    for (ctx, reqs) in batches.iter_mut() {
+        prom_store_handler.pre_write(reqs, ctx.clone()).await?;
+        // Detach from context clones retained by pre-write hooks so the checked
+        // schema cannot change before this prepared batch is written.
+        *ctx = Arc::new(ctx.fork());
+    }
+    operator::insert::admit_row_insert_batches(batches)
+        .await
+        .map_err(common_error::ext::BoxedError::new)
+        .context(error::ExecuteGrpcQuerySnafu)?;
+    Ok(())
+}
+
+/// Writes preflighted PRW batches and keeps the number of persisted rows on error.
 ///
 /// The v2 handler uses that partial progress to return Prometheus' written
 /// sample/histogram headers even when a later table write fails.
 async fn write_prometheus_rows_with_progress(
     prom_store_handler: PromStoreProtocolHandlerRef,
-    pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
+    pending_rows_batcher: Option<Arc<LogicalTablePendingRowsBatcher>>,
     prom_store_with_metric_engine: bool,
-    query_ctx: Arc<QueryContext>,
-    req: ContextReq,
+    mut batches: Vec<PromWriteBatch>,
 ) -> std::result::Result<PromWriteOutcome, PromWriteError> {
     if prom_store_with_metric_engine && let Some(batcher) = pending_rows_batcher {
-        let mut rows_written = 0;
-        for (temp_ctx, reqs) in req.as_req_iter(query_ctx) {
-            prom_store_handler
-                .pre_write(&reqs, temp_ctx.clone())
-                .await
-                .map_err(|error| PromWriteError {
-                    error,
-                    rows_written,
-                })?;
-            let rows = batcher
-                .submit(reqs, temp_ctx)
-                .await
-                .map_err(|error| PromWriteError {
-                    error,
-                    rows_written,
-                })?;
-            rows_written += rows;
-        }
-        return Ok(PromWriteOutcome {
-            write_cost: 0,
-            rows_written,
-        });
-    }
-
-    let mut write_cost = 0;
-    let mut rows_written = 0;
-    for (temp_ctx, reqs) in req.as_req_iter(query_ctx) {
-        let cnt: u64 = reqs
-            .inserts
-            .iter()
-            .filter_map(|s| s.rows.as_ref().map(|r| r.rows.len() as u64))
-            .sum();
-        let output = prom_store_handler
-            .write(reqs, temp_ctx, prom_store_with_metric_engine)
+        // Preflight before the bulk eligibility decision: pre_write hooks
+        // may redirect the contexts (e.g. to a per-tenant schema), so
+        // eligibility must be evaluated against the prepared batches —
+        // and the fallback below reuses them without re-running hooks or
+        // admission.
+        preflight_prometheus_rows(&prom_store_handler, &mut batches)
             .await
             .map_err(|error| PromWriteError {
                 error,
-                rows_written,
+                rows_written: 0,
             })?;
+        // Destinations bound to another physical table must stay on the
+        // ordinary insert path, which routes per destination; time index
+        // units need no check — the bulk encode converts each request to
+        // its destination's unit.
+        if batcher.accepts_bulk_destinations(batches.iter()).await {
+            let mut rows_written = 0;
+            for (temp_ctx, reqs) in batches {
+                let rows =
+                    batcher
+                        .submit(reqs, temp_ctx)
+                        .await
+                        .map_err(|error| PromWriteError {
+                            error,
+                            rows_written,
+                        })?;
+                rows_written += rows;
+            }
+            return Ok(PromWriteOutcome {
+                write_cost: 0,
+                rows_written,
+            });
+        }
+        return write_prepared_prometheus_rows_with_progress(
+            prom_store_handler,
+            batches,
+            prom_store_with_metric_engine,
+        )
+        .await;
+    }
+
+    let row_counts = batches
+        .iter()
+        .map(|(_, request)| prom_write_row_count(request))
+        .collect::<Vec<_>>();
+    let batch_count = batches.len();
+    let outputs = prom_store_handler
+        .write_all(batches, prom_store_with_metric_engine)
+        .await
+        .map_err(|error| PromWriteError {
+            error,
+            rows_written: 0,
+        })?;
+    let output_count = outputs.len();
+    let mut write_cost = 0;
+    let mut rows_written = 0;
+    for (output, rows) in outputs.into_iter().zip(row_counts) {
+        let output = output.map_err(|error| PromWriteError {
+            error,
+            rows_written,
+        })?;
         write_cost += output.meta.cost;
-        rows_written += cnt;
+        rows_written += rows;
+    }
+    if output_count != batch_count {
+        return Err(PromWriteError {
+            error: incomplete_prom_write_error(),
+            rows_written,
+        });
     }
 
     Ok(PromWriteOutcome {
@@ -431,21 +490,254 @@ async fn write_prometheus_rows_with_progress(
     })
 }
 
-fn record_remote_write_samples(db: &str, rows: u64) {
+/// Writes already-preflighted batches through the ordinary (prepared) write
+/// path; the pre_write hooks and admission have already run.
+async fn write_prepared_prometheus_rows_with_progress(
+    prom_store_handler: PromStoreProtocolHandlerRef,
+    batches: Vec<PromWriteBatch>,
+    prom_store_with_metric_engine: bool,
+) -> std::result::Result<PromWriteOutcome, PromWriteError> {
+    let mut write_cost = 0;
+    let mut rows_written = 0;
+    for (ctx, request) in batches {
+        let rows = prom_write_row_count(&request);
+        let output = prom_store_handler
+            .write_prepared(request, ctx, prom_store_with_metric_engine)
+            .await
+            .map_err(|error| PromWriteError {
+                error,
+                rows_written,
+            })?;
+        write_cost += output.meta.cost;
+        rows_written += rows;
+    }
+    Ok(PromWriteOutcome {
+        write_cost,
+        rows_written,
+    })
+}
+
+async fn write_prometheus_v2_rows_with_progress(
+    prom_store_handler: PromStoreProtocolHandlerRef,
+    pending_rows_batcher: Option<Arc<LogicalTablePendingRowsBatcher>>,
+    prom_store_with_metric_engine: bool,
+    sample_batches: Vec<PromWriteBatch>,
+    histogram_batches: Vec<PromWriteBatch>,
+) -> std::result::Result<PromWriteV2Outcome, PromWriteV2Error> {
+    if histogram_batches.is_empty() {
+        return write_prometheus_rows_with_progress(
+            prom_store_handler,
+            pending_rows_batcher,
+            prom_store_with_metric_engine,
+            sample_batches,
+        )
+        .await
+        .map(|outcome| PromWriteV2Outcome {
+            write_cost: outcome.write_cost,
+            samples_written: outcome.rows_written,
+            histograms_written: 0,
+        })
+        .map_err(|error| PromWriteV2Error {
+            error: error.error,
+            samples_written: error.rows_written,
+            histograms_written: 0,
+        });
+    }
+
+    let sample_batch_count = sample_batches.len();
+    let mut batches = sample_batches;
+    batches.extend(histogram_batches);
+
+    if prom_store_with_metric_engine && let Some(batcher) = pending_rows_batcher {
+        // Same ordering as the v1 path: preflight (which may redirect the
+        // contexts) before the bulk eligibility decision, and the fallback
+        // reuses the prepared batches without re-running hooks or admission.
+        preflight_prometheus_rows(&prom_store_handler, &mut batches)
+            .await
+            .map_err(|error| PromWriteV2Error {
+                error,
+                samples_written: 0,
+                histograms_written: 0,
+            })?;
+        // Destinations bound to another physical table must stay on the
+        // ordinary insert path, which routes per destination; time index
+        // units need no check — the bulk encode converts each request to
+        // its destination's unit.
+        if batcher.accepts_bulk_destinations(batches.iter()).await {
+            return write_batched_prometheus_v2_rows_with_progress(
+                prom_store_handler,
+                batcher.as_ref(),
+                prom_store_with_metric_engine,
+                sample_batch_count,
+                batches,
+            )
+            .await;
+        }
+        return write_prepared_prometheus_v2_rows_with_progress(
+            prom_store_handler,
+            batches,
+            sample_batch_count,
+            prom_store_with_metric_engine,
+        )
+        .await;
+    }
+
+    let row_counts = batches
+        .iter()
+        .map(|(_, request)| prom_write_row_count(request))
+        .collect::<Vec<_>>();
+    let batch_count = batches.len();
+    let outputs = prom_store_handler
+        .write_all(batches, prom_store_with_metric_engine)
+        .await
+        .map_err(|error| PromWriteV2Error {
+            error,
+            samples_written: 0,
+            histograms_written: 0,
+        })?;
+
+    let mut write_cost = 0;
+    let mut samples_written = 0;
+    let mut histograms_written = 0;
+    let mut output_count = 0;
+    for (index, (output, rows)) in outputs.into_iter().zip(row_counts).enumerate() {
+        let output = output.map_err(|error| PromWriteV2Error {
+            error,
+            samples_written,
+            histograms_written,
+        })?;
+        write_cost += output.meta.cost;
+        if index < sample_batch_count {
+            samples_written += rows;
+        } else {
+            histograms_written += rows;
+        }
+        output_count += 1;
+    }
+    if output_count != batch_count {
+        return Err(PromWriteV2Error {
+            error: incomplete_prom_write_error(),
+            samples_written,
+            histograms_written,
+        });
+    }
+
+    Ok(PromWriteV2Outcome {
+        write_cost,
+        samples_written,
+        histograms_written,
+    })
+}
+
+/// Writes already-preflighted batches through the ordinary (prepared) write
+/// path with v2 partial-progress accounting; the pre_write hooks and
+/// admission have already run.
+async fn write_prepared_prometheus_v2_rows_with_progress(
+    prom_store_handler: PromStoreProtocolHandlerRef,
+    batches: Vec<PromWriteBatch>,
+    sample_batch_count: usize,
+    prom_store_with_metric_engine: bool,
+) -> std::result::Result<PromWriteV2Outcome, PromWriteV2Error> {
+    let mut write_cost = 0;
+    let mut samples_written = 0;
+    let mut histograms_written = 0;
+    for (index, (ctx, request)) in batches.into_iter().enumerate() {
+        let rows = prom_write_row_count(&request);
+        let output = prom_store_handler
+            .write_prepared(request, ctx, prom_store_with_metric_engine)
+            .await
+            .map_err(|error| PromWriteV2Error {
+                error,
+                samples_written,
+                histograms_written,
+            })?;
+        write_cost += output.meta.cost;
+        if index < sample_batch_count {
+            samples_written += rows;
+        } else {
+            histograms_written += rows;
+        }
+    }
+    Ok(PromWriteV2Outcome {
+        write_cost,
+        samples_written,
+        histograms_written,
+    })
+}
+
+async fn write_batched_prometheus_v2_rows_with_progress<B: PromWriteBatcher + ?Sized>(
+    prom_store_handler: PromStoreProtocolHandlerRef,
+    batcher: &B,
+    prom_store_with_metric_engine: bool,
+    sample_batch_count: usize,
+    batches: Vec<PromWriteBatch>,
+) -> std::result::Result<PromWriteV2Outcome, PromWriteV2Error> {
+    let mut samples_written = 0;
+    let mut histograms_written = 0;
+    let mut write_cost = 0;
+    let mut batches = batches.into_iter();
+    for (ctx, requests) in batches.by_ref().take(sample_batch_count) {
+        let rows = batcher
+            .submit(requests, ctx)
+            .await
+            .map_err(|error| PromWriteV2Error {
+                error,
+                samples_written,
+                histograms_written,
+            })?;
+        samples_written += rows;
+    }
+    for (ctx, requests) in batches {
+        let rows = prom_write_row_count(&requests);
+        let output = prom_store_handler
+            .write_prepared(requests, ctx, prom_store_with_metric_engine)
+            .await
+            .map_err(|error| PromWriteV2Error {
+                error,
+                samples_written,
+                histograms_written,
+            })?;
+        write_cost += output.meta.cost;
+        histograms_written += rows;
+    }
+
+    Ok(PromWriteV2Outcome {
+        write_cost,
+        samples_written,
+        histograms_written,
+    })
+}
+
+fn prom_write_row_count(request: &RowInsertRequests) -> u64 {
+    request
+        .inserts
+        .iter()
+        .filter_map(|insert| insert.rows.as_ref().map(|rows| rows.rows.len() as u64))
+        .sum()
+}
+
+fn incomplete_prom_write_error() -> error::Error {
+    InternalSnafu {
+        err_msg: "prometheus write handler returned before processing every batch".to_string(),
+    }
+    .build()
+}
+
+fn record_remote_write_samples(db: &str, version: &str, rows: u64) {
     if rows == 0 {
         return;
     }
     crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
-        .with_label_values(&[db])
+        .with_label_values(&[db, version])
         .inc_by(rows);
 }
 
-fn record_remote_write_histograms(db: &str, rows: u64) {
+fn record_remote_write_histograms(db: &str, version: &str, rows: u64) {
     if rows == 0 {
         return;
     }
     crate::metrics::PROM_STORE_REMOTE_WRITE_HISTOGRAMS
-        .with_label_values(&[db])
+        .with_label_values(&[db, version])
         .inc_by(rows);
 }
 
@@ -564,12 +856,7 @@ pub async fn remote_read(
     let db = params.db.clone().unwrap_or_default();
     query_ctx.set_channel(Channel::Prometheus);
 
-    let request = decode_remote_read_request(body).await?;
-
-    // Extract schema from special labels and set it in query context
-    if let Some(schema) = extract_schema_from_read_request(&request) {
-        query_ctx.set_current_schema(&schema);
-    }
+    let request = decode_remote_read_request(body, &state.memory_limiter).await?;
 
     let query_ctx = Arc::new(query_ctx);
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_READ_ELAPSED
@@ -579,16 +866,23 @@ pub async fn remote_read(
     state.prom_store_handler.read(request, query_ctx).await
 }
 
-async fn decode_remote_read_request(body: Bytes) -> Result<ReadRequest> {
-    let buf = snappy_decompress(&body[..])?;
+async fn decode_remote_read_request(
+    body: Bytes,
+    limiter: &ServerMemoryLimiter,
+) -> Result<ReadRequest> {
+    // Holds the memory permits for the decompressed bytes until the protobuf
+    // decoding is finished.
+    let buf = snappy_decompress_limited(&body[..], MAX_DECOMPRESSED_REQUEST_SIZE, limiter).await?;
 
     ReadRequest::decode(&buf[..]).context(error::DecodePromRemoteRequestSnafu)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use api::prom_store::remote::ReadRequest;
-    use api::v1::RowInsertRequests;
+    use api::v1::{Row, RowInsertRequest, Rows};
     use async_trait::async_trait;
     use common_query::Output;
     use pipeline::GreptimePipelineParams;
@@ -596,7 +890,6 @@ mod tests {
 
     use super::*;
     use crate::prom_remote_write::validation::PromValidationMode;
-    use crate::prom_store::Metrics;
     use crate::query_handler::PromStoreProtocolHandler;
 
     #[test]
@@ -675,6 +968,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_mixed_v2_preflights_all_then_batches_only_samples() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let handler: PromStoreProtocolHandlerRef = Arc::new(RecordingPromStoreHandler {
+            events: events.clone(),
+        });
+        let batcher = RecordingPromWriteBatcher {
+            events: events.clone(),
+        };
+
+        let mut batches = vec![
+            test_prom_write_batch("sample"),
+            test_prom_write_batch("histogram"),
+        ];
+        // The caller preflights before choosing the bulk path; the batched
+        // writer consumes the prepared batches.
+        preflight_prometheus_rows(&handler, &mut batches)
+            .await
+            .unwrap();
+        let Ok(outcome) =
+            write_batched_prometheus_v2_rows_with_progress(handler, &batcher, true, 1, batches)
+                .await
+        else {
+            panic!("mixed remote write should succeed")
+        };
+
+        assert_eq!(1, outcome.samples_written);
+        assert_eq!(1, outcome.histograms_written);
+        assert_eq!(
+            vec![
+                "pre:sample".to_string(),
+                "pre:histogram".to_string(),
+                "batch:sample".to_string(),
+                "direct:histogram".to_string(),
+            ],
+            *events.lock().unwrap()
+        );
+    }
+
+    fn test_prom_write_batch(table_name: &str) -> PromWriteBatch {
+        (
+            Arc::new(QueryContext::with("greptime", "public")),
+            RowInsertRequests {
+                inserts: vec![RowInsertRequest {
+                    table_name: table_name.to_string(),
+                    rows: Some(Rows {
+                        schema: Vec::new(),
+                        rows: vec![Row { values: Vec::new() }],
+                    }),
+                }],
+            },
+        )
+    }
+
+    fn record_write_event(events: &Mutex<Vec<String>>, phase: &str, request: &RowInsertRequests) {
+        events.lock().unwrap().push(format!(
+            "{phase}:{}",
+            request.inserts.first().unwrap().table_name
+        ));
+    }
+
+    struct RecordingPromWriteBatcher {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl PromWriteBatcher for RecordingPromWriteBatcher {
+        async fn submit(&self, requests: RowInsertRequests, ctx: QueryContextRef) -> Result<u64> {
+            assert_eq!(ctx.write_rows_to_admit("greptime", "public", 1), 0);
+            record_write_event(&self.events, "batch", &requests);
+            Ok(prom_write_row_count(&requests))
+        }
+    }
+
+    struct RecordingPromStoreHandler {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl PromStoreProtocolHandler for RecordingPromStoreHandler {
+        async fn pre_write(
+            &self,
+            request: &RowInsertRequests,
+            _ctx: QueryContextRef,
+        ) -> Result<()> {
+            record_write_event(&self.events, "pre", request);
+            Ok(())
+        }
+
+        async fn write_prepared(
+            &self,
+            request: RowInsertRequests,
+            ctx: QueryContextRef,
+            _with_metric_engine: bool,
+        ) -> Result<Output> {
+            assert_eq!(ctx.write_rows_to_admit("greptime", "public", 1), 0);
+            record_write_event(&self.events, "direct", &request);
+            Ok(Output::new_with_affected_rows(0))
+        }
+
+        async fn write(
+            &self,
+            _request: RowInsertRequests,
+            _ctx: QueryContextRef,
+            _with_metric_engine: bool,
+        ) -> Result<Output> {
+            unreachable!("mixed v2 writes use preflighted execution")
+        }
+
+        async fn write_all(
+            &self,
+            _requests: Vec<(QueryContextRef, RowInsertRequests)>,
+            _with_metric_engine: bool,
+        ) -> Result<Vec<Result<Output>>> {
+            unreachable!("mixed v2 writes preserve sample and histogram routing")
+        }
+
+        async fn read(
+            &self,
+            _request: ReadRequest,
+            _ctx: QueryContextRef,
+        ) -> Result<PromStoreResponse> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
     async fn test_remote_write_v2_ignores_pipeline() {
         let request = api::greptime_proto::io::prometheus::write::v2::Request {
             symbols: vec![String::new()],
@@ -710,8 +1129,8 @@ mod tests {
             pipeline_handler: None,
             prom_store_with_metric_engine: false,
             prom_validation_mode: PromValidationMode::Strict,
-            experimental_enable_prometheus_native_histogram: false,
             pending_rows_batcher: None,
+            memory_limiter: ServerMemoryLimiter::default(),
         }
     }
 
@@ -727,6 +1146,23 @@ mod tests {
 
     #[async_trait]
     impl PromStoreProtocolHandler for NoopPromStoreHandler {
+        async fn pre_write(
+            &self,
+            _request: &RowInsertRequests,
+            _ctx: QueryContextRef,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn write_prepared(
+            &self,
+            _request: RowInsertRequests,
+            _ctx: QueryContextRef,
+            _with_metric_engine: bool,
+        ) -> Result<Output> {
+            unreachable!("empty remote write v2 request should not write")
+        }
+
         async fn write(
             &self,
             _request: RowInsertRequests,
@@ -736,15 +1172,20 @@ mod tests {
             unreachable!("empty remote write v2 request should not write")
         }
 
+        async fn write_all(
+            &self,
+            requests: Vec<(QueryContextRef, RowInsertRequests)>,
+            _with_metric_engine: bool,
+        ) -> Result<Vec<Result<Output>>> {
+            assert!(requests.is_empty());
+            Ok(Vec::new())
+        }
+
         async fn read(
             &self,
             _request: ReadRequest,
             _ctx: QueryContextRef,
         ) -> Result<PromStoreResponse> {
-            unimplemented!()
-        }
-
-        async fn ingest_metrics(&self, _metrics: Metrics) -> Result<()> {
             unimplemented!()
         }
     }

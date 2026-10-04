@@ -28,6 +28,7 @@ use clap::Parser;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::{Configurable, metadata_store_dir};
+use common_datasource::object_store::{LocalFileAccess, configured_local_path};
 use common_error::ext::BoxedError;
 use common_meta::DatanodeId;
 use common_meta::cache::{LayeredCacheRegistryBuilder, LayeredCacheRegistryRef};
@@ -43,7 +44,7 @@ use common_meta::procedure_executor::{LocalProcedureExecutor, ProcedureExecutorR
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::{Sequence, SequenceBuilder};
-use common_meta::wal_provider::{WalProviderRef, build_wal_provider};
+use common_meta::wal_provider::{WalProvider, WalProviderRef, build_wal_provider};
 use common_options::plugin_options::StandaloneFlag;
 use common_procedure::ProcedureManagerRef;
 use common_query::prelude::set_default_prefix;
@@ -51,15 +52,16 @@ use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_time::timezone::set_default_timezone;
 use common_version::{short_version, verbose_version};
-use datanode::config::DatanodeOptions;
+use common_wal::config::DatanodeWalConfig;
+use common_wal::config::object_store::STANDALONE_GENERATION;
+use datanode::config::{DatanodeOptions, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::region_server::RegionServer;
 use flow::{
     FlowDualEngineRef, FlownodeBuilder, FlownodeInstance, FlownodeOptions, FrontendClient,
-    FrontendInvoker, GrpcQueryHandlerWithBoxedError,
+    GrpcQueryHandlerWithBoxedError,
 };
 use frontend::frontend::Frontend;
-use frontend::instance::StandaloneDatanodeManager;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
@@ -69,9 +71,12 @@ use plugins::frontend::context::{
 };
 use plugins::standalone::context::DdlManagerConfigureContext;
 use servers::tls::{TlsMode, TlsOption, merge_tls_option};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use standalone::options::StandaloneOptions;
-use standalone::{StandaloneInformationExtension, StandaloneRepartitionProcedureFactory};
+use standalone::{
+    StandaloneDatanodeManager, StandaloneInformationExtension,
+    StandaloneRepartitionProcedureFactory,
+};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::error::{OtherSnafu, Result, StartFlownodeSnafu};
@@ -79,6 +84,86 @@ use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, error, log_versions, maybe_activate_heap_profile};
 
 pub const APP_NAME: &str = "greptime-standalone";
+
+/// Builds the WAL provider that allocates region WAL options in standalone mode.
+///
+/// The object store WAL allocates the node prefix of `node_id`, the datanode id
+/// of the standalone instance; an absent id is treated as 0, the id
+/// `StandaloneOptions::datanode_options` assigns.
+pub async fn build_standalone_wal_provider(
+    wal: &DatanodeWalConfig,
+    node_id: Option<DatanodeId>,
+    kv_backend: KvBackendRef,
+) -> Result<WalProvider> {
+    match wal {
+        DatanodeWalConfig::ObjectStore(config) => Ok(WalProvider::ObjectStore {
+            prefix: config.node_prefix(node_id.unwrap_or(0), STANDALONE_GENERATION),
+        }),
+        DatanodeWalConfig::RaftEngine(_)
+        | DatanodeWalConfig::Kafka(_)
+        | DatanodeWalConfig::Noop => {
+            let metasrv_wal_config = wal
+                .clone()
+                .try_into()
+                .context(error::InvalidWalProviderSnafu)?;
+            build_wal_provider(&metasrv_wal_config, kv_backend)
+                .await
+                .context(error::BuildWalProviderSnafu)
+        }
+    }
+}
+
+fn standalone_local_file_access(
+    storage: &StorageConfig,
+) -> common_datasource::error::Result<LocalFileAccess> {
+    let data_home = configured_local_path(&storage.data_home)?;
+    let copy_root = match &storage.copy_root {
+        Some(root) => configured_local_path(root)?.with_context(|| {
+            common_datasource::error::InvalidLocalFileRootConfigSnafu {
+                root: root.clone(),
+                reason: "copy_root must be a local path or file URL".to_string(),
+            }
+        })?,
+        None => {
+            let Some(data_home) = &data_home else {
+                info!(
+                    "SQL access to local files is disabled because storage.data_home is not a local path and storage.copy_root is unset"
+                );
+                return Ok(LocalFileAccess::Disabled);
+            };
+            data_home.join("copy")
+        }
+    };
+
+    let access = LocalFileAccess::sandboxed(&copy_root)?;
+    if let Some(data_home) = data_home {
+        let canonical_data_home = data_home.canonicalize().with_context(|_| {
+            common_datasource::error::InvalidLocalFileRootSnafu {
+                root: data_home.display().to_string(),
+            }
+        })?;
+        let canonical_copy_root = access.sandbox_root().with_context(|| {
+            common_datasource::error::InvalidLocalFileRootConfigSnafu {
+                root: copy_root.display().to_string(),
+                reason: "sandboxed local file access has no root".to_string(),
+            }
+        })?;
+        let default_copy_root = canonical_data_home.join("copy");
+        let exposes_internal_files = canonical_data_home.starts_with(canonical_copy_root)
+            || (canonical_copy_root.starts_with(&canonical_data_home)
+                && !canonical_copy_root.starts_with(default_copy_root));
+        if exposes_internal_files {
+            return common_datasource::error::InvalidLocalFileRootConfigSnafu {
+                root: copy_root.display().to_string(),
+                reason: "copy_root must not expose files in data_home outside data_home/copy"
+                    .to_string(),
+            }
+            .fail();
+        }
+    }
+
+    Ok(access)
+}
 
 #[derive(Parser)]
 pub struct Command {
@@ -96,6 +181,11 @@ impl Command {
         global_options: &GlobalOptions,
     ) -> Result<GreptimeOptions<StandaloneOptions>> {
         self.subcmd.load_options(global_options)
+    }
+
+    /// Whether the `standalone start` command requested daemonization.
+    pub fn is_daemon(&self) -> bool {
+        self.subcmd.is_daemon()
     }
 }
 
@@ -117,6 +207,12 @@ impl SubCommand {
     ) -> Result<GreptimeOptions<StandaloneOptions>> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
+        }
+    }
+
+    fn is_daemon(&self) -> bool {
+        match self {
+            SubCommand::Start(cmd) => cmd.is_daemon(),
         }
     }
 }
@@ -236,9 +332,24 @@ pub struct StartCommand {
     /// The working home directory of this standalone instance.
     #[clap(long)]
     data_home: Option<String>,
+    /// Run in the background as a daemon.
+    #[cfg(unix)]
+    #[clap(short, long)]
+    daemon: bool,
 }
 
 impl StartCommand {
+    /// Whether the `standalone start` command requested daemonization.
+    #[cfg(unix)]
+    pub(crate) fn is_daemon(&self) -> bool {
+        self.daemon
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn is_daemon(&self) -> bool {
+        false
+    }
+
     /// Load the GreptimeDB options from various sources (command line, config file or env).
     pub fn load_options(
         &self,
@@ -340,8 +451,6 @@ impl StartCommand {
     #[allow(clippy::diverging_sub_expression)]
     /// Build GreptimeDB instance with the loaded options.
     pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
-        common_runtime::init_global_runtimes(&opts.runtime);
-
         let guard = common_telemetry::init_global_logging(
             APP_NAME,
             &opts.component.logging,
@@ -350,6 +459,9 @@ impl StartCommand {
             Some(&opts.component.slow_query),
         );
 
+        common_runtime::init_standalone_runtimes(&opts.runtime);
+
+        crate::options::flush_dropped_plugin_warnings();
         log_versions(verbose_version(), short_version(), APP_NAME);
         maybe_activate_heap_profile(&opts.component.memory);
         create_resource_limit_metrics(APP_NAME);
@@ -395,13 +507,16 @@ impl StartCommand {
         // Ensure the data_home directory exists.
         fs::create_dir_all(path::Path::new(data_home))
             .context(error::CreateDirSnafu { dir: data_home })?;
+        let local_file_access = standalone_local_file_access(&dn_opts.storage)
+            .map_err(BoxedError::new)
+            .context(OtherSnafu)?;
 
         let metadata_dir = metadata_store_dir(data_home);
         let kv_backend = creator
             .metadata_kv_backend_creator
             .create(metadata_dir, &opts)
             .await?;
-        let procedure_manager =
+        let (procedure_manager, event_recorder_handle) =
             standalone::build_procedure_manager(kv_backend.clone(), opts.procedure);
 
         plugins::setup_standalone_plugins(&mut plugins, &plugin_opts, &opts, kv_backend.clone())
@@ -426,6 +541,7 @@ impl StartCommand {
 
         let mut builder = DatanodeBuilder::new(dn_opts, plugins.clone(), kv_backend.clone());
         builder.with_cache_registry(layered_cache_registry.clone());
+        builder.with_local_file_access(local_file_access.clone());
         if let Some(writable) = creator.open_regions_writable_override {
             builder.with_open_regions_writable_override(writable);
         }
@@ -524,15 +640,8 @@ impl StartCommand {
                 .step(10)
                 .build(),
         );
-        let kafka_options = opts
-            .wal
-            .clone()
-            .try_into()
-            .context(error::InvalidWalProviderSnafu)?;
-        let wal_provider = build_wal_provider(&kafka_options, kv_backend.clone())
-            .await
-            .context(error::BuildWalProviderSnafu)?;
-        let wal_provider = Arc::new(wal_provider);
+        let wal_provider =
+            Arc::new(build_standalone_wal_provider(&opts.wal, node_id, kv_backend.clone()).await?);
         let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
             table_id_allocator.clone(),
             wal_provider.clone(),
@@ -552,15 +661,15 @@ impl StartCommand {
             flow_metadata_allocator: flow_metadata_allocator.clone(),
             region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
             soft_drop_enabled: false,
+            soft_drop_retention: None,
+            create_database_metadata_committer: None,
         };
 
-        let ddl_manager = DdlManager::try_new(
+        let ddl_manager = DdlManager::new(
             ddl_context,
             procedure_manager.clone(),
             Arc::new(StandaloneRepartitionProcedureFactory),
-            true,
-        )
-        .context(error::InitDdlManagerSnafu)?;
+        );
 
         let ddl_manager = if let Some(configurator) =
             plugins.get::<DdlManagerConfiguratorRef<DdlManagerConfigureContext>>()
@@ -577,6 +686,9 @@ impl StartCommand {
         } else {
             ddl_manager
         };
+        ddl_manager
+            .register_loaders()
+            .context(error::InitDdlManagerSnafu)?;
 
         let procedure_executor = creator
             .procedure_executor_creator
@@ -591,7 +703,8 @@ impl StartCommand {
             node_manager.clone(),
             procedure_executor.clone(),
             process_manager,
-        );
+        )
+        .with_local_file_access(local_file_access);
 
         plugins::setup_frontend_plugins_post_build(&mut plugins, &plugin_opts, &fe_instance)
             .await
@@ -604,28 +717,14 @@ impl StartCommand {
             .context(error::StartFrontendSnafu)?;
         let fe_instance = Arc::new(fe_instance);
 
+        event_recorder_handle.install(fe_instance.event_recorder());
+
         // set the frontend client for flownode
         let grpc_handler = fe_instance.clone() as Arc<dyn GrpcQueryHandlerWithBoxedError>;
         let weak_grpc_handler = Arc::downgrade(&grpc_handler);
         frontend_instance_handler
             .set_handler(weak_grpc_handler)
             .await;
-
-        // set the frontend invoker for flownode
-        let flow_streaming_engine = flow_engine.streaming_engine();
-        // flow server need to be able to use frontend to write insert requests back
-        let invoker = FrontendInvoker::build_from(
-            flow_streaming_engine.clone(),
-            catalog_manager.clone(),
-            kv_backend.clone(),
-            layered_cache_registry.clone(),
-            procedure_executor,
-            node_manager.clone(),
-            fe_instance.frontend_peer_addr().to_string(),
-        )
-        .await
-        .context(StartFlownodeSnafu)?;
-        flow_streaming_engine.set_frontend_invoker(invoker).await;
 
         let servers = Services::new(opts, fe_instance.clone(), plugins.clone())
             .build()
@@ -959,15 +1058,123 @@ mod tests {
     use clap::{CommandFactory, Parser};
     use common_base::readable_size::ReadableSize;
     use common_config::ENV_VAR_SEP;
+    use common_meta::ddl::allocator::wal_options::WalOptionsAllocator;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_options::plugin_options::StandaloneFlag;
-    use common_test_util::temp_dir::create_named_temp_file;
-    use common_wal::config::DatanodeWalConfig;
+    use common_test_util::temp_dir::{create_named_temp_file, create_temp_dir};
+    use common_wal::config::object_store::ObjectStoreWalConfig;
+    use common_wal::options::{ObjectStoreWalOptions, WalOptions};
     use frontend::frontend::FrontendOptions;
     use object_store::config::{FileConfig, GcsConfig};
     use servers::grpc::GrpcOptions;
 
     use super::*;
     use crate::options::GlobalOptions;
+
+    #[tokio::test]
+    async fn test_build_standalone_wal_provider() {
+        let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
+
+        let config = ObjectStoreWalConfig {
+            prefix: "cluster-a/wal".to_string(),
+            ..Default::default()
+        };
+        // The regions persist the node prefix the datanode runs its store under.
+        let node_prefix = config.node_prefix(0, STANDALONE_GENERATION);
+        assert_eq!(node_prefix, "cluster-a/wal/datanodes/0/epochs/0");
+        let provider = build_standalone_wal_provider(
+            &DatanodeWalConfig::ObjectStore(config),
+            Some(0),
+            kv_backend.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            &provider,
+            WalProvider::ObjectStore { prefix } if *prefix == node_prefix
+        ));
+        let regions = vec![0, 1];
+        let wal_options = provider.allocate(&regions, false).await.unwrap();
+        for region in regions {
+            assert_eq!(
+                wal_options[&region],
+                WalOptions::ObjectStore(ObjectStoreWalOptions::new(node_prefix.clone()))
+            );
+        }
+
+        let provider =
+            build_standalone_wal_provider(&DatanodeWalConfig::default(), Some(0), kv_backend)
+                .await
+                .unwrap();
+        assert!(matches!(provider, WalProvider::RaftEngine));
+    }
+
+    #[test]
+    fn test_standalone_local_file_access_config() {
+        let data_home = create_temp_dir("standalone_copy_root");
+        let storage = StorageConfig {
+            data_home: data_home.path().display().to_string(),
+            ..Default::default()
+        };
+        let access = standalone_local_file_access(&storage).unwrap();
+        assert_eq!(
+            access.sandbox_root().unwrap(),
+            data_home.path().join("copy").canonicalize().unwrap()
+        );
+
+        let remote_data_home = StorageConfig {
+            data_home: "s3://bucket/data".to_string(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            standalone_local_file_access(&remote_data_home).unwrap(),
+            LocalFileAccess::Disabled
+        ));
+
+        let explicit_root = create_temp_dir("standalone_explicit_copy_root");
+        let remote_with_explicit_root = StorageConfig {
+            data_home: "s3://bucket/data".to_string(),
+            copy_root: Some(explicit_root.path().display().to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            standalone_local_file_access(&remote_with_explicit_root)
+                .unwrap()
+                .sandbox_root()
+                .unwrap(),
+            explicit_root.path().canonicalize().unwrap()
+        );
+
+        let remote_copy_root = StorageConfig {
+            data_home: data_home.path().display().to_string(),
+            copy_root: Some("s3://bucket/copy".to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            standalone_local_file_access(&remote_copy_root),
+            Err(common_datasource::error::Error::InvalidLocalFileRootConfig { .. })
+        ));
+
+        let exposes_internal = StorageConfig {
+            data_home: data_home.path().display().to_string(),
+            copy_root: Some(data_home.path().join("data").display().to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            standalone_local_file_access(&exposes_internal),
+            Err(common_datasource::error::Error::InvalidLocalFileRootConfig { .. })
+        ));
+
+        let exposes_data_home = StorageConfig {
+            data_home: data_home.path().display().to_string(),
+            copy_root: Some(data_home.path().parent().unwrap().display().to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            standalone_local_file_access(&exposes_data_home),
+            Err(common_datasource::error::Error::InvalidLocalFileRootConfig { .. })
+        ));
+    }
 
     #[tokio::test]
     async fn test_try_from_start_command_to_anymap() {
@@ -996,7 +1203,8 @@ mod tests {
     fn test_toml() {
         let opts = StandaloneOptions::default();
         let toml_string = toml::to_string(&opts).unwrap();
-        let _parsed: StandaloneOptions = toml::from_str(&toml_string).unwrap();
+        let parsed: StandaloneOptions = toml::from_str(&toml_string).unwrap();
+        assert_eq!(parsed.otlp, opts.otlp);
     }
 
     #[test]
@@ -1221,6 +1429,19 @@ mod tests {
         assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:34001"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_parse_daemon_flag() {
+        let command = StartCommand::try_parse_from(["standalone", "--daemon"]).unwrap();
+        assert!(command.is_daemon());
+
+        let command = StartCommand::try_parse_from(["standalone", "-d"]).unwrap();
+        assert!(command.is_daemon());
+
+        let command = StartCommand::try_parse_from(["standalone"]).unwrap();
+        assert!(!command.is_daemon());
+    }
+
     #[test]
     fn test_help_uses_grpc_option_names() {
         let mut cmd = StartCommand::command();
@@ -1269,5 +1490,91 @@ mod tests {
             opts.storage.store.cache_config().unwrap().cache_path,
             "test_data_home"
         );
+    }
+
+    #[test]
+    #[cfg(not(feature = "enterprise"))]
+    fn test_load_options_ignores_unknown_plugin_options() {
+        // Plugin options that are not recognized by the current build (for example,
+        // an enterprise plugin option seen by an open-source build) must not abort
+        // startup. They should be dropped with a warning instead.
+        let mut file = create_named_temp_file();
+        write!(
+            file,
+            r#"
+[[plugins]]
+SomeUnknownPlugin = {{ feature = "foo", count = 5 }}
+
+[[plugins]]
+AnotherUnknownPlugin = {{}}
+"#
+        )
+        .unwrap();
+
+        let opts = GreptimeOptions::<StandaloneOptions>::load_layered_options(
+            Some(file.path().to_str().unwrap()),
+            "GREPTIMEDB_STANDALONE_UT",
+        )
+        .expect(
+            "loading a config with unrecognized plugin options should succeed, \
+             ignoring the unknown ones",
+        );
+        // Unknown plugin options are dropped; the recognized list is empty in the
+        // open-source build.
+        assert!(opts.plugins.is_empty());
+    }
+
+    #[test]
+    fn test_load_options_errors_on_malformed_known_plugin_option() {
+        // A *known* variant with a malformed payload must NOT be silently
+        // dropped; config loading must fail so a misconfigured plugin is not
+        // disabled without notice. Here `Dummy` (a unit variant) is given a map
+        // payload, which is invalid.
+        let mut file = create_named_temp_file();
+        write!(
+            file,
+            r#"
+[[plugins]]
+Dummy = {{ unexpected = "payload" }}
+"#
+        )
+        .unwrap();
+
+        let result = GreptimeOptions::<StandaloneOptions>::load_layered_options(
+            Some(file.path().to_str().unwrap()),
+            "GREPTIMEDB_STANDALONE_UT",
+        );
+        assert!(
+            result.is_err(),
+            "a malformed payload for a known plugin variant must fail config loading"
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "enterprise"))]
+    fn test_load_options_ignores_multi_key_unknown_plugin_entry() {
+        // A single plugin table carrying several *unknown* keys must not abort
+        // startup with serde's "expected map with a single key" error; it is
+        // dropped like any other unrecognized plugin option.
+        let mut file = create_named_temp_file();
+        write!(
+            file,
+            r#"
+[[plugins]]
+FirstUnknownPlugin = {{ a = 1 }}
+SecondUnknownPlugin = {{ b = 2 }}
+"#
+        )
+        .unwrap();
+
+        let opts = GreptimeOptions::<StandaloneOptions>::load_layered_options(
+            Some(file.path().to_str().unwrap()),
+            "GREPTIMEDB_STANDALONE_UT",
+        )
+        .expect(
+            "loading a config with a multi-key unknown plugin entry should succeed, \
+             ignoring the unknown ones",
+        );
+        assert!(opts.plugins.is_empty());
     }
 }

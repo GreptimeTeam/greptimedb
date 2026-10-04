@@ -40,10 +40,11 @@ from
 ORDER BY
        val;
 
-++
-++
++-----+
+| val |
++-----+
++-----+
 
--- SQLNESS SLEEP 2s
 ADMIN flush_table('test_ttl');
 
 +-------------------------------+
@@ -67,8 +68,10 @@ from
 ORDER BY
        val;
 
-++
-++
++-----+
+| val |
++-----+
++-----+
 
 ALTER TABLE
        test_ttl UNSET 'ttl';
@@ -107,7 +110,7 @@ CREATE TABLE test_ttl(
        ts TIMESTAMP TIME INDEX,
        val INT,
        PRIMARY KEY (`val`)
-) WITH (ttl = '1s');
+) WITH (ttl = '5s');
 
 Affected Rows: 0
 
@@ -125,7 +128,7 @@ SHOW CREATE TABLE test_ttl;
 |          |                                         |
 |          | ENGINE=mito                             |
 |          | WITH(                                   |
-|          |   ttl = '1s'                            |
+|          |   ttl = '5s'                            |
 |          | )                                       |
 +----------+-----------------------------------------+
 
@@ -184,6 +187,13 @@ ORDER BY
 | 3   |
 +-----+
 
+ALTER TABLE
+       test_ttl
+SET
+       ttl = '1s';
+
+Affected Rows: 0
+
 -- SQLNESS SLEEP 2s
 ADMIN flush_table('test_ttl');
 
@@ -208,8 +218,10 @@ from
 ORDER BY
        val;
 
-++
-++
++-----+
+| val |
++-----+
++-----+
 
 ALTER TABLE
        test_ttl
@@ -272,14 +284,16 @@ from
 ORDER BY
        val;
 
-++
-++
++-----+
+| val |
++-----+
++-----+
 
 -- to make sure alter back and forth from duration to/from instant wouldn't break anything
 ALTER TABLE
        test_ttl
 SET
-       ttl = '1s';
+       ttl = '5s';
 
 Affected Rows: 0
 
@@ -307,6 +321,13 @@ ORDER BY
 | 3   |
 +-----+
 
+ALTER TABLE
+       test_ttl
+SET
+       ttl = '1s';
+
+Affected Rows: 0
+
 -- SQLNESS SLEEP 2s
 ADMIN flush_table('test_ttl');
 
@@ -331,8 +352,10 @@ from
 ORDER BY
        val;
 
-++
-++
++-----+
+| val |
++-----+
++-----+
 
 DROP TABLE test_ttl;
 

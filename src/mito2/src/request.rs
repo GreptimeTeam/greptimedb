@@ -20,6 +20,7 @@ use std::time::Instant;
 
 use api::helper::{
     ColumnDataTypeWrapper, is_column_type_value_eq, is_semantic_type_eq, proto_value_type,
+    proto_value_type_match,
 };
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value, WriteHint};
@@ -38,13 +39,15 @@ use store_api::region_engine::{
 };
 use store_api::region_request::{
     AffectedRows, ApplyStagingManifestRequest, EnterStagingRequest, RegionAlterRequest,
-    RegionBuildIndexRequest, RegionBulkInsertsRequest, RegionCatchupRequest, RegionCloseRequest,
-    RegionCompactRequest, RegionCreateRequest, RegionDropRequest, RegionFlushRequest,
-    RegionOpenRequest, RegionRequest, RegionTruncateRequest, StagingPartitionDirective,
+    RegionBuildIndexRequest, RegionBulkInsertsRequest, RegionCatchupRequest, RegionCleanUpRequest,
+    RegionCloseRequest, RegionCompactRequest, RegionCreateRequest, RegionDropRequest,
+    RegionFlushRequest, RegionOpenRequest, RegionRequest, RegionTruncateRequest,
+    StagingPartitionDirective,
 };
-use store_api::storage::{FileId, RegionId};
+use store_api::storage::{FileId, RegionId, SequenceNumber};
 use tokio::sync::oneshot::{self, Receiver, Sender};
 
+use crate::compaction::{CompactionExecution, CompactionPickFinished};
 use crate::error::{
     CompactRegionSnafu, CompactionCancelledSnafu, ConvertColumnDataTypeSnafu, CreateDefaultSnafu,
     Error, FillDefaultSnafu, FlushRegionSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu,
@@ -74,6 +77,8 @@ pub struct WriteRequest {
     pub name_to_index: HashMap<String, usize>,
     /// Whether each column has null.
     pub has_null: Vec<bool>,
+    /// Whether this insert should skip WAL. Never applies to deletes.
+    pub skip_wal: bool,
     /// Write hint.
     pub hint: Option<WriteHint>,
     /// Region metadata on the time of this request is created.
@@ -135,9 +140,16 @@ impl WriteRequest {
             name_to_index,
             has_null,
             hint: None,
+            skip_wal: false,
             region_metadata,
             partition_expr_version: None,
         })
+    }
+
+    /// Sets the request-level WAL policy.
+    pub fn with_skip_wal(mut self, skip_wal: bool) -> Self {
+        self.skip_wal = skip_wal;
+        self
     }
 
     /// Sets the write hint.
@@ -461,15 +473,6 @@ pub(crate) fn validate_proto_value(
     Ok(())
 }
 
-fn proto_value_type_match(column_type: ColumnDataType, value_type: ColumnDataType) -> bool {
-    match (column_type, value_type) {
-        (ct, vt) if ct == vt => true,
-        (ColumnDataType::Vector, ColumnDataType::Binary) => true,
-        (ColumnDataType::Json, ColumnDataType::Binary) => true,
-        _ => false,
-    }
-}
-
 /// Oneshot output result sender.
 #[derive(Debug)]
 pub struct OutputTx(Sender<Result<AffectedRows>>);
@@ -549,6 +552,7 @@ pub(crate) struct SenderWriteRequest {
 }
 
 pub(crate) struct SenderBulkRequest {
+    pub(crate) skip_wal: bool,
     pub(crate) sender: OptionOutputTx,
     pub(crate) region_id: RegionId,
     pub(crate) request: BulkPart,
@@ -670,6 +674,7 @@ impl WorkerRequest {
                 let mut write_request =
                     WriteRequest::new(region_id, OpType::Put, v.rows, region_metadata.clone())?
                         .with_hint(v.hint)
+                        .with_skip_wal(v.skip_wal)
                         .with_partition_expr_version(v.partition_expr_version);
                 if write_request.primary_key_encoding() == PrimaryKeyEncoding::Dense
                     && let Some(region_metadata) = &region_metadata
@@ -710,6 +715,11 @@ impl WorkerRequest {
                 region_id,
                 sender: sender.into(),
                 request: DdlRequest::Open((v, None)),
+            }),
+            RegionRequest::CleanUp(v) => WorkerRequest::Ddl(SenderDdlRequest {
+                region_id,
+                sender: sender.into(),
+                request: DdlRequest::OfflineCleanup(v),
             }),
             RegionRequest::Close(v) => WorkerRequest::Ddl(SenderDdlRequest {
                 region_id,
@@ -863,6 +873,7 @@ pub(crate) enum DdlRequest {
     Create(RegionCreateRequest),
     Drop(RegionDropRequest),
     Open((RegionOpenRequest, Option<WalEntryReceiver>)),
+    OfflineCleanup(RegionCleanUpRequest),
     Close(RegionCloseRequest),
     Alter(RegionAlterRequest),
     Flush(RegionFlushRequest),
@@ -888,6 +899,8 @@ pub(crate) struct SenderDdlRequest {
 /// Notification from a background job.
 #[derive(Debug)]
 pub(crate) enum BackgroundNotify {
+    /// Compaction planning has finished.
+    CompactionPickFinished(CompactionPickFinished),
     /// Flush has finished.
     FlushFinished(FlushFinished),
     /// Flush has failed.
@@ -898,6 +911,8 @@ pub(crate) enum BackgroundNotify {
     IndexBuildStopped(IndexBuildStopped),
     /// Index build has failed.
     IndexBuildFailed(IndexBuildFailed),
+    /// An index build must be retried against the latest schema generation.
+    IndexBuildRetry(BuildIndexRequest),
     /// Compaction has finished.
     CompactionFinished(CompactionFinished),
     /// Compaction has been cancelled cooperatively.
@@ -906,6 +921,8 @@ pub(crate) enum BackgroundNotify {
     CompactionFailed(CompactionFailed),
     /// Truncate result.
     Truncate(TruncateResult),
+    /// Discard unflushed data result.
+    DiscardUnflushed(DiscardUnflushedResult),
     /// Region change result.
     RegionChange(RegionChangeResult),
     /// Region edit result.
@@ -964,18 +981,22 @@ pub(crate) struct FlushFailed {
     pub(crate) err: Arc<Error>,
 }
 
+impl FlushFailed {
+    /// Returns whether the flush was cancelled cooperatively.
+    pub(crate) fn is_cancelled(&self) -> bool {
+        matches!(self.err.as_ref(), Error::FlushCancelled { .. })
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct IndexBuildFinished {
-    #[allow(dead_code)]
-    pub(crate) region_id: RegionId,
-    pub(crate) edit: RegionEdit,
+    pub(crate) manifest_version: ManifestVersion,
+    pub(crate) file_meta: FileMeta,
 }
 
 /// Notifies an index build job has been stopped.
 #[derive(Debug)]
 pub(crate) struct IndexBuildStopped {
-    #[allow(dead_code)]
-    pub(crate) region_id: RegionId,
     pub(crate) file_id: FileId,
 }
 
@@ -990,6 +1011,8 @@ pub(crate) struct IndexBuildFailed {
 pub(crate) struct CompactionFinished {
     /// Region id.
     pub(crate) region_id: RegionId,
+    /// Identity and reservation lease of the accepted execution.
+    pub(crate) execution: CompactionExecution,
     /// Compaction result senders.
     pub(crate) senders: Vec<OutputTx>,
     /// Start time of compaction task.
@@ -1003,6 +1026,8 @@ pub(crate) struct CompactionFinished {
 pub(crate) struct CompactionCancelled {
     /// Region id.
     pub(crate) region_id: RegionId,
+    /// Identity and reservation lease of the accepted execution.
+    pub(crate) execution: CompactionExecution,
     /// Waiters to wake once the cancellation has been observed by the worker.
     pub(crate) senders: Vec<OutputTx>,
 }
@@ -1044,6 +1069,8 @@ impl OnFailure for CompactionFinished {
 #[derive(Debug)]
 pub(crate) struct CompactionFailed {
     pub(crate) region_id: RegionId,
+    /// Identity and reservation lease of the accepted execution.
+    pub(crate) execution: CompactionExecution,
     /// The error source of the failure.
     pub(crate) err: Arc<Error>,
 }
@@ -1058,6 +1085,25 @@ pub(crate) struct TruncateResult {
     /// Truncate result.
     pub(crate) result: Result<()>,
     pub(crate) kind: TruncateKind,
+}
+
+/// Notifies the result of discarding unflushed data from a region.
+#[derive(Debug)]
+pub(crate) struct DiscardUnflushedResult {
+    /// Region id.
+    pub(crate) region_id: RegionId,
+    /// Result sender.
+    pub(crate) sender: OptionOutputTx,
+    /// Manifest update result.
+    pub(crate) result: Result<()>,
+    /// Last WAL entry covered by the discard operation.
+    pub(crate) discarded_entry_id: EntryId,
+    /// Last sequence covered by the discard operation.
+    pub(crate) discarded_sequence: SequenceNumber,
+    /// Estimated number of discarded rows.
+    pub(crate) discarded_rows: u64,
+    /// Estimated number of discarded bytes.
+    pub(crate) discarded_bytes: u64,
 }
 
 /// Notifies the region the result of writing region change action.
@@ -1337,6 +1383,7 @@ mod tests {
         let (tx, rx) = oneshot::channel();
         let request = CompactionCancelled {
             region_id: RegionId::new(1, 1),
+            execution: crate::compaction::CompactionExecution::for_test(0),
             senders: vec![OutputTx::new(tx)],
         };
 
@@ -1827,6 +1874,25 @@ mod tests {
             &err,
             "column f1 expect type Int64(Int64Type), given: STRING(12)",
         );
+    }
+
+    #[test]
+    fn test_delete_request_defaults_to_writing_wal() {
+        let (request, _receiver) = WorkerRequest::try_from_region_request(
+            RegionId::new(1, 1),
+            RegionRequest::Delete(store_api::region_request::RegionDeleteRequest {
+                rows: Rows::default(),
+                hint: None,
+                partition_expr_version: None,
+            }),
+            None,
+        )
+        .unwrap();
+        let WorkerRequest::Write(request) = request else {
+            panic!("expected a write request");
+        };
+        assert_eq!(request.request.op_type, OpType::Delete);
+        assert!(!request.request.skip_wal);
     }
 
     #[test]

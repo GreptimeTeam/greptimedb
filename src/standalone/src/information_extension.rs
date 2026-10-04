@@ -139,6 +139,8 @@ impl InformationExtension for StandaloneInformationExtension {
                     written_bytes: region_stat.written_bytes,
                     query_cpu_time: region_stat.query_cpu_time,
                     query_scanned_bytes: region_stat.query_scanned_bytes,
+                    min_timestamp: region_stat.min_timestamp,
+                    max_timestamp: region_stat.max_timestamp,
                 }
             })
             .collect::<Vec<_>>();

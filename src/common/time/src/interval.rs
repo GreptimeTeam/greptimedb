@@ -80,6 +80,10 @@ impl IntervalYearMonth {
         Self::new(-self.months)
     }
 
+    pub fn checked_negative(&self) -> Option<Self> {
+        self.months.checked_neg().map(Self::new)
+    }
+
     pub fn to_iso8601_string(&self) -> String {
         IntervalFormat::from(*self).to_iso8601_string()
     }
@@ -155,6 +159,13 @@ impl IntervalDayTime {
 
     pub fn negative(&self) -> Self {
         Self::new(-self.days, -self.milliseconds)
+    }
+
+    pub fn checked_negative(&self) -> Option<Self> {
+        Some(Self::new(
+            self.days.checked_neg()?,
+            self.milliseconds.checked_neg()?,
+        ))
     }
 
     pub fn to_iso8601_string(&self) -> String {
@@ -276,6 +287,14 @@ impl IntervalMonthDayNano {
 
     pub fn negative(&self) -> Self {
         Self::new(-self.months, -self.days, -self.nanoseconds)
+    }
+
+    pub fn checked_negative(&self) -> Option<Self> {
+        Some(Self::new(
+            self.months.checked_neg()?,
+            self.days.checked_neg()?,
+            self.nanoseconds.checked_neg()?,
+        ))
     }
 
     pub fn to_iso8601_string(&self) -> String {

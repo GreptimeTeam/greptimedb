@@ -84,6 +84,7 @@ pub async fn execute_procedure_until_done(procedure: &mut dyn Procedure) -> Opti
     let ctx = Context {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
+        event_context: None,
     };
 
     loop {
@@ -110,6 +111,7 @@ pub async fn execute_procedure_once(
     let ctx = Context {
         procedure_id,
         provider: Arc::new(provider),
+        event_context: None,
     };
 
     match procedure.execute(&ctx).await.unwrap() {
@@ -137,6 +139,7 @@ pub async fn execute_until_suspended_or_done(
     let ctx = Context {
         procedure_id,
         provider: Arc::new(provider),
+        event_context: None,
     };
 
     loop {
@@ -155,6 +158,7 @@ pub fn new_test_procedure_context() -> Context {
     Context {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
+        event_context: None,
     }
 }
 

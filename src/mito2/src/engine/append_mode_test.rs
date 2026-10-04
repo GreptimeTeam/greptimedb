@@ -200,7 +200,9 @@ async fn test_append_mode_compaction_with_format(flat_format: bool) {
         .scanner(region_id, ScanRequest::default())
         .await
         .unwrap();
-    assert_eq!(2, scanner.num_files());
+    // The manual compaction waits for the in-flight automatic compaction, then runs its own
+    // cycle and compacts the remaining SSTs into one file.
+    assert_eq!(1, scanner.num_files());
     assert_eq!(1, scanner.num_memtables());
     scanner.set_target_partitions(2);
     let stream = scanner.scan().await.unwrap();

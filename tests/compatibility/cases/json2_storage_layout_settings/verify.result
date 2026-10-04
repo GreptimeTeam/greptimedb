@@ -1,0 +1,27 @@
+SELECT j.a AS a
+FROM t_json2_storage_layout_settings;
+
++---+
+| a |
++---+
+| 1 |
++---+
+
+SHOW CREATE TABLE t_json2_storage_layout_settings;
+
++---------------------------------+----------------------------------------------------------------+
+| Table                           | Create Table                                                   |
++---------------------------------+----------------------------------------------------------------+
+| t_json2_storage_layout_settings | CREATE TABLE IF NOT EXISTS "t_json2_storage_layout_settings" ( |
+|                                 |   "ts" TIMESTAMP(3) NOT NULL,                                  |
+|                                 |   "j" JSON2(                                                   |
+|                                 |     max_auto_expanded_paths = 0                                |
+|                                 |   ) NULL,                                                      |
+|                                 |   TIME INDEX ("ts")                                            |
+|                                 | )                                                              |
+|                                 |                                                                |
+|                                 | ENGINE=mito                                                    |
+|                                 | WITH(                                                          |
+|                                 |   append_mode = 'true'                                         |
+|                                 | )                                                              |
++---------------------------------+----------------------------------------------------------------+

@@ -162,6 +162,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to daemonize: {msg}"))]
+    Daemonize {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unsupported selector type: {}", selector_type))]
     UnsupportedSelectorType {
         selector_type: String,
@@ -361,7 +368,8 @@ impl ErrorExt for Error {
             Error::SerdeJson { .. }
             | Error::FileIo { .. }
             | Error::SpawnThread { .. }
-            | Error::InitTlsProvider { .. } => StatusCode::Unexpected,
+            | Error::InitTlsProvider { .. }
+            | Error::Daemonize { .. } => StatusCode::Unexpected,
 
             Error::Other { source, .. } => source.status_code(),
 

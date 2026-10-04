@@ -18,8 +18,9 @@ use store_api::logstore::LogStore;
 use store_api::region_request::RegionCompactRequest;
 use store_api::storage::RegionId;
 
+use crate::compaction::{CompactionPickFinished, CompactionTransition};
 use crate::config::IndexBuildMode;
-use crate::error::RegionNotFoundSnafu;
+use crate::error::{RegionNotFoundSnafu, StaleCompactionExecutionSnafu};
 use crate::metrics::COMPACTION_REQUEST_COUNT;
 use crate::region::MitoRegionRef;
 use crate::request::{
@@ -29,7 +30,51 @@ use crate::request::{
 use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
 
+fn made_progress(files_to_add: usize, files_to_remove: usize) -> bool {
+    files_to_add > 0 || files_to_remove > files_to_add
+}
+
 impl<S> RegionWorkerLoop<S> {
+    pub(crate) async fn handle_compaction_pick_finished(
+        &mut self,
+        region_id: RegionId,
+        request: CompactionPickFinished,
+    ) where
+        S: LogStore,
+    {
+        let Some(region) = self.regions.get_region(region_id) else {
+            return;
+        };
+        // A terminal pick (canceled, no plan, or failed) may remove the
+        // compaction status and release DDLs fenced behind its picking phase.
+        // Such a pick never produces an execution callback, so the worker must
+        // execute the returned DDLs from this notification.
+        let transition = self
+            .compaction_scheduler
+            .handle_compaction_pick_finished(
+                request,
+                &region.manifest_ctx,
+                self.schema_metadata_manager.clone(),
+            )
+            .await;
+        match transition {
+            CompactionTransition::AutomaticFollowupScheduled => {
+                // There will be a followup compaction so we need to update the
+                // last schedule time to avoid frequent compactions.
+                region.update_schedule_compaction_millis();
+            }
+            CompactionTransition::NoAction => {}
+            CompactionTransition::DdlReady(mut pending_ddls) => {
+                if !pending_ddls.is_empty() {
+                    // Preserve the lifecycle order observed by listeners: compaction
+                    // termination is visible before its dependent DDLs are dispatched.
+                    self.listener.on_compaction_result_notified(region_id).await;
+                    self.handle_ddl_requests(&mut pending_ddls).await;
+                }
+            }
+        }
+    }
+
     /// Handles compaction request submitted to region worker.
     pub(crate) async fn handle_compaction_request(
         &mut self,
@@ -42,26 +87,27 @@ impl<S> RegionWorkerLoop<S> {
         };
         COMPACTION_REQUEST_COUNT.inc();
         let parallelism = req.parallelism.unwrap_or(1) as usize;
-        if let Err(e) = self
-            .compaction_scheduler
-            .schedule_compaction(
-                region.region_id,
-                req.options,
-                &region.version_control,
-                &region.access_layer,
-                sender,
-                &region.manifest_ctx,
-                self.schema_metadata_manager.clone(),
-                parallelism,
-            )
-            .await
-        {
-            error!(e; "Failed to schedule compaction task for region: {}", region_id);
-        } else {
-            info!(
+        match self.compaction_scheduler.schedule_manual_compaction(
+            req.options,
+            &region.version_control,
+            &region.access_layer,
+            sender,
+            &region.manifest_ctx,
+            self.schema_metadata_manager.clone(),
+            parallelism,
+            req.time_range,
+        ) {
+            // Ok(false) means the request was merged, queued or rejected; the
+            // waiter was already notified or will be completed by the queued
+            // cycle, so only a newly scheduled task is logged as success.
+            Ok(true) => info!(
                 "Successfully scheduled compaction task for region: {}",
                 region_id
-            );
+            ),
+            Ok(false) => {}
+            Err(e) => {
+                error!(e; "Failed to schedule compaction task for region: {}", region_id);
+            }
         }
     }
 
@@ -80,6 +126,19 @@ impl<S> RegionWorkerLoop<S> {
                 return;
             }
         };
+        // Reject stale terminal results before applying their manifest edit.
+        if !self
+            .compaction_scheduler
+            .is_current_execution(region_id, &request.execution)
+        {
+            request.on_failure(StaleCompactionExecutionSnafu { region_id }.build());
+            return;
+        }
+        let execution = request.execution.clone();
+        let made_progress = made_progress(
+            request.edit.files_to_add.len(),
+            request.edit.files_to_remove.len(),
+        );
 
         region.version_control.apply_edit(
             Some(request.edit.clone()),
@@ -91,6 +150,7 @@ impl<S> RegionWorkerLoop<S> {
 
         // compaction finished.
         request.on_success();
+        self.listener.on_compaction_result_notified(region_id).await;
 
         // In async mode, create indexes after compact if new files are created.
         if self.config.index.build_mode == IndexBuildMode::Async
@@ -108,38 +168,23 @@ impl<S> RegionWorkerLoop<S> {
         }
 
         // Schedule next compaction if necessary.
-        let mut pending_ddls = self
+        let transition = self
             .compaction_scheduler
-            .on_compaction_finished(
+            .on_execution_finished(
                 region_id,
+                &execution,
                 &region.manifest_ctx,
                 self.schema_metadata_manager.clone(),
+                made_progress,
             )
             .await;
-        self.handle_ddl_requests(&mut pending_ddls).await;
-
-        if self.compaction_scheduler.is_compacting(region_id) {
-            return;
-        }
-
-        let now = self.time_provider.current_time_millis();
-        if now - region.last_schedule_compaction_millis()
-            >= self.config.min_compaction_interval.as_millis() as i64
-        {
-            debug!(
-                "minimal compaction interval time {:?} has passed, scheduling next compaction",
-                self.config.min_compaction_interval
-            );
-            if self
-                .compaction_scheduler
-                .schedule_next_compaction(
-                    region_id,
-                    &region.manifest_ctx,
-                    self.schema_metadata_manager.clone(),
-                )
-                .await
-            {
+        match transition {
+            CompactionTransition::AutomaticFollowupScheduled => {
                 region.update_schedule_compaction_millis();
+            }
+            CompactionTransition::NoAction => {}
+            CompactionTransition::DdlReady(mut pending_ddls) => {
+                self.handle_ddl_requests(&mut pending_ddls).await;
             }
         }
     }
@@ -151,27 +196,48 @@ impl<S> RegionWorkerLoop<S> {
     ) where
         S: LogStore,
     {
+        let execution = request.execution.clone();
+        let is_current = self.regions.get_region(region_id).is_some_and(|_| {
+            self.compaction_scheduler
+                .is_current_execution(region_id, &execution)
+        });
         request.on_success();
 
+        if !is_current {
+            return;
+        }
+
         // Reuse the scheduler's finish path to wake pending DDLs after a cooperative stop.
-        let mut pending_ddls = match self.regions.get_region(region_id) {
-            Some(_) => {
-                self.compaction_scheduler
-                    .on_compaction_cancelled(region_id)
-                    .await
-            }
-            None => Vec::new(),
-        };
+        let mut pending_ddls = self
+            .compaction_scheduler
+            .on_execution_cancelled(region_id, &execution)
+            .await;
+        if !pending_ddls.is_empty() {
+            self.listener.on_compaction_result_notified(region_id).await;
+        }
 
         self.handle_ddl_requests(&mut pending_ddls).await;
     }
 
     /// When compaction fails, we simply log the error.
     pub(crate) async fn handle_compaction_failure(&mut self, req: CompactionFailed) {
-        error!(req.err; "Failed to compact region: {}", req.region_id);
+        if self.regions.get_region(req.region_id).is_none() {
+            return;
+        }
+        if !self
+            .compaction_scheduler
+            .is_current_execution(req.region_id, &req.execution)
+        {
+            debug!(
+                "Ignores stale compaction failure for region {}: {:?}",
+                req.region_id, req.err
+            );
+            return;
+        }
 
+        error!(req.err; "Failed to compact region: {}", req.region_id);
         self.compaction_scheduler
-            .on_compaction_failed(req.region_id, req.err);
+            .on_execution_failed(req.region_id, &req.execution, req.err);
     }
 
     /// Schedule compaction for the region if necessary.
@@ -191,26 +257,41 @@ impl<S> RegionWorkerLoop<S> {
                 "minimal compaction interval time {:?} has passed, scheduling next compaction",
                 self.config.min_compaction_interval
             );
-            match self
-                .compaction_scheduler
-                .schedule_compaction(
-                    region.region_id,
-                    compact_request::Options::Regular(Default::default()),
-                    &region.version_control,
-                    &region.access_layer,
-                    OptionOutputTx::none(),
-                    &region.manifest_ctx,
-                    self.schema_metadata_manager.clone(),
-                    1, // Default for automatic compaction
-                )
-                .await
-            {
+            match self.compaction_scheduler.schedule_automatic_compaction(
+                compact_request::Options::Regular(Default::default()),
+                &region.version_control,
+                &region.access_layer,
+                &region.manifest_ctx,
+                self.schema_metadata_manager.clone(),
+            ) {
                 Ok(true) => region.update_schedule_compaction_millis(),
                 Ok(false) => {}
                 Err(e) => {
                     error!(e; "Failed to schedule compaction for region: {}", region.region_id)
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::made_progress;
+
+    #[test]
+    fn test_nonempty_output_or_file_reduction_is_progress() {
+        for (files_to_add, files_to_remove, expected) in [
+            (3, 3, true),  // Equal-count rewrite.
+            (1, 3, true),  // Ordinary reduction.
+            (0, 3, true),  // Zero-output reduction.
+            (0, 0, false), // Empty edit.
+            (3, 2, true),  // Growth rewrite with output.
+        ] {
+            assert_eq!(
+                expected,
+                made_progress(files_to_add, files_to_remove),
+                "files_to_remove: {files_to_remove}, files_to_add: {files_to_add}"
+            );
         }
     }
 }

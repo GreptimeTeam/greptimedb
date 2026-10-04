@@ -30,6 +30,8 @@ use crate::statements::create::{
 use crate::statements::cursor::{CloseCursor, DeclareCursor, FetchCursor};
 use crate::statements::delete::Delete;
 use crate::statements::describe::DescribeTable;
+#[cfg(feature = "enterprise")]
+use crate::statements::drop::UndropTable;
 use crate::statements::drop::{DropDatabase, DropFlow, DropTable, DropView};
 use crate::statements::explain::ExplainStatement;
 use crate::statements::insert::Insert;
@@ -38,8 +40,8 @@ use crate::statements::query::Query;
 use crate::statements::set_variables::SetVariables;
 use crate::statements::show::{
     ShowColumns, ShowCreateDatabase, ShowCreateFlow, ShowCreateTable, ShowCreateView,
-    ShowDatabases, ShowFlows, ShowIndex, ShowKind, ShowProcessList, ShowRegion, ShowSearchPath,
-    ShowStatus, ShowTableStatus, ShowTables, ShowVariables, ShowViews,
+    ShowDatabases, ShowFlowStatus, ShowFlows, ShowIndex, ShowKind, ShowProcessList, ShowRegion,
+    ShowSearchPath, ShowStatus, ShowTableStatus, ShowTables, ShowVariables, ShowViews,
 };
 use crate::statements::tql::Tql;
 use crate::statements::truncate::TruncateTable;
@@ -69,6 +71,9 @@ pub enum Statement {
     CreateTrigger(crate::statements::create::trigger::CreateTrigger),
     // DROP TABLE
     DropTable(DropTable),
+    // UNDROP TABLE
+    #[cfg(feature = "enterprise")]
+    UndropTable(UndropTable),
     // DROP DATABASE
     DropDatabase(DropDatabase),
     // DROP FLOW
@@ -113,6 +118,8 @@ pub enum Statement {
     ShowCreateTrigger(crate::statements::show::trigger::ShowCreateTrigger),
     /// SHOW FLOWS
     ShowFlows(ShowFlows),
+    /// SHOW FLOW STATUS
+    ShowFlowStatus(ShowFlowStatus),
     // SHOW TRIGGERS
     #[cfg(feature = "enterprise")]
     ShowTriggers(crate::statements::show::trigger::ShowTriggers),
@@ -173,12 +180,12 @@ impl Statement {
             | Statement::ShowCreateTable(_)
             | Statement::ShowCreateFlow(_)
             | Statement::ShowFlows(_)
+            | Statement::ShowFlowStatus(_)
             | Statement::ShowCreateView(_)
             | Statement::ShowStatus(_)
             | Statement::ShowSearchPath(_)
             | Statement::ShowViews(_)
             | Statement::DescribeTable(_)
-            | Statement::Explain(_)
             | Statement::ShowVariables(_)
             | Statement::ShowProcesslist(_)
             | Statement::FetchCursor(_)
@@ -188,6 +195,8 @@ impl Statement {
             Statement::ShowCreateTrigger(_) => true,
             #[cfg(feature = "enterprise")]
             Statement::ShowTriggers(_) => true,
+
+            Statement::Explain(explain) => !explain.analyze || explain.statement.is_readonly(),
 
             // Write operations
             Statement::Insert(_)
@@ -215,6 +224,9 @@ impl Statement {
             | Statement::Admin(_) => false,
 
             #[cfg(feature = "enterprise")]
+            Statement::UndropTable(_) => false,
+
+            #[cfg(feature = "enterprise")]
             Statement::AlterTrigger(_) => false,
 
             #[cfg(feature = "enterprise")]
@@ -239,6 +251,8 @@ impl Display for Statement {
             #[cfg(feature = "enterprise")]
             Statement::DropTrigger(s) => s.fmt(f),
             Statement::DropTable(s) => s.fmt(f),
+            #[cfg(feature = "enterprise")]
+            Statement::UndropTable(s) => s.fmt(f),
             Statement::DropDatabase(s) => s.fmt(f),
             Statement::DropView(s) => s.fmt(f),
             Statement::CreateDatabase(s) => s.fmt(f),
@@ -257,6 +271,7 @@ impl Display for Statement {
             #[cfg(feature = "enterprise")]
             Statement::ShowCreateTrigger(s) => s.fmt(f),
             Statement::ShowFlows(s) => s.fmt(f),
+            Statement::ShowFlowStatus(s) => s.fmt(f),
             #[cfg(feature = "enterprise")]
             Statement::ShowTriggers(s) => s.fmt(f),
             Statement::ShowCreateDatabase(s) => s.fmt(f),

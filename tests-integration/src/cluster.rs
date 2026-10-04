@@ -19,6 +19,7 @@ use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::Duration;
 
+use api::v1::health_check_server::HealthCheckServer;
 use api::v1::region::region_server::RegionServer;
 use arrow_flight::flight_service_server::FlightServiceServer;
 use cache::{
@@ -34,6 +35,8 @@ use client::Client;
 use client::client_manager::NodeClients;
 use cmd::frontend::create_heartbeat_task;
 use common_base::Plugins;
+use common_datasource::object_store::LocalFileAccess;
+use common_event_recorder::EventRecorderOptions;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::DatanodeId;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
@@ -65,9 +68,9 @@ use mito2::gc::GcConfig;
 use mito2::region::MitoRegionRef;
 use object_store::config::ObjectStoreConfig;
 use rand::Rng;
-use servers::grpc::GrpcOptions;
 use servers::grpc::flight::FlightCraftWrapper;
 use servers::grpc::region_server::RegionServerRequestHandler;
+use servers::grpc::{GrpcOptions, HealthCheckHandler};
 use servers::server::ServerHandlers;
 use store_api::storage::RegionId;
 use tempfile::TempDir;
@@ -77,7 +80,7 @@ use tower::service_fn;
 use uuid::Uuid;
 
 use crate::test_util::{
-    self, FileDirGuard, PEER_PLACEHOLDER_ADDR, StorageType, TestGuard, create_datanode_opts,
+    self, FileDirGuard, StorageType, TestGuard, create_datanode_opts,
     create_tmp_dir_and_datanode_opts,
 };
 
@@ -168,8 +171,11 @@ pub struct GreptimeDbClusterBuilder {
     metasrv_wal_config: MetasrvWalConfig,
     datanode_gc_config: GcConfig,
     metasrv_gc_config: GcSchedulerOptions,
+    frontend_auto_create_table: bool,
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
+    local_file_access: LocalFileAccess,
+    event_recorder_options: EventRecorderOptions,
 }
 
 impl GreptimeDbClusterBuilder {
@@ -201,8 +207,11 @@ impl GreptimeDbClusterBuilder {
             metasrv_wal_config: MetasrvWalConfig::default(),
             datanode_gc_config: GcConfig::default(),
             metasrv_gc_config: GcSchedulerOptions::default(),
+            frontend_auto_create_table: true,
             shared_home_dir: None,
             meta_selector: None,
+            local_file_access: LocalFileAccess::default(),
+            event_recorder_options: EventRecorderOptions::default(),
         }
     }
 
@@ -248,6 +257,22 @@ impl GreptimeDbClusterBuilder {
     }
 
     #[must_use]
+    pub fn with_event_recorder_options(
+        mut self,
+        event_recorder_options: EventRecorderOptions,
+    ) -> Self {
+        self.event_recorder_options = event_recorder_options;
+        self
+    }
+
+    /// Sets whether the test frontend automatically creates tables on write.
+    #[must_use]
+    pub fn with_frontend_auto_create_table(mut self, auto_create_table: bool) -> Self {
+        self.frontend_auto_create_table = auto_create_table;
+        self
+    }
+
+    #[must_use]
     pub fn with_shared_home_dir(mut self, shared_home_dir: Arc<TempDir>) -> Self {
         self.shared_home_dir = Some(shared_home_dir);
         self
@@ -256,6 +281,12 @@ impl GreptimeDbClusterBuilder {
     #[must_use]
     pub fn with_meta_selector(mut self, selector: SelectorRef) -> Self {
         self.meta_selector = Some(selector);
+        self
+    }
+
+    /// Configure the frontend COPY sandbox for filesystem integration tests.
+    pub fn with_local_file_access(mut self, access: LocalFileAccess) -> Self {
+        self.local_file_access = access;
         self
     }
 
@@ -284,6 +315,7 @@ impl GreptimeDbClusterBuilder {
                 ..Default::default()
             },
             gc: self.metasrv_gc_config.clone(),
+            event_recorder: self.event_recorder_options.clone(),
             ..Default::default()
         };
 
@@ -303,13 +335,17 @@ impl GreptimeDbClusterBuilder {
             .build_datanodes_with_options(&metasrv, &datanode_options)
             .await;
 
-        build_datanode_clients(datanode_clients.clone(), &datanode_instances, datanodes).await;
+        build_datanode_clients(datanode_clients.clone(), &datanode_instances).await;
 
         self.wait_datanodes_alive(metasrv.metasrv.meta_peer_client(), datanodes)
             .await;
 
         let mut frontend = self
-            .build_frontend(metasrv.clone(), datanode_clients, start_frontend_servers)
+            .build_frontend(
+                metasrv.clone(),
+                datanode_clients.clone(),
+                start_frontend_servers,
+            )
             .await;
 
         frontend.start().await.unwrap();
@@ -433,7 +469,7 @@ impl GreptimeDbClusterBuilder {
                 .build(),
         );
 
-        let mut builder = DatanodeBuilder::new(opts, Plugins::default(), meta_backend);
+        let mut builder = DatanodeBuilder::new(opts.clone(), Plugins::default(), meta_backend);
         builder
             .with_cache_registry(layered_cache_registry)
             .with_meta_client(meta_client);
@@ -498,6 +534,7 @@ impl GreptimeDbClusterBuilder {
             meta_client.clone(),
             Arc::new(ProcessManager::new(fe_opts.grpc.server_addr.clone(), None)),
         )
+        .with_local_file_access(self.local_file_access.clone())
         .with_local_cache_invalidator(cache_registry)
         .try_build()
         .await
@@ -524,7 +561,11 @@ impl GreptimeDbClusterBuilder {
     }
 
     fn build_frontend_options(&self) -> FrontendOptions {
-        let mut fe_opts = FrontendOptions::default();
+        let mut fe_opts = FrontendOptions {
+            auto_create_table: self.frontend_auto_create_table,
+            event_recorder: self.event_recorder_options.clone(),
+            ..Default::default()
+        };
 
         // Choose a random unused port between [14000, 24000] for local test to avoid conflicts.
         let port_range = 14000..=24000;
@@ -578,11 +619,8 @@ impl GreptimeDbClusterBuilder {
 async fn build_datanode_clients(
     clients: Arc<NodeClients>,
     instances: &HashMap<DatanodeId, Datanode>,
-    datanodes: usize,
 ) {
-    for i in 0..datanodes {
-        let datanode_id = i as u64 + 1;
-        let instance = instances.get(&datanode_id).unwrap();
+    for (&datanode_id, instance) in instances {
         let (addr, client) = create_datanode_client(instance).await;
         clients
             .insert_client(Peer::new(datanode_id, addr), client)
@@ -600,7 +638,6 @@ async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
         .unwrap();
 
     let flight_handler = FlightCraftWrapper(datanode.region_server());
-
     let region_server_handler =
         RegionServerRequestHandler::new(Arc::new(datanode.region_server()), runtime);
 
@@ -620,34 +657,302 @@ async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
                     .send_compressed(CompressionEncoding::Gzip)
                     .send_compressed(CompressionEncoding::Zstd),
             )
+            .add_service(HealthCheckServer::new(HealthCheckHandler))
             .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))
             .await
     });
 
-    // Move client to an option so we can _move_ the inner value
-    // on the first attempt to connect. All other attempts will fail.
     let mut client = Some(client);
-    // `PEER_PLACEHOLDER_ADDR` is just a placeholder, does not actually connect to it.
-    let addr = PEER_PLACEHOLDER_ADDR;
+    let addr = test_util::PEER_PLACEHOLDER_ADDR;
     let channel_manager = ChannelManager::new();
-    let _ = channel_manager
+    channel_manager
         .reset_with_connector(
             addr,
             service_fn(move |_| {
                 let client = client.take();
 
                 async move {
-                    if let Some(client) = client {
-                        Ok(TokioIo::new(client))
-                    } else {
-                        Err(std::io::Error::other("Client already taken"))
-                    }
+                    client
+                        .map(TokioIo::new)
+                        .ok_or_else(|| std::io::Error::other("Client already taken"))
                 }
             }),
         )
         .unwrap();
+
     (
         addr.to_string(),
-        Client::with_manager_and_urls(channel_manager, vec![addr]),
+        // The mock connector pool lives on this single manager, so both lanes
+        // intentionally share it (same semantics as the legacy constructor).
+        Client::with_query_and_control_managers(channel_manager.clone(), channel_manager, [addr]),
     )
+}
+
+// Mock connectors are registered on a shared channel manager.
+#[cfg(test)]
+#[allow(deprecated)]
+mod tests {
+    use api::v1::flow::FlowRequest;
+    use api::v1::region::{
+        ListMetadataRequest, RegionRequest, RegionRequestHeader, region_request,
+    };
+    use catalog::memory::new_memory_catalog_manager;
+    use client::Client;
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
+    use common_meta::key::TableMetadataManager;
+    use common_meta::key::flow::FlowMetadataManager;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::node_manager::{DatanodeManager, FlownodeManager};
+    use common_meta::peer::Peer;
+    use flow::{FlownodeBuilder, FlownodeOptions, FlownodeServiceBuilder, FrontendClient};
+
+    use super::*;
+
+    const HEALTH_REFRESH_INTERVAL: Duration = Duration::from_millis(10);
+    const HEALTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
+
+    async fn wait_for_active_route(client: &Client, active_addr: &str) {
+        client.find_channel().unwrap();
+        tokio::time::timeout(HEALTH_REFRESH_TIMEOUT, async {
+            let mut interval = tokio::time::interval(HEALTH_REFRESH_INTERVAL);
+            loop {
+                interval.tick().await;
+                let (active, inactive) = client.peer_addresses_by_state();
+                if active.len() == 1 && active[0] == active_addr && inactive.len() == 1 {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("background health routing did not select the active peer");
+    }
+
+    async fn create_region_requester_health_client(datanode: &Datanode) -> (Peer, Peer, Client) {
+        const ACTIVE_ADDR: &str = "127.0.0.1:3001";
+        const INACTIVE_ADDR: &str = "127.0.0.1:3002";
+
+        let (active_client, server) = tokio::io::duplex(1024);
+        let runtime = RuntimeBuilder::default()
+            .worker_threads(2)
+            .thread_name("grpc-handlers")
+            .build()
+            .unwrap();
+        let region_server_handler =
+            RegionServerRequestHandler::new(Arc::new(datanode.region_server()), runtime);
+
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(RegionServer::new(region_server_handler))
+                .add_service(HealthCheckServer::new(HealthCheckHandler))
+                .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))
+                .await
+        });
+
+        let channel_manager = ChannelManager::new();
+        let mut active_client = Some(active_client);
+        channel_manager
+            .reset_with_connector(
+                ACTIVE_ADDR,
+                service_fn(move |_| {
+                    let client = active_client.take();
+
+                    async move {
+                        client
+                            .map(TokioIo::new)
+                            .ok_or_else(|| std::io::Error::other("Active client already taken"))
+                    }
+                }),
+            )
+            .unwrap();
+        channel_manager
+            .reset_with_connector(
+                INACTIVE_ADDR,
+                service_fn(|_| async {
+                    Err::<TokioIo<tokio::io::DuplexStream>, _>(std::io::Error::other(
+                        "Inactive synthetic peer",
+                    ))
+                }),
+            )
+            .unwrap();
+
+        let client = Client::with_manager_and_urls_and_options(
+            channel_manager,
+            [INACTIVE_ADDR, ACTIVE_ADDR],
+            client::ClientOptions {
+                health_check_interval: HEALTH_REFRESH_INTERVAL,
+                ..Default::default()
+            },
+        );
+        (
+            Peer::new(1, ACTIVE_ADDR),
+            Peer::new(2, INACTIVE_ADDR),
+            client,
+        )
+    }
+
+    async fn create_flow_requester_health_client(
+        flownode: &flow::FlownodeInstance,
+    ) -> (Peer, Peer, Client) {
+        const ACTIVE_ADDR: &str = "127.0.0.1:3003";
+        const INACTIVE_ADDR: &str = "127.0.0.1:3004";
+
+        let (active_client, server) = tokio::io::duplex(1024);
+        let flow_service = flownode.flownode_server().create_flow_service();
+
+        tokio::spawn(async move {
+            Server::builder()
+                .add_service(flow_service)
+                .add_service(HealthCheckServer::new(HealthCheckHandler))
+                .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))
+                .await
+        });
+
+        let channel_manager = ChannelManager::new();
+        let mut active_client = Some(active_client);
+        channel_manager
+            .reset_with_connector(
+                ACTIVE_ADDR,
+                service_fn(move |_| {
+                    let client = active_client.take();
+
+                    async move {
+                        client
+                            .map(TokioIo::new)
+                            .ok_or_else(|| std::io::Error::other("Active client already taken"))
+                    }
+                }),
+            )
+            .unwrap();
+        channel_manager
+            .reset_with_connector(
+                INACTIVE_ADDR,
+                service_fn(|_| async {
+                    Err::<TokioIo<tokio::io::DuplexStream>, _>(std::io::Error::other(
+                        "Inactive synthetic peer",
+                    ))
+                }),
+            )
+            .unwrap();
+
+        let client = Client::with_manager_and_urls_and_options(
+            channel_manager,
+            [INACTIVE_ADDR, ACTIVE_ADDR],
+            client::ClientOptions {
+                health_check_interval: HEALTH_REFRESH_INTERVAL,
+                ..Default::default()
+            },
+        );
+        (
+            Peer::new(1, ACTIVE_ADDR),
+            Peer::new(2, INACTIVE_ADDR),
+            client,
+        )
+    }
+
+    async fn start_flownode(addr: String) -> flow::FlownodeInstance {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let table_meta = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        table_meta.init().await.unwrap();
+        let flow_meta = Arc::new(FlowMetadataManager::new(kv_backend));
+        let catalog_manager = new_memory_catalog_manager().unwrap();
+        let (frontend_client, _handler) =
+            FrontendClient::from_empty_grpc_handler(Default::default());
+        let mut opts = FlownodeOptions::default();
+        opts.grpc.bind_addr = addr.clone();
+        opts.grpc.server_addr = addr;
+
+        let mut flownode = FlownodeBuilder::new(
+            opts.clone(),
+            Plugins::default(),
+            table_meta,
+            catalog_manager,
+            flow_meta,
+            Arc::new(frontend_client),
+        )
+        .build()
+        .await
+        .unwrap();
+        let services = FlownodeServiceBuilder::new(&opts)
+            .with_default_grpc_server(flownode.flownode_server())
+            .build()
+            .unwrap();
+        flownode.setup_services(services);
+        flownode.start().await.unwrap();
+        flownode
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_region_requester_health_check_and_list_metadata() {
+        // Arrange: configure active and inactive synthetic peers over the duplex harness.
+        let cluster = GreptimeDbClusterBuilder::new("region_requester_health_check")
+            .await
+            .with_datanodes(1)
+            .build(false)
+            .await;
+        let (active_peer, inactive_peer, client) =
+            create_region_requester_health_client(cluster.datanode_instances.get(&1).unwrap())
+                .await;
+        let clients = NodeClients::default();
+        clients
+            .insert_client(active_peer.clone(), client.clone())
+            .await;
+        clients
+            .insert_client(inactive_peer.clone(), client.clone())
+            .await;
+
+        // Act: wait for background health routing, then send a real Region RPC.
+        wait_for_active_route(&client, &active_peer.addr).await;
+        let requester = clients.datanode(&active_peer).await;
+        let response = requester
+            .handle(RegionRequest {
+                header: Some(RegionRequestHeader::default()),
+                body: Some(region_request::Body::ListMetadata(ListMetadataRequest {
+                    region_ids: vec![],
+                })),
+            })
+            .await
+            .unwrap();
+
+        // Assert: the inactive peer was rejected and the RegionRequester reached the active service.
+        assert_eq!(
+            (vec![active_peer.addr], vec![inactive_peer.addr]),
+            client.peer_addresses_by_state()
+        );
+        assert_eq!(b"[]", response.metadata.as_slice());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_flow_requester_health_check_and_handle_request() {
+        // Arrange: start a flownode and expose its production flow service through a duplex harness.
+        let mut flownode = start_flownode("127.0.0.1:0".to_string()).await;
+        let (active_peer, inactive_peer, client) =
+            create_flow_requester_health_client(&flownode).await;
+        let clients = NodeClients::default();
+        clients
+            .insert_client(active_peer.clone(), client.clone())
+            .await;
+        clients
+            .insert_client(inactive_peer.clone(), client.clone())
+            .await;
+
+        // Act: wait for background health routing, then send a real Flow RPC.
+        wait_for_active_route(&client, &active_peer.addr).await;
+        let response = clients
+            .flownode(&active_peer)
+            .await
+            .handle(FlowRequest::default())
+            .await;
+
+        // Assert: the inactive peer was rejected and the production Flow service handled the RPC.
+        assert_eq!(
+            (vec![active_peer.addr], vec![inactive_peer.addr]),
+            client.peer_addresses_by_state()
+        );
+        assert_eq!(
+            StatusCode::InvalidArguments,
+            response.unwrap_err().status_code()
+        );
+        flownode.shutdown().await.unwrap();
+    }
 }

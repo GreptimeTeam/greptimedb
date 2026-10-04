@@ -2,7 +2,8 @@
 ## @toml2docs:none-default
 default_timezone = "UTC"
 
-## The default column prefix for auto-created time index and value columns.
+## The default column prefix for auto-created time index, value, and native histogram columns.
+## Legacy OTLP summary columns keep their historical `greptime_` prefix.
 ## @toml2docs:none-default
 default_column_prefix = "greptime"
 
@@ -10,11 +11,23 @@ default_column_prefix = "greptime"
 ## When `false`, a missing table is never auto-created even if the request sets the `auto_create_table` hint to `true`. Default: `true`.
 #+ auto_create_table = true
 
+## Enables experimental Parquet COPY DATABASE using shared Metric physical scans.
+## Resume requires the previous export and storage writes to have ended; HTTP timeout is not confirmation.
+#+ experimental_metric_export = false
+
 ## The user provider for authentication.
 ## Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"
 ## Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",
-## "mysql_native_password:<hex_sha1_sha1_password>"
-## "pbkdf2_sha256" protects passwords at rest but is not compatible with mysql_native_password.
+## "mysql_native_password:<hex_sha1_sha1_password>",
+## "pg_scram_sha256:<iterations>:<hex_salt>:<hex_stored_key>:<hex_server_key>"
+## "pbkdf2_sha256" and "pg_scram_sha256" protect passwords at rest, but cannot authenticate over MySQL's
+## native password handshake; a MySQL client must send the password in cleartext for such users.
+## "mysql_native_password" is MySQL-specific and cannot authenticate over PostgreSQL at all.
+## PostgreSQL SCRAM only covers "plain" and "pg_scram_sha256" users; if any user is "pbkdf2_sha256" or
+## "mysql_native_password", PostgreSQL falls back to cleartext password auth for every user.
+## For "pg_scram_sha256" users, keep the default iteration count (4096) and salt length (16): both are
+## observable in the SCRAM server-first message, and non-default values weaken resistance to username
+## enumeration.
 ## @toml2docs:none-default
 #+ user_provider = "static_user_provider:file:/path/to/users"
 
@@ -45,14 +58,32 @@ max_concurrent_queries = 0
 #+ [runtime]
 ## The number of threads to execute the runtime for global read operations.
 #+ global_rt_size = 8
-## The number of threads to execute the runtime for global write operations.
+## The number of threads to execute compact operations.
 #+ compact_rt_size = 4
+## The maximum number of blocking threads for compact operations.
+## Defaults to max(num_cpus / 2, 2).
+#+ compact_rt_max_blocking_threads = 4
+
+## Experimental weighted, work-conserving query/write task scheduler.
+#+ [runtime.experimental_workload_scheduler]
+## Enable when concurrent queries and writes interfere with each other—for example, when long-running queries increase ingestion latency.
+## The weights set their relative runtime shares while both are backlogged. Disabled by default.
+#+ enable = false
+## Relative query share while both query and write workloads are backlogged.
+#+ query_weight = 2
+## Relative write share while both query and write workloads are backlogged.
+#+ write_weight = 8
+## Number of polls between scheduler fairness samples. Must be greater than zero.
+#+ sample_every_polls = 16
 
 ## The HTTP server options.
 [http]
 ## The address to bind the HTTP server.
 addr = "127.0.0.1:4000"
 ## HTTP request timeout. Set to 0 to disable timeout.
+## When synchronous Prometheus, OTLP metrics, or ordinary-table batching is enabled, a nonzero timeout is
+## raised to at least the largest active flush interval plus 1 second. The intervals come from
+## `pending_rows_batcher.logical_table.pending_rows_flush_interval` and `pending_rows_batcher.pending_rows_flush_interval`.
 timeout = "0s"
 ## HTTP request body limit.
 ## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
@@ -65,16 +96,14 @@ enable_cors = true
 ## @toml2docs:none-default
 cors_allowed_origins = ["https://example.com"]
 
-## Whether to enable validation for Prometheus remote write requests.
-## Available options:
-## - strict: deny invalid UTF-8 strings (default).
-## - lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).
-## - unchecked: do not valid strings.
-prom_validation_mode = "strict"
-## Experimental: enable Prometheus remote write v2 native histogram ingestion.
-experimental_enable_prometheus_native_histogram = false
-## Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics.
-experimental_enable_explain_analyze_stream = false
+
+## Whether to start the dedicated public HTTP **API** server. This server serves
+## only the `v1` interfaces plus the dashboard, and shares every other `[http]`
+## option with the main server. It is disabled by default; set to `true` to enable.
+enable_api_server = false
+## The address to bind the dedicated HTTP API server, in the same form as `addr`.
+## Defaults to `127.0.0.1:4006`.
+api_server_addr = "127.0.0.1:4006"
 
 ## The gRPC server options.
 [grpc]
@@ -82,6 +111,11 @@ experimental_enable_explain_analyze_stream = false
 bind_addr = "127.0.0.1:4001"
 ## The number of server worker threads.
 runtime_size = 8
+## Enable CORS for gRPC-Web clients in browsers. Disabled by default.
+#+ enable_cors = false
+## Origins allowed by gRPC CORS. An empty list allows any origin.
+## @toml2docs:none-default
+#+ cors_allowed_origins = ["https://example.com"]
 ## The maximum connection age for gRPC connection.
 ## The value can be a human-readable time string. For example: `10m` for ten minutes or `1h` for one hour.
 ## Refer to https://grpc.io/docs/guides/keepalive/ for more details.
@@ -181,6 +215,61 @@ enable = true
 ## Available values: "last_non_null", "last_row".
 default_merge_mode = "last_non_null"
 
+## Ordinary-table batching for opted-in ingestion protocols.
+## PENDING_ROWS_BATCH_SYNC defaults to true for both batchers. Set it to false to acknowledge
+## queue admission without waiting for storage; later failures cannot be returned to the client.
+## Omitted or empty protocols disables batching. Prom without metric engine uses this batcher.
+## OTLP logs, traces and ordinary metrics use this batcher.
+## MySQL and PostgreSQL use the same acknowledgement policy. Protocol timeouts are unchanged.
+## Single-connection writes and INSERT SELECT may incur additional flush waits.
+[pending_rows_batcher]
+# protocols = [
+#     "influxdb",
+#     "opentsdb",
+#     "otlp",
+#     "logs",
+#     "loki",
+#     "splunk",
+#     "elasticsearch",
+#     "http_sql",
+#     "mysql",
+#     "postgres",
+#     "prom",
+# ]
+## Flush interval measured from the first pending submission. Zero disables batching.
+pending_rows_flush_interval = "0s"
+## Flush after a complete submission reaches this row threshold.
+max_batch_rows = 100000
+## Maximum concurrent flushes shared by the frontend batcher.
+max_concurrent_flushes = 256
+## Maximum queued submissions per table worker.
+worker_channel_capacity = 65536
+## Maximum admitted original requests awaiting completion.
+max_inflight_requests = 3000
+## Maximum number of queued table Flow notifications.
+flow_notification_queue_capacity = 1024
+
+## Metric-engine logical-table batching for Prom remote write and non-legacy OTLP metrics.
+## Requires prom_store.with_metric_engine. Logs, traces and legacy metrics are not eligible.
+## Enable independently with protocols and a nonzero flush interval.
+## Omitted fields use independent defaults, not parent settings.
+## Empty protocols or a zero interval disables logical batching without fallback.
+## Omitting this entire section preserves legacy Prom batching; it does not enable OTLP batching.
+[pending_rows_batcher.logical_table]
+# protocols = ["prom", "otlp"]
+## Flush interval measured from the first pending submission. Zero disables batching.
+pending_rows_flush_interval = "0s"
+## Flush after a complete submission reaches this row threshold.
+max_batch_rows = 100000
+## Maximum concurrent flushes shared by Prom and OTLP metrics.
+max_concurrent_flushes = 256
+## Maximum queued submissions per physical-table worker.
+worker_channel_capacity = 65536
+## Maximum admitted original requests awaiting completion.
+max_inflight_requests = 3000
+## Maximum number of queued logical-table Flow notifications.
+flow_notification_queue_capacity = 1024
+
 ## Jaeger protocol options.
 [jaeger]
 ## Whether to enable Jaeger protocol in HTTP API.
@@ -191,7 +280,10 @@ enable = true
 ## Whether to enable OpenTelemetry protocol in HTTP API.
 enable = true
 ## Maximum spans per trace ingest chunk. Set to 0 to disable splitting.
-trace_ingest_chunk_size = 128
+trace_ingest_chunk_size = 512
+## Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric
+## resource attributes, so metrics-only services reach the semantic graph.
+experimental_enable_resource_info = false
 
 ## Prometheus remote storage options
 [prom_store]
@@ -199,23 +291,20 @@ trace_ingest_chunk_size = 128
 enable = true
 ## Whether to store the data from Prometheus remote write in metric engine.
 with_metric_engine = true
-## Interval to flush pending rows batcher.
-## Set to "0s" to disable batching mode in Prometheus Remote Write endpoint
-#+pending_rows_flush_interval = "0s"
-## Max rows per pending batch before triggering a flush.
-#+max_batch_rows = 100000
-## Max number of concurrent batch flushes.
-#+max_concurrent_flushes = 256
-## Capacity of the pending batch worker channel.
-#+worker_channel_capacity = 65526
-## Max inflight write requests before backpressure.
-#+max_inflight_requests = 3000
+## Whether to enable validation for Prometheus remote write requests.
+## Available options:
+## - strict: deny invalid UTF-8 strings (default).
+## - lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).
+## - unchecked: do not valid strings.
+prom_validation_mode = "strict"
+
 
 ## The WAL options.
 [wal]
 ## The provider of the WAL.
 ## - `raft_engine`: the wal is stored in the local file system by raft-engine.
 ## - `kafka`: it's remote wal that data is stored in Kafka.
+## - `experimental_object_store`: the wal is stored as objects in an object store.<br/>**Notes: experimental.**
 provider = "raft_engine"
 
 ## The directory to store the WAL files.
@@ -253,7 +342,7 @@ prefill_log_files = false
 
 ## Duration for fsyncing log files.
 ## **It's only used when the provider is `raft_engine`**.
-sync_period = "10s"
+sync_period = "5s"
 
 ## Parallelism during WAL recovery.
 recovery_parallelism = 2
@@ -266,9 +355,9 @@ broker_endpoints = ["127.0.0.1:9092"]
 ## **It's only used when the provider is `kafka`**.
 #+ connect_timeout = "3s"
 
-## The timeout for kafka client.
+## The total request timeout for kafka client.
 ## **It's only used when the provider is `kafka`**.
-#+ timeout = "3s"
+#+ timeout = "5s"
 
 ## Automatically create topics for WAL.
 ## Set to `true` to automatically create topics for WAL.
@@ -300,7 +389,8 @@ create_topic_timeout = "30s"
 
 ## The max size of a single producer batch.
 ## Warning: Kafka has a default limit of 1MB per message in a topic.
-## **It's only used when the provider is `kafka`**.
+## Defaults to `8MB` when the provider is `experimental_object_store`.
+## **It's only used when the provider is `kafka` or `experimental_object_store`**.
 max_batch_bytes = "1MB"
 
 ## The consumer wait timeout.
@@ -317,6 +407,42 @@ consumer_wait_timeout = "100ms"
 ## as the system will skip over missing entries instead of treating
 ## them as critical errors.
 overwrite_entry_start_id = false
+
+## The name of the storage provider that holds the WAL objects, an empty name selects the default object store.
+## **It's only used when the provider is `experimental_object_store`**.
+#+ storage_provider = ""
+
+## The path prefix of the WAL objects inside the storage provider.
+## The objects are written under `<prefix>/datanodes/<node_id>/epochs/<generation>`, which is derived from this prefix.
+## **It's only used when the provider is `experimental_object_store`**.
+#+ prefix = "wal"
+
+## The interval of flushing buffered entries to the object store, at least `10ms`, defaults to `100ms`.
+## Each non-empty timer-triggered flush creates one object, and a batch that reaches `max_batch_bytes` is flushed immediately, so under sustained load the batch seals on size and the interval no longer matters.
+## When writes are sparse, a shorter interval lowers the acknowledgement latency of `durable` appends and raises the number of object requests: timer-triggered sealing creates at most one object per interval per node, and in `enqueued` mode the backlog thresholds can seal earlier. An `enqueued` append does not wait for its batch to seal once it is admitted, but the backlog thresholds can delay admission.
+## **It's only used when the provider is `experimental_object_store`**.
+#+ flush_interval = "100ms"
+
+## When an append to the object store WAL returns.
+## - `durable`: an append returns after the object holding its entries is durable (the default).
+## - `enqueued`: an append returns once its entries are admitted and their ids are assigned, and the object is created in the background. A crash loses the unpersisted backlog.
+## **It's only used when the provider is `experimental_object_store`**.
+#+ ack_mode = "durable"
+
+## The size of the unpersisted backlog at which new appends stall until an upload completes, in `enqueued` mode.
+## Nothing is dropped and nothing is rejected; the threshold does not bound what a crash during an outage can lose.
+## **It's only used when the provider is `experimental_object_store` and `ack_mode` is `enqueued`**.
+#+ max_unpersisted_bytes = "64MB"
+
+## The age of the oldest unpersisted entry at which new appends stall until an upload completes, in `enqueued` mode.
+## **It's only used when the provider is `experimental_object_store` and `ack_mode` is `enqueued`**.
+#+ max_unpersisted_age = "8s"
+
+## What a read does with a segment that still does not decode after a second fetch, because its checksum does not match or its content disagrees with its footer entry.
+## - `skip`: the segment is skipped and recorded as a WAL hole of its region, a metric is incremented and a warning is logged; the other regions of the object are unaffected (the default).
+## - `fail`: the read fails, so the region does not open.
+## **It's only used when the provider is `experimental_object_store`**.
+#+ on_corrupted_segment = "skip"
 
 # The Kafka SASL configuration.
 # **It's only used when the provider is `kafka`**.
@@ -355,12 +481,6 @@ retry_delay = "500ms"
 ## The maximum number of procedures that can be running at the same time.
 ## If the number of running procedures exceeds this limit, the procedure will be rejected.
 max_running_procedures = 128
-
-## flow engine options.
-[flow]
-## The number of flow worker in flownode.
-## Not setting(or set to 0) this value will use the number of CPU cores divided by 2.
-#+num_workers=0
 
 # Example of using S3 as the storage.
 # [storage]
@@ -403,6 +523,13 @@ max_running_procedures = 128
 # credential = "base64-credential"
 # endpoint = "https://storage.googleapis.com"
 
+# Example of using HDFS as the storage with the native Rust client.
+# [storage]
+# type = "Hdfs"
+# root = "/greptimedb"
+# name_node = "hdfs://127.0.0.1:9000"
+# options = { "dfs.client.block.write.replace-datanode-on-failure.enable" = "true" }
+
 ## The query engine options.
 [query]
 ## Parallelism of the query engine.
@@ -416,10 +543,43 @@ parallelism = 0
 ## NOTE: This does NOT limit memory used by table scans.
 memory_pool_size = "50%"
 
+## Experimental memory pool allocation policy:
+## - "greedy" (default): first-come-first-served allocation; preserves current behavior.
+## - "fair": divides available memory among spillable operators and may spill earlier.
+## Only effective when `memory_pool_size` is bounded (>0).
+#+ experimental_memory_pool_policy = "greedy"
+
+# --- Experimental: DataFusion spill-to-disk controls ---
+## Spill mode:
+## - "default": preserve DataFusion built-in OS temp directory (default).
+## - "custom": explicitly configure spill path, quota, and compression.
+## - "disabled": explicitly disable disk spilling.
+## Set this to "custom" before using the path/quota/compression keys below.
+#+ experimental_spill_mode = "default"
+## Spill directory path. Ignored unless mode is "custom".
+## @toml2docs:none-default
+#+ experimental_spill_path = "/path/to/spill"
+## Maximum total size of spill directory (default: "1GiB").
+## Ignored unless mode is "custom".
+#+ experimental_spill_max_temp_directory_size = "1GiB"
+## Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".
+## Ignored unless mode is "custom".
+#+ experimental_spill_compression = "uncompressed"
+# --- End spill-to-disk ---
+
 ## The data storage options.
 [storage]
 ## The working home directory.
 data_home = "./greptimedb_data"
+
+## Root directory for standalone SQL access to local files.
+## Relative SQL paths are resolved below this directory. Absolute paths are accepted only when
+## they are inside this directory. Defaults to `<data_home>/copy`.
+## Distributed deployments always reject SQL access to local files.
+## Upgrade note: COPY commands and existing external tables that reference paths outside this
+## directory will fail. Move those files below the copy root, set this option to a dedicated
+## directory containing them, or migrate the files to object storage before upgrading.
+#+ copy_root = "./greptimedb_data/copy"
 
 ## The storage type used to store the data.
 ## - `File`: the data is stored in the local file system.
@@ -427,6 +587,7 @@ data_home = "./greptimedb_data"
 ## - `Gcs`: the data is stored in the Google Cloud Storage.
 ## - `Azblob`: the data is stored in the Azure Blob Storage.
 ## - `Oss`: the data is stored in the Aliyun OSS.
+## - `Hdfs`: the data is stored in the Hadoop Distributed File System.
 type = "File"
 
 ## The S3 bucket name.
@@ -434,10 +595,20 @@ type = "File"
 ## @toml2docs:none-default
 bucket = "greptimedb"
 
-## The S3 data will be stored in the specified prefix, for example, `s3://${bucket}/${root}`.
-## **It's only used when the storage type is `S3`, `Oss` and `Azblob`**.
+## The directory or object prefix under which data is stored.
+## **It's only used when the storage type is `S3`, `Oss`, `Gcs`, `Azblob` and `Hdfs`**.
 ## @toml2docs:none-default
 root = "greptimedb"
+
+## The HDFS NameNode URI, for example, `hdfs://127.0.0.1:9000`.
+## **It's only used when the storage type is `Hdfs`**.
+## @toml2docs:none-default
+name_node = "hdfs://127.0.0.1:9000"
+
+## Additional options passed to the native HDFS client.
+## **It's only used when the storage type is `Hdfs`**.
+## @toml2docs:none-default
+options = {}
 
 ## The access key id of the aws account.
 ## It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.
@@ -543,6 +714,7 @@ skip_ssl_validation = false
 # endpoint = "https://storage.googleapis.com"
 
 ## The region engine options. You can configure multiple region engines.
+## Each engine type (mito, file, metric) may appear only once; duplicates cause startup to fail.
 [[region_engine]]
 
 ## The Mito engine options.
@@ -562,6 +734,28 @@ manifest_checkpoint_distance = 10
 
 ## Whether to compress manifest and checkpoint file by gzip (default false).
 compress_manifest = false
+
+## Under development; do not enable. Whether to enable series indexes.
+## Indexes are stored on the local filesystem under `{data_home}/series_index`.
+#+ experimental_enable_series_index = false
+
+## Approximate series and range index size limit in open regions, shared across workers.
+## Workers periodically refresh usage and skip maintenance when full. In-flight reconciliation
+## can exceed the limit. Closed-region files, temporary output, catalogs, and old snapshots
+## retained by readers are not counted.
+## Minimum: 1KiB. Takes effect on restart.
+#+ experimental_series_index_max_size = "5GiB"
+
+## Whether to build and query range indexes when series indexes are enabled.
+## Obsolete range-index metadata and files are still cleaned up when disabled.
+#+ experimental_enable_range_index = false
+
+## Interval between series-index maintenance runs. Zero uses the default of 5 min.
+#+ experimental_series_index_maintenance_interval = "5m"
+
+## Requested minimum series-index bucket width (default: 5 days), rounded up to
+## an exact multiple of each region's compaction time window.
+#+ experimental_series_index_bucket_width = "5days"
 
 ## Max number of running background flush jobs (default: 1/2 of cpu cores).
 ## @toml2docs:none-default="Auto"
@@ -587,7 +781,7 @@ compress_manifest = false
 #+ experimental_compaction_on_exhausted = "wait"
 
 ## Interval to auto flush a region if it has not flushed yet.
-auto_flush_interval = "1h"
+auto_flush_interval = "10m"
 
 ## Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB.
 ## @toml2docs:none-default="Auto"
@@ -597,10 +791,13 @@ auto_flush_interval = "1h"
 ## @toml2docs:none-default="Auto"
 #+ global_write_buffer_reject_size = "2GB"
 
+## Default write buffer size for each region. Regions stall at this size and reject writes at twice this size. Setting it to 0 disables both limits unless the table specifies `write_buffer_size`.
+#+ default_region_write_buffer_size = "0"
+
 ## Cache size for SST metadata. Setting it to 0 to disable the cache.
-## If not set, it's default to 1/32 of OS memory with a max limitation of 128MB.
+## If not set, it's default to 1/8 of OS memory with a max limitation of 512MB.
 ## @toml2docs:none-default="Auto"
-#+ sst_meta_cache_size = "128MB"
+#+ sst_meta_cache_size = "512MB"
 
 ## Cache size for vectors and arrow arrays. Setting it to 0 to disable the cache.
 ## If not set, it's default to 1/16 of OS memory with a max limitation of 512MB.
@@ -692,6 +889,9 @@ schedule_compaction_after_edit = true
 
 ## Whether to enable flat format as the default SST format.
 default_flat_format = true
+
+## Whether to enable the experimental two-phase mode for eligible metric series scans.
+experimental_series_scan_v2 = false
 
 ## The options for index in Mito engine.
 [region_engine.mito.index]
@@ -807,8 +1007,6 @@ mem_threshold_on_create = "auto"
 [[region_engine]]
 ## Metric engine options.
 [region_engine.metric]
-## Whether to use sparse primary key encoding.
-sparse_primary_key_encoding = true
 
 ## The logging options.
 [logging]
@@ -828,11 +1026,18 @@ otlp_endpoint = "http://localhost:4318/v1/traces"
 ## Whether to append logs to stdout.
 append_stdout = true
 
+## Whether to write logs to files in `dir`.
+enable_file_logging = true
+
 ## The log format. Can be `text`/`json`.
 log_format = "text"
 
 ## The maximum amount of log files.
 max_log_files = 720
+
+## The maximum total size of managed log files in `dir`.
+## Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.
+max_log_dir_size = "0B"
 
 ## Whether to enable per-region metrics.
 ## Default to false.
@@ -876,6 +1081,25 @@ default_ratio = 1.0
 ## The tokio console address.
 ## @toml2docs:none-default
 #+ tokio_console_addr = "127.0.0.1"
+
+## The pipeline options.
+[pipeline]
+## Time to live of the local pipeline cache. Default is `10s`.
+cache_ttl = "10s"
+
+## Configuration options for the event recorder.
+[event_recorder]
+## TTL for the events table that will be used to store the events. Default is `90d`.
+ttl = "90d"
+## Event types to record. Current available event types: `create_database`,
+## `alter_database`, `drop_database`, `create_flow`, `drop_flow`,
+## `create_table`, `create_logical_tables`, `alter_table`, `alter_logical_tables`,
+## `drop_table`, `undrop_table`, `purge_dropped_table`, `truncate_table`,
+## `create_view`, `drop_view`, `admin_function`, `reconcile_catalog`,
+## `reconcile_database`, `reconcile_table`, `reconcile_logical_tables`.
+## When omitted, all current and future event types are recorded.
+## Set to an empty array to disable event recording.
+#+ event_types = ["create_database"]
 
 ## The memory options.
 [memory]

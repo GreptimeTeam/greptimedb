@@ -1,10 +1,10 @@
 CREATE TABLE json2_type_hints (
     ts TIMESTAMP TIME INDEX,
     j JSON2 (
-        user.age BIGINT NOT NULL DEFAULT 18,
-        user.name STRING DEFAULT 'unknown',
-        user.active BOOLEAN NULL,
-        score DOUBLE NULL DEFAULT 1.5
+        user.age BIGINT,
+        user.name STRING,
+        user.active BOOLEAN,
+        score DOUBLE
     )
 ) WITH (
     'append_mode' = 'true'
@@ -14,25 +14,26 @@ Affected Rows: 0
 
 SHOW CREATE TABLE json2_type_hints;
 
-+------------------+--------------------------------------------------+
-| Table            | Create Table                                     |
-+------------------+--------------------------------------------------+
-| json2_type_hints | CREATE TABLE IF NOT EXISTS "json2_type_hints" (  |
-|                  |   "ts" TIMESTAMP(3) NOT NULL,                    |
-|                  |   "j" JSON2(                                     |
-|                  |     "user"."age" BIGINT NOT NULL DEFAULT 18,     |
-|                  |     "user"."name" STRING NULL DEFAULT 'unknown', |
-|                  |     "user"."active" BOOLEAN NULL,                |
-|                  |     "score" DOUBLE NULL DEFAULT 1.5              |
-|                  |   ) NULL,                                        |
-|                  |   TIME INDEX ("ts")                              |
-|                  | )                                                |
-|                  |                                                  |
-|                  | ENGINE=mito                                      |
-|                  | WITH(                                            |
-|                  |   append_mode = 'true'                           |
-|                  | )                                                |
-+------------------+--------------------------------------------------+
++------------------+-------------------------------------------------+
+| Table            | Create Table                                    |
++------------------+-------------------------------------------------+
+| json2_type_hints | CREATE TABLE IF NOT EXISTS "json2_type_hints" ( |
+|                  |   "ts" TIMESTAMP(3) NOT NULL,                   |
+|                  |   "j" JSON2(                                    |
+|                  |     max_auto_expanded_paths = 100,              |
+|                  |     "user"."age" BIGINT,                        |
+|                  |     "user"."name" STRING,                       |
+|                  |     "user"."active" BOOLEAN,                    |
+|                  |     "score" DOUBLE                              |
+|                  |   ) NULL,                                       |
+|                  |   TIME INDEX ("ts")                             |
+|                  | )                                               |
+|                  |                                                 |
+|                  | ENGINE=mito                                     |
+|                  | WITH(                                           |
+|                  |   append_mode = 'true'                          |
+|                  | )                                               |
++------------------+-------------------------------------------------+
 
 INSERT INTO json2_type_hints
 VALUES
@@ -50,34 +51,18 @@ SELECT
 FROM json2_type_hints
 ORDER BY ts;
 
-+-----------------------------------------------+------------------------------------------------+--------------------------------------------------+--------------------------------------------+
-| json_get(json2_type_hints.j,Utf8("user.age")) | json_get(json2_type_hints.j,Utf8("user.name")) | json_get(json2_type_hints.j,Utf8("user.active")) | json_get(json2_type_hints.j,Utf8("score")) |
-+-----------------------------------------------+------------------------------------------------+--------------------------------------------------+--------------------------------------------+
-| 42                                            | Alice                                          | true                                             | 3.25                                       |
-| 18                                            | Bob                                            |                                                  | 1.5                                        |
-| 18                                            | unknown                                        |                                                  | 1.5                                        |
-+-----------------------------------------------+------------------------------------------------+--------------------------------------------------+--------------------------------------------+
++-------------------------------------------------------------+-----------------------------------------------------------------+------------------------------------------------------------------+------------------------------------------------------------+
+| json_get(json2_type_hints.j,Utf8("$.user.age"),Int64(NULL)) | json_get(json2_type_hints.j,Utf8("$.user.name"),Utf8View(NULL)) | json_get(json2_type_hints.j,Utf8("$.user.active"),Boolean(NULL)) | json_get(json2_type_hints.j,Utf8("$.score"),Float64(NULL)) |
++-------------------------------------------------------------+-----------------------------------------------------------------+------------------------------------------------------------------+------------------------------------------------------------+
+| 42                                                          | Alice                                                           | true                                                             | 3.25                                                       |
+|                                                             | Bob                                                             |                                                                  |                                                            |
+|                                                             |                                                                 |                                                                  |                                                            |
++-------------------------------------------------------------+-----------------------------------------------------------------+------------------------------------------------------------------+------------------------------------------------------------+
 
 INSERT INTO json2_type_hints
 VALUES (4, '{"user":{"age":"bad"}}');
 
 Error: 1004(InvalidArguments), Invalid JSON: JSON value at user.age does not match JSON2 type hint Int64
-
-CREATE TABLE json2_type_hints_required (
-    ts TIMESTAMP TIME INDEX,
-    j JSON2 (
-        user.age BIGINT NOT NULL
-    )
-) WITH (
-    'append_mode' = 'true'
-);
-
-Affected Rows: 0
-
-INSERT INTO json2_type_hints_required
-VALUES (1, '{}');
-
-Error: 1004(InvalidArguments), Invalid JSON: missing non-null JSON2 type hint path user.age
 
 CREATE TABLE json2_type_hints_timestamp (
     ts TIMESTAMP TIME INDEX,
@@ -86,13 +71,166 @@ CREATE TABLE json2_type_hints_timestamp (
     )
 );
 
-Error: 2000(InvalidSyntax), Invalid SQL, error: unsupported JSON2 type hint data type: TIMESTAMP
+Error: 2000(InvalidSyntax), Invalid SQL, error: unsupported JSON2 type hint data type: TIMESTAMP; supported types: STRING, BIGINT, BIGINT UNSIGNED, DOUBLE, BOOLEAN; supported aliases: INT64, UINT64, FLOAT64
+
+-- A type hint at the maximum supported depth is accepted.
+CREATE TABLE json2_type_hint_depth_50 (
+    ts TIMESTAMP TIME INDEX,
+    j JSON2 (
+        l01.l02.l03.l04.l05.l06.l07.l08.l09.l10.l11.l12.l13.l14.l15.l16.l17.l18.l19.l20.l21.l22.l23.l24.l25.l26.l27.l28.l29.l30.l31.l32.l33.l34.l35.l36.l37.l38.l39.l40.l41.l42.l43.l44.l45.l46.l47.l48.l49.l50 STRING
+    )
+) WITH (
+    'append_mode' = 'true'
+);
+
+Affected Rows: 0
+
+-- A type hint beyond the structured depth limit is rejected at CREATE TABLE.
+CREATE TABLE json2_type_hint_depth_51 (
+    ts TIMESTAMP TIME INDEX,
+    j JSON2 (
+        l01.l02.l03.l04.l05.l06.l07.l08.l09.l10.l11.l12.l13.l14.l15.l16.l17.l18.l19.l20.l21.l22.l23.l24.l25.l26.l27.l28.l29.l30.l31.l32.l33.l34.l35.l36.l37.l38.l39.l40.l41.l42.l43.l44.l45.l46.l47.l48.l49.l50.l51 STRING
+    )
+) WITH (
+    'append_mode' = 'true'
+);
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: JSON2 type hint path cannot exceed 50 segments
 
 DROP TABLE json2_type_hints;
 
 Affected Rows: 0
 
-DROP TABLE json2_type_hints_required;
+DROP TABLE json2_type_hint_depth_50;
+
+Affected Rows: 0
+
+-- Type hints reject unsupported types and aliases.
+CREATE TABLE json2_hint_int8 (ts TIMESTAMP TIME INDEX, j JSON2 (value INT8));
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: unsupported JSON2 type hint data type: INT8; supported types: STRING, BIGINT, BIGINT UNSIGNED, DOUBLE, BOOLEAN; supported aliases: INT64, UINT64, FLOAT64
+
+CREATE TABLE json2_hint_tinyint (ts TIMESTAMP TIME INDEX, j JSON2 (value TINYINT));
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: unsupported JSON2 type hint data type: TINYINT; supported types: STRING, BIGINT, BIGINT UNSIGNED, DOUBLE, BOOLEAN; supported aliases: INT64, UINT64, FLOAT64
+
+CREATE TABLE json2_hint_uint8 (ts TIMESTAMP TIME INDEX, j JSON2 (value UINT8));
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: unsupported JSON2 type hint data type: UInt8; supported types: STRING, BIGINT, BIGINT UNSIGNED, DOUBLE, BOOLEAN; supported aliases: INT64, UINT64, FLOAT64
+
+CREATE TABLE json2_hint_float (ts TIMESTAMP TIME INDEX, j JSON2 (value FLOAT));
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: unsupported JSON2 type hint data type: FLOAT; supported types: STRING, BIGINT, BIGINT UNSIGNED, DOUBLE, BOOLEAN; supported aliases: INT64, UINT64, FLOAT64
+
+CREATE TABLE json2_hint_text (ts TIMESTAMP TIME INDEX, j JSON2 (value TEXT));
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: unsupported JSON2 type hint data type: TEXT; supported types: STRING, BIGINT, BIGINT UNSIGNED, DOUBLE, BOOLEAN; supported aliases: INT64, UINT64, FLOAT64
+
+CREATE TABLE json2_hint_unsigned (
+    ts TIMESTAMP TIME INDEX,
+    j JSON2 (value BIGINT UNSIGNED)
+) WITH ('append_mode' = 'true');
+
+Affected Rows: 0
+
+INSERT INTO json2_hint_unsigned VALUES (1, '{"value":18446744073709551615}');
+
+Affected Rows: 1
+
+SELECT j.value FROM json2_hint_unsigned;
+
++--------------------------------------------------------------+
+| json_get(json2_hint_unsigned.j,Utf8("$.value"),UInt64(NULL)) |
++--------------------------------------------------------------+
+| 18446744073709551615                                         |
++--------------------------------------------------------------+
+
+ALTER TABLE json2_hint_unsigned MODIFY COLUMN j JSON2 (value INT8);
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: unsupported JSON2 type hint data type: INT8; supported types: STRING, BIGINT, BIGINT UNSIGNED, DOUBLE, BOOLEAN; supported aliases: INT64, UINT64, FLOAT64
+
+DROP TABLE json2_hint_unsigned;
+
+Affected Rows: 0
+
+-- These aliases preserve the exact type and are displayed using canonical names.
+CREATE TABLE json2_hint_aliases (
+    ts TIMESTAMP TIME INDEX,
+    j JSON2 (i INT64, u UINT64, f FLOAT64)
+) WITH ('append_mode' = 'true');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE json2_hint_aliases;
+
++--------------------+---------------------------------------------------+
+| Table              | Create Table                                      |
++--------------------+---------------------------------------------------+
+| json2_hint_aliases | CREATE TABLE IF NOT EXISTS "json2_hint_aliases" ( |
+|                    |   "ts" TIMESTAMP(3) NOT NULL,                     |
+|                    |   "j" JSON2(                                      |
+|                    |     max_auto_expanded_paths = 100,                |
+|                    |     "i" BIGINT,                                   |
+|                    |     "u" BIGINT UNSIGNED,                          |
+|                    |     "f" DOUBLE                                    |
+|                    |   ) NULL,                                         |
+|                    |   TIME INDEX ("ts")                               |
+|                    | )                                                 |
+|                    |                                                   |
+|                    | ENGINE=mito                                       |
+|                    | WITH(                                             |
+|                    |   append_mode = 'true'                            |
+|                    | )                                                 |
++--------------------+---------------------------------------------------+
+
+INSERT INTO json2_hint_aliases VALUES
+    (1, '{"i":-9223372036854775808,"u":18446744073709551615,"f":1.5}');
+
+Affected Rows: 1
+
+SELECT j.i AS i, j.u AS u, j.f AS f FROM json2_hint_aliases;
+
++----------------------+----------------------+-----+
+| i                    | u                    | f   |
++----------------------+----------------------+-----+
+| -9223372036854775808 | 18446744073709551615 | 1.5 |
++----------------------+----------------------+-----+
+
+ALTER TABLE json2_hint_aliases MODIFY COLUMN j JSON2 (i INT64, u UINT64, f FLOAT64);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE json2_hint_aliases;
+
++--------------------+---------------------------------------------------+
+| Table              | Create Table                                      |
++--------------------+---------------------------------------------------+
+| json2_hint_aliases | CREATE TABLE IF NOT EXISTS "json2_hint_aliases" ( |
+|                    |   "ts" TIMESTAMP(3) NOT NULL,                     |
+|                    |   "j" JSON2(                                      |
+|                    |     max_auto_expanded_paths = 100,                |
+|                    |     "i" BIGINT,                                   |
+|                    |     "u" BIGINT UNSIGNED,                          |
+|                    |     "f" DOUBLE                                    |
+|                    |   ) NULL,                                         |
+|                    |   TIME INDEX ("ts")                               |
+|                    | )                                                 |
+|                    |                                                   |
+|                    | ENGINE=mito                                       |
+|                    | WITH(                                             |
+|                    |   append_mode = 'true'                            |
+|                    | )                                                 |
++--------------------+---------------------------------------------------+
+
+SELECT j.i AS i, j.u AS u, j.f AS f FROM json2_hint_aliases;
+
++----------------------+----------------------+-----+
+| i                    | u                    | f   |
++----------------------+----------------------+-----+
+| -9223372036854775808 | 18446744073709551615 | 1.5 |
++----------------------+----------------------+-----+
+
+DROP TABLE json2_hint_aliases;
 
 Affected Rows: 0
 

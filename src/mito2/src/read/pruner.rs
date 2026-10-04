@@ -87,6 +87,12 @@ impl PartitionPruner {
         }
     }
 
+    /// Excludes files replaced by another candidate source from prefetching.
+    pub(crate) fn excluding_files(mut self, excluded: &HashSet<usize>) -> Self {
+        self.file_indices.retain(|index| !excluded.contains(index));
+        self
+    }
+
     /// Gets or creates the FileRangeBuilder for a file.
     ///
     /// This method also triggers pre-fetching of upcoming files in the background
@@ -178,6 +184,30 @@ impl PartitionPruner {
     }
 }
 
+/// Options to create a [`Pruner`].
+#[derive(Debug, Clone, Copy)]
+pub struct PrunerOptions {
+    /// Keeps file range builders until the query-scoped pruner is dropped.
+    pub retain_builders: bool,
+    /// Whether [`FileRange`]s execute the reduced-column predicate prefilter.
+    ///
+    /// The flag is baked into the cached [`FileRangeBuilder`], so it belongs to
+    /// the whole scan. All partitions sharing this pruner must agree on it.
+    /// Two-stage series scans disable this prefilter: candidate discovery applies
+    /// tag predicates, then the data phase calls [`FileRange::precise_filter_flat`]
+    /// with tag filtering skipped so the predicates are applied exactly once.
+    pub enable_predicate_prefilter: bool,
+}
+
+impl Default for PrunerOptions {
+    fn default() -> Self {
+        Self {
+            retain_builders: false,
+            enable_predicate_prefilter: true,
+        }
+    }
+}
+
 /// A pruner that prunes files for all partitions of a scanner.
 pub struct Pruner {
     /// Channels to send requests to workers.
@@ -198,6 +228,21 @@ struct PrunerInner {
     /// negative decisions are not cached. Reset by `add_partition_ranges()` for
     /// each fresh batch of partition ranges.
     manifest_pruned_files: Vec<AtomicBool>,
+    /// Keeps file range builders until the query-scoped pruner is dropped.
+    retain_builders: bool,
+    /// Whether FileRanges should execute the reduced-column predicate prefilter.
+    enable_predicate_prefilter: bool,
+}
+
+impl Drop for PrunerInner {
+    fn drop(&mut self) {
+        let active_builders = self
+            .file_entries
+            .iter_mut()
+            .map(|entry| usize::from(entry.get_mut().is_ok_and(|entry| entry.builder.is_some())))
+            .sum::<usize>();
+        PRUNER_ACTIVE_BUILDERS.sub(active_builders as i64);
+    }
 }
 
 impl PrunerInner {
@@ -230,10 +275,15 @@ impl PrunerInner {
 
 /// Per-file state tracking.
 struct FileBuilderEntry {
-    /// Cached builder after pruning. None if not yet built or already cleared.
+    /// Cached builder for this file.
+    ///
+    /// A newly completed builder is cached only while `remaining_ranges > 0`.
+    /// In retaining mode, the builder may remain cached after
+    /// `remaining_ranges` reaches zero.
     builder: Option<Arc<FileRangeBuilder>>,
-    /// Number of remaining ranges to scan for this file.
-    /// When this reaches 0, the builder is dropped for memory cleanup.
+    /// Number of ranges remaining in the current initialized batch.
+    ///
+    /// This may be zero while `builder` is still present in retaining mode.
     remaining_ranges: usize,
     /// Waiters when pruning is in-progress.
     waiters: Vec<oneshot::Sender<Result<Arc<FileRangeBuilder>>>>,
@@ -257,6 +307,19 @@ impl Pruner {
     /// Initially all file_entries have `remaining_ranges = 0`.
     /// Call `add_partition_ranges()` to initialize ref counts.
     pub fn new(stream_ctx: Arc<StreamContext>, num_workers: usize) -> Self {
+        Self::new_with_options(stream_ctx, num_workers, PrunerOptions::default())
+    }
+
+    /// Creates a new pruner with the given options.
+    pub fn new_with_options(
+        stream_ctx: Arc<StreamContext>,
+        num_workers: usize,
+        options: PrunerOptions,
+    ) -> Self {
+        let PrunerOptions {
+            retain_builders,
+            enable_predicate_prefilter,
+        } = options;
         let num_files = stream_ctx.input.num_files();
         let file_entries: Vec<_> = (0..num_files)
             .map(|_| {
@@ -283,14 +346,18 @@ impl Pruner {
             file_entries,
             stream_ctx,
             manifest_pruned_files,
+            retain_builders,
+            enable_predicate_prefilter,
         });
 
-        // Spawn worker tasks with their receivers
+        // Keep pruning and prefetching on the runtime of the originating workload.
         for (worker_id, rx) in receivers.into_iter().enumerate() {
-            let inner_clone = inner.clone();
-            common_runtime::spawn_query(async move {
-                Self::worker_loop(worker_id, rx, inner_clone).await;
-            });
+            let worker = Self::worker_loop(worker_id, rx, inner.clone());
+            if inner.stream_ctx.input.compaction {
+                common_runtime::spawn_compact(worker);
+            } else {
+                common_runtime::spawn_query(worker);
+            }
         }
 
         Self {
@@ -299,10 +366,14 @@ impl Pruner {
         }
     }
 
-    /// Adds reference counts for all partitions' ranges and resets the full
-    /// manifest-prune cache so that dynamic-filter updates are visible to the
-    /// fresh scan.
+    /// Adds reference counts for partition ranges that the caller will scan.
+    ///
+    /// The caller must keep these ranges consistent with the ranges passed to
+    /// `PartitionPruner`. If called multiple times, all calls must describe
+    /// ranges from the same logical scan because their reference counts
+    /// accumulate in this pruner.
     pub fn add_partition_ranges(&self, partition_ranges: &[PartitionRange]) {
+        // Reset manifest-prune results so the latest dynamic filters are visible.
         for pruned in &self.inner.manifest_pruned_files {
             pruned.store(false, Ordering::Relaxed);
         }
@@ -324,7 +395,7 @@ impl Pruner {
     }
 
     /// Gets or creates the FileRangeBuilder for a file, builds ranges,
-    /// and decrements ref count (cleans up if zero).
+    /// and decrements its ref count. Non-retained builders are cleaned up at zero.
     ///
     /// Callers should invoke [add_partition_ranges()](Pruner::add_partition_ranges()) to initialize the
     /// file entries and ref counts.
@@ -351,7 +422,7 @@ impl Pruner {
         let mut ranges = SmallVec::new();
         builder.build_ranges(index.row_group_index, &mut ranges);
 
-        // Decrement ref count and cleanup if needed
+        // Decrement ref count and clean up non-retained builders if needed.
         self.decrement_and_maybe_clear(file_index, reader_metrics);
 
         Ok(ranges)
@@ -454,6 +525,12 @@ impl Pruner {
         let _ = self.worker_senders[worker_idx].try_send(request);
     }
 
+    /// Returns whether this pruner builds file ranges with the reduced-column
+    /// predicate prefilter enabled.
+    pub fn predicate_prefilter_enabled(&self) -> bool {
+        self.inner.enable_predicate_prefilter
+    }
+
     fn get_worker_idx(&self, file_id: FileId) -> usize {
         let file_id_hash = Uuid::from(file_id).as_u128() as usize;
         file_id_hash % self.inner.num_workers
@@ -484,13 +561,19 @@ impl Pruner {
             .inner
             .stream_ctx
             .input
-            .prune_file_after_manifest_check(file, pre_filter_mode, predicate, reader_metrics)
+            .prune_file_after_manifest_check(
+                file,
+                pre_filter_mode,
+                self.inner.enable_predicate_prefilter,
+                predicate,
+                reader_metrics,
+            )
             .await?;
 
         let arc_builder = Arc::new(builder);
 
-        // Caches the builder only if the file still has remaining ranges.
-        // `skip_file_range` may have already consumed all ranges for this file.
+        // Cache only while the file still has remaining ranges. Retaining mode
+        // affects cleanup after the builder has been cached, not cache eligibility.
         {
             let mut entry = self.inner.file_entries[file_index].lock().unwrap();
             cache_builder_if_needed(&mut entry, &arc_builder, reader_metrics);
@@ -504,7 +587,8 @@ impl Pruner {
         let mut entry = self.inner.file_entries[file_index].lock().unwrap();
         entry.remaining_ranges = entry.remaining_ranges.saturating_sub(1);
 
-        if entry.remaining_ranges == 0
+        if !self.inner.retain_builders
+            && entry.remaining_ranges == 0
             && let Some(builder) = entry.builder.take()
         {
             PRUNER_ACTIVE_BUILDERS.dec();
@@ -566,7 +650,13 @@ impl Pruner {
                 inner
                     .stream_ctx
                     .input
-                    .prune_file_after_manifest_check(file, pre_filter_mode, predicate, &mut metrics)
+                    .prune_file_after_manifest_check(
+                        file,
+                        pre_filter_mode,
+                        inner.enable_predicate_prefilter,
+                        predicate,
+                        &mut metrics,
+                    )
                     .await
             };
 
@@ -577,10 +667,10 @@ impl Pruner {
                     let arc_builder = Arc::new(builder);
                     let is_background = response_tx.is_none();
 
-                    // Only cache the builder if the file still has remaining ranges.
-                    // If remaining_ranges == 0, a concurrent `skip_file_range` (e.g. from a
-                    // dynamic filter tightening via manifest-prune fast-skip) already consumed
-                    // all ranges and may have cleared a previously cached builder.
+                    // Cache only if the file still has remaining ranges. If
+                    // remaining_ranges == 0, a concurrent `skip_file_range` already consumed
+                    // all ranges and may have cleared a previously cached builder. Retaining
+                    // mode only preserves builders that were cached before the count reached 0.
                     // Skip caching manifest-pruned empty builders; the cache flag is enough.
                     let did_cache =
                         if inner.manifest_pruned_files[file_index].load(Ordering::Relaxed) {
@@ -655,7 +745,7 @@ impl Pruner {
 #[cfg(test)]
 impl Pruner {
     /// Returns the remaining range count for a file (test-only).
-    fn test_remaining_ranges(&self, file_index: usize) -> usize {
+    pub(crate) fn test_remaining_ranges(&self, file_index: usize) -> usize {
         self.inner.file_entries[file_index]
             .lock()
             .unwrap()
@@ -691,8 +781,8 @@ fn should_cache_builder(entry: &FileBuilderEntry) -> bool {
     entry.builder.is_none() && entry.remaining_ranges > 0
 }
 
-/// Caches a freshly pruned builder if the file still has remaining ranges, and
-/// records the corresponding builder memory/count deltas for verbose metrics.
+/// Caches a freshly pruned builder if it is still referenced, and records the
+/// corresponding builder memory/count deltas for verbose metrics.
 fn cache_builder_if_needed(
     entry: &mut FileBuilderEntry,
     builder: &Arc<FileRangeBuilder>,
@@ -730,6 +820,13 @@ mod tests {
     use crate::test_util::scheduler_util::SchedulerEnv;
 
     async fn make_test_pruner(num_files: usize) -> (SchedulerEnv, Arc<Pruner>) {
+        make_test_pruner_with_retained_builders(num_files, false).await
+    }
+
+    async fn make_test_pruner_with_retained_builders(
+        num_files: usize,
+        retain_builders: bool,
+    ) -> (SchedulerEnv, Arc<Pruner>) {
         let env = SchedulerEnv::new().await;
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
         let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
@@ -752,11 +849,19 @@ mod tests {
             })
             .collect();
 
-        let input = ScanInput::new(env.access_layer.clone(), mapper)
+        let input = ScanInput::builder(env.access_layer.clone(), mapper)
             .with_files(files)
-            .with_append_mode(true);
+            .with_append_mode(true)
+            .build();
         let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input));
-        let pruner = Arc::new(Pruner::new(stream_ctx, 1));
+        let pruner = Arc::new(Pruner::new_with_options(
+            stream_ctx,
+            1,
+            PrunerOptions {
+                retain_builders,
+                ..Default::default()
+            },
+        ));
         (env, pruner)
     }
 
@@ -802,10 +907,11 @@ mod tests {
             })
             .collect();
 
-        let input = ScanInput::new(env.access_layer.clone(), mapper)
+        let input = ScanInput::builder(env.access_layer.clone(), mapper)
             .with_files(files)
             .with_predicate(predicate)
-            .with_append_mode(true);
+            .with_append_mode(true)
+            .build();
         let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input));
         let pruner = Arc::new(Pruner::new(stream_ctx, 1));
         (env, pruner)
@@ -866,7 +972,7 @@ mod tests {
         assert!(cache_builder_if_needed(
             &mut entry,
             &builder,
-            &mut reader_metrics
+            &mut reader_metrics,
         ));
         assert!(entry.builder.is_some());
         assert_eq!(
@@ -912,8 +1018,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn worker_does_not_cache_after_skip_file_range_consumed_all() {
-        let (_env, pruner) = make_test_pruner(1).await;
+    async fn retained_builder_survives_after_last_range() {
+        let (_env, pruner) = make_test_pruner_with_retained_builders(1, true).await;
+        pruner.add_partition_ranges(&[file_partition_range(0)]);
+        {
+            let mut entry = pruner.inner.file_entries[0].lock().unwrap();
+            entry.builder = Some(Arc::new(FileRangeBuilder::default()));
+            PRUNER_ACTIVE_BUILDERS.inc();
+        }
+
+        let mut reader_metrics = ReaderMetrics::default();
+        pruner.skip_file_range(
+            RowGroupIndex {
+                index: 0,
+                row_group_index: 0,
+            },
+            &mut reader_metrics,
+        );
+
+        assert_eq!(pruner.test_remaining_ranges(0), 0);
+        assert!(pruner.test_has_builder(0));
+
+        let partition_metrics = make_partition_metrics();
+        let mut reader_metrics = ReaderMetrics::default();
+        let _builder = pruner
+            .get_file_builder(
+                0,
+                PreFilterMode::SkipFields,
+                &partition_metrics,
+                &mut reader_metrics,
+            )
+            .await
+            .unwrap();
+        assert_eq!(reader_metrics.filter_metrics.pruner_cache_hit, 1);
+    }
+
+    #[tokio::test]
+    async fn add_partition_ranges_keeps_retained_builder() {
+        let (_env, pruner) = make_test_pruner_with_retained_builders(1, true).await;
+        pruner.add_partition_ranges(&[file_partition_range(0)]);
+        {
+            let mut entry = pruner.inner.file_entries[0].lock().unwrap();
+            entry.builder = Some(Arc::new(FileRangeBuilder::default()));
+            PRUNER_ACTIVE_BUILDERS.inc();
+        }
+
+        let mut reader_metrics = ReaderMetrics::default();
+        pruner.skip_file_range(
+            RowGroupIndex {
+                index: 0,
+                row_group_index: 0,
+            },
+            &mut reader_metrics,
+        );
+        assert!(pruner.test_has_builder(0));
+
+        pruner.add_partition_ranges(&[file_partition_range(0)]);
+        assert!(pruner.test_has_builder(0));
+        assert_eq!(pruner.test_remaining_ranges(0), 1);
+    }
+
+    #[tokio::test]
+    async fn retaining_mode_does_not_cache_after_skip_file_range_consumed_all() {
+        let (_env, pruner) = make_test_pruner_with_retained_builders(1, true).await;
 
         // Simulate one range for file 0.
         let ranges = vec![file_partition_range(0)];

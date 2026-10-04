@@ -29,7 +29,7 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("{}", msg))]
+    #[snafu(display("{}, code: {}, tonic code: {}", msg, code, tonic_code))]
     MetaServer {
         code: StatusCode,
         msg: String,
@@ -63,6 +63,12 @@ pub enum Error {
     #[snafu(display("{} not started", name))]
     NotStarted {
         name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Procedure submission requires query context"))]
+    MissingQueryContext {
         #[snafu(implicit)]
         location: Location,
     },
@@ -150,6 +156,7 @@ impl ErrorExt for Error {
             | Error::NoLeader { .. }
             | Error::AskLeaderTimeout { .. }
             | Error::NotStarted { .. }
+            | Error::MissingQueryContext { .. }
             | Error::SendHeartbeat { .. }
             | Error::CreateHeartbeatStream { .. }
             | Error::HeartbeatHandshakeTimeout { .. }
@@ -187,7 +194,7 @@ impl Error {
         matches!(
             self,
             Error::MetaServer {
-                tonic_code: tonic::Code::OutOfRange,
+                tonic_code: tonic::Code::OutOfRange | tonic::Code::ResourceExhausted,
                 ..
             }
         )
@@ -252,5 +259,29 @@ mod tests {
         let err: Error = status.into();
 
         assert_eq!(err.retry_hint(), RetryHint::Retryable);
+    }
+
+    #[test]
+    fn test_is_exceeded_size_limit_for_out_of_range() {
+        let err = Error::from(tonic::Status::new(tonic::Code::OutOfRange, "any message"));
+
+        assert!(err.is_exceeded_size_limit());
+    }
+
+    #[test]
+    fn test_is_exceeded_size_limit_for_resource_exhausted() {
+        let err = Error::from(tonic::Status::new(
+            tonic::Code::ResourceExhausted,
+            "arbitrary message",
+        ));
+
+        assert!(err.is_exceeded_size_limit());
+    }
+
+    #[test]
+    fn test_is_exceeded_size_limit_for_non_size_code() {
+        let err = Error::from(tonic::Status::new(tonic::Code::Internal, "message"));
+
+        assert!(!err.is_exceeded_size_limit());
     }
 }

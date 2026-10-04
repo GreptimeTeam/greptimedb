@@ -17,7 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, IntervalDayTime, TimeUnit};
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
 use common_error::ext::BoxedError;
 use common_function::aggrs::aggr_wrapper::{StateMergeHelper, StateWrapper};
 use common_recordbatch::adapter::RecordBatchMetrics;
@@ -28,22 +28,25 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::SessionState;
 use datafusion::functions_aggregate::expr_fn::avg;
 use datafusion::functions_aggregate::min_max::{max, min};
+use datafusion::functions_nested::expr_fn::make_array;
 use datafusion::prelude::SessionContext;
 use datafusion_common::tree_node::TreeNodeRecursion;
-use datafusion_common::{ExprSchema, JoinType, ScalarValue};
+use datafusion_common::{ExprSchema, JoinType, ScalarValue, TableReference};
 use datafusion_expr::expr::{Exists, ScalarFunction};
+use datafusion_expr::utils::split_conjunction;
 use datafusion_expr::{
-    AggregateUDF, Expr, ExprSchemable as _, LogicalPlanBuilder, Operator, Subquery, binary_expr,
-    col, lit,
+    AggregateUDF, Expr, ExprSchemable as _, Extension, LogicalPlanBuilder, Operator, Subquery,
+    binary_expr, col, lit,
 };
 use datafusion_functions::datetime::date_bin;
 use datafusion_functions::datetime::expr_fn::now;
-use datafusion_sql::TableReference;
+use datafusion_functions::unicode::expr_fn::substring;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::Stream;
 use futures::task::{Context, Poll};
 use pretty_assertions::assert_eq;
+use promql::extension_plan::{HistogramFold, HistogramFoldOperation};
 use regex::Regex;
 use store_api::data_source::DataSource;
 use store_api::storage::ScanRequest;
@@ -251,7 +254,7 @@ impl TestDataSource {
 
 impl DataSource for TestDataSource {
     fn get_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream, BoxedError> {
-        let projected_schema = match request.projection_indices() {
+        let projected_schema = match request.projection.as_deref() {
             Some(projection) => Arc::new(self.schema.try_project(projection).unwrap()),
             None => self.schema.clone(),
         };
@@ -287,186 +290,243 @@ impl Stream for EmptyStream {
     }
 }
 
-#[cfg(feature = "vector_index")]
-mod vector_search_tests {
-    use std::sync::Arc;
-
-    use common_function::function::Function;
-    use common_function::scalars::udf::create_udf;
-    use datafusion_expr::expr::ScalarFunction;
-    use datafusion_expr::{Expr, LogicalPlanBuilder, Signature, Volatility, col, lit};
-    use datatypes::schema::{ColumnSchema, SchemaBuilder};
-    use store_api::storage::ConcreteDataType;
-    use table::metadata::{FilterPushDownType, TableInfoBuilder, TableMeta, TableType};
-    use table::table::adapter::DfTableProviderAdapter;
-    use table::{Table, TableRef};
-
-    use super::*;
-    use crate::dist_plan::MergeScanLogicalPlan;
-
-    struct TestVectorFunction {
-        name: &'static str,
-        signature: Signature,
+fn find_merge_scan(plan: &LogicalPlan) -> Option<&MergeScanLogicalPlan> {
+    if let LogicalPlan::Extension(extension) = plan
+        && let Some(merge_scan) = extension
+            .node
+            .as_any()
+            .downcast_ref::<MergeScanLogicalPlan>()
+    {
+        return Some(merge_scan);
     }
 
-    impl TestVectorFunction {
-        fn new(name: &'static str) -> Self {
-            Self {
-                name,
-                signature: Signature::any(2, Volatility::Immutable),
-            }
-        }
+    plan.inputs().into_iter().find_map(find_merge_scan)
+}
+
+fn find_table_scan<'a>(
+    plan: &'a LogicalPlan,
+    table_name: &str,
+) -> Option<&'a datafusion_expr::logical_plan::TableScan> {
+    if let LogicalPlan::TableScan(table_scan) = plan
+        && table_scan.table_name.to_string() == table_name
+    {
+        return Some(table_scan);
     }
 
-    impl std::fmt::Display for TestVectorFunction {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "{}", self.name)
-        }
+    plan.inputs()
+        .into_iter()
+        .find_map(|input| find_table_scan(input, table_name))
+}
+
+fn find_merge_scan_for_table<'a>(
+    plan: &'a LogicalPlan,
+    table_name: &str,
+) -> Option<&'a MergeScanLogicalPlan> {
+    if let LogicalPlan::Extension(extension) = plan
+        && let Some(merge_scan) = extension
+            .node
+            .as_any()
+            .downcast_ref::<MergeScanLogicalPlan>()
+        && find_table_scan(merge_scan.input(), table_name).is_some()
+    {
+        return Some(merge_scan);
     }
 
-    impl Function for TestVectorFunction {
-        fn name(&self) -> &str {
-            self.name
-        }
+    plan.inputs()
+        .into_iter()
+        .find_map(|input| find_merge_scan_for_table(input, table_name))
+}
 
-        fn return_type(
-            &self,
-            _input_types: &[datatypes::arrow::datatypes::DataType],
-        ) -> datafusion_common::Result<datatypes::arrow::datatypes::DataType> {
-            Ok(datatypes::arrow::datatypes::DataType::Float32)
-        }
-
-        fn signature(&self) -> &Signature {
-            &self.signature
-        }
-
-        fn invoke_with_args(
-            &self,
-            _args: datafusion_expr::ScalarFunctionArgs,
-        ) -> datafusion_common::Result<datafusion_expr::ColumnarValue> {
-            Err(datafusion_common::DataFusionError::Execution(
-                "test udf should not be invoked".to_string(),
-            ))
-        }
+fn has_filter_above_table_scan(plan: &LogicalPlan, table_name: &str, predicate: &Expr) -> bool {
+    if let LogicalPlan::Filter(filter) = plan
+        && split_conjunction(&filter.predicate).contains(&predicate)
+        && find_table_scan(filter.input.as_ref(), table_name).is_some()
+    {
+        return true;
     }
 
-    fn build_vector_table(table_id: TableId) -> TableRef {
-        let schema = {
-            let columns = vec![
-                ColumnSchema::new("k0", ConcreteDataType::string_datatype(), true),
-                ColumnSchema::new(
-                    "ts",
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    false,
-                )
-                .with_time_index(true),
-                ColumnSchema::new("v", ConcreteDataType::vector_datatype(2), false),
-            ];
-            Arc::new(
-                SchemaBuilder::try_from_columns(columns)
-                    .unwrap()
-                    .build()
-                    .unwrap(),
-            )
-        };
+    plan.inputs()
+        .into_iter()
+        .any(|input| has_filter_above_table_scan(input, table_name, predicate))
+}
 
-        let table_meta = TableMeta {
-            schema: schema.clone(),
-            primary_key_indices: vec![0],
-            value_indices: vec![2],
-            engine: "test_engine".to_string(),
-            next_column_id: 3,
-            options: Default::default(),
-            created_on: Default::default(),
-            updated_on: Default::default(),
-            partition_key_indices: vec![0],
-            column_ids: vec![0, 1, 2],
-        };
+#[test]
+fn frontend_only_histogram_folds_stay_above_merge_scan() {
+    let table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(table),
+    )));
+    let input = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
 
-        let table_info = TableInfoBuilder::default()
-            .table_id(table_id)
-            .name("t".to_string())
-            .catalog_name(DEFAULT_CATALOG_NAME)
-            .schema_name(DEFAULT_SCHEMA_NAME)
-            .table_version(0)
-            .table_type(TableType::Base)
-            .meta(table_meta)
-            .build()
+    for (name, operation, histogram_column) in [
+        (
+            "mixed",
+            HistogramFoldOperation::Quantile(0.5.into()),
+            Some("pk2".to_string()),
+        ),
+        (
+            "fraction",
+            HistogramFoldOperation::Fraction {
+                lower: 0.0.into(),
+                upper: 1.0.into(),
+            },
+            None,
+        ),
+    ] {
+        let fold = HistogramFold::new_with_operation(
+            "pk1".to_string(),
+            "number".to_string(),
+            "ts".to_string(),
+            operation,
+            histogram_column,
+            input.clone(),
+        )
+        .unwrap();
+        let plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(fold),
+        });
+        assert!(
+            DFLogicalSubstraitConvertor
+                .encode(&plan, DefaultSerializer)
+                .is_err(),
+            "{name}"
+        );
+
+        let result = DistPlannerAnalyzer {}
+            .analyze(plan, &ConfigOptions::default())
             .unwrap();
+        let result_text = result.to_string();
+        assert!(
+            result_text.contains("HistogramFold:"),
+            "{name}\n{result_text}"
+        );
 
-        let data_source = Arc::new(TestDataSource::new(schema));
-        Arc::new(Table::new(
-            Arc::new(table_info),
-            FilterPushDownType::Unsupported,
-            data_source,
-        ))
-    }
-
-    fn vector_distance_expr() -> Expr {
-        let udf = create_udf(Arc::new(TestVectorFunction::new("vec_l2sq_distance")));
-        Expr::ScalarFunction(ScalarFunction::new_udf(
-            Arc::new(udf),
-            vec![
-                col("v"),
-                lit(ScalarValue::Utf8(Some("[1.0, 2.0]".to_string()))),
-            ],
-        ))
-    }
-
-    #[test]
-    fn vector_search_rewrite_keeps_sort_in_child_plan() {
-        init_default_ut_logging();
-        let table = build_vector_table(0);
-        let table_source = Arc::new(DefaultTableSource::new(Arc::new(
-            DfTableProviderAdapter::new(table),
-        )));
-
-        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
-            .unwrap()
-            .sort(vec![vector_distance_expr().sort(true, false)])
-            .unwrap()
-            .limit(0, Some(5))
-            .unwrap()
-            .build()
+        let remote_input = find_merge_scan(&result).unwrap().input();
+        let remote_text = remote_input.to_string();
+        assert!(
+            !remote_text.contains("HistogramFold:"),
+            "{name}\n{remote_text}"
+        );
+        DFLogicalSubstraitConvertor
+            .encode(remote_input, DefaultSerializer)
             .unwrap();
-
-        let config = ConfigOptions::default();
-        let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-
-        let plan_str = result.to_string();
-        assert!(plan_str.contains("MergeSort: vec_l2sq_distance"));
-        assert!(plan_str.contains("Sort: vec_l2sq_distance"));
-        assert!(plan_str.contains(MergeScanLogicalPlan::name()));
     }
+}
 
-    #[test]
-    fn vector_search_rewrite_with_filter_keeps_sort_in_child_plan() {
-        init_default_ut_logging();
-        let table = build_vector_table(0);
-        let table_source = Arc::new(DefaultTableSource::new(Arc::new(
-            DfTableProviderAdapter::new(table),
-        )));
+/// `Categorizer` calls `Unnest` commutative, so the Substrait check in `should_expand` is
+/// the only thing keeping it on the frontend. It also sits above an encodable projection,
+/// which pins the rewriter to the whole-plan check rather than to the root node alone.
+#[test]
+fn unencodable_unnest_stays_above_merge_scan() {
+    let table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .project(vec![
+            col("pk1"),
+            make_array(vec![col("number")]).alias("numbers"),
+        ])
+        .unwrap()
+        .unnest_column("numbers")
+        .unwrap()
+        .build()
+        .unwrap();
+    assert!(
+        DFLogicalSubstraitConvertor
+            .encode(&plan, DefaultSerializer)
+            .is_err()
+    );
 
-        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
-            .unwrap()
-            .filter(col("k0").eq(lit("hello")))
-            .unwrap()
-            .sort(vec![vector_distance_expr().sort(true, false)])
-            .unwrap()
-            .limit(0, Some(5))
-            .unwrap()
-            .build()
-            .unwrap();
+    let result = DistPlannerAnalyzer {}
+        .analyze(plan, &ConfigOptions::default())
+        .unwrap();
+    let result_text = result.to_string();
+    assert!(result_text.contains("Unnest:"), "{result_text}");
 
-        let config = ConfigOptions::default();
-        let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let remote_input = find_merge_scan(&result).unwrap().input();
+    let remote_text = remote_input.to_string();
+    assert!(!remote_text.contains("Unnest:"), "{remote_text}");
+    assert!(remote_text.contains("make_array"), "{remote_text}");
+    DFLogicalSubstraitConvertor
+        .encode(remote_input, DefaultSerializer)
+        .unwrap();
+}
 
-        let plan_str = result.to_string();
-        assert!(plan_str.contains("MergeSort: vec_l2sq_distance"));
-        assert!(plan_str.contains("Sort: vec_l2sq_distance"));
-        assert!(plan_str.contains("Filter: t.k0 = Utf8(\"hello\")"));
-        assert!(plan_str.contains(MergeScanLogicalPlan::name()));
-    }
+#[test]
+fn dictionary_literals_are_unwrapped_before_pushdown() {
+    let table = Arc::new(Table::new(
+        TestTable::table_info(0, "t".to_string(), MITO_ENGINE.to_string()),
+        FilterPushDownType::Inexact,
+        Arc::new(TestDataSource::new(TestTable::schema())),
+    ));
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(table),
+    )));
+    let literal = Expr::Literal(
+        ScalarValue::Dictionary(
+            Box::new(DataType::UInt32),
+            Box::new(ScalarValue::Utf8(Some("host-a".to_string()))),
+        ),
+        None,
+    );
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .filter(col("pk1").eq(literal))
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let result = DistPlannerAnalyzer {}
+        .analyze(plan, &ConfigOptions::default())
+        .unwrap();
+    assert!(
+        result
+            .to_string()
+            .contains("Filter: t.pk1 = Utf8(\"host-a\")")
+    );
+
+    let remote_input = find_merge_scan(&result).unwrap().input();
+    assert!(
+        remote_input
+            .to_string()
+            .contains("partial_filters=[t.pk1 = Utf8(\"host-a\")]")
+    );
+    DFLogicalSubstraitConvertor
+        .encode(remote_input, DefaultSerializer)
+        .unwrap();
+}
+
+#[test]
+fn dictionary_literals_in_values_keep_their_schema() {
+    let literal = Expr::Literal(
+        ScalarValue::Dictionary(
+            Box::new(DataType::UInt32),
+            Box::new(ScalarValue::Utf8(Some("host-a".to_string()))),
+        ),
+        None,
+    );
+    let plan = LogicalPlanBuilder::values(vec![vec![literal]])
+        .unwrap()
+        .build()
+        .unwrap();
+    let schema = plan.schema().clone();
+
+    let transformed = plan
+        .transform_down_with_subqueries(&unwrap_dictionary_literals)
+        .unwrap()
+        .data;
+
+    assert_eq!(&schema, transformed.schema());
+    assert!(
+        transformed
+            .to_string()
+            .contains("Dictionary(UInt32, Utf8(\"host-a\"))")
+    );
 }
 
 fn try_encode_decode_substrait(plan: &LogicalPlan, state: SessionState) {
@@ -936,6 +996,40 @@ fn expand_proj_alias_aliased_part_col_aggr() {
         "  Projection: t.number, pk3 AS pk42, pk4 AS pk43",
         "    Projection: t.number, t.pk1 AS pk3, t.pk2 AS pk4",
         "      TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+/// `substr(pk1, 1, 1)` maps rows from different partitions to the same group, so the
+/// aggregate has to be merged on the frontend even though it references `pk1`.
+#[test]
+fn expand_expr_over_part_col_aggr() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .aggregate(
+            vec![substring(col("pk1"), lit(1i64), lit(1i64)), col("pk2")],
+            vec![min(col("number"))],
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [
+        "Projection: substr(t.pk1,Int64(1),Int64(1)), t.pk2, min(t.number)",
+        "  Aggregate: groupBy=[[substr(t.pk1,Int64(1),Int64(1)), t.pk2]], aggr=[[__min_merge(__min_state(t.number)) AS min(t.number)]]",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[substr(t.pk1, Int64(1), Int64(1)), t.pk2]], aggr=[[__min_state(t.number)]]",
+        "  TableScan: t",
         "]]",
     ]
     .join("\n");
@@ -2392,34 +2486,37 @@ fn test_join_side_local_filter_pushdown_into_merge_scan() {
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
     assert_remote_table_scan_filters_are_safe(&result);
 
-    let plan_str = result.to_string();
-    // After PushDownFilter runs, the predicate `t1.pk1 = Utf8("v")` should appear
-    // inside the left MergeScan's remote_input. The pre-MergeScan optimizer may
-    // combine it with join-derived IS NOT NULL pushdowns, so it may not appear as
-    // a standalone Filter: line. It must still be in TableScan partial_filters
-    // and below the Inner Join.
+    let predicate = col("t1.pk1").eq(lit("v"));
+    let t1_remote_input = find_merge_scan_for_table(&result, "t1")
+        .expect("expected MergeScan for t1")
+        .input();
+    let t1_scan = find_table_scan(t1_remote_input, "t1").expect("expected t1 TableScan");
     assert!(
-        plan_str.contains("t1.pk1 = Utf8(\"v\")"),
-        "Expected predicate t1.pk1 = Utf8(\"v\") in plan, got:\n{plan_str}"
-    );
-    assert!(
-        plan_str.contains(
-            "TableScan: t1, partial_filters=[t1.pk1 = Utf8(\"v\"), t1.number IS NOT NULL]"
-        ),
-        "Expected t1 TableScan partial_filters to contain pushed predicate, got:\n{plan_str}"
+        t1_scan
+            .filters
+            .iter()
+            .flat_map(|filter| split_conjunction(filter))
+            .any(|filter| filter == &predicate),
+        "expected t1 TableScan to contain the pushed predicate: {t1_remote_input}"
     );
 
-    // Find the position of the filter and verify it appears after a MergeScan
-    // opening (i.e., inside remote_input) rather than before the Join.
-    let filter_pos = plan_str
-        .find("TableScan: t1, partial_filters=[t1.pk1 = Utf8(\"v\"), t1.number IS NOT NULL]")
-        .unwrap();
-    let join_pos = plan_str.find("Inner Join").unwrap();
-    // The filter should be after the Join (meaning it was pushed down below the Join,
-    // into a MergeScan's remote_input)
+    // Inexact provider pushdown must retain the predicate in an ancestor Filter.
     assert!(
-        filter_pos > join_pos,
-        "Filter should be pushed below Join (into MergeScan remote_input), but found before Join"
+        has_filter_above_table_scan(t1_remote_input, "t1", &predicate),
+        "expected an ancestor Filter for t1 to retain the pushed predicate: {t1_remote_input}"
+    );
+
+    let t2_remote_input = find_merge_scan_for_table(&result, "t2")
+        .expect("expected MergeScan for t2")
+        .input();
+    assert!(
+        !find_table_scan(t2_remote_input, "t2")
+            .expect("expected t2 TableScan")
+            .filters
+            .iter()
+            .flat_map(|filter| split_conjunction(filter))
+            .any(|filter| filter == &predicate),
+        "t2 TableScan must not contain t1's predicate: {t2_remote_input}"
     );
 }
 
@@ -2737,4 +2834,78 @@ fn scheduled_none_falls_back_to_wall_clock() {
         remote_section.contains("TimestampNanosecond("),
         "Remote should contain TimestampNanosecond:\n{result_str}"
     );
+}
+
+/// Regression test for https://github.com/GreptimeTeam/greptimedb/issues/9260:
+/// every scalar subquery level must get its own MergeScan, even when nested
+/// inside another scalar subquery.
+#[test]
+fn expand_nested_scalar_subquery() {
+    init_default_ut_logging();
+    let table_source = || {
+        Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(TestTable::table_with_name(0, "t".to_string())),
+        ))) as _
+    };
+
+    // Innermost: SELECT max(t.number) FROM t
+    let innermost = LogicalPlanBuilder::scan_with_filters("t", table_source(), None, vec![])
+        .unwrap()
+        .aggregate(Vec::<Expr>::new(), vec![max(col("number"))])
+        .unwrap()
+        .build()
+        .unwrap();
+    // Middle: SELECT max(t.number) FROM t WHERE t.number > (<innermost>)
+    let middle = LogicalPlanBuilder::scan_with_filters("t", table_source(), None, vec![])
+        .unwrap()
+        .filter(col("number").gt(Expr::ScalarSubquery(Subquery {
+            subquery: Arc::new(innermost),
+            outer_ref_columns: vec![],
+            spans: Default::default(),
+        })))
+        .unwrap()
+        .aggregate(Vec::<Expr>::new(), vec![max(col("number"))])
+        .unwrap()
+        .build()
+        .unwrap();
+    // Outermost projection: SELECT (<middle>) AS m FROM t
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source(), None, vec![])
+        .unwrap()
+        .project(vec![
+            Expr::ScalarSubquery(Subquery {
+                subquery: Arc::new(middle),
+                outer_ref_columns: vec![],
+                spans: Default::default(),
+            })
+            .alias("m"),
+        ])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result_str = result.to_string();
+
+    // The main scan and both subquery levels must each be wrapped in a MergeScan.
+    let merge_scan_count = result_str
+        .matches("MergeScan [is_placeholder=false")
+        .count();
+    assert_eq!(
+        3, merge_scan_count,
+        "expected 3 MergeScan nodes (main + 2 subquery levels) in plan:\n{result_str}"
+    );
+    // No bare TableScan may remain outside a MergeScan remote input. The
+    // subquery-aware walk still visits subquery plans, but cannot see into a
+    // MergeScan's hidden remote input (`MergeScanLogicalPlan::inputs()` is
+    // empty), so any TableScan it reaches was not wrapped.
+    result
+        .apply_with_subqueries(|node| {
+            assert!(
+                !matches!(node, LogicalPlan::TableScan(_)),
+                "unwrapped TableScan in plan:\n{result_str}"
+            );
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
 }

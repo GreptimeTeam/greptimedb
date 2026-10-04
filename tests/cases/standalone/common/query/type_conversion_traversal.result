@@ -1,0 +1,144 @@
+-- String-to-timestamp and string-to-boolean conversion must traverse JOIN
+-- filters and correlated subqueries.
+DROP TABLE IF EXISTS type_conversion_join_left;
+
+Affected Rows: 0
+
+DROP TABLE IF EXISTS type_conversion_join_right;
+
+Affected Rows: 0
+
+DROP TABLE IF EXISTS type_conversion_exists_outer;
+
+Affected Rows: 0
+
+DROP TABLE IF EXISTS type_conversion_exists_inner;
+
+Affected Rows: 0
+
+CREATE TABLE type_conversion_join_left (
+    ts TIMESTAMP(3) TIME INDEX,
+    key_col INT PRIMARY KEY
+) ENGINE = mito;
+
+Affected Rows: 0
+
+CREATE TABLE type_conversion_join_right (
+    ts TIMESTAMP(3) TIME INDEX,
+    key_col INT PRIMARY KEY
+) ENGINE = mito;
+
+Affected Rows: 0
+
+INSERT INTO type_conversion_join_left VALUES
+    ('2024-04-01 00:00:00', 1),
+    ('2024-04-01 00:01:00', 2);
+
+Affected Rows: 2
+
+INSERT INTO type_conversion_join_right VALUES
+    ('2024-04-01 00:00:00', 1),
+    ('2024-04-01 00:01:00', 2);
+
+Affected Rows: 2
+
+SET TIME_ZONE = '+8:00';
+
+Affected Rows: 0
+
+SELECT l.key_col AS left_key, r.key_col AS right_key
+FROM type_conversion_join_left l
+LEFT JOIN type_conversion_join_right r
+  ON l.key_col = r.key_col AND l.ts > '2024-04-01 08:00:00'
+ORDER BY l.key_col;
+
++----------+-----------+
+| left_key | right_key |
++----------+-----------+
+| 1        |           |
+| 2        | 2         |
++----------+-----------+
+
+CREATE TABLE type_conversion_exists_outer (
+    ts TIMESTAMP(3) TIME INDEX,
+    key_col INT PRIMARY KEY
+) ENGINE = mito;
+
+Affected Rows: 0
+
+CREATE TABLE type_conversion_exists_inner (
+    ts TIMESTAMP(3) TIME INDEX,
+    key_col INT PRIMARY KEY,
+    enabled BOOLEAN
+) ENGINE = mito;
+
+Affected Rows: 0
+
+INSERT INTO type_conversion_exists_outer VALUES
+    ('2024-05-01 08:00:00', 1),
+    ('2024-05-01 08:01:00', 2),
+    ('2024-05-01 08:02:00', 3);
+
+Affected Rows: 3
+
+INSERT INTO type_conversion_exists_inner VALUES
+    ('2024-05-01 08:00:00', 1, true),
+    ('2024-05-01 08:01:00', 2, false),
+    ('2024-05-01 08:02:00', 3, true);
+
+Affected Rows: 3
+
+SELECT o.key_col
+FROM type_conversion_exists_outer o
+WHERE EXISTS (
+    SELECT 1
+    FROM type_conversion_exists_inner i
+    WHERE i.key_col = o.key_col
+      AND i.ts > '2024-05-01 08:00:00'
+      AND i.enabled = TRUE
+)
+ORDER BY o.key_col;
+
++---------+
+| key_col |
++---------+
+| 3       |
++---------+
+
+SELECT o.key_col
+FROM type_conversion_exists_outer o
+WHERE EXISTS (
+    SELECT 1
+    FROM type_conversion_exists_inner i
+    WHERE i.key_col = o.key_col
+      AND i.ts > TIMESTAMP '2024-05-01 00:00:00'
+      AND i.enabled = 'true'
+)
+ORDER BY o.key_col;
+
++---------+
+| key_col |
++---------+
+| 3       |
++---------+
+
+SET TIME_ZONE = 'UTC';
+
+Affected Rows: 0
+
+DROP TABLE type_conversion_join_left;
+
+Affected Rows: 0
+
+DROP TABLE type_conversion_join_right;
+
+Affected Rows: 0
+
+DROP TABLE type_conversion_exists_outer;
+
+Affected Rows: 0
+
+DROP TABLE type_conversion_exists_inner;
+
+Affected Rows: 0
+

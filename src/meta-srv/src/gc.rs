@@ -29,6 +29,7 @@ mod scheduler;
 mod tracker;
 mod util;
 
+pub(crate) use ctx::DefaultGcSchedulerCtx;
 pub use options::GcSchedulerOptions;
 pub use procedure::BatchGcProcedure;
 pub use scheduler::{Event, GcJobReport, GcScheduler, GcTickerRef};

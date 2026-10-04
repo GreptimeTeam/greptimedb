@@ -13,22 +13,33 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use ahash::{HashMap as AHashMap, HashMapExt};
+use api::helper::encode_json_value;
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::helper::time_index_column_schema;
 use api::v1::value::ValueData;
 use api::v1::{
-    ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
+    ColumnDataType, ColumnDataTypeExtension, ColumnOptions, ColumnSchema, JsonTypeExtension, Row,
     RowInsertRequest, RowInsertRequests, Rows, SemanticType, Value,
+};
+use arrow_schema::extension::{
+    EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
 };
 use common_grpc::precision::Precision;
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp::TimeUnit::Nanosecond;
+use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+use datatypes::json::JsonSettings;
+use datatypes::value::Value as DataValue;
+use serde::Serialize;
 use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error::{
-    IncompatibleSchemaSnafu, Result, RowWriterSnafu, TimePrecisionSnafu, TimestampOverflowSnafu,
+    ConvertScalarValueSnafu, IncompatibleSchemaSnafu, InternalSnafu, Result, RowWriterSnafu,
+    TimePrecisionSnafu, TimestampOverflowSnafu, ToJsonSnafu,
 };
 
 /// The intermediate data structure for building the write request.
@@ -37,7 +48,7 @@ use crate::error::{
 pub struct TableData {
     schema: Vec<ColumnSchema>,
     rows: Vec<Row>,
-    column_indexes: HashMap<String, usize>,
+    column_indexes: AHashMap<String, usize>,
 }
 
 impl TableData {
@@ -45,7 +56,7 @@ impl TableData {
         Self {
             schema: Vec::with_capacity(num_columns),
             rows: Vec::with_capacity(num_rows),
-            column_indexes: HashMap::with_capacity(num_columns),
+            column_indexes: AHashMap::with_capacity(num_columns),
         }
     }
 
@@ -74,6 +85,43 @@ impl TableData {
         self.rows.reserve(additional);
     }
 
+    pub(crate) fn ensure_column(&mut self, column_schema: ColumnSchema) -> Result<usize> {
+        if let Some(index) = self.column_indexes.get(&column_schema.column_name).copied() {
+            check_schema_number(
+                column_schema.datatype,
+                column_schema.semantic_type,
+                &self.schema[index],
+            )?;
+            return Ok(index);
+        }
+
+        let index = self.schema.len();
+        let name = column_schema.column_name.clone();
+        self.schema.push(column_schema);
+        self.column_indexes.insert(name, index);
+        Ok(index)
+    }
+
+    /// Ensures a default column schema without allocating its name when it already exists.
+    pub(crate) fn ensure_column_by_name(
+        &mut self,
+        name: &str,
+        datatype: ColumnDataType,
+        semantic_type: SemanticType,
+    ) -> Result<usize> {
+        if let Some(index) = self.column_indexes.get(name).copied() {
+            check_schema(datatype, semantic_type, &self.schema[index])?;
+            return Ok(index);
+        }
+
+        self.ensure_column(ColumnSchema {
+            column_name: name.to_string(),
+            datatype: datatype as i32,
+            semantic_type: semantic_type as i32,
+            ..Default::default()
+        })
+    }
+
     #[allow(dead_code)]
     pub fn columns(&self) -> &Vec<ColumnSchema> {
         &self.schema
@@ -96,17 +144,30 @@ impl TableData {
         value: Option<ValueData>,
         one_row: &mut Vec<Value>,
     ) {
-        let name = name.to_string();
-        if let Some(index) = self.column_indexes.get(&name).copied() {
-            one_row[index].value_data = value;
-        } else {
-            let index = self.schema.len();
-            self.schema.push(ColumnSchema {
-                column_name: name.clone(),
+        self.write_column_unchecked(
+            ColumnSchema {
+                column_name: name.to_string(),
                 datatype: datatype as i32,
                 semantic_type: SemanticType::Field as i32,
                 ..Default::default()
-            });
+            },
+            value,
+            one_row,
+        );
+    }
+
+    pub fn write_column_unchecked(
+        &mut self,
+        column_schema: ColumnSchema,
+        value: Option<ValueData>,
+        one_row: &mut Vec<Value>,
+    ) {
+        if let Some(index) = self.column_indexes.get(&column_schema.column_name).copied() {
+            one_row[index].value_data = value;
+        } else {
+            let index = self.schema.len();
+            let name = column_schema.column_name.clone();
+            self.schema.push(column_schema);
             self.column_indexes.insert(name, index);
             one_row.push(Value { value_data: value });
         }
@@ -180,11 +241,14 @@ impl MultiTableData {
 }
 
 /// Write data as tags into the table data.
-pub fn write_tags(
+pub fn write_tags<K>(
     table_data: &mut TableData,
-    tags: impl Iterator<Item = (String, String)>,
+    tags: impl Iterator<Item = (K, String)>,
     one_row: &mut Vec<Value>,
-) -> Result<()> {
+) -> Result<()>
+where
+    K: AsRef<str> + Into<String>,
+{
     let ktv_iter = tags.map(|(k, v)| (k, ColumnDataType::String, Some(ValueData::StringValue(v))));
     write_by_semantic_type(table_data, SemanticType::Tag, ktv_iter, one_row)
 }
@@ -235,7 +299,7 @@ pub fn write_f64(
     )
 }
 
-fn build_json_column_schema(name: impl ToString) -> ColumnSchema {
+pub(crate) fn build_json_column_schema(name: impl ToString) -> ColumnSchema {
     ColumnSchema {
         column_name: name.to_string(),
         datatype: ColumnDataType::Binary as i32,
@@ -261,6 +325,43 @@ pub fn write_json(
         )),
         one_row,
     )
+}
+
+pub(crate) fn build_json2_column_schema(name: impl ToString) -> ColumnSchema {
+    let extension = Json2ExtensionType::new(Arc::new(JsonMetadata::new(JsonSettings::new_v2())));
+    let mut options = ColumnOptions::default();
+    options.options.insert(
+        EXTENSION_TYPE_NAME_KEY.to_string(),
+        Json2ExtensionType::NAME.to_string(),
+    );
+    if let Some(metadata) = extension.serialize_metadata() {
+        options
+            .options
+            .insert(EXTENSION_TYPE_METADATA_KEY.to_string(), metadata);
+    }
+
+    ColumnSchema {
+        column_name: name.to_string(),
+        datatype: ColumnDataType::Json as i32,
+        semantic_type: SemanticType::Field as i32,
+        options: Some(options),
+        ..Default::default()
+    }
+}
+
+/// Encodes a JSON2 field without constructing its column schema.
+pub(crate) fn encode_json2(value: impl Serialize) -> Result<ValueData> {
+    let json = serde_json::to_value(value).context(ToJsonSnafu)?;
+    let value = JsonSettings::new_v2()
+        .encode(json)
+        .context(ConvertScalarValueSnafu)?;
+    let DataValue::Json(value) = value else {
+        return InternalSnafu {
+            err_msg: "JSON2 encoding returned a non-JSON value",
+        }
+        .fail();
+    };
+    Ok(ValueData::JsonValue(encode_json_value(*value)))
 }
 
 pub(crate) fn write_by_schema(
@@ -295,12 +396,15 @@ pub(crate) fn write_by_schema(
     Ok(())
 }
 
-fn write_by_semantic_type(
+fn write_by_semantic_type<K>(
     table_data: &mut TableData,
     semantic_type: SemanticType,
-    ktv_iter: impl Iterator<Item = (String, ColumnDataType, Option<ValueData>)>,
+    ktv_iter: impl Iterator<Item = (K, ColumnDataType, Option<ValueData>)>,
     one_row: &mut Vec<Value>,
-) -> Result<()> {
+) -> Result<()>
+where
+    K: AsRef<str> + Into<String>,
+{
     let TableData {
         schema,
         column_indexes,
@@ -308,12 +412,13 @@ fn write_by_semantic_type(
     } = table_data;
 
     for (name, datatype, value) in ktv_iter {
-        let index = column_indexes.get(&name);
+        let index = column_indexes.get(name.as_ref()).copied();
         if let Some(index) = index {
-            check_schema(datatype, semantic_type, &schema[*index])?;
-            one_row[*index].value_data = value;
+            check_schema(datatype, semantic_type, &schema[index])?;
+            one_row[index].value_data = value;
         } else {
             let index = schema.len();
+            let name = name.into();
             schema.push(ColumnSchema {
                 column_name: name.clone(),
                 datatype: datatype as i32,

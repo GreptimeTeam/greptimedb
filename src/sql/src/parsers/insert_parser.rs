@@ -30,8 +30,10 @@ impl ParserContext<'_> {
             .context(error::SyntaxSnafu)?;
 
         match spstatement {
-            SpStatement::Insert { .. } => {
-                Ok(Statement::Insert(Box::new(Insert { inner: spstatement })))
+            insert_stmt @ SpStatement::Insert { .. } => {
+                let insert = Insert::try_from(insert_stmt)
+                    .map_err(|e| error::InvalidSqlSnafu { msg: e.to_string() }.build())?;
+                Ok(Statement::Insert(Box::new(insert)))
             }
             unexp => error::UnsupportedSnafu {
                 keyword: unexp.to_string(),
@@ -50,9 +52,9 @@ impl ParserContext<'_> {
         match spstatement {
             SpStatement::Insert(mut insert_stmt) => {
                 insert_stmt.replace_into = true;
-                Ok(Statement::Insert(Box::new(Insert {
-                    inner: SpStatement::Insert(insert_stmt),
-                })))
+                let insert = Insert::try_from(SpStatement::Insert(insert_stmt))
+                    .map_err(|e| error::InvalidSqlSnafu { msg: e.to_string() }.build())?;
+                Ok(Statement::Insert(Box::new(insert)))
             }
             unexp => error::UnsupportedSnafu {
                 keyword: unexp.to_string(),

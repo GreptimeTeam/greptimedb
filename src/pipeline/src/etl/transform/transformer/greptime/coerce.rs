@@ -12,10 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::column_def::{options_from_fulltext, options_from_inverted, options_from_skipping};
 use api::v1::{ColumnDataTypeExtension, ColumnOptions, JsonTypeExtension};
+use arrow_schema::extension::{
+    EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
+};
+use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+use datatypes::json::JsonSettings;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
+use datatypes::value::Value;
 use greptime_proto::v1::value::ValueData;
 use greptime_proto::v1::{ColumnDataType, ColumnSchema, SemanticType};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -23,12 +31,14 @@ use vrl::value::Value as VrlValue;
 
 use crate::error::{
     CoerceIncompatibleTypesSnafu, CoerceJsonTypeToSnafu, CoerceStringToTypeSnafu,
-    CoerceTypeToJsonSnafu, CoerceUnsupportedEpochTypeSnafu, ColumnOptionsSnafu,
+    CoerceTypeToJsonSnafu, CoerceUnsupportedEpochTypeSnafu, ColumnOptionsSnafu, Error,
     InvalidTimestampSnafu, Result, TransformIndexStateMismatchSnafu,
     UnsupportedTypeInPipelineSnafu, VrlRegexValueSnafu,
 };
 use crate::etl::transform::index::Index;
-use crate::etl::transform::transformer::greptime::vrl_value_to_jsonb_value;
+use crate::etl::transform::transformer::greptime::{
+    vrl_value_to_jsonb_value, vrl_value_to_serde_json,
+};
 use crate::etl::transform::{OnFailure, Transform, TransformIndexOptions};
 
 pub(crate) fn coerce_columns(transform: &Transform) -> Result<Vec<ColumnSchema>> {
@@ -128,7 +138,7 @@ fn build_skipping_index_options(transform: &Transform) -> Result<SkippingIndexOp
 fn coerce_options(transform: &Transform) -> Result<Option<ColumnOptions>> {
     validate_transform_index_state(transform)?;
 
-    match transform.index {
+    let mut options = match transform.index {
         Some(Index::Fulltext) => {
             let options = build_fulltext_index_options(transform)?;
             options_from_fulltext(&options).context(ColumnOptionsSnafu)
@@ -139,10 +149,32 @@ fn coerce_options(transform: &Transform) -> Result<Option<ColumnOptions>> {
         }
         Some(Index::Inverted) => Ok(Some(options_from_inverted())),
         _ => Ok(None),
+    }?;
+
+    if transform.type_ == ColumnDataType::Json {
+        let extension = Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+            transform.json_settings.clone().unwrap_or_default(),
+        )));
+        let options = options.get_or_insert_default();
+        options.options.insert(
+            EXTENSION_TYPE_NAME_KEY.to_string(),
+            Json2ExtensionType::NAME.to_string(),
+        );
+        if let Some(metadata) = extension.serialize_metadata() {
+            options
+                .options
+                .insert(EXTENSION_TYPE_METADATA_KEY.to_string(), metadata);
+        }
     }
+
+    Ok(options)
 }
 
-pub(crate) fn coerce_value(val: &VrlValue, transform: &Transform) -> Result<Option<ValueData>> {
+pub(crate) fn coerce_value(
+    val: &VrlValue,
+    transform: &Transform,
+    json_settings: Option<&JsonSettings>,
+) -> Result<Option<ValueData>> {
     match val {
         VrlValue::Null => Ok(None),
         VrlValue::Integer(n) => coerce_i64_value(*n, transform),
@@ -169,7 +201,9 @@ pub(crate) fn coerce_value(val: &VrlValue, transform: &Transform) -> Result<Opti
             }
             .fail(),
         },
-        VrlValue::Array(_) | VrlValue::Object(_) => coerce_json_value(val, transform),
+        VrlValue::Array(_) | VrlValue::Object(_) => {
+            coerce_json_value(val, transform, json_settings)
+        }
         VrlValue::Regex(_) => VrlRegexValueSnafu.fail(),
     }
 }
@@ -205,7 +239,7 @@ fn coerce_bool_value(b: bool, transform: &Transform) -> Result<Option<ValueData>
             }
         },
 
-        ColumnDataType::Binary => {
+        ColumnDataType::Binary | ColumnDataType::Json => {
             return CoerceJsonTypeToSnafu {
                 ty: transform.type_.as_str_name(),
             }
@@ -223,17 +257,65 @@ fn coerce_bool_value(b: bool, transform: &Transform) -> Result<Option<ValueData>
     Ok(Some(val))
 }
 
+fn handle_coercion_failure(transform: &Transform, error: Error) -> Result<Option<ValueData>> {
+    match transform.on_failure {
+        Some(OnFailure::Ignore) => Ok(None),
+        Some(OnFailure::Default) => match transform.get_default() {
+            Some(default) => Ok(Some(default.clone())),
+            None => transform.get_type_matched_default_val().map(Some),
+        },
+        None => Err(error),
+    }
+}
+
+fn integer_out_of_range<T: std::fmt::Display>(
+    value: T,
+    transform: &Transform,
+) -> Result<Option<ValueData>> {
+    handle_coercion_failure(
+        transform,
+        CoerceIncompatibleTypesSnafu {
+            msg: format!(
+                "integer value `{value}` is out of range for {}",
+                transform.type_.as_str_name()
+            ),
+        }
+        .build(),
+    )
+}
+
 fn coerce_i64_value(n: i64, transform: &Transform) -> Result<Option<ValueData>> {
-    let val = match &transform.type_ {
-        ColumnDataType::Int8 => ValueData::I8Value(n as i32),
-        ColumnDataType::Int16 => ValueData::I16Value(n as i32),
-        ColumnDataType::Int32 => ValueData::I32Value(n as i32),
+    let val = match transform.type_ {
+        ColumnDataType::Int8 => match i8::try_from(n) {
+            Ok(value) => ValueData::I8Value(value.into()),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::Int16 => match i16::try_from(n) {
+            Ok(value) => ValueData::I16Value(value.into()),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::Int32 => match i32::try_from(n) {
+            Ok(value) => ValueData::I32Value(value),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
         ColumnDataType::Int64 => ValueData::I64Value(n),
 
-        ColumnDataType::Uint8 => ValueData::U8Value(n as u32),
-        ColumnDataType::Uint16 => ValueData::U16Value(n as u32),
-        ColumnDataType::Uint32 => ValueData::U32Value(n as u32),
-        ColumnDataType::Uint64 => ValueData::U64Value(n as u64),
+        ColumnDataType::Uint8 => match u8::try_from(n) {
+            Ok(value) => ValueData::U8Value(value.into()),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::Uint16 => match u16::try_from(n) {
+            Ok(value) => ValueData::U16Value(value.into()),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::Uint32 => match u32::try_from(n) {
+            Ok(value) => ValueData::U32Value(value),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::Uint64 => match u64::try_from(n) {
+            Ok(value) => ValueData::U64Value(value),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
 
         ColumnDataType::Float32 => ValueData::F32Value(n as f32),
         ColumnDataType::Float64 => ValueData::F64Value(n as f64),
@@ -246,7 +328,7 @@ fn coerce_i64_value(n: i64, transform: &Transform) -> Result<Option<ValueData>> 
         ColumnDataType::TimestampMillisecond => ValueData::TimestampMillisecondValue(n),
         ColumnDataType::TimestampSecond => ValueData::TimestampSecondValue(n),
 
-        ColumnDataType::Binary => {
+        ColumnDataType::Binary | ColumnDataType::Json => {
             return CoerceJsonTypeToSnafu {
                 ty: transform.type_.as_str_name(),
             }
@@ -260,15 +342,36 @@ fn coerce_i64_value(n: i64, transform: &Transform) -> Result<Option<ValueData>> 
 }
 
 fn coerce_u64_value(n: u64, transform: &Transform) -> Result<Option<ValueData>> {
-    let val = match &transform.type_ {
-        ColumnDataType::Int8 => ValueData::I8Value(n as i32),
-        ColumnDataType::Int16 => ValueData::I16Value(n as i32),
-        ColumnDataType::Int32 => ValueData::I32Value(n as i32),
-        ColumnDataType::Int64 => ValueData::I64Value(n as i64),
+    let val = match transform.type_ {
+        ColumnDataType::Int8 => match i8::try_from(n) {
+            Ok(value) => ValueData::I8Value(value.into()),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::Int16 => match i16::try_from(n) {
+            Ok(value) => ValueData::I16Value(value.into()),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::Int32 => match i32::try_from(n) {
+            Ok(value) => ValueData::I32Value(value),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::Int64 => match i64::try_from(n) {
+            Ok(value) => ValueData::I64Value(value),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
 
-        ColumnDataType::Uint8 => ValueData::U8Value(n as u32),
-        ColumnDataType::Uint16 => ValueData::U16Value(n as u32),
-        ColumnDataType::Uint32 => ValueData::U32Value(n as u32),
+        ColumnDataType::Uint8 => match u8::try_from(n) {
+            Ok(value) => ValueData::U8Value(value.into()),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::Uint16 => match u16::try_from(n) {
+            Ok(value) => ValueData::U16Value(value.into()),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::Uint32 => match u32::try_from(n) {
+            Ok(value) => ValueData::U32Value(value),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
         ColumnDataType::Uint64 => ValueData::U64Value(n),
 
         ColumnDataType::Float32 => ValueData::F32Value(n as f32),
@@ -277,12 +380,24 @@ fn coerce_u64_value(n: u64, transform: &Transform) -> Result<Option<ValueData>> 
         ColumnDataType::Boolean => ValueData::BoolValue(n != 0),
         ColumnDataType::String => ValueData::StringValue(n.to_string()),
 
-        ColumnDataType::TimestampNanosecond => ValueData::TimestampNanosecondValue(n as i64),
-        ColumnDataType::TimestampMicrosecond => ValueData::TimestampMicrosecondValue(n as i64),
-        ColumnDataType::TimestampMillisecond => ValueData::TimestampMillisecondValue(n as i64),
-        ColumnDataType::TimestampSecond => ValueData::TimestampSecondValue(n as i64),
+        ColumnDataType::TimestampNanosecond => match i64::try_from(n) {
+            Ok(value) => ValueData::TimestampNanosecondValue(value),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::TimestampMicrosecond => match i64::try_from(n) {
+            Ok(value) => ValueData::TimestampMicrosecondValue(value),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::TimestampMillisecond => match i64::try_from(n) {
+            Ok(value) => ValueData::TimestampMillisecondValue(value),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
+        ColumnDataType::TimestampSecond => match i64::try_from(n) {
+            Ok(value) => ValueData::TimestampSecondValue(value),
+            Err(_) => return integer_out_of_range(n, transform),
+        },
 
-        ColumnDataType::Binary => {
+        ColumnDataType::Binary | ColumnDataType::Json => {
             return CoerceJsonTypeToSnafu {
                 ty: transform.type_.as_str_name(),
             }
@@ -326,7 +441,7 @@ fn coerce_f64_value(n: f64, transform: &Transform) -> Result<Option<ValueData>> 
             }
         },
 
-        ColumnDataType::Binary => {
+        ColumnDataType::Binary | ColumnDataType::Json => {
             return CoerceJsonTypeToSnafu {
                 ty: transform.type_.as_str_name(),
             }
@@ -342,19 +457,15 @@ fn coerce_f64_value(n: f64, transform: &Transform) -> Result<Option<ValueData>> 
 macro_rules! coerce_string_value {
     ($s:expr, $transform:expr, $type:ident, $parse:ident) => {
         match $s.parse::<$type>() {
-            Ok(v) => Ok(Some(ValueData::$parse(v))),
-            Err(_) => match $transform.on_failure {
-                Some(OnFailure::Ignore) => Ok(None),
-                Some(OnFailure::Default) => match $transform.get_default() {
-                    Some(default) => Ok(Some(default.clone())),
-                    None => $transform.get_type_matched_default_val().map(Some),
-                },
-                None => CoerceStringToTypeSnafu {
+            Ok(v) => Ok(Some(ValueData::$parse(v.into()))),
+            Err(_) => handle_coercion_failure(
+                $transform,
+                CoerceStringToTypeSnafu {
                     s: $s,
                     ty: $transform.type_.as_str_name(),
                 }
-                .fail(),
-            },
+                .build(),
+            ),
         }
     };
 }
@@ -362,10 +473,10 @@ macro_rules! coerce_string_value {
 fn coerce_string_value(s: &str, transform: &Transform) -> Result<Option<ValueData>> {
     match transform.type_ {
         ColumnDataType::Int8 => {
-            coerce_string_value!(s, transform, i32, I8Value)
+            coerce_string_value!(s, transform, i8, I8Value)
         }
         ColumnDataType::Int16 => {
-            coerce_string_value!(s, transform, i32, I16Value)
+            coerce_string_value!(s, transform, i16, I16Value)
         }
         ColumnDataType::Int32 => {
             coerce_string_value!(s, transform, i32, I32Value)
@@ -375,10 +486,10 @@ fn coerce_string_value(s: &str, transform: &Transform) -> Result<Option<ValueDat
         }
 
         ColumnDataType::Uint8 => {
-            coerce_string_value!(s, transform, u32, U8Value)
+            coerce_string_value!(s, transform, u8, U8Value)
         }
         ColumnDataType::Uint16 => {
-            coerce_string_value!(s, transform, u32, U16Value)
+            coerce_string_value!(s, transform, u16, U16Value)
         }
         ColumnDataType::Uint32 => {
             coerce_string_value!(s, transform, u32, U32Value)
@@ -409,7 +520,7 @@ fn coerce_string_value(s: &str, transform: &Transform) -> Result<Option<ValueDat
             None => CoerceUnsupportedEpochTypeSnafu { ty: "String" }.fail(),
         },
 
-        ColumnDataType::Binary => CoerceStringToTypeSnafu {
+        ColumnDataType::Binary | ColumnDataType::Json => CoerceStringToTypeSnafu {
             s,
             ty: transform.type_.as_str_name(),
         }
@@ -419,34 +530,203 @@ fn coerce_string_value(s: &str, transform: &Transform) -> Result<Option<ValueDat
     }
 }
 
-fn coerce_json_value(v: &VrlValue, transform: &Transform) -> Result<Option<ValueData>> {
-    match &transform.type_ {
-        ColumnDataType::Binary => (),
+fn coerce_json_value(
+    v: &VrlValue,
+    transform: &Transform,
+    json_settings: Option<&JsonSettings>,
+) -> Result<Option<ValueData>> {
+    let value = match transform.type_ {
+        ColumnDataType::Binary => {
+            let data: jsonb::Value = vrl_value_to_jsonb_value(v);
+            ValueData::BinaryValue(data.to_vec())
+        }
+        ColumnDataType::Json => {
+            let json = vrl_value_to_serde_json(v);
+            let encoded = if let Some(settings) = json_settings.or(transform.json_settings.as_ref())
+            {
+                settings.encode(json)
+            } else {
+                JsonSettings::default().encode(json)
+            };
+            let value = match encoded {
+                Ok(value) => value,
+                Err(error) => return handle_coercion_failure(transform, error.into()),
+            };
+            let Value::Json(value) = value else {
+                unreachable!()
+            };
+            ValueData::JsonValue(api::helper::encode_json_value(*value))
+        }
         t => {
             return CoerceTypeToJsonSnafu {
                 ty: t.as_str_name(),
             }
             .fail();
         }
-    }
-    let data: jsonb::Value = vrl_value_to_jsonb_value(v);
-    Ok(Some(ValueData::BinaryValue(data.to_vec())))
+    };
+    Ok(Some(value))
 }
 
 #[cfg(test)]
 mod tests {
 
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::json::JsonTypeHint;
     use datatypes::schema::{FulltextAnalyzer, FulltextBackend, SkippingIndexType};
     use vrl::prelude::Bytes;
 
     use super::*;
     use crate::etl::field::Fields;
 
+    fn transform(type_: ColumnDataType) -> Transform {
+        Transform {
+            fields: Fields::default(),
+            type_,
+            json_settings: None,
+            default: None,
+            index: None,
+            index_options: None,
+            on_failure: None,
+            tag: false,
+        }
+    }
+
+    fn narrow_i64_value(type_: ColumnDataType, value: i64) -> ValueData {
+        match type_ {
+            ColumnDataType::Int8 => ValueData::I8Value(value as i32),
+            ColumnDataType::Int16 => ValueData::I16Value(value as i32),
+            ColumnDataType::Int32 => ValueData::I32Value(value as i32),
+            ColumnDataType::Uint8 => ValueData::U8Value(value as u32),
+            ColumnDataType::Uint16 => ValueData::U16Value(value as u32),
+            ColumnDataType::Uint32 => ValueData::U32Value(value as u32),
+            _ => unreachable!("narrow integer type required"),
+        }
+    }
+
+    fn checked_u64_value(type_: ColumnDataType, value: u64) -> ValueData {
+        match type_ {
+            ColumnDataType::Int8 => ValueData::I8Value(value as i32),
+            ColumnDataType::Int16 => ValueData::I16Value(value as i32),
+            ColumnDataType::Int32 => ValueData::I32Value(value as i32),
+            ColumnDataType::Int64 => ValueData::I64Value(value as i64),
+            ColumnDataType::Uint8 => ValueData::U8Value(value as u32),
+            ColumnDataType::Uint16 => ValueData::U16Value(value as u32),
+            ColumnDataType::Uint32 => ValueData::U32Value(value as u32),
+            ColumnDataType::TimestampNanosecond => {
+                ValueData::TimestampNanosecondValue(value as i64)
+            }
+            ColumnDataType::TimestampMicrosecond => {
+                ValueData::TimestampMicrosecondValue(value as i64)
+            }
+            ColumnDataType::TimestampMillisecond => {
+                ValueData::TimestampMillisecondValue(value as i64)
+            }
+            ColumnDataType::TimestampSecond => ValueData::TimestampSecondValue(value as i64),
+            _ => unreachable!("checked u64 target type required"),
+        }
+    }
+
+    fn assert_out_of_range(
+        result: crate::error::Result<Option<ValueData>>,
+        value: impl std::fmt::Display,
+        type_: ColumnDataType,
+    ) {
+        let error = result.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "Failed to coerce value: integer value `{value}` is out of range for {}",
+                type_.as_str_name()
+            )
+        );
+        assert!(matches!(
+            error,
+            crate::error::Error::CoerceIncompatibleTypes { .. }
+        ));
+    }
+
+    #[test]
+    fn test_coerce_i64_narrowing_boundaries_and_overflows() {
+        // target type, inclusive minimum, inclusive maximum
+        let cases = [
+            (ColumnDataType::Int8, i8::MIN as i64, i8::MAX as i64),
+            (ColumnDataType::Int16, i16::MIN as i64, i16::MAX as i64),
+            (ColumnDataType::Int32, i32::MIN as i64, i32::MAX as i64),
+            (ColumnDataType::Uint8, u8::MIN as i64, u8::MAX as i64),
+            (ColumnDataType::Uint16, u16::MIN as i64, u16::MAX as i64),
+            (ColumnDataType::Uint32, u32::MIN as i64, u32::MAX as i64),
+        ];
+
+        for (type_, min, max) in cases {
+            let transform = transform(type_);
+            assert_eq!(
+                coerce_i64_value(min, &transform).unwrap(),
+                Some(narrow_i64_value(type_, min)),
+                "{type_:?} minimum"
+            );
+            assert_eq!(
+                coerce_i64_value(max, &transform).unwrap(),
+                Some(narrow_i64_value(type_, max)),
+                "{type_:?} maximum"
+            );
+            assert_out_of_range(coerce_i64_value(min - 1, &transform), min - 1, type_);
+            assert_out_of_range(coerce_i64_value(max + 1, &transform), max + 1, type_);
+        }
+    }
+
+    #[test]
+    fn test_coerce_i64_to_u64_rejects_negative_value() {
+        assert_out_of_range(
+            coerce_i64_value(-1, &transform(ColumnDataType::Uint64)),
+            -1,
+            ColumnDataType::Uint64,
+        );
+    }
+
+    #[test]
+    fn test_coerce_u64_checked_conversions() {
+        // target type, inclusive maximum
+        let cases = [
+            (ColumnDataType::Int8, i8::MAX as u64),
+            (ColumnDataType::Int16, i16::MAX as u64),
+            (ColumnDataType::Int32, i32::MAX as u64),
+            (ColumnDataType::Int64, i64::MAX as u64),
+            (ColumnDataType::Uint8, u8::MAX as u64),
+            (ColumnDataType::Uint16, u16::MAX as u64),
+            (ColumnDataType::Uint32, u32::MAX as u64),
+            (ColumnDataType::TimestampNanosecond, i64::MAX as u64),
+            (ColumnDataType::TimestampMicrosecond, i64::MAX as u64),
+            (ColumnDataType::TimestampMillisecond, i64::MAX as u64),
+            (ColumnDataType::TimestampSecond, i64::MAX as u64),
+        ];
+
+        for (type_, max) in cases {
+            let transform = transform(type_);
+            assert_eq!(
+                coerce_u64_value(max, &transform).unwrap(),
+                Some(checked_u64_value(type_, max)),
+                "{type_:?} maximum"
+            );
+            assert_out_of_range(coerce_u64_value(max + 1, &transform), max + 1, type_);
+        }
+
+        assert_eq!(
+            coerce_u64_value(u64::MAX, &transform(ColumnDataType::Uint64)).unwrap(),
+            Some(ValueData::U64Value(u64::MAX))
+        );
+        assert_out_of_range(
+            coerce_u64_value(u64::MAX, &transform(ColumnDataType::TimestampNanosecond)),
+            u64::MAX,
+            ColumnDataType::TimestampNanosecond,
+        );
+    }
+
     #[test]
     fn test_coerce_string_without_on_failure() {
         let transform = Transform {
             fields: Fields::default(),
             type_: ColumnDataType::Int32,
+            json_settings: None,
             default: None,
             index: None,
             index_options: None,
@@ -457,14 +737,14 @@ mod tests {
         // valid string
         {
             let val = VrlValue::Integer(123);
-            let result = coerce_value(&val, &transform).unwrap();
+            let result = coerce_value(&val, &transform, None).unwrap();
             assert_eq!(result, Some(ValueData::I32Value(123)));
         }
 
         // invalid string
         {
             let val = VrlValue::Bytes(Bytes::from("hello"));
-            let result = coerce_value(&val, &transform);
+            let result = coerce_value(&val, &transform, None);
             assert!(result.is_err());
         }
     }
@@ -474,6 +754,7 @@ mod tests {
         let transform = Transform {
             fields: Fields::default(),
             type_: ColumnDataType::Int32,
+            json_settings: None,
             default: None,
             index: None,
             index_options: None,
@@ -482,8 +763,33 @@ mod tests {
         };
 
         let val = VrlValue::Bytes(Bytes::from("hello"));
-        let result = coerce_value(&val, &transform).unwrap();
+        let result = coerce_value(&val, &transform, None).unwrap();
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_coerce_json2_with_on_failure() {
+        let settings = JsonSettings::try_new(
+            vec![JsonTypeHint {
+                path: vec!["age".to_string()],
+                data_type: ConcreteDataType::int64_datatype(),
+                inverted_index: false,
+            }],
+            None,
+        )
+        .unwrap();
+        let mut transform = transform(ColumnDataType::Json);
+        transform.json_settings = Some(settings);
+        transform.on_failure = Some(OnFailure::Ignore);
+        let value: VrlValue = serde_json::json!({"age": "42"}).into();
+
+        assert_eq!(coerce_value(&value, &transform, None).unwrap(), None);
+
+        transform.on_failure = Some(OnFailure::Default);
+        assert_eq!(
+            coerce_value(&value, &transform, None).unwrap(),
+            Some(ValueData::JsonValue(Default::default()))
+        );
     }
 
     #[test]
@@ -491,6 +797,7 @@ mod tests {
         let mut transform = Transform {
             fields: Fields::default(),
             type_: ColumnDataType::Int32,
+            json_settings: None,
             default: None,
             index: None,
             index_options: None,
@@ -501,7 +808,7 @@ mod tests {
         // with no explicit default value
         {
             let val = VrlValue::Bytes(Bytes::from("hello"));
-            let result = coerce_value(&val, &transform).unwrap();
+            let result = coerce_value(&val, &transform, None).unwrap();
             assert_eq!(result, Some(ValueData::I32Value(0)));
         }
 
@@ -509,7 +816,7 @@ mod tests {
         {
             transform.default = Some(ValueData::I32Value(42));
             let val = VrlValue::Bytes(Bytes::from("hello"));
-            let result = coerce_value(&val, &transform).unwrap();
+            let result = coerce_value(&val, &transform, None).unwrap();
             assert_eq!(result, Some(ValueData::I32Value(42)));
         }
     }
@@ -519,6 +826,7 @@ mod tests {
         let transform = Transform {
             fields: Fields::default(),
             type_: ColumnDataType::String,
+            json_settings: None,
             default: None,
             index: Some(Index::Fulltext),
             index_options: Some(TransformIndexOptions::Fulltext(
@@ -550,6 +858,7 @@ mod tests {
         let transform = Transform {
             fields: Fields::default(),
             type_: ColumnDataType::Int64,
+            json_settings: None,
             default: None,
             index: Some(Index::Skipping),
             index_options: Some(TransformIndexOptions::Skipping(
@@ -573,6 +882,7 @@ mod tests {
         let transform = Transform {
             fields: Fields::default(),
             type_: ColumnDataType::String,
+            json_settings: None,
             default: None,
             index: Some(Index::Fulltext),
             index_options: Some(TransformIndexOptions::Skipping(
@@ -590,6 +900,7 @@ mod tests {
         let transform = Transform {
             fields: Fields::default(),
             type_: ColumnDataType::String,
+            json_settings: None,
             default: None,
             index: None,
             index_options: Some(TransformIndexOptions::Fulltext(

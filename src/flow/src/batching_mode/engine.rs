@@ -21,7 +21,10 @@ use std::time::Duration;
 use api::v1::flow::DirtyWindowRequests;
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
-use common_meta::ddl::create_flow::{FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType};
+use common_meta::ddl::create_flow::{
+    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY,
+    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE, FlowType,
+};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::key::flow::flow_state::FlowStat;
@@ -46,13 +49,14 @@ use tokio::sync::{RwLock, oneshot};
 use crate::batching_mode::BatchingModeOptions;
 use crate::batching_mode::eval_schedule::EvalSchedule;
 use crate::batching_mode::frontend_client::FrontendClient;
+use crate::batching_mode::state::DirtyTimeWindows;
 use crate::batching_mode::task::{BatchingTask, TaskArgs};
 use crate::batching_mode::time_window::{TimeWindowExpr, find_time_window_expr};
 use crate::batching_mode::utils::sql_to_df_plan;
 use crate::engine::{FlowEngine, FlowStatProvider};
 use crate::error::{
     CreateFlowSnafu, DatafusionSnafu, ExternalSnafu, FlowAlreadyExistSnafu, FlowNotFoundSnafu,
-    InvalidQuerySnafu, TableNotFoundMetaSnafu, UnexpectedSnafu, UnsupportedSnafu,
+    InvalidQuerySnafu, JoinTaskSnafu, TableNotFoundMetaSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::metrics::METRIC_FLOW_BATCHING_ENGINE_BULK_MARK_TIME_WINDOW;
 use crate::{CreateFlowArgs, Error, FlowId, TableName};
@@ -71,6 +75,7 @@ pub struct BatchingEngine {
     /// Batching mode options for control how batching mode query works
     ///
     pub(crate) batch_opts: Arc<BatchingModeOptions>,
+    execution_factory: Option<Arc<dyn crate::BatchingExecutionFactory>>,
 }
 
 #[derive(Default)]
@@ -127,6 +132,26 @@ impl BatchingEngine {
         catalog_manager: CatalogManagerRef,
         batch_opts: BatchingModeOptions,
     ) -> Self {
+        Self::new_with_execution(
+            frontend_client,
+            query_engine,
+            flow_metadata_manager,
+            table_meta,
+            catalog_manager,
+            batch_opts,
+            None,
+        )
+    }
+
+    pub fn new_with_execution(
+        frontend_client: Arc<FrontendClient>,
+        query_engine: QueryEngineRef,
+        flow_metadata_manager: FlowMetadataManagerRef,
+        table_meta: TableMetadataManagerRef,
+        catalog_manager: CatalogManagerRef,
+        batch_opts: BatchingModeOptions,
+        execution_factory: Option<Arc<dyn crate::BatchingExecutionFactory>>,
+    ) -> Self {
         Self {
             runtime: Default::default(),
             frontend_client,
@@ -135,6 +160,7 @@ impl BatchingEngine {
             catalog_manager,
             query_engine,
             batch_opts: Arc::new(batch_opts),
+            execution_factory,
         }
     }
 
@@ -151,17 +177,24 @@ impl BatchingEngine {
             .collect()
     }
 
+    /// Mark dirty time windows for batching flows.
+    ///
+    /// Both `timestamps` and `time_ranges` (`[start_inclusive, end_exclusive)`)
+    /// in each `DirtyWindowRequest` are bare `i64`s interpreted in the source
+    /// table's time index column native unit, resolved via table metadata.
     pub async fn handle_mark_dirty_time_window(
         &self,
         reqs: DirtyWindowRequests,
     ) -> Result<(), Error> {
         let table_info_mgr = self.table_meta.table_info_manager();
 
-        let mut group_by_table_id: HashMap<u32, Vec<_>> = HashMap::new();
+        let mut group_by_table_id: HashMap<u32, (Vec<i64>, Vec<api::v1::flow::TimeRange>)> =
+            HashMap::new();
         for r in reqs.requests {
             let tid = TableId::from(r.table_id);
             let entry = group_by_table_id.entry(tid).or_default();
-            entry.extend(r.timestamps);
+            entry.0.extend(r.timestamps);
+            entry.1.extend(r.time_ranges);
         }
         let tids = group_by_table_id.keys().cloned().collect::<Vec<TableId>>();
         let table_infos =
@@ -174,7 +207,7 @@ impl BatchingEngine {
 
         let group_by_table_name = group_by_table_id
             .into_iter()
-            .filter_map(|(id, timestamps)| {
+            .filter_map(|(id, (timestamps, time_ranges))| {
                 let table_name = table_infos.get(&id).map(|info| info.table_name());
                 let Some(table_name) = table_name else {
                     warn!("Failed to get table infos for table id: {:?}", id);
@@ -191,7 +224,7 @@ impl BatchingEngine {
                     .as_timestamp()
                     .unwrap()
                     .unit();
-                Some((table_name, (timestamps, time_index_unit)))
+                Some((table_name, (timestamps, time_ranges, time_index_unit)))
             })
             .collect::<HashMap<_, _>>();
 
@@ -219,13 +252,15 @@ impl BatchingEngine {
 
             let group_by_table_name = group_by_table_name.clone();
             let task = task.clone();
-
             let handle: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
                 let src_table_names = &task.config.source_table_names;
                 let mut all_dirty_windows = HashSet::new();
+                let mut all_dirty_ranges = Vec::new();
                 let mut is_dirty = false;
                 for src_table_name in src_table_names {
-                    if let Some((timestamps, unit)) = group_by_table_name.get(src_table_name) {
+                    if let Some((timestamps, time_ranges, unit)) =
+                        group_by_table_name.get(src_table_name)
+                    {
                         let Some(expr) = &task.config.time_window_expr else {
                             is_dirty = true;
                             continue;
@@ -235,9 +270,26 @@ impl BatchingEngine {
                                 .eval(common_time::Timestamp::new(*timestamp, *unit))?
                                 .0
                                 .context(UnexpectedSnafu {
-                                    reason: "Failed to eval start value",
+                                    reason: format!(
+                                        "Failed to align dirty timestamp {timestamp}: missing window lower bound"
+                                    ),
                                 })?;
                             all_dirty_windows.insert(align_start);
+                        }
+                        for time_range in time_ranges {
+                            if time_range.end_exclusive <= time_range.start_inclusive {
+                                warn!(
+                                    "Ignoring invalid dirty time range with start_inclusive={} >= end_exclusive={}",
+                                    time_range.start_inclusive, time_range.end_exclusive
+                                );
+                                continue;
+                            }
+                            let (align_start, align_end) = DirtyTimeWindows::align_time_window(
+                                common_time::Timestamp::new(time_range.start_inclusive, *unit),
+                                Some(common_time::Timestamp::new(time_range.end_exclusive, *unit)),
+                                expr,
+                            )?;
+                            all_dirty_ranges.push((align_start, align_end));
                         }
                     }
                 }
@@ -249,6 +301,9 @@ impl BatchingEngine {
                 for timestamp in all_dirty_windows {
                     state.dirty_time_windows.add_window(timestamp, None);
                 }
+                for (start, end) in all_dirty_ranges {
+                    state.dirty_time_windows.add_window(start, end);
+                }
 
                 METRIC_FLOW_BATCHING_ENGINE_BULK_MARK_TIME_WINDOW
                     .with_label_values(&[&flow_id_label])
@@ -258,15 +313,7 @@ impl BatchingEngine {
             handles.push(handle);
         }
         for handle in handles {
-            match handle.await {
-                Err(e) => {
-                    warn!("Failed to handle inserts: {e}");
-                }
-                Ok(Ok(())) => (),
-                Ok(Err(e)) => {
-                    warn!("Failed to handle inserts: {e}");
-                }
-            }
+            handle.await.context(JoinTaskSnafu)??;
         }
 
         Ok(())
@@ -392,14 +439,24 @@ impl BatchingEngine {
 
 impl FlowStatProvider for BatchingEngine {
     async fn flow_stat(&self) -> FlowStat {
+        let runtime = self.runtime.read().await;
+        let mut last_exec_time_map = BTreeMap::new();
+        let mut start_time_map = BTreeMap::new();
+
+        for (flow_id, task) in runtime.tasks.iter() {
+            let id = *flow_id as u32;
+            if let Some(ts) = task.last_execution_time_millis() {
+                last_exec_time_map.insert(id, ts);
+            }
+            if let Some(ts) = task.start_time_millis() {
+                start_time_map.insert(id, ts);
+            }
+        }
+
         FlowStat {
             state_size: BTreeMap::new(),
-            last_exec_time_map: self
-                .get_last_exec_time_map()
-                .await
-                .into_iter()
-                .map(|(flow_id, timestamp)| (flow_id as u32, timestamp))
-                .collect(),
+            last_exec_time_map,
+            start_time_map,
         }
     }
 }
@@ -433,21 +490,24 @@ impl BatchingEngine {
     fn batch_opts_for_flow_options(
         &self,
         flow_options: &HashMap<String, String>,
+        exact_sequence_range_required: bool,
     ) -> Result<Arc<BatchingModeOptions>, Error> {
         let mut batch_opts = (*self.batch_opts).clone();
         if let Some(enable_incremental_read) =
             flow_options.get(FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY)
         {
-            batch_opts.experimental_enable_incremental_read = enable_incremental_read
-                .parse::<bool>()
-                .map_err(|_| {
+            batch_opts.experimental_enable_incremental_read = if exact_sequence_range_required {
+                true
+            } else {
+                enable_incremental_read.parse::<bool>().map_err(|_| {
                     InvalidQuerySnafu {
                         reason: format!(
                             "Invalid flow option {FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY}: {enable_incremental_read}"
                         ),
                     }
                     .build()
-                })?;
+                })?
+            };
         }
 
         Ok(Arc::new(batch_opts))
@@ -562,7 +622,14 @@ impl BatchingEngine {
             }
         );
 
-        let batch_opts = self.batch_opts_for_flow_options(&flow_options)?;
+        // The meta layer validates this reserved sentinel before it reaches the
+        // flownode. Derive the requirement once and pass it directly to task
+        // config; query-context extensions are irrelevant.
+        let exact_sequence_range_required = flow_options
+            .get(FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY)
+            .is_some_and(|value| value == FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE);
+        let batch_opts =
+            self.batch_opts_for_flow_options(&flow_options, exact_sequence_range_required)?;
 
         let mut source_table_names = Vec::with_capacity(2);
         for src_id in source_table_ids {
@@ -665,17 +732,38 @@ impl BatchingEngine {
             eval_schedule,
         };
 
-        let task = BatchingTask::try_new(task_args)?;
+        let task = BatchingTask::try_new_with_exact_sequence_range_required(
+            task_args,
+            exact_sequence_range_required,
+        )?;
 
-        let task_inner = task.clone();
+        if task.config.exact_sequence_range_required {
+            ensure!(
+                task.sequence_range_capable().await?,
+                UnsupportedSnafu {
+                    reason: format!(
+                        "Flow {flow_id} requires exact sequence-range reads, but a source table lacks the Mito preserve_row_sequence capability"
+                    ),
+                }
+            );
+        }
+
         let engine = self.query_engine.clone();
         let frontend = self.frontend_client.clone();
 
-        // Create sink table if needed, then validate an existing/created sink schema before
-        // spawning the background task. This catches user-created sink schema mismatches at
-        // CREATE FLOW time instead of surfacing them later in the execution loop.
-        task.check_or_create_sink_table(&engine, &frontend).await?;
-        task.validate_sink_table_schema(&engine).await?;
+        // Create the sink before asking an optional extension to own execution.
+        // The default path retains the OSS schema validation.
+        let table = task.check_or_create_sink_table(&engine, &frontend).await?;
+        let execution = if let Some(factory) = &self.execution_factory {
+            factory.create(&task, table, &engine, &frontend).await?
+        } else {
+            None
+        };
+        if execution.is_none() {
+            task.validate_sink_table_schema(&engine).await?;
+        }
+        let task = task.with_execution(execution);
+        let task_inner = task.clone();
 
         let (start_tx, start_rx) = oneshot::channel();
 
@@ -959,6 +1047,8 @@ fn abort_flow_task(flow_id: FlowId, task: Option<BatchingTask>, action: &str) ->
         return false;
     };
 
+    task.stop_execution();
+
     if let Some(handle) = task.state.write().unwrap().task_handle.take() {
         handle.abort();
         debug!("Aborted {action} flow task {flow_id}");
@@ -1007,14 +1097,24 @@ impl FlowEngine for BatchingEngine {
 
 #[cfg(test)]
 mod tests {
-    use catalog::memory::new_memory_catalog_manager;
+    use api::v1::flow::{DirtyWindowRequest, TimeRange};
+    use catalog::RegisterTableRequest;
+    use catalog::memory::{MemoryCatalogManager, new_memory_catalog_manager};
     use common_meta::key::TableMetadataManager;
     use common_meta::key::flow::FlowMetadataManager;
+    use common_meta::key::table_route::TableRouteValue;
+    use common_meta::key::test_utils::new_test_table_info_with_name;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_recordbatch::RecordBatch;
+    use common_time::timestamp::TimeUnit;
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::{TimestampMillisecondVector, UInt32Vector, VectorRef};
     use query::options::QueryOptions;
     use session::context::QueryContext;
+    use tokio::sync::Notify;
 
     use super::*;
+    use crate::ExecuteOnceOutcome;
     use crate::test_utils::create_test_query_engine;
 
     struct DropNotify(Option<oneshot::Sender<()>>);
@@ -1047,20 +1147,347 @@ mod tests {
         )
     }
 
+    async fn new_test_engine_with_execution(
+        execution_factory: Option<Arc<dyn crate::BatchingExecutionFactory>>,
+    ) -> BatchingEngine {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let table_meta = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        table_meta.init().await.unwrap();
+        let flow_meta = Arc::new(FlowMetadataManager::new(kv_backend));
+        let query_engine = create_test_query_engine();
+        let catalog_manager = query_engine.engine_state().catalog_manager().clone();
+        let (frontend_client, _handler) =
+            FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+
+        let engine = BatchingEngine::new_with_execution(
+            Arc::new(frontend_client),
+            query_engine,
+            flow_meta,
+            table_meta,
+            catalog_manager,
+            BatchingModeOptions::default(),
+            execution_factory,
+        );
+        engine
+            .table_meta
+            .create_table_metadata(
+                new_test_table_info_with_name(1, "numbers_with_ts"),
+                TableRouteValue::physical(vec![]),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        engine
+    }
+
+    fn register_sink_with_schema(engine: &BatchingEngine, name: &str) {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        ]));
+        let recordbatch = RecordBatch::new(
+            schema,
+            vec![
+                Arc::new(UInt32Vector::from_slice([1_u32])) as VectorRef,
+                Arc::new(TimestampMillisecondVector::from_slice([0_i64])) as VectorRef,
+            ],
+        )
+        .unwrap();
+        engine
+            .catalog_manager
+            .as_any()
+            .downcast_ref::<MemoryCatalogManager>()
+            .unwrap()
+            .register_table_sync(RegisterTableRequest {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table_name: name.to_string(),
+                table_id: 9000,
+                table: table::test_util::MemTable::table(name, recordbatch),
+            })
+            .unwrap();
+    }
+
+    fn register_number_only_sink(engine: &BatchingEngine, name: &str) {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "number",
+            ConcreteDataType::uint32_datatype(),
+            false,
+        )]));
+        let recordbatch = RecordBatch::new(
+            schema,
+            vec![Arc::new(UInt32Vector::from_slice([1_u32])) as VectorRef],
+        )
+        .unwrap();
+        engine
+            .catalog_manager
+            .as_any()
+            .downcast_ref::<MemoryCatalogManager>()
+            .unwrap()
+            .register_table_sync(RegisterTableRequest {
+                catalog: "greptime".to_string(),
+                schema: "public".to_string(),
+                table_name: name.to_string(),
+                table_id: 9001,
+                table: table::test_util::MemTable::table(name, recordbatch),
+            })
+            .unwrap();
+    }
+
+    fn flow_create_args(flow_id: FlowId, sink: &str) -> CreateFlowArgs {
+        CreateFlowArgs {
+            flow_id,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                sink.to_string(),
+            ],
+            source_table_ids: vec![1],
+            create_if_not_exists: false,
+            or_replace: false,
+            expire_after: None,
+            eval_interval: Some(10),
+            comment: None,
+            sql: "SELECT number, ts FROM numbers_with_ts".to_string(),
+            flow_options: HashMap::new(),
+            query_ctx: Some(QueryContext::arc().as_ref().clone()),
+            eval_schedule: None,
+        }
+    }
+
+    struct TestExecution {
+        manual_calls: std::sync::atomic::AtomicUsize,
+        stops: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::BatchingExecution for TestExecution {
+        async fn execute_once(
+            self: Arc<Self>,
+            _guard: crate::BatchingExecutionGuard,
+            task: &BatchingTask,
+            _engine: &QueryEngineRef,
+            _frontend: &Arc<FrontendClient>,
+            _max_window_cnt: Option<usize>,
+        ) -> ExecuteOnceOutcome {
+            if task
+                .state
+                .read()
+                .unwrap()
+                .query_ctx
+                .extension(query::options::FLOW_SCHEDULED_TIME_MILLIS)
+                .is_none()
+            {
+                self.manual_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            ExecuteOnceOutcome {
+                new_query: None,
+                result: Ok(None),
+            }
+        }
+
+        fn stop(&self) {
+            self.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    type TestExecutionResult = crate::Result<Option<Arc<dyn crate::BatchingExecution>>>;
+
+    struct TestExecutionFactory {
+        entered: Option<Arc<Notify>>,
+        release: Option<Arc<Notify>>,
+        result: std::sync::Mutex<Option<TestExecutionResult>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::BatchingExecutionFactory for TestExecutionFactory {
+        async fn create(
+            &self,
+            _task: &BatchingTask,
+            _sink: table::TableRef,
+            _engine: &QueryEngineRef,
+            _frontend: &Arc<FrontendClient>,
+        ) -> crate::Result<Option<Arc<dyn crate::BatchingExecution>>> {
+            if let Some(entered) = &self.entered {
+                entered.notify_one();
+            }
+            if let Some(release) = &self.release {
+                release.notified().await;
+            }
+            self.result
+                .lock()
+                .unwrap()
+                .take()
+                .expect("execution factory should only be called once")
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execution_factory_finishes_before_task_publication() {
+        const GATE_TIMEOUT: Duration = Duration::from_secs(1);
+
+        let execution = Arc::new(TestExecution {
+            manual_calls: Default::default(),
+            stops: Default::default(),
+        });
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let factory = Arc::new(TestExecutionFactory {
+            entered: Some(entered.clone()),
+            release: Some(release.clone()),
+            result: std::sync::Mutex::new(Some(Ok(Some(execution.clone())))),
+        });
+        let engine = Arc::new(new_test_engine_with_execution(Some(factory)).await);
+        register_sink_with_schema(&engine, "factory_sink");
+
+        let entered_wait = entered.notified();
+        let mut args = flow_create_args(6, "factory_sink");
+        args.eval_interval = Some(86_400);
+        let mut create = tokio::spawn({
+            let engine = engine.clone();
+            async move { engine.create_flow_inner(args).await }
+        });
+        if tokio::time::timeout(GATE_TIMEOUT, entered_wait)
+            .await
+            .is_err()
+        {
+            release.notify_one();
+            if tokio::time::timeout(GATE_TIMEOUT, &mut create)
+                .await
+                .is_err()
+            {
+                create.abort();
+            }
+            panic!("execution factory should be entered");
+        }
+        let unpublished = {
+            let runtime = engine.runtime.read().await;
+            !runtime.tasks.contains_key(&6) && !runtime.shutdown_txs.contains_key(&6)
+        };
+
+        release.notify_one();
+        assert!(unpublished);
+        let created = tokio::time::timeout(GATE_TIMEOUT, &mut create)
+            .await
+            .expect("flow creation should finish after factory release");
+        created.unwrap().unwrap();
+        assert!(engine.flow_exist_inner(6).await);
+        let calls_before_flush = execution
+            .manual_calls
+            .load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(engine.flush_flow_inner(6).await.unwrap(), 0);
+        assert_eq!(
+            execution
+                .manual_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            calls_before_flush + 1
+        );
+        engine.remove_flow_inner(6).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_execution_factory_result_controls_sink_validation_and_publication() {
+        let no_factory_engine = new_test_engine_with_execution(None).await;
+        register_number_only_sink(&no_factory_engine, "no_factory_sink");
+        assert!(
+            no_factory_engine
+                .create_flow_inner(flow_create_args(7, "no_factory_sink"))
+                .await
+                .is_err()
+        );
+        assert!(!no_factory_engine.flow_exist_inner(7).await);
+
+        let declined_engine =
+            new_test_engine_with_execution(Some(Arc::new(TestExecutionFactory {
+                entered: None,
+                release: None,
+                result: std::sync::Mutex::new(Some(Ok(None))),
+            })))
+            .await;
+        register_number_only_sink(&declined_engine, "declined_factory_sink");
+        assert!(
+            declined_engine
+                .create_flow_inner(flow_create_args(8, "declined_factory_sink"))
+                .await
+                .is_err()
+        );
+        assert!(!declined_engine.flow_exist_inner(8).await);
+
+        let accepted_engine =
+            new_test_engine_with_execution(Some(Arc::new(TestExecutionFactory {
+                entered: None,
+                release: None,
+                result: std::sync::Mutex::new(Some(Ok(Some(Arc::new(TestExecution {
+                    manual_calls: Default::default(),
+                    stops: Default::default(),
+                }))))),
+            })))
+            .await;
+        register_number_only_sink(&accepted_engine, "accepted_factory_sink");
+        accepted_engine
+            .create_flow_inner(flow_create_args(9, "accepted_factory_sink"))
+            .await
+            .unwrap();
+        assert!(accepted_engine.flow_exist_inner(9).await);
+        accepted_engine.remove_flow_inner(9).await.unwrap();
+
+        let error_engine = new_test_engine_with_execution(Some(Arc::new(TestExecutionFactory {
+            entered: None,
+            release: None,
+            result: std::sync::Mutex::new(Some(
+                UnexpectedSnafu {
+                    reason: "test execution factory failure".to_string(),
+                }
+                .fail(),
+            )),
+        })))
+        .await;
+        register_sink_with_schema(&error_engine, "error_factory_sink");
+        assert!(
+            error_engine
+                .create_flow_inner(flow_create_args(10, "error_factory_sink"))
+                .await
+                .is_err()
+        );
+        assert!(!error_engine.flow_exist_inner(10).await);
+    }
+
     #[tokio::test]
     async fn test_flow_option_overrides_incremental_read_switch() {
         let engine = new_test_engine().await;
 
-        let default_opts = engine.batch_opts_for_flow_options(&HashMap::new()).unwrap();
+        let default_opts = engine
+            .batch_opts_for_flow_options(&HashMap::new(), false)
+            .unwrap();
         assert!(!default_opts.experimental_enable_incremental_read);
 
         let enabled_opts = engine
-            .batch_opts_for_flow_options(&HashMap::from([(
-                FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY.to_string(),
-                "true".to_string(),
-            )]))
+            .batch_opts_for_flow_options(
+                &HashMap::from([(
+                    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY.to_string(),
+                    "true".to_string(),
+                )]),
+                false,
+            )
             .unwrap();
         assert!(enabled_opts.experimental_enable_incremental_read);
+
+        let exact_opts = engine
+            .batch_opts_for_flow_options(
+                &HashMap::from([(
+                    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY.to_string(),
+                    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_SEQUENCE_RANGE.to_string(),
+                )]),
+                true,
+            )
+            .unwrap();
+        assert!(exact_opts.experimental_enable_incremental_read);
     }
 
     #[test]
@@ -1174,6 +1601,89 @@ GROUP BY l.number, time_window
     }
 
     async fn new_test_task(flow_id: FlowId) -> (BatchingTask, oneshot::Sender<()>) {
+        new_test_task_for_source(flow_id, "numbers_with_ts", None).await
+    }
+
+    async fn new_test_task_with_time_window_expr(
+        flow_id: FlowId,
+        time_window_expr: Option<TimeWindowExpr>,
+    ) -> (BatchingTask, oneshot::Sender<()>) {
+        new_test_task_for_source(flow_id, "numbers_with_ts", time_window_expr).await
+    }
+
+    fn test_table_info_with_ts_unit(
+        table_id: TableId,
+        table_name: &str,
+        unit: TimeUnit,
+    ) -> table::metadata::TableInfo {
+        use datatypes::schema::{ColumnSchema, SchemaBuilder};
+        use table::metadata::{TableInfoBuilder, TableMetaBuilder};
+
+        let ts_type = match unit {
+            TimeUnit::Second => ConcreteDataType::timestamp_second_datatype(),
+            TimeUnit::Millisecond => ConcreteDataType::timestamp_millisecond_datatype(),
+            TimeUnit::Microsecond => ConcreteDataType::timestamp_microsecond_datatype(),
+            TimeUnit::Nanosecond => ConcreteDataType::timestamp_nanosecond_datatype(),
+        };
+        let column_schemas = vec![
+            ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new("ts", ts_type, false).with_time_index(true),
+        ];
+        let schema = SchemaBuilder::try_from(column_schemas)
+            .unwrap()
+            .build()
+            .unwrap();
+        let meta = TableMetaBuilder::empty()
+            .schema(Arc::new(schema))
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+        TableInfoBuilder::default()
+            .table_id(table_id)
+            .table_version(0)
+            .name(table_name)
+            .catalog_name("greptime")
+            .schema_name("public")
+            .meta(meta)
+            .build()
+            .unwrap()
+    }
+
+    /// A 5-second `date_bin` time window expr over the test table's `ts` column.
+    async fn test_time_window_expr() -> TimeWindowExpr {
+        let query_engine = create_test_query_engine();
+        let ctx = QueryContext::arc();
+        let plan = sql_to_df_plan(
+            ctx.clone(),
+            query_engine.clone(),
+            "SELECT date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window",
+            true,
+        )
+        .await
+        .unwrap();
+        let (column_name, time_window_expr, _, df_schema) = find_time_window_expr(
+            &plan,
+            query_engine.engine_state().catalog_manager().clone(),
+            ctx,
+        )
+        .await
+        .unwrap();
+        TimeWindowExpr::from_expr(
+            &time_window_expr.unwrap(),
+            &column_name,
+            &df_schema,
+            &query_engine.engine_state().session_state(),
+        )
+        .unwrap()
+    }
+
+    async fn new_test_task_for_source(
+        flow_id: FlowId,
+        source_table_name: &str,
+        time_window_expr: Option<TimeWindowExpr>,
+    ) -> (BatchingTask, oneshot::Sender<()>) {
         let query_engine = create_test_query_engine();
         let ctx = QueryContext::arc();
         let plan = sql_to_df_plan(
@@ -1190,7 +1700,7 @@ GROUP BY l.number, time_window
             flow_id,
             query: "SELECT number, ts FROM numbers_with_ts",
             plan,
-            time_window_expr: None,
+            time_window_expr,
             expire_after: None,
             sink_table_name: [
                 "greptime".to_string(),
@@ -1200,7 +1710,7 @@ GROUP BY l.number, time_window
             source_table_names: vec![[
                 "greptime".to_string(),
                 "public".to_string(),
-                "numbers_with_ts".to_string(),
+                source_table_name.to_string(),
             ]],
             query_ctx: ctx,
             catalog_manager: query_engine.engine_state().catalog_manager().clone(),
@@ -1212,6 +1722,182 @@ GROUP BY l.number, time_window
         .unwrap();
 
         (task, tx)
+    }
+
+    #[tokio::test]
+    async fn test_handle_mark_dirty_time_window_with_time_ranges() {
+        let engine = new_test_engine().await;
+
+        // Register the source table info so the engine can resolve the table
+        // name and the time index unit (millisecond).
+        let mut table_info = new_test_table_info_with_name(1, "numbers_with_ts");
+        table_info.catalog_name = "greptime".to_string();
+        table_info.schema_name = "public".to_string();
+        engine
+            .table_meta
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::physical(vec![]),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        // Build a task with a 5-second time window expr.
+        let (task, shutdown_tx) =
+            new_test_task_with_time_window_expr(1, Some(test_time_window_expr().await)).await;
+        let task_identity = task.clone();
+        engine.runtime.write().await.insert(1, task, shutdown_tx);
+
+        engine
+            .handle_mark_dirty_time_window(DirtyWindowRequests {
+                requests: vec![DirtyWindowRequest {
+                    table_id: 1,
+                    timestamps: vec![],
+                    time_ranges: vec![
+                        // [3s, 11s) aligns to window start 0s and window end 15s.
+                        TimeRange {
+                            start_inclusive: 3_000,
+                            end_exclusive: 11_000,
+                        },
+                        // Empty and reversed ranges are invalid and skipped.
+                        TimeRange {
+                            start_inclusive: 5_000,
+                            end_exclusive: 5_000,
+                        },
+                        TimeRange {
+                            start_inclusive: 9_000,
+                            end_exclusive: 4_000,
+                        },
+                    ],
+                }],
+            })
+            .await
+            .unwrap();
+
+        let state = task_identity.state.read().unwrap();
+        assert_eq!(1, state.dirty_time_windows.len());
+        assert_eq!(
+            Duration::from_secs(15),
+            state.dirty_time_windows.window_size()
+        );
+    }
+
+    /// Dirty timestamps and time ranges are interpreted in the source table's
+    /// time index native unit. The same physical range [3s, 11s) expressed in
+    /// second/millisecond/microsecond/nanosecond units must align to the same
+    /// dirty window [0s, 15s).
+    #[tokio::test]
+    async fn test_handle_mark_dirty_time_window_time_index_units() {
+        let engine = new_test_engine().await;
+
+        let cases = [
+            (TimeUnit::Second, 1u32, "t_sec", 3i64, 11i64),
+            (TimeUnit::Millisecond, 2, "t_ms", 3_000, 11_000),
+            (TimeUnit::Microsecond, 3, "t_us", 3_000_000, 11_000_000),
+            (
+                TimeUnit::Nanosecond,
+                4,
+                "t_ns",
+                3_000_000_000,
+                11_000_000_000,
+            ),
+        ];
+
+        let mut task_identities = vec![];
+        let mut requests = vec![];
+        for (unit, table_id, table_name, start_inclusive, end_exclusive) in cases {
+            engine
+                .table_meta
+                .create_table_metadata(
+                    test_table_info_with_ts_unit(table_id, table_name, unit),
+                    TableRouteValue::physical(vec![]),
+                    HashMap::new(),
+                )
+                .await
+                .unwrap();
+
+            let (task, shutdown_tx) = new_test_task_for_source(
+                table_id as FlowId,
+                table_name,
+                Some(test_time_window_expr().await),
+            )
+            .await;
+            task_identities.push((table_id, task.clone()));
+            engine
+                .runtime
+                .write()
+                .await
+                .insert(table_id as FlowId, task, shutdown_tx);
+
+            requests.push(DirtyWindowRequest {
+                table_id,
+                timestamps: vec![],
+                time_ranges: vec![TimeRange {
+                    start_inclusive,
+                    end_exclusive,
+                }],
+            });
+        }
+
+        engine
+            .handle_mark_dirty_time_window(DirtyWindowRequests { requests })
+            .await
+            .unwrap();
+
+        for (table_id, task) in task_identities {
+            let state = task.state.read().unwrap();
+            assert_eq!(1, state.dirty_time_windows.len(), "table id = {table_id}");
+            assert_eq!(
+                Duration::from_secs(15),
+                state.dirty_time_windows.window_size(),
+                "table id = {table_id}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_mark_dirty_time_window_returns_error_on_alignment_failure() {
+        let engine = new_test_engine().await;
+        let table_id = 10;
+        let table_name = "t_bad_timestamp";
+
+        engine
+            .table_meta
+            .create_table_metadata(
+                test_table_info_with_ts_unit(table_id, table_name, TimeUnit::Second),
+                TableRouteValue::physical(vec![]),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let (task, shutdown_tx) = new_test_task_for_source(
+            table_id as FlowId,
+            table_name,
+            Some(test_time_window_expr().await),
+        )
+        .await;
+        engine
+            .runtime
+            .write()
+            .await
+            .insert(table_id as FlowId, task, shutdown_tx);
+
+        let result = engine
+            .handle_mark_dirty_time_window(DirtyWindowRequests {
+                requests: vec![DirtyWindowRequest {
+                    table_id,
+                    timestamps: vec![i64::MAX],
+                    time_ranges: vec![],
+                }],
+            })
+            .await;
+
+        assert!(
+            result.is_err(),
+            "invalid timestamp alignment should be returned to the caller"
+        );
     }
 
     async fn install_abort_observed_handle(task: &BatchingTask) -> oneshot::Receiver<()> {
@@ -1245,11 +1931,30 @@ GROUP BY l.number, time_window
     }
 
     #[tokio::test]
-    async fn test_abort_flow_task_aborts_handle() {
+    async fn test_abort_flow_task_stops_execution_without_loop_handle() {
         let (task, _shutdown_tx) = new_test_task(42).await;
+        let execution = Arc::new(TestExecution {
+            manual_calls: Default::default(),
+            stops: Default::default(),
+        });
+        let task = task.with_execution(Some(execution.clone()));
+
+        assert!(!abort_flow_task(42, Some(task), "test"));
+        assert_eq!(execution.stops.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_abort_flow_task_stops_execution_before_aborting_handle() {
+        let (task, _shutdown_tx) = new_test_task(42).await;
+        let execution = Arc::new(TestExecution {
+            manual_calls: Default::default(),
+            stops: Default::default(),
+        });
+        let task = task.with_execution(Some(execution.clone()));
         let drop_rx = install_abort_observed_handle(&task).await;
 
         assert!(abort_flow_task(42, Some(task), "test"));
+        assert_eq!(execution.stops.load(std::sync::atomic::Ordering::SeqCst), 1);
 
         tokio::time::timeout(Duration::from_secs(1), drop_rx)
             .await

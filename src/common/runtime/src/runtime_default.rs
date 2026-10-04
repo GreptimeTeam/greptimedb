@@ -38,6 +38,10 @@ impl DefaultRuntime {
             _dropper: dropper,
         }
     }
+
+    pub(crate) fn handle(&self) -> tokio::runtime::Handle {
+        self.handle.clone()
+    }
 }
 
 impl RuntimeTrait for DefaultRuntime {

@@ -28,11 +28,11 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema as DtColumnSchema, Schema as DtSchema};
 use partition::error::Result as PartitionResult;
 use partition::partition::{PartitionRule, PartitionRuleRef, RegionMask};
-use servers::error::{self, Result};
-use servers::pending_rows_batcher::{
+use servers::batcher::logical_table::{
     PhysicalFlushCatalogProvider, PhysicalFlushNodeRequester, PhysicalFlushPartitionProvider,
-    PhysicalTableMetadata, TableBatch, flush_batch_physical,
+    PhysicalTableMetadata, RecordBatchWithTsIdx, TableBatch, flush_batch_physical,
 };
+use servers::error::{self, Result};
 use store_api::storage::RegionId;
 use table::test_util::table_info::test_table_info;
 use tokio::runtime::Runtime;
@@ -201,7 +201,7 @@ fn make_table_batches(
             TableBatch {
                 table_name: format!("logical_{}", i),
                 table_id: (100 + i) as u32,
-                batches: vec![batch],
+                batches: vec![RecordBatchWithTsIdx::try_new(batch, 0).unwrap()],
                 row_count,
             }
         })

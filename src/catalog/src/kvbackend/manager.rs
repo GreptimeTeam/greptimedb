@@ -14,11 +14,12 @@
 
 use std::any::Any;
 use std::collections::BTreeSet;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 
 use async_stream::try_stream;
 use common_catalog::consts::{
-    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME,
+    DEFAULT_CATALOG_NAME, DEFAULT_PRIVATE_SCHEMA_NAME, DEFAULT_SCHEMA_NAME,
+    INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME,
 };
 use common_error::ext::BoxedError;
 use common_meta::cache::{
@@ -29,7 +30,7 @@ use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::schema_name::SchemaNameKey;
-use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
+use common_meta::key::table_info::TableInfoValue;
 use common_meta::key::table_name::TableNameKey;
 use common_meta::kv_backend::KvBackendRef;
 use common_procedure::ProcedureManagerRef;
@@ -61,6 +62,7 @@ use crate::process_manager::ProcessManagerRef;
 use crate::system_schema::SystemSchemaProvider;
 use crate::system_schema::numbers_table_provider::NumbersTableProvider;
 use crate::system_schema::pg_catalog::PGCatalogProvider;
+use crate::system_schema::semantic_graph::{EntityGraphProviderRef, SemanticGraphTableProvider};
 
 /// Access all existing catalog, schema and tables.
 ///
@@ -71,6 +73,12 @@ use crate::system_schema::pg_catalog::PGCatalogProvider;
 pub struct KvBackendCatalogManager {
     /// Provides the extension methods for the `information_schema` tables
     pub(super) information_extension: InformationExtensionRef,
+    /// Backs the computed entity-graph tables (`semantic_entities` /
+    /// `semantic_relationships`). Set once, after the query engine is built, to
+    /// break the `catalog -> query` cycle; `None` until then. `Arc` so the cell
+    /// stays shared across `Clone`s of the manager (a plain `OnceLock` would
+    /// fork on clone).
+    pub(super) entity_graph_provider: Arc<OnceLock<EntityGraphProviderRef>>,
     /// Manages partition rules.
     pub(super) partition_manager: PartitionRuleManagerRef,
     /// Manages table metadata.
@@ -97,6 +105,19 @@ impl KvBackendCatalogManager {
         self.information_extension.clone()
     }
 
+    /// Returns the entity-graph provider, or `None` if it has not been injected
+    /// yet (before the query engine is built). The computed graph tables stream
+    /// empty until it is set.
+    pub fn entity_graph_provider(&self) -> Option<EntityGraphProviderRef> {
+        self.entity_graph_provider.get().cloned()
+    }
+
+    /// Injects the entity-graph provider once the query engine exists. A second
+    /// call is a no-op (the first binding wins).
+    pub fn set_entity_graph_provider(&self, provider: EntityGraphProviderRef) {
+        let _ = self.entity_graph_provider.set(provider);
+    }
+
     pub fn partition_manager(&self) -> PartitionRuleManagerRef {
         self.partition_manager.clone()
     }
@@ -112,7 +133,7 @@ impl KvBackendCatalogManager {
     // Override logical table's partition key indices with physical table's.
     async fn override_logical_table_partition_key_indices(
         table_route_cache: &TableRouteCacheRef,
-        table_info_manager: &TableInfoManager,
+        table_info_cache: &TableInfoCacheRef,
         table: TableRef,
     ) -> Result<TableRef> {
         // If the table is not a metric table, return the table directly.
@@ -125,7 +146,7 @@ impl KvBackendCatalogManager {
             .await
             .context(TableMetadataManagerSnafu)?
             && let TableRoute::Logical(logical_route) = &*table_route_value
-            && let Some(physical_table_info_value) = table_info_manager
+            && let Some(physical_table_info) = table_info_cache
                 .get(logical_route.physical_table_id())
                 .await
                 .context(TableMetadataManagerSnafu)?
@@ -135,15 +156,13 @@ impl KvBackendCatalogManager {
             let mut phy_part_cols_not_in_logical_table = vec![];
 
             // Remap partition key indices from physical table to logical table
-            new_table_info.meta.partition_key_indices = physical_table_info_value
-                .table_info
+            new_table_info.meta.partition_key_indices = physical_table_info
                 .meta
                 .partition_key_indices
                 .iter()
                 .filter_map(|&physical_index| {
                     // Get the column name from the physical table using the physical index
-                    physical_table_info_value
-                        .table_info
+                    physical_table_info
                         .meta
                         .schema
                         .column_schemas()
@@ -321,9 +340,13 @@ impl CatalogManager for KvBackendCatalogManager {
                 self.cache_registry.get().context(CacheNotFoundSnafu {
                     name: "table_route_cache",
                 })?;
+            let table_info_cache: TableInfoCacheRef =
+                self.cache_registry.get().context(CacheNotFoundSnafu {
+                    name: "table_info_cache",
+                })?;
             return Self::override_logical_table_partition_key_indices(
                 &table_route_cache,
-                self.table_metadata_manager.table_info_manager(),
+                &table_info_cache,
                 table,
             )
             .await
@@ -453,10 +476,21 @@ impl CatalogManager for KvBackendCatalogManager {
             self.cache_registry.get().context(CacheNotFoundSnafu {
                 name: "table_route_cache",
             });
+        let table_info_cache: Result<TableInfoCacheRef> =
+            self.cache_registry.get().context(CacheNotFoundSnafu {
+                name: "table_info_cache",
+            });
 
         common_runtime::spawn_global(async move {
             let table_route_cache = match table_route_cache {
                 Ok(table_route_cache) => table_route_cache,
+                Err(e) => {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+            };
+            let table_info_cache = match table_info_cache {
+                Ok(table_info_cache) => table_info_cache,
                 Err(e) => {
                     let _ = tx.send(Err(e)).await;
                     return;
@@ -490,6 +524,7 @@ impl CatalogManager for KvBackendCatalogManager {
                 let tx = tx.clone();
                 let semaphore = semaphore.clone();
                 let table_route_cache = table_route_cache.clone();
+                let table_info_cache = table_info_cache.clone();
                 common_runtime::spawn_global(async move {
                     // we don't explicitly close the semaphore so just ignore the potential error.
                     let _ = semaphore.acquire().await;
@@ -509,7 +544,7 @@ impl CatalogManager for KvBackendCatalogManager {
                     for table in table_info_values.into_values().map(build_table) {
                         let table = Self::override_logical_table_partition_key_indices(
                             &table_route_cache,
-                            metadata_manager.table_info_manager(),
+                            &table_info_cache,
                             table,
                         )
                         .await;
@@ -577,6 +612,9 @@ impl SystemCatalog {
                 self.pg_catalog_provider.table_names()
             }
             DEFAULT_SCHEMA_NAME => self.numbers_table_provider.table_names(),
+            // Computed entity-graph tables overlay the physical tables of
+            // `greptime_private` (the caller appends these to the physical list).
+            DEFAULT_PRIVATE_SCHEMA_NAME => SemanticGraphTableProvider::table_names(),
             _ => vec![],
         }
     }
@@ -597,6 +635,8 @@ impl SystemCatalog {
             self.numbers_table_provider.table_exists(table)
         } else if schema == PG_CATALOG_NAME && channel == Channel::Postgres {
             self.pg_catalog_provider.table(table).is_some()
+        } else if schema == DEFAULT_PRIVATE_SCHEMA_NAME {
+            SemanticGraphTableProvider::table_exists(table)
         } else {
             false
         }
@@ -640,8 +680,103 @@ impl SystemCatalog {
             }
         } else if schema == DEFAULT_SCHEMA_NAME {
             self.numbers_table_provider.table(table_name)
+        } else if schema == DEFAULT_PRIVATE_SCHEMA_NAME
+            && SemanticGraphTableProvider::table_exists(table_name)
+        {
+            // Constructed on demand (the provider is a name + a weak ref); the
+            // system catalog is consulted before physical resolution, so the
+            // computed tables shadow same-named physical tables by design.
+            SemanticGraphTableProvider::new(
+                catalog.to_string(),
+                self.catalog_manager.clone(),
+                query_ctx.cloned().map(Arc::new),
+            )
+            .table(table_name)
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use common_meta::cache::{CacheContainer, Initializer};
+    use common_meta::key::table_route::LogicalTableRouteValue;
+    use moka::future::Cache as FutureCache;
+    use table::metadata::TableInfo;
+
+    use super::*;
+
+    fn metric_table_info(
+        table_id: TableId,
+        table_name: &str,
+        partition_key_indices: Vec<usize>,
+    ) -> TableInfo {
+        let mut table_info =
+            common_meta::ddl::test_util::create_table::test_create_table_task(table_name, table_id)
+                .table_info;
+        table_info.meta.engine = METRIC_ENGINE_NAME.to_string();
+        table_info.meta.partition_key_indices = partition_key_indices;
+        table_info
+    }
+
+    #[tokio::test]
+    async fn test_logical_table_uses_cached_physical_table_info() {
+        const LOGICAL_TABLE_ID: TableId = 1;
+        const PHYSICAL_TABLE_ID: TableId = 2;
+
+        let route = Arc::new(TableRoute::Logical(Arc::new(LogicalTableRouteValue::new(
+            PHYSICAL_TABLE_ID,
+        ))));
+        let route_initializer: Initializer<TableId, Arc<TableRoute>> = Arc::new(move |_| {
+            let route = route.clone();
+            Box::pin(async move { Ok(Some(route)) })
+        });
+        let table_route_cache = Arc::new(CacheContainer::new(
+            "test_table_route_cache".to_string(),
+            FutureCache::new(16),
+            Box::new(|_, _| Box::pin(async { Ok(()) })),
+            route_initializer,
+            |_| true,
+        ));
+
+        let load_count = Arc::new(AtomicUsize::new(0));
+        let physical_table_info =
+            Arc::new(metric_table_info(PHYSICAL_TABLE_ID, "physical", vec![1]));
+        let table_info_initializer: Initializer<TableId, Arc<TableInfo>> = {
+            let load_count = load_count.clone();
+            let table_info = physical_table_info.clone();
+            Arc::new(move |_| {
+                load_count.fetch_add(1, Ordering::Relaxed);
+                let table_info = table_info.clone();
+                Box::pin(async move { Ok(Some(table_info)) })
+            })
+        };
+        let table_info_cache = Arc::new(CacheContainer::new(
+            "test_table_info_cache".to_string(),
+            FutureCache::new(16),
+            Box::new(|_, _| Box::pin(async { Ok(()) })),
+            table_info_initializer,
+            |_| true,
+        ));
+
+        let logical_table = DistTable::table(Arc::new(metric_table_info(
+            LOGICAL_TABLE_ID,
+            "logical",
+            vec![],
+        )));
+        for _ in 0..2 {
+            let table = KvBackendCatalogManager::override_logical_table_partition_key_indices(
+                &table_route_cache,
+                &table_info_cache,
+                logical_table.clone(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(table.table_info().meta.partition_key_indices, vec![1]);
+        }
+        assert_eq!(load_count.load(Ordering::Relaxed), 1);
     }
 }

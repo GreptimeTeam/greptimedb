@@ -45,16 +45,15 @@ use crate::metasrv::MetasrvInfo;
 use crate::procedure::region_migration::close_downgraded_region::CloseDowngradedRegion;
 use crate::procedure::region_migration::downgrade_leader_region::DowngradeLeaderRegion;
 use crate::procedure::region_migration::flush_leader_region::PreFlushRegion;
-use crate::procedure::region_migration::manager::{
-    RegionMigrationProcedureTracker, RegionMigrationTriggerReason,
-};
+use crate::procedure::region_migration::manager::RegionMigrationProcedureTracker;
 use crate::procedure::region_migration::migration_abort::RegionMigrationAbort;
 use crate::procedure::region_migration::migration_end::RegionMigrationEnd;
 use crate::procedure::region_migration::open_candidate_region::OpenCandidateRegion;
 use crate::procedure::region_migration::update_metadata::UpdateMetadata;
 use crate::procedure::region_migration::upgrade_candidate_region::UpgradeCandidateRegion;
 use crate::procedure::region_migration::{
-    Context, ContextFactory, DefaultContextFactory, PersistentContext, State, VolatileContext,
+    Context, ContextFactory, DefaultContextFactory, PersistentContext,
+    RegionMigrationTriggerReason, State, VolatileContext,
 };
 use crate::procedure::test_util::{MailboxContext, send_mock_reply};
 use crate::service::mailbox::Channel;
@@ -158,6 +157,7 @@ impl TestingEnv {
         ProcedureContext {
             procedure_id: ProcedureId::random(),
             provider: Arc::new(MockContextProvider::default()),
+            event_context: None,
         }
     }
 
@@ -191,7 +191,7 @@ pub fn new_persistent_context(from: u64, to: u64, region_id: RegionId) -> Persis
         Peer::empty(to),
         vec![region_id],
         Duration::from_secs(10),
-        RegionMigrationTriggerReason::default(),
+        RegionMigrationTriggerReason::Unknown,
     )
 }
 
@@ -578,5 +578,6 @@ pub fn new_procedure_context() -> ProcedureContext {
     ProcedureContext {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
+        event_context: None,
     }
 }

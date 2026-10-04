@@ -35,12 +35,12 @@ use tokio::sync::{Barrier, mpsc, oneshot};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
-use crate::engine::flush_test::MockTimeProvider;
 use crate::engine::listener::EventListener;
 use crate::manifest::action::RegionEdit;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::sst::file::FileMeta;
 use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, rows_schema};
+use crate::time_provider::mock::MockTimeProvider;
 
 #[tokio::test]
 async fn test_edit_region_schedule_compaction() {
@@ -286,6 +286,7 @@ async fn test_write_during_region_editing_is_queued() {
             .handle_request(
                 region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows,
                     hint: None,
                     partition_expr_version: None,
@@ -400,6 +401,7 @@ async fn test_stalled_write_fails_fast_if_region_closed_during_editing() {
             .handle_request(
                 region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows,
                     hint: None,
                     partition_expr_version: None,
@@ -419,7 +421,10 @@ async fn test_stalled_write_fails_fast_if_region_closed_during_editing() {
     let close_engine = engine.clone();
     let close_task = tokio::spawn(async move {
         close_engine
-            .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+            .handle_request(
+                region_id,
+                RegionRequest::Close(RegionCloseRequest::default()),
+            )
             .await
     });
 
@@ -560,6 +565,42 @@ async fn test_region_edit_with_file_sequence_is_not_merged() {
     assert_eq!(Some(3), region_file_sequence(&region, third_file_id));
 }
 
+#[tokio::test]
+async fn test_region_edit_clears_preserve_row_sequence() {
+    let mut env = TestEnv::new().await;
+    let (engine, _) = create_engine_with_request_listener(&mut env).await;
+
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+
+    let file_id = FileId::random();
+    let mut edit = test_region_edit(region.region_id, file_id);
+    // The caller claims the file preserves per-row sequences...
+    edit.files_to_add[0].preserve_row_sequence = true;
+
+    engine.edit_region(region.region_id, edit).await.unwrap();
+
+    // ...but a generic region edit assigns a new destination sequence domain
+    // without proving or rewriting the physical per-row sequence column, so the
+    // marker must be cleared while the assigned sequence stays committed + 1.
+    let version = region.version();
+    let file = version.ssts.levels()[0]
+        .files
+        .iter()
+        .find(|(id, _)| **id == file_id)
+        .unwrap()
+        .1;
+    assert!(!file.meta_ref().preserve_row_sequence);
+    assert_eq!(Some(1), file.meta_ref().sequence.map(|s| s.get()));
+}
+
 async fn wait_until_region_is_in_editing(region: &MitoRegionRef) {
     tokio::time::timeout(Duration::from_secs(3), async {
         while region.state() != RegionRoleState::Leader(RegionLeaderState::Editing) {
@@ -659,6 +700,7 @@ fn build_bulk_insert_request(
     let (schema, record_batch) = encode_to_flight_data(payload.clone());
 
     RegionBulkInsertsRequest {
+        skip_wal: false,
         region_id,
         payload,
         raw_data: ArrowIpc {

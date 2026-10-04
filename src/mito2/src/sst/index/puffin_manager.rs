@@ -215,7 +215,7 @@ mod tests {
         let (_dir, factory) =
             PuffinManagerFactory::new_for_test_async("test_puffin_manager_factory_").await;
 
-        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
         let manager = factory.build(object_store, TestFilePathProvider);
 
         let file_id = RegionIndexId::new(RegionFileId::new(0.into(), FileId::random()), 0);

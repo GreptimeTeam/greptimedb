@@ -18,7 +18,7 @@ mod validate;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use api::v1::SemanticType;
-use common_query::native_histogram::is_native_histogram_value_schema;
+use common_query::native_histogram::is_native_histogram_value_type;
 use extract_new_columns::extract_new_columns;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::ColumnMetadata;
@@ -246,10 +246,7 @@ impl MetricEngineInner {
 
             ensure!(
                 fields.len() == 1
-                    && is_native_histogram_value_schema(
-                        &fields[0].column_schema.name,
-                        &fields[0].column_schema.data_type
-                    ),
+                    && is_native_histogram_value_type(&fields[0].column_schema.data_type),
                 AddingFieldColumnSnafu {
                     name: first_added_field.column_metadata.column_schema.name.clone(),
                 }
@@ -273,8 +270,6 @@ impl MetricEngineInner {
 
 #[cfg(test)]
 mod test {
-    use std::time::Duration;
-
     use api::v1::SemanticType;
     use common_meta::ddl::test_util::assert_column_name_and_id;
     use common_meta::ddl::utils::{parse_column_metadatas, parse_manifest_infos_from_extensions};
@@ -288,6 +283,22 @@ mod test {
     use store_api::storage::consts::ReservedColumnId;
 
     use crate::test_util::{TestEnv, alter_logical_region_request, create_logical_region_request};
+
+    async fn check_alter_physical_skip_wal(
+        engine: &super::MetricEngineInner,
+        region_id: RegionId,
+        skip_wal: bool,
+    ) {
+        let request = RegionAlterRequest {
+            kind: AlterKind::SetRegionOptions {
+                options: vec![SetRegionOption::SkipWal(skip_wal)],
+            },
+        };
+        engine
+            .alter_physical_region(region_id, request)
+            .await
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn test_alter_region() {
@@ -309,16 +320,9 @@ mod test {
             "Alter request to physical region is forbidden".to_string()
         );
 
-        // alter physical region's option should work
-        let alter_region_option_request = RegionAlterRequest {
-            kind: AlterKind::SetRegionOptions {
-                options: vec![SetRegionOption::Ttl(Some(Duration::from_secs(500).into()))],
-            },
-        };
-        let result = engine_inner
-            .alter_physical_region(physical_region_id, alter_region_option_request.clone())
-            .await;
-        assert!(result.is_ok());
+        // skip-WAL changes on the physical region should be forwarded to the data region
+        check_alter_physical_skip_wal(&engine_inner, physical_region_id, true).await;
+        check_alter_physical_skip_wal(&engine_inner, physical_region_id, false).await;
 
         // alter logical region
         let metadata_region = env.metadata_region();

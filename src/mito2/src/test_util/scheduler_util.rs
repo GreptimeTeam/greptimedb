@@ -66,7 +66,7 @@ impl SchedulerEnv {
         let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
             .await
             .unwrap();
-        let object_store = ObjectStore::new(builder).unwrap().finish();
+        let object_store = ObjectStore::new(builder).unwrap();
         let access_layer = Arc::new(AccessLayer::new(
             "",
             PathType::Bare,
@@ -93,13 +93,21 @@ impl SchedulerEnv {
         &self,
         request_sender: Sender<WorkerRequestWithTime>,
     ) -> CompactionScheduler {
+        self.mock_compaction_scheduler_with_config(request_sender, MitoConfig::default())
+    }
+
+    pub(crate) fn mock_compaction_scheduler_with_config(
+        &self,
+        request_sender: Sender<WorkerRequestWithTime>,
+        config: MitoConfig,
+    ) -> CompactionScheduler {
         let scheduler = self.get_scheduler();
 
         CompactionScheduler::new(
             scheduler,
             request_sender,
             Arc::new(CacheManager::default()),
-            Arc::new(MitoConfig::default()),
+            Arc::new(config),
             WorkerListener::default(),
             Plugins::new(),
             Arc::new(new_compaction_memory_manager(0)),

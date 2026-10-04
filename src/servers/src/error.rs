@@ -62,6 +62,14 @@ pub enum Error {
     #[snafu(display("Pending rows batcher channel closed"))]
     BatcherChannelClosed,
 
+    #[snafu(display("Write rejected: {error}"))]
+    WriteRejected {
+        #[snafu(source)]
+        error: meter_core::collect::WriteRejected,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unsupported data type: {}, reason: {}", data_type, reason))]
     UnsupportedDataType {
         data_type: ConcreteDataType,
@@ -176,6 +184,9 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid OTLP metric input: {}", reason))]
+    InvalidOtlpMetricInput { reason: String },
 
     #[snafu(display(
         "Too many concurrent large requests, limit: {}, request size: {}",
@@ -306,6 +317,18 @@ pub enum Error {
         location: Location,
         #[snafu(source)]
         error: std::io::Error,
+    },
+
+    #[snafu(display(
+        "Decompressed request body is too large: {} bytes exceeds the limit {} bytes",
+        size,
+        limit
+    ))]
+    DecompressedBodyTooLarge {
+        size: u64,
+        limit: u64,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Failed to compress prometheus remote request"))]
@@ -684,6 +707,13 @@ pub enum Error {
     },
 
     #[snafu(transparent)]
+    Operator {
+        source: operator::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(transparent)]
     GreptimeProto {
         source: api::error::Error,
         #[snafu(implicit)]
@@ -742,7 +772,7 @@ impl ErrorExt for Error {
             #[cfg(not(windows))]
             UpdateJemallocMetrics { .. } => StatusCode::Internal,
 
-            CollectRecordbatch { .. } => StatusCode::EngineExecuteQuery,
+            CollectRecordbatch { source, .. } => source.status_code(),
 
             ExecuteQuery { source, .. }
             | ExecutePlan { source, .. }
@@ -755,6 +785,7 @@ impl ErrorExt for Error {
 
             NotSupported { .. }
             | InvalidParameter { .. }
+            | InvalidOtlpMetricInput { .. }
             | InvalidQuery { .. }
             | InfluxdbLineProtocol { .. }
             | InvalidOpentsdbJsonRequest { .. }
@@ -766,6 +797,7 @@ impl ErrorExt for Error {
             | DecompressSnappyPromRemoteRequest { .. }
             | DecompressSnappyLokiRequest { .. }
             | DecompressZstdPromRemoteRequest { .. }
+            | DecompressedBodyTooLarge { .. }
             | InvalidPromRemoteRequest { .. }
             | InvalidFlightTicket { .. }
             | InvalidPrepareStatement { .. }
@@ -844,11 +876,12 @@ impl ErrorExt for Error {
 
             Suspended { .. } => StatusCode::Suspended,
 
-            MemoryLimitExceeded { .. } => StatusCode::RateLimited,
+            MemoryLimitExceeded { .. } | WriteRejected { .. } => StatusCode::RateLimited,
 
             GreptimeProto { source, .. } => source.status_code(),
             Partition { source, .. } => source.status_code(),
             MetricEngine { source, .. } => source.status_code(),
+            Operator { source, .. } => source.status_code(),
             SubmitBatch { source, .. } => source.status_code(),
         }
     }
@@ -883,12 +916,13 @@ impl ErrorExt for Error {
             GreptimeProto { source, .. } => source.retry_hint(),
             Partition { source, .. } => source.retry_hint(),
             MetricEngine { source, .. } => source.retry_hint(),
+            Operator { source, .. } => source.retry_hint(),
             SubmitBatch { source, .. } => source.retry_hint(),
 
             MemoryLimitExceeded { source, .. } => source.retry_hint(),
             CollectRecordbatch { source, .. } => source.retry_hint(),
 
-            TooManyConcurrentRequests { .. } => RetryHint::Retryable,
+            TooManyConcurrentRequests { .. } | WriteRejected { .. } => RetryHint::Retryable,
 
             _ => RetryHint::NonRetryable,
         }
@@ -980,5 +1014,39 @@ pub fn status_code_to_http_status(status_code: &StatusCode) -> HttpStatusCode {
         | StatusCode::Unknown
         | StatusCode::RuntimeResourcesExhausted
         | StatusCode::EngineExecuteQuery => HttpStatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_error::GREPTIME_DB_HEADER_ERROR_CODE;
+    use common_error::ext::PlainError;
+
+    use super::*;
+
+    #[test]
+    fn collect_recordbatch_preserves_poll_stream_status_in_tonic_status() {
+        let error = Error::CollectRecordbatch {
+            source: common_recordbatch::error::Error::PollStream {
+                error: DataFusionError::External(Box::new(BoxedError::new(PlainError::new(
+                    "neutral error".to_string(),
+                    StatusCode::RequestOutdated,
+                )))),
+                location: Location::default(),
+            },
+            location: Location::default(),
+        };
+
+        let status: tonic::Status = error.into();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            status
+                .metadata()
+                .get(GREPTIME_DB_HEADER_ERROR_CODE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            (StatusCode::RequestOutdated as u32).to_string()
+        );
     }
 }

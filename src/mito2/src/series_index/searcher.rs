@@ -1,0 +1,929 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use async_stream::try_stream;
+use common_recordbatch::filter::SimpleFilterEvaluator;
+use common_time::range::TimestampRange;
+use common_time::timestamp::TimeUnit;
+use datafusion_expr::{Expr, col, lit};
+use datatypes::arrow::array::{ArrayRef, UInt32Array, UInt64Array};
+use datatypes::arrow::buffer::BooleanBuffer;
+use datatypes::arrow::datatypes::{DataType, SchemaRef};
+use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::value::timestamp_to_scalar_value;
+use futures::TryStreamExt;
+use object_store::ObjectStore;
+use snafu::{OptionExt, ResultExt, ensure};
+use store_api::metadata::RegionMetadataRef;
+use table::predicate::Predicate;
+
+use crate::error::{InvalidRecordBatchSnafu, RecordBatchSnafu, Result, UnexpectedSnafu};
+use crate::series_index::{
+    MAX_TS_COLUMN, METRIC_SERIES_ID_BATCH_SIZE, MIN_TS_COLUMN, MetricSeriesId,
+    MetricSeriesIdStream, ROW_COUNT_COLUMN, SeriesIndexFileHandle, TABLE_ID_COLUMN, TSID_COLUMN,
+    series_index_path, series_index_schema,
+};
+use crate::sst::parquet::index_reader::ParquetIndexReader;
+use crate::sst::parquet::prefilter::simple_tag_filters;
+
+/// Searches a series-index file for metric series matching query predicates.
+pub struct SeriesIndexSearcher {
+    /// Pins the index file until this searcher and all of its streams are dropped.
+    file_handle: SeriesIndexFileHandle,
+    /// The file to search, or `None` when an empty time range rules out
+    /// every series without opening the file.
+    reader: Option<ParquetIndexReader>,
+    /// Row-group pruning predicate built from all of the file's filters.
+    pruning_predicate: Predicate,
+    filters: Vec<SimpleFilterEvaluator>,
+}
+
+impl SeriesIndexSearcher {
+    /// Creates a searcher for the series-index file protected by `file_handle`.
+    /// Predicates are built from the unit recorded in the file's schema, so a
+    /// file written before a time index unit widening keeps being interpreted
+    /// in its own unit.
+    pub(crate) async fn try_new(
+        metadata: RegionMetadataRef,
+        object_store: ObjectStore,
+        file_handle: SeriesIndexFileHandle,
+        predicate: Option<&Predicate>,
+        time_range: Option<TimestampRange>,
+    ) -> Result<Self> {
+        // Keep search-time metadata validation identical to the writer.
+        series_index_schema(&metadata)?;
+        if time_range.as_ref().is_some_and(TimestampRange::is_empty) {
+            return Ok(Self {
+                file_handle,
+                reader: None,
+                pruning_predicate: Predicate::new(Vec::new()),
+                filters: Vec::new(),
+            });
+        }
+
+        let file_id = file_handle.file_id();
+        let path = series_index_path(file_id.region_id(), file_id.file_id());
+        let reader = ParquetIndexReader::open(object_store, &path).await?;
+        let unit = validate_index_schema(reader.schema())?;
+
+        let mut filters = simple_tag_filters(&metadata, None, predicate);
+        for expr in time_range_exprs(unit, time_range.as_ref()) {
+            let filter = SimpleFilterEvaluator::try_new(&expr).context(UnexpectedSnafu {
+                reason: "failed to build an internal series-index time filter",
+            })?;
+            filters.push((expr, filter));
+        }
+        // An older index file may not contain tags added by schema evolution.
+        // Ignore filters on those tags to preserve a conservative candidate set.
+        let (pruning_predicate, filters) = filters_for_schema(reader.schema(), &filters);
+
+        Ok(Self {
+            file_handle,
+            reader: Some(reader),
+            pruning_predicate,
+            filters,
+        })
+    }
+
+    /// Searches the index file and returns sorted batches of matching
+    /// metric-series IDs.
+    pub fn search(&self) -> Result<MetricSeriesIdStream> {
+        let Some(reader) = self.reader.as_ref() else {
+            return Ok(Box::pin(futures::stream::empty()));
+        };
+        let mut projection_columns = Vec::with_capacity(self.filters.len() + 2);
+        projection_columns.extend([TABLE_ID_COLUMN, TSID_COLUMN]);
+        projection_columns.extend(self.filters.iter().map(SimpleFilterEvaluator::column_name));
+        let mut batches = reader.read(&self.pruning_predicate, &projection_columns)?;
+        let filters = self.filters.clone();
+        let file_handle = self.file_handle.clone();
+
+        Ok(Box::pin(try_stream! {
+            let mut last_series = None;
+            let mut output = Vec::with_capacity(METRIC_SERIES_ID_BATCH_SIZE);
+            while let Some(batch) = batches.try_next().await? {
+                let mut mask = BooleanBuffer::new_set(batch.num_rows());
+                for filter in &filters {
+                    let column = column(&batch, filter.column_name())?;
+                    let evaluated = filter.evaluate_array(column).context(RecordBatchSnafu)?;
+                    mask = &mask & &evaluated;
+                }
+
+                let table_ids = column(&batch, TABLE_ID_COLUMN)?
+                    .as_any()
+                    .downcast_ref::<UInt32Array>()
+                    .context(InvalidRecordBatchSnafu {
+                        reason: "series index __table_id is not UInt32",
+                    })?;
+                let tsids = column(&batch, TSID_COLUMN)?
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .context(InvalidRecordBatchSnafu {
+                        reason: "series index __tsid is not UInt64",
+                    })?;
+
+                for (row, matched) in mask.iter().enumerate() {
+                    if !matched {
+                        continue;
+                    }
+                    let series = MetricSeriesId {
+                        table_id: table_ids.value(row),
+                        tsid: tsids.value(row),
+                    };
+                    if last_series == Some(series) {
+                        continue;
+                    }
+                    last_series = Some(series);
+                    output.push(series);
+                    if output.len() == METRIC_SERIES_ID_BATCH_SIZE {
+                        yield std::mem::replace(
+                            &mut output,
+                            Vec::with_capacity(METRIC_SERIES_ID_BATCH_SIZE),
+                        );
+                    }
+                }
+            }
+            if !output.is_empty() {
+                yield output;
+            }
+            drop(file_handle);
+        }))
+    }
+}
+
+fn filters_for_schema(
+    schema: &SchemaRef,
+    filters: &[(Expr, SimpleFilterEvaluator)],
+) -> (Predicate, Vec<SimpleFilterEvaluator>) {
+    let (exprs, filters): (Vec<_>, Vec<_>) = filters
+        .iter()
+        .filter(|(_, filter)| schema.field_with_name(filter.column_name()).is_ok())
+        .cloned()
+        .unzip();
+    (Predicate::new(exprs), filters)
+}
+
+// Builds `__series_min_ts`/`__series_max_ts` predicates in `unit`, the unit
+// recorded in the file being searched: its raw i64 bounds were written in that
+// unit even if the region's time index has since been widened. The searcher
+// handles empty ranges itself, so `time_range`, if present, is non-empty.
+fn time_range_exprs(unit: TimeUnit, time_range: Option<&TimestampRange>) -> Vec<Expr> {
+    let Some(time_range) = time_range else {
+        return Vec::new();
+    };
+    let mut exprs = Vec::with_capacity(2);
+    // A series overlaps [start, end) only if its maximum is at least start.
+    // Round start up so a series ending before an unaligned start is pruned.
+    if let Some(start) = time_range
+        .start()
+        .and_then(|start| start.convert_to_ceil(unit))
+    {
+        exprs.push(
+            col(MAX_TS_COLUMN).gt_eq(lit(timestamp_to_scalar_value(unit, Some(start.value())))),
+        );
+    }
+    // A series overlaps [start, end) only if its minimum is less than end.
+    // Round the exclusive end up to avoid pruning the containing unit interval.
+    if let Some(end) = time_range.end().and_then(|end| end.convert_to_ceil(unit)) {
+        exprs.push(col(MIN_TS_COLUMN).lt(lit(timestamp_to_scalar_value(unit, Some(end.value())))));
+    }
+    exprs
+}
+
+/// Validates an index file's schema and returns the time unit of its
+/// `__series_min_ts`/`__series_max_ts` columns. They are native
+/// `Timestamp(unit)` columns, so the unit is part of the datatype and each
+/// file is interpreted in the unit it was written with.
+fn validate_index_schema(schema: &SchemaRef) -> Result<TimeUnit> {
+    for (name, data_type) in [
+        (ROW_COUNT_COLUMN, DataType::UInt64),
+        (TABLE_ID_COLUMN, DataType::UInt32),
+        (TSID_COLUMN, DataType::UInt64),
+    ] {
+        let field = schema
+            .field_with_name(name)
+            .ok()
+            .with_context(|| InvalidRecordBatchSnafu {
+                reason: format!("series index is missing internal column {name}"),
+            })?;
+        ensure!(
+            field.data_type() == &data_type && !field.is_nullable(),
+            InvalidRecordBatchSnafu {
+                reason: format!(
+                    "series index internal column {name} must be non-nullable {data_type:?}, got {:?}",
+                    field.data_type()
+                ),
+            }
+        );
+    }
+    let unit = |name: &str| {
+        let field = schema
+            .field_with_name(name)
+            .ok()
+            .context(InvalidRecordBatchSnafu {
+                reason: format!("series index is missing internal column {name}"),
+            })?;
+        ensure!(
+            !field.is_nullable(),
+            InvalidRecordBatchSnafu {
+                reason: format!("series index column {name} must be non-nullable"),
+            }
+        );
+        match field.data_type() {
+            DataType::Timestamp(unit, _) => Ok(unit.into()),
+            data_type => InvalidRecordBatchSnafu {
+                reason: format!(
+                    "series index column {name} must be a Timestamp, got {data_type:?}"
+                ),
+            }
+            .fail(),
+        }
+    };
+    let min_unit = unit(MIN_TS_COLUMN)?;
+    let max_unit = unit(MAX_TS_COLUMN)?;
+    ensure!(
+        min_unit == max_unit,
+        InvalidRecordBatchSnafu {
+            reason: format!(
+                "series index columns {MIN_TS_COLUMN} and {MAX_TS_COLUMN} have different time units"
+            ),
+        }
+    );
+    Ok(min_unit)
+}
+
+fn column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a ArrayRef> {
+    let index = batch
+        .schema()
+        .index_of(name)
+        .ok()
+        .with_context(|| InvalidRecordBatchSnafu {
+            reason: format!("series index batch is missing column {name}"),
+        })?;
+    Ok(batch.column(index))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use api::v1::SemanticType;
+    use datafusion_expr::{col, lit};
+    use datatypes::arrow::array::{
+        BinaryArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+        TimestampNanosecondArray, TimestampSecondArray, UInt8Array,
+    };
+    use datatypes::arrow::datatypes::{Field, Schema, TimeUnit as ArrowTimeUnit};
+    use datatypes::arrow::record_batch::RecordBatch;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use futures::TryStreamExt;
+    use object_store::services::Memory;
+    use store_api::codec::PrimaryKeyEncoding;
+    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+    use store_api::storage::FileId;
+    use tokio::sync::mpsc::UnboundedReceiver;
+
+    use super::*;
+    use crate::series_index::purger::PurgeRequest;
+    use crate::series_index::{
+        SeriesIndexEntry, SeriesIndexWriter, SeriesIndexWriterOptions, series_index_channel,
+    };
+    use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
+
+    fn object_store() -> ObjectStore {
+        ObjectStore::new(Memory::default()).unwrap()
+    }
+
+    fn index_handle(
+        metadata: &RegionMetadataRef,
+        store: &ObjectStore,
+    ) -> (SeriesIndexFileHandle, UnboundedReceiver<PurgeRequest>) {
+        let (purger, receiver) = series_index_channel(store.clone());
+        let entry = SeriesIndexEntry {
+            file_size: 0,
+            index_uuid: FileId::random(),
+            bucket_start: common_time::Timestamp::new_second(0),
+            bucket_end: common_time::Timestamp::new_second(60),
+            source_file_ids: Vec::new(),
+            min_file_sequence: 0,
+            max_file_sequence: 0,
+            compaction_window_secs: 60,
+            window_sequences: Default::default(),
+        };
+        (
+            SeriesIndexFileHandle::new(metadata.region_id, entry, purger),
+            receiver,
+        )
+    }
+
+    fn flat_batch_with_time_unit(
+        primary_keys: &[Vec<u8>],
+        timestamps: &[i64],
+        unit: ArrowTimeUnit,
+    ) -> RecordBatch {
+        let ts_column = match unit {
+            ArrowTimeUnit::Second => {
+                Arc::new(TimestampSecondArray::from(timestamps.to_vec())) as ArrayRef
+            }
+            ArrowTimeUnit::Millisecond => {
+                Arc::new(TimestampMillisecondArray::from(timestamps.to_vec())) as ArrayRef
+            }
+            ArrowTimeUnit::Microsecond => {
+                Arc::new(TimestampMicrosecondArray::from(timestamps.to_vec())) as ArrayRef
+            }
+            ArrowTimeUnit::Nanosecond => {
+                Arc::new(TimestampNanosecondArray::from(timestamps.to_vec())) as ArrayRef
+            }
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ts", DataType::Timestamp(unit, None), false),
+            Field::new("__primary_key", DataType::Binary, false),
+            Field::new("__sequence", DataType::UInt64, false),
+            Field::new("__op_type", DataType::UInt8, false),
+        ]));
+        RecordBatch::try_new(
+            schema,
+            vec![
+                ts_column,
+                Arc::new(BinaryArray::from_iter_values(
+                    primary_keys.iter().map(Vec::as_slice),
+                )),
+                Arc::new(UInt64Array::from(vec![1; timestamps.len()])),
+                Arc::new(UInt8Array::from(vec![0; timestamps.len()])),
+            ],
+        )
+        .unwrap()
+    }
+
+    async fn write_index(
+        metadata: RegionMetadataRef,
+        object_store: ObjectStore,
+        rows: &[(u32, u64, &str, &str, i64)],
+        row_group_size: usize,
+    ) -> (SeriesIndexFileHandle, UnboundedReceiver<PurgeRequest>) {
+        write_index_with_time_unit(
+            metadata,
+            object_store,
+            rows,
+            row_group_size,
+            ArrowTimeUnit::Millisecond,
+        )
+        .await
+    }
+
+    async fn write_index_with_time_unit(
+        metadata: RegionMetadataRef,
+        object_store: ObjectStore,
+        rows: &[(u32, u64, &str, &str, i64)],
+        row_group_size: usize,
+        unit: ArrowTimeUnit,
+    ) -> (SeriesIndexFileHandle, UnboundedReceiver<PurgeRequest>) {
+        let (file_handle, receiver) = index_handle(&metadata, &object_store);
+        let file_id = file_handle.file_id();
+        let path = series_index_path(file_id.region_id(), file_id.file_id());
+        let primary_keys = rows
+            .iter()
+            .map(|(table_id, tsid, tag_0, tag_1, _)| {
+                new_sparse_primary_key(&[*tag_0, *tag_1], &metadata, *table_id, *tsid)
+            })
+            .collect::<Vec<_>>();
+        let timestamps = rows.iter().map(|row| row.4).collect::<Vec<_>>();
+        let mut writer = SeriesIndexWriter::try_new(
+            metadata,
+            object_store,
+            &path,
+            SeriesIndexWriterOptions { row_group_size },
+            None,
+        )
+        .await
+        .unwrap();
+        writer
+            .write(&flat_batch_with_time_unit(&primary_keys, &timestamps, unit))
+            .await
+            .unwrap();
+        writer.finish().await.unwrap();
+        (file_handle, receiver)
+    }
+
+    async fn collect_ids(stream: MetricSeriesIdStream) -> Vec<MetricSeriesId> {
+        stream
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn search_applies_candidate_tag_filters_and_time_overlap() {
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let object_store = object_store();
+        let (index, _receiver) = write_index(
+            metadata.clone(),
+            object_store.clone(),
+            &[
+                (1, 10, "a", "x", 10),
+                (1, 20, "b", "x", 20),
+                (1, 30, "a", "y", 30),
+            ],
+            2,
+        )
+        .await;
+
+        // The field filter is not available in the series index and is ignored,
+        // matching candidate-primary-key filter behavior.
+        let predicate = Predicate::new(vec![
+            col("tag_0").eq(lit("a")),
+            col("field_0").gt(lit(0_u64)),
+        ]);
+        let time_range = TimestampRange::new(
+            common_time::Timestamp::new_millisecond(20),
+            common_time::Timestamp::new_millisecond(31),
+        )
+        .unwrap();
+        let searcher = SeriesIndexSearcher::try_new(
+            metadata.clone(),
+            object_store.clone(),
+            index.clone(),
+            Some(&predicate),
+            Some(time_range),
+        )
+        .await
+        .unwrap();
+        let ids = collect_ids(searcher.search().unwrap()).await;
+        assert_eq!(
+            ids,
+            vec![MetricSeriesId {
+                table_id: 1,
+                tsid: 30
+            }]
+        );
+
+        // Both bounds fall between millisecond ticks. Rounding the inclusive
+        // start and exclusive end upward leaves only the 30 ms series.
+        let time_range = TimestampRange::new(
+            common_time::Timestamp::new_microsecond(20_001),
+            common_time::Timestamp::new_microsecond(30_001),
+        )
+        .unwrap();
+        let searcher = SeriesIndexSearcher::try_new(
+            metadata.clone(),
+            object_store.clone(),
+            index.clone(),
+            None,
+            Some(time_range),
+        )
+        .await
+        .unwrap();
+        let ids = collect_ids(searcher.search().unwrap()).await;
+        assert_eq!(
+            ids,
+            vec![MetricSeriesId {
+                table_id: 1,
+                tsid: 30
+            }]
+        );
+
+        // The stored maximum equal to the query start intersects, while the
+        // stored minimum equal to the exclusive query end does not.
+        let time_range = TimestampRange::new(
+            common_time::Timestamp::new_millisecond(20),
+            common_time::Timestamp::new_millisecond(30),
+        )
+        .unwrap();
+        let searcher =
+            SeriesIndexSearcher::try_new(metadata, object_store, index, None, Some(time_range))
+                .await
+                .unwrap();
+        let ids = collect_ids(searcher.search().unwrap()).await;
+        assert_eq!(
+            ids,
+            vec![MetricSeriesId {
+                table_id: 1,
+                tsid: 20
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn search_skips_filters_for_columns_missing_from_older_index() {
+        let old_metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let object_store = object_store();
+        let (index, _receiver) = write_index(
+            old_metadata.clone(),
+            object_store.clone(),
+            &[
+                (1, 10, "a", "x", 10),
+                (1, 20, "b", "x", 20),
+                (1, 30, "a", "y", 30),
+            ],
+            2,
+        )
+        .await;
+
+        let mut builder = RegionMetadataBuilder::from_existing(old_metadata.as_ref().clone());
+        builder.push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("tag_2", ConcreteDataType::string_datatype(), true),
+            semantic_type: SemanticType::Tag,
+            column_id: 4,
+        });
+        let mut primary_key = old_metadata.primary_key.clone();
+        primary_key.push(4);
+        builder.primary_key(primary_key);
+        let current_metadata = Arc::new(builder.build().unwrap());
+
+        let predicate =
+            Predicate::new(vec![col("tag_0").eq(lit("a")), col("tag_2").eq(lit("new"))]);
+        let searcher = SeriesIndexSearcher::try_new(
+            current_metadata,
+            object_store,
+            index,
+            Some(&predicate),
+            None,
+        )
+        .await
+        .unwrap();
+        let ids = collect_ids(searcher.search().unwrap()).await;
+        assert_eq!(
+            ids,
+            vec![
+                MetricSeriesId {
+                    table_id: 1,
+                    tsid: 10,
+                },
+                MetricSeriesId {
+                    table_id: 1,
+                    tsid: 30,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn search_uses_file_time_unit_after_time_index_widen() {
+        // The index is written while the region's time index is milliseconds.
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let object_store = object_store();
+        let (index, _receiver) = write_index(
+            metadata.clone(),
+            object_store.clone(),
+            &[
+                (1, 10, "a", "x", 10),
+                (1, 20, "b", "x", 20),
+                (1, 30, "c", "x", 30),
+            ],
+            2,
+        )
+        .await;
+
+        // The region's time index is then widened to microseconds.
+        let mut widened = (*metadata).clone();
+        for column in &mut widened.column_metadatas {
+            if column.column_schema.name == "ts" {
+                column.column_schema.data_type = ConcreteDataType::timestamp_microsecond_datatype();
+            }
+        }
+        let widened = Arc::new(widened);
+
+        // A query range of [10.001ms, 25ms) expressed in microseconds must be
+        // compared against the file's millisecond bounds (ceil: [11ms,
+        // 25ms)): only the 20ms series intersects. Interpreting the file in
+        // microseconds instead would match nothing.
+        let time_range = TimestampRange::new(
+            common_time::Timestamp::new_microsecond(10_001),
+            common_time::Timestamp::new_microsecond(25_000),
+        )
+        .unwrap();
+        let searcher = SeriesIndexSearcher::try_new(
+            widened,
+            object_store.clone(),
+            index.clone(),
+            None,
+            Some(time_range),
+        )
+        .await
+        .unwrap();
+        let ids = collect_ids(searcher.search().unwrap()).await;
+        assert_eq!(
+            ids,
+            vec![MetricSeriesId {
+                table_id: 1,
+                tsid: 20
+            }]
+        );
+
+        // A millisecond-unit range behaves identically to the pre-widen
+        // searcher: [20ms, 30ms) keeps only the 20ms series.
+        let time_range = TimestampRange::new(
+            common_time::Timestamp::new_millisecond(20),
+            common_time::Timestamp::new_millisecond(30),
+        )
+        .unwrap();
+        let searcher =
+            SeriesIndexSearcher::try_new(metadata, object_store, index, None, Some(time_range))
+                .await
+                .unwrap();
+        let ids = collect_ids(searcher.search().unwrap()).await;
+        assert_eq!(
+            ids,
+            vec![MetricSeriesId {
+                table_id: 1,
+                tsid: 20
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn search_reads_each_file_in_its_recorded_unit() {
+        // The first file is written while the region's time index is
+        // milliseconds; its series sit at 10ms and 20ms.
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let object_store = object_store();
+        let (index, _receiver) = write_index(
+            metadata.clone(),
+            object_store.clone(),
+            &[(1, 10, "a", "x", 10), (1, 20, "b", "x", 20)],
+            2,
+        )
+        .await;
+
+        // The region's time index is then widened to microseconds and a
+        // second file is written; its series sit at 15_000µs and 15µs.
+        let mut widened = (*metadata).clone();
+        for column in &mut widened.column_metadatas {
+            if column.column_schema.name == "ts" {
+                column.column_schema.data_type = ConcreteDataType::timestamp_microsecond_datatype();
+            }
+        }
+        let widened = Arc::new(widened);
+        let (new_index, _new_receiver) = write_index_with_time_unit(
+            widened.clone(),
+            object_store.clone(),
+            &[(1, 30, "c", "x", 15_000), (1, 40, "d", "x", 15)],
+            2,
+            ArrowTimeUnit::Microsecond,
+        )
+        .await;
+
+        // Each file is searched by its own searcher, which interprets it in
+        // the unit recorded in its schema. For [10.5ms, 25ms):
+        // - the millisecond file (ceil: [11ms, 25ms)) keeps only the 20ms
+        //   series; reading it in microseconds would match nothing;
+        // - the microsecond file keeps only the 15_000µs series; reading it
+        //   in milliseconds would also keep the 15µs series.
+        let time_range = TimestampRange::new(
+            common_time::Timestamp::new_microsecond(10_500),
+            common_time::Timestamp::new_microsecond(25_000),
+        )
+        .unwrap();
+        let searcher = SeriesIndexSearcher::try_new(
+            widened.clone(),
+            object_store.clone(),
+            index,
+            None,
+            Some(time_range),
+        )
+        .await
+        .unwrap();
+        let ids = collect_ids(searcher.search().unwrap()).await;
+        assert_eq!(
+            ids,
+            vec![MetricSeriesId {
+                table_id: 1,
+                tsid: 20
+            }]
+        );
+        let searcher =
+            SeriesIndexSearcher::try_new(widened, object_store, new_index, None, Some(time_range))
+                .await
+                .unwrap();
+        let ids = collect_ids(searcher.search().unwrap()).await;
+        assert_eq!(
+            ids,
+            vec![MetricSeriesId {
+                table_id: 1,
+                tsid: 30
+            }]
+        );
+    }
+
+    fn ts_field(name: &str, unit: Option<ArrowTimeUnit>) -> Field {
+        let data_type = match unit {
+            Some(unit) => DataType::Timestamp(unit, None),
+            None => DataType::Int64,
+        };
+        Field::new(name, data_type, false)
+    }
+
+    fn index_file_schema(
+        min_unit: Option<ArrowTimeUnit>,
+        max_unit: Option<ArrowTimeUnit>,
+    ) -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            ts_field(MIN_TS_COLUMN, min_unit),
+            ts_field(MAX_TS_COLUMN, max_unit),
+            Field::new(ROW_COUNT_COLUMN, DataType::UInt64, false),
+            Field::new(TABLE_ID_COLUMN, DataType::UInt32, false),
+            Field::new(TSID_COLUMN, DataType::UInt64, false),
+        ]))
+    }
+
+    #[test]
+    fn validate_index_schema_rejects_unusable_columns() {
+        // Min/max columns that are not Timestamps are rejected.
+        let err = validate_index_schema(&index_file_schema(None, None))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must be a Timestamp, got Int64"), "{err}");
+
+        // The min and max columns must agree on the unit.
+        let err = validate_index_schema(&index_file_schema(
+            Some(ArrowTimeUnit::Millisecond),
+            Some(ArrowTimeUnit::Microsecond),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("have different time units"), "{err}");
+
+        assert_eq!(
+            TimeUnit::Nanosecond,
+            validate_index_schema(&index_file_schema(
+                Some(ArrowTimeUnit::Nanosecond),
+                Some(ArrowTimeUnit::Nanosecond),
+            ))
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn search_streams_fixed_size_batches() {
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let object_store = object_store();
+        let rows = (0..501_u64)
+            .map(|tsid| (1, tsid, "a", "x", tsid as i64))
+            .collect::<Vec<_>>();
+        let (index, _receiver) =
+            write_index(metadata.clone(), object_store.clone(), &rows, 100).await;
+
+        let searcher = SeriesIndexSearcher::try_new(metadata, object_store, index, None, None)
+            .await
+            .unwrap();
+        let batches = searcher
+            .search()
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(batches.iter().map(Vec::len).collect::<Vec<_>>(), [500, 1]);
+        assert_eq!(
+            batches[0][0],
+            MetricSeriesId {
+                table_id: 1,
+                tsid: 0
+            }
+        );
+        assert_eq!(
+            batches[1][0],
+            MetricSeriesId {
+                table_id: 1,
+                tsid: 500
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn search_streams_pin_deleted_index_until_released() {
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let store = object_store();
+        let rows = (0..501_u64)
+            .map(|tsid| (1, tsid, "a", "x", tsid as i64))
+            .collect::<Vec<_>>();
+        let (index, mut receiver) = write_index(metadata.clone(), store.clone(), &rows, 100).await;
+        let file_id = index.file_id();
+        let searcher = SeriesIndexSearcher::try_new(metadata, store, index.clone(), None, None)
+            .await
+            .unwrap();
+        index.mark_deleted();
+        drop(index);
+        assert!(receiver.try_recv().is_err());
+
+        let mut stream = searcher.search().unwrap();
+        let cancelled = searcher.search().unwrap();
+        drop(searcher);
+        // Even a stream that has not been polled must pin its file.
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(stream.try_next().await.unwrap().unwrap().len(), 500);
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(
+            collect_ids(stream).await,
+            vec![MetricSeriesId {
+                table_id: 1,
+                tsid: 500
+            }]
+        );
+        assert!(receiver.try_recv().is_err());
+
+        // The unpolled stream is now the final owner; cancellation releases it.
+        drop(cancelled);
+        assert_eq!(receiver.try_recv().unwrap().file_id, file_id);
+    }
+
+    #[tokio::test]
+    async fn search_prunes_row_groups_and_empty_ranges() {
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let object_store = object_store();
+        let (index, _receiver) = write_index(
+            metadata.clone(),
+            object_store.clone(),
+            &[
+                (1, 0, "a", "x", 0),
+                (1, 1, "b", "x", 1),
+                (1, 2, "m", "x", 2),
+                (1, 3, "m", "x", 3),
+                (1, 4, "y", "x", 4),
+                (1, 5, "z", "x", 5),
+            ],
+            2,
+        )
+        .await;
+
+        let file_id = index.file_id();
+        let path = series_index_path(file_id.region_id(), file_id.file_id());
+        let reader = ParquetIndexReader::open(object_store.clone(), &path)
+            .await
+            .unwrap();
+        let unit = validate_index_schema(reader.schema()).unwrap();
+
+        // Tag predicates prune row groups through the tag-column statistics.
+        let predicate = Predicate::new(vec![col("tag_0").eq(lit("m"))]);
+        let mut filters = simple_tag_filters(&metadata, None, Some(&predicate));
+        let (pruning_predicate, _) = filters_for_schema(reader.schema(), &filters);
+        assert_eq!(reader.row_groups_to_read(&pruning_predicate), vec![1]);
+
+        // Time-range predicates prune row groups in the file's own unit:
+        // [2ms, 4ms) keeps only the row group holding the 2ms and 3ms series.
+        let time_range = TimestampRange::new(
+            common_time::Timestamp::new_millisecond(2),
+            common_time::Timestamp::new_millisecond(4),
+        )
+        .unwrap();
+        for expr in time_range_exprs(unit, Some(&time_range)) {
+            let filter = SimpleFilterEvaluator::try_new(&expr)
+                .context(UnexpectedSnafu {
+                    reason: "failed to build an internal series-index time filter",
+                })
+                .unwrap();
+            filters.push((expr, filter));
+        }
+        let (pruning_predicate, _) = filters_for_schema(reader.schema(), &filters);
+        assert_eq!(reader.row_groups_to_read(&pruning_predicate), vec![1]);
+
+        // An empty time range yields no series without opening the file.
+        let (missing_index, _receiver) = index_handle(&metadata, &object_store);
+        let empty = SeriesIndexSearcher::try_new(
+            metadata,
+            object_store,
+            missing_index,
+            None,
+            Some(TimestampRange::empty()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            empty
+                .search()
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+}

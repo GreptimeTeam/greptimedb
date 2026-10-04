@@ -17,25 +17,114 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use common_telemetry::info;
-use object_store::util::join_path;
+use common_telemetry::{info, warn};
+use object_store::util::{join_path, normalize_dir};
 use snafu::{OptionExt, ResultExt};
 use store_api::logstore::LogStore;
-use store_api::region_request::RegionOpenRequest;
+use store_api::region_request::{AffectedRows, RegionCleanUpRequest, RegionOpenRequest};
 use store_api::storage::RegionId;
 use table::requests::STORAGE_KEY;
 
+use crate::access_layer::AccessLayer;
+use crate::engine::region_hook::{RegionGcInfo, RegionHookRef};
 use crate::error::{
-    ObjectStoreNotFoundSnafu, OpenDalSnafu, OpenRegionSnafu, RegionNotFoundSnafu, Result,
+    ObjectStoreNotFoundSnafu, OpenDalSnafu, OpenRegionSnafu, RegionBusySnafu, RegionNotFoundSnafu,
+    Result,
 };
-use crate::region::opener::{RegionOpener, sanitize_open_request_options};
+use crate::region::opener::{
+    RegionOpener, get_object_store, provider_from_wal_options, sanitize_open_request_options,
+};
+use crate::region::options::RegionOptions;
 use crate::request::OptionOutputTx;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::wal::entry_distributor::WalEntryReceiver;
-use crate::worker::handle_drop::remove_region_dir_once;
+use crate::worker::handle_drop::{
+    cleanup_region_file_artifacts, remove_region_dir_for_full_drop, remove_region_dir_once,
+};
 use crate::worker::{DROPPING_MARKER_FILE, RegionWorkerLoop};
 
 impl<S: LogStore> RegionWorkerLoop<S> {
+    pub(crate) async fn handle_offline_cleanup_request(
+        &mut self,
+        region_id: RegionId,
+        mut request: RegionCleanUpRequest,
+    ) -> Result<AffectedRows> {
+        info!(
+            "Try to clean region {} offline, worker: {}",
+            region_id, self.id
+        );
+
+        if self.regions.is_region_exists(region_id) {
+            return RegionBusySnafu { region_id }.fail();
+        }
+
+        sanitize_open_request_options(&mut request.options);
+
+        let options = RegionOptions::try_from_options(region_id, &request.options)?;
+        let object_store = get_object_store(&options.storage, &self.object_store_manager)?;
+        let provider = provider_from_wal_options::<S>(region_id, &options.wal_options)?;
+        self.wal.obsolete_all(region_id, &provider).await?;
+
+        let table_dir = normalize_dir(&request.table_dir);
+        let region_dir = region_dir_from_table_dir(&table_dir, region_id, request.path_type);
+        remove_region_dir_for_full_drop(&region_dir, &object_store).await?;
+
+        // The region directory is gone. Offline cleanup (soft-drop PURGE) is a
+        // terminal physical removal, identical in effect to the drop GC
+        // worker's directory deletion — but unlike the drop worker it never
+        // fires `on_region_files_removed`, because the region is offline and
+        // carries no `RegionMetadataRef`. Fire `on_region_gc` instead: it
+        // accepts an absent region and lets extensions with sidecar files
+        // outside the region dir (e.g. an Iceberg export) reclaim their
+        // per-region state.
+        //
+        // Propagate the hook's error so the caller retries the cleanup, mirroring
+        // how the global GC worker keeps a region for the next pass when
+        // `on_region_gc` fails. The whole handler is idempotent (the existing
+        // `test_engine_offline_cleanup_closed_region` already drives it twice in
+        // a row), so a retry re-runs the directory removal, WAL obsolete and the
+        // hook safely. Runs inline, consistent with the blocking directory
+        // removal above; offline cleanup is already a slow path.
+        if let Some(hook) = self.plugins.get::<RegionHookRef>() {
+            let access_layer = Arc::new(AccessLayer::new(
+                table_dir.clone(),
+                request.path_type,
+                object_store.clone(),
+                self.puffin_manager_factory.clone(),
+                self.intermediate_manager.clone(),
+            ));
+            let gc_info = RegionGcInfo {
+                removed_files: &[],
+                is_region_dropped: true,
+                full_file_listing: true,
+            };
+            if let Err(err) = hook
+                .on_region_gc(region_id, None, &access_layer, &gc_info)
+                .await
+            {
+                warn!(
+                    err;
+                    "Region hook on_region_gc failed during offline cleanup for region {}; \
+                     returning the error so the caller retries the cleanup",
+                    region_id,
+                );
+                return Err(err);
+            }
+        }
+
+        self.cleanup_dropped_region_runtime_state(region_id).await;
+        self.dropping_regions.remove_region(region_id);
+        cleanup_region_file_artifacts(
+            region_id,
+            &table_dir,
+            &self.intermediate_manager,
+            &self.cache_manager,
+        )
+        .await;
+
+        Ok(0)
+    }
+
     async fn check_and_cleanup_region(
         &self,
         region_id: RegionId,
@@ -107,6 +196,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         )
         .skip_wal_replay(request.skip_wal_replay)
         .cache(Some(self.cache_manager.clone()))
+        .series_index_store(self.series_index_store.clone())
+        .series_index_purger(self.series_index_purger.clone())
         .hook(self.plugins.get())
         .wal_entry_reader(wal_entry_receiver.map(|receiver| Box::new(receiver) as _))
         .replay_checkpoint(request.checkpoint.map(|checkpoint| checkpoint.entry_id))
@@ -136,6 +227,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let opening_regions = self.opening_regions.clone();
         let region_count = self.region_count.clone();
         let worker_id = self.id;
+        let series_index_task_state = self.series_index_task_state.clone();
         opening_regions.insert_sender(region_id, sender);
         common_runtime::spawn_global(async move {
             match opener.open(&config, &wal).await {
@@ -158,6 +250,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
                     // Insert the Region into the RegionMap.
                     regions.insert_region(region);
+                    if let Some(state) = &series_index_task_state {
+                        state.wake();
+                    }
 
                     let senders = opening_regions.remove_sender(region_id);
                     for sender in senders {

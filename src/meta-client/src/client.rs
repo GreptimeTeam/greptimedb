@@ -49,7 +49,10 @@ use common_meta::peer::PeerDiscovery;
 use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutor};
 use common_meta::range_stream::PaginationStream;
 use common_meta::rpc::KeyValue;
-use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+use common_meta::rpc::ddl::{
+    CREATE_DATABASE_CREATOR_EXTENSION_KEY, CreateDatabaseTask, DdlTask, SubmitDdlTaskRequest,
+    SubmitDdlTaskResponse,
+};
 use common_meta::rpc::procedure::{
     AddRegionFollowerRequest, AddTableFollowerRequest, GcRegionsRequest, GcResponse,
     GcTableRequest, ManageRegionFollowerRequest, MigrateRegionRequest, MigrateRegionResponse,
@@ -66,7 +69,7 @@ use common_time::util::DefaultSystemTimer;
 use config::Client as ConfigClient;
 use futures::TryStreamExt;
 use heartbeat::{Client as HeartbeatClient, HeartbeatConfig};
-use procedure::Client as ProcedureClient;
+use procedure::{Client as ProcedureClient, procedure_actor, procedure_event_context};
 use serde::de::DeserializeOwned;
 use snafu::{OptionExt, ResultExt};
 use store::Client as StoreClient;
@@ -75,7 +78,7 @@ pub use self::heartbeat::{HeartbeatSender, HeartbeatStream};
 use crate::client::ask_leader::{LeaderProviderFactoryImpl, LeaderProviderFactoryRef};
 use crate::error::{
     ConvertMetaConfigSnafu, ConvertMetaRequestSnafu, ConvertMetaResponseSnafu, Error,
-    GetFlowStatSnafu, NotStartedSnafu, Result,
+    GetFlowStatSnafu, MissingQueryContextSnafu, NotStartedSnafu, Result,
 };
 
 pub type Id = u64;
@@ -334,10 +337,10 @@ pub trait RegionFollowerClient: Sync + Send + Debug {
 impl ProcedureExecutor for MetaClient {
     async fn submit_ddl_task(
         &self,
-        _ctx: &ExecutorContext,
+        ctx: ExecutorContext,
         request: SubmitDdlTaskRequest,
     ) -> MetaResult<SubmitDdlTaskResponse> {
-        self.submit_ddl_task(request)
+        MetaClient::submit_ddl_task(self, ctx, request)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
@@ -345,10 +348,10 @@ impl ProcedureExecutor for MetaClient {
 
     async fn migrate_region(
         &self,
-        _ctx: &ExecutorContext,
+        ctx: &ExecutorContext,
         request: MigrateRegionRequest,
     ) -> MetaResult<MigrateRegionResponse> {
-        self.migrate_region(request)
+        self.migrate_region(ctx, request)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
@@ -418,10 +421,10 @@ impl ProcedureExecutor for MetaClient {
 
     async fn gc_regions(
         &self,
-        _ctx: &ExecutorContext,
+        ctx: &ExecutorContext,
         request: GcRegionsRequest,
     ) -> MetaResult<GcResponse> {
-        self.gc_regions(request)
+        self.gc_regions(ctx, request)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
@@ -429,10 +432,10 @@ impl ProcedureExecutor for MetaClient {
 
     async fn gc_table(
         &self,
-        _ctx: &ExecutorContext,
+        ctx: &ExecutorContext,
         request: GcTableRequest,
     ) -> MetaResult<GcResponse> {
-        self.gc_table(request)
+        self.gc_table(ctx, request)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
@@ -807,10 +810,12 @@ impl MetaClient {
     /// Submit a region migration task.
     pub async fn migrate_region(
         &self,
+        context: &ExecutorContext,
         request: MigrateRegionRequest,
     ) -> Result<MigrateRegionResponse> {
         self.procedure_client()?
             .migrate_region(
+                context,
                 request.region_id,
                 request.from_peer,
                 request.to_peer,
@@ -825,28 +830,57 @@ impl MetaClient {
     }
 
     /// Manually trigger GC for specific regions.
-    pub async fn gc_regions(&self, request: GcRegionsRequest) -> Result<GcResponse> {
-        self.procedure_client()?.gc_regions(request).await
+    pub async fn gc_regions(
+        &self,
+        context: &ExecutorContext,
+        request: GcRegionsRequest,
+    ) -> Result<GcResponse> {
+        self.procedure_client()?.gc_regions(context, request).await
     }
 
     /// Manually trigger GC for a table (all its regions).
-    pub async fn gc_table(&self, request: GcTableRequest) -> Result<GcResponse> {
-        self.procedure_client()?.gc_table(request).await
+    pub async fn gc_table(
+        &self,
+        context: &ExecutorContext,
+        request: GcTableRequest,
+    ) -> Result<GcResponse> {
+        self.procedure_client()?.gc_table(context, request).await
     }
 
-    /// Submit a DDL task
+    /// Submit a DDL task.
     pub async fn submit_ddl_task(
         &self,
-        req: SubmitDdlTaskRequest,
+        context: ExecutorContext,
+        request: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse> {
-        let res = self
-            .procedure_client()?
-            .submit_ddl_task(req.try_into().context(ConvertMetaRequestSnafu)?)
+        let event_context = procedure_event_context(&context);
+        let actor = procedure_actor(&context);
+        let mut query_context = context.query_context.context(MissingQueryContextSnafu)?;
+        query_context
+            .extensions
+            .remove(CREATE_DATABASE_CREATOR_EXTENSION_KEY);
+        if let DdlTask::CreateDatabase(CreateDatabaseTask {
+            creator: Some(creator),
+            ..
+        }) = &request.task
+        {
+            query_context.extensions.insert(
+                CREATE_DATABASE_CREATOR_EXTENSION_KEY.to_string(),
+                serde_json::to_string(creator).context(ConvertMetaConfigSnafu)?,
+            );
+        }
+
+        let mut request: api::v1::meta::DdlTaskRequest =
+            request.try_into().context(ConvertMetaRequestSnafu)?;
+        request.query_context = Some(api::v1::QueryContext::from(query_context));
+        request.event_context = event_context;
+        request.actor = actor;
+
+        self.procedure_client()?
+            .submit_ddl_task(request)
             .await?
             .try_into()
-            .context(ConvertMetaResponseSnafu)?;
-
-        Ok(res)
+            .context(ConvertMetaResponseSnafu)
     }
 
     pub fn heartbeat_client(&self) -> Result<HeartbeatClient> {
@@ -891,9 +925,11 @@ impl MetaClient {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use api::v1::meta::{HeartbeatRequest, Peer};
-    use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
+    use common_base::readable_size::ReadableSize;
+    use common_meta::kv_backend::{KvBackend, KvBackendRef, ResettableKvBackendRef, TxnService};
     use rand::Rng;
 
     use super::*;
@@ -912,6 +948,27 @@ mod tests {
         async fn new(ns: impl Into<String>) -> Self {
             // can also test with etcd: mocks::mock_client_with_etcdstore("127.0.0.1:2379").await;
             let (client, meta_ctx) = mocks::mock_client_with_memstore().await;
+            Self {
+                ns: ns.into(),
+                client,
+                meta_ctx,
+            }
+        }
+
+        async fn new_with_grpc_message_sizes(
+            ns: impl Into<String>,
+            server_max_recv_message_size: ReadableSize,
+            server_max_send_message_size: ReadableSize,
+            client_max_recv_message_size: ReadableSize,
+            client_max_send_message_size: ReadableSize,
+        ) -> Self {
+            let (client, meta_ctx) = mocks::mock_client_with_memstore_and_grpc_message_sizes(
+                server_max_recv_message_size,
+                server_max_send_message_size,
+                client_max_recv_message_size,
+                client_max_send_message_size,
+            )
+            .await;
             Self {
                 ns: ns.into(),
                 client,
@@ -1331,20 +1388,77 @@ mod tests {
         }
     }
 
-    fn mock_decoder(_kv: KeyValue) -> MetaResult<()> {
-        Ok(())
+    fn mock_decoder(kv: KeyValue) -> MetaResult<Vec<u8>> {
+        Ok(kv.value)
     }
 
-    #[tokio::test]
-    async fn test_cluster_client_adaptive_range() {
-        let tx = new_client("test_cluster_client").await;
+    struct RecordingKvBackend {
+        inner: KvBackendRef,
+        limits: Arc<Mutex<Vec<i64>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl TxnService for RecordingKvBackend {
+        type Error = meta_error::Error;
+    }
+
+    #[async_trait::async_trait]
+    impl KvBackend for RecordingKvBackend {
+        fn name(&self) -> &str {
+            "RecordingKvBackend"
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        async fn range(&self, req: RangeRequest) -> MetaResult<RangeResponse> {
+            self.limits.lock().unwrap().push(req.limit);
+            self.inner.range(req).await
+        }
+
+        async fn put(&self, req: PutRequest) -> MetaResult<PutResponse> {
+            self.inner.put(req).await
+        }
+
+        async fn batch_put(&self, req: BatchPutRequest) -> MetaResult<BatchPutResponse> {
+            self.inner.batch_put(req).await
+        }
+
+        async fn batch_get(&self, req: BatchGetRequest) -> MetaResult<BatchGetResponse> {
+            self.inner.batch_get(req).await
+        }
+
+        async fn delete_range(&self, req: DeleteRangeRequest) -> MetaResult<DeleteRangeResponse> {
+            self.inner.delete_range(req).await
+        }
+
+        async fn batch_delete(&self, req: BatchDeleteRequest) -> MetaResult<BatchDeleteResponse> {
+            self.inner.batch_delete(req).await
+        }
+    }
+
+    async fn adaptive_range_with_message_sizes(
+        server_max_recv_message_size: ReadableSize,
+        server_max_send_message_size: ReadableSize,
+        client_max_recv_message_size: ReadableSize,
+        client_max_send_message_size: ReadableSize,
+    ) -> (Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<i64>) {
+        let tx = TestClient::new_with_grpc_message_sizes(
+            "test_cluster_client",
+            server_max_recv_message_size,
+            server_max_send_message_size,
+            client_max_recv_message_size,
+            client_max_send_message_size,
+        )
+        .await;
         let in_memory = tx.in_memory().unwrap();
         let cluster_client = tx.client.cluster_client().unwrap();
         let mut rng = rand::rng();
 
-        // Generates rough 10MB data, which is larger than the default grpc message size limit.
-        for i in 0..10 {
-            let data: Vec<u8> = (0..1024 * 1024).map(|_| rng.random::<u8>()).collect();
+        let mut expected = Vec::new();
+        for i in 0..4 {
+            let data: Vec<u8> = (0..256 * 1024).map(|_| rng.random::<u8>()).collect();
             in_memory
                 .put(
                     PutRequest::new()
@@ -1353,13 +1467,48 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            expected.push(data);
         }
 
         let req = RangeRequest::new().with_prefix(b"__prefix/");
+        let limits = Arc::new(Mutex::new(Vec::new()));
+        let recording_backend = RecordingKvBackend {
+            inner: Arc::new(cluster_client),
+            limits: limits.clone(),
+        };
         let stream =
-            PaginationStream::new(Arc::new(cluster_client), req, 10, mock_decoder).into_stream();
+            PaginationStream::new(Arc::new(recording_backend), req, 4, mock_decoder).into_stream();
 
         let res = stream.try_collect::<Vec<_>>().await.unwrap();
-        assert_eq!(10, res.len());
+        let limits = limits.lock().unwrap().clone();
+        (expected, res, limits)
+    }
+
+    #[tokio::test]
+    async fn test_cluster_client_adaptive_range() {
+        let (expected, res, limits) = adaptive_range_with_message_sizes(
+            ReadableSize::mb(2),
+            ReadableSize::mb(16),
+            ReadableSize::mb(1),
+            ReadableSize::mb(2),
+        )
+        .await;
+
+        assert_eq!(expected, res);
+        assert_eq!(vec![4, 2, 2], limits);
+    }
+
+    #[tokio::test]
+    async fn test_cluster_client_adaptive_range_server_limit() {
+        let (expected, res, limits) = adaptive_range_with_message_sizes(
+            ReadableSize::mb(2),
+            ReadableSize::mb(1),
+            ReadableSize::mb(16),
+            ReadableSize::mb(2),
+        )
+        .await;
+
+        assert_eq!(expected, res);
+        assert_eq!(vec![4, 2, 2], limits);
     }
 }

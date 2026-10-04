@@ -24,7 +24,7 @@ use std::time::Instant;
 use api::v1::SemanticType;
 use axum::Extension;
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::IntoResponse;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -33,6 +33,7 @@ use common_error::ext::ErrorExt;
 use common_query::prelude::greptime_timestamp;
 use common_telemetry::{debug, error};
 use operator::insert::SPLUNK_PK_METADATA_ORDER_KEY;
+use pipeline::util::to_pipeline_version;
 use pipeline::{
     ContextReq, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME, GreptimePipelineParams, PipelineContext,
     PipelineDefinition,
@@ -58,6 +59,89 @@ const DEFAULT_SPLUNK_TABLE: &str = "splunk_logs";
 /// HEC response code for a healthy collector. Splunk returns
 /// `{"text":"HEC is healthy","code":17}`.
 const HEC_HEALTHY_CODE: u32 = 17;
+
+/// Query parameters for `/services/collector/raw`.
+/// `channel` is accepted but ignored until indexer acknowledgment lands. `table`,
+/// `pipeline_name`, `version`, and `linebreaker` are Greptime extensions
+/// (`linebreaker` opts into event breaking; without it the body is one event).
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct SplunkRawQueryParams {
+    pub channel: Option<String>,
+    pub host: Option<String>,
+    pub source: Option<String>,
+    pub sourcetype: Option<String>,
+    pub index: Option<String>,
+    pub time: Option<String>,
+    pub table: Option<String>,
+    pub pipeline_name: Option<String>,
+    pub version: Option<String>,
+    pub linebreaker: Option<String>,
+}
+
+/// Splits a raw body into events. Without `?linebreaker=`, the whole body is ONE
+/// event. With `?linebreaker=<literal>` (percent-encoded, e.g. `%0A` for `\n`),
+/// the body is split on that literal delimiter; whitespace-only segments are
+/// dropped, segment content is kept verbatim.
+fn split_raw_body<'a>(body: &'a str, linebreaker: Option<&str>) -> Vec<&'a str> {
+    match linebreaker {
+        Some(lb) if !lb.is_empty() => body
+            .split(lb)
+            .filter(|segment| !segment.trim().is_empty())
+            .collect(),
+        _ => {
+            if body.trim().is_empty() {
+                vec![]
+            } else {
+                vec![body]
+            }
+        }
+    }
+}
+
+/// Column holding the verbatim raw body on `/raw` (Splunk's `_raw`). Named `message`
+/// to avoid clashing with `/event`'s `event` column (whose shape
+/// varies by client: string vs identity-flattened object).
+const RAW_MESSAGE_COLUMN: &str = "message";
+
+/// Collects request-level `/raw` metadata (`host`/`source`/`sourcetype`) present in
+/// the query params. The keys double as the tag-column names; values apply to every
+/// event in the request (HEC `/raw` metadata is request-level, unlike `/event`).
+fn raw_metadata(params: &SplunkRawQueryParams) -> Vec<(&'static str, Bytes)> {
+    [
+        ("host", &params.host),
+        ("source", &params.source),
+        ("sourcetype", &params.sourcetype),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| {
+        value
+            .as_deref()
+            .map(|v| (key, Bytes::copy_from_slice(v.as_bytes())))
+    })
+    .collect()
+}
+
+/// Maps one raw event to a per-event map: `{ greptime_timestamp: ts, message: <event>,
+/// <metadata columns> }`. The event text is stored as it is.
+fn raw_event_to_map(
+    event: &str,
+    ts: DateTime<Utc>,
+    metadata: &[(&'static str, Bytes)],
+) -> VrlValue {
+    let mut map: BTreeMap<KeyString, VrlValue> = BTreeMap::new();
+    map.insert(
+        KeyString::from(greptime_timestamp()),
+        VrlValue::Timestamp(ts),
+    );
+    map.insert(
+        KeyString::from(RAW_MESSAGE_COLUMN),
+        VrlValue::Bytes(Bytes::copy_from_slice(event.as_bytes())),
+    );
+    for (key, value) in metadata {
+        map.insert(KeyString::from(*key), VrlValue::Bytes(value.clone()));
+    }
+    VrlValue::Object(map)
+}
 
 /// HEC response body `{"text", "code"}`; clients branch on `code`.
 fn hec_response(status: StatusCode, code: u32, text: &str) -> axum::response::Response {
@@ -349,14 +433,128 @@ pub async fn handle_event(
         return hec_response(StatusCode::BAD_REQUEST, 7, &msg);
     }
 
-    // Pipeline: identity by default; override via `pipeline` param or header.
-    let pipeline_name = params.pipeline_name.clone().unwrap_or_else(|| {
+    resolve_pipeline_and_ingest(
+        log_state,
+        query_ctx,
+        &headers,
+        params.pipeline_name.clone(),
+        params.version.clone(),
+        requests,
+        tag_columns,
+    )
+    .await
+}
+
+/// `POST /services/collector/raw` (+ `/raw/1.0` alias). By default, the whole body is
+/// raw text stored verbatim as ONE event in the [`RAW_MESSAGE_COLUMN`] — multiline
+/// payloads (e.g. stack traces) are preserved intact. Explicit framing is opt-in
+/// via `?linebreaker=` (see [`split_raw_body`]). Metadata comes from query params
+/// and applies to every event. `channel` (param or `x-splunk-request-channel` header)
+/// is accepted but ignored until indexer acknowledgment lands;
+#[axum_macros::debug_handler]
+pub async fn handle_raw(
+    State(log_state): State<LogState>,
+    Query(params): Query<SplunkRawQueryParams>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+    headers: HeaderMap,
+    payload: Bytes,
+) -> impl IntoResponse {
+    query_ctx.set_channel(Channel::Splunk);
+
+    // The decompression layer runs strips `Content-Encoding` when it decompresses,
+    // so a non-identity value means the body is still compressed
+    if let Some(encoding) = headers.get(header::CONTENT_ENCODING)
+        && encoding.as_bytes() != b"identity"
+    {
+        // HEC code 6 == "invalid data format".
+        return hec_response(StatusCode::BAD_REQUEST, 6, "invalid data format");
+    }
+
+    let Ok(body) = std::str::from_utf8(&payload) else {
+        debug!("splunk raw body contains invalid UTF-8; rejecting");
+        // HEC code 6 == "invalid data format".
+        return hec_response(StatusCode::BAD_REQUEST, 6, "invalid data format");
+    };
+    let events = split_raw_body(body, params.linebreaker.as_deref());
+    if events.is_empty() {
+        // HEC code 5 == "No data".
+        return hec_response(StatusCode::BAD_REQUEST, 5, "No data");
+    }
+
+    // Request-level default timestamp: `?time=` (epoch) or ingest time. Splunk would
+    // additionally extract per-event timestamps from line content; this doesn't support that yet.
+    let ts = match &params.time {
+        Some(t) => match parse_hec_time(&VrlValue::Bytes(Bytes::from(t.clone()))) {
+            Some(ts) => ts,
+            // HEC code 6 == "invalid data format".
+            None => return hec_response(StatusCode::BAD_REQUEST, 6, "invalid data format"),
+        },
+        None => Utc::now(),
+    };
+
+    // Table routing: `?index=` (sanitized) -> `?table=` -> default.
+    let table = params
+        .index
+        .as_deref()
+        .and_then(sanitize_index)
+        .or_else(|| params.table.clone())
+        .unwrap_or_else(|| DEFAULT_SPLUNK_TABLE.to_string());
+    // Bad table name (e.g. invalid `?table=`) -> HEC code 7.
+    if !NAME_PATTERN_REG.is_match(&table) {
+        let msg = format!("Invalid index name: {table}");
+        return hec_response(StatusCode::BAD_REQUEST, 7, &msg);
+    }
+
+    let metadata = raw_metadata(&params);
+    let values = events
+        .iter()
+        .map(|event| raw_event_to_map(event, ts, &metadata))
+        .collect();
+    let tag_columns = HashMap::from([(
+        table.clone(),
+        metadata.iter().map(|(key, _)| key.to_string()).collect(),
+    )]);
+    let requests = vec![PipelineIngestRequest { table, values }];
+
+    resolve_pipeline_and_ingest(
+        log_state,
+        query_ctx,
+        &headers,
+        params.pipeline_name.clone(),
+        params.version.clone(),
+        requests,
+        tag_columns,
+    )
+    .await
+}
+
+/// Shared tail of `/event` and `/raw`: resolves the pipeline (identity default;
+/// overridable via param/header, with an optional `?version=` pin), enables tag
+/// promotion + metadata-first primary-key ordering for the identity path only, runs
+/// the ingest, and maps the outcome to a HEC response.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_pipeline_and_ingest(
+    log_state: LogState,
+    mut query_ctx: QueryContext,
+    headers: &HeaderMap,
+    pipeline_name: Option<String>,
+    version: Option<String>,
+    requests: Vec<PipelineIngestRequest>,
+    tag_columns: HashMap<String, HashSet<String>>,
+) -> axum::response::Response {
+    // Pipeline: identity by default; override via `pipeline_name` param or header.
+    let pipeline_name = pipeline_name.unwrap_or_else(|| {
         headers
             .get(GREPTIME_PIPELINE_NAME_HEADER_NAME)
             .and_then(|v| v.to_str().ok())
             .unwrap_or(GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME)
             .to_string()
     });
+    let version = match to_pipeline_version(version.as_deref()) {
+        Ok(version) => version,
+        // HEC code 6 == "invalid data format" (bad `?version=`).
+        Err(_) => return hec_response(StatusCode::BAD_REQUEST, 6, "invalid pipeline version"),
+    };
     // Only post-process tags for the identity default; respect a user pipeline's schema.
     let apply_tags = pipeline_name == GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME;
     if apply_tags {
@@ -366,12 +564,15 @@ pub async fn handle_event(
     }
     // custom_time_index so timestamp doesn't get overridden by identity pipeline.
     let custom_time_index = Some((format!("{};epoch;ns", greptime_timestamp()), false));
-    let pipeline = match PipelineDefinition::from_name(&pipeline_name, None, custom_time_index) {
+    let pipeline = match PipelineDefinition::from_name(&pipeline_name, version, custom_time_index) {
         Ok(pipeline) => pipeline,
-        Err(_) => return hec_response(StatusCode::INTERNAL_SERVER_ERROR, 8, "pipeline error"),
+        Err(e) => {
+            error!(e; "failed to resolve splunk pipeline definition: {pipeline_name}");
+            return hec_response(StatusCode::INTERNAL_SERVER_ERROR, 8, "pipeline error");
+        }
     };
     let pipeline_params =
-        GreptimePipelineParams::from_map(extract_pipeline_params_map_from_headers(&headers));
+        GreptimePipelineParams::from_map(extract_pipeline_params_map_from_headers(headers));
 
     match ingest_events(
         log_state.log_handler,
@@ -452,6 +653,116 @@ mod tests {
     #[test]
     fn malformed_json_is_rejected() {
         assert!(parse_hec_events(br#"{"event":"a"}{bad}"#).is_err());
+    }
+
+    // ---- split_raw_body ----
+
+    #[test]
+    fn splits_raw_body_only_with_explicit_linebreaker() {
+        // default (no linebreaker): whole body is one event, verbatim.
+        assert_eq!(split_raw_body("a\nb\r\nc\n", None), vec!["a\nb\r\nc\n"]);
+        // empty / whitespace-only body -> no events (HEC code 5 upstream).
+        assert!(split_raw_body("", None).is_empty());
+        assert!(split_raw_body(" \n \r\n ", None).is_empty());
+        // empty linebreaker behaves like none.
+        assert_eq!(split_raw_body("a\nb", Some("")), vec!["a\nb"]);
+
+        // explicit "\n": split; whitespace-only segments dropped;
+        // (a "\r\n"-separated body keeps the "\r" — pass "\r\n" to strip it).
+        assert_eq!(split_raw_body("a\nb\n", Some("\n")), vec!["a", "b"]);
+        assert_eq!(
+            split_raw_body("a\n\n   \n\t\nb", Some("\n")),
+            vec!["a", "b"]
+        );
+        assert_eq!(
+            split_raw_body("line one\n  indented stack frame", Some("\n")),
+            vec!["line one", "  indented stack frame"]
+        );
+        assert_eq!(split_raw_body("a\r\nb", Some("\r\n")), vec!["a", "b"]);
+        // multi-char literal delimiters work too.
+        assert_eq!(split_raw_body("a::b::c", Some("::")), vec!["a", "b", "c"]);
+        // whitespace-only after split -> no events.
+        assert!(split_raw_body("\n \n", Some("\n")).is_empty());
+    }
+
+    // ---- raw_metadata / raw_event_to_map ----
+
+    #[test]
+    fn multiline_raw_body_is_one_event() {
+        // `/raw` must NOT split on newlines unless query parameter is provided.
+        let stack_trace = "java.lang.NullPointerException: boom\n\
+                           \tat com.example.Foo.bar(Foo.java:42)\n\
+                           \tat com.example.Main.main(Main.java:7)";
+        let ts = DateTime::from_timestamp(1447828325, 0).unwrap();
+        let VrlValue::Object(m) = raw_event_to_map(stack_trace, ts, &[]) else {
+            panic!("expected object");
+        };
+        assert_eq!(
+            m.get(RAW_MESSAGE_COLUMN),
+            Some(&VrlValue::from(json!(stack_trace)))
+        );
+    }
+
+    #[test]
+    fn maps_raw_line_with_request_metadata() {
+        let params = SplunkRawQueryParams {
+            host: Some("web-01".to_string()),
+            sourcetype: Some("access_log".to_string()),
+            ..Default::default()
+        };
+        let meta = raw_metadata(&params);
+        // present params only; keys are the tag-column names.
+        assert_eq!(
+            meta,
+            vec![
+                ("host", Bytes::from_static(b"web-01")),
+                ("sourcetype", Bytes::from_static(b"access_log"))
+            ]
+        );
+
+        let ts = DateTime::from_timestamp(1447828325, 0).unwrap();
+        let VrlValue::Object(m) = raw_event_to_map("GET /api 200", ts, &meta) else {
+            panic!("expected object");
+        };
+        assert_eq!(
+            m.get(RAW_MESSAGE_COLUMN),
+            Some(&VrlValue::from(json!("GET /api 200")))
+        );
+        assert_eq!(m.get("host"), Some(&VrlValue::from(json!("web-01"))));
+        assert_eq!(
+            m.get("sourcetype"),
+            Some(&VrlValue::from(json!("access_log")))
+        );
+        // absent metadata (`source`) makes no column.
+        assert!(!m.contains_key("source"));
+        assert!(matches!(
+            m.get(greptime_timestamp()),
+            Some(VrlValue::Timestamp(dt)) if dt.timestamp() == 1447828325
+        ));
+
+        // no query params at all -> just timestamp + message.
+        let default_params = SplunkRawQueryParams::default();
+        let empty = raw_metadata(&default_params);
+        assert!(empty.is_empty());
+        let VrlValue::Object(m) = raw_event_to_map("x", ts, &empty) else {
+            panic!("expected object");
+        };
+        assert_eq!(m.len(), 2);
+    }
+
+    #[test]
+    fn parses_real_raw_client_payloads() {
+        // Shapes captured from Vector's `splunk_hec_logs` sink with
+        // `endpoint_target = "raw"`
+        let single = "190.79.85.36 - b0rnc0nfused [13/Jul/2026:05:10:25 +0000] \"GET /money HTTP/2.0\" 300 29099";
+        let ts = DateTime::from_timestamp(1447828325, 0).unwrap();
+        let VrlValue::Object(m) = raw_event_to_map(single, ts, &[]) else {
+            panic!("expected object");
+        };
+        assert_eq!(
+            m.get(RAW_MESSAGE_COLUMN),
+            Some(&VrlValue::from(json!(single)))
+        );
     }
 
     // ---- parse_hec_time ----

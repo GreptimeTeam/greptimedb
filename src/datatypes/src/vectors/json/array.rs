@@ -12,30 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cmp::Ordering;
 use std::sync::Arc;
 
-use arrow::compute;
-use arrow::util::display::{ArrayFormatter, FormatOptions};
-use arrow_array::builder::{
-    ArrayBuilder, BooleanBuilder, Float64Builder, Int64Builder, NullBuilder, StringViewBuilder,
-    make_builder,
-};
+use arrow::compute::{can_cast_types, cast};
 use arrow_array::cast::AsArray;
-use arrow_array::types::{Float64Type, Int64Type, UInt64Type};
-use arrow_array::{Array, ArrayRef, GenericListArray, ListArray, StructArray, new_null_array};
-use arrow_schema::{DataType, FieldRef};
+use arrow_array::types::{
+    Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type,
+    UInt32Type, UInt64Type,
+};
+use arrow_array::{Array, ArrayRef, GenericListArray, StructArray, new_null_array};
+use arrow_schema::{DataType, Field};
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 
-use crate::arrow_array::{
-    MutableBinaryArray, StringViewArray, binary_array_value, string_array_value,
-};
+use crate::arrow_array::{binary_array_value, string_array_value};
+use crate::data_type::{ConcreteDataType, DataType as _};
 use crate::error::{
-    AlignJsonArraySnafu, ArrowComputeSnafu, CastTypeSnafu, InvalidJsonSnafu, InvalidJsonbSnafu,
-    Result,
+    AlignJsonArraySnafu, ArrowComputeSnafu, InvalidJsonSnafu, InvalidJsonbSnafu, Result,
 };
-use crate::json::value::{decode_json_variant, encode_serde_json_as_jsonb};
+use crate::extension::json::{JSON2_REMAINDER_FIELD_NAME, json2_remainder_field};
+use crate::json::value::decode_json_variant;
+use crate::json::{JsonSettings, TypeHintMismatchPolicy, coerce_json_value_to_type};
+use crate::vectors::MutableVector;
+use crate::vectors::json::builder::{JsonVectorBuilder, json2_physical_data_type};
+use crate::vectors::json::variant::variant_to_json_values;
 
 pub struct JsonArray<'a> {
     inner: &'a ArrayRef,
@@ -52,8 +52,15 @@ impl JsonArray<'_> {
         let value = match array.data_type() {
             DataType::Null => Value::Null,
             DataType::Boolean => Value::Bool(array.as_boolean().value(i)),
+            DataType::Int8 => Value::from(array.as_primitive::<Int8Type>().value(i)),
+            DataType::Int16 => Value::from(array.as_primitive::<Int16Type>().value(i)),
+            DataType::Int32 => Value::from(array.as_primitive::<Int32Type>().value(i)),
             DataType::Int64 => Value::from(array.as_primitive::<Int64Type>().value(i)),
+            DataType::UInt8 => Value::from(array.as_primitive::<UInt8Type>().value(i)),
+            DataType::UInt16 => Value::from(array.as_primitive::<UInt16Type>().value(i)),
+            DataType::UInt32 => Value::from(array.as_primitive::<UInt32Type>().value(i)),
             DataType::UInt64 => Value::from(array.as_primitive::<UInt64Type>().value(i)),
+            DataType::Float32 => Value::from(array.as_primitive::<Float32Type>().value(i)),
             DataType::Float64 => Value::from(array.as_primitive::<Float64Type>().value(i)),
             DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => {
                 Value::String(string_array_value(array, i).to_string())
@@ -96,238 +103,242 @@ impl JsonArray<'_> {
         Ok(value)
     }
 
-    /// Align a JSON array to the `expect` data type. The alignment mostly does three things:
+    /// Projects a physical JSON2 array to a logical query type.
     ///
-    /// 1. set the missing fields with null arrays;
-    /// 2. discard the fields that are not in the `expect` data type;
-    /// 3. cast the fields to the ones with same names in the `expect` if their data types are not
-    ///    matched.
-    pub fn try_align(&self, expect: &DataType) -> Result<ArrayRef> {
-        if self.inner.data_type() == expect {
-            return Ok(self.inner.clone());
-        }
-
-        common_telemetry::trace!(
-            "Try aligning JSON array {} to data type {}",
-            self.inner.data_type(),
-            expect
-        );
-
-        let struct_array = self.inner.as_struct_opt().context(AlignJsonArraySnafu {
-            reason: "expect struct array",
-        })?;
-        let array_fields = struct_array.fields();
-        let array_columns = struct_array.columns();
-        let DataType::Struct(expect_fields) = expect else {
-            return AlignJsonArraySnafu {
-                reason: "expect struct datatype",
-            }
-            .fail();
-        };
-        let mut aligned = Vec::with_capacity(expect_fields.len());
-
-        // Compare the fields in the JSON array and the to-be-aligned schema, amending with null
-        // arrays on the way. It's very important to note that fields in the JSON array and those
-        // in the JSON type are both **SORTED**, which can be guaranteed because the fields in the
-        // JSON type implementation are sorted.
-        debug_assert!(expect_fields.iter().map(|f| f.name()).is_sorted());
-        debug_assert!(array_fields.iter().map(|f| f.name()).is_sorted());
-
-        let mut i = 0; // point to the expect fields
-        let mut j = 0; // point to the array fields
-        while i < expect_fields.len() && j < array_fields.len() {
-            let expect_field = &expect_fields[i];
-            let array_field = &array_fields[j];
-            match expect_field.name().cmp(array_field.name()) {
-                Ordering::Equal => {
-                    if expect_field.data_type() == array_field.data_type() {
-                        aligned.push(array_columns[j].clone());
-                    } else {
-                        let expect_type = expect_field.data_type();
-                        let array_type = array_field.data_type();
-                        let array = match (expect_type, array_type) {
-                            (DataType::Struct(_), DataType::Struct(_)) => {
-                                JsonArray::from(&array_columns[j]).try_align(expect_type)?
-                            }
-                            (DataType::List(expect_item), DataType::List(array_item)) => {
-                                let list_array = array_columns[j].as_list::<i32>();
-                                try_align_list(list_array, expect_item, array_item)?
-                            }
-                            _ => JsonArray::from(&array_columns[j]).try_cast(expect_type)?,
-                        };
-                        aligned.push(array);
-                    }
-                    i += 1;
-                    j += 1;
-                }
-                Ordering::Less => {
-                    aligned.push(new_null_array(expect_field.data_type(), struct_array.len()));
-                    i += 1;
-                }
-                Ordering::Greater => {
-                    j += 1;
-                }
-            }
-        }
-        if i < expect_fields.len() {
-            for field in &expect_fields[i..] {
-                aligned.push(new_null_array(field.data_type(), struct_array.len()));
-            }
-        }
-
-        let json_array = StructArray::try_new(
-            expect_fields.clone(),
-            aligned,
-            struct_array.nulls().cloned(),
-        )
-        .map_err(|e| {
-            AlignJsonArraySnafu {
-                reason: e.to_string(),
-            }
-            .build()
-        })?;
-        Ok(Arc::new(json_array))
-    }
-
-    fn try_cast(&self, to_type: &DataType) -> Result<ArrayRef> {
-        let from_type = self.inner.data_type();
-        if from_type == to_type {
-            return Ok(self.inner.clone());
-        }
-
-        if from_type.is_binary() && !to_type.is_binary() {
-            return self.decode_variant(to_type);
-        }
-
-        if !from_type.is_binary() && to_type.is_binary() {
-            return self.encode_variant();
-        }
-
-        if compute::can_cast_types(from_type, to_type) {
-            return compute::cast(&self.inner, to_type).context(ArrowComputeSnafu);
-        }
-
-        let formatter = ArrayFormatter::try_new(&self.inner, &FormatOptions::default())
-            .context(ArrowComputeSnafu)?;
-        let values = (0..self.inner.len())
-            .map(|i| {
-                self.inner
-                    .is_valid(i)
-                    .then(|| formatter.value(i).to_string())
-            })
-            .collect::<Vec<_>>();
-        Ok(Arc::new(StringViewArray::from(values)))
-    }
-
-    fn encode_variant(&self) -> Result<ArrayRef> {
-        let len = self.inner.len();
-        let mut encoded = Vec::with_capacity(len);
-        let mut total_bytes = 0;
-
-        for i in 0..len {
-            let value = self.try_get_value(i)?;
-            if value.is_null() {
-                encoded.push(None);
-            } else {
-                let bytes = encode_serde_json_as_jsonb(value);
-                total_bytes += bytes.len();
-                encoded.push(Some(bytes));
-            }
-        }
-
-        let mut builder = MutableBinaryArray::with_capacity(len, total_bytes);
-        for value in encoded {
-            builder.append_option(value);
-        }
-        Ok(Arc::new(builder.finish()))
-    }
-
-    fn decode_variant(&self, to_type: &DataType) -> Result<ArrayRef> {
-        fn downcast_builder<'a, T: ArrayBuilder>(
-            builder: &'a mut dyn ArrayBuilder,
-            to_type: &DataType,
-        ) -> Result<&'a mut T> {
-            builder
-                .as_any_mut()
-                .downcast_mut::<T>()
-                .with_context(|| CastTypeSnafu {
-                    msg: format!("Expect ArrayBuilder is of type {to_type}"),
-                })
-        }
-
-        let mut builder = make_builder(to_type, self.inner.len());
-        if to_type.is_null() {
-            downcast_builder::<NullBuilder>(builder.as_mut(), to_type)?
-                .append_nulls(self.inner.len());
+    /// TODO(LFC) Supersede `project_to_v2` to `project_to`.
+    pub fn project_to_v2(&self, field: &Field, target: &DataType) -> Result<ArrayRef> {
+        if json2_remainder_field(field)?.is_some() {
+            project_json_values(self.json2_values()?, target)
         } else {
-            match to_type {
-                DataType::Boolean => {
-                    let b = downcast_builder::<BooleanBuilder>(builder.as_mut(), to_type)?;
-                    for i in 0..self.inner.len() {
-                        b.append_option(self.try_get_value(i)?.as_bool());
-                    }
-                }
-                DataType::Int64 => {
-                    let b = downcast_builder::<Int64Builder>(builder.as_mut(), to_type)?;
-                    for i in 0..self.inner.len() {
-                        b.append_option(self.try_get_value(i)?.as_i64());
-                    }
-                }
-                DataType::Float64 => {
-                    let b = downcast_builder::<Float64Builder>(builder.as_mut(), to_type)?;
-                    for i in 0..self.inner.len() {
-                        b.append_option(self.try_get_value(i)?.as_f64());
-                    }
-                }
-                DataType::Utf8View => {
-                    let b = downcast_builder::<StringViewBuilder>(builder.as_mut(), to_type)?;
-                    for i in 0..self.inner.len() {
-                        let v = self.try_get_value(i)?;
-                        if v.is_null() {
-                            b.append_null();
-                        } else if let Some(s) = v.as_str() {
-                            b.append_value(s);
-                        } else {
-                            b.append_value(v.to_string());
-                        }
-                    }
-                }
-                _ => {
-                    return CastTypeSnafu {
-                        msg: format!("Cannot cast JSON value to {to_type}"),
+            self.project_to(target)
+        }
+    }
+
+    /// Rewrites a JSON2 array from the current physical layout into the specified
+    /// v2 physical layout.
+    pub fn rewrite_to_v2(
+        &self,
+        field: &Field,
+        logical_settings: &JsonSettings,
+        target_layout: &JsonSettings,
+    ) -> Result<ArrayRef> {
+        self.rewrite_to_v2_with_type_hint_mismatch_policy(
+            field,
+            logical_settings,
+            target_layout,
+            TypeHintMismatchPolicy::Reject,
+        )
+    }
+
+    /// Rewrites a JSON2 array to the specified v2 physical layout using the
+    /// given type hint mismatch policy.
+    pub fn rewrite_to_v2_with_type_hint_mismatch_policy(
+        &self,
+        field: &Field,
+        logical_settings: &JsonSettings,
+        target_layout: &JsonSettings,
+        policy: TypeHintMismatchPolicy,
+    ) -> Result<ArrayRef> {
+        let is_v2 = json2_remainder_field(field)?.is_some();
+        if is_v2 && self.inner.data_type() == &json2_physical_data_type(target_layout) {
+            return Ok(self.inner.clone());
+        }
+
+        let values = if is_v2 {
+            self.json2_values()?
+        } else {
+            (0..self.inner.len())
+                .map(|i| self.try_get_value(i))
+                .collect::<Result<Vec<_>>>()?
+        };
+        let mut builder = JsonVectorBuilder::with_settings(target_layout, values.len());
+        for value in values {
+            if value.is_null() {
+                builder.push_null();
+            } else {
+                let value =
+                    logical_settings.encode_with_type_hint_mismatch_policy(value, policy)?;
+                builder.try_push_value_ref(&value.as_value_ref())?;
+            }
+        }
+        Ok(builder.to_vector().to_arrow_array())
+    }
+
+    fn json2_values(&self) -> Result<Vec<Value>> {
+        let structs = self.inner.as_struct_opt().context(AlignJsonArraySnafu {
+            reason: "JSON2 layout v2 root array must be a struct",
+        })?;
+        let remainder = structs.column_by_name(JSON2_REMAINDER_FIELD_NAME);
+        let mut remainders = if let Some(remainder) = remainder {
+            variant_to_json_values(remainder)?
+        } else {
+            vec![None; structs.len()]
+        };
+        let mut values = Vec::with_capacity(structs.len());
+        let mut path = Vec::new();
+
+        for (i, remainder) in remainders.iter_mut().enumerate() {
+            if structs.is_null(i) {
+                values.push(Value::Null);
+                continue;
+            }
+
+            let mut object = match remainder.take() {
+                None => serde_json::Map::new(),
+                Some(Value::Object(object)) => object,
+                Some(value) => {
+                    return InvalidJsonSnafu {
+                        value: format!("JSON2 layout v2 remainder must be an object, got {value}"),
                     }
                     .fail();
                 }
+            };
+
+            for (child, column) in structs.fields().iter().zip(structs.columns()) {
+                if child.name() == JSON2_REMAINDER_FIELD_NAME {
+                    continue;
+                }
+                let mut value = JsonArray::from(column).try_get_value(i)?;
+                // Arrow child nulls cannot distinguish a missing path from an explicit JSON
+                // null. Builders preserve explicit null presence in the remainder, so nulls
+                // from the explicit branch must be discarded before merging both branches.
+                remove_null_object_fields(&mut value);
+                if value.is_null() {
+                    continue;
+                }
+                merge_explicit_value(&mut object, child.name().clone(), value, &mut path)?;
             }
+            values.push(Value::Object(object));
         }
-        Ok(builder.finish())
+
+        Ok(values)
+    }
+
+    /// Projects this JSON array to `target` for query evaluation.
+    ///
+    /// Unlike [`Self::widen_to`], projection tolerates lossy conversions:
+    /// - source fields not present in `target` are discarded;
+    /// - fields missing from the source are filled with typed null arrays;
+    /// - values incompatible with the target type become NULL.
+    ///
+    /// Projection is applied recursively to structs and lists. Input nulls
+    /// remain NULL. Errors unrelated to type incompatibility, such as invalid
+    /// JSONB, are returned.
+    pub fn project_to(&self, target: &DataType) -> Result<ArrayRef> {
+        if self.inner.data_type() == target {
+            return Ok(self.inner.clone());
+        }
+
+        match (self.inner.data_type(), target) {
+            (DataType::Struct(_), DataType::Struct(target_fields)) => {
+                let struct_array = self.inner.as_struct();
+                let mut columns = Vec::with_capacity(target_fields.len());
+                for target_field in target_fields {
+                    let column = struct_array
+                        .column_by_name(target_field.name())
+                        .map(|column| JsonArray::from(column).project_to(target_field.data_type()))
+                        .transpose()?
+                        .unwrap_or_else(|| {
+                            new_null_array(target_field.data_type(), self.inner.len())
+                        });
+                    columns.push(column);
+                }
+                let projected = StructArray::try_new_with_length(
+                    target_fields.clone(),
+                    columns,
+                    struct_array.nulls().cloned(),
+                    struct_array.len(),
+                )
+                .context(ArrowComputeSnafu)?;
+                Ok(Arc::new(projected))
+            }
+            (DataType::List(_), DataType::List(target_item)) => {
+                let list_array = self.inner.as_list::<i32>();
+                let item_projected =
+                    JsonArray::from(list_array.values()).project_to(target_item.data_type())?;
+                Ok(Arc::new(
+                    GenericListArray::<i32>::try_new(
+                        target_item.clone(),
+                        list_array.offsets().clone(),
+                        item_projected,
+                        list_array.nulls().cloned(),
+                    )
+                    .context(ArrowComputeSnafu)?,
+                ))
+            }
+            _ => self.project_values_to(target),
+        }
+    }
+
+    fn project_values_to(&self, to_type: &DataType) -> Result<ArrayRef> {
+        let from_type = self.inner.data_type();
+        if can_fast_cast_types(from_type, to_type) {
+            return cast(self.inner.as_ref(), to_type).context(ArrowComputeSnafu);
+        }
+
+        let values = (0..self.inner.len())
+            .map(|i| self.try_get_value(i))
+            .collect::<Result<Vec<_>>>()?;
+        project_json_values(values, to_type)
     }
 }
 
-fn try_align_list(
-    list_array: &ListArray,
-    expect_item: &FieldRef,
-    array_item: &FieldRef,
-) -> Result<ArrayRef> {
-    let item_aligned = match (expect_item.data_type(), array_item.data_type()) {
-        (DataType::Struct(_), DataType::Struct(_)) => {
-            JsonArray::from(list_array.values()).try_align(expect_item.data_type())?
-        }
-        (DataType::List(expect_item), DataType::List(array_item)) => {
-            let list_array = list_array.values().as_list::<i32>();
-            try_align_list(list_array, expect_item, array_item)?
-        }
-        _ => JsonArray::from(list_array.values()).try_cast(expect_item.data_type())?,
+fn merge_explicit_value(
+    remainder: &mut serde_json::Map<String, Value>,
+    key: String,
+    explicit: Value,
+    path: &mut Vec<String>,
+) -> Result<()> {
+    let Some(existing) = remainder.get_mut(&key) else {
+        remainder.insert(key, explicit);
+        return Ok(());
     };
-    Ok(Arc::new(
-        GenericListArray::<i32>::try_new(
-            expect_item.clone(),
-            list_array.offsets().clone(),
-            item_aligned,
-            list_array.nulls().cloned(),
-        )
-        .context(ArrowComputeSnafu)?,
-    ))
+    path.push(key);
+
+    let (Value::Object(remainder), Value::Object(explicit)) = (existing, explicit) else {
+        return InvalidJsonSnafu {
+            value: format!(
+                "cannot merge '{}' in explicit fields and remainder: not both objects",
+                path.join("."),
+            ),
+        }
+        .fail();
+    };
+    for (key, value) in explicit {
+        merge_explicit_value(remainder, key, value, path)?;
+    }
+    path.pop();
+    Ok(())
+}
+
+fn remove_null_object_fields(value: &mut Value) {
+    let Value::Object(object) = value else {
+        return;
+    };
+    object.retain(|_, value| {
+        remove_null_object_fields(value);
+        !value.is_null()
+    });
+}
+
+/// Returns whether Arrow can cast between the types without JSON-aware projection.
+/// Binary and nested types require JSONB decoding or recursive projection.
+fn can_fast_cast_types(from_type: &DataType, to_type: &DataType) -> bool {
+    let is_scalar = |data_type: &DataType| {
+        data_type.is_numeric() || data_type.is_string() || data_type == &DataType::Boolean
+    };
+
+    is_scalar(from_type) && is_scalar(to_type) && can_cast_types(from_type, to_type)
+}
+
+fn project_json_values(values: Vec<Value>, to_type: &DataType) -> Result<ArrayRef> {
+    let concrete_type = ConcreteDataType::from_arrow_type(to_type);
+    let mut builder = concrete_type.create_mutable_vector(values.len());
+    for value in values {
+        let value = coerce_json_value_to_type(value, &concrete_type);
+        builder.try_push_value_ref(&value.as_value_ref())?;
+    }
+    Ok(builder.to_vector().to_arrow_array())
 }
 
 impl<'a> From<&'a ArrayRef> for JsonArray<'a> {
@@ -338,14 +349,20 @@ impl<'a> From<&'a ArrayRef> for JsonArray<'a> {
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use arrow_array::types::Int64Type;
     use arrow_array::{
-        BinaryArray, BooleanArray, Float64Array, Int32Array, Int64Array, ListArray, StringArray,
+        BinaryArray, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
+        Int64Array, ListArray, StringArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
     };
     use arrow_schema::{Field, Fields};
     use serde_json::json;
 
     use super::*;
+    use crate::extension::json::{Json2ExtensionType, JsonMetadata};
+    use crate::json::{JsonSettings, JsonTypeHint};
+    use crate::vectors::json::variant::{json_values_to_variant, variant_field};
 
     #[test]
     fn test_try_get_value() -> Result<()> {
@@ -359,6 +376,20 @@ mod test {
         let ints: ArrayRef = Arc::new(Int64Array::from(vec![Some(-7), None]));
         assert_eq!(JsonArray::from(&ints).try_get_value(0)?, json!(-7));
         assert_eq!(JsonArray::from(&ints).try_get_value(1)?, Value::Null);
+
+        macro_rules! assert_number {
+            ($array:expr, $expected:expr) => {{
+                let array: ArrayRef = Arc::new($array);
+                assert_eq!(JsonArray::from(&array).try_get_value(0)?, json!($expected));
+            }};
+        }
+        assert_number!(Int8Array::from(vec![-8]), -8);
+        assert_number!(Int16Array::from(vec![-16]), -16);
+        assert_number!(Int32Array::from(vec![-32]), -32);
+        assert_number!(UInt8Array::from(vec![8]), 8);
+        assert_number!(UInt16Array::from(vec![16]), 16);
+        assert_number!(UInt32Array::from(vec![32]), 32);
+        assert_number!(Float32Array::from(vec![1.25]), 1.25);
 
         let floats: ArrayRef = Arc::new(Float64Array::from(vec![Some(1.5)]));
         assert_eq!(JsonArray::from(&floats).try_get_value(0)?, json!(1.5));
@@ -415,160 +446,285 @@ mod test {
             json!({"flag": null, "items": [2]})
         );
 
-        let unsupported: ArrayRef = Arc::new(Int32Array::from(vec![1]));
+        Ok(())
+    }
+
+    #[test]
+    fn test_cast_variant_to_utf8_view_preserves_json_null() -> Result<()> {
+        let encode = |json: &[u8]| jsonb::parse_value(json).unwrap().to_vec();
+        let json_null = encode(b"null");
+        let object = encode(br#"{"value":1}"#);
+        let string = encode(br#""text""#);
+        let variants: ArrayRef = Arc::new(BinaryArray::from(vec![
+            Some(json_null.as_slice()),
+            Some(object.as_slice()),
+            Some(string.as_slice()),
+            None,
+        ]));
+
+        let casted = JsonArray::from(&variants).project_to(&DataType::Utf8View)?;
+        let casted = casted.as_string_view();
+        assert!(casted.is_null(0));
+        assert_eq!(casted.value(1), r#"{"value":1}"#);
+        assert_eq!(casted.value(2), "text");
+        assert!(casted.is_null(3));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_project_plain_scalars() -> Result<()> {
+        let integers: ArrayRef = Arc::new(Int64Array::from(vec![Some(42), Some(i64::MAX), None]));
+        let projected = JsonArray::from(&integers).project_to(&DataType::Int32)?;
+        let expected: ArrayRef = Arc::new(Int32Array::from(vec![Some(42), None, None]));
+        assert_eq!(&expected, &projected);
+
+        let booleans: ArrayRef = Arc::new(BooleanArray::from(vec![Some(true), Some(false), None]));
+        let projected = JsonArray::from(&booleans).project_to(&DataType::Float64)?;
+        let expected: ArrayRef = Arc::new(Float64Array::from(vec![Some(1.0), Some(0.0), None]));
+        assert_eq!(&expected, &projected);
+
+        let strings: ArrayRef = Arc::new(StringArray::from(vec![Some("42"), Some("bad"), None]));
+        let projected = JsonArray::from(&strings).project_to(&DataType::UInt64)?;
+        let expected: ArrayRef = Arc::new(UInt64Array::from(vec![Some(42), None, None]));
+        assert_eq!(&expected, &projected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_align_variant_to_struct() -> Result<()> {
+        let encode = |json: &[u8]| jsonb::parse_value(json).unwrap().to_vec();
+        let object =
+            encode(br#"{"nested":{"flag":true,"items":[1,2],"raw":{"x":1},"text":42,"value":42}}"#);
+        let scalar = encode(b"1");
+        let variants: ArrayRef = Arc::new(BinaryArray::from(vec![
+            Some(object.as_slice()),
+            None,
+            Some(scalar.as_slice()),
+        ]));
+        let expected_type = DataType::Struct(Fields::from(vec![Field::new_struct(
+            "nested",
+            vec![
+                Field::new("flag", DataType::Boolean, true),
+                Field::new_list("items", Field::new_list_field(DataType::UInt64, true), true),
+                Field::new("raw", DataType::Binary, true),
+                Field::new("text", DataType::Utf8View, true),
+                Field::new("value", DataType::UInt64, true),
+            ],
+            true,
+        )]));
+
+        let aligned = JsonArray::from(&variants).project_to(&expected_type)?;
+        assert_eq!(&expected_type, aligned.data_type());
         assert_eq!(
-            JsonArray::from(&unsupported)
-                .try_get_value(0)
-                .unwrap_err()
-                .to_string(),
-            "Invalid JSON: unknown JSON type Int32"
+            json!({
+                "nested": {
+                    "flag": true,
+                    "items": [1, 2],
+                    "raw": {"x": 1},
+                    "text": "42",
+                    "value": 42
+                }
+            }),
+            JsonArray::from(&aligned).try_get_value(0)?
+        );
+        assert!(aligned.is_null(1));
+        assert!(aligned.is_null(2));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_align_nested_variant_to_struct() -> Result<()> {
+        let object = jsonb::parse_value(br#"{"flag":true,"value":42}"#)
+            .unwrap()
+            .to_vec();
+        let variants: ArrayRef = Arc::new(BinaryArray::from(vec![Some(object.as_slice()), None]));
+        let input: ArrayRef = Arc::new(StructArray::from(vec![(
+            Arc::new(Field::new("nested", DataType::Binary, true)),
+            variants,
+        )]));
+        let expected_type = DataType::Struct(Fields::from(vec![Field::new_struct(
+            "nested",
+            vec![
+                Field::new("flag", DataType::Boolean, true),
+                Field::new("value", DataType::UInt64, true),
+            ],
+            true,
+        )]));
+
+        let aligned = JsonArray::from(&input).project_to(&expected_type)?;
+        assert_eq!(&expected_type, aligned.data_type());
+        assert_eq!(
+            json!({"nested": {"flag": true, "value": 42}}),
+            JsonArray::from(&aligned).try_get_value(0)?
+        );
+        assert_eq!(
+            json!({"nested": null}),
+            JsonArray::from(&aligned).try_get_value(1)?
         );
 
         Ok(())
     }
 
     #[test]
-    fn test_align_json_array() -> Result<()> {
-        struct TestCase {
-            json_array: ArrayRef,
-            schema_type: DataType,
-            expected: std::result::Result<ArrayRef, String>,
-        }
+    fn test_reconstruct_json2_v2_value() -> Result<()> {
+        let remainders = json_values_to_variant(&[
+            Some(json!({"cold": 1, "nested": {"right": true}})),
+            Some(json!({"!__remainder__!": "user value"})),
+        ])?;
+        let remainder = Arc::new(variant_field(JSON2_REMAINDER_FIELD_NAME, true));
+        let nested = Arc::new(Field::new_struct(
+            "nested",
+            [Arc::new(Field::new("left", DataType::Utf8, true))],
+            true,
+        ));
+        let nested_values: ArrayRef = Arc::new(StructArray::from(vec![(
+            Arc::new(Field::new("left", DataType::Utf8, true)),
+            Arc::new(StringArray::from(vec![Some("value"), None])) as ArrayRef,
+        )]));
+        let fields = Fields::from(vec![
+            remainder,
+            Arc::new(Field::new("count", DataType::Int64, true)),
+            nested,
+        ]);
+        let array: ArrayRef = Arc::new(StructArray::new(
+            fields.clone(),
+            vec![
+                remainders,
+                Arc::new(Int64Array::from(vec![Some(42), None])),
+                nested_values,
+            ],
+            None,
+        ));
+        let field = Field::new("data", DataType::Struct(fields), true).with_extension_type(
+            Json2ExtensionType::new(Arc::new(JsonMetadata::new(JsonSettings::default()))),
+        );
 
-        impl TestCase {
-            fn new(
-                json_array: StructArray,
-                schema_type: Fields,
-                expected: std::result::Result<Vec<ArrayRef>, String>,
-            ) -> Self {
-                Self {
-                    json_array: Arc::new(json_array),
-                    schema_type: DataType::Struct(schema_type.clone()),
-                    expected: expected
-                        .map(|x| Arc::new(StructArray::new(schema_type, x, None)) as ArrayRef),
-                }
-            }
+        assert_eq!(
+            json!({
+                "cold": 1,
+                "count": 42,
+                "nested": {"left": "value", "right": true}
+            }),
+            JsonArray::from(&array).json2_values()?[0]
+        );
+        assert_eq!(
+            json!({
+                "!__remainder__!": "user value",
+                "nested": {}
+            }),
+            JsonArray::from(&array).json2_values()?[1]
+        );
+        let target = DataType::Struct(
+            vec![
+                Arc::new(Field::new("cold", DataType::UInt64, true)),
+                Arc::new(Field::new("count", DataType::Int64, true)),
+            ]
+            .into(),
+        );
+        let projected = JsonArray::from(&array).project_to_v2(&field, &target)?;
+        assert_eq!(
+            json!({"cold": 1, "count": 42}),
+            JsonArray::from(&projected).try_get_value(0)?
+        );
+        assert_eq!(
+            json!({"cold": null, "count": null}),
+            JsonArray::from(&projected).try_get_value(1)?
+        );
+        Ok(())
+    }
 
-            fn test(self) -> Result<()> {
-                let result = JsonArray::from(&self.json_array).try_align(&self.schema_type);
-                match (result, self.expected) {
-                    (Ok(json_array), Ok(expected)) => assert_eq!(&json_array, &expected),
-                    (Ok(json_array), Err(e)) => {
-                        panic!("expecting error {e} but actually get: {json_array:?}")
-                    }
-                    (Err(e), Err(expected)) => assert_eq!(e.to_string(), expected),
-                    (Err(e), Ok(_)) => return Err(e),
-                }
-                Ok(())
-            }
-        }
+    #[test]
+    fn test_rewrite_to_v2_reuses_matching_layout() -> Result<()> {
+        let settings = JsonSettings::try_new(
+            vec![JsonTypeHint {
+                path: vec!["kind".to_string()],
+                data_type: ConcreteDataType::string_datatype(),
+                inverted_index: false,
+            }],
+            Some(0),
+        )?;
+        let value = settings.encode(json!({"kind": "access", "cold": 1}))?;
+        let mut builder = JsonVectorBuilder::with_settings(&settings, 1);
+        builder.try_push_value_ref(&value.as_value_ref())?;
+        let array = builder.to_vector().to_arrow_array();
+        let structs = array.as_struct();
+        assert!(structs.column_by_name("kind").is_some());
+        assert_eq!(
+            vec![Some(json!({"cold": 1}))],
+            variant_to_json_values(structs.column_by_name(JSON2_REMAINDER_FIELD_NAME).unwrap())?
+        );
+        let field = Field::new("data", array.data_type().clone(), true).with_extension_type(
+            Json2ExtensionType::new(Arc::new(JsonMetadata::new(settings.clone()))),
+        );
 
-        // Test empty json array can be aligned with a complex json type.
-        TestCase::new(
-            StructArray::new_empty_fields(2, None),
-            Fields::from(vec![
-                Field::new("int", DataType::Int64, true),
-                Field::new_struct(
-                    "nested",
-                    vec![Field::new("bool", DataType::Boolean, true)],
-                    true,
-                ),
-                Field::new("string", DataType::Utf8, true),
-            ]),
-            Ok(vec![
-                Arc::new(Int64Array::new_null(2)) as ArrayRef,
-                Arc::new(StructArray::new_null(
-                    Fields::from(vec![Arc::new(Field::new("bool", DataType::Boolean, true))]),
-                    2,
-                )),
-                Arc::new(StringArray::new_null(2)),
-            ]),
+        let rewritten = JsonArray::from(&array).rewrite_to_v2(&field, &settings, &settings)?;
+
+        assert!(Arc::ptr_eq(&array, &rewritten));
+        Ok(())
+    }
+
+    #[test]
+    fn test_project_partial_json2_v2_without_remainder() -> Result<()> {
+        let fields = Fields::from(vec![Arc::new(Field::new("hot", DataType::Int64, true))]);
+        let array: ArrayRef = Arc::new(StructArray::new(
+            fields.clone(),
+            vec![Arc::new(Int64Array::from(vec![1, 2]))],
+            None,
+        ));
+        let field = Field::new("data", DataType::Struct(fields), true).with_extension_type(
+            Json2ExtensionType::new(Arc::new(JsonMetadata::new(JsonSettings::default()))),
+        );
+
+        let projected = JsonArray::from(&array).project_to_v2(&field, field.data_type())?;
+        assert!(Arc::ptr_eq(&array, &projected));
+        Ok(())
+    }
+
+    #[test]
+    fn test_reject_conflict_json2_v2_path() -> Result<()> {
+        let remainders = json_values_to_variant(&[Some(json!({"count": 1}))])?;
+        let fields = Fields::from(vec![
+            Arc::new(variant_field(JSON2_REMAINDER_FIELD_NAME, true)),
+            Arc::new(Field::new("count", DataType::Int64, true)),
+        ]);
+        let array: ArrayRef = Arc::new(StructArray::new(
+            fields,
+            vec![remainders, Arc::new(Int64Array::from(vec![2]))],
+            None,
+        ));
+        let error = JsonArray::from(&array).json2_values().unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "cannot merge 'count' in explicit fields and remainder: not both objects"
+            )
+        );
+
+        let Value::Object(mut remainder) = json!({"count": 1}) else {
+            unreachable!();
+        };
+        let error = merge_explicit_value(
+            &mut remainder,
+            "count".to_string(),
+            json!(1),
+            &mut Vec::new(),
         )
-        .test()?;
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot merge 'count'"));
 
-        // Test simple json array alignment.
-        TestCase::new(
-            StructArray::from(vec![(
-                Arc::new(Field::new("float", DataType::Float64, true)),
-                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])) as ArrayRef,
-            )]),
-            Fields::from(vec![
-                Field::new("float", DataType::Float64, true),
-                Field::new("string", DataType::Utf8, true),
-            ]),
-            Ok(vec![
-                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])) as ArrayRef,
-                Arc::new(StringArray::new_null(3)),
-            ]),
+        let Value::Object(mut remainder) = json!({"nested": {"count": 1}}) else {
+            unreachable!();
+        };
+        let error = merge_explicit_value(
+            &mut remainder,
+            "nested".to_string(),
+            json!({"count": 2}),
+            &mut Vec::new(),
         )
-        .test()?;
-
-        // Test complex json array alignment.
-        TestCase::new(
-            StructArray::from(vec![
-                (
-                    Arc::new(Field::new_list(
-                        "list",
-                        Field::new_list_field(DataType::Int64, true),
-                        true,
-                    )),
-                    Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>(vec![
-                        Some(vec![Some(1)]),
-                        None,
-                        Some(vec![Some(2), Some(3)]),
-                    ])) as ArrayRef,
-                ),
-                (
-                    Arc::new(Field::new_struct(
-                        "nested",
-                        vec![Field::new("int", DataType::Int64, true)],
-                        true,
-                    )),
-                    Arc::new(StructArray::from(vec![(
-                        Arc::new(Field::new("int", DataType::Int64, true)),
-                        Arc::new(Int64Array::from(vec![-1, -2, -3])) as ArrayRef,
-                    )])),
-                ),
-                (
-                    Arc::new(Field::new("string", DataType::Utf8, true)),
-                    Arc::new(StringArray::from(vec!["a", "b", "c"])),
-                ),
-            ]),
-            Fields::from(vec![
-                Field::new("bool", DataType::Boolean, true),
-                Field::new_list("list", Field::new_list_field(DataType::Int64, true), true),
-                Field::new_struct(
-                    "nested",
-                    vec![
-                        Field::new("float", DataType::Float64, true),
-                        Field::new("int", DataType::Int64, true),
-                    ],
-                    true,
-                ),
-                Field::new("string", DataType::Utf8, true),
-            ]),
-            Ok(vec![
-                Arc::new(BooleanArray::new_null(3)) as ArrayRef,
-                Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>(vec![
-                    Some(vec![Some(1)]),
-                    None,
-                    Some(vec![Some(2), Some(3)]),
-                ])),
-                Arc::new(StructArray::from(vec![
-                    (
-                        Arc::new(Field::new("float", DataType::Float64, true)),
-                        Arc::new(Float64Array::new_null(3)) as ArrayRef,
-                    ),
-                    (
-                        Arc::new(Field::new("int", DataType::Int64, true)),
-                        Arc::new(Int64Array::from(vec![-1, -2, -3])),
-                    ),
-                ])),
-                Arc::new(StringArray::from(vec!["a", "b", "c"])),
-            ]),
-        )
-        .test()?;
-
+        .unwrap_err();
+        assert!(error.to_string().contains("cannot merge 'nested.count'"));
         Ok(())
     }
 }

@@ -18,14 +18,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::{AffectedRows, FlightMetadata, Metrics};
+use arrow_flight::FlightData;
 use arrow_flight::utils::flight_data_to_arrow_batch;
-use arrow_flight::{FlightData, SchemaAsIpc};
 use common_base::bytes::Bytes;
 use common_recordbatch::DfRecordBatch;
 use datatypes::arrow;
 use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::buffer::Buffer;
-use datatypes::arrow::datatypes::{DataType, Schema as ArrowSchema, SchemaRef};
+use datatypes::arrow::datatypes::{Schema as ArrowSchema, SchemaRef};
 use datatypes::arrow::error::ArrowError;
 use datatypes::arrow::ipc::{MessageHeader, convert, reader, root_as_message, writer};
 use flatbuffers::FlatBufferBuilder;
@@ -36,6 +36,35 @@ use vec1::{Vec1, vec1};
 
 use crate::error;
 use crate::error::{DecodeFlightDataSnafu, InvalidFlightDataSnafu, Result};
+
+/// Encodes a batch into the schema, record-batch header and payload used by bulk inserts.
+///
+/// Uses the default Flight compression and rejects dictionary batches, whose
+/// additional Flight messages cannot be represented by this three-part format.
+pub fn record_batch_to_ipc(
+    record_batch: DfRecordBatch,
+) -> Result<(ProstBytes, ProstBytes, ProstBytes)> {
+    let mut encoder = FlightEncoder::default();
+    let schema = encoder.encode_schema(record_batch.schema().as_ref());
+    let mut iter = encoder
+        .encode(FlightMessage::RecordBatch(record_batch))
+        .into_iter();
+    let flight_data = iter.next().context(InvalidFlightDataSnafu {
+        reason: "Failed to encode empty flight data",
+    })?;
+    if iter.next().is_some() {
+        return error::NotSupportedSnafu {
+            feat: "bulk insert RecordBatch with dictionary arrays",
+        }
+        .fail();
+    }
+
+    Ok((
+        schema.data_header,
+        flight_data.data_header,
+        flight_data.data_body,
+    ))
+}
 
 /// Flight metadata key used to carry flow query extensions as JSON pairs.
 pub const FLOW_EXTENSIONS_METADATA_KEY: &str = "x-greptime-flow-extensions";
@@ -88,8 +117,14 @@ impl FlightEncoder {
     }
 
     /// Encode the Arrow schema to [FlightData].
-    pub fn encode_schema(&self, schema: &ArrowSchema) -> FlightData {
-        SchemaAsIpc::new(schema, &self.write_options).into()
+    pub fn encode_schema(&mut self, schema: &ArrowSchema) -> FlightData {
+        self.data_gen
+            .schema_to_bytes_with_dictionary_tracker(
+                schema,
+                &mut self.dictionary_tracker,
+                &self.write_options,
+            )
+            .into()
     }
 
     /// Encode the [FlightMessage] to a list (at least one element) of [FlightData]s.
@@ -99,15 +134,7 @@ impl FlightEncoder {
     /// be encoded to exactly one [FlightData].
     pub fn encode(&mut self, flight_message: FlightMessage) -> Vec1<FlightData> {
         match flight_message {
-            FlightMessage::Schema(schema) => {
-                schema.fields().iter().for_each(|x| {
-                    if matches!(x.data_type(), DataType::Dictionary(_, _)) {
-                        self.dictionary_tracker.next_dict_id();
-                    }
-                });
-
-                vec1![self.encode_schema(schema.as_ref())]
-            }
+            FlightMessage::Schema(schema) => vec1![self.encode_schema(schema.as_ref())],
             FlightMessage::RecordBatch(record_batch) => {
                 let (encoded_dictionaries, encoded_batch) = self
                     .data_gen
@@ -371,12 +398,57 @@ fn build_none_flight_msg() -> Bytes {
 mod test {
     use arrow_flight::utils::batches_to_flight_data;
     use datatypes::arrow::array::{
-        DictionaryArray, Int32Array, StringArray, UInt8Array, UInt32Array,
+        DictionaryArray, Int32Array, ListArray, StringArray, UInt8Array, UInt32Array,
     };
+    use datatypes::arrow::buffer::OffsetBuffer;
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
 
-    use super::*;
     use crate::Error;
+    use crate::flight::*;
+
+    #[test]
+    fn test_record_batch_to_ipc_preserves_wire_bytes() {
+        let schema = Arc::new(Schema::new(vec![Field::new("n", DataType::Int32, true)]));
+        for values in [vec![], vec![Some(1), None, Some(3)]] {
+            let batch =
+                DfRecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(values))])
+                    .unwrap();
+            // Reproduce the previous Prom encoding sequence and compare all bytes.
+            let mut encoder = FlightEncoder::default();
+            let expected_schema = encoder.encode_schema(batch.schema().as_ref());
+            let messages = encoder.encode(FlightMessage::RecordBatch(batch.clone()));
+            assert_eq!(messages.len(), 1);
+            let expected_batch = messages.first();
+            assert_eq!(
+                record_batch_to_ipc(batch).unwrap(),
+                (
+                    expected_schema.data_header,
+                    expected_batch.data_header.clone(),
+                    expected_batch.data_body.clone(),
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn test_record_batch_to_ipc_rejects_dictionary() {
+        let schema = Arc::new(Schema::new(vec![Field::new_dictionary(
+            "tag",
+            DataType::UInt32,
+            DataType::Utf8,
+            true,
+        )]));
+        let dictionary = DictionaryArray::new(
+            UInt32Array::from_value(0, 3),
+            Arc::new(StringArray::from_iter_values(["x"])),
+        );
+        let batch = DfRecordBatch::try_new(schema, vec![Arc::new(dictionary)]).unwrap();
+        assert!(matches!(
+            record_batch_to_ipc(batch),
+            Err(Error::NotSupported { feat })
+                if feat == "bulk insert RecordBatch with dictionary arrays"
+        ));
+    }
 
     #[test]
     fn test_try_decode() -> Result<()> {
@@ -602,6 +674,50 @@ mod test {
 | 8 | o |
 +---+---+";
         assert_eq!(actual, expected.trim());
+        Ok(())
+    }
+
+    #[test]
+    fn test_encode_schema_with_nested_dictionary_array() -> Result<()> {
+        let item = Arc::new(Field::new_dictionary(
+            "item",
+            DataType::UInt32,
+            DataType::Utf8,
+            true,
+        ));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "tags",
+            DataType::List(item.clone()),
+            true,
+        )]));
+        let values = DictionaryArray::new(
+            UInt32Array::from_iter_values([0, 1, 0]),
+            Arc::new(StringArray::from_iter_values(["host-a", "host-b"])),
+        );
+        let list = ListArray::new(
+            item,
+            OffsetBuffer::from_lengths([2, 1]),
+            Arc::new(values),
+            None,
+        );
+        let batch = DfRecordBatch::try_new(schema.clone(), vec![Arc::new(list)]).unwrap();
+
+        let mut encoder = FlightEncoder::default();
+        let encoded_schema = encoder.encode_schema(schema.as_ref());
+        let encoded_batch = encoder.encode(FlightMessage::RecordBatch(batch.clone()));
+
+        let mut decoder = FlightDecoder::default();
+        assert!(matches!(
+            decoder.try_decode(&encoded_schema)?,
+            Some(FlightMessage::Schema(actual)) if actual == schema
+        ));
+        for data in encoded_batch.iter().take(encoded_batch.len() - 1) {
+            assert!(decoder.try_decode(data)?.is_none());
+        }
+        assert!(matches!(
+            decoder.try_decode(encoded_batch.last())?,
+            Some(FlightMessage::RecordBatch(actual)) if actual == batch
+        ));
         Ok(())
     }
 

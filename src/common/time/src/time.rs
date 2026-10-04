@@ -145,6 +145,11 @@ impl Time {
         self.value = -self.value;
         self
     }
+
+    pub fn checked_negative(mut self) -> Option<Self> {
+        self.value = self.value.checked_neg()?;
+        Some(self)
+    }
 }
 
 impl From<i64> for Time {

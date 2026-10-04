@@ -19,7 +19,7 @@ use std::{assert_matches, vec};
 use common_test_util::find_workspace_path;
 use datafusion::assert_batches_eq;
 use datafusion::datasource::physical_plan::{
-    CsvSource, FileScanConfig, FileSource, FileStream, JsonSource, ParquetSource,
+    CsvSource, FileScanConfig, FileSource, FileStreamBuilder, JsonSource, ParquetSource,
 };
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::execution::context::TaskContext;
@@ -50,16 +50,15 @@ impl Test<'_> {
             .create_file_opener(store, &self.config, 0)
             .unwrap();
 
-        let result = FileStream::new(
-            &self.config,
-            0,
-            file_opener,
-            &ExecutionPlanMetricsSet::new(),
-        )
-        .unwrap()
-        .map(|b| b.unwrap())
-        .collect::<Vec<_>>()
-        .await;
+        let result = FileStreamBuilder::new(&self.config)
+            .with_partition(0)
+            .with_file_opener(file_opener)
+            .with_metrics(&ExecutionPlanMetricsSet::new())
+            .build()
+            .unwrap()
+            .map(|b| b.unwrap())
+            .collect::<Vec<_>>()
+            .await;
 
         assert_batches_eq!(self.expected, &result);
     }
@@ -67,13 +66,12 @@ impl Test<'_> {
 
 #[tokio::test]
 async fn test_json_opener() {
-    let store = test_store("/");
+    let root = find_workspace_path("/src/common/datasource/tests");
+    let store = test_store(root.to_str().unwrap());
     let schema = basic_schema_with_time_format();
     let file_source = Arc::new(JsonSource::new(schema)).with_batch_size(test_util::TEST_BATCH_SIZE);
 
-    let path = &find_workspace_path("/src/common/datasource/tests/json/basic.json")
-        .display()
-        .to_string();
+    let path = "json/basic.json";
 
     let tests = [
         Test {
@@ -109,11 +107,10 @@ async fn test_json_opener() {
 
 #[tokio::test]
 async fn test_csv_opener() {
-    let store = test_store("/");
+    let root = find_workspace_path("/src/common/datasource/tests");
+    let store = test_store(root.to_str().unwrap());
     let schema = basic_schema_with_time_format();
-    let path = &find_workspace_path("/src/common/datasource/tests/csv/basic.csv")
-        .display()
-        .to_string();
+    let path = "csv/basic.csv";
 
     let file_source = CsvSource::new(schema).with_batch_size(test_util::TEST_BATCH_SIZE);
 
@@ -151,13 +148,12 @@ async fn test_csv_opener() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_parquet_exec() {
-    let store = test_store("/");
+    let root = find_workspace_path("/src/common/datasource/tests");
+    let store = test_store(root.to_str().unwrap());
 
     let schema = test_basic_schema();
 
-    let path = &find_workspace_path("/src/common/datasource/tests/parquet/basic.parquet")
-        .display()
-        .to_string();
+    let path = "parquet/basic.parquet";
 
     let parquet_source = ParquetSource::new(schema)
         .with_parquet_file_reader_factory(Arc::new(DefaultParquetFileReaderFactory::new(store)));
@@ -192,11 +188,10 @@ async fn test_parquet_exec() {
 
 #[tokio::test]
 async fn test_orc_opener() {
-    let path = &find_workspace_path("/src/common/datasource/tests/orc/test.orc")
-        .display()
-        .to_string();
+    let path = "orc/test.orc";
 
-    let store = test_store("/");
+    let root = find_workspace_path("/src/common/datasource/tests");
+    let store = test_store(root.to_str().unwrap());
     let schema = Arc::new(OrcFormat.infer_schema(&store, path).await.unwrap());
     let file_source = Arc::new(OrcSource::new(schema.into()));
 

@@ -1,0 +1,87 @@
+-- Exercise dictionary-encoded metric labels across physical-table partitions.
+CREATE TABLE metric_dictionary_regex_filter_physical (
+    ts TIMESTAMP(3) TIME INDEX,
+    host STRING,
+    val DOUBLE,
+    PRIMARY KEY(host)
+)
+PARTITION ON COLUMNS (host) (
+    host < 'api-02',
+    host >= 'api-02' AND host < 'db',
+    host >= 'db'
+)
+ENGINE = metric
+WITH (
+    physical_metric_table = "true"
+);
+
+Affected Rows: 0
+
+CREATE TABLE metric_dictionary_regex_filter (
+    ts TIMESTAMP(3) TIME INDEX,
+    host STRING PRIMARY KEY,
+    val DOUBLE
+)
+ENGINE = metric
+WITH (
+    on_physical_table = "metric_dictionary_regex_filter_physical"
+);
+
+Affected Rows: 0
+
+INSERT INTO metric_dictionary_regex_filter (ts, host, val) VALUES
+    (1000, 'api-01', 1.0),
+    (2000, 'api-02', 2.0),
+    (3000, 'db-01', 3.0);
+
+Affected Rows: 3
+
+ADMIN FLUSH_TABLE('metric_dictionary_regex_filter_physical');
+
++--------------------------------------------------------------+
+| ADMIN FLUSH_TABLE('metric_dictionary_regex_filter_physical') |
++--------------------------------------------------------------+
+| 0                                                            |
++--------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (2, 2, '1s') metric_dictionary_regex_filter{host=~"api-.*"};
+
++-----+--------+---------------------+
+| val | host   | ts                  |
++-----+--------+---------------------+
+| 1.0 | api-01 | 1970-01-01T00:00:02 |
+| 2.0 | api-02 | 1970-01-01T00:00:02 |
++-----+--------+---------------------+
+
+SELECT host, ts, val
+FROM metric_dictionary_regex_filter
+WHERE host ~ '^api-.*$'
+ORDER BY host, ts;
+
++--------+---------------------+-----+
+| host   | ts                  | val |
++--------+---------------------+-----+
+| api-01 | 1970-01-01T00:00:01 | 1.0 |
+| api-02 | 1970-01-01T00:00:02 | 2.0 |
++--------+---------------------+-----+
+
+SELECT host, ts, val
+FROM metric_dictionary_regex_filter
+WHERE host !~ '^api-.*$'
+ORDER BY host, ts;
+
++-------+---------------------+-----+
+| host  | ts                  | val |
++-------+---------------------+-----+
+| db-01 | 1970-01-01T00:00:03 | 3.0 |
++-------+---------------------+-----+
+
+DROP TABLE metric_dictionary_regex_filter;
+
+Affected Rows: 0
+
+DROP TABLE metric_dictionary_regex_filter_physical;
+
+Affected Rows: 0
+

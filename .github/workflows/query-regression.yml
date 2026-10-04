@@ -1,10 +1,67 @@
 name: Query Regression
 
 on:
+  workflow_call:
+    inputs:
+      case:
+        description: Query perf case path(s) in candidate checkout, all, or heavy
+        required: false
+        type: string
+        default: all
+      allow_large_fixture:
+        description: Pass --allow-large-fixture to runner
+        required: false
+        type: boolean
+        default: true
+      http_timeout:
+        description: Runner HTTP timeout seconds
+        required: false
+        type: string
+        default: "300"
+      base_ref:
+        description: Base ref/sha to build
+        required: true
+        type: string
+      candidate_ref:
+        description: Candidate ref/sha to build; reusable release calls must provide an immutable full SHA
+        required: true
+        type: string
+      cargo_profile:
+        description: Cargo profile to build base and candidate binaries with
+        required: false
+        type: string
+        default: nightly
+      runner:
+        description: Self-hosted runner label; aliyun-ecs provisions a fresh ECS instance per run
+        required: false
+        type: string
+        default: aliyun-ecs
+      pr_number:
+        description: >-
+          When set, treat this reusable call as PR admission (merge-SHA
+          verification, trusted helper scripts, sticky comment artifact)
+        required: false
+        type: string
+        default: ""
+      head_sha:
+        description: PR head SHA snapshotted at admission (required with pr_number)
+        required: false
+        type: string
+        default: ""
+      head_repo:
+        description: PR head repository full_name (required with pr_number)
+        required: false
+        type: string
+        default: ""
+      base_repo:
+        description: PR base repository full_name (required with pr_number)
+        required: false
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       case:
-        description: Query perf case path(s) in candidate checkout, or all
+        description: Query perf case path(s) in candidate checkout, all, or heavy
         required: true
         default: all
       base_ref:
@@ -33,39 +90,189 @@ on:
           - release
           - dev
       runner:
-        description: Self-hosted runner label or ARC runner scale set for this query regression run
+        description: >-
+          Self-hosted runner label; aliyun-ecs provisions a fresh ECS instance
+          per run, any other value is used as a literal runner label
         required: true
-        type: choice
-        default: perf-regression-8-cores
-        options:
-          - perf-regression-8-cores
-  pull_request:
-    types: [labeled]
+        type: string
+        default: aliyun-ecs
+      keep_instance:
+        description: >-
+          Debug: keep the ECS instance after the run (skip teardown) so its
+          runner _diag logs, journal, and telemetry can be inspected; the
+          janitor still sweeps it after the TTL
+        required: false
+        type: boolean
+        default: false
 
 permissions:
+  # Load-bearing: every job, including ECS, gets this GITHUB_TOKEN.
+  # Do not grant issues or pull-requests write; candidate code could
+  # otherwise forge the HMAC admission marker on a victim PR.
   contents: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: true
-
 jobs:
+  test-tooling:
+    # Stdlib unittests for the workflow Python (case selection, report
+    # helpers, nightly SHA picking, comment-command admission, and rendered
+    # ECS user-data). They do not talk to Aliyun or the Actions runner
+    # process; running them on ubuntu-latest fails fast before any ECS spend.
+    # Ordinary PRs also run the same tests from checks.yml.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Test query regression tooling
+        run: |
+          python3 tests/perf/test_query_regression_runner_compaction_toctou.py
+          python3 tests/perf/test_query_regression_runner_otlp_trace_load.py
+          python3 tests/perf/test_query_regression_summary_otlp.py
+          python3 tests/perf/test_query_regression_case_selection.py
+          python3 tests/perf/test_query_regression_nightly_refs.py
+          python3 tests/perf/test_query_regression_slash.py
+          python3 tests/perf/test_aliyun_ecs_runner_scripts.py
+
+  provision:
+    # Runs when the aliyun-ecs path is selected via the runner input (PR
+    # comment admission can redirect with QUERY_REGRESSION_PR_RUNNER). Uses
+    # trusted scripts from the caller ref, never from candidate code. Waits
+    # for test-tooling so a broken user-data template does not still create a VM.
+    needs: [test-tooling]
+    if: ${{ !failure() && !cancelled() && inputs.runner == 'aliyun-ecs' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      label: ${{ steps.provision.outputs.label }}
+      instance_id: ${{ steps.provision.outputs.instance_id }}
+      runner_name: ${{ steps.provision.outputs.runner_name }}
+    steps:
+      - name: Checkout trusted provisioning scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Provision ECS runner
+        id: provision
+        uses: ./.github/actions/aliyun-ecs-create
+        with:
+          access-key-id: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_ID }}
+          access-key-secret: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_SECRET }}
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          region-id: ${{ vars.ALIYUN_ECS_REGION_ID }}
+          vswitch-id: ${{ vars.ALIYUN_ECS_VSWITCH_ID }}
+          security-group-id: ${{ vars.ALIYUN_ECS_SECURITY_GROUP_ID }}
+          instance-type: ${{ vars.ALIYUN_ECS_INSTANCE_TYPE }}
+          # Preserve query regression's original resource and janitor budgets.
+          system-disk-gib: '80'
+          ttl-hours: '4'
+          resource-group-id: ${{ vars.ALIYUN_ECS_RESOURCE_GROUP_ID }}
+          image-id: ${{ vars.QUERY_REGRESSION_ECS_IMAGE_ID }}
+          runner-uid: ${{ vars.QUERY_REGRESSION_RUNNER_UID || '1001' }}
+          runner-gid: ${{ vars.QUERY_REGRESSION_RUNNER_GID || '1001' }}
+
   query-regression:
-    if: >-
-      ${{ github.event_name == 'workflow_dispatch' ||
-           (github.event_name == 'pull_request' &&
-            !github.event.pull_request.draft &&
-            contains(github.event.pull_request.labels.*.name, 'query-regression') &&
-            (github.event.action != 'labeled' || github.event.label.name == 'query-regression')) }}
-    runs-on: ${{ github.event_name == 'workflow_dispatch' && inputs.runner || 'perf-regression-8-cores' }}
+    needs: [provision, test-tooling]
+    # `!failure() && !cancelled()` both suppresses the implicit success() and
+    # lets the job run when provision was intentionally skipped because a
+    # literal runner label was selected; a failed or cancelled provision still
+    # blocks the run because no ECS runner would be waiting.
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ${{ needs.provision.outputs.label || inputs.runner }}
     timeout-minutes: 180
     env:
-      CARGO_PROFILE: ${{ github.event_name == 'pull_request' && 'nightly' || inputs.cargo_profile }}
-      CARGO_TARGET_DIR: ${{ github.workspace }}/query-regression-target
-      CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
-      BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || inputs.base_ref }}
-      CANDIDATE_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || inputs.candidate_ref || github.ref }}
+      CARGO_PROFILE: ${{ inputs.cargo_profile }}
+      CARGO_HOME: /home/runner/.cargo
+      UV_CACHE_DIR: /home/runner/.cargo/uv-cache
+      RUSTUP_HOME: /opt/rustup
+      # Deliberately NOT derived from rust-toolchain.toml: the benchmark
+      # also compiles the BASE checkout (the previous nightly build, which
+      # may predate the stable-toolchain migration and still uses
+      # #![feature] gates), so the runner must keep a nightly toolchain
+      # that can build historical revisions. This pin moves only via a
+      # deliberate runner-image rebuild.
+      RUSTUP_TOOLCHAIN: nightly-2026-03-21
+      RUSTUP_AUTO_INSTALL: "0"
+      CARGO_TARGET_DIR: /home/runner/query-regression-target
+      QUERY_REGRESSION_CACHE_META: /home/runner/query-regression-cache-meta
+      RUSTC_WRAPPER: /usr/local/bin/sccache
+      SCCACHE_DIR: /home/runner/.cache/sccache
+      # Caps the local sccache on the system disk next to target and cargo.
+      SCCACHE_CACHE_SIZE: 10G
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: -D warnings -C link-arg=-fuse-ld=mold
+      QUERY_REGRESSION_CACHE_EPOCH: "1"
+      # Reusable workflows keep the caller's github.event_name (slash is
+      # repository_dispatch; nightly is workflow_run), never "workflow_call".
+      # PR admission is the explicit pr_number input from the slash wrapper.
+      PR_ADMISSION: ${{ inputs.pr_number != '' }}
+      PR_NUMBER: ${{ inputs.pr_number }}
+      HEAD_REPO: ${{ inputs.head_repo }}
+      BASE_REPO: ${{ inputs.base_repo }}
+      BASE_REF: ${{ inputs.base_ref }}
+      CANDIDATE_REF: ${{ inputs.candidate_ref || github.ref }}
+      EVENT_MERGE_SHA: ${{ inputs.pr_number != '' && inputs.candidate_ref || '' }}
+      EVENT_HEAD_SHA: ${{ inputs.head_sha }}
+      EVENT_BASE_SHA: ${{ inputs.pr_number != '' && inputs.base_ref || '' }}
+      # Runner identity contract. The ECS image uses 1001; a manually prepared
+      # host may override via repo variables when 1001 is already taken.
+      EXPECTED_RUNNER_UID: ${{ vars.QUERY_REGRESSION_RUNNER_UID || '1001' }}
+      EXPECTED_RUNNER_GID: ${{ vars.QUERY_REGRESSION_RUNNER_GID || '1001' }}
     steps:
+      - name: Report provisioned ECS runner
+        if: ${{ needs.provision.outputs.instance_id != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf -- '- ECS instance: `%s` (type `%s`, image `%s`, region `%s`)\n' \
+              "${{ needs.provision.outputs.instance_id }}" \
+              "${{ vars.ALIYUN_ECS_INSTANCE_TYPE }}" \
+              "${{ vars.QUERY_REGRESSION_ECS_IMAGE_ID }}" \
+              "${{ vars.ALIYUN_ECS_REGION_ID }}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Start machine telemetry sampler
+        shell: bash
+        # The ECS instance is deleted when the run ends, so machine state must
+        # be captured while the job runs. A background sampler appends load,
+        # memory, disk, and top-memory processes to a log every 30s; the
+        # "Dump machine telemetry" step (if: always()) prints and uploads it.
+        # Note: when the job is *cancelled*, even always() steps are killed —
+        # telemetry covers failures, not cancellations.
+        run: |
+          set -euo pipefail
+          log="${GITHUB_WORKSPACE}/machine-telemetry.log"
+          {
+            echo "== baseline $(date -u +%Y-%m-%dT%H:%M:%SZ) =="
+            nproc
+            free -h
+            df -h / /home/runner
+          } >> "${log}"
+          {
+            printf '## Disk (start)\n\n```\n'
+            df -hP / /home/runner
+            printf '```\n'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          nohup bash -c "
+            while true; do
+              {
+                date -u '+== %Y-%m-%dT%H:%M:%SZ =='
+                uptime
+                free -m
+                df -h / /home/runner
+                ps -eo pid,comm,%mem,%cpu --sort=-%mem | head -6
+              } >> '${log}' 2>&1
+              sleep 30
+            done
+          " >/dev/null 2>&1 &
+          echo "Telemetry sampler started (pid $!), logging to ${log}"
+
       - name: Checkout base source
         uses: actions/checkout@v4
         with:
@@ -74,36 +281,429 @@ jobs:
           path: src
           persist-credentials: false
 
-      - name: Preserve trusted query regression scripts
+      - name: Resolve immutable candidate and build base
+        working-directory: src
+        shell: bash
+        env:
+          CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
+          DEFINING_WORKFLOW_REF: ${{ job.workflow_ref }}
         run: |
-          mkdir -p query-regression-trusted-scripts
-          cp src/.github/scripts/query-regression-pr-metadata.py \
-            query-regression-trusted-scripts/query-regression-pr-metadata.py
-          cp src/.github/scripts/query-regression-summary.py \
-            query-regression-trusted-scripts/query-regression-summary.py
+          set -euo pipefail
 
-      - uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          fail_closed() {
+            printf '%s\n' \
+              "PR changed or merge result unavailable; maintainer must re-admit the current revision by commenting /query-regression. $1" >&2
+            exit 1
+          }
 
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: false
+          is_full_sha() {
+            [[ "$1" =~ ^[[:xdigit:]]{40}$ ]]
+          }
 
-      - uses: astral-sh/setup-uv@v5
+          is_reusable_call=false
+          if [[ "${CALLER_WORKFLOW_REF}" != "${DEFINING_WORKFLOW_REF}" ]]; then
+            is_reusable_call=true
+          fi
 
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src
-          shared-key: query-regression
-          cache-all-crates: "true"
-          save-if: false
+          fetch_with_retry() {
+            local ref="$1"
+            local depth="$2"
+            local attempt=1
+            local max_attempts=5
+            local delay
+
+            while (( attempt <= max_attempts )); do
+              if git fetch --no-tags --prune --depth="${depth}" origin "${ref}"; then
+                return 0
+              fi
+              printf 'Git fetch failed for %s (attempt %d/%d).\n' \
+                "${ref}" "${attempt}" "${max_attempts}" >&2
+              if (( attempt < max_attempts )); then
+                delay=$(( 2 ** (attempt - 1) ))
+                printf 'Retrying git fetch for %s in %d seconds.\n' "${ref}" "${delay}" >&2
+                sleep "${delay}"
+              fi
+              ((attempt += 1))
+            done
+            return 1
+          }
+
+          initially_checked_out_base_sha="$(git rev-parse --verify HEAD)"
+          is_full_sha "${initially_checked_out_base_sha}" || {
+            printf 'Could not resolve initially checked-out BASE_REF commit.\n' >&2
+            exit 1
+          }
+
+          if [[ "${PR_ADMISSION}" == "true" ]]; then
+            for identity in EVENT_MERGE_SHA EVENT_HEAD_SHA EVENT_BASE_SHA; do
+              value="${!identity-}"
+              is_full_sha "${value}" || fail_closed "Missing or invalid ${identity}."
+            done
+
+            if ! fetch_with_retry "${EVENT_MERGE_SHA}" 2; then
+              fail_closed "Could not fetch event merge SHA ${EVENT_MERGE_SHA}."
+            fi
+            fetched_sha="$(git rev-parse --verify FETCH_HEAD 2>/dev/null)" \
+              || fail_closed "Fetched event merge SHA could not be resolved."
+            [[ "${fetched_sha,,}" == "${EVENT_MERGE_SHA,,}" ]] \
+              || fail_closed "FETCH_HEAD ${fetched_sha} does not match event merge SHA ${EVENT_MERGE_SHA}."
+
+            read -r -a parents <<< "$(git show -s --format=%P FETCH_HEAD)"
+            (( ${#parents[@]} == 2 )) \
+              || fail_closed "Event merge SHA ${EVENT_MERGE_SHA} is not a two-parent merge commit."
+            head_parent_count=0
+            for parent in "${parents[@]}"; do
+              if [[ "${parent,,}" == "${EVENT_HEAD_SHA,,}" ]]; then
+                ((head_parent_count += 1))
+              else
+                VERIFIED_BASE_SHA="${parent,,}"
+              fi
+            done
+            (( head_parent_count == 1 )) \
+              || fail_closed "Event merge SHA must have exactly one EVENT_HEAD_SHA parent."
+            is_full_sha "${VERIFIED_BASE_SHA-}" \
+              || fail_closed "Event merge SHA has no non-head parent for the base build."
+            VERIFIED_CANDIDATE_SHA="${fetched_sha,,}"
+          else
+            if [[ "${is_reusable_call}" == true ]] && ! is_full_sha "${CANDIDATE_REF}"; then
+              printf 'Reusable calls require CANDIDATE_REF to be an immutable full SHA, got: %s\n' \
+                "${CANDIDATE_REF}" >&2
+              exit 1
+            fi
+            if ! fetch_with_retry "${CANDIDATE_REF}" 1; then
+              printf 'Could not fetch candidate ref %s.\n' "${CANDIDATE_REF}" >&2
+              exit 1
+            fi
+            fetched_sha="$(git rev-parse --verify FETCH_HEAD)"
+            if { [[ "${is_reusable_call}" == true ]] || is_full_sha "${CANDIDATE_REF}"; } && \
+              [[ "${fetched_sha,,}" != "${CANDIDATE_REF,,}" ]]; then
+              printf 'FETCH_HEAD %s does not match immutable candidate SHA %s.\n' \
+                "${fetched_sha}" "${CANDIDATE_REF}" >&2
+              exit 1
+            fi
+            VERIFIED_CANDIDATE_SHA="${fetched_sha}"
+            VERIFIED_BASE_SHA="${initially_checked_out_base_sha}"
+          fi
+
+          is_full_sha "${VERIFIED_CANDIDATE_SHA}" || {
+            printf 'Could not resolve candidate SHA.\n' >&2
+            exit 1
+          }
+          is_full_sha "${VERIFIED_BASE_SHA}" || {
+            printf 'Could not resolve build base SHA.\n' >&2
+            exit 1
+          }
+          printf 'VERIFIED_CANDIDATE_SHA=%s\n' "${VERIFIED_CANDIDATE_SHA,,}" >> "${GITHUB_ENV}"
+          printf 'VERIFIED_BASE_SHA=%s\n' "${VERIFIED_BASE_SHA,,}" >> "${GITHUB_ENV}"
+          printf 'Verified candidate SHA: %s\n' "${VERIFIED_CANDIDATE_SHA,,}"
+          printf 'Verified build base SHA: %s\n' "${VERIFIED_BASE_SHA,,}"
+          printf -- '- Verified candidate SHA: `%s`; built base SHA: `%s`\n' \
+            "${VERIFIED_CANDIDATE_SHA,,}" "${VERIFIED_BASE_SHA,,}" >> "${GITHUB_STEP_SUMMARY}"
+          git reset --hard "${VERIFIED_BASE_SHA}"
+          git clean -ffdx
+
+      - name: Preserve trusted query regression scripts
+        working-directory: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          helper_ref="${VERIFIED_CANDIDATE_SHA}"
+          if [[ "${PR_ADMISSION}" == "true" ]]; then
+            helper_ref="${VERIFIED_BASE_SHA}"
+          fi
+          mkdir -p "${GITHUB_WORKSPACE}/query-regression-trusted-scripts"
+          git show "${helper_ref}:.github/scripts/query-regression-pr-metadata.py" \
+            > "${GITHUB_WORKSPACE}/query-regression-trusted-scripts/query-regression-pr-metadata.py"
+          git show "${helper_ref}:.github/scripts/query-regression-summary.py" \
+            > "${GITHUB_WORKSPACE}/query-regression-trusted-scripts/query-regression-summary.py"
+
+      - name: Verify runner image tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          errors=()
+          record() {
+            printf 'FAIL %s\n' "$*"
+            errors+=("$*")
+          }
+          require_eq() {
+            local name="$1" actual="$2" expected="$3"
+            printf 'check %s: %s\n' "${name}" "${actual}"
+            [[ "${actual}" == "${expected}" ]] || record "${name}: expected '${expected}', got '${actual}'"
+          }
+          require_match() {
+            local name="$1" actual="$2" pattern="$3"
+            printf 'check %s: %s\n' "${name}" "${actual}"
+            [[ "${actual}" =~ $pattern ]] || record "${name}: expected to match ${pattern}, got '${actual}'"
+          }
+          require() {
+            local name="$1"
+            shift
+            printf 'check %s\n' "${name}"
+            "$@" || record "${name}"
+          }
+          capture() {
+            local out
+            if out="$("$@" 2>&1)"; then
+              printf '%s' "${out}"
+            else
+              printf '<failed to run: %s>' "$*"
+            fi
+          }
+
+          printf 'uid=%s gid=%s PATH=%s CARGO_HOME=%s\n' "$(id -u)" "$(id -g)" "${PATH}" "${CARGO_HOME}"
+          ls -la "${CARGO_HOME}" 2>&1 || printf '(CARGO_HOME missing)\n'
+
+          # Image/host hygiene: CARGO_HOME must be empty of config and
+          # install-state before cargo/rustup run. Those tools create
+          # .package-cache / bin on first use, so this cannot come after.
+          cargo_home_dirty=()
+          for entry in config config.toml credentials credentials.toml bin .crates.toml .crates2.json .global-cache .package-cache; do
+            if [[ -e "${CARGO_HOME}/${entry}" ]]; then
+              cargo_home_dirty+=("${entry}")
+              record "CARGO_HOME must not contain ${entry}"
+            fi
+          done
+          if (( ${#cargo_home_dirty[@]} > 0 )); then
+            printf 'CARGO_HOME contents:\n' >&2
+            ls -la "${CARGO_HOME}" >&2 || true
+          fi
+
+          require_eq uid "$(id -u)" "${EXPECTED_RUNNER_UID}"
+          require_eq gid "$(id -g)" "${EXPECTED_RUNNER_GID}"
+          require_eq UV_CACHE_DIR "${UV_CACHE_DIR}" "/home/runner/.cargo/uv-cache"
+          require_eq protoc "$(capture protoc --version)" "libprotoc 3.21.12"
+          temporary_proto_dir="$(mktemp --directory)"
+          trap 'rm -rf "${temporary_proto_dir}"' EXIT
+          require "readable /usr/include/google/protobuf/any.proto" \
+            test -r /usr/include/google/protobuf/any.proto
+          require "readable /usr/include/google/protobuf/empty.proto" \
+            test -r /usr/include/google/protobuf/empty.proto
+          printf '%s\n' \
+            'syntax = "proto3";' \
+            'package smoke;' \
+            'import "google/protobuf/any.proto";' \
+            'import "google/protobuf/empty.proto";' \
+            'message Smoke { google.protobuf.Any any = 1; google.protobuf.Empty empty = 2; }' \
+            > "${temporary_proto_dir}/smoke.proto"
+          if protoc --proto_path="${temporary_proto_dir}" --proto_path=/usr/include \
+            --descriptor_set_out="${temporary_proto_dir}/smoke.pb" \
+            "${temporary_proto_dir}/smoke.proto"; then
+            require "protoc smoke descriptor is non-empty" test -s "${temporary_proto_dir}/smoke.pb"
+          else
+            record "protoc smoke compile failed"
+          fi
+          require_match uv "$(capture uv --version)" '^uv[[:space:]]0\.11\.26([[:space:]]|$)'
+          require_match mold "$(capture mold --version)" '^mold[[:space:]]2\.40\.4([[:space:]]|$)'
+          require_eq python3 "$(capture python3 --version)" "Python 3.14.4"
+          otelgen_path="$(command -v otelgen || true)"
+          otelgen_version="<unavailable>"
+          if [[ -n "${otelgen_path}" ]]; then
+            otelgen_version="$(capture "${otelgen_path}" --version)"
+          fi
+          require_eq otelgen_path "${otelgen_path}" "/usr/local/bin/otelgen"
+          printf 'check otelgen_version: %s\n' "${otelgen_version}"
+          [[ "${otelgen_version}" == *"863a3f395d062c7322cc1de08a38774b7fdaa6c8"* ]] \
+            || record "otelgen_version: expected commit 863a3f395d062c7322cc1de08a38774b7fdaa6c8, got '${otelgen_version}'"
+          require_match sccache "$(capture sccache --version)" '^sccache[[:space:]]0\.16\.0([[:space:]]|$)'
+          require_eq rustup_path "$(command -v rustup || true)" "/opt/cargo/bin/rustup"
+          require_eq cargo_path "$(command -v cargo || true)" "/opt/cargo/bin/cargo"
+          require_eq rustc_path "$(command -v rustc || true)" "/opt/cargo/bin/rustc"
+          require_match rustup "$(capture rustup --version)" '^rustup[[:space:]]1\.29\.0([[:space:]]|$)'
+          # The runner toolchain is pinned to nightly-2026-03-21 (see the
+          # RUSTUP_TOOLCHAIN comment): it must compile historical base
+          # checkouts, so it intentionally does not follow rust-toolchain.toml.
+          require_match cargo "$(capture cargo --version)" \
+            '^cargo[[:space:]]1\.96\.0-nightly[[:space:]]\(cbb9bb8bd[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}\)$'
+          require_match rustc "$(capture rustc --version)" \
+            '^rustc[[:space:]]1\.96\.0-nightly[[:space:]]\(ac7f9ec7d[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}\)$'
+          require_match active_toolchain "$(capture rustup show active-toolchain)" \
+            '^nightly-2026-03-21-x86_64-unknown-linux-gnu([[:space:]]|$)'
+          require_eq RUSTUP_HOME "${RUSTUP_HOME}" "/opt/rustup"
+          require_eq RUSTUP_TOOLCHAIN "${RUSTUP_TOOLCHAIN}" "nightly-2026-03-21"
+          require_eq RUSTUP_AUTO_INSTALL "${RUSTUP_AUTO_INSTALL}" "0"
+          require "readable /opt/rustup" test -r /opt/rustup
+          require "executable /opt/rustup" test -x /opt/rustup
+          require "runner cannot write /opt/rustup" test ! -w /opt/rustup
+          require "runner cannot write /opt/cargo/bin" test ! -w /opt/cargo/bin
+          mkdir -p "${CARGO_HOME}/registry" "${CARGO_HOME}/git"
+          if (( ${#errors[@]} > 0 )); then
+            printf '\nVerify runner image tools failed (%d checks):\n' "${#errors[@]}" >&2
+            printf '  - %s\n' "${errors[@]}" >&2
+            exit 1
+          fi
+
+      - name: Prepare query regression cache
+        shell: bash
+        working-directory: src
+        run: |
+          set -euo pipefail
+
+          readonly EXPECTED_CARGO_HOME="/home/runner/.cargo"
+          readonly EXPECTED_CARGO_REGISTRY="/home/runner/.cargo/registry"
+          readonly EXPECTED_CARGO_GIT="/home/runner/.cargo/git"
+          readonly EXPECTED_UV_CACHE_DIR="/home/runner/.cargo/uv-cache"
+          readonly EXPECTED_RUSTUP_HOME="/opt/rustup"
+          readonly EXPECTED_TARGET_DIR="/home/runner/query-regression-target"
+          readonly EXPECTED_CACHE_META="/home/runner/query-regression-cache-meta"
+          readonly EXPECTED_SCCACHE_DIR="/home/runner/.cache/sccache"
+          readonly EXPECTED_RUSTC_WRAPPER="/usr/local/bin/sccache"
+          readonly RUNNER_IMAGE_DIGEST="sha256:e713b294e23b7e15184e558866c90025e59930033e72c97650dbc7f1ca022d11"
+          readonly RUNNER_IMAGE_EPOCH="7"
+
+          require_expected_root() {
+            local name="$1"
+            local actual="$2"
+            local expected="$3"
+            [[ "${actual}" == /* && "${actual}" == "${expected}" ]] || {
+              printf 'Refusing unexpected %s root: %s\n' "${name}" "${actual}" >&2
+              exit 1
+            }
+          }
+
+          clear_directory() {
+            local root="$1"
+            [[ "${root}" == /* && "${root}" != "/" ]] || {
+              printf 'Refusing to clear non-absolute or root path: %s\n' "${root}" >&2
+              exit 1
+            }
+            case "${root}" in
+              "${EXPECTED_TARGET_DIR}"|"${EXPECTED_TARGET_DIR}/debug"|"${EXPECTED_TARGET_DIR}/release"|"${EXPECTED_TARGET_DIR}/nightly") ;;
+              *)
+                printf 'Refusing to clear unexpected cache path: %s\n' "${root}" >&2
+                exit 1
+                ;;
+            esac
+            find "${root}" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          }
+
+          report_cache_usage() {
+            du -sh -- "${CARGO_HOME}" "${CARGO_HOME}/registry" "${CARGO_HOME}/git" \
+              "${RUSTUP_HOME}" "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}" "${SCCACHE_DIR}"
+            df -P "${CARGO_TARGET_DIR}"
+            df -hP "${CARGO_TARGET_DIR}"
+            df -Pi "${CARGO_TARGET_DIR}"
+          }
+
+          require_expected_root CARGO_HOME "${CARGO_HOME}" "${EXPECTED_CARGO_HOME}"
+          require_expected_root CARGO_REGISTRY "${CARGO_HOME}/registry" "${EXPECTED_CARGO_REGISTRY}"
+          require_expected_root CARGO_GIT "${CARGO_HOME}/git" "${EXPECTED_CARGO_GIT}"
+          require_expected_root UV_CACHE_DIR "${UV_CACHE_DIR}" "${EXPECTED_UV_CACHE_DIR}"
+          require_expected_root RUSTUP_HOME "${RUSTUP_HOME}" "${EXPECTED_RUSTUP_HOME}"
+          require_expected_root CARGO_TARGET_DIR "${CARGO_TARGET_DIR}" "${EXPECTED_TARGET_DIR}"
+          require_expected_root QUERY_REGRESSION_CACHE_META "${QUERY_REGRESSION_CACHE_META}" "${EXPECTED_CACHE_META}"
+          require_expected_root SCCACHE_DIR "${SCCACHE_DIR}" "${EXPECTED_SCCACHE_DIR}"
+          [[ "${RUSTC_WRAPPER}" == "${EXPECTED_RUSTC_WRAPPER}" ]] || {
+            printf 'Refusing unexpected RUSTC_WRAPPER: %s\n' "${RUSTC_WRAPPER}" >&2
+            exit 1
+          }
+          [[ "${SCCACHE_CACHE_SIZE}" == "10G" ]] || {
+            printf 'Refusing unexpected SCCACHE_CACHE_SIZE: %s\n' "${SCCACHE_CACHE_SIZE}" >&2
+            exit 1
+          }
+          [[ "${CARGO_INCREMENTAL}" == "0" ]] || {
+            printf 'Refusing unexpected CARGO_INCREMENTAL: %s\n' "${CARGO_INCREMENTAL}" >&2
+            exit 1
+          }
+          test -r "${RUSTUP_HOME}"
+          test -x "${RUSTUP_HOME}"
+          test ! -w "${RUSTUP_HOME}"
+          mkdir -p "${CARGO_HOME}" "${CARGO_HOME}/registry" "${CARGO_HOME}/git" "${UV_CACHE_DIR}" \
+            "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}" "${SCCACHE_DIR}"
+          for root in "${CARGO_HOME}" "${CARGO_HOME}/registry" "${CARGO_HOME}/git" \
+            "${UV_CACHE_DIR}" "${CARGO_TARGET_DIR}" "${QUERY_REGRESSION_CACHE_META}" "${SCCACHE_DIR}"; do
+            test -w "${root}"
+            touch "${root}/.query-regression-write-test"
+            rm -f "${root}/.query-regression-write-test"
+          done
+
+          case "${CARGO_PROFILE}" in
+            dev) target_profile="debug" ;;
+            release|nightly) target_profile="${CARGO_PROFILE}" ;;
+            *) printf 'Unsupported CARGO_PROFILE: %s\n' "${CARGO_PROFILE}" >&2; exit 1 ;;
+          esac
+
+          rustc_vv="$(rustc -vV)"
+          if cargo -Vv >/dev/null 2>&1; then
+            cargo_vv="$(cargo -Vv)"
+          else
+            cargo_vv="$(cargo -V)"
+          fi
+          host_triple="$(printf '%s\n' "${rustc_vv}" | grep '^host: ' | cut -d' ' -f2-)"
+          cc_version="$(cc --version)"
+          mold_version="$(mold --version | grep -m1 .)"
+          protoc_version="$(protoc --version)"
+          sccache_version="$(sccache --version)"
+          rustup_version="$(rustup --version)"
+          active_toolchain="$(rustup show active-toolchain)"
+          rustup_path="$(command -v rustup)"
+          cargo_path="$(command -v cargo)"
+          rustc_path="$(command -v rustc)"
+          profile_target_dir="${CARGO_TARGET_DIR}/${target_profile}"
+          marker="${QUERY_REGRESSION_CACHE_META}/target-${target_profile}.abi"
+          new_marker="$(mktemp "${QUERY_REGRESSION_CACHE_META}/.${target_profile}.abi.XXXXXX")"
+          {
+            printf 'cache_epoch=%s\n' "${QUERY_REGRESSION_CACHE_EPOCH}"
+            printf 'runner_image_digest=%s\n' "${RUNNER_IMAGE_DIGEST}"
+            printf 'runner_image_epoch=%s\n' "${RUNNER_IMAGE_EPOCH}"
+            printf 'host_triple=%s\n' "${host_triple}"
+            printf 'architecture=%s\n' "$(uname -m)"
+            printf 'cargo_profile=%s\n' "${CARGO_PROFILE}"
+            printf 'target_profile=%s\n' "${target_profile}"
+            printf 'RUSTFLAGS=%s\n' "${RUSTFLAGS-}"
+            printf 'CARGO_ENCODED_RUSTFLAGS=%s\n' "${CARGO_ENCODED_RUSTFLAGS-}"
+            printf 'CARGO_INCREMENTAL=%s\n' "${CARGO_INCREMENTAL-}"
+            printf 'RUSTC_WRAPPER=%s\n' "${RUSTC_WRAPPER-}"
+            printf 'SCCACHE_DIR=%s\n' "${SCCACHE_DIR-}"
+            printf 'SCCACHE_CACHE_SIZE=%s\n' "${SCCACHE_CACHE_SIZE-}"
+            printf 'RUSTUP_HOME=%s\n' "${RUSTUP_HOME-}"
+            printf 'RUSTUP_TOOLCHAIN=%s\n' "${RUSTUP_TOOLCHAIN-}"
+            printf 'RUSTUP_AUTO_INSTALL=%s\n' "${RUSTUP_AUTO_INSTALL-}"
+            printf 'PATH=%s\n' "${PATH-}"
+            printf '%s\n' "rustc_vV=${rustc_vv}"
+            printf '%s\n' "cargo_vV=${cargo_vv}"
+            printf '%s\n' "cc_version=${cc_version}"
+            printf '%s\n' "mold_version=${mold_version}"
+            printf '%s\n' "protoc_version=${protoc_version}"
+            printf '%s\n' "sccache_version=${sccache_version}"
+            printf '%s\n' "rustup_version=${rustup_version}"
+            printf '%s\n' "active_toolchain=${active_toolchain}"
+            printf '%s\n' "rustup_path=${rustup_path}"
+            printf '%s\n' "cargo_path=${cargo_path}"
+            printf '%s\n' "rustc_path=${rustc_path}"
+          } > "${new_marker}"
+
+          if ! cmp -s "${marker}" "${new_marker}"; then
+            printf 'Cache ABI marker mismatch; invalidating target profile: %s\n' "${target_profile}"
+            mkdir -p "${profile_target_dir}"
+            clear_directory "${profile_target_dir}"
+          else
+            printf 'Cache ABI marker match; reusing target profile: %s\n' "${target_profile}"
+          fi
+          mv -f "${new_marker}" "${marker}"
+
+          report_cache_usage
+
+          # Every run starts from a fresh system disk, so size/free-space
+          # watermarks from the retired retained-disk era are not restored.
+          # A run that overflows the disk fails the build outright, which the
+          # telemetry step makes diagnosable.
+
+          sccache --start-server
+          sccache --zero-stats
+          sccache --show-stats
 
       - name: Build base greptime
         working-directory: src
         run: |
+          set -euo pipefail
+          SECONDS=0
           cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime
+          base_build_elapsed="${SECONDS}"
+          printf 'Base greptime cargo build elapsed: %s seconds\n' "${base_build_elapsed}"
+          printf -- '- Base greptime cargo build: %s seconds\n' "${base_build_elapsed}" >> "${GITHUB_STEP_SUMMARY}"
+          sccache --show-stats
+          sccache --zero-stats
           target_dir="${CARGO_PROFILE}"
           if [[ "${CARGO_PROFILE}" == "dev" ]]; then
             target_dir="debug"
@@ -114,20 +714,32 @@ jobs:
 
       - name: Switch source to candidate
         working-directory: src
+        shell: bash
         run: |
-          git fetch --no-tags --prune --depth=1 origin "${CANDIDATE_REF}"
-          git reset --hard FETCH_HEAD
+          set -euo pipefail
+          [[ "${VERIFIED_CANDIDATE_SHA}" =~ ^[[:xdigit:]]{40}$ ]] || {
+            printf 'Verified candidate SHA is missing or invalid.\n' >&2
+            exit 1
+          }
+          git cat-file -e "${VERIFIED_CANDIDATE_SHA}^{commit}" || {
+            printf 'Verified candidate SHA is unavailable in the local repository.\n' >&2
+            exit 1
+          }
+          git reset --hard "${VERIFIED_CANDIDATE_SHA}"
           git clean -ffdx
 
-      - name: Test query regression runner lifecycle
-        working-directory: src
-        run: uv run --no-project python tests/perf/test_query_regression_runner_compaction_toctou.py
-
-      - name: Build candidate greptime and fixture generators
+      - name: Build candidate greptime and query regression helpers
         working-directory: src
         run: |
+          set -euo pipefail
+          SECONDS=0
           cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime
           cargo build --profile "${CARGO_PROFILE}" -p cmd --bin query_perf_fixture --features dev-tools
+          cargo build --profile "${CARGO_PROFILE}" -p cmd --bin query_regression_runner --features dev-tools
+          candidate_build_elapsed="${SECONDS}"
+          printf 'Candidate greptime and query regression helper cargo builds elapsed: %s seconds\n' "${candidate_build_elapsed}"
+          printf -- '- Candidate greptime and query regression helper cargo builds: %s seconds\n' "${candidate_build_elapsed}" >> "${GITHUB_STEP_SUMMARY}"
+          sccache --show-stats
           target_dir="${CARGO_PROFILE}"
           if [[ "${CARGO_PROFILE}" == "dev" ]]; then
             target_dir="debug"
@@ -137,32 +749,33 @@ jobs:
             "${GITHUB_WORKSPACE}/query-regression-bins/candidate/greptime"
           cp "${CARGO_TARGET_DIR}/${target_dir}/query_perf_fixture" \
             "${GITHUB_WORKSPACE}/query-regression-bins/candidate/query_perf_fixture"
+          cp "${CARGO_TARGET_DIR}/${target_dir}/query_regression_runner" \
+            "${GITHUB_WORKSPACE}/query-regression-bins/candidate/query_regression_runner"
 
       - name: Run query regression
         id: run
         env:
-          CASE_PATHS: ${{ github.event_name == 'pull_request' && 'all' || inputs.case }}
-          HTTP_TIMEOUT: ${{ github.event_name == 'pull_request' && '300' || inputs.http_timeout }}
-          ALLOW_LARGE_FIXTURE: ${{ github.event_name == 'pull_request' && 'true' || inputs.allow_large_fixture }}
+          CASE_PATHS: ${{ inputs.case }}
+          HTTP_TIMEOUT: ${{ inputs.http_timeout }}
+          ALLOW_LARGE_FIXTURE: ${{ inputs.allow_large_fixture }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          CASE_NAME: ${{ github.event_name == 'pull_request' && 'default case set' || inputs.case }}
+          CASE_NAME: ${{ inputs.case }}
           BASE_BIN: ${{ github.workspace }}/query-regression-bins/base/greptime
           CANDIDATE_BIN: ${{ github.workspace }}/query-regression-bins/candidate/greptime
           FIXTURE_GENERATOR: ${{ github.workspace }}/query-regression-bins/candidate/query_perf_fixture
+          OTELGEN_BIN: /usr/local/bin/otelgen
+          SUMMARY_SCRIPT: ${{ env.PR_ADMISSION == 'true' && 'query-regression-trusted-scripts/query-regression-summary.py' || 'src/.github/scripts/query-regression-summary.py' }}
+          QUERY_REGRESSION_RUNNER: ${{ github.workspace }}/query-regression-bins/candidate/query_regression_runner
         run: >-
           uv run --no-project python src/.github/scripts/query-regression-run.py
           --base-src src
           --candidate-src src
-          --summary-script query-regression-trusted-scripts/query-regression-summary.py
+          --summary-script "${SUMMARY_SCRIPT}"
 
       - name: Write PR metadata for trusted comment workflow
-        if: ${{ always() && github.event_name == 'pull_request' }}
+        if: ${{ always() && env.PR_ADMISSION == 'true' }}
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          BASE_REPO: ${{ github.event.pull_request.base.repo.full_name }}
+          HEAD_SHA: ${{ inputs.head_sha }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: uv run --no-project python query-regression-trusted-scripts/query-regression-pr-metadata.py
@@ -177,12 +790,16 @@ jobs:
             query-regression-work/**/base/report.json
             query-regression-work/**/candidate/report.json
             query-regression-work/**/logs/**
+            query-regression-work/**/otelgen/**
             query-regression-summary.md
+            machine-telemetry.log
           if-no-files-found: warn
           retention-days: 7
+          # Re-run failed jobs uploads again in the same run; v4 rejects duplicate names.
+          overwrite: true
 
       - name: Upload trusted comment artifact
-        if: ${{ always() && github.event_name == 'pull_request' }}
+        if: ${{ always() && env.PR_ADMISSION == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: query-regression-comment
@@ -191,7 +808,108 @@ jobs:
             query-regression-work/**/query-regression-report.json
           if-no-files-found: warn
           retention-days: 7
+          overwrite: true
+
+      - name: Report cache usage
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          for root in \
+            /home/runner/.cargo \
+            /home/runner/.cargo/registry \
+            /home/runner/.cargo/git \
+            /opt/rustup \
+            /home/runner/query-regression-target \
+            /home/runner/query-regression-cache-meta \
+            /home/runner/.cache/sccache; do
+            if [[ -e "${root}" ]]; then
+              du -sh -- "${root}"
+            else
+              printf 'Missing cache path (report only): %s\n' "${root}"
+            fi
+          done
+          if [[ -e /opt/rustup ]]; then
+            if [[ -w /opt/rustup ]]; then
+              printf 'Immutable Rustup path is unexpectedly writable: /opt/rustup\n' >&2
+            else
+              printf 'Immutable Rustup path is read-only to runner: /opt/rustup\n'
+            fi
+          fi
+          report_root=/home/runner/query-regression-target
+          if [[ ! -e "${report_root}" ]]; then
+            report_root=/home/runner
+            printf 'Target cache path is missing; reporting its filesystem through %s\n' "${report_root}"
+          fi
+          df -P "${report_root}"
+          df -hP "${report_root}"
+          df -Pi "${report_root}"
+          {
+            printf '## Disk (end)\n\n```\n'
+            df -hP / /home/runner "${report_root}"
+            printf '\n'
+            du -sh -- \
+              /home/runner/.cargo \
+              /home/runner/.cargo/registry \
+              /home/runner/.cargo/git \
+              /opt/rustup \
+              /home/runner/query-regression-target \
+              /home/runner/query-regression-cache-meta \
+              /home/runner/.cache/sccache \
+              2>/dev/null || true
+            printf '```\n'
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats || printf 'Unable to show sccache statistics (report only)\n' >&2
+          else
+            printf 'sccache is unavailable (report only)\n' >&2
+          fi
+
+      - name: Dump machine telemetry
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          log="${GITHUB_WORKSPACE}/machine-telemetry.log"
+          if [[ -f "${log}" ]]; then
+            echo "::group::Machine telemetry (last 200 lines)"
+            tail -n 200 "${log}"
+            echo "::endgroup::"
+          else
+            echo "No telemetry log found (sampler never started?)"
+          fi
+          echo "::group::dmesg tail (OOM killer records)"
+          sudo dmesg -T 2>/dev/null | tail -n 50 || dmesg -T 2>/dev/null | tail -n 50 || \
+            echo "dmesg unavailable without root"
+          echo "::endgroup::"
 
       - name: Fail on regression failure
         if: ${{ steps.run.outputs.status != '0' }}
         run: exit 1
+
+  teardown:
+    # Releases the dynamically provisioned ECS runner. Runs even when the
+    # benchmark job fails or is cancelled; skipped when a literal runner label
+    # was selected because the provision outputs are empty, or when the
+    # dispatch set keep_instance to preserve the machine for post-mortem
+    # debugging (the janitor sweep still reclaims it after the TTL).
+    if: ${{ always() && needs.provision.outputs.instance_id != '' && !inputs.keep_instance }}
+    needs: [provision, query-regression]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout trusted teardown scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Teardown ECS runner
+        uses: ./.github/actions/aliyun-ecs-delete
+        with:
+          access-key-id: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_ID }}
+          access-key-secret: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_SECRET }}
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          region-id: ${{ vars.ALIYUN_ECS_REGION_ID }}
+          instance-id: ${{ needs.provision.outputs.instance_id }}
+          runner-name: ${{ needs.provision.outputs.runner_name }}

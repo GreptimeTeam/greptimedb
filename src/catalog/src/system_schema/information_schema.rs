@@ -14,12 +14,15 @@
 
 mod cluster_info;
 pub mod columns;
+pub mod flow_statistics;
 pub mod flows;
 mod information_memory_table;
 pub mod key_column_usage;
 mod partitions;
 mod procedure_info;
 pub mod process_list;
+#[cfg(feature = "enterprise")]
+mod recycle_bin;
 mod region_info;
 pub mod region_peers;
 mod region_statistics;
@@ -31,6 +34,9 @@ mod table_names;
 mod table_semantics;
 pub mod tables;
 mod views;
+
+#[cfg(all(test, feature = "enterprise"))]
+mod recycle_bin_test;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
@@ -68,10 +74,13 @@ use crate::CatalogManager;
 use crate::error::{Error, Result};
 use crate::process_manager::ProcessManagerRef;
 use crate::system_schema::information_schema::cluster_info::InformationSchemaClusterInfo;
+use crate::system_schema::information_schema::flow_statistics::InformationSchemaFlowStatistics;
 use crate::system_schema::information_schema::flows::InformationSchemaFlows;
 use crate::system_schema::information_schema::information_memory_table::get_schema_columns;
 use crate::system_schema::information_schema::key_column_usage::InformationSchemaKeyColumnUsage;
 use crate::system_schema::information_schema::partitions::InformationSchemaPartitions;
+#[cfg(feature = "enterprise")]
+use crate::system_schema::information_schema::recycle_bin::InformationSchemaRecycleBin;
 use crate::system_schema::information_schema::region_peers::InformationSchemaRegionPeers;
 use crate::system_schema::information_schema::schemata::InformationSchemaSchemata;
 use crate::system_schema::information_schema::ssts::{
@@ -126,6 +135,9 @@ lazy_static! {
         GLOBAL_STATUS,
         SESSION_STATUS,
         PARTITIONS,
+        PLUGINS,
+        USER_PRIVILEGES,
+        PROCESSLIST,
     ];
 }
 
@@ -228,6 +240,9 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
             TABLE_PRIVILEGES => setup_memory_table!(TABLE_PRIVILEGES),
             GLOBAL_STATUS => setup_memory_table!(GLOBAL_STATUS),
             SESSION_STATUS => setup_memory_table!(SESSION_STATUS),
+            PLUGINS => setup_memory_table!(PLUGINS),
+            USER_PRIVILEGES => setup_memory_table!(USER_PRIVILEGES),
+            PROCESSLIST => setup_memory_table!(PROCESSLIST),
             KEY_COLUMN_USAGE => Some(Arc::new(InformationSchemaKeyColumnUsage::new(
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),
@@ -264,11 +279,21 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
                 self.catalog_manager.clone(),
                 self.flow_metadata_manager.clone(),
             )) as _),
+            FLOW_STATISTICS => Some(Arc::new(InformationSchemaFlowStatistics::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+                self.flow_metadata_manager.clone(),
+            )) as _),
             PROCEDURE_INFO => Some(
                 Arc::new(procedure_info::InformationSchemaProcedureInfo::new(
                     self.catalog_manager.clone(),
                 )) as _,
             ),
+            #[cfg(feature = "enterprise")]
+            RECYCLE_BIN => Some(Arc::new(InformationSchemaRecycleBin::new(
+                self.catalog_name.clone(),
+                self.catalog_manager.clone(),
+            )) as _),
             REGION_STATISTICS => Some(Arc::new(
                 region_statistics::InformationSchemaRegionStatistics::new(
                     self.catalog_manager.clone(),
@@ -394,6 +419,15 @@ impl InformationSchemaProvider {
             self.build_table(STATISTICS).unwrap(),
         );
         tables.insert(FLOWS.to_string(), self.build_table(FLOWS).unwrap());
+        tables.insert(
+            FLOW_STATISTICS.to_string(),
+            self.build_table(FLOW_STATISTICS).unwrap(),
+        );
+        #[cfg(feature = "enterprise")]
+        tables.insert(
+            RECYCLE_BIN.to_string(),
+            self.build_table(RECYCLE_BIN).unwrap(),
+        );
         tables.insert(
             TABLE_SEMANTICS.to_string(),
             self.build_table(TABLE_SEMANTICS).unwrap(),

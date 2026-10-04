@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(never_type)]
-
 pub mod adapter;
 pub mod cursor;
 pub mod error;
@@ -22,7 +20,7 @@ pub mod filter;
 pub mod recordbatch;
 pub mod util;
 
-use std::fmt;
+use std::fmt::{self, Write};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -36,20 +34,28 @@ use common_memory_manager::{
 };
 use common_telemetry::tracing::Span;
 pub use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
-use datatypes::arrow::array::{ArrayRef, AsArray, StringBuilder};
+use datatypes::arrow::array::{Array, ArrayRef, AsArray, StringBuilder};
 use datatypes::arrow::compute::SortOptions;
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
+use datatypes::arrow::error::ArrowError;
 pub use datatypes::arrow::record_batch::RecordBatch as DfRecordBatch;
-use datatypes::arrow::util::pretty;
-use datatypes::prelude::{ConcreteDataType, VectorRef};
+use datatypes::arrow::util::display::{
+    ArrayFormatter, ArrayFormatterFactory, DisplayIndex, FormatOptions, FormatResult,
+};
+use datatypes::arrow::util::pretty::{
+    pretty_format_batches_with_options, pretty_format_batches_with_schema,
+};
+use datatypes::extension::json::is_any_json_extension_type;
+use datatypes::prelude::{ConcreteDataType, DataType, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-use datatypes::types::{JsonFormat, jsonb_to_string};
+use datatypes::types::{JsonFormat, StructField, StructType, jsonb_to_string};
 use error::Result;
 use futures::task::{Context, Poll};
 use futures::{Stream, TryStreamExt};
 pub use recordbatch::RecordBatch;
 use snafu::{IntoError, ResultExt, ensure};
 
-use crate::error::NewDfRecordBatchSnafu;
+use crate::error::{ArrowComputeSnafu, NewDfRecordBatchSnafu};
 
 pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
     fn name(&self) -> &str {
@@ -161,6 +167,107 @@ pub fn map_json_type_to_string_schema(schema: SchemaRef) -> (SchemaRef, bool) {
         }
     }
     (Arc::new(Schema::new(new_columns)), apply_mapper)
+}
+
+/// Replaces dictionary types with their value types, including dictionaries nested in lists and
+/// structs.
+pub fn map_dictionary_to_values_data_type(data_type: &ConcreteDataType) -> ConcreteDataType {
+    match data_type {
+        ConcreteDataType::Dictionary(dictionary) => {
+            map_dictionary_to_values_data_type(dictionary.value_type())
+        }
+        ConcreteDataType::List(list) => ConcreteDataType::list_datatype(Arc::new(
+            map_dictionary_to_values_data_type(list.item_type()),
+        )),
+        ConcreteDataType::Struct(struct_type) => {
+            let fields = struct_type
+                .fields()
+                .iter()
+                .map(|field| {
+                    StructField::new(
+                        field.name(),
+                        map_dictionary_to_values_data_type(field.data_type()),
+                        field.is_nullable(),
+                    )
+                })
+                .collect();
+            ConcreteDataType::struct_datatype(StructType::new(Arc::new(fields)))
+        }
+        _ => data_type.clone(),
+    }
+}
+
+/// Maps dictionary columns in a schema to their value types.
+pub fn map_dictionary_to_values_schema(schema: SchemaRef) -> (SchemaRef, bool) {
+    let mut apply_mapper = false;
+    let columns: Vec<_> = schema
+        .column_schemas()
+        .iter()
+        .map(|column| {
+            let data_type = map_dictionary_to_values_data_type(&column.data_type);
+            apply_mapper |= data_type != column.data_type;
+            let mut column = column.clone();
+            column.data_type = data_type;
+            column
+        })
+        .collect();
+
+    if !apply_mapper {
+        return (schema, false);
+    }
+
+    // Query projections may contain duplicate column names, which SchemaBuilder rejects. Preserve
+    // the existing Arrow fields and only replace their data types so field and schema metadata are
+    // retained as well.
+    let fields = schema
+        .arrow_schema()
+        .fields()
+        .iter()
+        .zip(&columns)
+        .map(|(field, column)| {
+            Arc::new(
+                field
+                    .as_ref()
+                    .clone()
+                    .with_data_type(column.data_type.as_arrow_type()),
+            )
+        })
+        .collect::<Vec<_>>();
+    let arrow_schema =
+        datatypes::arrow::datatypes::Schema::new(fields).with_metadata(schema.metadata().clone());
+    (
+        Arc::new(Schema::try_from(Arc::new(arrow_schema)).unwrap()),
+        true,
+    )
+}
+
+/// Expands dictionary arrays to their value arrays according to `mapped_schema`.
+pub fn map_dictionary_to_values(
+    batch: RecordBatch,
+    original_schema: &SchemaRef,
+    mapped_schema: &SchemaRef,
+) -> Result<RecordBatch> {
+    let arrays = batch
+        .columns()
+        .iter()
+        .zip(original_schema.column_schemas())
+        .zip(mapped_schema.column_schemas())
+        .map(|((array, original), mapped)| {
+            if original.data_type == mapped.data_type {
+                Ok(array.clone())
+            } else {
+                datatypes::arrow::compute::cast(array, &mapped.data_type.as_arrow_type())
+                    .context(ArrowComputeSnafu)
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let record_batch = DfRecordBatch::try_new(mapped_schema.arrow_schema().clone(), arrays)
+        .context(NewDfRecordBatchSnafu)?;
+    Ok(RecordBatch::from_df_record_batch(
+        mapped_schema.clone(),
+        record_batch,
+    ))
 }
 
 impl SendableRecordBatchMapper {
@@ -289,9 +396,19 @@ impl RecordBatches {
             .iter()
             .map(|x| x.df_record_batch().clone())
             .collect::<Vec<_>>();
-        let result = pretty::pretty_format_batches(df_batches).context(error::FormatSnafu)?;
+        let result: String = if df_batches.is_empty() {
+            pretty_format_batches_with_schema(self.schema.arrow_schema().clone(), df_batches)
+                .context(error::FormatSnafu)?
+                .to_string()
+        } else {
+            let options =
+                FormatOptions::default().with_formatter_factory(Some(&BinaryFormatterFactory));
+            pretty_format_batches_with_options(df_batches, &options)
+                .context(error::FormatSnafu)?
+                .to_string()
+        };
 
-        Ok(result.to_string())
+        Ok(result)
     }
 
     pub fn try_new(schema: SchemaRef, batches: Vec<RecordBatch>) -> Result<Self> {
@@ -325,6 +442,63 @@ impl RecordBatches {
             },
             index: 0,
         })
+    }
+}
+
+#[derive(Debug)]
+struct BinaryFormatterFactory;
+
+impl ArrayFormatterFactory for BinaryFormatterFactory {
+    fn create_array_formatter<'a>(
+        &self,
+        array: &'a dyn Array,
+        options: &FormatOptions<'a>,
+        field: Option<&'a Field>,
+    ) -> std::result::Result<Option<ArrayFormatter<'a>>, ArrowError> {
+        if !array.data_type().is_binary() {
+            return Ok(None);
+        }
+
+        Ok(Some(ArrayFormatter::new(
+            Box::new(BinaryFormatter {
+                array,
+                is_json: field.is_some_and(is_any_json_extension_type),
+                default: ArrayFormatter::try_new(array, options)?,
+                null: options.null(),
+            }),
+            options.safe(),
+        )))
+    }
+}
+
+struct BinaryFormatter<'a> {
+    array: &'a dyn Array,
+    is_json: bool,
+    default: ArrayFormatter<'a>,
+    null: &'a str,
+}
+
+impl DisplayIndex for BinaryFormatter<'_> {
+    fn write(&self, idx: usize, f: &mut dyn Write) -> FormatResult {
+        if !self.is_json {
+            self.default.value(idx).write(f)?;
+            return Ok(());
+        }
+
+        if self.array.is_null(idx) {
+            write!(f, "{}", self.null)?;
+        } else {
+            let bytes = match self.array.data_type() {
+                ArrowDataType::Binary => self.array.as_binary::<i32>().value(idx),
+                ArrowDataType::LargeBinary => self.array.as_binary::<i64>().value(idx),
+                ArrowDataType::BinaryView => self.array.as_binary_view().value(idx),
+                _ => return Ok(self.default.value(idx).write(f)?),
+            };
+            let value =
+                jsonb_to_string(bytes).map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
+            write!(f, "{value}")?;
+        }
+        Ok(())
     }
 }
 
@@ -769,7 +943,7 @@ impl MemoryTrackedStream {
         batch: RecordBatch,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<RecordBatch>>> {
-        let additional = batch.buffer_memory_size();
+        let additional = batch.logical_slice_memory_size();
         let tracker = self.ready_tracker_mut();
 
         if let Err(error) = tracker.try_track(additional) {
@@ -835,6 +1009,13 @@ mod tests {
     use std::time::Duration;
 
     use common_memory_manager::{OnExhaustedPolicy, PermitGranularity};
+    use datatypes::arrow::array::{
+        DictionaryArray, Int32Array, ListArray, StringArray, UInt32Array,
+    };
+    use datatypes::arrow::buffer::OffsetBuffer;
+    use datatypes::arrow::datatypes::{
+        DataType as ArrowDataType, Field, Int32Type, Schema as ArrowSchema,
+    };
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{BooleanVector, Int32Vector, StringVector};
@@ -860,6 +1041,35 @@ mod tests {
             as usize
     }
 
+    #[tokio::test]
+    async fn test_memory_tracked_stream_charges_logical_slice_size() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "payload",
+            ConcreteDataType::string_datatype(),
+            false,
+        )]));
+        let payloads: Vec<_> = (0..1024)
+            .map(|value| format!("payload-{value:04}"))
+            .collect();
+        let batch = RecordBatch::new(schema, vec![Arc::new(StringVector::from(payloads)) as _])
+            .unwrap()
+            .slice(512, 1)
+            .unwrap();
+        let expected_bytes = aligned_tracked_bytes(batch.logical_slice_memory_size());
+        assert!(expected_bytes < aligned_tracked_bytes(batch.buffer_memory_size()));
+        let tracker = QueryMemoryTracker::builder(MB, OnExhaustedPolicy::Fail).build();
+        let mut stream = MemoryTrackedStream::new(
+            RecordBatches::try_new(batch.schema.clone(), vec![batch])
+                .unwrap()
+                .as_stream(),
+            tracker.clone(),
+        );
+
+        stream.next().await.unwrap().unwrap();
+
+        assert_eq!(tracker.current(), expected_bytes);
+    }
+
     #[test]
     fn test_recordbatches_try_from_columns() {
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
@@ -877,6 +1087,35 @@ mod tests {
         let expected = vec![RecordBatch::new(schema.clone(), vec![v.clone()]).unwrap()];
         let r = RecordBatches::try_from_columns(schema, vec![v]).unwrap();
         assert_eq!(r.take(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_recordbatches_pretty_print_empty_batches_preserves_schema() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("unit", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                "lhs.degrees(val) + rhs.radians(val)",
+                ConcreteDataType::float64_datatype(),
+                false,
+            ),
+        ]));
+        let batches =
+            RecordBatches::try_collect(Box::pin(EmptyRecordBatchStream::new(schema.clone())))
+                .await
+                .unwrap();
+
+        assert_eq!(schema, batches.schema());
+        let expected = "\
++------+----+-------------------------------------+
+| unit | ts | lhs.degrees(val) + rhs.radians(val) |
++------+----+-------------------------------------+
++------+----+-------------------------------------+";
+        assert_eq!(expected, batches.pretty_print().unwrap());
     }
 
     #[test]
@@ -916,6 +1155,104 @@ mod tests {
 
         assert_eq!(schema1, batches.schema());
         assert_eq!(vec![batch1], batches.take());
+    }
+
+    #[test]
+    fn test_map_dictionary_to_values_recursively() {
+        let string_dictionary = ConcreteDataType::dictionary_datatype(
+            ConcreteDataType::int32_datatype(),
+            ConcreteDataType::string_datatype(),
+        );
+        let list_dictionary =
+            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::dictionary_datatype(
+                ConcreteDataType::uint32_datatype(),
+                ConcreteDataType::string_datatype(),
+            )));
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("host", string_dictionary, true),
+            ColumnSchema::new("tags", list_dictionary, true),
+        ]));
+
+        let host = DictionaryArray::<Int32Type>::new(
+            Int32Array::from(vec![0, 1]),
+            Arc::new(StringArray::from(vec![Some("host-a"), None])),
+        );
+        let ArrowDataType::List(item_field) = schema.arrow_schema().field(1).data_type().clone()
+        else {
+            unreachable!()
+        };
+        let tag_values = DictionaryArray::new(
+            UInt32Array::from_iter_values([0, 1, 0]),
+            Arc::new(StringArray::from(vec![Some("a"), None])),
+        );
+        let tags = ListArray::new(
+            item_field,
+            OffsetBuffer::from_lengths([2, 1]),
+            Arc::new(tag_values),
+            None,
+        );
+        let batch = DfRecordBatch::try_new(
+            schema.arrow_schema().clone(),
+            vec![Arc::new(host), Arc::new(tags)],
+        )
+        .unwrap();
+        let batch = RecordBatch::from_df_record_batch(schema.clone(), batch);
+
+        let (mapped_schema, apply_mapper) = map_dictionary_to_values_schema(schema.clone());
+        assert!(apply_mapper);
+        assert_eq!(
+            &ArrowDataType::Utf8,
+            mapped_schema.arrow_schema().field(0).data_type()
+        );
+        assert_eq!(
+            &ArrowDataType::List(Arc::new(
+                datatypes::arrow::datatypes::Field::new_list_field(ArrowDataType::Utf8, true,)
+            )),
+            mapped_schema.arrow_schema().field(1).data_type()
+        );
+
+        let mapped = map_dictionary_to_values(batch, &schema, &mapped_schema).unwrap();
+        let host = mapped
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(vec![Some("host-a"), None], host.iter().collect::<Vec<_>>());
+        let tags = mapped
+            .column(1)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+        let tag_values = tags
+            .values()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(
+            vec![Some("a"), None, Some("a")],
+            tag_values.iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_map_dictionary_to_values_schema_with_duplicate_columns() {
+        let dictionary_type = ArrowDataType::Dictionary(
+            Box::new(ArrowDataType::Int32),
+            Box::new(ArrowDataType::Utf8),
+        );
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("area", dictionary_type.clone(), true),
+            Field::new("area", dictionary_type, true),
+        ]));
+        let schema = Arc::new(Schema::try_from(arrow_schema).unwrap());
+
+        let (mapped_schema, apply_mapper) = map_dictionary_to_values_schema(schema);
+        assert!(apply_mapper);
+        assert_eq!(2, mapped_schema.num_columns());
+        for field in mapped_schema.arrow_schema().fields() {
+            assert_eq!("area", field.name());
+            assert_eq!(&ArrowDataType::Utf8, field.data_type());
+        }
     }
 
     #[tokio::test]
@@ -1052,7 +1389,7 @@ mod tests {
         })
         .build();
         let batch = large_string_batch(700 * 1024);
-        let expected_bytes = aligned_tracked_bytes(batch.buffer_memory_size());
+        let expected_bytes = aligned_tracked_bytes(batch.logical_slice_memory_size());
 
         let mut stream1 = MemoryTrackedStream::new(
             RecordBatches::try_new(batch.schema.clone(), vec![batch.clone()])

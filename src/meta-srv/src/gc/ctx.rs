@@ -13,13 +13,26 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+#[cfg(feature = "enterprise")]
+use std::collections::HashSet;
+#[cfg(feature = "enterprise")]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "enterprise")]
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common_meta::datanode::RegionStat;
+#[cfg(feature = "enterprise")]
+use common_meta::ddl_manager::DdlManagerRef;
+#[cfg(feature = "enterprise")]
+use common_meta::key::DroppedTableName;
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_meta::key::table_repart::TableRepartValue;
 use common_meta::key::table_route::PhysicalTableRouteValue;
-use common_procedure::{ProcedureManagerRef, ProcedureWithId, watcher};
+#[cfg(feature = "enterprise")]
+use common_meta::rpc::ddl::PurgeDroppedTableTask;
+use common_procedure::{ProcedureContext, ProcedureManagerRef, ProcedureWithId, watcher};
 use common_telemetry::debug;
 use snafu::{OptionExt as _, ResultExt as _};
 use store_api::storage::{GcReport, RegionId};
@@ -29,6 +42,8 @@ use crate::cluster::MetaPeerClientRef;
 use crate::error::{self, Result, TableMetadataManagerSnafu};
 use crate::gc::Region2Peers;
 use crate::gc::procedure::BatchGcProcedure;
+#[cfg(feature = "enterprise")]
+use crate::metrics::METRIC_META_GC_SOFT_DROP_PURGES_TOTAL;
 use crate::service::mailbox::MailboxRef;
 
 #[async_trait::async_trait]
@@ -53,7 +68,87 @@ pub(crate) trait SchedulerCtx: Send + Sync {
         full_file_listing: bool,
         timeout: Duration,
         region_routes_override: Region2Peers,
+        procedure_context: ProcedureContext,
     ) -> Result<GcReport>;
+
+    #[cfg(feature = "enterprise")]
+    async fn list_dropped_tables(&self) -> Result<Vec<DroppedTableName>>;
+
+    #[cfg(feature = "enterprise")]
+    async fn purge_dropped_table(&self, table_id: TableId) -> Result<()>;
+
+    #[cfg(feature = "enterprise")]
+    fn try_reserve_purge(
+        &self,
+        table_id: TableId,
+        max_in_flight: usize,
+    ) -> Option<PurgeReservation>;
+
+    #[cfg(feature = "enterprise")]
+    fn next_purge_scan_start(&self, _table_count: usize) -> usize {
+        0
+    }
+}
+
+#[cfg(feature = "enterprise")]
+pub(crate) enum PurgeOutcome {
+    Succeeded,
+    Failed,
+}
+
+#[cfg(feature = "enterprise")]
+pub(crate) struct PurgeReservation {
+    table_id: TableId,
+    in_flight: Arc<Mutex<HashSet<TableId>>>,
+    outcome_recorded: bool,
+}
+
+#[cfg(feature = "enterprise")]
+impl PurgeReservation {
+    pub(crate) fn try_new(
+        in_flight: Arc<Mutex<HashSet<TableId>>>,
+        table_id: TableId,
+        max_in_flight: usize,
+    ) -> Option<Self> {
+        let mut tables = in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if tables.len() >= max_in_flight || !tables.insert(table_id) {
+            return None;
+        }
+        drop(tables);
+        Some(Self {
+            table_id,
+            in_flight,
+            outcome_recorded: false,
+        })
+    }
+
+    pub(crate) fn record_outcome(mut self, outcome: PurgeOutcome) {
+        let status = match outcome {
+            PurgeOutcome::Succeeded => "succeeded",
+            PurgeOutcome::Failed => "failed",
+        };
+        METRIC_META_GC_SOFT_DROP_PURGES_TOTAL
+            .with_label_values(&[status])
+            .inc();
+        self.outcome_recorded = true;
+    }
+}
+
+#[cfg(feature = "enterprise")]
+impl Drop for PurgeReservation {
+    fn drop(&mut self) {
+        if !self.outcome_recorded {
+            METRIC_META_GC_SOFT_DROP_PURGES_TOTAL
+                .with_label_values(&["cancelled"])
+                .inc();
+        }
+        self.in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.table_id);
+    }
 }
 
 pub(crate) struct DefaultGcSchedulerCtx {
@@ -61,6 +156,17 @@ pub(crate) struct DefaultGcSchedulerCtx {
     pub(crate) table_metadata_manager: TableMetadataManagerRef,
     /// Procedure manager.
     pub(crate) procedure_manager: ProcedureManagerRef,
+    /// Runtime switch manager used by recovered and newly submitted GC procedures.
+    pub(crate) runtime_switch_manager: RuntimeSwitchManagerRef,
+    /// DDL manager used to submit the existing purge procedure.
+    #[cfg(feature = "enterprise")]
+    pub(crate) ddl_manager: DdlManagerRef,
+    /// Process-local reservations for purge procedures submitted by this scheduler.
+    /// Procedure recovery after a metasrv restart may outlive this set.
+    #[cfg(feature = "enterprise")]
+    in_flight_purges: Arc<Mutex<HashSet<TableId>>>,
+    #[cfg(feature = "enterprise")]
+    purge_scan_cursor: AtomicUsize,
     /// For getting `RegionStats`.
     pub(crate) meta_peer_client: MetaPeerClientRef,
     /// The mailbox to send messages.
@@ -73,6 +179,8 @@ impl DefaultGcSchedulerCtx {
     pub fn try_new(
         table_metadata_manager: TableMetadataManagerRef,
         procedure_manager: ProcedureManagerRef,
+        runtime_switch_manager: RuntimeSwitchManagerRef,
+        #[cfg(feature = "enterprise")] ddl_manager: DdlManagerRef,
         meta_peer_client: MetaPeerClientRef,
         mailbox: MailboxRef,
         server_addr: String,
@@ -80,6 +188,13 @@ impl DefaultGcSchedulerCtx {
         Ok(Self {
             table_metadata_manager,
             procedure_manager,
+            runtime_switch_manager,
+            #[cfg(feature = "enterprise")]
+            ddl_manager,
+            #[cfg(feature = "enterprise")]
+            in_flight_purges: Arc::new(Mutex::new(HashSet::new())),
+            #[cfg(feature = "enterprise")]
+            purge_scan_cursor: AtomicUsize::new(0),
             meta_peer_client,
             mailbox,
             server_addr,
@@ -145,14 +260,50 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
         full_file_listing: bool,
         timeout: Duration,
         region_routes_override: Region2Peers,
+        procedure_context: ProcedureContext,
     ) -> Result<GcReport> {
         self.gc_regions_inner(
             region_ids,
             full_file_listing,
             timeout,
             region_routes_override,
+            procedure_context,
         )
         .await
+    }
+
+    #[cfg(feature = "enterprise")]
+    async fn list_dropped_tables(&self) -> Result<Vec<DroppedTableName>> {
+        self.table_metadata_manager
+            .list_dropped_tables()
+            .await
+            .context(TableMetadataManagerSnafu)
+    }
+
+    #[cfg(feature = "enterprise")]
+    async fn purge_dropped_table(&self, table_id: TableId) -> Result<()> {
+        self.ddl_manager
+            .submit_expired_purge_dropped_table_task(PurgeDroppedTableTask { table_id })
+            .await
+            .context(error::SubmitDdlTaskSnafu)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "enterprise")]
+    fn try_reserve_purge(
+        &self,
+        table_id: TableId,
+        max_in_flight: usize,
+    ) -> Option<PurgeReservation> {
+        PurgeReservation::try_new(self.in_flight_purges.clone(), table_id, max_in_flight)
+    }
+
+    #[cfg(feature = "enterprise")]
+    fn next_purge_scan_start(&self, table_count: usize) -> usize {
+        if table_count == 0 {
+            return 0;
+        }
+        self.purge_scan_cursor.fetch_add(1, Ordering::Relaxed) % table_count
     }
 }
 
@@ -163,6 +314,7 @@ impl DefaultGcSchedulerCtx {
         full_file_listing: bool,
         timeout: Duration,
         region_routes_override: Region2Peers,
+        procedure_context: ProcedureContext,
     ) -> Result<GcReport> {
         debug!(
             "Sending GC instruction for {} regions (full_file_listing: {})",
@@ -173,13 +325,15 @@ impl DefaultGcSchedulerCtx {
         let procedure = BatchGcProcedure::new(
             self.mailbox.clone(),
             self.table_metadata_manager.clone(),
+            self.runtime_switch_manager.clone(),
             self.server_addr.clone(),
             region_ids.to_vec(),
             full_file_listing,
             timeout,
             region_routes_override,
         );
-        let procedure_with_id = ProcedureWithId::with_random_id(Box::new(procedure));
+        let procedure_with_id =
+            ProcedureWithId::with_random_id(Box::new(procedure)).with_context(procedure_context);
 
         let id = procedure_with_id.id;
 
@@ -200,5 +354,50 @@ impl DefaultGcSchedulerCtx {
         let gc_report = BatchGcProcedure::cast_result(res)?;
 
         Ok(gc_report)
+    }
+}
+
+#[cfg(all(test, feature = "enterprise"))]
+mod tests {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    use super::*;
+    use crate::metrics::METRIC_META_GC_SOFT_DROP_PURGES_TOTAL;
+
+    #[test]
+    fn test_purge_reservation_releases_slot_on_panic() {
+        let in_flight = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let cancelled = METRIC_META_GC_SOFT_DROP_PURGES_TOTAL.with_label_values(&["cancelled"]);
+        let before = cancelled.get();
+        let reservation = PurgeReservation::try_new(in_flight.clone(), 1, 1).unwrap();
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _reservation = reservation;
+            panic!("mock purge panic");
+        }));
+
+        assert!(result.is_err());
+        assert!(PurgeReservation::try_new(in_flight, 2, 1).is_some());
+        assert!(cancelled.get() > before);
+    }
+
+    #[tokio::test]
+    async fn test_purge_reservation_releases_slot_on_task_abort() {
+        let in_flight = Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let cancelled = METRIC_META_GC_SOFT_DROP_PURGES_TOTAL.with_label_values(&["cancelled"]);
+        let before = cancelled.get();
+        let reservation = PurgeReservation::try_new(in_flight.clone(), 1, 1).unwrap();
+        let handle = tokio::spawn(async move {
+            let _reservation = reservation;
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+
+        handle.abort();
+        let error = handle.await.unwrap_err();
+
+        assert!(error.is_cancelled());
+        assert!(PurgeReservation::try_new(in_flight, 2, 1).is_some());
+        assert!(cancelled.get() > before);
     }
 }

@@ -7,6 +7,16 @@ if [ -z "$CURRENT_VERSION" ]; then
   exit 1
 fi
 
+if [[ "$CURRENT_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  IS_CURRENT_VERSION_STABLE=true
+else
+  IS_CURRENT_VERSION_STABLE=false
+fi
+
+if [ -n "$GITHUB_OUTPUT" ]; then
+  echo "is-current-version-stable=$IS_CURRENT_VERSION_STABLE" >> "$GITHUB_OUTPUT"
+fi
+
 # Get the latest version from GitHub Releases
 API_RESPONSE=$(curl -s "https://api.github.com/repos/GreptimeTeam/greptimedb/releases/latest")
 

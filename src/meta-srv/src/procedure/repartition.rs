@@ -16,6 +16,7 @@ pub mod allocate_region;
 pub mod collect;
 pub mod deallocate_region;
 pub mod dispatch;
+pub mod gc_requirement;
 pub mod group;
 pub mod plan;
 pub mod repartition_end;
@@ -33,6 +34,7 @@ use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::DdlContext;
 use common_meta::ddl::allocator::region_routes::RegionRoutesAllocatorRef;
 use common_meta::ddl::allocator::wal_options::WalOptionsAllocatorRef;
+use common_meta::ddl::utils::get_region_wal_options;
 use common_meta::ddl_manager::{RepartitionProcedureFactory, RepartitionSource};
 use common_meta::instruction::CacheIdent;
 use common_meta::key::datanode_table::RegionInfo;
@@ -47,8 +49,9 @@ use common_meta::rpc::router::{RegionRoute, operating_leader_region_roles};
 use common_meta::wal_provider::RegionWalOptions;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    BoxedProcedure, Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
-    ProcedureManagerRef, Result as ProcedureResult, Status, StringKey, UserMetadata,
+    BoxedProcedure, Context as ProcedureContext, Error as ProcedureError, EventContext,
+    EventTrigger, LockKey, Procedure, ProcedureManagerRef, Result as ProcedureResult, Status,
+    StringKey,
 };
 use common_telemetry::{error, info, warn};
 use partition::expr::PartitionExpr;
@@ -58,8 +61,10 @@ use store_api::storage::TableId;
 use table::table_name::TableName;
 
 use crate::error::{self, Result};
+use crate::event::repartition::{REPARTITION_EVENT_TYPE, RepartitionEvent};
 use crate::procedure::repartition::collect::ProcedureMeta;
 use crate::procedure::repartition::deallocate_region::DeallocateRegion;
+use crate::procedure::repartition::gc_requirement::RepartitionGcRequirementManagerRef;
 use crate::procedure::repartition::group::{
     Context as RepartitionGroupContext, RepartitionGroupProcedure, region_routes,
 };
@@ -102,7 +107,7 @@ pub struct PersistentContext {
 }
 
 fn default_timeout() -> Duration {
-    Duration::from_mins(2)
+    Duration::from_secs(2 * 60)
 }
 
 impl PersistentContext {
@@ -398,16 +403,27 @@ impl Context {
         let datanode_table_value =
             get_datanode_table_value(&self.table_metadata_manager, table_id, datanode_id).await?;
 
-        let RegionInfo {
-            region_options,
-            region_wal_options,
-            ..
-        } = &datanode_table_value.region_info;
+        let RegionInfo { region_options, .. } = &datanode_table_value.region_info;
+
+        let mut region_wal_options = get_region_wal_options(
+            &self.table_metadata_manager,
+            current_table_route_value,
+            table_id,
+        )
+        .await
+        .context(error::TableMetadataManagerSnafu)?;
+        // Legacy regions without a persisted WAL option use RaftEngine. Only
+        // existing routes get this default; allocated regions must supply one.
+        for route in current_table_route_value.region_routes().unwrap() {
+            region_wal_options
+                .entry(route.region.id.region_number())
+                .or_default();
+        }
 
         // Merge and validate the new region wal options.
         let validated_region_wal_options =
             crate::procedure::repartition::utils::merge_and_validate_region_wal_options(
-                region_wal_options,
+                &region_wal_options,
                 new_region_wal_options,
                 &new_region_routes,
                 table_id,
@@ -788,26 +804,104 @@ impl Procedure for RepartitionProcedure {
         LockKey::new(self.context.persistent_ctx.lock_key())
     }
 
-    fn user_metadata(&self) -> Option<UserMetadata> {
-        // TODO(weny): support user metadata.
-        None
+    fn event(&self, ctx: &EventContext<'_>) -> Option<Box<dyn common_event_recorder::Event>> {
+        if !ctx.event_type_filter.allows(REPARTITION_EVENT_TYPE) {
+            return None;
+        }
+
+        let event = if matches!(ctx.trigger, EventTrigger::Submitted) {
+            let start = self.state.as_any().downcast_ref::<RepartitionStart>()?;
+            RepartitionEvent::submitted(&self.context.persistent_ctx, start)
+        } else {
+            RepartitionEvent::lifecycle(&self.context.persistent_ctx)
+        };
+        Some(Box::new(event))
     }
 }
 
 pub struct DefaultRepartitionProcedureFactory {
     mailbox: MailboxRef,
     server_addr: String,
+    gc_requirement_manager: RepartitionGcRequirementManagerRef,
 }
 
 impl DefaultRepartitionProcedureFactory {
-    pub fn new(mailbox: MailboxRef, server_addr: String) -> Self {
+    pub fn new(
+        mailbox: MailboxRef,
+        server_addr: String,
+        gc_requirement_manager: RepartitionGcRequirementManagerRef,
+    ) -> Self {
         Self {
             mailbox,
             server_addr,
+            gc_requirement_manager,
         }
     }
 }
 
+/// Rejects new repartition requests when metasrv GC is disabled.
+///
+/// Procedure loaders are still delegated to the enabled factory so procedures
+/// persisted before a metasrv restart remain recoverable after GC is re-enabled.
+pub struct GcDisabledRepartitionProcedureFactory {
+    enabled_factory: DefaultRepartitionProcedureFactory,
+}
+
+impl GcDisabledRepartitionProcedureFactory {
+    pub fn new(
+        mailbox: MailboxRef,
+        server_addr: String,
+        gc_requirement_manager: RepartitionGcRequirementManagerRef,
+    ) -> Self {
+        Self {
+            enabled_factory: DefaultRepartitionProcedureFactory::new(
+                mailbox,
+                server_addr,
+                gc_requirement_manager,
+            ),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RepartitionProcedureFactory for GcDisabledRepartitionProcedureFactory {
+    fn create(
+        &self,
+        _ddl_ctx: &DdlContext,
+        _table_name: TableName,
+        _table_id: TableId,
+        _source: RepartitionSource,
+        _to_exprs: Vec<String>,
+        _timeout: Option<Duration>,
+    ) -> std::result::Result<BoxedProcedure, BoxedError> {
+        Err(BoxedError::new(
+            error::InvalidArgumentsSnafu {
+                err_msg: "Repartition requires metasrv GC to be enabled".to_string(),
+            }
+            .build(),
+        ))
+    }
+
+    fn register_loaders(
+        &self,
+        ddl_ctx: &DdlContext,
+        procedure_manager: &ProcedureManagerRef,
+    ) -> std::result::Result<(), BoxedError> {
+        self.enabled_factory
+            .register_loaders(ddl_ctx, procedure_manager)
+    }
+
+    async fn ensure_gc_requirement(&self) -> std::result::Result<(), BoxedError> {
+        Err(BoxedError::new(
+            error::InvalidArgumentsSnafu {
+                err_msg: "Repartition requires metasrv GC to be enabled".to_string(),
+            }
+            .build(),
+        ))
+    }
+}
+
+#[async_trait::async_trait]
 impl RepartitionProcedureFactory for DefaultRepartitionProcedureFactory {
     fn create(
         &self,
@@ -911,6 +1005,13 @@ impl RepartitionProcedureFactory for DefaultRepartitionProcedureFactory {
 
         Ok(())
     }
+
+    async fn ensure_gc_requirement(&self) -> std::result::Result<(), BoxedError> {
+        self.gc_requirement_manager
+            .require_gc()
+            .await
+            .map_err(BoxedError::new)
+    }
 }
 
 #[cfg(test)]
@@ -919,9 +1020,10 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use common_error::ext::BoxedError;
+    use common_error::ext::{BoxedError, ErrorExt};
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
+    use common_event_recorder::EventTypeFilter;
     use common_meta::ddl::test_util::datanode_handler::{
         DatanodeWatcher, NaiveDatanodeHandler, UnexpectedErrorDatanodeHandler,
     };
@@ -929,7 +1031,9 @@ mod tests {
     use common_meta::peer::Peer;
     use common_meta::region_keeper::MemoryRegionKeeper;
     use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
+    use common_meta::state_store::KvStateStore;
     use common_meta::test_util::MockDatanodeManager;
+    use common_procedure::local::{LocalManager, ManagerConfig};
     use common_procedure::{Error as ProcedureError, Procedure, ProcedureId, ProcedureState};
     use store_api::region_engine::RegionRole;
     use store_api::storage::RegionId;
@@ -942,6 +1046,7 @@ mod tests {
     use crate::procedure::repartition::collect::Collect;
     use crate::procedure::repartition::deallocate_region::DeallocateRegion;
     use crate::procedure::repartition::dispatch::Dispatch;
+    use crate::procedure::repartition::gc_requirement::RepartitionGcRequirementManager;
     use crate::procedure::repartition::group::update_metadata::UpdateMetadata;
     use crate::procedure::repartition::plan::{SourceRegionDescriptor, TargetRegionDescriptor};
     use crate::procedure::repartition::repartition_end::RepartitionEnd;
@@ -1051,6 +1156,53 @@ mod tests {
     }
 
     #[test]
+    fn test_gc_disabled_factory_rejects_repartition_and_registers_loaders() {
+        let env = TestingEnv::new();
+        let node_manager = Arc::new(MockDatanodeManager::new(UnexpectedErrorDatanodeHandler));
+        let ddl_ctx = env.ddl_context(node_manager);
+        let factory = GcDisabledRepartitionProcedureFactory::new(
+            env.mailbox_ctx.mailbox().clone(),
+            env.server_addr.clone(),
+            Arc::new(RepartitionGcRequirementManager::new(env.kv_backend.clone())),
+        );
+
+        let err = factory
+            .create(
+                &ddl_ctx,
+                TableName::new("test_catalog", "test_schema", "test_table"),
+                1024,
+                RepartitionSource::Unpartitioned {
+                    partition_columns: vec![],
+                },
+                vec![],
+                None,
+            )
+            .err()
+            .expect("GC-disabled factory must reject repartition");
+
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+        assert_eq!(
+            "Invalid arguments: Repartition requires metasrv GC to be enabled",
+            err.to_string()
+        );
+
+        let state_store = Arc::new(KvStateStore::new(env.kv_backend));
+        let procedure_manager = Arc::new(LocalManager::new(
+            ManagerConfig::default(),
+            state_store.clone(),
+            state_store,
+            None,
+            None,
+        ));
+        let procedure_manager_ref: ProcedureManagerRef = procedure_manager.clone();
+        factory
+            .register_loaders(&ddl_ctx, &procedure_manager_ref)
+            .unwrap();
+        assert!(procedure_manager.contains_loader(RepartitionProcedure::TYPE_NAME));
+        assert!(procedure_manager.contains_loader(RepartitionGroupProcedure::TYPE_NAME));
+    }
+
+    #[test]
     fn test_filter_allocated_region_routes() {
         let table_id = 1024;
         let region_routes = vec![
@@ -1107,6 +1259,78 @@ mod tests {
 
         let procedure = test_procedure(Box::new(RepartitionEnd), test_context(&env, table_id));
         assert!(!procedure.should_rollback());
+    }
+
+    #[test]
+    fn test_event_hook_records_submitted_and_lightweight_lifecycle_events() {
+        let env = TestingEnv::new();
+        let procedure = test_procedure(
+            Box::new(RepartitionStart::new(
+                RepartitionFrom::Unpartitioned {
+                    partition_columns: vec!["x".to_string()],
+                },
+                vec![range_expr("x", 0, 100)],
+            )),
+            test_context(&env, 1024),
+        );
+        let state = ProcedureState::Running;
+        let all = Arc::new(EventTypeFilter::All);
+
+        let submitted = procedure
+            .event(&EventContext {
+                procedure_id: ProcedureId::random(),
+                lifecycle_state: &state,
+                trigger: EventTrigger::Submitted,
+                event_type_filter: all.clone(),
+                event_context: None,
+            })
+            .unwrap();
+        assert_eq!(submitted.event_type(), REPARTITION_EVENT_TYPE);
+        assert_ne!(submitted.json_payload().unwrap(), serde_json::Value::Null);
+
+        let allowed = procedure
+            .event(&EventContext {
+                procedure_id: ProcedureId::random(),
+                lifecycle_state: &state,
+                trigger: EventTrigger::Submitted,
+                event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::from([
+                    REPARTITION_EVENT_TYPE.to_string(),
+                ]))),
+                event_context: None,
+            })
+            .unwrap();
+        assert_eq!(allowed.event_type(), REPARTITION_EVENT_TYPE);
+
+        let succeeded = procedure
+            .event(&EventContext {
+                procedure_id: ProcedureId::random(),
+                lifecycle_state: &state,
+                trigger: EventTrigger::Succeeded,
+                event_type_filter: all,
+                event_context: None,
+            })
+            .unwrap();
+        assert_eq!(succeeded.json_payload().unwrap(), serde_json::Value::Null);
+
+        let filtered = procedure.event(&EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state: &state,
+            trigger: EventTrigger::Submitted,
+            event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::from([
+                "another_event".to_string()
+            ]))),
+            event_context: None,
+        });
+        assert!(filtered.is_none());
+
+        let empty = procedure.event(&EventContext {
+            procedure_id: ProcedureId::random(),
+            lifecycle_state: &state,
+            trigger: EventTrigger::Submitted,
+            event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::new())),
+            event_context: None,
+        });
+        assert!(empty.is_none());
     }
 
     #[test]

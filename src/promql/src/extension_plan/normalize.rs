@@ -12,14 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use datafusion::arrow::array::{BooleanArray, Float64Array};
+use common_query::native_histogram::{START_TIMESTAMP_FIELD, native_histogram_arrow_type};
+use datafusion::arrow::array::{Array, BooleanArray, StructArray};
 use datafusion::arrow::compute;
-use datafusion::common::{DFSchema, DFSchemaRef, Result as DataFusionResult, Statistics};
+use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::common::{Column, DFSchema, DFSchemaRef, Result as DataFusionResult, Statistics};
 use datafusion::error::DataFusionError;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
@@ -28,12 +29,13 @@ use datafusion::physical_plan::metrics::{
     BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricValue, MetricsSet,
 };
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, PlanProperties, RecordBatchStream,
-    SendableRecordBatchStream,
+    ChildStats, DisplayAs, DisplayFormatType, Distribution, ExecutionPlan,
+    InputDistributionRequirements, PhysicalExpr, PlanProperties, RecordBatchStream,
+    SendableRecordBatchStream, StatisticsArgs,
 };
-use datafusion_expr::col;
+use datafusion_expr::ident;
 use datatypes::arrow::array::TimestampMillisecondArray;
-use datatypes::arrow::datatypes::SchemaRef;
+use datatypes::arrow::datatypes::{SchemaRef, TimestampMillisecondType};
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
@@ -42,22 +44,23 @@ use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
 use crate::extension_plan::{
-    METRIC_NUM_SERIES, Millisecond, resolve_column_name, serialize_column_index,
+    METRIC_NUM_SERIES, Millisecond, is_prometheus_stale_sample, prometheus_stale_sample_column,
+    resolve_column_name, serialize_column_index,
 };
 use crate::metrics::PROMQL_SERIES_COUNT;
 
-/// Normalize the input record batch. Notice that for simplicity, this method assumes
-/// the input batch only contains sample points from one time series.
+/// Normalizes a single-series input batch and optionally removes Prometheus stale markers.
 ///
-/// Roughly speaking, this method does these things:
-/// - bias sample's timestamp by offset
-/// - sort the record batch based on timestamp column
-/// - remove NaN values (optional)
+/// This node remains the serialized carrier of the selector offset. Native sample timestamps
+/// stay raw: applying an offset can overflow native `i64` ticks even when evaluation is valid.
+/// Manipulators instead apply it in `i128` during selection and produce millisecond outputs.
+/// Histogram start timestamps are already millisecond payloads used for rate/reset, so their
+/// offsets are applied here, preserving unknown zero values and nulls.
 #[derive(Debug, PartialEq, Eq, Hash, PartialOrd)]
 pub struct SeriesNormalize {
     offset: Millisecond,
     time_index_column_name: String,
-    need_filter_out_nan: bool,
+    filter_stale_markers: bool,
     tag_columns: Vec<String>,
 
     input: LogicalPlan,
@@ -90,8 +93,8 @@ impl UserDefinedLogicalNodeCore for SeriesNormalize {
 
         self.tag_columns
             .iter()
-            .map(col)
-            .chain(std::iter::once(col(&self.time_index_column_name)))
+            .map(ident)
+            .chain(std::iter::once(ident(&self.time_index_column_name)))
             .collect()
     }
 
@@ -122,7 +125,7 @@ impl UserDefinedLogicalNodeCore for SeriesNormalize {
         write!(
             f,
             "PromSeriesNormalize: offset=[{}], time index=[{}], filter NaN: [{}]",
-            self.offset, self.time_index_column_name, self.need_filter_out_nan
+            self.offset, self.time_index_column_name, self.filter_stale_markers
         )
     }
 
@@ -158,7 +161,7 @@ impl UserDefinedLogicalNodeCore for SeriesNormalize {
             Ok(Self {
                 offset: self.offset,
                 time_index_column_name,
-                need_filter_out_nan: self.need_filter_out_nan,
+                filter_stale_markers: self.filter_stale_markers,
                 tag_columns,
                 input,
                 unfix: None,
@@ -167,7 +170,7 @@ impl UserDefinedLogicalNodeCore for SeriesNormalize {
             Ok(Self {
                 offset: self.offset,
                 time_index_column_name: self.time_index_column_name.clone(),
-                need_filter_out_nan: self.need_filter_out_nan,
+                filter_stale_markers: self.filter_stale_markers,
                 tag_columns: self.tag_columns.clone(),
                 input,
                 unfix: None,
@@ -177,17 +180,25 @@ impl UserDefinedLogicalNodeCore for SeriesNormalize {
 }
 
 impl SeriesNormalize {
+    pub(crate) fn offset_for_time_index(&self, time_index: &Column) -> Option<Millisecond> {
+        let index = self.input.schema().maybe_index_of_column(time_index)?;
+        let (qualifier, field) = self.input.schema().qualified_field(index);
+        (field.name() == &self.time_index_column_name
+            && time_index == &Column::new(qualifier.cloned(), field.name().clone()))
+            .then_some(self.offset)
+    }
+
     pub fn new<N: AsRef<str>>(
         offset: Millisecond,
         time_index_column_name: N,
-        need_filter_out_nan: bool,
+        filter_stale_markers: bool,
         tag_columns: Vec<String>,
         input: LogicalPlan,
     ) -> Self {
         Self {
             offset,
             time_index_column_name: time_index_column_name.as_ref().to_string(),
-            need_filter_out_nan,
+            filter_stale_markers,
             tag_columns,
             input,
             unfix: None,
@@ -198,11 +209,16 @@ impl SeriesNormalize {
         "SeriesNormalize"
     }
 
+    /// Returns whether this plan removes Prometheus stale markers.
+    pub const fn filter_stale_markers(&self) -> bool {
+        self.filter_stale_markers
+    }
+
     pub fn to_execution_plan(&self, exec_input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
         Arc::new(SeriesNormalizeExec {
             offset: self.offset,
             time_index_column_name: self.time_index_column_name.clone(),
-            need_filter_out_nan: self.need_filter_out_nan,
+            filter_stale_markers: self.filter_stale_markers,
             input: exec_input,
             tag_columns: self.tag_columns.clone(),
             metric: ExecutionPlanMetricsSet::new(),
@@ -222,7 +238,7 @@ impl SeriesNormalize {
         pb::SeriesNormalize {
             offset: self.offset,
             time_index_idx,
-            filter_nan: self.need_filter_out_nan,
+            filter_nan: self.filter_stale_markers,
             tag_column_indices,
             ..Default::default()
         }
@@ -244,7 +260,7 @@ impl SeriesNormalize {
         Ok(Self {
             offset: pb_normalize.offset,
             time_index_column_name: String::new(),
-            need_filter_out_nan: pb_normalize.filter_nan,
+            filter_stale_markers: pb_normalize.filter_nan,
             tag_columns: Vec::new(),
             input: placeholder_plan,
             unfix: Some(unfix),
@@ -256,7 +272,7 @@ impl SeriesNormalize {
 pub struct SeriesNormalizeExec {
     offset: Millisecond,
     time_index_column_name: String,
-    need_filter_out_nan: bool,
+    filter_stale_markers: bool,
     tag_columns: Vec<String>,
 
     input: Arc<dyn ExecutionPlan>,
@@ -264,27 +280,30 @@ pub struct SeriesNormalizeExec {
 }
 
 impl ExecutionPlan for SeriesNormalizeExec {
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
+    ) -> DataFusionResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn schema(&self) -> SchemaRef {
         self.input.schema()
     }
 
-    fn required_input_distribution(&self) -> Vec<Distribution> {
+    fn input_distribution_requirements(&self) -> InputDistributionRequirements {
         if self.tag_columns.is_empty() {
-            return vec![Distribution::SinglePartition];
+            return InputDistributionRequirements::new(vec![Distribution::SinglePartition]);
         }
 
         let schema = self.input.schema();
-        vec![Distribution::HashPartitioned(
+        InputDistributionRequirements::new(vec![Distribution::KeyPartitioned(
             self.tag_columns
                 .iter()
                 // Safety: the tag column names is verified in the planning phase
                 .map(|tag| Arc::new(ColumnExpr::new_with_schema(tag, &schema).unwrap()) as _)
                 .collect(),
-        )]
+        )])
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -303,7 +322,7 @@ impl ExecutionPlan for SeriesNormalizeExec {
         Ok(Arc::new(Self {
             offset: self.offset,
             time_index_column_name: self.time_index_column_name.clone(),
-            need_filter_out_nan: self.need_filter_out_nan,
+            filter_stale_markers: self.filter_stale_markers,
             input: children[0].clone(),
             tag_columns: self.tag_columns.clone(),
             metric: self.metric.clone(),
@@ -327,14 +346,9 @@ impl ExecutionPlan for SeriesNormalizeExec {
 
         let input = self.input.execute(partition, context)?;
         let schema = input.schema();
-        let time_index = schema
-            .column_with_name(&self.time_index_column_name)
-            .expect("time index column not found")
-            .0;
         Ok(Box::pin(SeriesNormalizeStream {
             offset: self.offset,
-            time_index,
-            need_filter_out_nan: self.need_filter_out_nan,
+            filter_stale_markers: self.filter_stale_markers,
             schema,
             input,
             metric: baseline_metric,
@@ -346,8 +360,16 @@ impl ExecutionPlan for SeriesNormalizeExec {
         Some(self.metric.clone_inner())
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> DataFusionResult<Statistics> {
-        self.input.partition_statistics(partition)
+    fn child_stats_requests(&self, partition: Option<usize>) -> Vec<ChildStats> {
+        vec![ChildStats::At(partition)]
+    }
+
+    fn statistics_from_inputs(
+        &self,
+        input_stats: &[Arc<Statistics>],
+        _args: &StatisticsArgs,
+    ) -> DataFusionResult<Arc<Statistics>> {
+        Ok(Arc::clone(&input_stats[0]))
     }
 
     fn name(&self) -> &str {
@@ -364,7 +386,7 @@ impl DisplayAs for SeriesNormalizeExec {
                 write!(
                     f,
                     "PromSeriesNormalizeExec: offset=[{}], time index=[{}], filter NaN: [{}]",
-                    self.offset, self.time_index_column_name, self.need_filter_out_nan
+                    self.offset, self.time_index_column_name, self.filter_stale_markers
                 )
             }
         }
@@ -373,9 +395,7 @@ impl DisplayAs for SeriesNormalizeExec {
 
 pub struct SeriesNormalizeStream {
     offset: Millisecond,
-    // Column index of TIME INDEX column's position in schema
-    time_index: usize,
-    need_filter_out_nan: bool,
+    filter_stale_markers: bool,
 
     schema: SchemaRef,
     input: SendableRecordBatchStream,
@@ -386,47 +406,78 @@ pub struct SeriesNormalizeStream {
 
 impl SeriesNormalizeStream {
     pub fn normalize(&self, input: RecordBatch) -> DataFusionResult<RecordBatch> {
-        let ts_column = input
-            .column(self.time_index)
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .ok_or_else(|| {
-                DataFusionError::Execution(
-                    "Time index Column downcast to TimestampMillisecondArray failed".into(),
-                )
-            })?;
-
-        // bias the timestamp column by offset
-        let ts_column_biased = if self.offset == 0 {
-            Arc::new(ts_column.clone()) as _
-        } else {
-            Arc::new(TimestampMillisecondArray::from_iter(
-                ts_column.iter().map(|ts| ts.map(|ts| ts + self.offset)),
-            ))
-        };
+        // Native sample timestamps remain raw. Manipulators apply the selector offset
+        // in wide nanosecond arithmetic, avoiding overflow in native Arrow storage.
         let mut columns = input.columns().to_vec();
-        columns[self.time_index] = ts_column_biased;
+
+        // Offset selectors move native histogram start timestamps onto the evaluation
+        // timeline for rate and reset calculations. These payloads are milliseconds.
+        if self.offset != 0 {
+            let native_histogram_type = native_histogram_arrow_type();
+            for column in &mut columns {
+                let Some((histograms, start_timestamp_index, start_timestamps)) = column
+                    .as_any()
+                    .downcast_ref::<StructArray>()
+                    .filter(|histograms| histograms.data_type() == &native_histogram_type)
+                    .and_then(|histograms| {
+                        let (index, _) = histograms.fields().find(START_TIMESTAMP_FIELD)?;
+                        let timestamps = histograms
+                            .column(index)
+                            .as_any()
+                            .downcast_ref::<TimestampMillisecondArray>()?;
+                        Some((histograms, index, timestamps))
+                    })
+                else {
+                    continue;
+                };
+                let start_timestamps = start_timestamps
+                    .try_unary::<_, TimestampMillisecondType, _>(|timestamp| {
+                        // Prometheus uses zero to mean that the start timestamp is unknown.
+                        if timestamp == 0 {
+                            Ok(0)
+                        } else {
+                            timestamp.checked_add(self.offset).ok_or_else(|| {
+                                DataFusionError::Execution(
+                                    "SeriesNormalize: histogram timestamp offset overflow".into(),
+                                )
+                            })
+                        }
+                    })?;
+                // Struct arrays are immutable, so rebuild the physical histogram payload with
+                // only its start-timestamp child replaced. Its logical schema stays unchanged:
+                // the selector offset affects histogram reset/rate metadata, not the native
+                // sample timestamp column consumed by later manipulators.
+                let mut children = histograms.columns().to_vec();
+                children[start_timestamp_index] = Arc::new(start_timestamps);
+                *column = Arc::new(StructArray::new(
+                    histograms.fields().clone(),
+                    children,
+                    histograms.nulls().cloned(),
+                ));
+            }
+        }
 
         let result_batch = RecordBatch::try_new(input.schema(), columns)?;
-        if !self.need_filter_out_nan {
+        if !self.filter_stale_markers {
             return Ok(result_batch);
         }
 
-        // TODO(ruihang): consider the "special NaN"
-        // filter out NaN
-        let mut filter = vec![true; input.num_rows()];
+        // Filter out Prometheus stale markers.
+        let mut stale_marker_filter = vec![true; input.num_rows()];
         for column in result_batch.columns() {
-            if let Some(float_column) = column.as_any().downcast_ref::<Float64Array>() {
-                for (i, flag) in filter.iter_mut().enumerate() {
-                    if float_column.value(i).is_nan() {
-                        *flag = false;
-                    }
+            let Some(stale_sample_column) = prometheus_stale_sample_column(column.as_ref()) else {
+                continue;
+            };
+            for (i, flag) in stale_marker_filter.iter_mut().enumerate() {
+                if is_prometheus_stale_sample(stale_sample_column, i) {
+                    *flag = false;
                 }
             }
         }
 
-        let result = compute::filter_record_batch(&result_batch, &BooleanArray::from(filter))
-            .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
+        let result =
+            compute::filter_record_batch(&result_batch, &BooleanArray::from(stale_marker_filter))
+                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
         Ok(result)
     }
 }
@@ -461,9 +512,14 @@ impl Stream for SeriesNormalizeStream {
 
 #[cfg(test)]
 mod test {
-    use datafusion::arrow::array::Float64Array;
+    use common_query::native_histogram::{build_histogram_array, read_histogram};
+    use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
+    use datafusion::arrow::array::{
+        DictionaryArray, Float64Array, TimestampMicrosecondArray, TimestampNanosecondArray,
+    };
+    use datafusion::arrow::buffer::NullBuffer;
     use datafusion::arrow::datatypes::{
-        ArrowPrimitiveType, DataType, Field, Schema, TimestampMillisecondType,
+        ArrowPrimitiveType, DataType, Field, Int64Type, Schema, TimeUnit, TimestampMillisecondType,
     };
     use datafusion::common::ToDFSchema;
     use datafusion::datasource::memory::MemorySourceConfig;
@@ -474,6 +530,9 @@ mod test {
     use datatypes::arrow_array::StringArray;
 
     use super::*;
+    use crate::extension_plan::RangeManipulate;
+    use crate::extension_plan::test_util::native_histogram;
+    use crate::range_array::RangeArray;
 
     const TIME_INDEX_COLUMN: &str = "timestamp";
 
@@ -522,7 +581,7 @@ mod test {
         let normalize_exec = Arc::new(SeriesNormalizeExec {
             offset: 0,
             time_index_column_name: TIME_INDEX_COLUMN.to_string(),
-            need_filter_out_nan: true,
+            filter_stale_markers: true,
             input: memory_exec,
             tag_columns: vec!["path".to_string()],
             metric: ExecutionPlanMetricsSet::new(),
@@ -556,7 +615,7 @@ mod test {
         let normalize_exec = Arc::new(SeriesNormalizeExec {
             offset: 1_000,
             time_index_column_name: TIME_INDEX_COLUMN.to_string(),
-            need_filter_out_nan: true,
+            filter_stale_markers: true,
             input: memory_exec,
             metric: ExecutionPlanMetricsSet::new(),
             tag_columns: vec!["path".to_string()],
@@ -573,14 +632,284 @@ mod test {
             "+---------------------+--------+------+\
             \n| timestamp           | value  | path |\
             \n+---------------------+--------+------+\
-            \n| 1970-01-01T00:01:01 | 0.0    | foo  |\
-            \n| 1970-01-01T00:02:01 | 1.0    | foo  |\
-            \n| 1970-01-01T00:00:01 | 10.0   | foo  |\
-            \n| 1970-01-01T00:00:31 | 100.0  | foo  |\
-            \n| 1970-01-01T00:01:31 | 1000.0 | foo  |\
+            \n| 1970-01-01T00:01:00 | 0.0    | foo  |\
+            \n| 1970-01-01T00:02:00 | 1.0    | foo  |\
+            \n| 1970-01-01T00:00:00 | 10.0   | foo  |\
+            \n| 1970-01-01T00:00:30 | 100.0  | foo  |\
+            \n| 1970-01-01T00:01:30 | 1000.0 | foo  |\
             \n+---------------------+--------+------+",
         );
 
         assert_eq!(result_literal, expected);
+    }
+
+    #[tokio::test]
+    async fn filters_stale_markers_and_preserves_ordinary_nan() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIME_INDEX_COLUMN,
+                TimestampMillisecondType::DATA_TYPE,
+                false,
+            ),
+            Field::new("value", DataType::Float64, true),
+            Field::new("auxiliary", DataType::Float64, true),
+        ]));
+        let value_column = Float64Array::new(
+            vec![
+                42.0,
+                f64::from_bits(0x7ff0_0000_0000_0002),
+                24.0,
+                f64::from_bits(0x7ff0_0000_0000_0002),
+            ]
+            .into(),
+            Some(NullBuffer::from(vec![true, true, true, false])),
+        );
+        assert!(!value_column.is_valid(3));
+        assert_eq!(value_column.value(3).to_bits(), 0x7ff0_0000_0000_0002);
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    1_000, 2_000, 3_000, 4_000,
+                ])),
+                Arc::new(value_column),
+                Arc::new(Float64Array::from(vec![
+                    f64::from_bits(0x7ff8_0000_0000_0000),
+                    1.0,
+                    f64::from_bits(0x7ff0_0000_0000_0002),
+                    2.0,
+                ])),
+            ],
+        )
+        .unwrap();
+        let input = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+        )));
+        let exec = Arc::new(SeriesNormalizeExec {
+            offset: 0,
+            time_index_column_name: TIME_INDEX_COLUMN.to_string(),
+            filter_stale_markers: true,
+            tag_columns: Vec::new(),
+            input,
+            metric: ExecutionPlanMetricsSet::new(),
+        });
+
+        let context = SessionContext::default();
+        let batches = datafusion::physical_plan::collect(exec, context.task_ctx())
+            .await
+            .unwrap();
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
+        let batch = batches.iter().find(|batch| batch.num_rows() == 2).unwrap();
+        let value = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let auxiliary = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+
+        assert_eq!(value.value(0), 42.0);
+        assert_eq!(auxiliary.value(0).to_bits(), 0x7ff8_0000_0000_0000);
+        assert!(!value.is_valid(1));
+    }
+
+    #[tokio::test]
+    async fn offsets_native_histogram_timestamps_and_filters_stale_markers() {
+        let mut regular = native_histogram(42.0);
+        regular.start_timestamp = Some(500);
+        let mut ordinary_nan = native_histogram(f64::NAN);
+        ordinary_nan.start_timestamp = Some(0);
+        let mut unknown_start = native_histogram(7.0);
+        unknown_start.start_timestamp = None;
+        let histograms = build_histogram_array(&[
+            Some(regular),
+            Some(native_histogram(f64::from_bits(PROMETHEUS_STALE_NAN_BITS))),
+            Some(ordinary_nan),
+            Some(unknown_start),
+            None,
+        ]);
+        for (unit, ticks_per_ms) in [
+            (TimeUnit::Millisecond, 1_i64),
+            (TimeUnit::Microsecond, 1_000),
+            (TimeUnit::Nanosecond, 1_000_000),
+        ] {
+            let timestamp_array = |values: Vec<i64>| -> Arc<dyn Array> {
+                match unit {
+                    TimeUnit::Millisecond => Arc::new(TimestampMillisecondArray::from(values)),
+                    TimeUnit::Microsecond => Arc::new(TimestampMicrosecondArray::from(values)),
+                    TimeUnit::Nanosecond => Arc::new(TimestampNanosecondArray::from(values)),
+                    TimeUnit::Second => unreachable!(),
+                }
+            };
+            for offset in [-1_i64, 1] {
+                let timestamps = timestamp_array(
+                    [1_000, 2_000, 3_000, 4_000, 5_000]
+                        .into_iter()
+                        .map(|timestamp| timestamp * ticks_per_ms)
+                        .collect(),
+                );
+                let schema = Arc::new(Schema::new(vec![
+                    Field::new(TIME_INDEX_COLUMN, timestamps.data_type().clone(), false),
+                    Field::new("value", histograms.data_type().clone(), true),
+                ]));
+                let batch =
+                    RecordBatch::try_new(schema.clone(), vec![timestamps, histograms.clone()])
+                        .unwrap();
+                let input = Arc::new(DataSourceExec::new(Arc::new(
+                    MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+                )));
+                let exec = Arc::new(SeriesNormalizeExec {
+                    offset,
+                    time_index_column_name: TIME_INDEX_COLUMN.to_string(),
+                    filter_stale_markers: true,
+                    tag_columns: Vec::new(),
+                    input,
+                    metric: ExecutionPlanMetricsSet::new(),
+                });
+                let context = SessionContext::default();
+                let batches = datafusion::physical_plan::collect(exec, context.task_ctx())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+                    4,
+                    "unit={unit:?}, offset={offset}"
+                );
+                let batch = batches.iter().find(|batch| batch.num_rows() == 4).unwrap();
+                let expected_timestamps = timestamp_array(
+                    [1_000, 3_000, 4_000, 5_000]
+                        .into_iter()
+                        .map(|timestamp| timestamp * ticks_per_ms)
+                        .collect(),
+                );
+                assert_eq!(
+                    batch.column(0).to_data(),
+                    expected_timestamps.to_data(),
+                    "unit={unit:?}, offset={offset}"
+                );
+                let values = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<datafusion::arrow::array::StructArray>()
+                    .unwrap();
+                let regular = read_histogram(values, 0).unwrap().unwrap();
+                assert_eq!(
+                    (regular.sum, regular.start_timestamp),
+                    (42.0, Some(500 + offset)),
+                    "unit={unit:?}, offset={offset}"
+                );
+                let ordinary_nan = read_histogram(values, 1).unwrap().unwrap();
+                assert!(ordinary_nan.sum.is_nan());
+                assert_eq!(ordinary_nan.start_timestamp, Some(0));
+                let unknown_start = read_histogram(values, 2).unwrap().unwrap();
+                assert_eq!(
+                    (unknown_start.sum, unknown_start.start_timestamp),
+                    (7.0, None)
+                );
+                assert!(read_histogram(values, 3).unwrap().is_none());
+            }
+        }
+
+        let mut known_start = native_histogram(42.0);
+        known_start.start_timestamp = Some(500);
+        let mut sentinel_start = native_histogram(8.0);
+        sentinel_start.start_timestamp = Some(0);
+        let unknown_start = native_histogram(7.0);
+        let histograms =
+            build_histogram_array(&[Some(known_start), Some(sentinel_start), Some(unknown_start)]);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIME_INDEX_COLUMN,
+                TimestampMillisecondType::DATA_TYPE,
+                false,
+            ),
+            Field::new("value", histograms.data_type().clone(), true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![1_000; 3])),
+                histograms,
+            ],
+        )
+        .unwrap();
+        let logical_input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: schema.clone().to_dfschema_ref().unwrap(),
+        });
+        let normalized =
+            SeriesNormalize::new(1_000, TIME_INDEX_COLUMN, false, Vec::new(), logical_input);
+        let range = RangeManipulate::new(
+            2_000,
+            2_000,
+            1,
+            1_000,
+            1,
+            TIME_INDEX_COLUMN.to_string(),
+            vec!["value".to_string()],
+            LogicalPlan::Extension(datafusion::logical_expr::Extension {
+                node: Arc::new(normalized),
+            }),
+        )
+        .unwrap();
+        let input = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+        )));
+        let normalized_input = Arc::new(SeriesNormalizeExec {
+            offset: 1_000,
+            time_index_column_name: TIME_INDEX_COLUMN.to_string(),
+            filter_stale_markers: false,
+            tag_columns: Vec::new(),
+            input,
+            metric: ExecutionPlanMetricsSet::new(),
+        });
+        let output = datafusion::physical_plan::collect(
+            range.to_execution_plan(normalized_input),
+            SessionContext::default().task_ctx(),
+        )
+        .await
+        .unwrap();
+        let values = RangeArray::try_new(
+            output[0]
+                .column(1)
+                .as_any()
+                .downcast_ref::<DictionaryArray<Int64Type>>()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let values = values.get(0).unwrap();
+        let values = values
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::StructArray>()
+            .unwrap();
+        assert_eq!(
+            read_histogram(values, 0).unwrap().unwrap().start_timestamp,
+            Some(1_500)
+        );
+        assert_eq!(
+            read_histogram(values, 1).unwrap().unwrap().start_timestamp,
+            Some(0)
+        );
+        assert_eq!(
+            read_histogram(values, 2).unwrap().unwrap().start_timestamp,
+            None
+        );
+        let timestamps = RangeArray::try_new(
+            output[0]
+                .column(2)
+                .as_any()
+                .downcast_ref::<DictionaryArray<Int64Type>>()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            timestamps.get(0).unwrap().to_data(),
+            TimestampMillisecondArray::from(vec![2_000; 3]).to_data()
+        );
     }
 }

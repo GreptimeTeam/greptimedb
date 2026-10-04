@@ -60,7 +60,7 @@ impl InformationTable for InformationSchemaRegionInfo {
     }
 
     fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
-        let schema = if let Some(p) = request.projection_indices() {
+        let schema = if let Some(p) = request.projection.as_deref() {
             Arc::new(self.schema.try_project(p).context(ProjectSchemaSnafu)?)
         } else {
             self.schema.clone()
@@ -86,7 +86,7 @@ impl InformationTable for InformationSchemaRegionInfo {
     }
 
     fn scan_plan(&self, request: ScanRequest) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-        let schema = if let Some(p) = request.projection_indices() {
+        let schema = if let Some(p) = request.projection.as_deref() {
             Arc::new(self.schema.try_project(p).context(ProjectSchemaSnafu)?)
         } else {
             self.schema.clone()

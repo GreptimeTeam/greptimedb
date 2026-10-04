@@ -69,10 +69,6 @@ pub struct ContextOpt {
 
     // reset the schema in query context
     schema: Option<String>,
-
-    // pipeline options, not set in query context
-    // can be removed before the end of the pipeline execution
-    table_suffix: Option<String>,
 }
 
 impl ContextOpt {
@@ -112,9 +108,7 @@ impl ContextOpt {
                     GREPTIME_SKIP_WAL => {
                         opt.skip_wal = Some(v);
                     }
-                    GREPTIME_TABLE_SUFFIX => {
-                        opt.table_suffix = Some(v);
-                    }
+                    GREPTIME_TABLE_SUFFIX => {}
                     _ => {}
                 }
             }
@@ -123,12 +117,13 @@ impl ContextOpt {
     }
 
     pub(crate) fn resolve_table_suffix(
-        &mut self,
         table_suffix: Option<&TableSuffixTemplate>,
         pipeline_map: &VrlValue,
     ) -> Option<String> {
-        self.table_suffix
-            .take()
+        pipeline_map
+            .as_object()
+            .and_then(|map| map.get(GREPTIME_TABLE_SUFFIX))
+            .map(|value| value.to_string_lossy().to_string())
             .or_else(|| table_suffix.and_then(|s| s.apply(pipeline_map)))
     }
 
@@ -214,11 +209,9 @@ impl ContextReq {
     }
 
     pub fn as_req_iter(self, ctx: QueryContextRef) -> ContextReqIter {
-        let ctx = (*ctx).clone();
-
         ContextReqIter {
             opt_req: self.req.into_iter(),
-            ctx_template: ctx,
+            ctx_template: ctx.fork(),
         }
     }
 
@@ -249,12 +242,49 @@ impl Iterator for ContextReqIter {
 
     fn next(&mut self) -> Option<Self::Item> {
         let (mut opt, req_vec) = self.opt_req.next()?;
-        let mut ctx = self.ctx_template.clone();
+        let mut ctx = self.ctx_template.fork();
         if let Some(schema) = opt.schema.take() {
             ctx.set_current_schema(&schema);
         }
         opt.set_query_context(&mut ctx);
 
         Some((Arc::new(ctx), RowInsertRequests { inserts: req_vec }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_collected_contexts_keep_independent_schemas() {
+        let mut req = ContextReq::default();
+        for schema in ["schema_a", "schema_b"] {
+            let mut opt = ContextOpt::default();
+            opt.set_schema(schema.to_string());
+            req.add_row(
+                &opt,
+                RowInsertRequest {
+                    table_name: "metrics".to_string(),
+                    rows: None,
+                },
+            );
+        }
+
+        let original = Arc::new(QueryContext::with("greptime", "public"));
+        let batches = req.as_req_iter(original.clone()).collect::<Vec<_>>();
+        let mut schemas = batches
+            .iter()
+            .map(|(ctx, _)| ctx.current_schema())
+            .collect::<Vec<_>>();
+        schemas.sort_unstable();
+
+        assert_eq!(vec!["schema_a", "schema_b"], schemas);
+        assert_eq!("public", original.current_schema());
+
+        let other_schema = batches[1].0.current_schema();
+        batches[0].0.set_current_schema("changed");
+        assert_eq!(other_schema, batches[1].0.current_schema());
+        assert_eq!("public", original.current_schema());
     }
 }

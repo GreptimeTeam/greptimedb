@@ -51,6 +51,10 @@ pub mod listener;
 #[cfg(test)]
 mod merge_mode_test;
 #[cfg(test)]
+mod object_store_wal_recovery_test;
+#[cfg(test)]
+mod object_store_wal_test;
+#[cfg(test)]
 mod open_test;
 #[cfg(test)]
 mod parallel_test;
@@ -100,11 +104,13 @@ use common_meta::error::UnexpectedSnafu;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_recordbatch::{QueryMemoryTracker, SendableRecordBatchStream};
 use common_stat::get_total_memory_bytes;
-use common_telemetry::{info, tracing, warn};
+use common_telemetry::{debug, info, tracing, warn};
 use common_wal::options::WalOptions;
+use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
 use futures::future::{join_all, try_join_all};
 use futures::stream::{self, Stream, StreamExt};
 use object_store::manager::ObjectStoreManagerRef;
+use region_hook::RegionHookRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
 use store_api::codec::PrimaryKeyEncoding;
@@ -134,8 +140,8 @@ use crate::config::MitoConfig;
 use crate::engine::puffin_index::{IndexEntryContext, collect_index_entries_from_puffin};
 use crate::error::{
     IncrementalQueryStaleSnafu, InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu,
-    RegionNotFoundSnafu, Result, SerdeJsonSnafu, SerializeColumnMetadataSnafu,
-    SnapshotFenceStaleSnafu,
+    RegionNotFoundSnafu, Result, SequenceRangeUnsupportedSnafu, SerdeJsonSnafu,
+    SerializeColumnMetadataSnafu, SnapshotFenceStaleSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::BoxedExtensionRangeProviderFactory;
@@ -146,7 +152,7 @@ use crate::metrics::{
     HANDLE_REQUEST_ELAPSED, SCAN_MEMORY_EXHAUSTED_TOTAL, SCAN_MEMORY_USAGE_BYTES,
     SCAN_REQUESTS_REJECTED_TOTAL,
 };
-use crate::read::scan_region::{ScanRegion, Scanner};
+use crate::read::scan_region::{ScanRegion, Scanner, exact_sequence_range};
 use crate::read::stream::ScanBatchStream;
 use crate::region::MitoRegionRef;
 use crate::region::opener::PartitionExprFetcherRef;
@@ -219,7 +225,11 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         self.config.sanitize(self.data_home)?;
 
         let config = Arc::new(self.config);
+        // Extract the region hook before `plugins` is moved into the WorkerGroup,
+        // so the engine (and thus the GC worker) can fire `on_region_gc`.
+        let region_hook = self.plugins.get::<RegionHookRef>();
         let workers = WorkerGroup::start(
+            self.data_home,
             config.clone(),
             self.log_store.clone(),
             self.object_store_manager,
@@ -232,6 +242,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(self.log_store));
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
+        let scan_memory_pool = new_scan_memory_pool(scan_memory_limit);
         let scan_memory_tracker =
             QueryMemoryTracker::builder(scan_memory_limit, config.scan_memory_on_exhausted)
                 .on_update(|usage| {
@@ -250,6 +261,8 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
             config,
             wal_raw_entry_reader,
             scan_memory_tracker,
+            scan_memory_pool,
+            region_hook,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
         };
@@ -326,6 +339,12 @@ impl MitoEngine {
 
     pub fn schema_metadata_manager(&self) -> &SchemaMetadataManagerRef {
         self.inner.workers.schema_metadata_manager()
+    }
+
+    /// Returns the registered region hook (if any), for the GC worker to fire
+    /// [`RegionHook::on_region_gc`].
+    pub fn region_hook(&self) -> Option<RegionHookRef> {
+        self.inner.region_hook.clone()
     }
 
     /// Get all tmp ref files for given region ids, excluding files that's already in manifest.
@@ -728,6 +747,11 @@ struct EngineInner {
     wal_raw_entry_reader: Arc<dyn RawEntryReader>,
     /// Memory tracker for table scans.
     scan_memory_tracker: QueryMemoryTracker,
+    /// Memory pool shared by internal scan operators across all queries.
+    scan_memory_pool: Arc<dyn MemoryPool>,
+    /// The region hook (if any) registered via plugins; exposed for the GC worker
+    /// to fire [`RegionHook::on_region_gc`].
+    region_hook: Option<RegionHookRef>,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<BoxedExtensionRangeProviderFactory>,
 }
@@ -751,7 +775,7 @@ fn prepare_batch_open_requests(
                     .or_default()
                     .push((region_id, request));
             }
-            WalOptions::RaftEngine | WalOptions::Noop => {
+            WalOptions::RaftEngine | WalOptions::Noop | WalOptions::ObjectStore(_) => {
                 remaining_regions.push((region_id, request));
             }
         }
@@ -1033,6 +1057,15 @@ impl EngineInner {
         let query_start = Instant::now();
         // Reading a region doesn't need to go through the region worker thread.
         let region = self.find_region(region_id)?;
+        // Pin the index before the data snapshot: compaction and index publication
+        // could otherwise give us a newer index that omits series still visible
+        // in the query's older SST snapshot.
+        let series_index = region.series_index_store.as_ref().map(|store| {
+            crate::series_index::SeriesIndexReadContext {
+                store: store.clone(),
+                version: region.series_index_version(),
+            }
+        });
         let version_data = region.version_control.current();
         let version = version_data.version;
 
@@ -1040,37 +1073,82 @@ impl EngineInner {
             request.memtable_max_sequence = Some(version_data.committed_sequence);
         }
 
-        if let Some(given_seq) = request.memtable_min_sequence {
-            let min_readable_seq = version.flushed_sequence;
-            ensure!(
-                given_seq >= min_readable_seq,
-                IncrementalQueryStaleSnafu {
-                    region_id,
-                    given_seq,
-                    min_readable_seq,
+        // Select the files and decide the exact capability from the same version
+        // snapshot. Keep them together so the reader cannot recompute either
+        // side from a different file set.
+        let exact_selection = if request.exact_sequence_range {
+            match exact_sequence_range(&request, &version) {
+                Ok((files, sequence_range)) => Some((files, sequence_range)),
+                Err(err) => {
+                    debug!(
+                        "Scan region {} exact sequence range denied: min={:?}, max={:?}, denial_reason=foreign_file_missing_barrier",
+                        region_id, request.memtable_min_sequence, request.memtable_max_sequence,
+                    );
+                    return Err(err);
                 }
-            );
-        }
+            }
+        } else {
+            None
+        };
+        let exact_sequence_range = exact_selection
+            .as_ref()
+            .and_then(|(_, sequence_range)| *sequence_range);
 
-        if let Some(given_seq) = request.memtable_max_sequence
-            && !request.skip_sst_files
-        {
-            // Explicit snapshot fences that include SST reads are enforceable
-            // only while the requested upper bound is not older than the
-            // region's flushed frontier. If H has already been flushed into SST,
-            // mito cannot apply a memtable-only sequence upper bound to that
-            // SST scan, so fail and let Flow rebind the fenced repair instead
-            // of reading rows beyond H.
-            let min_enforceable_seq = version.flushed_sequence;
-            ensure!(
-                given_seq >= min_enforceable_seq,
-                SnapshotFenceStaleSnafu {
-                    region_id,
-                    given_seq,
-                    min_enforceable_seq,
-                }
-            );
-        }
+        // An extension range provider may contribute ranges on a follower
+        // region, and extension streams are returned without a row-level
+        // sequence filter (`scan_flat_extension_range`), so exactness cannot
+        // be proven when one is attached. Treat the capability as missing so
+        // the request fails closed below instead of emitting out-of-range
+        // rows. See the injection point in `ScanRegion::scan_input`.
+        #[cfg(feature = "enterprise")]
+        let extension_provider_blocks_exact = region.is_follower()
+            && self.extension_range_provider_factory.is_some()
+            && exact_sequence_range.is_some();
+        #[cfg(not(feature = "enterprise"))]
+        let extension_provider_blocks_exact = false;
+        let exact_sequence_range = if extension_provider_blocks_exact {
+            None
+        } else {
+            exact_sequence_range
+        };
+        let exact_selection = exact_selection.map(|(files, _)| (files, exact_sequence_range));
+        let exact_denial_reason = if !request.exact_sequence_range {
+            "not_requested"
+        } else if request.skip_sst_files {
+            "sst_files_skipped"
+        } else if request.memtable_min_sequence.is_none() {
+            "missing_lower_bound"
+        } else if request.memtable_max_sequence.is_none() {
+            "missing_upper_bound"
+        } else if !version.options.preserve_row_sequence {
+            "preserve_row_sequence_disabled"
+        } else if extension_provider_blocks_exact {
+            "extension_provider"
+        } else if exact_sequence_range.is_none() {
+            "selected_file_barrier_not_admitted"
+        } else {
+            "none"
+        };
+
+        debug!(
+            "Scan region {} exact sequence range: requested={}, min={:?}, max={:?}, committed={}, flushed={}, available={}, selected_files={}, denial_reason={}",
+            region_id,
+            request.exact_sequence_range,
+            request.memtable_min_sequence,
+            request.memtable_max_sequence,
+            version_data.committed_sequence,
+            version.flushed_sequence,
+            exact_sequence_range.is_some(),
+            exact_selection.as_ref().map_or(0, |(files, _)| files.len()),
+            exact_denial_reason,
+        );
+        validate_sequence_fences(
+            &request,
+            &version,
+            region_id,
+            exact_sequence_range.is_some(),
+            extension_provider_blocks_exact,
+        )?;
 
         // Get cache.
         let cache_manager = self.workers.cache_manager();
@@ -1081,12 +1159,21 @@ impl EngineInner {
             request,
             CacheStrategy::EnableAll(cache_manager),
         )
+        .with_series_index(series_index)
+        .with_ignore_range_index(!self.config.experimental_enable_range_index)
         .with_query_stat_counters(region.region_stats.query_stat_counters())
         .with_max_concurrent_scan_files(self.config.max_concurrent_scan_files)
+        .with_scan_memory_pool(self.scan_memory_pool.clone())
+        .with_experimental_series_scan_v2(self.config.experimental_series_scan_v2)
         .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
         .with_ignore_bloom_filter(self.config.bloom_filter_index.apply_on_query.disabled())
         .with_start_time(query_start);
+        let scan_region = if let Some(selection) = exact_selection {
+            scan_region.with_exact_selection(selection)
+        } else {
+            scan_region
+        };
 
         #[cfg(feature = "enterprise")]
         let scan_region = self.maybe_fill_extension_range_provider(scan_region, region);
@@ -1172,6 +1259,110 @@ impl EngineInner {
         self.workers
             .get_region(region_id)
             .map(|region| region.region_role())
+    }
+}
+
+fn validate_sequence_fences(
+    request: &ScanRequest,
+    version: &crate::region::version::Version,
+    region_id: RegionId,
+    exact_sequence_range_available: bool,
+    extension_provider_blocks_exact: bool,
+) -> Result<()> {
+    if request.exact_sequence_range {
+        // Exact `sequence_range` mode: when the capability is available the
+        // requested (C, H] delta is enforced row-level on memtables and every
+        // SST, so the lower/upper fences can be relaxed. When it is not, we
+        // must fail with a structured stale/unsupported error so Flow falls
+        // back instead of silently reading an approximate superset.
+        if !exact_sequence_range_available {
+            if let Some(given_seq) = request.memtable_min_sequence {
+                let min_readable_seq = version.flushed_sequence;
+                ensure!(
+                    given_seq >= min_readable_seq,
+                    IncrementalQueryStaleSnafu {
+                        region_id,
+                        given_seq,
+                        min_readable_seq,
+                    }
+                );
+            }
+
+            if let Some(given_seq) = request.memtable_max_sequence {
+                let min_enforceable_seq = version.flushed_sequence;
+                ensure!(
+                    given_seq >= min_enforceable_seq,
+                    SnapshotFenceStaleSnafu {
+                        region_id,
+                        given_seq,
+                        min_enforceable_seq,
+                    }
+                );
+            }
+
+            // Both bounds are enforceable against the flushed frontier, yet the
+            // region cannot serve an exact row-level delta (preserve option off,
+            // a file without the preserved-sequence marker, or a follower with
+            // an extension range provider). Main semantics would silently
+            // return rows outside (C, H], so fail instead.
+            return SequenceRangeUnsupportedSnafu {
+                region_id,
+                min_seq: request.memtable_min_sequence.unwrap_or_default(),
+                max_seq: request.memtable_max_sequence.unwrap_or_default(),
+                reason: sequence_range_unsupported_reason(version, extension_provider_blocks_exact),
+            }
+            .fail();
+        }
+    } else {
+        // Non-exact mode (including historical `memtable_only` scans): keep
+        // main's fences exactly as-is. The preserve option never relaxes them
+        // because `exact_sequence_range` is the only explicit exact intent.
+        if let Some(given_seq) = request.memtable_min_sequence {
+            let min_readable_seq = version.flushed_sequence;
+            ensure!(
+                given_seq >= min_readable_seq,
+                IncrementalQueryStaleSnafu {
+                    region_id,
+                    given_seq,
+                    min_readable_seq,
+                }
+            );
+        }
+
+        if let Some(given_seq) = request.memtable_max_sequence
+            && !request.skip_sst_files
+        {
+            // Explicit snapshot fences that include SST reads are enforceable
+            // only while the requested upper bound is not older than the
+            // region's flushed frontier. If H has already been flushed into SST,
+            // mito cannot apply a memtable-only sequence upper bound to that
+            // SST scan, so fail and let Flow rebind the fenced repair instead
+            // of reading rows beyond H.
+            let min_enforceable_seq = version.flushed_sequence;
+            ensure!(
+                given_seq >= min_enforceable_seq,
+                SnapshotFenceStaleSnafu {
+                    region_id,
+                    given_seq,
+                    min_enforceable_seq,
+                }
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn sequence_range_unsupported_reason(
+    version: &crate::region::version::Version,
+    extension_provider_blocks_exact: bool,
+) -> String {
+    if extension_provider_blocks_exact {
+        "region is a follower with an extension range provider, whose streams cannot be filtered by sequence".to_string()
+    } else if version.options.preserve_row_sequence {
+        "region has files without preserved per-row sequences".to_string()
+    } else {
+        "region does not preserve per-row sequences (preserve_row_sequence is off)".to_string()
     }
 }
 
@@ -1429,6 +1620,7 @@ impl MitoEngine {
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(log_store.clone()));
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
+        let scan_memory_pool = new_scan_memory_pool(scan_memory_limit);
         let scan_memory_tracker =
             QueryMemoryTracker::builder(scan_memory_limit, config.scan_memory_on_exhausted)
                 .on_update(|usage| {
@@ -1444,6 +1636,7 @@ impl MitoEngine {
         Ok(MitoEngine {
             inner: Arc::new(EngineInner {
                 workers: WorkerGroup::start_for_test(
+                    data_home,
                     config.clone(),
                     log_store,
                     object_store_manager,
@@ -1458,6 +1651,8 @@ impl MitoEngine {
                 config,
                 wal_raw_entry_reader,
                 scan_memory_tracker,
+                scan_memory_pool,
+                region_hook: None,
                 #[cfg(feature = "enterprise")]
                 extension_range_provider_factory: None,
             }),
@@ -1470,9 +1665,19 @@ impl MitoEngine {
     }
 }
 
+fn new_scan_memory_pool(scan_memory_limit: usize) -> Arc<dyn MemoryPool> {
+    if scan_memory_limit == 0 {
+        Arc::new(UnboundedMemoryPool::default())
+    } else {
+        Arc::new(GreedyMemoryPool::new(scan_memory_limit))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    use datafusion::execution::memory_pool::MemoryConsumer;
 
     use super::*;
     use crate::sst::file::FileMeta;
@@ -1558,5 +1763,18 @@ mod tests {
             committed_sequence: None,
         };
         assert!(!is_valid_region_edit(&edit));
+    }
+
+    #[test]
+    fn test_scan_memory_pool_is_shared_across_consumers() {
+        let pool = new_scan_memory_pool(100);
+        let cloned_pool = pool.clone();
+        let first = MemoryConsumer::new("first-scan").register(&pool);
+        let second = MemoryConsumer::new("second-scan").register(&cloned_pool);
+
+        first.try_grow(60).unwrap();
+        assert!(second.try_grow(50).is_err());
+        second.try_grow(40).unwrap();
+        assert_eq!(100, pool.reserved());
     }
 }

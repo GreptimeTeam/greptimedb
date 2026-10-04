@@ -24,6 +24,8 @@ use datafusion_common::ScalarValue;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, IntervalUnit};
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
+pub(crate) use json::parse_json2_type_and_options;
+pub use json::parse_json2_type_hint_path;
 use snafu::{OptionExt, ResultExt, ensure};
 use sqlparser::ast::{
     ColumnOption, ColumnOptionDef, DataType, Expr, KeyOrIndexDisplay, NullsDistinctOption,
@@ -34,19 +36,19 @@ use sqlparser::keywords::ALL_KEYWORDS;
 use sqlparser::parser::IsOptional::Mandatory;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithSpan, Word};
-use table::requests::validate_database_option;
+use table::requests::{validate_database_option, validate_database_option_value};
 
 use crate::ast::{ColumnDef, Ident, ObjectNamePartExt};
 use crate::error::{
-    self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidFlowQuerySnafu,
-    InvalidIntervalSnafu, InvalidSqlSnafu, InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result,
-    SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
+    self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidDatabaseOptionValueSnafu,
+    InvalidFlowQuerySnafu, InvalidIntervalSnafu, InvalidSqlSnafu, InvalidTimeIndexSnafu,
+    MissingTimeIndexSnafu, Result, SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::parser::{FLOW, ParserContext};
 use crate::parsers::tql_parser;
 use crate::parsers::utils::{
     self, parse_with_options, validate_column_fulltext_create_option,
-    validate_column_skipping_index_create_option, validate_column_vector_index_create_option,
+    validate_column_skipping_index_create_option,
 };
 use crate::statements::create::{
     Column, ColumnExtensions, CreateDatabase, CreateExternalTable, CreateFlow, CreateTable,
@@ -64,7 +66,6 @@ pub const EXPIRE: &str = "EXPIRE";
 pub const AFTER: &str = "AFTER";
 pub const INVERTED: &str = "INVERTED";
 pub const SKIPPING: &str = "SKIPPING";
-pub const VECTOR: &str = "VECTOR";
 
 pub type RawIntervalExpr = String;
 
@@ -222,11 +223,22 @@ impl<'a> ParserContext<'a> {
             .map(parse_option_string)
             .collect::<Result<HashMap<String, OptionValue>>>()?;
 
-        for key in options.keys() {
+        for (key, option_value) in &options {
             ensure!(
                 validate_database_option(key),
                 InvalidDatabaseOptionSnafu { key: key.clone() }
             );
+            let option_value_str = option_value.as_string();
+            validate_database_option_value(key, option_value_str).map_err(|reason| {
+                InvalidDatabaseOptionValueSnafu {
+                    key: key.clone(),
+                    value: option_value_str
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| option_value.to_string()),
+                    reason: reason.to_string(),
+                }
+                .build()
+            })?;
         }
         if let Some(append_mode) = options.get("append_mode").and_then(|x| x.as_string())
             && append_mode == "true"
@@ -324,11 +336,55 @@ impl<'a> ParserContext<'a> {
             None
         };
 
-        let eval_interval = if self
-            .parser
-            .consume_tokens(&[Token::make_keyword("EVAL"), Token::make_keyword("INTERVAL")])
-        {
-            Some(self.parse_interval_no_month("EVAL INTERVAL")?)
+        let (eval_interval, eval_interval_has_fractional_secs) =
+            if self.consume_eval_pair("INTERVAL") {
+                let (secs, has_fractional) =
+                    self.parse_interval_no_month_whole_secs("EVAL INTERVAL")?;
+                (Some(secs), has_fractional)
+            } else {
+                (None, false)
+            };
+
+        // `EVAL OFFSET` is only legal together with `EVAL INTERVAL`. The phase
+        // offset must be a whole number of seconds; when an offset is present
+        // the interval must also be whole seconds (never silently truncated).
+        let eval_offset = if self.consume_eval_pair("OFFSET") {
+            let Some(eval_interval) = eval_interval else {
+                return InvalidIntervalSnafu {
+                    reason: "EVAL OFFSET requires EVAL INTERVAL to be specified".to_string(),
+                }
+                .fail();
+            };
+            let (offset_secs, has_fractional) =
+                self.parse_interval_no_month_whole_secs("EVAL OFFSET")?;
+            if has_fractional {
+                return InvalidIntervalSnafu {
+                    reason: "EVAL OFFSET must be a whole number of seconds".to_string(),
+                }
+                .fail();
+            }
+            if eval_interval_has_fractional_secs {
+                return InvalidIntervalSnafu {
+                    reason: "EVAL INTERVAL must be a whole number of seconds when EVAL OFFSET is specified"
+                        .to_string(),
+                }
+                .fail();
+            }
+            if !(0..eval_interval).contains(&offset_secs) {
+                return InvalidIntervalSnafu {
+                    reason: format!(
+                        "EVAL OFFSET must be in range [0, EVAL INTERVAL), got {offset_secs} seconds with EVAL INTERVAL {eval_interval} seconds"
+                    ),
+                }
+                .fail();
+            }
+            // Canonicalize a zero offset to `None` (the default epoch-anchored
+            // schedule) so that parse/display/reparse round-trips are stable.
+            if offset_secs == 0 {
+                None
+            } else {
+                Some(offset_secs)
+            }
         } else {
             None
         };
@@ -371,6 +427,7 @@ impl<'a> ParserContext<'a> {
             if_not_exists,
             expire_after,
             eval_interval,
+            eval_offset,
             comment,
             flow_options: flow_option_map(flow_options),
             query,
@@ -436,6 +493,15 @@ impl<'a> ParserContext<'a> {
 
     /// Parse the interval expr to duration in seconds.
     fn parse_interval_no_month(&mut self, context: &str) -> Result<i64> {
+        Ok(self.parse_interval_no_month_whole_secs(context)?.0)
+    }
+
+    /// Parses an interval that must not contain months and returns the total
+    /// whole seconds together with whether the interval contains a sub-second
+    /// fraction. Whole seconds are computed by truncating the nanosecond part;
+    /// callers that require exact whole-second precision (e.g. `EVAL OFFSET`)
+    /// must reject `has_fractional_secs`.
+    fn parse_interval_no_month_whole_secs(&mut self, context: &str) -> Result<(i64, bool)> {
         let interval = self.parse_interval_month_day_nano()?.0;
         if interval.months != 0 {
             return InvalidIntervalSnafu {
@@ -443,13 +509,30 @@ impl<'a> ParserContext<'a> {
             }
             .fail();
         }
-        Ok(
-            interval.nanoseconds / 1_000_000_000
-                + interval.days as i64 * 60 * 60 * 24
-                + interval.months as i64 * 60 * 60 * 24 * 3044 / 1000, // 1 month=365.25/12=30.44 days
-                                                                       // this is to keep the same as https://docs.rs/humantime/latest/humantime/fn.parse_duration.html
-                                                                       // which we use in database to parse i.e. ttl interval and many other intervals
-        )
+        let has_fractional_secs = interval.nanoseconds % 1_000_000_000 != 0;
+        let whole_secs = interval.nanoseconds / 1_000_000_000 + interval.days as i64 * 60 * 60 * 24;
+        Ok((whole_secs, has_fractional_secs))
+    }
+
+    /// Consumes an `EVAL <keyword>` token pair case-insensitively.
+    ///
+    /// `EVAL` is not a sqlparser keyword, so a plain
+    /// `consume_tokens([Token::make_keyword("EVAL"), ...])` comparison would be
+    /// case-sensitive on the word value and reject lower-case `eval interval`.
+    fn consume_eval_pair(&mut self, second: &str) -> bool {
+        let matches = matches!(
+            (
+                &self.parser.peek_token().token,
+                &self.parser.peek_nth_token(1).token,
+            ),
+            (Token::Word(w1), Token::Word(w2))
+                if w1.value.eq_ignore_ascii_case("EVAL") && w2.value.eq_ignore_ascii_case(second)
+        );
+        if matches {
+            self.parser.next_token();
+            self.parser.next_token();
+        }
+        matches
     }
 
     /// Parse interval expr to [`IntervalMonthDayNano`].
@@ -711,8 +794,8 @@ impl<'a> ParserContext<'a> {
         let mut extensions = ColumnExtensions::default();
 
         let data_type =
-            if let Some((data_type, type_hints)) = json::parse_json2_type_and_hints(parser)? {
-                extensions.json_type_hints = type_hints;
+            if let Some((data_type, options)) = json::parse_json2_type_and_options(parser)? {
+                extensions.json2_options = options;
                 data_type
             } else {
                 parser.parse_data_type().context(SyntaxSnafu)?
@@ -981,61 +1064,6 @@ impl<'a> ParserContext<'a> {
             );
 
             column_extensions.inverted_index_options = Some(OptionMap::default());
-            is_index_declared |= true;
-        }
-
-        // vector index
-        if let Token::Word(word) = parser.peek_token().token
-            && word.value.eq_ignore_ascii_case(VECTOR)
-        {
-            parser.next_token();
-            // Consume `INDEX` keyword
-            ensure!(
-                parser.parse_keyword(Keyword::INDEX),
-                InvalidColumnOptionSnafu {
-                    name: column_name.to_string(),
-                    msg: "expect INDEX after VECTOR keyword",
-                }
-            );
-
-            ensure!(
-                column_extensions.vector_index_options.is_none(),
-                InvalidColumnOptionSnafu {
-                    name: column_name.to_string(),
-                    msg: "duplicated VECTOR INDEX option",
-                }
-            );
-
-            // Check that column is a vector type
-            let column_type = get_unalias_type(column_type);
-            let data_type = sql_data_type_to_concrete_data_type(&column_type)?;
-            ensure!(
-                matches!(data_type, ConcreteDataType::Vector(_)),
-                InvalidColumnOptionSnafu {
-                    name: column_name.to_string(),
-                    msg: "VECTOR INDEX only supports Vector type columns",
-                }
-            );
-
-            let options = parser
-                .parse_options(Keyword::WITH)
-                .context(error::SyntaxSnafu)?
-                .into_iter()
-                .map(parse_option_string)
-                .collect::<Result<Vec<_>>>()?;
-
-            for (key, _) in options.iter() {
-                ensure!(
-                    validate_column_vector_index_create_option(key),
-                    InvalidColumnOptionSnafu {
-                        name: column_name.to_string(),
-                        msg: format!("invalid VECTOR INDEX option: {key}"),
-                    }
-                );
-            }
-
-            let options = OptionMap::new(options);
-            column_extensions.vector_index_options = Some(options);
             is_index_declared |= true;
         }
 
@@ -1507,6 +1535,82 @@ mod tests {
             }
             _ => unreachable!(),
         }
+
+        let sql = "CREATE DATABASE prometheus with ('ingest_rows_rate_limit'='1000');";
+        let result =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
+        let stmts = result.unwrap();
+        match &stmts[0] {
+            Statement::CreateDatabase(c) => {
+                assert_eq!(c.name.to_string(), "prometheus");
+                assert_eq!(c.options.get("ingest_rows_rate_limit").unwrap(), "1000");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_parse_create_database_option_validation() {
+        let overflow = format!("{}0", usize::MAX);
+        for key in [
+            "compaction.twcs.trigger_file_num",
+            "compaction.twcs.active_window.trigger_file_num",
+            "compaction.twcs.inactive_window.trigger_file_num",
+        ] {
+            for invalid in ["invalid", "-1", overflow.as_str()] {
+                let sql = format!("CREATE DATABASE invalid WITH ('{key}'='{invalid}')");
+                let err = ParserContext::create_with_dialect(
+                    &sql,
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap_err();
+                assert_eq!(
+                    err.to_string(),
+                    format!(
+                        "Invalid database option value for {key}: {invalid}, expected a non-negative integer fitting in usize"
+                    )
+                );
+            }
+            for valid in ["0", "1"] {
+                let sql = format!("CREATE DATABASE valid WITH ('{key}'='{valid}')");
+                ParserContext::create_with_dialect(
+                    &sql,
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap();
+            }
+        }
+        for key in [
+            "compaction.twcs.active_window.l1_merge_trigger",
+            "compaction.twcs.inactive_window.l1_merge_trigger",
+        ] {
+            let sql = format!("CREATE DATABASE invalid WITH ('{key}'='1')");
+            let err = ParserContext::create_with_dialect(
+                &sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap_err();
+            assert_eq!(
+                format!(
+                    "Invalid database option value for {key}: 1, expected an integer greater than or equal to 2"
+                ),
+                err.to_string()
+            );
+        }
+
+        let sql =
+            "CREATE DATABASE valid WITH ('compaction.twcs.active_window.l1_merge_trigger'='2')";
+        ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+            .unwrap();
+
+        let sql = "CREATE DATABASE invalid WITH ('unknown'='1')";
+        let err =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err();
+        assert_eq!("Unrecognized database option key: unknown", err.to_string());
     }
 
     #[test]
@@ -1720,6 +1824,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 if_not_exists: expected.if_not_exists,
                 expire_after: expected.expire_after,
                 eval_interval: None,
+                eval_offset: None,
                 comment: expected.comment,
                 flow_options: expected.flow_options,
                 // ignore query parse result
@@ -1765,6 +1870,9 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
             /// Duration in seconds as `i64`
             /// If not set, flow will be evaluated based on time window size and other args.
             pub eval_interval: Option<i64>,
+            /// Phase offset of the flow evaluation schedule within `eval_interval`.
+            /// Duration in seconds as `i64`.
+            pub eval_offset: Option<i64>,
             /// Comment string
             pub comment: Option<String>,
             /// Flow creation options
@@ -1791,6 +1899,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     if_not_exists: true,
                     expire_after: Some(300),
                     eval_interval: None,
+                    eval_offset: None,
                     comment: Some("test comment".to_string()),
                     flow_options: OptionMap::default(),
                 },
@@ -1813,6 +1922,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     if_not_exists: true,
                     expire_after: Some(300),
                     eval_interval: None,
+                    eval_offset: None,
                     comment: Some("test comment".to_string()),
                     flow_options: OptionMap::default(),
                 },
@@ -1836,6 +1946,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     if_not_exists: true,
                     expire_after: Some(300),
                     eval_interval: Some(10),
+                    eval_offset: None,
                     comment: Some("test comment".to_string()),
                     flow_options: OptionMap::default(),
                 },
@@ -1859,6 +1970,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     if_not_exists: true,
                     expire_after: Some(300),
                     eval_interval: Some(10),
+                    eval_offset: None,
                     comment: Some("test comment".to_string()),
                     flow_options: OptionMap::default(),
                 },
@@ -1882,6 +1994,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     if_not_exists: false,
                     expire_after: Some(2 * 86400 + 3600 + 2 * 60),
                     eval_interval: None,
+                    eval_offset: None,
                     comment: None,
                     flow_options: OptionMap::default(),
                 },
@@ -1904,6 +2017,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                     if_not_exists: false,
                     expire_after: None,
                     eval_interval: Some(10),
+                    eval_offset: None,
                     comment: None,
                     flow_options: string_option_map([
                         ("defer_on_missing_source", "true"),
@@ -1923,6 +2037,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
                 if_not_exists: expected.if_not_exists,
                 expire_after: expected.expire_after,
                 eval_interval: expected.eval_interval,
+                eval_offset: expected.eval_offset,
                 comment: expected.comment,
                 flow_options: expected.flow_options,
                 // ignore query parse result
@@ -1934,6 +2049,142 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;",
             let recreated = parse_create_flow(&show_create);
             assert_eq!(recreated, expected, "input sql is:\n{show_create}");
         }
+    }
+
+    #[test]
+    fn test_parse_create_flow_with_eval_offset() {
+        use pretty_assertions::assert_eq;
+        fn parse_create_flow(sql: &str) -> CreateFlow {
+            let stmts = ParserContext::create_with_dialect(
+                sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(1, stmts.len());
+            match &stmts[0] {
+                Statement::CreateFlow(c) => c.clone(),
+                _ => panic!("{:?}", stmts[0]),
+            }
+        }
+        let sql = r#"
+CREATE FLOW task_1
+SINK TO schema_1.table_1
+EVAL INTERVAL '1 hour'
+EVAL OFFSET '2 minutes'
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;"#;
+        let create_task = parse_create_flow(sql);
+        assert_eq!(create_task.eval_interval, Some(3600));
+        assert_eq!(create_task.eval_offset, Some(120));
+        let show_create = create_task.to_string();
+        assert!(
+            show_create.contains("EVAL OFFSET '120 s'"),
+            "unexpected display:\n{show_create}"
+        );
+        let recreated = parse_create_flow(&show_create);
+        assert_eq!(recreated, create_task, "input sql is:\n{show_create}");
+
+        let sql = r#"
+create flow task_2
+sink to schema_1.table_1
+eval interval '1h'
+eval offset '2m'
+as
+select max(c1), min(c2) from schema_2.table_2;"#;
+        let create_task = parse_create_flow(sql);
+        assert_eq!(create_task.eval_interval, Some(3600));
+        assert_eq!(create_task.eval_offset, Some(120));
+
+        // zero offset is canonicalized to `None` and omitted on display
+        let sql = r#"
+CREATE FLOW task_3
+SINK TO schema_1.table_1
+EVAL INTERVAL '1 hour'
+EVAL OFFSET '0 seconds'
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;"#;
+        let create_task = parse_create_flow(sql);
+        assert_eq!(create_task.eval_interval, Some(3600));
+        assert_eq!(create_task.eval_offset, None);
+        assert!(
+            !create_task.to_string().contains("EVAL OFFSET"),
+            "zero offset should be omitted on display"
+        );
+
+        let sql = r#"
+CREATE FLOW task_4
+SINK TO schema_1.table_1
+EVAL OFFSET '2 minutes'
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;"#;
+        let err =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err()
+                .to_string();
+        assert!(
+            err.contains("EVAL OFFSET requires EVAL INTERVAL"),
+            "unexpected error: {err}"
+        );
+
+        for (offset, interval) in [
+            ("-1 seconds", "1 hour"),
+            ("1 hour", "1 hour"),
+            ("2 hours", "1 hour"),
+        ] {
+            let sql = format!(
+                r#"
+CREATE FLOW task_invalid
+SINK TO schema_1.table_1
+EVAL INTERVAL '{interval}'
+EVAL OFFSET '{offset}'
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;"#
+            );
+            let err = ParserContext::create_with_dialect(
+                &sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                err.contains("EVAL OFFSET must be in range"),
+                "unexpected error for offset {offset}: {err}"
+            );
+        }
+
+        let sql = r#"
+CREATE FLOW task_fractional_offset
+SINK TO schema_1.table_1
+EVAL INTERVAL '1 hour'
+EVAL OFFSET '1.5 seconds'
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;"#;
+        let err =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err()
+                .to_string();
+        assert!(
+            err.contains("EVAL OFFSET must be a whole number of seconds"),
+            "unexpected error: {err}"
+        );
+
+        let sql = r#"
+CREATE FLOW task_fractional_interval
+SINK TO schema_1.table_1
+EVAL INTERVAL '1.5 seconds'
+EVAL OFFSET '1 second'
+AS
+SELECT max(c1), min(c2) FROM schema_2.table_2;"#;
+        let err =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err()
+                .to_string();
+        assert!(
+            err.contains("EVAL INTERVAL must be a whole number of seconds"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -3220,181 +3471,28 @@ CREATE TABLE log (
     }
 
     #[test]
+    fn test_reject_vector_index() {
+        for index in ["VECTOR INDEX", "VECTOR INDEX WITH (metric = 'cosine')"] {
+            let sql = format!(
+                "CREATE TABLE vectors (ts TIMESTAMP TIME INDEX, embedding VECTOR(3) {index})"
+            );
+            assert!(
+                ParserContext::create_with_dialect(
+                    &sql,
+                    &GreptimeDbDialect {},
+                    ParseOptions::default()
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn test_parse_interval_cast() {
         let s = "select '10s'::INTERVAL";
         let stmts =
             ParserContext::create_with_dialect(s, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
         assert_eq!("SELECT '10 seconds'::INTERVAL", &stmts[0].to_string());
-    }
-
-    #[test]
-    fn test_parse_create_table_vector_index_options() {
-        // Test basic vector index
-        let sql = r"
-CREATE TABLE vectors (
-    ts TIMESTAMP TIME INDEX,
-    vec VECTOR(128) VECTOR INDEX,
-)";
-        let result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-
-        if let Statement::CreateTable(c) = &result[0] {
-            c.columns.iter().for_each(|col| {
-                if col.name().value == "vec" {
-                    assert!(
-                        col.extensions
-                            .vector_index_options
-                            .as_ref()
-                            .unwrap()
-                            .is_empty()
-                    );
-                }
-            });
-        } else {
-            panic!("should be create_table statement");
-        }
-
-        // Test vector index with options
-        let sql = r"
-CREATE TABLE vectors (
-    ts TIMESTAMP TIME INDEX,
-    vec VECTOR(128) VECTOR INDEX WITH (metric='cosine', connectivity='32', expansion_add='256', expansion_search='128')
-)";
-        let result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-
-        if let Statement::CreateTable(c) = &result[0] {
-            c.columns.iter().for_each(|col| {
-                if col.name().value == "vec" {
-                    let options = col.extensions.vector_index_options.as_ref().unwrap();
-                    assert_eq!(options.len(), 4);
-                    assert_eq!(options.get("metric").unwrap(), "cosine");
-                    assert_eq!(options.get("connectivity").unwrap(), "32");
-                    assert_eq!(options.get("expansion_add").unwrap(), "256");
-                    assert_eq!(options.get("expansion_search").unwrap(), "128");
-                }
-            });
-        } else {
-            panic!("should be create_table statement");
-        }
-    }
-
-    #[test]
-    fn test_parse_create_table_vector_index_invalid_type() {
-        // Test vector index on non-vector type (should fail)
-        let sql = r"
-CREATE TABLE vectors (
-    ts TIMESTAMP TIME INDEX,
-    col INT VECTOR INDEX,
-)";
-        let result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("VECTOR INDEX only supports Vector type columns")
-        );
-    }
-
-    #[test]
-    fn test_parse_create_table_vector_index_duplicate() {
-        // Test duplicate vector index (should fail)
-        let sql = r"
-CREATE TABLE vectors (
-    ts TIMESTAMP TIME INDEX,
-    vec VECTOR(128) VECTOR INDEX VECTOR INDEX,
-)";
-        let result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("duplicated VECTOR INDEX option")
-        );
-    }
-
-    #[test]
-    fn test_parse_create_table_vector_index_invalid_option() {
-        // Test invalid option key (should fail)
-        let sql = r"
-CREATE TABLE vectors (
-    ts TIMESTAMP TIME INDEX,
-    vec VECTOR(128) VECTOR INDEX WITH (metric='l2sq', invalid_option='foo')
-)";
-        let result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("invalid VECTOR INDEX option")
-        );
-    }
-
-    #[test]
-    fn test_parse_column_extensions_vector_index() {
-        // Test vector index on vector type
-        {
-            let sql = "VECTOR INDEX WITH (metric = 'l2sq')";
-            let dialect = GenericDialect {};
-            let mut tokenizer = Tokenizer::new(&dialect, sql);
-            let tokens = tokenizer.tokenize().unwrap();
-            let mut parser = Parser::new(&dialect).with_tokens(tokens);
-            let name = Ident::new("vec_col");
-            let data_type =
-                DataType::Custom(vec![Ident::new("VECTOR")].into(), vec!["128".to_string()]);
-            // First, parse the vector type to set vector_options
-            let mut extensions = ColumnExtensions {
-                vector_options: Some(OptionMap::from([(
-                    VECTOR_OPT_DIM.to_string(),
-                    "128".to_string(),
-                )])),
-                ..Default::default()
-            };
-
-            let result = ParserContext::parse_column_extensions(
-                &mut parser,
-                &name,
-                &data_type,
-                &mut extensions,
-            );
-            assert!(result.is_ok());
-            assert!(extensions.vector_index_options.is_some());
-            let vi_options = extensions.vector_index_options.unwrap();
-            assert_eq!(vi_options.get("metric"), Some("l2sq"));
-        }
-
-        // Test vector index on non-vector type (should fail)
-        {
-            let sql = "VECTOR INDEX";
-            let dialect = GenericDialect {};
-            let mut tokenizer = Tokenizer::new(&dialect, sql);
-            let tokens = tokenizer.tokenize().unwrap();
-            let mut parser = Parser::new(&dialect).with_tokens(tokens);
-            let name = Ident::new("num_col");
-            let data_type = DataType::Int(None); // Non-vector type
-            let mut extensions = ColumnExtensions::default();
-            let result = ParserContext::parse_column_extensions(
-                &mut parser,
-                &name,
-                &data_type,
-                &mut extensions,
-            );
-            assert!(result.is_err());
-            assert!(
-                result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("VECTOR INDEX only supports Vector type columns")
-            );
-        }
     }
 }

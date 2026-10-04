@@ -1,5 +1,9 @@
 flush_stats_factor = 1
 heartbeat_interval = "1s"
+{{ if enable_gc }}
+[gc]
+enable = true
+{{ endif }}
 {{ if use_etcd }}
 ## Store server address default to etcd store.
 store_addrs = [{store_addrs | unescaped}]
@@ -19,3 +23,6 @@ trigger_flush_threshold = 100
 
 [stats_persistence]
 ttl = "0s"
+
+[event_recorder]
+event_types = []

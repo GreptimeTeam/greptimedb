@@ -240,6 +240,7 @@ pub async fn query_pipeline_ddl(
     query_ctx.set_channel(Channel::Log);
     let query_ctx = Arc::new(query_ctx);
 
+    handler.check_pipeline_query_permission(&query_ctx)?;
     let pipeline = handler
         .get_pipeline(&pipeline_name, version, query_ctx.clone())
         .await?;
@@ -614,6 +615,7 @@ pub async fn pipeline_dryrun(
 
     query_ctx.set_channel(Channel::Log);
     let query_ctx = Arc::new(query_ctx);
+    handler.check_pipeline_query_permission(&query_ctx)?;
 
     match check_pipeline_dryrun_params_valid(&payload) {
         Some(params) => {
@@ -986,12 +988,11 @@ pub(crate) async fn execute_log_context_req(
 ) -> Result<HttpResponse> {
     let db = query_ctx.get_db_string();
 
-    let mut outputs = Vec::with_capacity(ctx_req.map_len());
     let mut total_rows: u64 = 0;
     let mut fail = false;
-    for (temp_ctx, act_req) in ctx_req.as_req_iter(query_ctx) {
-        let output = handler.insert(act_req, temp_ctx).await;
-
+    let batches = ctx_req.as_req_iter(query_ctx).collect::<Vec<_>>();
+    let outputs = handler.insert_all(batches).await?;
+    for output in &outputs {
         if let Ok(Output {
             data: OutputData::AffectedRows(rows),
             meta: _,
@@ -1001,7 +1002,6 @@ pub(crate) async fn execute_log_context_req(
         } else {
             fail = true;
         }
-        outputs.push(output);
     }
 
     // Record one aggregate metric sample for the whole ingestion request.

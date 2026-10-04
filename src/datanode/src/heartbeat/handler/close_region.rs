@@ -40,8 +40,10 @@ impl InstructionHandler for CloseRegionsHandler {
             .collect::<Vec<_>>();
 
         let futs = region_ids.iter().map(|region_id| {
-            ctx.region_server
-                .handle_request(*region_id, RegionRequest::Close(RegionCloseRequest {}))
+            ctx.region_server.handle_request(
+                *region_id,
+                RegionRequest::Close(RegionCloseRequest::default()),
+            )
         });
 
         let results = join_all(futs).await;

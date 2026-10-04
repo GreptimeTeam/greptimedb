@@ -1,0 +1,8 @@
+name = "flow_eval_offset_persistence"
+reason = "Verify a non-zero EVAL OFFSET created by a v1.3+ old stage persists in flow schedule metadata and remains visible after a distributed full restart on a v1.3+ new stage."
+introduced_by = "#8878 thread r3911676153"
+topologies = ["distributed"]
+from_range = [">=v1.3.0"]
+to_range = [">=v1.3.0"]
+features = ["flow", "table"]
+owner = "flow"

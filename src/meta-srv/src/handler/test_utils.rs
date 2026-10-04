@@ -92,6 +92,7 @@ impl TestEnv {
             leader_region_registry: self.leader_region_registry.clone(),
             topic_stats_registry: self.topic_stats_registry.clone(),
             heartbeat_interval: BASE_HEARTBEAT_INTERVAL,
+            gc_enabled: false,
             is_handshake: false,
         }
     }

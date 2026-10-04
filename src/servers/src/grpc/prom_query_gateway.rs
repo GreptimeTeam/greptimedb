@@ -36,7 +36,7 @@ use crate::grpc::TonicResult;
 use crate::grpc::context_auth::auth;
 use crate::grpc::greptime_handler::create_query_context;
 use crate::http::prometheus::{PrometheusJsonResponse, retrieve_metric_name_and_result_type};
-use crate::prometheus_handler::PrometheusHandlerRef;
+use crate::prometheus_handler::{ParsedPromQuery, PrometheusHandlerRef};
 
 pub struct PrometheusGatewayService {
     handler: PrometheusHandlerRef,
@@ -47,6 +47,11 @@ pub struct PrometheusGatewayService {
 impl PrometheusGateway for PrometheusGatewayService {
     async fn handle(&self, req: Request<PromqlRequest>) -> TonicResult<Response<PromqlResponse>> {
         let mut is_range_query = false;
+        let channel = req
+            .extensions()
+            .get::<Channel>()
+            .copied()
+            .unwrap_or(Channel::Promql);
         let inner = req.into_inner();
         let prom_query = match inner.promql.context(InvalidQuerySnafu {
             reason: "Expecting non-empty PromqlRequest.",
@@ -80,12 +85,8 @@ impl PrometheusGateway for PrometheusGatewayService {
         };
 
         let header = inner.header.as_ref();
-        let query_ctx = create_query_context(
-            Channel::Promql,
-            header,
-            Default::default(),
-            Default::default(),
-        )?;
+        let query_ctx =
+            create_query_context(channel, header, Default::default(), Default::default())?;
 
         let user_info = auth(self.user_provider.clone(), header, &query_ctx).await?;
         query_ctx.set_current_user(user_info);
@@ -127,19 +128,30 @@ impl PrometheusGatewayService {
             .with_label_values(&[db.as_str()])
             .start_timer();
 
-        let result = self.handler.do_query(&query, ctx).await;
-        let (metric_name, mut result_type) =
-            match retrieve_metric_name_and_result_type(&query.query) {
-                Ok((metric_name, result_type)) => (metric_name, result_type),
-                Err(err) => {
-                    return PrometheusJsonResponse::error(err.status_code(), err.output_msg());
-                }
-            };
-        // range query only returns matrix
-        if is_range_query {
-            result_type = ValueType::Matrix;
+        let query = match ParsedPromQuery::parse(query, &ctx) {
+            Ok(query) => query,
+            Err(err) => {
+                return PrometheusJsonResponse::error(err.status_code(), err.output_msg());
+            }
         };
+        let (metric_name, mut result_type) = retrieve_metric_name_and_result_type(query.expr());
+        let query_id = ctx.remote_query_id().map(str::to_string);
+        // A range query only returns a matrix, and matrix serialization sorts
+        // samples and series, so execution order never reaches the response.
+        let query = if is_range_query {
+            result_type = ValueType::Matrix;
+            query.with_unordered_output()
+        } else {
+            query
+        };
+        let result = self.handler.do_query_parsed(query, ctx).await;
 
-        PrometheusJsonResponse::from_query_result(result, metric_name, result_type).await
+        PrometheusJsonResponse::from_query_result(
+            result,
+            metric_name,
+            result_type,
+            query_id.as_deref(),
+        )
+        .await
     }
 }

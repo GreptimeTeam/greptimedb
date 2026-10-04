@@ -34,6 +34,7 @@ pub struct CreateFlowArgs {
     pub source_table_ids: Vec<TableId>,
     pub create_if_not_exists: bool,
     pub or_replace: bool,
+    /// Duration in seconds.
     pub expire_after: Option<i64>,
     pub eval_interval: Option<i64>,
     pub comment: Option<String>,

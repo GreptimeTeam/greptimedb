@@ -12,15 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
+use common_base::readable_size::ReadableSize;
+use common_runtime::runtime::RuntimeTrait;
+use common_telemetry::warn;
 use common_time::Timestamp;
 use futures::{Stream, TryStreamExt};
 use object_store::services::Fs;
 use object_store::util::{join_dir, with_instrument_layers};
 use object_store::{ATOMIC_WRITE_DIR, ErrorKind, OLD_ATOMIC_WRITE_DIR, ObjectStore};
+use parquet::file::metadata::PageIndexPolicy;
 use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
@@ -28,9 +33,9 @@ use store_api::region_request::PathType;
 use store_api::sst_entry::StorageSstEntry;
 use store_api::storage::{FileId, RegionId, SequenceNumber};
 
-use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::SstUploadRequest;
+use crate::cache::{CacheManagerRef, SstMetaPreparation, prepare_sst_meta_sync};
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, IndexConfig, InvertedIndexConfig};
 use crate::error::{
     CleanDirSnafu, DeleteIndexSnafu, DeleteIndexesSnafu, DeleteSstsSnafu, OpenDalSnafu, Result,
@@ -46,7 +51,7 @@ use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
 use crate::sst::parquet::{SstInfo, WriteOptions};
-use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FormatType};
+use crate::sst::{DEFAULT_WRITE_CONCURRENCY, FormatType};
 
 pub type AccessLayerRef = Arc<AccessLayer>;
 /// SST write results.
@@ -241,6 +246,7 @@ impl AccessLayer {
         }
 
         let attempted_files = file_ids.to_vec();
+        // Deleter does not normalize leading slashes like Operator::delete does.
         let paths: Vec<_> = file_ids
             .iter()
             .map(|file_id| {
@@ -249,6 +255,8 @@ impl AccessLayer {
                     RegionFileId::new(region_id, *file_id),
                     self.path_type,
                 )
+                .trim_start_matches('/')
+                .to_string()
             })
             .collect();
 
@@ -261,7 +269,7 @@ impl AccessLayer {
                 file_ids: attempted_files.clone(),
             })?;
         deleter
-            .delete_iter(paths.iter().map(String::as_str))
+            .delete_iter(paths)
             .await
             .with_context(|_| DeleteSstsSnafu {
                 region_id,
@@ -289,7 +297,11 @@ impl AccessLayer {
             .collect();
         let paths: Vec<_> = index_ids
             .iter()
-            .map(|index_id| location::index_file_path(&self.table_dir, *index_id, self.path_type))
+            .map(|index_id| {
+                location::index_file_path(&self.table_dir, *index_id, self.path_type)
+                    .trim_start_matches('/')
+                    .to_string()
+            })
             .collect();
 
         let mut deleter = self
@@ -300,7 +312,7 @@ impl AccessLayer {
                 file_ids: file_ids.clone(),
             })?;
         deleter
-            .delete_iter(paths.iter().map(String::as_str))
+            .delete_iter(paths)
             .await
             .context(DeleteIndexesSnafu {
                 file_ids: file_ids.clone(),
@@ -337,9 +349,15 @@ impl AccessLayer {
         write_opts: &WriteOptions,
         metrics: &mut Metrics,
     ) -> Result<SstInfoArray> {
+        let op_type = request.op_type;
         let region_id = request.metadata.region_id;
         let region_metadata = request.metadata.clone();
         let cache_manager = request.cache_manager.clone();
+        let override_sequence = if request.preserve_row_sequence {
+            None
+        } else {
+            request.max_sequence
+        };
 
         let sst_info = if let Some(write_cache) = cache_manager.write_cache() {
             // Write to the write cache.
@@ -364,7 +382,6 @@ impl AccessLayer {
             let indexer_builder = IndexerBuilderImpl {
                 build_type: request.op_type.into(),
                 metadata: request.metadata.clone(),
-                row_group_size: write_opts.row_group_size,
                 puffin_manager: self
                     .puffin_manager_factory
                     .build(store, path_provider.clone()),
@@ -374,8 +391,6 @@ impl AccessLayer {
                 inverted_index_config: request.inverted_index_config,
                 fulltext_index_config: request.fulltext_index_config,
                 bloom_filter_index_config: request.bloom_filter_index_config,
-                #[cfg(feature = "vector_index")]
-                vector_index_config: request.vector_index_config,
             };
             // We disable write cache on file system but we still use atomic write.
             // TODO(yingwen): If we support other non-fs stores without the write cache, then
@@ -396,28 +411,64 @@ impl AccessLayer {
                     writer
                         .write_all_flat_as_primary_key(
                             request.source,
-                            request.max_sequence,
+                            override_sequence,
                             write_opts,
                         )
                         .await?
                 }
                 FormatType::Flat => {
                     writer
-                        .write_all_flat(request.source, request.max_sequence, write_opts)
+                        .write_all_flat(request.source, override_sequence, write_opts)
                         .await?
                 }
             }
         };
 
         // Put parquet metadata to cache manager.
-        if !sst_info.is_empty() {
+        if !sst_info.is_empty() && cache_manager.sst_meta_cache_enabled() {
+            let runtime = match op_type {
+                OperationType::Compact => common_runtime::compact_runtime(),
+                OperationType::Flush => common_runtime::global_runtime(),
+            };
             for sst in &sst_info {
                 if let Some(parquet_metadata) = &sst.file_metadata {
-                    cache_manager.put_parquet_meta_data(
-                        RegionFileId::new(region_id, sst.file_id),
-                        parquet_metadata.clone(),
-                        Some(region_metadata.clone()),
-                    )
+                    let file_id = RegionFileId::new(region_id, sst.file_id);
+                    let file_path = format!(
+                        "region_id={}, file_id={}",
+                        file_id.region_id(),
+                        file_id.file_id()
+                    );
+                    let page_index_policy = if parquet_metadata.offset_index().is_some() {
+                        PageIndexPolicy::Optional
+                    } else {
+                        PageIndexPolicy::Skip
+                    };
+                    let parquet_metadata = parquet_metadata.clone();
+                    let region_metadata = region_metadata.clone();
+                    let cache_manager = cache_manager.clone();
+                    // Compact cache preparation is best-effort. Run the entire operation in one
+                    // detached blocking task so it neither blocks an async worker nor delays the
+                    // SST write.
+                    runtime.spawn_blocking(move || {
+                        match prepare_sst_meta_sync(
+                            &file_path,
+                            Arc::unwrap_or_clone(parquet_metadata),
+                            Some(region_metadata),
+                            page_index_policy,
+                        ) {
+                            Ok(SstMetaPreparation::Prepared(metadata)) => {
+                                cache_manager.put_prepared_sst_meta(file_id, metadata, true);
+                            }
+                            Ok(SstMetaPreparation::DecodedOnly { encoding_error, .. }) => warn!(
+                                encoding_error;
+                                "Failed to encode parquet metadata for cache, file: {}",
+                                file_path
+                            ),
+                            Err(err) => {
+                                warn!(err; "Failed to cache parquet metadata for {}", file_path);
+                            }
+                        }
+                    });
                 }
             }
         }
@@ -429,9 +480,9 @@ impl AccessLayer {
     pub(crate) async fn put_sst(
         &self,
         data: &bytes::Bytes,
-        region_id: RegionId,
-        sst_info: &SstInfo,
+        region_file_id: RegionFileId,
         cache_manager: &CacheManagerRef,
+        write_buffer_size: ReadableSize,
     ) -> Result<Metrics> {
         if let Some(write_cache) = cache_manager.write_cache() {
             // Write to cache and upload to remote store
@@ -443,27 +494,27 @@ impl AccessLayer {
                 remote_store: self.object_store.clone(),
             };
             write_cache
-                .put_and_upload_sst(data, region_id, sst_info, upload_request)
+                .put_and_upload_sst(data, region_file_id, upload_request, write_buffer_size)
                 .await
         } else {
             let start = Instant::now();
-            let cleaner = TempFileCleaner::new(region_id, self.object_store.clone());
+            let cleaner =
+                TempFileCleaner::new(region_file_id.region_id(), self.object_store.clone());
             let path_provider = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
-            let sst_file_path =
-                path_provider.build_sst_file_path(RegionFileId::new(region_id, sst_info.file_id));
+            let sst_file_path = path_provider.build_sst_file_path(region_file_id);
             let mut writer = self
                 .object_store
                 .writer_with(&sst_file_path)
-                .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
+                .chunk(write_buffer_size.as_bytes() as usize)
                 .concurrent(DEFAULT_WRITE_CONCURRENCY)
                 .await
                 .context(OpenDalSnafu)?;
             if let Err(err) = writer.write(data.clone()).await.context(OpenDalSnafu) {
-                cleaner.clean_by_file_id(sst_info.file_id).await;
+                cleaner.clean_by_file_id(region_file_id.file_id()).await;
                 return Err(err);
             }
             if let Err(err) = writer.close().await.context(OpenDalSnafu) {
-                cleaner.clean_by_file_id(sst_info.file_id).await;
+                cleaner.clean_by_file_id(region_file_id.file_id()).await;
                 return Err(err);
             }
             let mut metrics = Metrics::new(WriteType::Flush);
@@ -527,10 +578,12 @@ pub struct SstWriteRequest {
     pub metadata: RegionMetadataRef,
     pub source: FlatSource,
     pub cache_manager: CacheManagerRef,
-    #[allow(dead_code)]
-    pub storage: Option<String>,
+    /// Optional uniform row sequence for writes that do not preserve sequences.
+    /// Compaction passes `None` to retain the reader's effective input sequences.
     pub max_sequence: Option<SequenceNumber>,
     pub sst_write_format: FormatType,
+
+    pub preserve_row_sequence: bool,
 
     /// Configs for index
     pub index_options: IndexOptions,
@@ -538,8 +591,6 @@ pub struct SstWriteRequest {
     pub inverted_index_config: InvertedIndexConfig,
     pub fulltext_index_config: FulltextIndexConfig,
     pub bloom_filter_index_config: BloomFilterConfig,
-    #[cfg(feature = "vector_index")]
-    pub vector_index_config: crate::config::VectorIndexConfig,
 }
 
 /// Cleaner to remove temp files on the atomic write dir.
@@ -615,15 +666,18 @@ impl TempFileCleaner {
 }
 
 pub(crate) async fn new_fs_cache_store(root: &str) -> Result<ObjectStore> {
-    let atomic_write_dir = join_dir(root, ATOMIC_WRITE_DIR);
-    clean_dir(&atomic_write_dir).await?;
+    // Preserve native filesystem prefixes such as Windows UNC shares.
+    let atomic_write_dir = Path::new(root).join(ATOMIC_WRITE_DIR);
+    clean_dir(&atomic_write_dir.to_string_lossy()).await?;
 
     // Compatible code. Remove this after a major release.
     let old_atomic_temp_dir = join_dir(root, OLD_ATOMIC_WRITE_DIR);
     clean_dir(&old_atomic_temp_dir).await?;
 
-    let builder = Fs::default().root(root).atomic_write_dir(&atomic_write_dir);
-    let store = ObjectStore::new(builder).context(OpenDalSnafu)?.finish();
+    let builder = Fs::default()
+        .root(root)
+        .atomic_write_dir(&atomic_write_dir.to_string_lossy());
+    let store = ObjectStore::new(builder).context(OpenDalSnafu)?;
 
     Ok(with_instrument_layers(store, false))
 }
@@ -717,5 +771,113 @@ impl FilePathProvider for RegionFilePathFactory {
 
     fn build_sst_file_path(&self, file_id: RegionFileId) -> String {
         location::sst_file_path(&self.table_dir, file_id, self.path_type)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use bytes::Bytes;
+    use common_test_util::temp_dir::create_temp_dir;
+
+    use super::*;
+    use crate::cache::CacheManager;
+    use crate::cache::test_util::new_fs_store;
+    use crate::test_util::TestEnv;
+    use crate::test_util::sst_util::WriteChunkRecorder;
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn test_put_sst_uses_configured_buffer_size(
+        #[values(false, true)] enable_write_cache: bool,
+        #[values(1024, 4096)] chunk_size: usize,
+    ) {
+        let mut env = TestEnv::new().await;
+        let remote_chunks = WriteChunkRecorder::default();
+        let remote_store = env.init_object_store_manager().layer(remote_chunks.layer());
+        let local_dir = create_temp_dir("encoded-sst-cache");
+        let local_chunks = WriteChunkRecorder::default();
+        let local_store =
+            new_fs_store(local_dir.path().to_str().unwrap()).layer(local_chunks.layer());
+        let write_cache = if enable_write_cache {
+            Some(
+                env.create_write_cache(local_store.clone(), ReadableSize::mb(10))
+                    .await,
+            )
+        } else {
+            None
+        };
+        let cache_manager = Arc::new(
+            CacheManager::builder()
+                .write_cache(write_cache.clone())
+                .build(),
+        );
+        let access_layer = AccessLayer::new(
+            "test",
+            PathType::Bare,
+            remote_store.clone(),
+            env.get_puffin_manager(),
+            env.get_intermediate_manager(),
+        );
+        let file_id = RegionFileId::new(RegionId::new(1024, 1), FileId::random());
+        // Two full chunks and a partial tail distinguish the configured size from the default.
+        let encoded = Bytes::from(
+            (0..2 * chunk_size + 17)
+                .map(|i| (i % 251) as u8)
+                .collect::<Vec<_>>(),
+        );
+        access_layer
+            .put_sst(
+                &encoded,
+                file_id,
+                &cache_manager,
+                ReadableSize(chunk_size as u64),
+            )
+            .await
+            .unwrap();
+
+        let remote_path = location::sst_file_path("test", file_id, PathType::Bare);
+        remote_chunks.assert_chunks(&remote_path, chunk_size, encoded.len());
+        assert_eq!(
+            remote_store.read(&remote_path).await.unwrap().to_bytes(),
+            encoded
+        );
+        if let Some(write_cache) = write_cache {
+            let key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Parquet);
+            let cache_path = write_cache.file_cache().cache_file_path(key);
+            local_chunks.assert_chunks(&cache_path, chunk_size, encoded.len());
+            assert_eq!(
+                local_store.read(&cache_path).await.unwrap().to_bytes(),
+                encoded
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_new_fs_cache_store() {
+        let root = common_test_util::temp_dir::create_temp_dir("fs-cache-store");
+        let dirs = [
+            root.path().join(ATOMIC_WRITE_DIR),
+            PathBuf::from(join_dir(
+                root.path().to_str().unwrap(),
+                OLD_ATOMIC_WRITE_DIR,
+            )),
+        ];
+        for dir in &dirs {
+            tokio::fs::create_dir_all(dir).await.unwrap();
+            tokio::fs::write(dir.join("stale"), b"stale").await.unwrap();
+        }
+        let store = new_fs_cache_store(root.path().to_str().unwrap())
+            .await
+            .unwrap();
+        for dir in &dirs {
+            assert!(!dir.join("stale").exists());
+        }
+        store.write("index", "contents").await.unwrap();
+        assert_eq!(
+            tokio::fs::read(root.path().join("index")).await.unwrap(),
+            b"contents"
+        );
     }
 }

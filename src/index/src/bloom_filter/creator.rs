@@ -26,8 +26,8 @@ use prost::Message;
 use snafu::ResultExt;
 
 use crate::Bytes;
-use crate::bloom_filter::SEED;
 use crate::bloom_filter::error::{IoSnafu, Result};
+use crate::bloom_filter::{PrehashedBuildHasher, element_hash};
 use crate::external_provider::ExternalTempFileProvider;
 
 /// `BloomFilterCreator` is responsible for creating and managing bloom filters
@@ -52,8 +52,11 @@ pub struct BloomFilterCreator {
     /// Row count that added to the bloom filter so far.
     accumulated_row_count: usize,
 
-    /// A set of distinct elements in the current segment.
-    cur_seg_distinct_elems: HashSet<Bytes>,
+    /// Distinct element hashes (see [`element_hash`]) in the current segment.
+    ///
+    /// Elements with equal hashes set the same bits, so deduplicating by hash loses
+    /// nothing and avoids copying the values.
+    cur_seg_distinct_elems: HashSet<u64, PrehashedBuildHasher>,
 
     /// The memory usage of the current segment's distinct elements.
     cur_seg_distinct_elems_mem_usage: usize,
@@ -106,36 +109,57 @@ impl BloomFilterCreator {
     /// reaches `rows_per_segment`, it finalizes the current segment.
     pub async fn push_n_row_elems(
         &mut self,
-        mut nrows: usize,
+        nrows: usize,
         elems: impl IntoIterator<Item = Bytes>,
     ) -> Result<()> {
-        if nrows == 0 {
-            return Ok(());
+        let hashes = elems
+            .into_iter()
+            .map(|e| element_hash(&e))
+            .collect::<Vec<_>>();
+        self.push_n_row_hashes(nrows, &hashes).await
+    }
+
+    /// Adds `nrows` copies of a single borrowed value (or null). Row counts advance for
+    /// nulls as well.
+    pub async fn push_n_row_elem(&mut self, nrows: usize, elem: Option<&[u8]>) -> Result<()> {
+        match elem {
+            Some(elem) => self.push_n_row_hashes(nrows, &[element_hash(elem)]).await,
+            None => self.push_n_row_hashes(nrows, &[]).await,
         }
-        if nrows == 1 {
-            return self.push_row_elems(elems).await;
+    }
+
+    /// Adds a row of elements to the bloom filter. If the number of accumulated rows
+    /// reaches `rows_per_segment`, it finalizes the current segment.
+    pub async fn push_row_elems(&mut self, elems: impl IntoIterator<Item = Bytes>) -> Result<()> {
+        self.push_row_hashes(elems.into_iter().map(|e| element_hash(&e)))
+            .await
+    }
+
+    /// Adds a row of element hashes computed by [`element_hash`].
+    pub async fn push_row_hashes(&mut self, hashes: impl IntoIterator<Item = u64>) -> Result<()> {
+        self.accumulated_row_count += 1;
+        self.insert_hashes(hashes);
+
+        if self
+            .accumulated_row_count
+            .is_multiple_of(self.rows_per_segment)
+        {
+            self.finalize_segment().await?;
+            self.finalized_row_count = self.accumulated_row_count;
         }
 
-        let elems = elems.into_iter().collect::<Vec<_>>();
+        Ok(())
+    }
+
+    /// Adds `nrows` rows that all contain the element hashes in `hashes`.
+    pub async fn push_n_row_hashes(&mut self, mut nrows: usize, hashes: &[u64]) -> Result<()> {
         while nrows > 0 {
             let rows_to_seg_end =
                 self.rows_per_segment - (self.accumulated_row_count % self.rows_per_segment);
             let rows_to_push = nrows.min(rows_to_seg_end);
             nrows -= rows_to_push;
-
             self.accumulated_row_count += rows_to_push;
-
-            let mut mem_diff = 0;
-            for elem in &elems {
-                let len = elem.len();
-                let is_new = self.cur_seg_distinct_elems.insert(elem.clone());
-                if is_new {
-                    mem_diff += len;
-                }
-            }
-            self.cur_seg_distinct_elems_mem_usage += mem_diff;
-            self.global_memory_usage
-                .fetch_add(mem_diff, Ordering::Relaxed);
+            self.insert_hashes(hashes.iter().copied());
 
             if self
                 .accumulated_row_count
@@ -149,32 +173,19 @@ impl BloomFilterCreator {
         Ok(())
     }
 
-    /// Adds a row of elements to the bloom filter. If the number of accumulated rows
-    /// reaches `rows_per_segment`, it finalizes the current segment.
-    pub async fn push_row_elems(&mut self, elems: impl IntoIterator<Item = Bytes>) -> Result<()> {
-        self.accumulated_row_count += 1;
-
-        let mut mem_diff = 0;
-        for elem in elems.into_iter() {
-            let len = elem.len();
-            let is_new = self.cur_seg_distinct_elems.insert(elem);
-            if is_new {
-                mem_diff += len;
-            }
+    fn insert_hashes(&mut self, hashes: impl IntoIterator<Item = u64>) {
+        let old_len = self.cur_seg_distinct_elems.len();
+        // Not `extend`: it reserves for the iterator's length, which counts duplicate
+        // tokens, and the capacity survives `drain` at segment boundaries.
+        for hash in hashes {
+            self.cur_seg_distinct_elems.insert(hash);
         }
-        self.cur_seg_distinct_elems_mem_usage += mem_diff;
-        self.global_memory_usage
-            .fetch_add(mem_diff, Ordering::Relaxed);
-
-        if self
-            .accumulated_row_count
-            .is_multiple_of(self.rows_per_segment)
-        {
-            self.finalize_segment().await?;
-            self.finalized_row_count = self.accumulated_row_count;
+        let mem_diff = (self.cur_seg_distinct_elems.len() - old_len) * size_of::<u64>();
+        if mem_diff > 0 {
+            self.cur_seg_distinct_elems_mem_usage += mem_diff;
+            self.global_memory_usage
+                .fetch_add(mem_diff, Ordering::Relaxed);
         }
-
-        Ok(())
     }
 
     /// Finalizes any remaining segments and writes the bloom filters and metadata to the provided writer.
@@ -253,6 +264,7 @@ mod tests {
     use futures::io::Cursor;
 
     use super::*;
+    use crate::bloom_filter::SEED;
     use crate::external_provider::MockExternalTempFileProvider;
 
     /// Converts a slice of bytes to a vector of `u64`.
@@ -261,6 +273,23 @@ mod tests {
             .chunks_exact(std::mem::size_of::<u64>())
             .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_hashes_do_not_grow_segment_set() {
+        let mut creator = BloomFilterCreator::new(
+            4,
+            0.01,
+            Arc::new(MockExternalTempFileProvider::new()),
+            Arc::new(AtomicUsize::new(0)),
+            None,
+        );
+        creator
+            .push_row_hashes(std::iter::repeat_n(7, 1_000_000))
+            .await
+            .unwrap();
+        assert_eq!(creator.cur_seg_distinct_elems.len(), 1);
+        assert!(creator.cur_seg_distinct_elems.capacity() < 16);
     }
 
     #[tokio::test]
@@ -418,6 +447,42 @@ mod tests {
             assert!(bf.contains(&b"e"));
             assert!(bf.contains(&b"f"));
         }
+    }
+
+    #[tokio::test]
+    async fn borrowed_single_value_matches_owned_rows_across_segments() {
+        let make_creator = || {
+            BloomFilterCreator::new(
+                3,
+                0.01,
+                Arc::new(MockExternalTempFileProvider::new()),
+                Arc::new(AtomicUsize::new(0)),
+                None,
+            )
+        };
+        let mut borrowed = make_creator();
+        let mut owned = make_creator();
+        // Zero rows, nulls, empty values, duplicates and runs crossing segment boundaries.
+        for (rows, elem) in [
+            (0, Some(b"ignored".as_slice())),
+            (1, None),
+            (5, Some(b"".as_slice())),
+            (1, Some(b"".as_slice())),
+            (8, Some(b"label".as_slice())),
+            (1, None),
+        ] {
+            borrowed.push_n_row_elem(rows, elem).await.unwrap();
+            owned
+                .push_n_row_elems(rows, elem.map(<[u8]>::to_vec))
+                .await
+                .unwrap();
+            assert_eq!(borrowed.memory_usage(), owned.memory_usage());
+        }
+        let mut borrowed_blob = Cursor::new(Vec::new());
+        let mut owned_blob = Cursor::new(Vec::new());
+        borrowed.finish(&mut borrowed_blob).await.unwrap();
+        owned.finish(&mut owned_blob).await.unwrap();
+        assert_eq!(borrowed_blob.into_inner(), owned_blob.into_inner());
     }
 
     #[tokio::test]

@@ -16,7 +16,6 @@
 
 use common_telemetry::info;
 use store_api::logstore::LogStore;
-use store_api::logstore::provider::Provider;
 use store_api::region_request::{RegionCloseRequest, RegionFlushReason, RegionFlushRequest};
 use store_api::storage::RegionId;
 
@@ -27,6 +26,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     pub(crate) async fn handle_close_request(
         &mut self,
         region_id: RegionId,
+        request: RegionCloseRequest,
         sender: OptionOutputTx,
     ) {
         let Some(region) = self.regions.get_region(region_id) else {
@@ -36,9 +36,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         info!("Try to close region {}, worker: {}", region_id, self.id);
 
-        // If the region is using Noop WAL and has data in memtable and region is flushable (like,
-        // not in follower state), we should flush it before closing to ensure durability.
-        if region.provider == Provider::Noop
+        // If the close request asks for a flush, or the region skips WAL,
+        // and has data in memtable and region is flushable (like, not in follower state),
+        // we should flush it before closing to ensure durability.
+        if (request.flush_on_close || region.skip_wal())
             && !region
                 .version_control
                 .current()
@@ -53,7 +54,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     .add_ddl_request_to_pending(SenderDdlRequest {
                         region_id,
                         sender,
-                        request: DdlRequest::Close(RegionCloseRequest {}),
+                        request: DdlRequest::Close(request),
                     });
                 return;
             }

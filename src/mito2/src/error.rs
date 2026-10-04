@@ -67,6 +67,20 @@ pub enum Error {
         error: object_store::Error,
     },
 
+    #[snafu(display(
+        "Manifest delta {} disappeared after it was listed, path: {}",
+        version,
+        path
+    ))]
+    ManifestDeltaNotFound {
+        version: ManifestVersion,
+        path: String,
+        #[snafu(source)]
+        error: object_store::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Fail to compress object by {}, path: {}", compress_type, path))]
     CompressObject {
         compress_type: CompressionType,
@@ -192,6 +206,28 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Cannot assign a stable field id to native histogram sub-field '{}' of column id {} (unknown sub-field name or derived id overflows i32)",
+        field_name,
+        column_id
+    ))]
+    InvalidNativeHistogramSubfield {
+        column_id: i32,
+        field_name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Native histogram column '{}' has no usable PARQUET:field_id to namespace its sub-field ids (missing, malformed, or exceeds i32::MAX)",
+        field_name
+    ))]
+    InvalidNativeHistogramFieldId {
+        field_name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Region {} not found", region_id))]
     RegionNotFound {
         region_id: RegionId,
@@ -246,6 +282,36 @@ pub enum Error {
         region_id: RegionId,
         given_seq: u64,
         min_enforceable_seq: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "SEQUENCE_RANGE_UNSUPPORTED: exact sequence-range read unsupported, region: {}, min_seq: {}, max_seq: {}, reason: {}, retry_hint: FALLBACK_MEMTABLE_ONLY_OR_FULL_RECOMPUTE",
+        region_id,
+        min_seq,
+        max_seq,
+        reason
+    ))]
+    SequenceRangeUnsupported {
+        region_id: RegionId,
+        min_seq: u64,
+        max_seq: u64,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "region {} is unusable for sequence reads: file {} declares region {}",
+        region_id,
+        file_id,
+        file_region_id
+    ))]
+    RegionSequenceDomainBroken {
+        region_id: RegionId,
+        file_region_id: RegionId,
+        file_id: FileId,
         #[snafu(implicit)]
         location: Location,
     },
@@ -387,6 +453,14 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to wait for the WAL to be durable, region_id: {}", region_id))]
+    WaitWalDurable {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     // Shared error for each writer in the write group.
     #[snafu(display("Failed to write region"))]
     WriteGroup { source: Arc<Error> },
@@ -437,6 +511,14 @@ pub enum Error {
 
     #[snafu(display("Failed to evaluate partition filter"))]
     EvalPartitionFilter {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: datafusion::error::DataFusionError,
+    },
+
+    #[snafu(display("Failed to merge candidate series"))]
+    MergeCandidateSeries {
         #[snafu(implicit)]
         location: Location,
         #[snafu(source)]
@@ -527,6 +609,16 @@ pub enum Error {
 
     #[snafu(display("Region {} is closed", region_id))]
     RegionClosed {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Stale compaction execution for region {}, the region may have been reopened, truncated or the compaction was superseded",
+        region_id
+    ))]
+    StaleCompactionExecution {
         region_id: RegionId,
         #[snafu(implicit)]
         location: Location,
@@ -685,14 +777,6 @@ pub enum Error {
     #[snafu(display("Failed to apply bloom filter index"))]
     ApplyBloomFilterIndex {
         source: index::bloom_filter::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[cfg(feature = "vector_index")]
-    #[snafu(display("Failed to apply vector index: {}", reason))]
-    ApplyVectorIndex {
-        reason: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1054,6 +1138,21 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid SST primary key range: {reason}"))]
+    InvalidPrimaryKeyRange {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to decode SST primary key range {endpoint} endpoint"))]
+    DecodePrimaryKeyRange {
+        endpoint: &'static str,
+        source: mito_codec::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Region {} is busy", region_id))]
     RegionBusy {
         region_id: RegionId,
@@ -1098,27 +1197,17 @@ pub enum Error {
         location: Location,
     },
 
-    #[cfg(feature = "vector_index")]
-    #[snafu(display("Failed to build vector index: {}", reason))]
-    VectorIndexBuild {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[cfg(feature = "vector_index")]
-    #[snafu(display("Failed to finish vector index: {}", reason))]
-    VectorIndexFinish {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Manual compaction is override by following operations."))]
     ManualCompactionOverride {},
 
+    #[snafu(display("Manual compaction is already running for region {region_id}."))]
+    ManualCompactionAlreadyRunning { region_id: RegionId },
+
     #[snafu(display("Compaction is cancelled."))]
     CompactionCancelled {},
+
+    #[snafu(display("Flush is cancelled."))]
+    FlushCancelled {},
 
     #[snafu(display("Compaction memory exhausted for region {region_id} (policy: {policy})",))]
     CompactionMemoryExhausted {
@@ -1313,7 +1402,38 @@ impl Error {
     pub(crate) fn is_object_not_found(&self) -> bool {
         match self {
             Error::OpenDal { error, .. } => error.kind() == ErrorKind::NotFound,
+            Error::ManifestDeltaNotFound { .. } => true,
             _ => false,
+        }
+    }
+
+    /// Returns whether a failed manifest update may have been persisted.
+    ///
+    /// Unknown errors are treated conservatively because deleting output SSTs after an ambiguous
+    /// manifest write could leave the manifest referencing missing files.
+    pub(crate) fn may_have_persisted_manifest_update(&self) -> bool {
+        match self {
+            Error::UpdateManifest { .. }
+            | Error::RegionState { .. }
+            | Error::RegionTruncated { .. }
+            | Error::RegionStopped { .. }
+            | Error::SerdeJson { .. }
+            | Error::CompressObject { .. } => false,
+            Error::OpenDal { error, .. } => !matches!(
+                error.kind(),
+                ErrorKind::Unsupported
+                    | ErrorKind::ConfigInvalid
+                    | ErrorKind::NotFound
+                    | ErrorKind::PermissionDenied
+                    | ErrorKind::IsADirectory
+                    | ErrorKind::NotADirectory
+                    | ErrorKind::AlreadyExists
+                    | ErrorKind::RateLimited
+                    | ErrorKind::IsSameFile
+                    | ErrorKind::ConditionNotMatch
+                    | ErrorKind::RangeNotSatisfied
+            ),
+            _ => true,
         }
     }
 }
@@ -1324,10 +1444,13 @@ impl ErrorExt for Error {
 
         match self {
             DataTypeMismatch { source, .. } => source.status_code(),
-            OpenDal { .. } | ReadParquet { .. } => StatusCode::StorageUnavailable,
-            WriteWal { source, .. } | ReadWal { source, .. } | DeleteWal { source, .. } => {
-                source.status_code()
+            OpenDal { .. } | ManifestDeltaNotFound { .. } | ReadParquet { .. } => {
+                StatusCode::StorageUnavailable
             }
+            WriteWal { source, .. }
+            | ReadWal { source, .. }
+            | DeleteWal { source, .. }
+            | WaitWalDurable { source, .. } => source.status_code(),
             CompressObject { .. }
             | DecompressObject { .. }
             | SerdeJson { .. }
@@ -1373,13 +1496,17 @@ impl ErrorExt for Error {
 
             IncrementalQueryStale { .. } | SnapshotFenceStale { .. } => StatusCode::RequestOutdated,
 
-            RegionMetadataNotFound { .. }
+            SequenceRangeUnsupported { .. } => StatusCode::Unsupported,
+
+            RegionSequenceDomainBroken { .. }
+            | RegionMetadataNotFound { .. }
             | Join { .. }
             | WorkerStopped { .. }
             | Recv { .. }
             | DecodeWal { .. }
             | ComputeArrow { .. }
             | EvalPartitionFilter { .. }
+            | MergeCandidateSeries { .. }
             | BiErrors { .. }
             | StopScheduler { .. }
             | ComputeVector { .. }
@@ -1412,6 +1539,7 @@ impl ErrorExt for Error {
             FlushRegion { source, .. } | BuildIndexAsync { source, .. } => source.status_code(),
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
+            StaleCompactionExecution { .. } => StatusCode::Cancelled,
             RegionTruncated { .. } => StatusCode::Cancelled,
             RejectWrite { .. } => StatusCode::StorageUnavailable,
             CompactRegion { source, .. } => source.status_code(),
@@ -1428,8 +1556,6 @@ impl ErrorExt for Error {
             | PushIndexValue { source, .. }
             | ApplyInvertedIndex { source, .. }
             | IndexFinish { source, .. } => source.status_code(),
-            #[cfg(feature = "vector_index")]
-            ApplyVectorIndex { .. } => StatusCode::Internal,
             PuffinReadBlob { source, .. }
             | PuffinAddBlob { source, .. }
             | PuffinInitStager { source, .. }
@@ -1437,7 +1563,9 @@ impl ErrorExt for Error {
             | PuffinPurgeStager { source, .. } => source.status_code(),
             CleanDir { .. } => StatusCode::Unexpected,
             InvalidConfig { .. } => StatusCode::InvalidArguments,
-            StaleLogEntry { .. } => StatusCode::Unexpected,
+            StaleLogEntry { .. }
+            | InvalidNativeHistogramSubfield { .. }
+            | InvalidNativeHistogramFieldId { .. } => StatusCode::Unexpected,
 
             External { source, .. } => source.status_code(),
 
@@ -1456,7 +1584,10 @@ impl ErrorExt for Error {
             FulltextPushText { source, .. }
             | FulltextFinish { source, .. }
             | ApplyFulltextIndex { source, .. } => source.status_code(),
-            DecodeStats { .. } | StatsNotPresent { .. } => StatusCode::Internal,
+            DecodeStats { .. }
+            | StatsNotPresent { .. }
+            | InvalidPrimaryKeyRange { .. }
+            | DecodePrimaryKeyRange { .. } => StatusCode::Internal,
             RegionBusy { .. } => StatusCode::RegionBusy,
             GetSchemaMetadata { source, .. } => source.status_code(),
             Timeout { .. } => StatusCode::Cancelled,
@@ -1467,10 +1598,14 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
-            #[cfg(feature = "vector_index")]
-            VectorIndexBuild { .. } | VectorIndexFinish { .. } => StatusCode::Internal,
+            ManualCompactionOverride {} | CompactionCancelled {} | FlushCancelled {} => {
+                StatusCode::Cancelled
+            }
 
-            ManualCompactionOverride {} | CompactionCancelled {} => StatusCode::Cancelled,
+            // A concurrent manual compaction fails fast instead of being queued;
+            // the conflict is reported to the caller, which decides whether to
+            // issue a new request after the running one finishes.
+            ManualCompactionAlreadyRunning { .. } => StatusCode::RegionBusy,
 
             CompactionMemoryExhausted { source, .. } => source.status_code(),
 
@@ -1513,7 +1648,9 @@ impl ErrorExt for Error {
             | UpdateManifest { .. }
             | RegionStopped { .. }
             | RegionBusy { .. }
-            | FlushableRegionState { .. } => RetryHint::Retryable,
+            | ManualCompactionAlreadyRunning { .. }
+            | FlushableRegionState { .. }
+            | ManifestDeltaNotFound { .. } => RetryHint::Retryable,
 
             OpenDal { error, .. }
             | DeleteSsts { error, .. }
@@ -1523,6 +1660,7 @@ impl ErrorExt for Error {
             WriteWal { source, .. }
             | ReadWal { source, .. }
             | DeleteWal { source, .. }
+            | WaitWalDurable { source, .. }
             | FetchManifests { source, .. }
             | External { source, .. } => source.retry_hint(),
 
@@ -1574,5 +1712,48 @@ impl ErrorExt for Error {
 
             _ => RetryHint::NonRetryable,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use snafu::IntoError;
+
+    use super::*;
+
+    #[test]
+    fn test_manifest_update_persistence() {
+        let rejected_kinds = [
+            ErrorKind::Unsupported,
+            ErrorKind::ConfigInvalid,
+            ErrorKind::NotFound,
+            ErrorKind::PermissionDenied,
+            ErrorKind::IsADirectory,
+            ErrorKind::NotADirectory,
+            ErrorKind::AlreadyExists,
+            ErrorKind::RateLimited,
+            ErrorKind::IsSameFile,
+            ErrorKind::ConditionNotMatch,
+            ErrorKind::RangeNotSatisfied,
+        ];
+        for kind in rejected_kinds {
+            let error = OpenDalSnafu {}.into_error(object_store::Error::new(kind, "test"));
+            assert!(
+                !error.may_have_persisted_manifest_update(),
+                "error kind {kind:?} should prove the manifest was not persisted"
+            );
+        }
+
+        let error =
+            OpenDalSnafu {}.into_error(object_store::Error::new(ErrorKind::Unexpected, "test"));
+        assert!(error.may_have_persisted_manifest_update());
+
+        let region_id = RegionId::new(1, 1);
+        let error = RegionTruncatedSnafu { region_id }.build();
+        assert!(!error.may_have_persisted_manifest_update());
+
+        // This can be raised while applying an edit after its manifest file was saved.
+        let error = RegionMetadataNotFoundSnafu {}.build();
+        assert!(error.may_have_persisted_manifest_update());
     }
 }

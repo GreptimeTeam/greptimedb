@@ -54,7 +54,6 @@ use crate::error::Result;
 use crate::http::jaeger::QueryTraceParams;
 use crate::influxdb::InfluxdbRequest;
 use crate::opentsdb::codec::DataPoint;
-use crate::prom_store::Metrics;
 pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + Sync>;
 pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;
 pub type PromStoreProtocolHandlerRef = Arc<dyn PromStoreProtocolHandler + Send + Sync>;
@@ -71,18 +70,33 @@ pub struct TraceIngestOutcome {
     pub error_message: Option<String>,
 }
 
+/// Result of ingesting one OTLP metrics request or Arrow batch.
+#[derive(Debug, Default, Clone)]
+pub struct MetricsIngestOutcome {
+    pub write_cost: usize,
+    pub accepted_data_points: i64,
+    pub rejected_data_points: i64,
+    pub error_message: Option<String>,
+}
+
 #[async_trait]
 pub trait InfluxdbLineProtocolHandler {
-    /// A successful request will not return a response.
-    /// Only on error will the socket return a line of data.
     async fn exec(&self, request: InfluxdbRequest, ctx: QueryContextRef) -> Result<Output>;
 }
 
 #[async_trait]
 pub trait OpentsdbProtocolHandler {
-    /// A successful request will not return a response.
-    /// Only on error will the socket return a line of data.
+    /// Checks all points in one external request before per-point debug execution.
+    async fn preflight(&self, data_points: &[DataPoint], ctx: QueryContextRef) -> Result<()>;
+
     async fn exec(&self, data_points: Vec<DataPoint>, ctx: QueryContextRef) -> Result<usize>;
+
+    /// Executes an ordinary HTTP put with optional batching. Debug callers
+    /// retain [`Self::exec`]; the frontend clears HTTP batching selection
+    /// there so diagnostic requests preserve direct, per-point error attribution.
+    async fn exec_batch(&self, data_points: Vec<DataPoint>, ctx: QueryContextRef) -> Result<usize> {
+        self.exec(data_points, ctx).await
+    }
 }
 
 pub struct PromStoreResponse {
@@ -95,9 +109,15 @@ pub struct PromStoreResponse {
 #[async_trait]
 pub trait PromStoreProtocolHandler {
     /// Runs pre-write checks/hooks for prometheus remote write requests.
-    async fn pre_write(&self, _request: &RowInsertRequests, _ctx: QueryContextRef) -> Result<()> {
-        Ok(())
-    }
+    async fn pre_write(&self, request: &RowInsertRequests, ctx: QueryContextRef) -> Result<()>;
+
+    /// Writes one batch after [`Self::pre_write`] has succeeded for the entire request.
+    async fn write_prepared(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+        with_metric_engine: bool,
+    ) -> Result<Output>;
 
     /// Handling prometheus remote write requests
     async fn write(
@@ -107,10 +127,15 @@ pub trait PromStoreProtocolHandler {
         with_metric_engine: bool,
     ) -> Result<Output>;
 
+    /// Checks every batch before writing any of them.
+    async fn write_all(
+        &self,
+        requests: Vec<(QueryContextRef, RowInsertRequests)>,
+        with_metric_engine: bool,
+    ) -> Result<Vec<Result<Output>>>;
+
     /// Handling prometheus remote read requests
     async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PromStoreResponse>;
-    /// Handling push gateway requests
-    async fn ingest_metrics(&self, metrics: Metrics) -> Result<()>;
 }
 
 #[async_trait]
@@ -120,7 +145,7 @@ pub trait OpenTelemetryProtocolHandler: PipelineHandler {
         &self,
         request: ExportMetricsServiceRequest,
         ctx: QueryContextRef,
-    ) -> Result<Output>;
+    ) -> Result<MetricsIngestOutcome>;
 
     /// Handling opentelemetry traces request
     async fn traces(
@@ -155,6 +180,20 @@ pub trait OpenTelemetryProtocolHandler: PipelineHandler {
 pub trait PipelineHandler {
     async fn insert(&self, input: RowInsertRequests, ctx: QueryContextRef) -> Result<Output>;
 
+    /// Checks every batch before inserting any of them.
+    async fn insert_all(
+        &self,
+        inputs: Vec<(QueryContextRef, RowInsertRequests)>,
+    ) -> Result<Vec<Result<Output>>>;
+
+    fn check_pipeline_query_permission(&self, query_ctx: &QueryContextRef) -> Result<()>;
+
+    /// Loads a compiled pipeline for execution.
+    ///
+    /// This intentionally does not check pipeline-query permission: users with
+    /// write-only permission can ingest through an existing pipeline. Inspection
+    /// and preview callers must check query permission first; ingestion enforces
+    /// write and table-target permissions separately.
     async fn get_pipeline(
         &self,
         name: &str,

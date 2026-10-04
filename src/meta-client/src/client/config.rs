@@ -21,7 +21,6 @@ use common_meta::util;
 use common_telemetry::tracing_context::TracingContext;
 use snafu::{OptionExt, ResultExt, ensure};
 use tokio::sync::RwLock;
-use tonic::codec::CompressionEncoding;
 use tonic::transport::Channel;
 
 use crate::client::{Id, LeaderProviderRef};
@@ -132,10 +131,10 @@ impl Inner {
             .get(addr)
             .context(error::CreateChannelSnafu)?;
 
-        Ok(ConfigClient::new(channel)
-            .accept_compressed(CompressionEncoding::Zstd)
-            .accept_compressed(CompressionEncoding::Gzip)
-            .send_compressed(CompressionEncoding::Zstd))
+        Ok(common_grpc::configure_tonic_client!(
+            ConfigClient::new(channel),
+            self.channel_manager,
+        ))
     }
 
     #[inline]

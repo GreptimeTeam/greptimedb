@@ -17,12 +17,11 @@ use catalog::table_source::DfTableSourceProvider;
 use common_function::utils::escape_like_pattern;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::SessionState;
-use datafusion_common::{DFSchema, ScalarValue};
+use datafusion_common::{DFSchema, ScalarValue, TableReference};
 use datafusion_expr::utils::{conjunction, disjunction};
 use datafusion_expr::{
     BinaryExpr, Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder, Operator, col, lit, not,
 };
-use datafusion_sql::TableReference;
 use datatypes::schema::Schema;
 use log_query::{AggFunc, BinaryOperator, EqualValue, LogExpr, LogQuery, TimeFilter};
 use snafu::{OptionExt, ResultExt};
@@ -33,8 +32,6 @@ use crate::log_query::error::{
     UnimplementedSnafu, UnknownAggregateFunctionSnafu, UnknownScalarFunctionSnafu,
     UnknownTableSnafu,
 };
-
-const DEFAULT_LIMIT: usize = 1000;
 
 pub struct LogQueryPlanner {
     table_provider: DfTableSourceProvider,
@@ -58,11 +55,9 @@ impl LogQueryPlanner {
             .await
             .context(CatalogSnafu)?;
         let schema = table_source
-            .as_any()
             .downcast_ref::<DefaultTableSource>()
             .context(UnknownTableSnafu)?
             .table_provider
-            .as_any()
             .downcast_ref::<DfTableProviderAdapter>()
             .context(UnknownTableSnafu)?
             .table()
@@ -99,17 +94,16 @@ impl LogQueryPlanner {
                 .context(DataFusionPlanningSnafu)?;
         }
 
-        // Apply limit
-        plan_builder = plan_builder
-            .limit(
-                query.limit.skip.unwrap_or(0),
-                Some(query.limit.fetch.unwrap_or(DEFAULT_LIMIT)),
-            )
-            .context(DataFusionPlanningSnafu)?;
-
         // Apply log expressions
         for expr in &query.exprs {
             plan_builder = self.process_log_expr(plan_builder, expr)?;
+        }
+
+        // Apply pagination to the final result after all log expressions.
+        if query.limit.skip.is_some() || query.limit.fetch.is_some() {
+            plan_builder = plan_builder
+                .limit(query.limit.skip.unwrap_or(0), query.limit.fetch)
+                .context(DataFusionPlanningSnafu)?;
         }
 
         // Build the final plan
@@ -126,15 +120,14 @@ impl LogQueryPlanner {
             .clone();
 
         let start_time = ScalarValue::Utf8(time_filter.start.clone());
-        let end_time = ScalarValue::Utf8(
-            time_filter
-                .end
-                .clone()
-                .or(Some("9999-12-31T23:59:59Z".to_string())),
-        );
         let expr = col(timestamp_col.clone())
             .gt_eq(lit(start_time))
-            .and(col(timestamp_col).lt_eq(lit(end_time)));
+            .and(match &time_filter.end {
+                Some(end) => col(timestamp_col).lt(lit(ScalarValue::Utf8(Some(end.clone())))),
+                None => col(timestamp_col).lt_eq(lit(ScalarValue::Utf8(Some(
+                    "9999-12-31T23:59:59Z".to_string(),
+                )))),
+            });
 
         Ok(expr)
     }
@@ -149,7 +142,7 @@ impl LogQueryPlanner {
                 let exprs = filters
                     .iter()
                     .filter_map(|filter| self.build_filters(filter, schema).transpose())
-                    .try_collect::<Vec<_>>()?;
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
                 if exprs.is_empty() {
                     Ok(None)
                 } else {
@@ -160,7 +153,7 @@ impl LogQueryPlanner {
                 let exprs = filters
                     .iter()
                     .filter_map(|filter| self.build_filters(filter, schema).transpose())
-                    .try_collect::<Vec<_>>()?;
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
                 if exprs.is_empty() {
                     Ok(None)
                 } else {
@@ -198,7 +191,7 @@ impl LogQueryPlanner {
                 self.build_content_filter_with_expr(col_expr.clone(), filter, &df_schema)
                     .transpose()
             })
-            .try_collect::<Vec<_>>()?;
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         if filter_exprs.is_empty() {
             return Ok(Some(col_expr.is_true()));
@@ -292,7 +285,7 @@ impl LogQueryPlanner {
                         self.build_content_filter_with_expr(col_expr.clone(), filter, schema)
                             .transpose()
                     })
-                    .try_collect::<Vec<_>>()?;
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
 
                 if exprs.is_empty() {
                     return Ok(None);
@@ -333,19 +326,19 @@ impl LogQueryPlanner {
                 let args = args
                     .iter()
                     .map(|expr| self.log_expr_to_df_expr(expr, schema))
-                    .try_collect::<Vec<_>>()?;
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
                 if let Some(alias) = alias {
                     Ok(aggr_fn.call(args).alias(alias))
                 } else {
                     Ok(aggr_fn.call(args))
                 }
             })
-            .try_collect::<Vec<_>>()?;
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         let group_exprs = by
             .iter()
             .map(|expr| self.log_expr_to_df_expr(expr, schema))
-            .try_collect::<Vec<_>>()?;
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok((aggr_expr, group_exprs))
     }
@@ -387,7 +380,7 @@ impl LogQueryPlanner {
         let args = args
             .iter()
             .map(|expr| self.log_expr_to_df_expr(expr, schema))
-            .try_collect::<Vec<_>>()?;
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         let func = self.session_state.scalar_functions().get(name).context(
             UnknownScalarFunctionSnafu {
                 name: name.to_string(),
@@ -730,7 +723,7 @@ mod tests {
 
         let plan = planner.query_to_plan(log_query).await.unwrap();
         let expected = "Limit: skip=0, fetch=100 [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
-\n  Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp <= Utf8(\"2021-01-02T00:00:00Z\") AND greptime.public.test_table.message LIKE Utf8(\"%error%\") [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
+\n  Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp < Utf8(\"2021-01-02T00:00:00Z\") AND greptime.public.test_table.message LIKE Utf8(\"%error%\") [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
 \n    TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]";
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
@@ -757,7 +750,7 @@ mod tests {
             .gt_eq(lit(ScalarValue::Utf8(Some(
                 "2021-01-01T00:00:00Z".to_string(),
             ))))
-            .and(col("timestamp").lt_eq(lit(ScalarValue::Utf8(Some(
+            .and(col("timestamp").lt(lit(ScalarValue::Utf8(Some(
                 "2021-01-02T00:00:00Z".to_string(),
             )))));
 
@@ -850,8 +843,8 @@ mod tests {
         };
 
         let plan = planner.query_to_plan(log_query).await.unwrap();
-        let expected = "Limit: skip=10, fetch=1000 [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
-\n  Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp <= Utf8(\"2021-01-02T00:00:00Z\") AND greptime.public.test_table.message LIKE Utf8(\"%error%\") [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
+        let expected = "Limit: skip=10, fetch=None [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
+\n  Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp < Utf8(\"2021-01-02T00:00:00Z\") AND greptime.public.test_table.message LIKE Utf8(\"%error%\") [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
 \n    TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]";
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
@@ -885,9 +878,8 @@ mod tests {
         };
 
         let plan = planner.query_to_plan(log_query).await.unwrap();
-        let expected = "Limit: skip=0, fetch=1000 [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
-\n  Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp <= Utf8(\"2021-01-02T00:00:00Z\") AND greptime.public.test_table.message LIKE Utf8(\"%error%\") [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
-\n    TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]";
+        let expected = "Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp < Utf8(\"2021-01-02T00:00:00Z\") AND greptime.public.test_table.message LIKE Utf8(\"%error%\") [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
+\n  TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]";
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
     }
@@ -932,9 +924,9 @@ mod tests {
         };
 
         let plan = planner.query_to_plan(log_query).await.unwrap();
-        let expected = "Aggregate: groupBy=[[greptime.public.test_table.host]], aggr=[[count(greptime.public.test_table.message) AS count_result]] [host:Utf8;N, count_result:Int64]\
-\n  Limit: skip=0, fetch=100 [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
-\n    Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp <= Utf8(\"2021-01-02T00:00:00Z\") [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
+        let expected = "Limit: skip=0, fetch=100 [host:Utf8;N, count_result:Int64]\
+\n  Aggregate: groupBy=[[greptime.public.test_table.host]], aggr=[[count(greptime.public.test_table.message) AS count_result]] [host:Utf8;N, count_result:Int64]\
+\n    Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp < Utf8(\"2021-01-02T00:00:00Z\") [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
 \n      TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]";
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
@@ -972,9 +964,9 @@ mod tests {
         };
 
         let plan = planner.query_to_plan(log_query).await.unwrap();
-        let expected = "Projection: date_trunc(Utf8(\"day\"), greptime.public.test_table.timestamp) AS time_bucket [time_bucket:Timestamp(ms)]\
-        \n  Limit: skip=0, fetch=100 [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
-        \n    Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp <= Utf8(\"2021-01-02T00:00:00Z\") [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
+        let expected = "Limit: skip=0, fetch=100 [time_bucket:Timestamp(ms)]\
+        \n  Projection: date_trunc(Utf8(\"day\"), greptime.public.test_table.timestamp) AS time_bucket [time_bucket:Timestamp(ms)]\
+        \n    Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp < Utf8(\"2021-01-02T00:00:00Z\") [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
         \n      TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]";
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);
@@ -1055,10 +1047,10 @@ mod tests {
         };
 
         let plan = planner.query_to_plan(log_query).await.unwrap();
-        let expected = "Aggregate: groupBy=[[2__date_histogram__time_bucket]], aggr=[[count(2__date_histogram__time_bucket) AS count_result]] [2__date_histogram__time_bucket:Timestamp(ns);N, count_result:Int64]\
-\n  Projection: date_bin(Utf8(\"30 seconds\"), greptime.public.test_table.timestamp) AS 2__date_histogram__time_bucket [2__date_histogram__time_bucket:Timestamp(ns);N]\
-\n    Limit: skip=0, fetch=1000 [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
-\n      Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp <= Utf8(\"2021-01-02T00:00:00Z\") [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
+        let expected = "Limit: skip=0, fetch=None [2__date_histogram__time_bucket:Timestamp(ns);N, count_result:Int64]\
+\n  Aggregate: groupBy=[[2__date_histogram__time_bucket]], aggr=[[count(2__date_histogram__time_bucket) AS count_result]] [2__date_histogram__time_bucket:Timestamp(ns);N, count_result:Int64]\
+\n    Projection: date_bin(Utf8(\"30 seconds\"), greptime.public.test_table.timestamp) AS 2__date_histogram__time_bucket [2__date_histogram__time_bucket:Timestamp(ns);N]\
+\n      Filter: greptime.public.test_table.timestamp >= Utf8(\"2021-01-01T00:00:00Z\") AND greptime.public.test_table.timestamp < Utf8(\"2021-01-02T00:00:00Z\") [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]\
 \n        TableScan: greptime.public.test_table [message:Utf8, timestamp:Timestamp(ms), host:Utf8;N, is_active:Boolean;N]";
 
         assert_eq!(plan.display_indent_schema().to_string(), expected);

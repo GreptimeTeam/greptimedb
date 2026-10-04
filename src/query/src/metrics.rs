@@ -280,7 +280,7 @@ fn collect_region_watermarks(plan: Arc<dyn ExecutionPlan>) -> Vec<RegionWatermar
     let mut stack = vec![plan];
 
     while let Some(plan) = stack.pop() {
-        if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>()
+        if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>()
             && !merge_scan.is_flow_sink_scan()
         {
             merge_merge_scan_region_watermarks(
@@ -430,9 +430,17 @@ mod tests {
 
     #[async_trait]
     impl RegionQueryHandler for NoopRegionQueryHandler {
-        async fn do_get(
+        async fn select_target(
             &self,
             _read_preference: ReadPreference,
+            _region_id: RegionId,
+        ) -> Result<crate::region_query::RegionQueryTarget> {
+            unreachable!("metrics tests should not execute remote queries")
+        }
+
+        async fn do_get(
+            &self,
+            _target: &crate::region_query::RegionQueryTarget,
             _request: common_query::request::QueryRequest,
         ) -> Result<SendableRecordBatchStream> {
             unreachable!("metrics tests should not execute remote queries")
@@ -440,7 +448,7 @@ mod tests {
 
         async fn handle_remote_dyn_filter_update(
             &self,
-            _region_id: RegionId,
+            _target: &crate::region_query::RegionQueryTarget,
             _query_id: String,
             _update: RemoteDynFilterUpdate,
         ) -> Result<()> {
@@ -449,7 +457,7 @@ mod tests {
 
         async fn handle_remote_dyn_filter_unregister(
             &self,
-            _region_id: RegionId,
+            _target: &crate::region_query::RegionQueryTarget,
             _query_id: String,
             _unregister: RemoteDynFilterUnregister,
         ) -> Result<()> {

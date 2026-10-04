@@ -14,28 +14,45 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use auth::tests::{DatabaseAuthInfo, MockUserProvider};
+use auth::{BEARER_TOKEN_USER, Identity, Password, UserInfoRef, UserProvider};
+use catalog::RegisterSchemaRequest;
+use catalog::memory::MemoryCatalogManager;
+use chrono::{Datelike, NaiveDate};
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
+use common_query::Output;
 use common_recordbatch::RecordBatch;
 use common_runtime::Builder as RuntimeBuilder;
 use common_runtime::runtime::BuilderBuild;
+use common_time::{Timestamp, Timezone};
+use datafusion_expr::LogicalPlan;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::value::Value;
+use datatypes::vectors::{Int32Vector, TimestampMicrosecondVector, TimestampSecondVector};
 use mysql_async::prelude::*;
 use mysql_async::{Conn, Row, SslOpts};
+use query::QueryEngineFactory;
+use query::options::QueryOptions;
+use query::parser::PromQuery;
+use query::query_engine::DescribeResult;
 use servers::error::Result;
 use servers::install_default_crypto_provider;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
+use servers::query_handler::sql::{ServerSqlQueryHandlerRef, SqlQueryHandler};
 use servers::server::Server;
 use servers::tls::{ReloadableTlsServerConfig, TlsOption};
+use session::context::QueryContextRef;
+use sql::statements::statement::Statement;
 use table::TableRef;
 use table::test_util::MemTable;
 
-use crate::create_testing_sql_query_handler;
 use crate::mysql::{MysqlTextRow, TestingData, all_datatype_testing_data};
+use crate::{DummyInstance, create_testing_sql_query_handler};
 
 #[derive(Default)]
 struct MysqlOpts<'a> {
@@ -44,19 +61,76 @@ struct MysqlOpts<'a> {
     reject_no_database: bool,
 }
 
+#[derive(Default)]
+struct BearerProvider {
+    catalog: &'static str,
+    authentications: AtomicUsize,
+    authorizations: AtomicUsize,
+}
+
+#[async_trait]
+impl UserProvider for BearerProvider {
+    fn name(&self) -> &str {
+        "bearer-test"
+    }
+
+    async fn authenticate(
+        &self,
+        _: Identity<'_>,
+        _: Password<'_>,
+    ) -> auth::error::Result<UserInfoRef> {
+        unreachable!("the bearer sentinel must not use password authentication")
+    }
+
+    async fn authenticate_bearer_token(
+        &self,
+        token: &str,
+        catalog: &str,
+    ) -> auth::error::Result<UserInfoRef> {
+        assert_eq!("signed-token", token);
+        assert_eq!(self.catalog, catalog);
+        self.authentications.fetch_add(1, Ordering::Relaxed);
+        Ok(auth::userinfo_by_name(Some("alice".to_string())))
+    }
+
+    async fn authorize(
+        &self,
+        catalog: &str,
+        schema: &str,
+        user_info: &UserInfoRef,
+    ) -> auth::error::Result<()> {
+        assert_eq!(self.catalog, catalog);
+        assert_eq!(DEFAULT_SCHEMA_NAME, schema);
+        assert_eq!("alice", user_info.username());
+        self.authorizations.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
 fn create_mysql_server(table: TableRef, opts: MysqlOpts<'_>) -> Result<Box<dyn Server>> {
-    let _ = install_default_crypto_provider();
     let query_handler = create_testing_sql_query_handler(table);
+    create_mysql_server_with_query_handler(query_handler, opts, None)
+}
+
+fn create_mysql_server_with_query_handler(
+    query_handler: ServerSqlQueryHandlerRef,
+    opts: MysqlOpts<'_>,
+    user_provider: Option<auth::UserProviderRef>,
+) -> Result<Box<dyn Server>> {
+    let _ = install_default_crypto_provider();
     let io_runtime = RuntimeBuilder::default()
         .worker_threads(4)
         .thread_name("mysql-io-handlers")
         .build()
         .unwrap();
 
-    let mut provider = MockUserProvider::default();
-    if let Some(auth_info) = opts.auth_info {
-        provider.set_authorization_info(auth_info);
-    }
+    let user_provider = user_provider.unwrap_or_else(|| {
+        let mut provider = MockUserProvider::default();
+        if let Some(auth_info) = opts.auth_info {
+            provider.set_authorization_info(auth_info);
+        }
+        Arc::new(provider)
+    });
 
     let tls_server_config = Arc::new(
         ReloadableTlsServerConfig::try_new(opts.tls.clone())
@@ -65,7 +139,7 @@ fn create_mysql_server(table: TableRef, opts: MysqlOpts<'_>) -> Result<Box<dyn S
 
     Ok(MysqlServer::create_server(
         io_runtime,
-        Arc::new(MysqlSpawnRef::new(query_handler, Some(Arc::new(provider)))),
+        Arc::new(MysqlSpawnRef::new(query_handler, Some(user_provider))),
         Arc::new(MysqlSpawnConfig::new(
             opts.tls.should_force_tls(),
             tls_server_config,
@@ -75,6 +149,59 @@ fn create_mysql_server(table: TableRef, opts: MysqlOpts<'_>) -> Result<Box<dyn S
         )),
         None,
     ))
+}
+
+struct SessionTimezoneQueryHandler {
+    inner: ServerSqlQueryHandlerRef,
+}
+
+#[async_trait]
+impl SqlQueryHandler for SessionTimezoneQueryHandler {
+    async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
+        if query == "SET time_zone = '+08:00'" {
+            query_ctx.set_timezone(Timezone::hours_mins_opt(8, 0).unwrap());
+            return vec![Ok(Output::new_with_affected_rows(0))];
+        }
+
+        self.inner.do_query(query, query_ctx).await
+    }
+
+    async fn do_analyze_stream_query(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        self.inner.do_analyze_stream_query(query, query_ctx).await
+    }
+
+    async fn do_exec_plan(
+        &self,
+        plan: LogicalPlan,
+        stmt: Option<Statement>,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        self.inner.do_exec_plan(plan, stmt, query_ctx).await
+    }
+
+    async fn do_promql_query(
+        &self,
+        query: &PromQuery,
+        query_ctx: QueryContextRef,
+    ) -> Vec<Result<Output>> {
+        self.inner.do_promql_query(query, query_ctx).await
+    }
+
+    async fn do_describe(
+        &self,
+        stmt: Statement,
+        query_ctx: QueryContextRef,
+    ) -> Result<Option<DescribeResult>> {
+        self.inner.do_describe(stmt, query_ctx).await
+    }
+
+    async fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
+        self.inner.is_valid_schema(catalog, schema).await
+    }
 }
 
 #[tokio::test]
@@ -257,6 +384,91 @@ async fn test_server_require_secure_client_secure_with_pkcs8_priv_key() -> Resul
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_bearer_token_auth_over_clear_password() -> Result<()> {
+    common_telemetry::init_default_ut_logging();
+    for tls in [false, true] {
+        for (database, catalog) in [
+            (None, "greptime"),
+            (Some("public"), "greptime"),
+            (Some("greptime-public"), "greptime"),
+            (Some("tenant-public"), "tenant"),
+        ] {
+            let provider = Arc::new(BearerProvider {
+                catalog,
+                ..Default::default()
+            });
+            let catalog_manager =
+                MemoryCatalogManager::new_with_table(MemTable::default_numbers_table());
+            catalog_manager.register_catalog_sync("tenant").unwrap();
+            catalog_manager
+                .register_schema_sync(RegisterSchemaRequest {
+                    catalog: "tenant".to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                })
+                .unwrap();
+            let query_handler = Arc::new(DummyInstance::new(
+                QueryEngineFactory::new(
+                    catalog_manager,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                    QueryOptions::default(),
+                )
+                .query_engine(),
+            ));
+            let server_tls = if tls {
+                TlsOption {
+                    mode: servers::tls::TlsMode::Require,
+                    cert_path: "tests/ssl/server.crt".to_string(),
+                    key_path: "tests/ssl/server-rsa.key".to_string(),
+                    ..Default::default()
+                }
+            } else {
+                TlsOption::default()
+            };
+            let mut server = create_mysql_server_with_query_handler(
+                query_handler,
+                MysqlOpts {
+                    tls: server_tls,
+                    ..Default::default()
+                },
+                Some(provider.clone()),
+            )?;
+            server.start("127.0.0.1:0".parse().unwrap()).await?;
+            let port = server.bind_addr().unwrap().port();
+            let mut client_opts = mysql_async::OptsBuilder::default()
+                .ip_or_hostname("127.0.0.1")
+                .tcp_port(port)
+                .prefer_socket(false)
+                .user(Some(BEARER_TOKEN_USER.to_string()))
+                .pass(Some("signed-token".to_string()))
+                .db_name(database.map(str::to_string))
+                .enable_cleartext_plugin(true);
+            if tls {
+                client_opts = client_opts.ssl_opts(
+                    SslOpts::default()
+                        .with_danger_skip_domain_validation(true)
+                        .with_danger_accept_invalid_certs(true),
+                );
+            }
+            let mut connection = Conn::new(client_opts).await.unwrap();
+            let value: u32 = connection.query_first("SELECT 1").await.unwrap().unwrap();
+            assert_eq!(1, value);
+            assert_eq!(1, provider.authentications.load(Ordering::Relaxed));
+            assert_eq!(
+                usize::from(database.is_some()),
+                provider.authorizations.load(Ordering::Relaxed)
+            );
+            connection.disconnect().await.unwrap();
+            server.shutdown().await?;
+        }
+    }
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_server_required_secure_client_plain() -> Result<()> {
     let server_tls = TlsOption {
@@ -422,6 +634,386 @@ async fn do_test_query_all_datatypes(server_tls: TlsOption, client_tls: bool) ->
     Ok(())
 }
 
+#[tokio::test]
+async fn test_mysql_text_protocol_out_of_range_timestamp_fails_closed() -> Result<()> {
+    let timestamp = i64::MAX;
+    assert!(
+        Timestamp::new_second(timestamp)
+            .to_chrono_datetime_with_timezone(None)
+            .is_none(),
+        "the target value must be outside Chrono's timestamp range"
+    );
+
+    let (table, schema) = timestamp_table("out_of_range_timestamp", Some(timestamp));
+    assert!(
+        schema.column_schemas()[1].is_nullable(),
+        "the timestamp field must be nullable while Arrow marks this value valid"
+    );
+
+    let (result, health_check) =
+        query_timestamp_with_mysql_text_protocol(table, "out_of_range_timestamp").await;
+    assert_timestamp_overflow(result);
+    assert_eq!(Some(1), health_check.unwrap());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_mysql_text_protocol_max_timestamp_with_session_timezone_fails_closed() -> Result<()> {
+    let timestamp = Timestamp::MAX_SECOND.value();
+    let (table, _) = timestamp_table("max_timestamp_with_session_timezone", Some(timestamp));
+    let query_handler = Arc::new(SessionTimezoneQueryHandler {
+        inner: create_testing_sql_query_handler(table),
+    });
+    let mut mysql_server =
+        create_mysql_server_with_query_handler(query_handler, Default::default(), None)?;
+    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+    mysql_server.start(listening).await.unwrap();
+
+    let server_addr = mysql_server.bind_addr().unwrap();
+    let mut connection = create_connection_default_db_name(server_addr.port(), false)
+        .await
+        .unwrap();
+    connection
+        .query_drop("SET time_zone = '+08:00'")
+        .await
+        .unwrap();
+
+    let result = match connection
+        .query_iter("SELECT id, ts FROM max_timestamp_with_session_timezone")
+        .await
+    {
+        Ok(mut result) => result.collect::<MysqlTextRow>().await,
+        Err(error) => Err(error),
+    };
+    assert_timestamp_overflow_with_value(result, timestamp);
+    assert_eq!(Some(1), connection.query_first("SELECT 1").await.unwrap());
+
+    mysql_server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_mysql_binary_protocol_out_of_range_timestamp_fails_closed() -> Result<()> {
+    let timestamp = i64::MAX;
+    assert!(
+        Timestamp::new_second(timestamp)
+            .to_chrono_datetime_with_timezone(None)
+            .is_none(),
+        "the target value must be outside Chrono's timestamp range"
+    );
+
+    let (table, schema) = timestamp_table("out_of_range_timestamp", Some(timestamp));
+    assert!(
+        schema.column_schemas()[1].is_nullable(),
+        "the timestamp field must be nullable while Arrow marks this value valid"
+    );
+
+    let (result, health_check) =
+        query_timestamp_with_mysql_binary_protocol(table, "out_of_range_timestamp").await;
+    assert_timestamp_overflow(result);
+    assert_eq!(Some(1), health_check.unwrap());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_mysql_binary_protocol_chrono_representable_year_overflow_fails_closed() -> Result<()>
+{
+    let timestamp = Timestamp::new_second(
+        NaiveDate::from_ymd_opt(100_000, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp(),
+    );
+    assert_eq!(
+        100_000,
+        timestamp
+            .to_chrono_datetime_with_timezone(None)
+            .unwrap()
+            .year(),
+        "the target value must be Chrono-representable"
+    );
+
+    let (table, schema) = timestamp_table(
+        "chrono_representable_year_overflow",
+        Some(timestamp.value()),
+    );
+    assert!(
+        schema.column_schemas()[1].is_nullable(),
+        "the timestamp field must be nullable while Arrow marks this value valid"
+    );
+
+    let (result, health_check) =
+        query_timestamp_with_mysql_binary_protocol(table, "chrono_representable_year_overflow")
+            .await;
+    assert_timestamp_overflow_with_value(result, timestamp.value());
+    assert_eq!(Some(1), health_check.unwrap());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_mysql_text_protocol_timestamp_controls() -> Result<()> {
+    let (table, _) = timestamp_table("in_range_timestamp", Some(0));
+    let (result, health_check) =
+        query_timestamp_with_mysql_text_protocol(table, "in_range_timestamp").await;
+    let rows = result.unwrap();
+    assert_eq!(
+        vec![
+            Value::from(b"7".to_vec()),
+            Value::from(b"1970-01-01 00:00:00".to_vec())
+        ],
+        rows[0].values
+    );
+    assert_eq!(Some(1), health_check.unwrap());
+
+    let (table, _) = timestamp_table("null_timestamp", None);
+    let (result, health_check) =
+        query_timestamp_with_mysql_text_protocol(table, "null_timestamp").await;
+    let rows = result.unwrap();
+    assert_eq!(
+        vec![Value::from(b"7".to_vec()), Value::Null],
+        rows[0].values
+    );
+    assert_eq!(Some(1), health_check.unwrap());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_mysql_binary_protocol_timestamp_controls() -> Result<()> {
+    let (table, _) = timestamp_table("in_range_timestamp", Some(0));
+    let (result, health_check) =
+        query_timestamp_with_mysql_binary_protocol(table, "in_range_timestamp").await;
+    let rows = result.unwrap();
+    assert_eq!(1, rows.len());
+    assert_eq!(Some(&mysql_async::Value::Int(7)), rows[0].as_ref(0));
+    assert_eq!(
+        Some(&mysql_async::Value::Date(1970, 1, 1, 0, 0, 0, 0)),
+        rows[0].as_ref(1)
+    );
+    assert_eq!(Some(1), health_check.unwrap());
+
+    let (table, _) = timestamp_table("null_timestamp", None);
+    let (result, health_check) =
+        query_timestamp_with_mysql_binary_protocol(table, "null_timestamp").await;
+    let rows = result.unwrap();
+    assert_eq!(1, rows.len());
+    assert_eq!(Some(&mysql_async::Value::Int(7)), rows[0].as_ref(0));
+    assert_eq!(Some(&mysql_async::Value::NULL), rows[0].as_ref(1));
+    assert_eq!(Some(1), health_check.unwrap());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_mysql_timestamp_precision_slot_isolation() -> Result<()> {
+    let (result, health_check) = query_mysql_text_protocol(
+        precision_timestamp_table("precision_timestamps"),
+        "SELECT id, ts_a, ts_b FROM precision_timestamps".to_string(),
+    )
+    .await;
+    let rows = result.unwrap();
+    assert_eq!(
+        vec![
+            Value::from(b"7".to_vec()),
+            Value::from(b"1970-01-01 00:00:00.123456".to_vec()),
+            Value::Null,
+        ],
+        rows[0].values
+    );
+    assert_eq!(
+        vec![
+            Value::from(b"8".to_vec()),
+            Value::Null,
+            Value::from(b"1970-01-01 00:00:00.987654".to_vec()),
+        ],
+        rows[1].values
+    );
+    assert_eq!(Some(1), health_check.unwrap());
+
+    let (result, health_check) = query_mysql_binary_protocol(
+        precision_timestamp_table("precision_timestamps"),
+        "SELECT id, ts_a, ts_b FROM precision_timestamps".to_string(),
+    )
+    .await;
+    let rows = result.unwrap();
+    assert_eq!(2, rows.len());
+    assert_eq!(Some(&mysql_async::Value::Int(7)), rows[0].as_ref(0));
+    assert_eq!(
+        Some(&mysql_async::Value::Date(1970, 1, 1, 0, 0, 0, 123_456)),
+        rows[0].as_ref(1)
+    );
+    assert_eq!(Some(&mysql_async::Value::NULL), rows[0].as_ref(2));
+    assert_eq!(Some(&mysql_async::Value::Int(8)), rows[1].as_ref(0));
+    assert_eq!(Some(&mysql_async::Value::NULL), rows[1].as_ref(1));
+    assert_eq!(
+        Some(&mysql_async::Value::Date(1970, 1, 1, 0, 0, 0, 987_654)),
+        rows[1].as_ref(2)
+    );
+    assert_eq!(Some(1), health_check.unwrap());
+
+    Ok(())
+}
+
+fn timestamp_table(table_name: &str, timestamp: Option<i64>) -> (TableRef, Arc<Schema>) {
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "id",
+            datatypes::prelude::ConcreteDataType::int32_datatype(),
+            false,
+        ),
+        ColumnSchema::new(
+            "ts",
+            datatypes::prelude::ConcreteDataType::timestamp_second_datatype(),
+            true,
+        ),
+    ]));
+    let recordbatch = RecordBatch::new(
+        schema.clone(),
+        vec![
+            Arc::new(Int32Vector::from_values(vec![7])) as VectorRef,
+            Arc::new(TimestampSecondVector::from(vec![timestamp])) as VectorRef,
+        ],
+    )
+    .unwrap();
+
+    (MemTable::table(table_name, recordbatch), schema)
+}
+
+fn precision_timestamp_table(table_name: &str) -> TableRef {
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "id",
+            datatypes::prelude::ConcreteDataType::int32_datatype(),
+            false,
+        ),
+        ColumnSchema::new(
+            "ts_a",
+            datatypes::prelude::ConcreteDataType::timestamp_microsecond_datatype(),
+            true,
+        ),
+        ColumnSchema::new(
+            "ts_b",
+            datatypes::prelude::ConcreteDataType::timestamp_microsecond_datatype(),
+            true,
+        ),
+    ]));
+    let recordbatch = RecordBatch::new(
+        schema,
+        vec![
+            Arc::new(Int32Vector::from_values(vec![7, 8])) as VectorRef,
+            Arc::new(TimestampMicrosecondVector::from(vec![Some(123_456), None])) as VectorRef,
+            Arc::new(TimestampMicrosecondVector::from(vec![None, Some(987_654)])) as VectorRef,
+        ],
+    )
+    .unwrap();
+
+    MemTable::table(table_name, recordbatch)
+}
+
+async fn query_timestamp_with_mysql_text_protocol(
+    table: TableRef,
+    table_name: &str,
+) -> (
+    mysql_async::Result<Vec<MysqlTextRow>>,
+    mysql_async::Result<Option<u8>>,
+) {
+    query_mysql_text_protocol(table, format!("SELECT id, ts FROM {table_name}")).await
+}
+
+async fn query_mysql_text_protocol(
+    table: TableRef,
+    query: String,
+) -> (
+    mysql_async::Result<Vec<MysqlTextRow>>,
+    mysql_async::Result<Option<u8>>,
+) {
+    let mut mysql_server = create_mysql_server(table, Default::default()).unwrap();
+    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+    mysql_server.start(listening).await.unwrap();
+
+    let server_addr = mysql_server.bind_addr().unwrap();
+    let mut connection = create_connection_default_db_name(server_addr.port(), false)
+        .await
+        .unwrap();
+    let result = match connection.query_iter(query).await {
+        Ok(mut result) => result.collect::<MysqlTextRow>().await,
+        Err(error) => Err(error),
+    };
+    let health_check = connection.query_first("SELECT 1").await;
+
+    mysql_server.shutdown().await.unwrap();
+    (result, health_check)
+}
+
+async fn query_timestamp_with_mysql_binary_protocol(
+    table: TableRef,
+    table_name: &str,
+) -> (
+    mysql_async::Result<Vec<Row>>,
+    mysql_async::Result<Option<u8>>,
+) {
+    query_mysql_binary_protocol(table, format!("SELECT id, ts FROM {table_name}")).await
+}
+
+async fn query_mysql_binary_protocol(
+    table: TableRef,
+    query: String,
+) -> (
+    mysql_async::Result<Vec<Row>>,
+    mysql_async::Result<Option<u8>>,
+) {
+    let mut mysql_server = create_mysql_server(table, Default::default()).unwrap();
+    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+    mysql_server.start(listening).await.unwrap();
+
+    let server_addr = mysql_server.bind_addr().unwrap();
+    let mut connection = create_connection_default_db_name(server_addr.port(), false)
+        .await
+        .unwrap();
+    let result = match connection.prep(query).await {
+        Ok(statement) => connection.exec(statement, ()).await,
+        Err(error) => Err(error),
+    };
+    let health_check = connection.query_first("SELECT 1").await;
+
+    mysql_server.shutdown().await.unwrap();
+    (result, health_check)
+}
+
+fn assert_timestamp_overflow<T>(result: mysql_async::Result<T>) {
+    assert_timestamp_overflow_with_value(result, i64::MAX);
+}
+
+fn assert_timestamp_overflow_with_value<T>(result: mysql_async::Result<T>, timestamp: i64) {
+    match result {
+        Err(mysql_async::Error::Server(error)) => {
+            assert_eq!(1210, error.code, "expected ER_WRONG_ARGUMENTS");
+            assert!(
+                error.message.contains("Timestamp overflow"),
+                "expected timestamp overflow marker, got: {}",
+                error.message
+            );
+            assert!(
+                error.message.contains(&timestamp.to_string()),
+                "expected raw timestamp value, got: {}",
+                error.message
+            );
+            assert!(
+                error.message.contains("Second"),
+                "expected timestamp unit, got: {}",
+                error.message
+            );
+        }
+        Err(error) => panic!("expected a MySQL server timestamp overflow error, got: {error}"),
+        Ok(_) => panic!("out-of-range timestamp must fail closed instead of returning a row"),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_query_concurrently() -> Result<()> {
     common_telemetry::init_default_ut_logging();
@@ -510,7 +1102,7 @@ async fn test_query_prepared() -> Result<()> {
         .await
     {
         Err(mysql_async::Error::Server(e)) => assert_eq!(
-            "ERROR HY000 (1210): (InvalidArguments): Invalid prepare statement: Invalid SQL syntax: sql parser error: INTERVAL requires a unit after the literal value",
+            "ERROR 1210 (HY000): (InvalidArguments): Invalid prepare statement: Invalid SQL syntax: sql parser error: INTERVAL requires a unit after the literal value",
             e.to_string()
         ),
         _ => unreachable!(),

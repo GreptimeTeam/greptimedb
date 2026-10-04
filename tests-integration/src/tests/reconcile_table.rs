@@ -541,9 +541,6 @@ async fn test_renamed_table() {
     check_output_stream(output.data, expected).await;
 }
 
-#[tokio::test]
-async fn test_rename_table() {}
-
 async fn unwrap_err(output: OutputData) -> String {
     let error = match output {
         OutputData::Stream(stream) => collect_batches(stream).await.unwrap_err(),

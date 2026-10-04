@@ -18,6 +18,7 @@ pub mod cancellation;
 pub mod hash;
 pub mod memory_limit;
 pub mod plugins;
+pub mod protocol;
 pub mod range_read;
 #[allow(clippy::all)]
 pub mod readable_size;

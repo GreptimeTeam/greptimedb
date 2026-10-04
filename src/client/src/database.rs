@@ -12,20 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use api::v1::auth_header::AuthScheme;
+#[cfg(feature = "testing")]
 use api::v1::ddl_request::Expr as DdlExpr;
 use api::v1::greptime_database_client::GreptimeDatabaseClient;
 use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
+#[cfg(feature = "testing")]
+use api::v1::{AlterTableExpr, CreateTableExpr, DdlRequest};
 use api::v1::{
-    AlterTableExpr, AuthHeader, Basic, CreateTableExpr, DdlRequest, GreptimeRequest,
-    InsertRequests, QueryRequest, RequestHeader, RowInsertRequests,
+    AuthHeader, Basic, GreptimeRequest, InsertRequests, QueryRequest, RequestHeader,
+    RowInsertRequests,
 };
 use arc_swap::ArcSwapOption;
 use arrow_flight::{FlightData, Ticket};
@@ -34,7 +39,7 @@ use base64::Engine;
 use base64::prelude::BASE64_STANDARD;
 use common_catalog::build_db_string;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_grpc::flight::do_put::DoPutResponse;
 use common_grpc::flight::{
     FLOW_EXTENSIONS_METADATA_KEY, FlightDecoder, FlightMessage, SNAPSHOT_SEQS_METADATA_KEY,
@@ -49,33 +54,64 @@ use common_telemetry::{error, warn};
 use futures::future;
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use prost::Message;
-use snafu::{OptionExt, ResultExt};
+use snafu::{IntoError, ResultExt};
+use tokio::sync::Notify;
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue, MetadataMap, MetadataValue};
 use tonic::transport::Channel;
 
 use crate::error::{
-    ConvertFlightDataSnafu, Error, FlightGetSnafu, IllegalFlightMessagesSnafu,
+    ConvertFlightDataSnafu, Error, FlightGetSnafu, FlightStreamSnafu, IllegalFlightMessagesSnafu,
     InvalidTonicMetadataValueSnafu,
 };
+use crate::flight::{FlightMessageReader, decode_flight_data};
 use crate::{Client, Result, error, from_grpc_response};
 
 type FlightDataStream = Pin<Box<dyn Stream<Item = FlightData> + Send>>;
 
 type DoPutResponseStream = Pin<Box<dyn Stream<Item = Result<DoPutResponse>>>>;
 
+const HINTS_METADATA_KEY: &str = "x-greptime-hints";
+/// Maximum time to wait for the optional trailing metrics message after
+/// affected rows have already been delivered.
+const FLIGHT_TRAILING_METRICS_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Terminal metrics associated with a query output.
 ///
 /// For streaming outputs, metrics are only final after the stream is fully
-/// drained and [`Self::is_ready`] returns `true`.
+/// drained and [`Self::is_ready`] returns `true`. Affected-row outputs may
+/// briefly await a compatibility trailing metrics message.
 #[derive(Debug, Clone, Default)]
 pub struct OutputMetrics {
     inner: Arc<OutputMetricsInner>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct OutputMetricsInner {
     metrics: RwLock<Option<RecordBatchMetrics>>,
+    completion_error: RwLock<Option<String>>,
     ready: AtomicBool,
+    ready_notify: Notify,
+    compatibility_task: Mutex<Option<tokio::task::AbortHandle>>,
+}
+
+impl Default for OutputMetricsInner {
+    fn default() -> Self {
+        Self {
+            metrics: RwLock::new(None),
+            completion_error: RwLock::new(None),
+            ready: AtomicBool::new(false),
+            ready_notify: Notify::new(),
+            compatibility_task: Mutex::new(None),
+        }
+    }
+}
+
+impl Drop for OutputMetricsInner {
+    fn drop(&mut self) {
+        if let Some(handle) = self.compatibility_task.get_mut().unwrap().take() {
+            handle.abort();
+        }
+    }
 }
 
 impl OutputMetrics {
@@ -90,10 +126,45 @@ impl OutputMetrics {
 
     /// Marks the terminal metrics as final for this output.
     pub fn mark_ready(&self) {
-        let _ = self
+        if self
             .inner
             .ready
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire);
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.inner.ready_notify.notify_waiters();
+        }
+    }
+
+    /// Waits until terminal metrics are final.
+    pub async fn wait_ready(&self) {
+        loop {
+            let notified = self.inner.ready_notify.notified();
+            if self.is_ready() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Returns an error encountered while completing the output, if any.
+    pub fn completion_error(&self) -> Option<String> {
+        self.inner.completion_error.read().unwrap().clone()
+    }
+
+    fn set_completion_error(&self, error: impl Into<String>) {
+        *self.inner.completion_error.write().unwrap() = Some(error.into());
+    }
+
+    fn set_compatibility_task(&self, handle: tokio::task::AbortHandle) {
+        let mut task = self.inner.compatibility_task.lock().unwrap();
+        if !self.is_ready() {
+            *task = Some(handle);
+        }
+    }
+
+    fn take_compatibility_task(&self) -> Option<tokio::task::AbortHandle> {
+        self.inner.compatibility_task.lock().unwrap().take()
     }
 
     /// Returns whether terminal metrics are final.
@@ -140,7 +211,8 @@ impl OutputMetrics {
 ///
 /// The contained [`OutputMetrics`] lets callers read stream terminal metrics
 /// after consuming `output`. For non-stream outputs, metrics are ready
-/// immediately.
+/// immediately. Flight affected-row outputs without inline metrics require
+/// [`OutputMetrics::wait_ready`] before compatibility trailing metrics can be read.
 #[derive(Debug)]
 pub struct OutputWithMetrics {
     pub output: Output,
@@ -186,6 +258,55 @@ fn parse_terminal_metrics(metrics_json: &str) -> Result<RecordBatchMetrics> {
     })
 }
 
+fn spawn_affected_rows_trailing_metrics_task<S>(
+    terminal_metrics: &OutputMetrics,
+    mut reader: FlightMessageReader<S>,
+) where
+    S: Stream<Item = Result<FlightMessage>> + Send + Unpin + 'static,
+{
+    let metrics_ref = Arc::downgrade(&terminal_metrics.inner);
+    let remote_addr = reader.remote_addr().to_string();
+    let task = common_runtime::spawn_global(async move {
+        let result =
+            tokio::time::timeout(FLIGHT_TRAILING_METRICS_TIMEOUT, reader.read_next()).await;
+        let Some(inner) = metrics_ref.upgrade() else {
+            return;
+        };
+        let metrics = OutputMetrics { inner };
+        match result {
+            Ok(Ok(Some(FlightMessage::Metrics(s)))) => match parse_terminal_metrics(&s) {
+                Ok(metrics_json) => metrics.update(Some(metrics_json)),
+                Err(error) => {
+                    metrics.set_completion_error(error.to_string());
+                    warn!(
+                        "Failed to decode trailing Flight metrics from {}: {}",
+                        remote_addr, error
+                    );
+                }
+            },
+            Ok(Ok(None)) => {}
+            Ok(Ok(Some(other))) => {
+                let error = format!("Unexpected trailing Flight message: {other:?}");
+                metrics.set_completion_error(error.clone());
+                warn!("{} from {}", error, remote_addr);
+            }
+            Ok(Err(error)) => {
+                let error = flight_stream_error(&remote_addr, error);
+                metrics.set_completion_error(error.to_string());
+                warn!("{}", error);
+            }
+            Err(_) => {
+                let error = "Timed out waiting for trailing Flight metrics";
+                metrics.set_completion_error(error);
+                warn!("{} from {}", error, remote_addr);
+            }
+        }
+        metrics.mark_ready();
+        metrics.take_compatibility_task();
+    });
+    terminal_metrics.set_compatibility_task(task.abort_handle());
+}
+
 struct StreamWithMetrics {
     stream: common_recordbatch::SendableRecordBatchStream,
     metrics: OutputMetrics,
@@ -225,6 +346,9 @@ impl Stream for StreamWithMetrics {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let polled = Pin::new(&mut self.stream).poll_next(cx);
+        if let Poll::Ready(Some(Err(error))) = &polled {
+            self.metrics.set_completion_error(error.to_string());
+        }
         if let Poll::Ready(None) = &polled {
             self.sync_terminal_metrics();
             self.metrics.mark_ready();
@@ -256,47 +380,28 @@ fn attach_terminal_metrics(output: Output, terminal_metrics: &OutputMetrics) -> 
 }
 
 async fn output_from_flight_message_stream<S>(
-    mut flight_message_stream: S,
+    remote_addr: String,
+    flight_message_stream: S,
 ) -> Result<OutputWithMetrics>
 where
     S: Stream<Item = Result<FlightMessage>> + Send + Unpin + 'static,
 {
-    let Some(first_flight_message) = flight_message_stream.next().await else {
-        return IllegalFlightMessagesSnafu {
-            reason: "Expect the response not to be empty",
-        }
-        .fail();
-    };
-
-    let first_flight_message = first_flight_message?;
+    let mut reader = FlightMessageReader::new(remote_addr, flight_message_stream);
+    let first_flight_message = reader
+        .read_first()
+        .await
+        .map_err(|error| flight_stream_error(reader.remote_addr(), error))?;
 
     match first_flight_message {
         FlightMessage::AffectedRows { rows, metrics } => {
             let terminal_metrics = OutputMetrics::new();
             if let Some(metrics) = metrics {
+                // Inline metrics are authoritative. They complete the output
+                // without touching the rest of the Flight stream.
                 terminal_metrics.update(Some(parse_terminal_metrics(&metrics)?));
-            }
-            let next_message = flight_message_stream.next().await.transpose()?;
-            match next_message {
-                None => terminal_metrics.mark_ready(),
-                Some(FlightMessage::Metrics(s)) if terminal_metrics.get().is_none() => {
-                    terminal_metrics.update(Some(parse_terminal_metrics(&s)?));
-                    terminal_metrics.mark_ready();
-                }
-                Some(FlightMessage::Metrics(_)) => {
-                    return IllegalFlightMessagesSnafu {
-                        reason: "'AffectedRows' Flight metadata already carries Metrics and cannot be followed by another Metrics message",
-                    }
-                    .fail();
-                }
-                Some(other) => {
-                    return IllegalFlightMessagesSnafu {
-                        reason: format!(
-                            "'AffectedRows' Flight message can only be followed by a Metrics message, got {other:?}"
-                        ),
-                    }
-                    .fail();
-                }
+                terminal_metrics.mark_ready();
+            } else {
+                spawn_affected_rows_trailing_metrics_task(&terminal_metrics, reader);
             }
             Ok(OutputWithMetrics {
                 output: Output::new_with_affected_rows(rows),
@@ -315,15 +420,19 @@ where
             );
             let schema_cloned = schema.clone();
             let stream = Box::pin(stream!({
-                while let Some(flight_message_item) = flight_message_stream.next().await {
-                    let flight_message = match flight_message_item {
-                        Ok(message) => message,
-                        Err(e) => {
-                            yield Err(BoxedError::new(e)).context(ExternalSnafu);
+                loop {
+                    let flight_message = match reader.read_next().await {
+                        Ok(Some(message)) => message,
+                        Ok(None) => break,
+                        Err(error) => {
+                            yield Err(BoxedError::new(flight_stream_error(
+                                reader.remote_addr(),
+                                error,
+                            )))
+                            .context(ExternalSnafu);
                             break;
                         }
                     };
-
                     match flight_message {
                         FlightMessage::RecordBatch(arrow_batch) => {
                             yield Ok(RecordBatch::from_df_record_batch(
@@ -370,6 +479,25 @@ where
     }
 }
 
+fn flight_stream_error(addr: &str, error: Error) -> Error {
+    let tonic_code = error.tonic_code().unwrap_or(tonic::Code::Unknown);
+    let message = error.to_string();
+    if error.status_code().should_log_error() {
+        error!(
+            error; "Failed to receive Flight data, addr: {}, code: {}",
+            addr,
+            tonic_code
+        );
+    }
+
+    FlightStreamSnafu {
+        addr: addr.to_string(),
+        tonic_code,
+        message,
+    }
+    .into_error(BoxedError::new(error))
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Database {
     // The "catalog" and "schema" to be used in processing the requests at the server side.
@@ -386,6 +514,42 @@ pub struct Database {
 
     client: Client,
     ctx: FlightContext,
+}
+
+#[derive(Default)]
+struct FlightRequestOptions {
+    hints: Option<String>,
+    flow_extensions: Option<String>,
+    snapshot_seqs: Option<String>,
+    timeout: Option<Duration>,
+}
+
+impl FlightRequestOptions {
+    fn apply_to<T>(self, request: &mut tonic::Request<T>) -> Result<()> {
+        let metadata = request.metadata_mut();
+        if let Some(hints) = self.hints {
+            Database::put_metadata_value(metadata, HINTS_METADATA_KEY, hints)?;
+        }
+        if let Some(flow_extensions) = self.flow_extensions {
+            Database::put_metadata_value(metadata, FLOW_EXTENSIONS_METADATA_KEY, flow_extensions)?;
+        }
+        if let Some(snapshot_seqs) = self.snapshot_seqs {
+            Database::put_metadata_value(metadata, SNAPSHOT_SEQS_METADATA_KEY, snapshot_seqs)?;
+        }
+        if let Some(timeout) = self.timeout {
+            request.set_timeout(timeout);
+        }
+        Ok(())
+    }
+}
+
+/// A single Flight DoGet request to a [`Database`].
+///
+/// The builder carries request-scoped metadata and options. It does not modify
+/// the underlying [`Database`], so its configuration cannot affect later RPCs.
+pub struct DatabaseFlightRequest<'a> {
+    database: &'a Database,
+    options: FlightRequestOptions,
 }
 
 pub struct DatabaseClient {
@@ -482,6 +646,14 @@ impl Database {
         });
     }
 
+    /// Creates a builder for a single Flight DoGet request.
+    pub fn flight_request(&self) -> DatabaseFlightRequest<'_> {
+        DatabaseFlightRequest {
+            database: self,
+            options: FlightRequestOptions::default(),
+        }
+    }
+
     /// Make an InsertRequests request to the database.
     pub async fn insert(&self, requests: InsertRequests) -> Result<u32> {
         self.handle(Request::Inserts(requests)).await
@@ -537,44 +709,31 @@ impl Database {
     }
 
     fn put_hints(metadata: &mut MetadataMap, hints: &[(&str, &str)]) -> Result<()> {
-        let Some(value) = hints
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .reduce(|a, b| format!("{},{}", a, b))
-        else {
+        let Some(value) = Self::encode_hints(hints) else {
             return Ok(());
         };
 
-        let key = AsciiMetadataKey::from_static("x-greptime-hints");
-        let value = AsciiMetadataValue::from_str(&value).context(InvalidTonicMetadataValueSnafu)?;
-        metadata.insert(key, value);
-        Ok(())
+        Self::put_metadata_value(metadata, HINTS_METADATA_KEY, value)
     }
 
-    fn put_flow_extensions(
-        metadata: &mut MetadataMap,
-        flow_extensions: &[(&str, &str)],
-    ) -> Result<()> {
-        if flow_extensions.is_empty() {
-            return Ok(());
-        }
-
-        let value = serde_json::to_string(&flow_extensions.to_vec())
-            .expect("flow extension pairs should serialize");
-        Self::put_metadata_value(metadata, FLOW_EXTENSIONS_METADATA_KEY, value)
+    fn encode_hints(hints: &[(&str, &str)]) -> Option<String> {
+        hints
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v))
+            .reduce(|a, b| format!("{},{}", a, b))
     }
 
-    fn put_snapshot_seqs(
-        metadata: &mut MetadataMap,
-        snapshot_seqs: &std::collections::HashMap<u64, u64>,
-    ) -> Result<()> {
-        if snapshot_seqs.is_empty() {
-            return Ok(());
-        }
+    fn encode_flow_extensions(flow_extensions: &[(&str, &str)]) -> Option<String> {
+        (!flow_extensions.is_empty()).then(|| {
+            serde_json::to_string(&flow_extensions.to_vec())
+                .expect("flow extension pairs should serialize")
+        })
+    }
 
-        let value =
-            serde_json::to_string(snapshot_seqs).expect("snapshot sequence map should serialize");
-        Self::put_metadata_value(metadata, SNAPSHOT_SEQS_METADATA_KEY, value)
+    fn encode_snapshot_seqs(snapshot_seqs: &HashMap<u64, u64>) -> Option<String> {
+        (!snapshot_seqs.is_empty()).then(|| {
+            serde_json::to_string(snapshot_seqs).expect("snapshot sequence map should serialize")
+        })
     }
 
     fn put_metadata_value(
@@ -672,7 +831,7 @@ impl Database {
     where
         S: AsRef<str>,
     {
-        self.sql_with_hint(sql, &[]).await
+        self.flight_request().sql(sql).await
     }
 
     /// Executes a SQL query with optional hints for query optimization.
@@ -680,18 +839,15 @@ impl Database {
     where
         S: AsRef<str>,
     {
-        let request = Request::Query(QueryRequest {
-            query: Some(Query::Sql(sql.as_ref().to_string())),
-        });
-        self.do_get(request, hints, &[], &Default::default())
-            .await
-            .map(OutputWithMetrics::into_output)
+        self.flight_request().with_hints(hints).sql(sql).await
     }
 
     /// Executes a SQL query and returns the output with terminal metrics.
     ///
     /// For stream outputs, callers must consume the stream before reading final
-    /// terminal metrics from [`OutputWithMetrics::metrics`].
+    /// terminal metrics from [`OutputWithMetrics::metrics`]. For affected-row
+    /// outputs without inline metrics, call [`OutputMetrics::wait_ready`] when
+    /// compatibility trailing metrics are required.
     pub async fn sql_with_terminal_metrics<S>(
         &self,
         sql: S,
@@ -700,77 +856,33 @@ impl Database {
     where
         S: AsRef<str>,
     {
-        self.query_with_terminal_metrics_and_flow_extensions(
-            QueryRequest {
-                query: Some(Query::Sql(sql.as_ref().to_string())),
-            },
-            hints,
-            &[],
-            &Default::default(),
-        )
-        .await
+        self.flight_request()
+            .with_hints(hints)
+            .sql_with_terminal_metrics(sql)
+            .await
     }
 
     /// Executes a logical plan directly without SQL parsing.
     pub async fn logical_plan(&self, logical_plan: Vec<u8>) -> Result<Output> {
-        self.query_with_terminal_metrics_and_flow_extensions(
-            QueryRequest {
-                query: Some(Query::LogicalPlan(logical_plan)),
-            },
-            &[],
-            &[],
-            &Default::default(),
-        )
-        .await
-        .map(OutputWithMetrics::into_output)
-    }
-
-    /// Executes a query and carries flow extensions through Flight metadata.
-    ///
-    /// This is the lower-level terminal-metrics API for Flow callers that need
-    /// to pass JSON-bearing flow extensions without going through hint metadata.
-    pub async fn query_with_terminal_metrics_and_flow_extensions(
-        &self,
-        request: QueryRequest,
-        hints: &[(&str, &str)],
-        flow_extensions: &[(&str, &str)],
-        snapshot_seqs: &std::collections::HashMap<u64, u64>,
-    ) -> Result<OutputWithMetrics> {
-        self.do_get(
-            Request::Query(request),
-            hints,
-            flow_extensions,
-            snapshot_seqs,
-        )
-        .await
+        self.flight_request().logical_plan(logical_plan).await
     }
 
     /// Creates a new table using the provided table expression.
+    #[cfg(feature = "testing")]
     pub async fn create(&self, expr: CreateTableExpr) -> Result<Output> {
-        let request = Request::Ddl(DdlRequest {
-            expr: Some(DdlExpr::CreateTable(expr)),
-        });
-        self.do_get(request, &[], &[], &Default::default())
-            .await
-            .map(OutputWithMetrics::into_output)
+        self.flight_request().create(expr).await
     }
 
     /// Alters an existing table using the provided alter expression.
+    #[cfg(feature = "testing")]
     pub async fn alter(&self, expr: AlterTableExpr) -> Result<Output> {
-        let request = Request::Ddl(DdlRequest {
-            expr: Some(DdlExpr::AlterTable(expr)),
-        });
-        self.do_get(request, &[], &[], &Default::default())
-            .await
-            .map(OutputWithMetrics::into_output)
+        self.flight_request().alter(expr).await
     }
 
     async fn do_get(
         &self,
         request: Request,
-        hints: &[(&str, &str)],
-        flow_extensions: &[(&str, &str)],
-        snapshot_seqs: &std::collections::HashMap<u64, u64>,
+        options: FlightRequestOptions,
     ) -> Result<OutputWithMetrics> {
         let request = self.to_rpc_request(request);
         let request = Ticket {
@@ -778,12 +890,10 @@ impl Database {
         };
 
         let mut request = tonic::Request::new(request);
-        let metadata = request.metadata_mut();
-        Self::put_hints(metadata, hints)?;
-        Self::put_flow_extensions(metadata, flow_extensions)?;
-        Self::put_snapshot_seqs(metadata, snapshot_seqs)?;
+        options.apply_to(&mut request)?;
 
         let mut client = self.client.make_flight_client(false, false)?;
+        let remote_addr = client.addr().to_string();
 
         let response = client.mut_inner().do_get(request).await.or_else(|e| {
             let tonic_code = e.code();
@@ -795,7 +905,7 @@ impl Database {
                 e
             );
             Err(BoxedError::new(e)).with_context(|_| FlightGetSnafu {
-                addr: client.addr().to_string(),
+                addr: remote_addr.clone(),
                 tonic_code,
             })
         })?;
@@ -803,22 +913,27 @@ impl Database {
         let flight_data_stream = response.into_inner();
         let mut decoder = FlightDecoder::default();
 
-        let flight_message_stream = flight_data_stream.map(move |flight_data| {
-            flight_data
-                .map_err(Error::from)
-                .and_then(|data| decoder.try_decode(&data).context(ConvertFlightDataSnafu))?
-                .context(IllegalFlightMessagesSnafu {
-                    reason: "none message",
-                })
+        let flight_message_stream = flight_data_stream.filter_map(move |flight_data| {
+            future::ready(decode_flight_data(&mut decoder, flight_data))
         });
 
-        output_from_flight_message_stream(flight_message_stream).await
+        output_from_flight_message_stream(remote_addr, flight_message_stream).await
     }
 
     /// Ingest a stream of [RecordBatch]es that belong to a table, using Arrow Flight's "`DoPut`"
     /// method. The return value is also a stream, produces [DoPutResponse]s.
     pub async fn do_put(&self, stream: FlightDataStream) -> Result<DoPutResponseStream> {
+        self.do_put_with_hints(stream, &[]).await
+    }
+
+    /// Ingest a stream of [RecordBatch]es using Arrow Flight's `DoPut` with request hints.
+    pub async fn do_put_with_hints(
+        &self,
+        stream: FlightDataStream,
+        hints: &[(&str, &str)],
+    ) -> Result<DoPutResponseStream> {
         let mut request = tonic::Request::new(stream);
+        Self::put_hints(request.metadata_mut(), hints)?;
 
         if let Some(AuthHeader {
             auth_scheme: Some(AuthScheme::Basic(Basic { username, password })),
@@ -840,7 +955,7 @@ impl Database {
             MetadataValue::from_str(db_to_put).context(InvalidTonicMetadataValueSnafu)?,
         );
 
-        let mut client = self.client.make_flight_client(false, false)?;
+        let mut client = self.client.make_control_flight_client(false, false)?;
         let response = client.mut_inner().do_put(request).await?;
         let response = response
             .into_inner()
@@ -848,6 +963,98 @@ impl Database {
             .and_then(|x| future::ready(DoPutResponse::try_from(x).context(ConvertFlightDataSnafu)))
             .boxed();
         Ok(response)
+    }
+}
+
+impl<'a> DatabaseFlightRequest<'a> {
+    /// Adds query optimization hints to this Flight request.
+    pub fn with_hints(mut self, hints: &[(&str, &str)]) -> Self {
+        self.options.hints = Database::encode_hints(hints);
+        self
+    }
+
+    /// Adds Flow extensions to this Flight request.
+    pub fn with_flow_extensions(mut self, flow_extensions: &[(&str, &str)]) -> Self {
+        self.options.flow_extensions = Database::encode_flow_extensions(flow_extensions);
+        self
+    }
+
+    /// Adds snapshot sequence fences to this Flight request.
+    pub fn with_snapshot_seqs(mut self, snapshot_seqs: &HashMap<u64, u64>) -> Self {
+        self.options.snapshot_seqs = Database::encode_snapshot_seqs(snapshot_seqs);
+        self
+    }
+
+    /// Sets a timeout for this Flight request only.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.options.timeout = Some(timeout);
+        self
+    }
+
+    /// Executes a SQL query.
+    pub async fn sql<S>(self, sql: S) -> Result<Output>
+    where
+        S: AsRef<str>,
+    {
+        let request = Request::Query(QueryRequest {
+            query: Some(Query::Sql(sql.as_ref().to_string())),
+        });
+        self.do_get(request)
+            .await
+            .map(OutputWithMetrics::into_output)
+    }
+
+    /// Executes a SQL query and returns terminal metrics.
+    pub async fn sql_with_terminal_metrics<S>(self, sql: S) -> Result<OutputWithMetrics>
+    where
+        S: AsRef<str>,
+    {
+        self.query_with_terminal_metrics(QueryRequest {
+            query: Some(Query::Sql(sql.as_ref().to_string())),
+        })
+        .await
+    }
+
+    /// Executes a logical plan directly without SQL parsing.
+    pub async fn logical_plan(self, logical_plan: Vec<u8>) -> Result<Output> {
+        self.query_with_terminal_metrics(QueryRequest {
+            query: Some(Query::LogicalPlan(logical_plan)),
+        })
+        .await
+        .map(OutputWithMetrics::into_output)
+    }
+
+    /// Executes a query and returns terminal metrics.
+    pub async fn query_with_terminal_metrics(
+        self,
+        request: QueryRequest,
+    ) -> Result<OutputWithMetrics> {
+        self.do_get(Request::Query(request)).await
+    }
+
+    /// Creates a new table using the provided table expression.
+    #[cfg(feature = "testing")]
+    pub async fn create(self, expr: CreateTableExpr) -> Result<Output> {
+        self.do_get(Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::CreateTable(expr)),
+        }))
+        .await
+        .map(OutputWithMetrics::into_output)
+    }
+
+    /// Alters an existing table using the provided alter expression.
+    #[cfg(feature = "testing")]
+    pub async fn alter(self, expr: AlterTableExpr) -> Result<Output> {
+        self.do_get(Request::Ddl(DdlRequest {
+            expr: Some(DdlExpr::AlterTable(expr)),
+        }))
+        .await
+        .map(OutputWithMetrics::into_output)
+    }
+
+    async fn do_get(self, request: Request) -> Result<OutputWithMetrics> {
+        let Self { database, options } = self;
+        database.do_get(request, options).await
     }
 }
 
@@ -877,6 +1084,7 @@ mod tests {
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
     use futures_util::StreamExt;
+    use tokio::sync::oneshot;
     use tonic::codegen::http::{HeaderMap, HeaderValue};
     use tonic::metadata::MetadataMap;
     use tonic::{Code, Status};
@@ -938,12 +1146,14 @@ mod tests {
     #[test]
     fn test_put_flow_extensions_preserves_comma_bearing_values() {
         let mut metadata = MetadataMap::new();
-        Database::put_flow_extensions(
+        Database::put_metadata_value(
             &mut metadata,
-            &[
+            FLOW_EXTENSIONS_METADATA_KEY,
+            Database::encode_flow_extensions(&[
                 ("flow.return_region_seq", "true"),
                 ("flow.incremental_after_seqs", r#"{"1":10,"2":20}"#),
-            ],
+            ])
+            .unwrap(),
         )
         .unwrap();
 
@@ -973,7 +1183,12 @@ mod tests {
             (9_007_199_254_740_993_u64, 9_007_199_254_740_995_u64),
         ]);
 
-        Database::put_snapshot_seqs(&mut metadata, &snapshot_seqs).unwrap();
+        Database::put_metadata_value(
+            &mut metadata,
+            SNAPSHOT_SEQS_METADATA_KEY,
+            Database::encode_snapshot_seqs(&snapshot_seqs).unwrap(),
+        )
+        .unwrap();
 
         let value = metadata
             .get(SNAPSHOT_SEQS_METADATA_KEY)
@@ -982,6 +1197,50 @@ mod tests {
             .unwrap();
         let decoded: std::collections::HashMap<u64, u64> = serde_json::from_str(value).unwrap();
         assert_eq!(decoded, snapshot_seqs);
+    }
+
+    #[test]
+    fn test_flight_request_builder_applies_request_options() {
+        let database = Database::new("greptime", "public", Client::default());
+        let snapshot_seqs = HashMap::from([(42, 99)]);
+        let request = database
+            .flight_request()
+            .with_hints(&[("query_parallelism", "1")])
+            .with_flow_extensions(&[("flow.return_region_seq", "true")])
+            .with_snapshot_seqs(&snapshot_seqs)
+            .with_timeout(Duration::from_millis(50));
+        let mut tonic_request = tonic::Request::new(());
+
+        request.options.apply_to(&mut tonic_request).unwrap();
+
+        let metadata = tonic_request.metadata();
+        assert_eq!(
+            metadata.get(HINTS_METADATA_KEY).unwrap(),
+            "query_parallelism=1"
+        );
+        assert_eq!(
+            serde_json::from_str::<Vec<(String, String)>>(
+                metadata
+                    .get(FLOW_EXTENSIONS_METADATA_KEY)
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+            )
+            .unwrap(),
+            vec![("flow.return_region_seq".to_string(), "true".to_string())]
+        );
+        assert_eq!(
+            serde_json::from_str::<HashMap<u64, u64>>(
+                metadata
+                    .get(SNAPSHOT_SEQS_METADATA_KEY)
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+            )
+            .unwrap(),
+            snapshot_seqs
+        );
+        assert!(metadata.get("grpc-timeout").is_some());
     }
 
     #[test]
@@ -1022,6 +1281,28 @@ mod tests {
         assert_eq!(expected.to_string(), actual.to_string());
         assert_eq!(expected.retry_hint(), actual.retry_hint());
         assert_eq!(expected.should_retry(), actual.should_retry());
+    }
+
+    #[test]
+    fn test_flight_stream_error_preserves_addr_and_message() {
+        let error = flight_stream_error(
+            "127.0.0.1:4001",
+            Status::out_of_range("message length too large").into(),
+        );
+
+        assert!(matches!(
+            &error,
+            Error::FlightStream {
+                addr,
+                tonic_code: Code::OutOfRange,
+                message,
+                ..
+            } if addr == "127.0.0.1:4001" && message == "message length too large"
+        ));
+        assert_eq!(
+            "Failed to receive Flight data from 127.0.0.1:4001, code: Operation was attempted past the valid range: message length too large",
+            error.to_string(),
+        );
     }
 
     #[test]
@@ -1114,20 +1395,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_parse_terminal_metrics_rejects_invalid_json() {
-        assert!(parse_terminal_metrics("{not-json}").is_err());
-    }
-
     #[tokio::test]
     async fn test_affected_rows_inline_metrics_are_parsed() {
-        let output = output_from_flight_message_stream(futures_util::stream::iter(vec![Ok(
-            FlightMessage::AffectedRows {
+        let output = output_from_flight_message_stream(
+            "test-peer".to_string(),
+            futures_util::stream::iter(vec![Ok(FlightMessage::AffectedRows {
                 rows: 3,
                 metrics: Some(terminal_metrics_json()),
-            },
-        )]
-            as Vec<Result<FlightMessage>>))
+            })] as Vec<Result<FlightMessage>>),
+        )
         .await
         .unwrap();
 
@@ -1140,23 +1416,189 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_affected_rows_inline_metrics_rejects_trailing_metrics() {
+    async fn test_affected_rows_inline_metrics_do_not_poll_trailer() {
         let metrics_json = terminal_metrics_json();
-        let err = output_from_flight_message_stream(futures_util::stream::iter(vec![
-            Ok(FlightMessage::AffectedRows {
-                rows: 3,
-                metrics: Some(metrics_json.clone()),
-            }),
-            Ok(FlightMessage::Metrics(metrics_json)),
-        ]
-            as Vec<Result<FlightMessage>>))
+        let output = output_from_flight_message_stream(
+            "test-peer".to_string(),
+            futures_util::stream::iter(vec![
+                Ok(FlightMessage::AffectedRows {
+                    rows: 3,
+                    metrics: Some(metrics_json),
+                }),
+                Ok(FlightMessage::Metrics(terminal_metrics_json_with_seq(99))),
+            ] as Vec<Result<FlightMessage>>),
+        )
         .await
-        .unwrap_err();
+        .unwrap();
 
-        assert!(
-            err.to_string().contains("already carries Metrics"),
-            "unexpected error: {err:?}"
+        assert!(output.metrics.is_ready());
+        assert_eq!(
+            output.metrics.region_watermark_map(),
+            Some(std::collections::HashMap::from([(7, 42)]))
         );
+    }
+
+    #[tokio::test]
+    async fn test_affected_rows_without_inline_metrics_becomes_ready_after_trailer() {
+        // Hold the trailer until the not-ready state has been observed.
+        let (trailer_tx, trailer_rx) = oneshot::channel();
+        let trailer = futures_util::stream::once(trailer_rx).map(|ready| {
+            ready.unwrap();
+            Ok(FlightMessage::Metrics(terminal_metrics_json()))
+        });
+        let output = output_from_flight_message_stream(
+            "test-peer".to_string(),
+            futures_util::stream::iter(vec![Ok(FlightMessage::AffectedRows {
+                rows: 3,
+                metrics: None,
+            })])
+            .chain(trailer),
+        )
+        .await
+        .unwrap();
+
+        assert!(!output.metrics.is_ready());
+        trailer_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), output.metrics.wait_ready())
+            .await
+            .expect("terminal metrics must become ready once the trailer arrives");
+        assert!(output.metrics.completion_error().is_none());
+        assert_eq!(
+            output.metrics.region_watermark_map(),
+            Some(std::collections::HashMap::from([(7, 42)]))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_affected_rows_malformed_trailer_sets_completion_error_and_ready() {
+        let output = output_from_flight_message_stream(
+            "test-peer".to_string(),
+            futures_util::stream::iter(vec![
+                Ok(FlightMessage::AffectedRows {
+                    rows: 3,
+                    metrics: None,
+                }),
+                Ok(FlightMessage::Metrics("{not-json}".to_string())),
+            ] as Vec<Result<FlightMessage>>),
+        )
+        .await
+        .unwrap();
+
+        output.metrics.wait_ready().await;
+        let error = output.metrics.completion_error().unwrap();
+        assert!(error.contains("Invalid terminal metrics message"));
+        assert!(output.metrics.is_ready());
+    }
+
+    #[tokio::test]
+    async fn test_affected_rows_transport_trailer_error_sets_completion_error_and_ready() {
+        let output = output_from_flight_message_stream(
+            "test-peer".to_string(),
+            futures_util::stream::iter(vec![
+                Ok(FlightMessage::AffectedRows {
+                    rows: 3,
+                    metrics: None,
+                }),
+                Err(Status::unavailable("trailer read failed").into()),
+            ] as Vec<Result<FlightMessage>>),
+        )
+        .await
+        .unwrap();
+
+        output.metrics.wait_ready().await;
+        let error = output.metrics.completion_error().unwrap();
+        assert!(error.contains("trailer read failed"));
+        assert!(output.metrics.is_ready());
+    }
+
+    #[tokio::test]
+    async fn test_affected_rows_compatibility_reader_is_cancelled_after_second_poll_begins() {
+        struct DropProbe {
+            first: Option<Result<FlightMessage>>,
+            polled: Option<oneshot::Sender<()>>,
+            dropped: Option<oneshot::Sender<()>>,
+        }
+
+        impl Stream for DropProbe {
+            type Item = Result<FlightMessage>;
+
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
+                if let Some(message) = self.first.take() {
+                    return Poll::Ready(Some(message));
+                }
+                if let Some(polled) = self.polled.take() {
+                    let _ = polled.send(());
+                }
+                Poll::Pending
+            }
+        }
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                if let Some(dropped) = self.dropped.take() {
+                    let _ = dropped.send(());
+                }
+            }
+        }
+
+        let (polled_tx, polled_rx) = oneshot::channel();
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+        let output = output_from_flight_message_stream(
+            "test-peer".to_string(),
+            DropProbe {
+                first: Some(Ok(FlightMessage::AffectedRows {
+                    rows: 3,
+                    metrics: None,
+                })),
+                polled: Some(polled_tx),
+                dropped: Some(dropped_tx),
+            },
+        )
+        .await
+        .unwrap();
+        polled_rx.await.unwrap();
+        drop(output);
+        // Require cancellation before the five-second compatibility timeout.
+        tokio::time::timeout(Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("the compatibility reader must be dropped once the output is dropped")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_schema_record_batch_yields_before_pending_message_stream() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "v",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(Int32Vector::from_slice([1])) as VectorRef],
+        )
+        .unwrap();
+        let messages = futures_util::stream::iter(vec![
+            Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
+            Ok(FlightMessage::RecordBatch(batch.into_df_record_batch())),
+        ] as Vec<Result<FlightMessage>>)
+        .chain(futures_util::stream::pending());
+        let output = output_from_flight_message_stream("test-peer".to_string(), messages)
+            .await
+            .unwrap();
+        let OutputData::Stream(mut stream) = output.output.data else {
+            panic!("expected stream output");
+        };
+
+        let batch = tokio::time::timeout(Duration::from_secs(1), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert!(!output.metrics.is_ready());
     }
 
     #[tokio::test]
@@ -1171,12 +1613,14 @@ mod tests {
             vec![Arc::new(Int32Vector::from_slice([1])) as VectorRef],
         )
         .unwrap();
-        let output = output_from_flight_message_stream(futures_util::stream::iter(vec![
-            Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
-            Ok(FlightMessage::RecordBatch(batch.into_df_record_batch())),
-            Ok(FlightMessage::Metrics("{not-json}".to_string())),
-        ]
-            as Vec<Result<FlightMessage>>))
+        let output = output_from_flight_message_stream(
+            "test-peer".to_string(),
+            futures_util::stream::iter(vec![
+                Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
+                Ok(FlightMessage::RecordBatch(batch.into_df_record_batch())),
+                Ok(FlightMessage::Metrics("{not-json}".to_string())),
+            ] as Vec<Result<FlightMessage>>),
+        )
         .await
         .unwrap();
         let terminal_metrics = output.metrics.clone();
@@ -1215,18 +1659,20 @@ mod tests {
             vec![Arc::new(Int32Vector::from_slice([2])) as VectorRef],
         )
         .unwrap();
-        let output = output_from_flight_message_stream(futures_util::stream::iter(vec![
-            Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
-            Ok(FlightMessage::RecordBatch(
-                first_batch.into_df_record_batch(),
-            )),
-            Ok(FlightMessage::Metrics(terminal_metrics_json_with_seq(1))),
-            Ok(FlightMessage::RecordBatch(
-                second_batch.into_df_record_batch(),
-            )),
-            Ok(FlightMessage::Metrics(terminal_metrics_json_with_seq(2))),
-        ]
-            as Vec<Result<FlightMessage>>))
+        let output = output_from_flight_message_stream(
+            "test-peer".to_string(),
+            futures_util::stream::iter(vec![
+                Ok(FlightMessage::Schema(schema.arrow_schema().clone())),
+                Ok(FlightMessage::RecordBatch(
+                    first_batch.into_df_record_batch(),
+                )),
+                Ok(FlightMessage::Metrics(terminal_metrics_json_with_seq(1))),
+                Ok(FlightMessage::RecordBatch(
+                    second_batch.into_df_record_batch(),
+                )),
+                Ok(FlightMessage::Metrics(terminal_metrics_json_with_seq(2))),
+            ] as Vec<Result<FlightMessage>>),
+        )
         .await
         .unwrap();
         let terminal_metrics = output.metrics.clone();

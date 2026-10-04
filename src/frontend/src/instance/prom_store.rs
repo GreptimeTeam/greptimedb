@@ -23,25 +23,31 @@ use api::v1::{
     RowInsertRequests, SemanticType,
 };
 use async_trait::async_trait;
-use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
+use auth::{
+    PROM_STORE_READ, PROM_STORE_WRITE, PermissionChecker, PermissionCheckerRef, PermissionReq,
+    PermissionTableTarget, PermissionTableTargets,
+};
 use client::OutputData;
-use common_catalog::format_full_table_name;
+use common_catalog::{format_full_table_name, parse_optional_catalog_and_schema_from_db_string};
 use common_error::ext::BoxedError;
+use common_meta::rpc::ddl::TriggerReason;
 use common_query::Output;
-use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
+use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_value};
 use common_recordbatch::RecordBatches;
 use common_telemetry::{debug, tracing};
 use operator::insert::{
-    AutoCreateTableType, InserterRef, build_create_table_expr, fill_table_options_for_create,
+    AutoCreateTableType, InserterRef, PerTableSemanticIndex, apply_per_table_semantic_options,
+    build_create_table_expr, fill_table_options_for_create, parse_per_table_semantic_index,
 };
 use operator::statement::StatementExecutor;
 use prost::Message;
+use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
+use servers::batcher::logical_table::PendingRowsSchemaAlterer;
 use servers::error::{self, AuthSnafu, Result as ServerResult};
 use servers::http::header::{CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF, collect_plan_metrics};
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{PromStoreProtocolInterceptor, PromStoreProtocolInterceptorRef};
-use servers::pending_rows_batcher::PendingRowsSchemaAlterer;
-use servers::prom_store::{self, Metrics};
+use servers::prom_store;
 use servers::query_handler::{
     PromStoreProtocolHandler, PromStoreProtocolHandlerRef, PromStoreResponse,
 };
@@ -49,16 +55,24 @@ use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::mito_engine_options::SST_FORMAT_KEY;
+use table::TableRef;
 use table::table_reference::TableReference;
 use tracing::instrument;
 
 use crate::error::{
-    CatalogSnafu, ExecLogicalPlanSnafu, PromStoreRemoteQueryPlanSnafu, ReadTableSnafu, Result,
-    TableNotFoundSnafu,
+    AmbiguousValueColumnSnafu, CatalogSnafu, ColumnNotFoundSnafu, ExecLogicalPlanSnafu,
+    PromStoreRemoteQueryPlanSnafu, ReadTableSnafu, Result, TableNotFoundSnafu,
 };
 use crate::instance::Instance;
 
 const SAMPLES_RESPONSE_TYPE: i32 = ResponseType::Samples as i32;
+
+struct RemoteQueryOutput {
+    table_name: String,
+    timestamp_column_name: String,
+    value_column_name: String,
+    output: Output,
+}
 
 fn auto_create_table_type_for_prom_remote_write(
     ctx: &QueryContextRef,
@@ -117,8 +131,31 @@ fn negotiate_response_type(accepted_response_types: &[i32]) -> ServerResult<Resp
     Ok(ResponseType::try_from(*response_type).unwrap())
 }
 
+fn resolve_remote_query_target(
+    ctx: &QueryContextRef,
+    query: &Query,
+    table_name: &str,
+) -> PermissionTableTarget {
+    match prom_store::extract_schema_from_query(query) {
+        Some(database) => {
+            let (catalog, schema) = parse_optional_catalog_and_schema_from_db_string(&database);
+            PermissionTableTarget::new(
+                catalog.unwrap_or_else(|| ctx.current_catalog().to_string()),
+                schema,
+                table_name,
+            )
+        }
+        None => PermissionTableTarget::new(ctx.current_catalog(), ctx.current_schema(), table_name),
+    }
+}
+
 #[instrument(skip_all, fields(table_name))]
-async fn to_query_result(table_name: &str, output: Output) -> ServerResult<QueryResult> {
+async fn to_query_result(
+    table_name: &str,
+    timestamp_column_name: &str,
+    value_column_name: &str,
+    output: Output,
+) -> ServerResult<QueryResult> {
     let OutputData::Stream(stream) = output.data else {
         unreachable!()
     };
@@ -126,8 +163,39 @@ async fn to_query_result(table_name: &str, output: Output) -> ServerResult<Query
         .await
         .context(error::CollectRecordbatchSnafu)?;
     Ok(QueryResult {
-        timeseries: prom_store::recordbatches_to_timeseries(table_name, recordbatches)?,
+        timeseries: prom_store::recordbatches_to_timeseries(
+            table_name,
+            timestamp_column_name,
+            value_column_name,
+            recordbatches,
+        )?,
     })
+}
+
+fn resolve_column_names(table_name: &str, table: &TableRef) -> Result<String> {
+    let columns = table
+        .field_columns()
+        .map(|column| column.name)
+        .collect::<Vec<_>>();
+
+    match columns.as_slice() {
+        [] => ColumnNotFoundSnafu {
+            msg: format!("value field in table '{table_name}'"),
+        }
+        .fail(),
+
+        [only] => Ok(only.clone()),
+
+        columns if columns.iter().any(|name| name == greptime_value()) => {
+            Ok(greptime_value().to_string())
+        }
+
+        columns => AmbiguousValueColumnSnafu {
+            table_name: table_name.to_string(),
+            field_columns: columns.to_vec(),
+        }
+        .fail(),
+    }
 }
 
 impl Instance {
@@ -139,7 +207,7 @@ impl Instance {
         schema_name: &str,
         table_name: &str,
         query: &Query,
-    ) -> Result<Output> {
+    ) -> Result<RemoteQueryOutput> {
         let table = self
             .catalog_manager
             .table(catalog_name, schema_name, table_name, Some(ctx))
@@ -149,6 +217,17 @@ impl Instance {
                 table_name: format_full_table_name(catalog_name, schema_name, table_name),
             })?;
 
+        let timestamp_column_name = table
+            .schema()
+            .timestamp_column()
+            .with_context(|| ColumnNotFoundSnafu {
+                msg: format!("time index in table '{table_name}'"),
+            })?
+            .name
+            .clone();
+
+        let value_column_name = resolve_column_names(table_name, &table)?;
+
         let dataframe = self
             .query_engine
             .read_table(table)
@@ -156,8 +235,8 @@ impl Instance {
                 table_name: format_full_table_name(catalog_name, schema_name, table_name),
             })?;
 
-        let logical_plan =
-            prom_store::query_to_plan(dataframe, query).context(PromStoreRemoteQueryPlanSnafu)?;
+        let logical_plan = prom_store::query_to_plan(dataframe, query, &timestamp_column_name)
+            .context(PromStoreRemoteQueryPlanSnafu)?;
 
         debug!(
             "Prometheus remote read, table: {}, logical plan: {}",
@@ -165,10 +244,18 @@ impl Instance {
             logical_plan.display_indent(),
         );
 
-        self.query_engine
+        let output = self
+            .query_engine
             .execute(logical_plan, ctx.clone())
             .await
-            .context(ExecLogicalPlanSnafu)
+            .context(ExecLogicalPlanSnafu)?;
+
+        Ok(RemoteQueryOutput {
+            table_name: table_name.to_string(),
+            timestamp_column_name,
+            value_column_name,
+            output,
+        })
     }
 
     #[tracing::instrument(skip_all)]
@@ -176,22 +263,18 @@ impl Instance {
         &self,
         ctx: QueryContextRef,
         queries: &[Query],
-    ) -> ServerResult<Vec<(String, Output)>> {
+        query_targets: &[PermissionTableTarget],
+    ) -> ServerResult<Vec<RemoteQueryOutput>> {
         let mut results = Vec::with_capacity(queries.len());
 
-        let catalog_name = ctx.current_catalog();
-        let schema_name = ctx.current_schema();
-
-        for query in queries {
-            let table_name = prom_store::table_name(query)?;
-
-            let output = self
-                .handle_remote_query(&ctx, catalog_name, &schema_name, &table_name, query)
+        for (query, target) in queries.iter().zip(query_targets) {
+            let result = self
+                .handle_remote_query(&ctx, &target.catalog, &target.schema, &target.table, query)
                 .await
                 .map_err(BoxedError::new)
                 .context(error::ExecuteQuerySnafu)?;
 
-            results.push((table_name, output));
+            results.push(result);
         }
         Ok(results)
     }
@@ -231,6 +314,7 @@ impl PendingRowsSchemaAlterer for Instance {
         // Check which tables actually still need to be created (may have been
         // concurrently created by another request).
         let mut create_exprs: Vec<CreateTableExpr> = Vec::with_capacity(tables.len());
+        let mut per_table_semantics: Option<Option<PerTableSemanticIndex>> = None;
         for &(table_name, request_schema) in tables {
             let existing = self
                 .catalog_manager()
@@ -249,6 +333,17 @@ impl PendingRowsSchemaAlterer for Instance {
 
             let mut table_options = std::collections::HashMap::with_capacity(4);
             fill_table_options_for_create(&mut table_options, &create_type, &ctx);
+            // The batched create path bypasses the operator's auto-create, so
+            // fold the per-table semantic index in here too.
+            let semantic_index = per_table_semantics
+                .get_or_insert_with(|| parse_per_table_semantic_index(&ctx))
+                .as_ref();
+            apply_per_table_semantic_options(
+                &mut table_options,
+                semantic_index,
+                schema,
+                table_name,
+            );
             create_table_expr.table_options.extend(table_options);
             create_exprs.push(create_table_expr);
         }
@@ -261,7 +356,7 @@ impl PendingRowsSchemaAlterer for Instance {
             AutoCreateTableType::Logical(_) => {
                 // Use the batch API for logical tables.
                 self.statement_executor
-                    .create_logical_tables(&create_exprs, ctx)
+                    .create_logical_tables(&create_exprs, ctx, TriggerReason::AutoCreate)
                     .await
                     .map_err(BoxedError::new)
                     .context(error::ExecuteGrpcQuerySnafu)?;
@@ -272,7 +367,7 @@ impl PendingRowsSchemaAlterer for Instance {
                     expr.table_options
                         .insert(SST_FORMAT_KEY.to_string(), "flat".to_string());
                     self.statement_executor
-                        .create_table_inner(&mut expr, None, ctx.clone())
+                        .create_table_inner(&mut expr, None, ctx.clone(), TriggerReason::AutoCreate)
                         .await
                         .map_err(BoxedError::new)
                         .context(error::ExecuteGrpcQuerySnafu)?;
@@ -339,7 +434,7 @@ impl PendingRowsSchemaAlterer for Instance {
         }
 
         self.statement_executor
-            .alter_logical_tables(alter_exprs, ctx)
+            .alter_logical_tables(alter_exprs, ctx, TriggerReason::AutoAlter)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
@@ -348,33 +443,22 @@ impl PendingRowsSchemaAlterer for Instance {
     }
 }
 
-#[async_trait]
-impl PromStoreProtocolHandler for Instance {
-    async fn pre_write(
+impl Instance {
+    async fn prepare_prom_store_write(
         &self,
-        request: &RowInsertRequests,
+        request: RowInsertRequests,
         ctx: QueryContextRef,
-    ) -> ServerResult<()> {
-        self.plugins
-            .get::<PermissionCheckerRef>()
-            .as_ref()
-            .check_permission(ctx.current_user(), PermissionReq::PromStoreWrite)
-            .context(AuthSnafu)?;
-        let interceptor_ref = self
-            .plugins
-            .get::<PromStoreProtocolInterceptorRef<servers::error::Error>>();
-        interceptor_ref.pre_write(request, ctx)?;
-        Ok(())
+    ) -> ServerResult<(RowInsertRequests, QueryContextRef)> {
+        PromStoreProtocolHandler::pre_write(self, &request, ctx.clone()).await?;
+        Ok((request, Arc::new(ctx.fork())))
     }
 
-    async fn write(
+    async fn execute_prom_store_write(
         &self,
         request: RowInsertRequests,
         ctx: QueryContextRef,
         with_metric_engine: bool,
     ) -> ServerResult<Output> {
-        self.pre_write(&request, ctx.clone()).await?;
-
         let output = if with_metric_engine {
             let physical_table = ctx
                 .extension(PHYSICAL_TABLE_PARAM)
@@ -393,6 +477,75 @@ impl PromStoreProtocolHandler for Instance {
 
         Ok(output)
     }
+}
+
+#[async_trait]
+impl PromStoreProtocolHandler for Instance {
+    async fn pre_write(
+        &self,
+        request: &RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> ServerResult<()> {
+        self.plugins
+            .get::<PermissionCheckerRef>()
+            .as_ref()
+            .check_permission(ctx.current_user(), PermissionReq::Action(PROM_STORE_WRITE))
+            .context(AuthSnafu)?;
+        let interceptor_ref = self
+            .plugins
+            .get::<PromStoreProtocolInterceptorRef<servers::error::Error>>();
+        interceptor_ref.pre_write(request, ctx.clone())?;
+        self.check_row_insert_permission(request, &ctx, PermissionReq::Action(PROM_STORE_WRITE))
+            .context(AuthSnafu)?;
+        Ok(())
+    }
+
+    async fn write_prepared(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+        with_metric_engine: bool,
+    ) -> ServerResult<Output> {
+        self.execute_prom_store_write(request, ctx, with_metric_engine)
+            .await
+    }
+
+    async fn write(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+        with_metric_engine: bool,
+    ) -> ServerResult<Output> {
+        let (request, ctx) = self.prepare_prom_store_write(request, ctx).await?;
+        self.write_prepared(request, ctx, with_metric_engine).await
+    }
+
+    async fn write_all(
+        &self,
+        requests: Vec<(QueryContextRef, RowInsertRequests)>,
+        with_metric_engine: bool,
+    ) -> ServerResult<Vec<ServerResult<Output>>> {
+        let mut prepared = Vec::with_capacity(requests.len());
+        for (ctx, request) in requests {
+            let (request, ctx) = self.prepare_prom_store_write(request, ctx).await?;
+            prepared.push((ctx, request));
+        }
+        operator::insert::admit_row_insert_batches(&mut prepared)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
+
+        let mut outputs = Vec::with_capacity(prepared.len());
+        for (ctx, request) in prepared {
+            let output = self.write_prepared(request, ctx, with_metric_engine).await;
+            let failed = output.is_err();
+            outputs.push(output);
+            if failed {
+                break;
+            }
+        }
+        Ok(outputs)
+    }
 
     #[instrument(skip_all, fields(table_name))]
     async fn read(
@@ -403,25 +556,75 @@ impl PromStoreProtocolHandler for Instance {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
-            .check_permission(ctx.current_user(), PermissionReq::PromStoreRead)
+            .check_permission(ctx.current_user(), PermissionReq::Action(PROM_STORE_READ))
             .context(AuthSnafu)?;
+
         let interceptor_ref = self
             .plugins
             .get::<PromStoreProtocolInterceptorRef<servers::error::Error>>();
         interceptor_ref.pre_read(&request, ctx.clone())?;
+        let ctx = Arc::new(ctx.fork());
+
+        let table_names = request
+            .queries
+            .iter()
+            .map(prom_store::table_name)
+            .collect::<ServerResult<Vec<_>>>()?;
+        let query_targets = request
+            .queries
+            .iter()
+            .zip(&table_names)
+            .map(|(query, table_name)| resolve_remote_query_target(&ctx, query, table_name))
+            .collect::<Vec<_>>();
+        let disallow_cross_catalog_query = self
+            .plugins
+            .get::<QueryOptions>()
+            .map(|opts| opts.disallow_cross_catalog_query)
+            .unwrap_or_default();
+        if disallow_cross_catalog_query {
+            for target in &query_targets {
+                validate_catalog_and_schema(&target.catalog, &target.schema, &ctx)
+                    .map_err(BoxedError::new)
+                    .context(error::ExecuteQuerySnafu)?;
+            }
+        }
+        let targets = self
+            .resolve_query_permission_targets(
+                PermissionTableTargets::resolved(query_targets.clone()),
+                &ctx,
+            )
+            .await?;
+        self.check_table_permission(&ctx, PermissionReq::Action(PROM_STORE_READ), targets)
+            .context(AuthSnafu)?;
 
         let response_type = negotiate_response_type(&request.accepted_response_types)?;
 
         // TODO(dennis): use read_hints to speedup query if possible
-        let results = self.handle_remote_queries(ctx, &request.queries).await?;
+        let results = self
+            .handle_remote_queries(ctx, &request.queries, &query_targets)
+            .await?;
 
         match response_type {
             ResponseType::Samples => {
                 let mut query_results = Vec::with_capacity(results.len());
                 let mut map = HashMap::new();
-                for (table_name, output) in results {
+                for result in results {
+                    let RemoteQueryOutput {
+                        table_name,
+                        timestamp_column_name,
+                        value_column_name,
+                        output,
+                    } = result;
                     let plan = output.meta.plan.clone();
-                    query_results.push(to_query_result(&table_name, output).await?);
+                    query_results.push(
+                        to_query_result(
+                            &table_name,
+                            &timestamp_column_name,
+                            &value_column_name,
+                            output,
+                        )
+                        .await?,
+                    );
                     if let Some(ref plan) = plan {
                         collect_plan_metrics(plan, &mut [&mut map]);
                     }
@@ -449,10 +652,6 @@ impl PromStoreProtocolHandler for Instance {
             }
             .fail(),
         }
-    }
-
-    async fn ingest_metrics(&self, _metrics: Metrics) -> ServerResult<()> {
-        todo!();
     }
 }
 
@@ -502,7 +701,7 @@ impl Instance {
         fill_metric_physical_table_options(&mut create_table_expr.table_options);
 
         self.statement_executor
-            .create_table_inner(&mut create_table_expr, None, ctx)
+            .create_table_inner(&mut create_table_expr, None, ctx, TriggerReason::AutoCreate)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
@@ -534,7 +733,15 @@ impl ExportMetricHandler {
 
 #[async_trait]
 impl PromStoreProtocolHandler for ExportMetricHandler {
-    async fn write(
+    async fn pre_write(
+        &self,
+        _request: &RowInsertRequests,
+        _ctx: QueryContextRef,
+    ) -> ServerResult<()> {
+        Ok(())
+    }
+
+    async fn write_prepared(
         &self,
         request: RowInsertRequests,
         ctx: QueryContextRef,
@@ -552,15 +759,41 @@ impl PromStoreProtocolHandler for ExportMetricHandler {
             .context(error::ExecuteGrpcQuerySnafu)
     }
 
+    async fn write(
+        &self,
+        request: RowInsertRequests,
+        ctx: QueryContextRef,
+        with_metric_engine: bool,
+    ) -> ServerResult<Output> {
+        self.write_prepared(request, ctx, with_metric_engine).await
+    }
+
+    async fn write_all(
+        &self,
+        mut requests: Vec<(QueryContextRef, RowInsertRequests)>,
+        with_metric_engine: bool,
+    ) -> ServerResult<Vec<ServerResult<Output>>> {
+        operator::insert::admit_row_insert_batches(&mut requests)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
+        let mut outputs = Vec::with_capacity(requests.len());
+        for (ctx, request) in requests {
+            let output = self.write_prepared(request, ctx, with_metric_engine).await;
+            let failed = output.is_err();
+            outputs.push(output);
+            if failed {
+                break;
+            }
+        }
+        Ok(outputs)
+    }
+
     async fn read(
         &self,
         _request: ReadRequest,
         _ctx: QueryContextRef,
     ) -> ServerResult<PromStoreResponse> {
-        unreachable!();
-    }
-
-    async fn ingest_metrics(&self, _metrics: Metrics) -> ServerResult<()> {
         unreachable!();
     }
 }
@@ -569,6 +802,7 @@ impl PromStoreProtocolHandler for ExportMetricHandler {
 mod tests {
     use std::sync::Arc;
 
+    use api::prom_store::remote::LabelMatcher;
     use session::context::QueryContext;
 
     use super::*;
@@ -631,5 +865,56 @@ mod tests {
                 .get(PHYSICAL_TABLE_METADATA_KEY)
                 .map(String::as_str)
         );
+    }
+
+    fn query_with_database(database: &str) -> Query {
+        Query {
+            matchers: vec![LabelMatcher {
+                name: servers::prom_store::DATABASE_LABEL.to_string(),
+                value: database.to_string(),
+                r#type: api::prom_store::remote::label_matcher::Type::Eq as i32,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_resolve_remote_query_target() {
+        let ctx = Arc::new(QueryContext::with("request_catalog", "request_schema"));
+
+        assert_eq!(
+            PermissionTableTarget::new("request_catalog", "request_schema", "fallback_metric"),
+            resolve_remote_query_target(&ctx, &Query::default(), "fallback_metric")
+        );
+        assert_eq!(
+            PermissionTableTarget::new("request_catalog", "selected_schema", "schema_metric"),
+            resolve_remote_query_target(
+                &ctx,
+                &query_with_database("selected_schema"),
+                "schema_metric"
+            )
+        );
+        assert_eq!(
+            PermissionTableTarget::new("selected_catalog", "selected_schema", "catalog_metric"),
+            resolve_remote_query_target(
+                &ctx,
+                &query_with_database("selected_catalog-selected_schema"),
+                "catalog_metric"
+            )
+        );
+    }
+
+    #[test]
+    fn test_resolve_remote_query_target_preserves_context() {
+        let ctx = Arc::new(QueryContext::with("request_catalog", "request_schema"));
+
+        resolve_remote_query_target(
+            &ctx,
+            &query_with_database("selected_catalog-selected_schema"),
+            "metric",
+        );
+
+        assert_eq!("request_catalog", ctx.current_catalog());
+        assert_eq!("request_schema", ctx.current_schema());
     }
 }

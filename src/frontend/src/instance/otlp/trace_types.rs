@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::{ColumnDataType, Row};
+use api::v1::value::ValueData;
+use api::v1::{ColumnDataType, Row, Rows};
 use servers::error::{self, Result as ServerResult};
 use servers::otlp::coerce::{
     coerce_value_data, is_supported_trace_coercion, resolve_new_trace_column_type,
@@ -20,6 +21,39 @@ use servers::otlp::coerce::{
 };
 
 use crate::instance::otlp::trace_semconv::trace_semconv_fixed_type;
+
+/// Attribute values are user data echoed back in the OTLP partial-success
+/// message and the server log, so diagnostics keep at most this many characters.
+const TRACE_VALUE_DIAGNOSTIC_LIMIT: usize = 16;
+
+/// Truncates to `limit` characters, marking the cut with `...`.
+///
+/// Diagnostics carry user-controlled text; slicing by byte offset would panic in
+/// the middle of a multi-byte sequence.
+pub(super) fn truncate_for_diagnostics(text: &str, limit: usize) -> String {
+    match text.char_indices().nth(limit) {
+        Some((offset, _)) => format!("{}...", &text[..offset]),
+        None => text.to_string(),
+    }
+}
+
+/// Renders a failing trace value as `Type(value)`, e.g. `String("")`.
+fn describe_trace_value(value: &ValueData, request_type: ColumnDataType) -> String {
+    let payload = match value {
+        ValueData::StringValue(string_value) => format!(
+            "{:?}",
+            truncate_for_diagnostics(string_value, TRACE_VALUE_DIAGNOSTIC_LIMIT)
+        ),
+        ValueData::BoolValue(bool_value) => bool_value.to_string(),
+        ValueData::I64Value(int_value) => int_value.to_string(),
+        ValueData::F64Value(float_value) => float_value.to_string(),
+        ValueData::BinaryValue(bytes) => format!("{} bytes", bytes.len()),
+        // Other value kinds never reach trace coercion, so report the type alone.
+        _ => return format!("{request_type:?}"),
+    };
+
+    format!("{request_type:?}({payload})")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TraceReconcileDecision {
@@ -42,10 +76,52 @@ impl TraceReconcileDecision {
     }
 }
 
+/// Describes a column rewrite before its row values have been validated.
+#[derive(Debug)]
 pub(super) struct PendingTraceColumnRewrite {
     pub(super) col_idx: usize,
     pub(super) target_type: ColumnDataType,
     pub(super) column_name: String,
+}
+
+/// Holds the schema and value rewrites prepared for atomic application.
+#[derive(Debug)]
+pub(super) struct PreparedTraceColumnRewrites {
+    columns: Vec<PreparedTraceColumnRewrite>,
+    values: Vec<PreparedTraceValueRewrite>,
+}
+
+/// Reports the column whose trace value could not be rewritten.
+#[derive(Debug)]
+pub(super) struct TraceColumnRewriteError {
+    pub(super) error: servers::error::Error,
+    pub(super) column_name: String,
+}
+
+/// Updates one request column to its reconciled datatype.
+#[derive(Debug)]
+struct PreparedTraceColumnRewrite {
+    col_idx: usize,
+    target_type: ColumnDataType,
+}
+
+/// Replaces one trace value with its precomputed coerced value.
+#[derive(Debug)]
+struct PreparedTraceValueRewrite {
+    row_idx: usize,
+    col_idx: usize,
+    value_data: Option<ValueData>,
+}
+
+impl PreparedTraceColumnRewrites {
+    pub(super) fn apply(self, rows: &mut Rows) {
+        for column in self.columns {
+            rows.schema[column.col_idx].datatype = column.target_type as i32;
+        }
+        for value in self.values {
+            rows.rows[value.row_idx].values[value.col_idx].value_data = value.value_data;
+        }
+    }
 }
 
 /// Picks the reconciliation action for one trace column.
@@ -129,42 +205,66 @@ fn choose_fixed_trace_reconcile_decision(
     .fail()
 }
 
-/// Validate all pending trace column rewrites before any schema mutation happens.
-pub(super) fn validate_trace_column_rewrites(
+/// Prepares an atomic rewrite plan without mutating the input rows.
+///
+/// For each pending column rewrite, this precomputes every required value
+/// coercion. Missing, null, and already-correct values are skipped. If any
+/// coercion fails, it returns the failing column and leaves all rows unchanged.
+///
+/// Target types must already have been selected by `TraceRequestSchema`.
+/// Call [`PreparedTraceColumnRewrites::apply`] to update the schema and values.
+pub(super) fn prepare_trace_column_rewrites(
     rows: &[Row],
-    pending_rewrites: &[PendingTraceColumnRewrite],
+    pending_rewrites: Vec<PendingTraceColumnRewrite>,
     table_name: &str,
-) -> ServerResult<()> {
-    for row in rows {
-        for pending_rewrite in pending_rewrites {
+) -> Result<PreparedTraceColumnRewrites, TraceColumnRewriteError> {
+    let mut values = Vec::new();
+    for (row_idx, row) in rows.iter().enumerate() {
+        for pending_rewrite in &pending_rewrites {
             let Some(value) = row.values.get(pending_rewrite.col_idx) else {
                 continue;
             };
-            let Some(request_type) = value.value_data.as_ref().and_then(trace_value_datatype)
-            else {
+            let Some(request_value) = value.value_data.as_ref() else {
+                continue;
+            };
+            let Some(request_type) = trace_value_datatype(request_value) else {
                 continue;
             };
             if request_type == pending_rewrite.target_type {
                 continue;
             }
 
-            coerce_value_data(&value.value_data, pending_rewrite.target_type, request_type)
-                .map_err(|_| {
-                    error::InvalidParameterSnafu {
-                        reason: format!(
-                            "failed to coerce trace column '{}' in table '{}' from {:?} to {:?}",
-                            pending_rewrite.column_name,
-                            table_name,
-                            request_type,
-                            pending_rewrite.target_type
-                        ),
-                    }
-                    .build()
-                })?;
+            let value_data =
+                coerce_value_data(&value.value_data, pending_rewrite.target_type, request_type)
+                    .map_err(|_| TraceColumnRewriteError {
+                        error: error::InvalidParameterSnafu {
+                            reason: format!(
+                                "failed to coerce trace column '{}' in table '{}' from {} to {:?}",
+                                pending_rewrite.column_name,
+                                table_name,
+                                describe_trace_value(request_value, request_type),
+                                pending_rewrite.target_type
+                            ),
+                        }
+                        .build(),
+                        column_name: pending_rewrite.column_name.clone(),
+                    })?;
+            values.push(PreparedTraceValueRewrite {
+                row_idx,
+                col_idx: pending_rewrite.col_idx,
+                value_data,
+            });
         }
     }
 
-    Ok(())
+    let columns = pending_rewrites
+        .into_iter()
+        .map(|rewrite| PreparedTraceColumnRewrite {
+            col_idx: rewrite.col_idx,
+            target_type: rewrite.target_type,
+        })
+        .collect();
+    Ok(PreparedTraceColumnRewrites { columns, values })
 }
 
 pub(super) fn enrich_trace_reconcile_error(
@@ -228,14 +328,14 @@ pub(super) fn push_observed_trace_type(
 #[cfg(test)]
 mod tests {
     use api::v1::value::ValueData;
-    use api::v1::{ColumnDataType, Row, Value};
+    use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, Value};
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
 
     use super::{
         PendingTraceColumnRewrite, TraceReconcileDecision, choose_trace_reconcile_decision,
-        enrich_trace_reconcile_error, is_trace_reconcile_candidate_type, push_observed_trace_type,
-        validate_trace_column_rewrites,
+        describe_trace_value, enrich_trace_reconcile_error, is_trace_reconcile_candidate_type,
+        prepare_trace_column_rewrites, push_observed_trace_type, truncate_for_diagnostics,
     };
 
     #[test]
@@ -248,6 +348,24 @@ mod tests {
             )
             .unwrap(),
             Some(TraceReconcileDecision::UseExisting(ColumnDataType::Int64))
+        );
+    }
+
+    #[test]
+    fn test_choose_trace_reconcile_decision_existing_uint64_keeps_uint64() {
+        // Backward-compat for the unsigned -> signed transition: an existing
+        // table whose `duration_nano` is still UInt64 must keep that type (no
+        // ALTER) when new signed (Int64) ingest arrives, coercing the value in
+        // place. This is the no-ALTER guarantee for the trace path; it relies on
+        // the Int64 -> UInt64 coercion arm added in Phase 0.
+        assert_eq!(
+            choose_trace_reconcile_decision(
+                "duration_nano",
+                &[ColumnDataType::Int64],
+                Some(ColumnDataType::Uint64)
+            )
+            .unwrap(),
+            Some(TraceReconcileDecision::UseExisting(ColumnDataType::Uint64))
         );
     }
 
@@ -375,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_trace_column_rewrites_rejects_invalid_string_parse() {
+    fn test_prepare_trace_column_rewrites_rejects_invalid_string_parse() {
         let rows = vec![Row {
             values: vec![Value {
                 value_data: Some(ValueData::StringValue("not_a_number".to_string())),
@@ -387,29 +505,169 @@ mod tests {
             column_name: "span_attributes.attr_int".to_string(),
         }];
 
-        let err = validate_trace_column_rewrites(&rows, &pending_rewrites, "trace_type_atomicity")
+        let err = prepare_trace_column_rewrites(&rows, pending_rewrites, "trace_type_atomicity")
             .unwrap_err();
-        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+        assert_eq!(err.error.status_code(), StatusCode::InvalidArguments);
+        assert_eq!(err.column_name, "span_attributes.attr_int");
+        assert!(
+            err.error.to_string().contains(
+                "failed to coerce trace column 'span_attributes.attr_int' in table \
+                 'trace_type_atomicity' from String(\"not_a_number\") to Int64"
+            ),
+            "unexpected error message: {}",
+            err.error
+        );
+    }
+
+    /// The PHP instrumentation case: an empty string must be distinguishable
+    /// from any other unparsable value in the reported diagnostics.
+    #[test]
+    fn test_prepare_trace_column_rewrites_reports_empty_string_value() {
+        let rows = vec![Row {
+            values: vec![Value {
+                value_data: Some(ValueData::StringValue(String::new())),
+            }],
+        }];
+        let pending_rewrites = vec![PendingTraceColumnRewrite {
+            col_idx: 0,
+            target_type: ColumnDataType::Int64,
+            column_name: "span_attributes.http.response.body.size".to_string(),
+        }];
+
+        let err = prepare_trace_column_rewrites(&rows, pending_rewrites, "opentelemetry_traces")
+            .unwrap_err();
+        assert!(
+            err.error.to_string().contains(
+                "'span_attributes.http.response.body.size' in table 'opentelemetry_traces' \
+                 from String(\"\") to Int64"
+            ),
+            "unexpected error message: {}",
+            err.error
+        );
     }
 
     #[test]
-    fn test_validate_trace_column_rewrites_whitelisted_values_validate_against_fixed_type() {
-        let rows = vec![Row {
-            values: vec![Value {
-                value_data: Some(ValueData::StringValue("503".to_string())),
+    fn test_describe_trace_value_bounds_and_escapes_strings() {
+        assert_eq!(
+            describe_trace_value(
+                &ValueData::StringValue(String::new()),
+                ColumnDataType::String
+            ),
+            r#"String("")"#
+        );
+        assert_eq!(
+            describe_trace_value(
+                &ValueData::StringValue("a\tb\"c".to_string()),
+                ColumnDataType::String
+            ),
+            r#"String("a\tb\"c")"#
+        );
+        assert_eq!(
+            describe_trace_value(
+                &ValueData::StringValue("0123456789abcdefghij".to_string()),
+                ColumnDataType::String
+            ),
+            r#"String("0123456789abcdef...")"#
+        );
+    }
+
+    #[test]
+    fn test_describe_trace_value_omits_binary_content() {
+        assert_eq!(
+            describe_trace_value(
+                &ValueData::BinaryValue(vec![1_u8, 2, 3]),
+                ColumnDataType::Binary
+            ),
+            "Binary(3 bytes)"
+        );
+        assert_eq!(
+            describe_trace_value(&ValueData::F64Value(1.5), ColumnDataType::Float64),
+            "Float64(1.5)"
+        );
+    }
+
+    /// Truncation runs over user-supplied text, so it must not split a
+    /// multi-byte character.
+    #[test]
+    fn test_truncate_for_diagnostics_cuts_on_char_boundary() {
+        assert_eq!(truncate_for_diagnostics("日本語テキスト", 3), "日本語...");
+        assert_eq!(truncate_for_diagnostics("short", 16), "short");
+        assert_eq!(truncate_for_diagnostics("exact", 5), "exact");
+    }
+
+    #[test]
+    fn test_prepare_trace_column_rewrites_applies_prepared_values() {
+        let mut rows = Rows {
+            schema: vec![ColumnSchema {
+                datatype: ColumnDataType::String as i32,
+                ..Default::default()
             }],
-        }];
+            rows: vec![Row {
+                values: vec![Value {
+                    value_data: Some(ValueData::StringValue("503".to_string())),
+                }],
+            }],
+        };
         let pending_rewrites = vec![PendingTraceColumnRewrite {
             col_idx: 0,
             target_type: ColumnDataType::Int64,
             column_name: "span_attributes.http.response.status_code".to_string(),
         }];
 
-        validate_trace_column_rewrites(&rows, &pending_rewrites, "trace_type_atomicity").unwrap();
+        let prepared =
+            prepare_trace_column_rewrites(&rows.rows, pending_rewrites, "trace_type_atomicity")
+                .unwrap();
+        assert_eq!(
+            rows.rows[0].values[0].value_data,
+            Some(ValueData::StringValue("503".to_string()))
+        );
+
+        prepared.apply(&mut rows);
+        assert_eq!(rows.schema[0].datatype, ColumnDataType::Int64 as i32);
+        assert_eq!(
+            rows.rows[0].values[0].value_data,
+            Some(ValueData::I64Value(503))
+        );
     }
 
     #[test]
-    fn test_validate_trace_column_rewrites_whitelisted_boolean_rejects_invalid_string_parse() {
+    fn test_prepare_trace_column_rewrites_coerces_int64_into_existing_uint64() {
+        // Existing-table backward-compat for the trace path: new signed ingest
+        // arrives as Int64, but the existing `duration_nano` column is UInt64, so
+        // the rewrite coerces the value into the existing type in place (no
+        // ALTER). Mirrors what happens for a table created before the
+        // unsigned -> signed flip.
+        let mut rows = Rows {
+            schema: vec![ColumnSchema {
+                datatype: ColumnDataType::Int64 as i32,
+                ..Default::default()
+            }],
+            rows: vec![Row {
+                values: vec![Value {
+                    value_data: Some(ValueData::I64Value(42)),
+                }],
+            }],
+        };
+        let pending_rewrites = vec![PendingTraceColumnRewrite {
+            col_idx: 0,
+            target_type: ColumnDataType::Uint64,
+            column_name: "duration_nano".to_string(),
+        }];
+
+        let prepared =
+            prepare_trace_column_rewrites(&rows.rows, pending_rewrites, "trace_type_atomicity")
+                .unwrap();
+
+        prepared.apply(&mut rows);
+        assert_eq!(rows.schema[0].datatype, ColumnDataType::Uint64 as i32);
+        assert_eq!(
+            rows.rows[0].values[0].value_data,
+            Some(ValueData::U64Value(42))
+        );
+    }
+
+    #[test]
+    fn test_prepare_trace_column_rewrites_boolean_rejects_invalid_string_parse() {
         let rows = vec![Row {
             values: vec![Value {
                 value_data: Some(ValueData::StringValue("not_a_bool".to_string())),
@@ -421,9 +679,13 @@ mod tests {
             column_name: "span_attributes.messaging.destination.temporary".to_string(),
         }];
 
-        let err = validate_trace_column_rewrites(&rows, &pending_rewrites, "trace_type_atomicity")
+        let err = prepare_trace_column_rewrites(&rows, pending_rewrites, "trace_type_atomicity")
             .unwrap_err();
-        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+        assert_eq!(err.error.status_code(), StatusCode::InvalidArguments);
+        assert_eq!(
+            err.column_name,
+            "span_attributes.messaging.destination.temporary"
+        );
     }
 
     #[test]

@@ -12,19 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io::Write;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::Duration;
 
 use cmd::options::GreptimeOptions;
 use common_base::memory_limit::MemoryLimit;
+use common_base::readable_size::ReadableSize;
 use common_config::{Configurable, DEFAULT_DATA_HOME, ENV_VAR_SEP};
 use common_options::datanode::{ClientOptions, DatanodeClientOptions};
+use common_runtime::global::RuntimeOptions;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, DEFAULT_OTLP_HTTP_ENDPOINT, LoggingOptions};
+use common_test_util::temp_dir::create_named_temp_file;
 use common_wal::config::DatanodeWalConfig;
 use common_wal::config::raft_engine::RaftEngineConfig;
 use datanode::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use file_engine::config::EngineConfig as FileEngineConfig;
 use flow::FlownodeOptions;
 use frontend::frontend::FrontendOptions;
+use frontend::service_config::PendingRowsBatcherOptions;
 use meta_client::MetaClientOptions;
 use meta_srv::metasrv::MetasrvOptions;
 use meta_srv::selector::SelectorType;
@@ -43,16 +49,118 @@ fn test_load_datanode_runtime_options_from_runtime_section() {
         [runtime]
         global_rt_size = 8
         compact_rt_size = 4
+        compact_rt_max_blocking_threads = 6
         ingest_rt_size = 8
         query_rt_size = 7
+
+        [runtime.experimental_workload_scheduler]
+        enable = true
+        query_weight = 1
+        write_weight = 4
+        sample_every_polls = 32
     "#;
 
     let options: GreptimeOptions<DatanodeOptions> = toml::from_str(toml).unwrap();
 
     assert_eq!(8, options.runtime.global_rt_size);
     assert_eq!(4, options.runtime.compact_rt_size);
+    assert_eq!(6, options.runtime.compact_rt_max_blocking_threads);
     assert_eq!(8, options.runtime.ingest_rt_size);
     assert_eq!(7, options.runtime.query_rt_size);
+    assert!(options.runtime.experimental_workload_scheduler.enable);
+    assert_eq!(
+        NonZeroU32::new(1).unwrap(),
+        options.runtime.experimental_workload_scheduler.query_weight
+    );
+    assert_eq!(
+        NonZeroU32::new(4).unwrap(),
+        options.runtime.experimental_workload_scheduler.write_weight
+    );
+    assert_eq!(
+        NonZeroUsize::new(32).unwrap(),
+        options
+            .runtime
+            .experimental_workload_scheduler
+            .sample_every_polls
+    );
+}
+
+#[test]
+fn test_load_runtime_options_rejects_zero_scheduler_sampling() {
+    let toml = r#"
+        [runtime.experimental_workload_scheduler]
+        sample_every_polls = 0
+    "#;
+
+    let result = toml::from_str::<GreptimeOptions<DatanodeOptions>>(toml);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_load_runtime_options_rejects_zero_scheduler_weight() {
+    let toml = r#"
+        [runtime.experimental_workload_scheduler]
+        query_weight = 0
+    "#;
+
+    let result = toml::from_str::<GreptimeOptions<DatanodeOptions>>(toml);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_load_runtime_options_without_max_blocking_threads() {
+    let toml = r#"
+        [runtime]
+        global_rt_size = 8
+        compact_rt_size = 4
+        ingest_rt_size = 8
+        query_rt_size = 7
+    "#;
+
+    let options: GreptimeOptions<DatanodeOptions> = toml::from_str(toml).unwrap();
+
+    assert_eq!(
+        RuntimeOptions::default().compact_rt_max_blocking_threads,
+        options.runtime.compact_rt_max_blocking_threads
+    );
+}
+
+#[test]
+#[cfg(feature = "hdfs-object-store")]
+fn test_load_datanode_hdfs_config() {
+    let config = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        config.path(),
+        r#"
+            [storage]
+            type = "Hdfs"
+            name = "local-hdfs"
+            root = "/greptimedb"
+            name_node = "hdfs://127.0.0.1:9000"
+            enable_read_cache = false
+            options = { "dfs.client.block.write.replace-datanode-on-failure.enable" = "true" }
+        "#,
+    )
+    .unwrap();
+
+    let options =
+        GreptimeOptions::<DatanodeOptions>::load_layered_options(config.path().to_str(), "")
+            .unwrap();
+    let object_store::config::ObjectStoreConfig::Hdfs(hdfs) = options.component.storage.store
+    else {
+        unreachable!()
+    };
+
+    assert_eq!("local-hdfs", hdfs.name);
+    assert_eq!("/greptimedb", hdfs.connection.root);
+    assert_eq!("hdfs://127.0.0.1:9000", hdfs.connection.name_node);
+    assert_eq!(
+        Some(&"true".to_string()),
+        hdfs.connection
+            .options
+            .get("dfs.client.block.write.replace-datanode-on-failure.enable")
+    );
+    assert!(!hdfs.cache.enable_read_cache);
 }
 
 #[allow(deprecated)]
@@ -79,7 +187,7 @@ fn test_load_datanode_example_config() {
             }),
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
                 dir: Some(format!("{}/{}", DEFAULT_DATA_HOME, WAL_DIR)),
-                sync_period: Some(Duration::from_secs(10)),
+                sync_period: Some(Duration::from_secs(5)),
                 recovery_parallelism: 2,
                 ..Default::default()
             }),
@@ -89,14 +197,15 @@ fn test_load_datanode_example_config() {
             },
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
-                    auto_flush_interval: Duration::from_secs(3600),
+                    experimental_series_index_max_size: ReadableSize::gb(5),
+                    auto_flush_interval: Duration::from_secs(10 * 60),
+                    default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     scan_memory_limit: MemoryLimit::Unlimited,
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(FileEngineConfig {}),
                 RegionEngineConfig::Metric(MetricEngineConfig {
-                    sparse_primary_key_encoding: true,
                     flush_metadata_region_interval: Duration::from_secs(30),
                 }),
             ],
@@ -131,6 +240,10 @@ fn test_load_frontend_example_config() {
             .unwrap();
     let expected = GreptimeOptions::<FrontendOptions> {
         component: FrontendOptions {
+            pending_rows_batcher: PendingRowsBatcherOptions {
+                logical_table: Some(Default::default()),
+                ..Default::default()
+            },
             default_timezone: Some("UTC".to_string()),
             default_column_prefix: Some("greptime".to_string()),
             auto_create_table: true,
@@ -208,6 +321,7 @@ fn test_load_metasrv_example_config() {
                     timeout: Duration::from_secs(10),
                     connect_timeout: Duration::from_secs(10),
                     tcp_nodelay: true,
+                    ..Default::default()
                 },
             },
             backend_tls: Some(TlsOption {
@@ -223,6 +337,25 @@ fn test_load_metasrv_example_config() {
         ..Default::default()
     };
     similar_asserts::assert_eq!(options, expected);
+}
+
+#[test]
+fn test_load_metasrv_soft_drop_config() {
+    let config = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        config.path(),
+        "[gc]\nenable = true\n[gc.experimental_soft_drop]\nenable = true\nretention = \"1d\"\n",
+    )
+    .unwrap();
+
+    let options =
+        GreptimeOptions::<MetasrvOptions>::load_layered_options(config.path().to_str(), "")
+            .unwrap();
+    assert!(options.component.gc.experimental_soft_drop.enable);
+    assert_eq!(
+        Duration::from_secs(24 * 60 * 60),
+        options.component.gc.experimental_soft_drop.retention
+    );
 }
 
 #[test]
@@ -257,6 +390,7 @@ fn test_load_flownode_example_config() {
                 allow_query_fallback: false,
                 memory_pool_size: MemoryLimit::Percentage(50),
                 enable_per_region_metrics: false,
+                ..Default::default()
             },
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
@@ -287,25 +421,30 @@ fn test_load_standalone_example_config() {
             .unwrap();
     let expected = GreptimeOptions::<StandaloneOptions> {
         component: StandaloneOptions {
+            pending_rows_batcher: PendingRowsBatcherOptions {
+                logical_table: Some(Default::default()),
+                ..Default::default()
+            },
             default_timezone: Some("UTC".to_string()),
             default_column_prefix: Some("greptime".to_string()),
             auto_create_table: true,
             wal: DatanodeWalConfig::RaftEngine(RaftEngineConfig {
                 dir: Some(format!("{}/{}", DEFAULT_DATA_HOME, WAL_DIR)),
-                sync_period: Some(Duration::from_secs(10)),
+                sync_period: Some(Duration::from_secs(5)),
                 recovery_parallelism: 2,
                 ..Default::default()
             }),
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
-                    auto_flush_interval: Duration::from_secs(3600),
+                    experimental_series_index_max_size: ReadableSize::gb(5),
+                    auto_flush_interval: Duration::from_secs(10 * 60),
+                    default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     scan_memory_limit: MemoryLimit::Unlimited,
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(FileEngineConfig {}),
                 RegionEngineConfig::Metric(MetricEngineConfig {
-                    sparse_primary_key_encoding: true,
                     flush_metadata_region_interval: Duration::from_secs(30),
                 }),
             ],
@@ -325,6 +464,7 @@ fn test_load_standalone_example_config() {
                 cors_allowed_origins: vec!["https://example.com".to_string()],
                 ..Default::default()
             },
+            grpc: GrpcOptions::default(),
             query: QueryOptions {
                 memory_pool_size: MemoryLimit::Percentage(50),
                 ..Default::default()
@@ -334,6 +474,37 @@ fn test_load_standalone_example_config() {
         ..Default::default()
     };
     similar_asserts::assert_eq!(options, expected);
+}
+
+#[test]
+fn test_load_removed_histogram_options() {
+    for enabled in [false, true] {
+        let config = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            config.path(),
+            format!(
+                "[otlp]\nexperimental_enable_exponential_histogram = {enabled}\n\
+                 [prom_store]\nenable = true\nwith_metric_engine = true\n\
+                 experimental_enable_prometheus_native_histogram = {enabled}\n"
+            ),
+        )
+        .unwrap();
+
+        let frontend =
+            GreptimeOptions::<FrontendOptions>::load_layered_options(config.path().to_str(), "")
+                .unwrap();
+        let standalone =
+            GreptimeOptions::<StandaloneOptions>::load_layered_options(config.path().to_str(), "")
+                .unwrap();
+        let defaults = FrontendOptions::default();
+        for options in [frontend.component, standalone.component.frontend_options()] {
+            assert_eq!(options.otlp, defaults.otlp);
+            assert_eq!(options.prom_store, defaults.prom_store);
+            let serialized = toml::to_string(&options).unwrap();
+            assert!(!serialized.contains("experimental_enable_exponential_histogram"));
+            assert!(!serialized.contains("experimental_enable_prometheus_native_histogram"));
+        }
+    }
 }
 
 #[test]
@@ -382,4 +553,72 @@ fn test_load_heartbeat_env_vars_from_env() {
             GreptimeOptions::<StandaloneOptions>::load_layered_options(None, env_prefix).unwrap();
         similar_asserts::assert_eq!(standalone.component.heartbeat_env_vars, expected);
     });
+}
+
+#[test]
+fn test_load_event_types_from_env() {
+    let env_prefix = "EVENT_TYPES_UT";
+    let env_key = [env_prefix, "EVENT_RECORDER", "EVENT_TYPES"].join(ENV_VAR_SEP);
+
+    temp_env::with_var(env_key, Some("region_migration"), || {
+        for event_types in [
+            GreptimeOptions::<MetasrvOptions>::load_layered_options(None, env_prefix)
+                .unwrap()
+                .component
+                .event_recorder
+                .event_types,
+            GreptimeOptions::<StandaloneOptions>::load_layered_options(None, env_prefix)
+                .unwrap()
+                .component
+                .event_recorder
+                .event_types,
+            GreptimeOptions::<FrontendOptions>::load_layered_options(None, env_prefix)
+                .unwrap()
+                .component
+                .event_recorder
+                .event_types,
+        ] {
+            assert!(event_types.allows("region_migration"));
+            assert!(!event_types.allows("other_event"));
+        }
+    });
+}
+
+#[test]
+fn test_load_metric_config_with_removed_sparse_primary_key_encoding() {
+    // The `sparse_primary_key_encoding` option was removed from the metric
+    // engine config and is now always-on. Existing user configs that still set
+    // it must be tolerated (ignored), not rejected.
+    let mut file = create_named_temp_file();
+    let toml_str = r#"
+        node_id = 42
+
+        [meta_client]
+        metasrv_addrs = ["127.0.0.1:3002"]
+
+        [[region_engine]]
+        [region_engine.metric]
+        sparse_primary_key_encoding = false
+        flush_metadata_region_interval = "30s"
+    "#;
+    write!(file, "{}", toml_str).unwrap();
+
+    let options =
+        GreptimeOptions::<DatanodeOptions>::load_layered_options(file.path().to_str(), "")
+            .expect("config with removed 'sparse_primary_key_encoding' should load without error");
+
+    // The unknown option is ignored; known metric engine options are still parsed/applied.
+    let metric = options
+        .component
+        .region_engine
+        .iter()
+        .find_map(|c| match c {
+            RegionEngineConfig::Metric(c) => Some(c),
+            _ => None,
+        })
+        .expect("metric engine config should be present");
+    assert_eq!(
+        metric.flush_metadata_region_interval,
+        Duration::from_secs(30)
+    );
 }

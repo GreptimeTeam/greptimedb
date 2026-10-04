@@ -16,41 +16,43 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use auth::{JAEGER_QUERY, PermissionReq, PermissionTableTarget, PermissionTableTargets};
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{
     TRACE_TABLE_NAME, trace_operations_table_name, trace_services_table_name,
 };
 use common_function::function::FunctionRef;
 use common_function::scalars::json::json_get::{
-    JsonGetBool, JsonGetFloat, JsonGetInt, JsonGetString,
+    JsonGetBool, JsonGetFloat, JsonGetInt, JsonGetString, JsonGetWithType,
 };
 use common_function::scalars::udf::create_udf;
 use common_query::{Output, OutputData};
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::util;
 use common_telemetry::warn;
+use datafusion::common::ScalarValue;
 use datafusion::dataframe::DataFrame;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::SessionContext;
+use datafusion::functions::core::expr_fn::coalesce;
 use datafusion::functions_window::expr_fn::row_number;
 use datafusion_expr::select_expr::SelectExpr;
 use datafusion_expr::{Expr, ExprFunctionExt, SortExpr, col, lit, lit_timestamp_nano, wildcard};
 use query::QueryEngineRef;
 use serde_json::Value as JsonValue;
 use servers::error::{
-    CollectRecordbatchSnafu, DataFusionSnafu, Result as ServerResult, TableNotFoundSnafu,
+    AuthSnafu, CollectRecordbatchSnafu, DataFusionSnafu, Result as ServerResult, TableNotFoundSnafu,
 };
 use servers::http::jaeger::{JAEGER_QUERY_TABLE_NAME_KEY, QueryTraceParams, TraceUserAgent};
 use servers::otlp::trace::{
-    DURATION_NANO_COLUMN, KEY_OTEL_STATUS_ERROR_KEY, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN,
-    SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, SPAN_STATUS_CODE, SPAN_STATUS_ERROR,
-    TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
+    DURATION_NANO_COLUMN, KEY_OTEL_STATUS_ERROR_KEY, RESOURCE_ATTRIBUTES_COLUMN,
+    SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_KIND_COLUMN, SPAN_KIND_PREFIX,
+    SPAN_NAME_COLUMN, SPAN_STATUS_CODE, SPAN_STATUS_ERROR, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
 };
 use servers::query_handler::JaegerQueryHandler;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use table::TableRef;
-use table::requests::{TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1};
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::instance::Instance;
@@ -58,9 +60,28 @@ use crate::instance::Instance;
 const DEFAULT_LIMIT: usize = 2000;
 const KEY_RN: &str = "greptime_rn";
 
+impl Instance {
+    async fn check_jaeger_query_permission(&self, ctx: &QueryContextRef) -> ServerResult<()> {
+        let table = ctx
+            .extension(JAEGER_QUERY_TABLE_NAME_KEY)
+            .unwrap_or(TRACE_TABLE_NAME);
+        let targets = PermissionTableTargets::resolved(vec![PermissionTableTarget::new(
+            ctx.current_catalog(),
+            ctx.current_schema(),
+            table,
+        )]);
+        let targets = self.resolve_query_permission_targets(targets, ctx).await?;
+        self.check_table_permission(ctx, PermissionReq::Action(JAEGER_QUERY), targets)
+            .context(AuthSnafu)?;
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl JaegerQueryHandler for Instance {
     async fn get_services(&self, ctx: QueryContextRef) -> ServerResult<Output> {
+        self.check_jaeger_query_permission(&ctx).await?;
+
         // It's equivalent to `SELECT DISTINCT(service_name) FROM {db}.{trace_table}`.
         Ok(query_trace_table(
             ctx,
@@ -81,6 +102,8 @@ impl JaegerQueryHandler for Instance {
         service_name: &str,
         span_kind: Option<&str>,
     ) -> ServerResult<Output> {
+        self.check_jaeger_query_permission(&ctx).await?;
+
         let mut filters = vec![col(SERVICE_NAME_COLUMN).eq(lit(service_name))];
 
         if let Some(span_kind) = span_kind {
@@ -129,6 +152,8 @@ impl JaegerQueryHandler for Instance {
         end_time: Option<i64>,
         limit: Option<usize>,
     ) -> ServerResult<Output> {
+        self.check_jaeger_query_permission(&ctx).await?;
+
         // It's equivalent to the following SQL query:
         //
         // ```
@@ -173,6 +198,8 @@ impl JaegerQueryHandler for Instance {
         ctx: QueryContextRef,
         query_params: QueryTraceParams,
     ) -> ServerResult<Output> {
+        self.check_jaeger_query_permission(&ctx).await?;
+
         let mut filters = vec![];
 
         // `service_name` is already validated in `from_jaeger_query_params()`, so no additional check needed here.
@@ -342,19 +369,11 @@ async fn query_trace_table(
             schema: ctx.current_schema(),
         })?;
 
-    let is_data_model_v1 = table
-        .clone()
-        .table_info()
-        .meta
-        .options
-        .extra_options
-        .get(TABLE_DATA_MODEL)
-        .map(|s| s.as_str())
-        == Some(TABLE_DATA_MODEL_TRACE_V1);
+    let table_info = table.table_info();
+    let data_model = table_info.meta.options.data_model();
 
     // collect to set
-    let col_names = table
-        .table_info()
+    let col_names = table_info
         .meta
         .field_column_names()
         .map(|s| format!("\"{}\"", s))
@@ -372,7 +391,7 @@ async fn query_trace_table(
     let dataframe = filters
         .into_iter()
         .chain(tags.map_or(Ok(vec![]), |t| {
-            tags_filters(&dataframe, t, is_data_model_v1, &col_names)
+            tags_filters(&dataframe, t, data_model, &col_names)
         })?)
         .try_fold(dataframe, |df, expr| {
             df.filter(expr).context(DataFusionSnafu)
@@ -408,7 +427,9 @@ async fn query_trace_table(
         RecordBatchStreamAdapter::try_new(stream).context(CollectRecordbatchSnafu)?,
     ));
 
-    Ok(output)
+    output
+        .map_dictionary_to_values()
+        .context(CollectRecordbatchSnafu)
 }
 
 async fn get_table(
@@ -485,7 +506,9 @@ async fn find_traces_rank_3(
         RecordBatchStreamAdapter::try_new(stream).context(CollectRecordbatchSnafu)?,
     ));
 
-    Ok(output)
+    output
+        .map_dictionary_to_values()
+        .context(CollectRecordbatchSnafu)
 }
 
 // The current implementation registers UDFs during the planning stage, which makes it difficult
@@ -497,8 +520,9 @@ fn create_df_context(query_engine: &QueryEngineRef) -> ServerResult<SessionConte
         SessionStateBuilder::new_from_existing(query_engine.engine_state().session_state()).build(),
     );
 
-    // The following JSON UDFs will be used for tags filters on v0 data model.
+    // JSON UDFs used by the v0 and v2 tag filters.
     let udfs: Vec<FunctionRef> = vec![
+        Arc::new(JsonGetWithType::default()),
         Arc::new(JsonGetInt::default()),
         Arc::new(JsonGetFloat::default()),
         Arc::new(JsonGetBool::default()),
@@ -577,6 +601,65 @@ fn json_tag_filters(
     }
 
     Ok(filters)
+}
+
+/// Resolves each tag per row, falling back to Resource when the typed Span value is null.
+fn json2_tag_filters(
+    dataframe: &DataFrame,
+    tags: HashMap<String, JsonValue>,
+) -> ServerResult<Vec<Expr>> {
+    let get = dataframe
+        .registry()
+        .udf(JsonGetWithType::NAME)
+        .context(DataFusionSnafu)?;
+    tags.into_iter()
+        .map(|(key, value)| {
+            if key == KEY_OTEL_STATUS_ERROR_KEY && value == JsonValue::Bool(true) {
+                return Ok(col(SPAN_STATUS_CODE).eq(lit(SPAN_STATUS_ERROR)));
+            }
+            // JSON quoting preserves literal dots, quotes, and backslashes in attribute keys.
+            let path = lit(format!("$[{}]", JsonValue::String(key)));
+            let (value, value_type) = match value {
+                JsonValue::String(value) => (
+                    ScalarValue::Utf8View(Some(value)),
+                    ScalarValue::Utf8View(None),
+                ),
+                JsonValue::Bool(value) => (
+                    ScalarValue::Boolean(Some(value)),
+                    ScalarValue::Boolean(None),
+                ),
+                JsonValue::Number(value) => {
+                    if let Some(value) = value.as_i64() {
+                        (ScalarValue::Int64(Some(value)), ScalarValue::Int64(None))
+                    } else if let Some(value) = value.as_u64() {
+                        (ScalarValue::UInt64(Some(value)), ScalarValue::UInt64(None))
+                    } else if let Some(value) = value.as_f64() {
+                        (
+                            ScalarValue::Float64(Some(value)),
+                            ScalarValue::Float64(None),
+                        )
+                    } else {
+                        return Ok(lit(false));
+                    }
+                }
+                JsonValue::Null => (ScalarValue::Utf8View(None), ScalarValue::Utf8View(None)),
+                JsonValue::Array(_) | JsonValue::Object(_) => return Ok(lit(false)),
+            };
+            let attribute = coalesce(vec![
+                get.call(vec![
+                    col(SPAN_ATTRIBUTES_COLUMN),
+                    path.clone(),
+                    lit(value_type.clone()),
+                ]),
+                get.call(vec![col(RESOURCE_ATTRIBUTES_COLUMN), path, lit(value_type)]),
+            ]);
+            Ok(if value.is_null() {
+                attribute.is_null()
+            } else {
+                attribute.eq(lit(value))
+            })
+        })
+        .collect()
 }
 
 /// Helper function to check if span_key or resource_key exists in col_names and create an expression.
@@ -658,13 +741,13 @@ fn flatten_tag_filters(
 fn tags_filters(
     dataframe: &DataFrame,
     tags: HashMap<String, JsonValue>,
-    is_data_model_v1: bool,
+    data_model: Option<&str>,
     col_names: &HashSet<String>,
 ) -> ServerResult<Vec<Expr>> {
-    if is_data_model_v1 {
-        flatten_tag_filters(tags, col_names)
-    } else {
-        json_tag_filters(dataframe, tags)
+    match data_model {
+        Some(table::requests::TABLE_DATA_MODEL_TRACE_V1) => flatten_tag_filters(tags, col_names),
+        Some(table::requests::TABLE_DATA_MODEL_TRACE_V2) => json2_tag_filters(dataframe, tags),
+        _ => json_tag_filters(dataframe, tags),
     }
 }
 

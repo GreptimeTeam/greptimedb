@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_base::Plugins;
+
 use crate::handlers::{FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef};
 
 /// Shared state for SQL functions.
 /// The handlers in state may be `None` in cli command-line or test cases.
 #[derive(Clone, Default)]
 pub struct FunctionState {
+    /// Process plugins available to dynamically registered functions.
+    pub plugins: Plugins,
     // The table mutation handler
     pub table_mutation_handler: Option<TableMutationHandlerRef>,
     // The procedure service handler
@@ -48,6 +52,7 @@ impl FunctionState {
             BuildIndexTableRequest, CompactTableRequest, DeleteRequest, FlushTableRequest,
             InsertRequest,
         };
+        use table::table_name::TableName;
 
         use crate::handlers::{FlowServiceHandler, ProcedureServiceHandler, TableMutationHandler};
         struct MockProcedureServiceHandler;
@@ -57,8 +62,17 @@ impl FunctionState {
 
         #[async_trait]
         impl ProcedureServiceHandler for MockProcedureServiceHandler {
+            async fn purge_table(
+                &self,
+                _query_ctx: QueryContextRef,
+                _table_name: table::table_name::TableName,
+            ) -> Result<()> {
+                Ok(())
+            }
+
             async fn migrate_region(
                 &self,
+                _ctx: QueryContextRef,
                 _request: MigrateRegionRequest,
             ) -> Result<Option<String>> {
                 Ok(Some("test_pid".to_string()))
@@ -83,7 +97,11 @@ impl FunctionState {
                 Ok(())
             }
 
-            async fn gc_regions(&self, _request: GcRegionsRequest) -> Result<GcResponse> {
+            async fn gc_regions(
+                &self,
+                _context: QueryContextRef,
+                _request: GcRegionsRequest,
+            ) -> Result<GcResponse> {
                 Ok(GcResponse {
                     processed_regions: 1,
                     need_retry_regions: vec![],
@@ -92,7 +110,11 @@ impl FunctionState {
                 })
             }
 
-            async fn gc_table(&self, _request: GcTableRequest) -> Result<GcResponse> {
+            async fn gc_table(
+                &self,
+                _context: QueryContextRef,
+                _request: GcTableRequest,
+            ) -> Result<GcResponse> {
                 Ok(GcResponse {
                     processed_regions: 1,
                     need_retry_regions: vec![],
@@ -163,6 +185,22 @@ impl FunctionState {
             ) -> Result<AffectedRows> {
                 Ok(ROWS)
             }
+
+            async fn discard_unflushed_data(
+                &self,
+                _region_id: RegionId,
+                _ctx: QueryContextRef,
+            ) -> Result<AffectedRows> {
+                Ok(ROWS)
+            }
+
+            async fn discard_unflushed_data_by_table(
+                &self,
+                _table_name: TableName,
+                _ctx: QueryContextRef,
+            ) -> Result<AffectedRows> {
+                Ok(ROWS)
+            }
         }
 
         #[async_trait]
@@ -178,6 +216,7 @@ impl FunctionState {
         }
 
         Self {
+            plugins: Plugins::default(),
             table_mutation_handler: Some(Arc::new(MockTableMutationHandler)),
             procedure_service_handler: Some(Arc::new(MockProcedureServiceHandler)),
             flow_service_handler: Some(Arc::new(MockFlowServiceHandler)),

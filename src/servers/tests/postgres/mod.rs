@@ -12,16 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use auth::UserProviderRef;
+use async_trait::async_trait;
 use auth::tests::{DatabaseAuthInfo, MockUserProvider};
+use auth::{
+    BEARER_TOKEN_USER, Identity, Password, UserInfoRef, UserProvider, UserProviderRef,
+    format_pg_scram_sha256_password_verifier, user_provider_from_option,
+};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_runtime::Builder as RuntimeBuilder;
 use common_runtime::runtime::BuilderBuild;
 use pgwire::api::Type;
+use postgres_types::FromSql;
 use rand::Rng;
 use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
 use rustls::{Error, SignatureScheme};
@@ -37,18 +44,57 @@ use tokio_postgres::{Client, Error as PgError, NoTls, SimpleQueryMessage};
 
 use crate::create_testing_instance;
 
+#[derive(Default)]
+struct BearerProvider {
+    authentications: AtomicUsize,
+    authorizations: AtomicUsize,
+}
+
+#[async_trait]
+impl UserProvider for BearerProvider {
+    fn name(&self) -> &str {
+        "bearer-test"
+    }
+
+    async fn authenticate(
+        &self,
+        _: Identity<'_>,
+        _: Password<'_>,
+    ) -> auth::error::Result<UserInfoRef> {
+        unreachable!("the bearer sentinel must not use password authentication")
+    }
+
+    async fn authenticate_bearer_token(
+        &self,
+        token: &str,
+        catalog: &str,
+    ) -> auth::error::Result<UserInfoRef> {
+        assert_eq!("signed-token", token);
+        assert_eq!(DEFAULT_CATALOG_NAME, catalog);
+        self.authentications.fetch_add(1, Ordering::Relaxed);
+        Ok(auth::userinfo_by_name(Some("alice".to_string())))
+    }
+
+    async fn authorize(
+        &self,
+        catalog: &str,
+        schema: &str,
+        user_info: &UserInfoRef,
+    ) -> auth::error::Result<()> {
+        assert_eq!(DEFAULT_CATALOG_NAME, catalog);
+        assert_eq!(DEFAULT_SCHEMA_NAME, schema);
+        assert_eq!("alice", user_info.username());
+        self.authorizations.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
 fn create_postgres_server(
     table: TableRef,
     check_pwd: bool,
     tls: TlsOption,
     auth_info: Option<DatabaseAuthInfo>,
 ) -> Result<Box<dyn Server>> {
-    let instance = Arc::new(create_testing_instance(table));
-    let io_runtime = RuntimeBuilder::default()
-        .worker_threads(4)
-        .thread_name("postgres-io-handlers")
-        .build()
-        .unwrap();
     let user_provider: Option<UserProviderRef> = if check_pwd {
         let mut provider = MockUserProvider::default();
         if let Some(info) = auth_info {
@@ -58,6 +104,20 @@ fn create_postgres_server(
     } else {
         None
     };
+    create_postgres_server_with_user_provider(table, tls, user_provider)
+}
+
+fn create_postgres_server_with_user_provider(
+    table: TableRef,
+    tls: TlsOption,
+    user_provider: Option<UserProviderRef>,
+) -> Result<Box<dyn Server>> {
+    let instance = Arc::new(create_testing_instance(table));
+    let io_runtime = RuntimeBuilder::default()
+        .worker_threads(4)
+        .thread_name("postgres-io-handlers")
+        .build()
+        .unwrap();
 
     let tls_server_config = Arc::new(
         ReloadableTlsServerConfig::try_new(tls.clone())
@@ -73,6 +133,22 @@ fn create_postgres_server(
         user_provider,
         None,
     )))
+}
+
+async fn start_test_server_with_user_provider(
+    user_provider: UserProviderRef,
+    tls: TlsOption,
+) -> Result<(Box<dyn Server>, u16)> {
+    common_telemetry::init_default_ut_logging();
+    let _ = install_default_crypto_provider();
+
+    let table = MemTable::default_numbers_table();
+    let mut postgres_server =
+        create_postgres_server_with_user_provider(table, tls, Some(user_provider))?;
+    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+    postgres_server.start(listening).await.unwrap();
+    let server_addr = postgres_server.bind_addr().unwrap();
+    Ok((postgres_server, server_addr.port()))
 }
 
 #[tokio::test]
@@ -135,6 +211,82 @@ async fn test_schema_validating() -> Result<()> {
     assert!(fail.is_err());
     pg_server.shutdown().await.unwrap();
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pg_scram_sha256_auth() -> Result<()> {
+    let verifier =
+        format_pg_scram_sha256_password_verifier(b"greptime", b"pg-scram-salt", 4096).unwrap();
+    let user_provider =
+        user_provider_from_option(&format!("static_user_provider:cmd:greptime={verifier}"))
+            .unwrap();
+    let (postgres_server, server_port) =
+        start_test_server_with_user_provider(user_provider, Default::default()).await?;
+
+    let client = create_plain_connection_with_credentials(server_port, "greptime", "greptime")
+        .await
+        .unwrap();
+    let rows = client
+        .simple_query("SELECT uint32s FROM numbers LIMIT 1")
+        .await;
+    assert_eq!(unwrap_results(rows.unwrap().as_ref())[0], "0");
+
+    let wrong_password =
+        create_plain_connection_with_credentials(server_port, "greptime", "wrong").await;
+    assert!(wrong_password.is_err());
+
+    let unknown_user =
+        create_plain_connection_with_credentials(server_port, "not_found", "greptime").await;
+    assert!(unknown_user.is_err());
+
+    postgres_server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pg_cleartext_auth_fallback() -> Result<()> {
+    common_telemetry::init_default_ut_logging();
+    let table = MemTable::default_numbers_table();
+    let mut postgres_server = create_postgres_server(table, true, Default::default(), None)?;
+    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+    postgres_server.start(listening).await.unwrap();
+    let server_port = postgres_server.bind_addr().unwrap().port();
+
+    let client = create_plain_connection_with_credentials(server_port, "greptime", "greptime")
+        .await
+        .unwrap();
+    let rows = client
+        .simple_query("SELECT uint32s FROM numbers LIMIT 1")
+        .await;
+    assert_eq!(unwrap_results(rows.unwrap().as_ref())[0], "0");
+
+    let wrong_password =
+        create_plain_connection_with_credentials(server_port, "greptime", "wrong").await;
+    assert!(wrong_password.is_err());
+
+    postgres_server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_bearer_token_auth_over_cleartext() -> Result<()> {
+    let provider = Arc::new(BearerProvider::default());
+    let (server, port) =
+        start_test_server_with_user_provider(provider.clone(), TlsOption::default()).await?;
+
+    let client = create_plain_connection_with_credentials(port, BEARER_TOKEN_USER, "signed-token")
+        .await
+        .unwrap();
+    let rows = client
+        .simple_query("SELECT uint32s FROM numbers LIMIT 1")
+        .await
+        .unwrap();
+    assert_eq!("0", unwrap_results(&rows)[0]);
+    assert_eq!(1, provider.authentications.load(Ordering::Relaxed));
+    assert_eq!(1, provider.authorizations.load(Ordering::Relaxed));
+
+    server.shutdown().await?;
     Ok(())
 }
 
@@ -339,6 +491,66 @@ async fn test_using_db() -> Result<()> {
     Ok(())
 }
 
+struct RegprocOid(u32);
+
+impl<'a> FromSql<'a> for RegprocOid {
+    fn from_sql(
+        ty: &Type,
+        raw: &'a [u8],
+    ) -> std::result::Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        if ty != &Type::REGPROC {
+            return Err(Box::new(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("expected REGPROC, got {ty}"),
+            )));
+        }
+
+        let oid = raw.try_into().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("expected a four-byte OID, got {} bytes", raw.len()),
+            )
+        })?;
+        Ok(Self(u32::from_be_bytes(oid)))
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        ty == &Type::REGPROC
+    }
+}
+
+#[tokio::test]
+async fn test_extended_query_regproc_response() -> Result<()> {
+    let server_port = start_test_server(TlsOption::default()).await?;
+    let client = create_connection_with_given_db(server_port, DEFAULT_SCHEMA_NAME)
+        .await
+        .unwrap();
+    let stmt = client
+        .prepare("SELECT typreceive FROM pg_catalog.pg_type WHERE oid = 16")
+        .await
+        .unwrap();
+    assert_eq!(stmt.columns()[0].type_(), &Type::REGPROC);
+
+    let rows = client.query(&stmt, &[]).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<usize, RegprocOid>(0).0, 2436);
+
+    let result = client
+        .simple_query("SELECT typreceive FROM pg_catalog.pg_type WHERE oid = 16")
+        .await
+        .unwrap();
+    let row = result
+        .iter()
+        .find_map(|message| match message {
+            SimpleQueryMessage::Row(row) => Some(row),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(row.get(0), Some("boolrecv"));
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_extended_query() -> Result<()> {
     let server_port = start_test_server(TlsOption::default()).await?;
@@ -375,6 +587,92 @@ async fn start_test_server(server_tls: TlsOption) -> Result<u16> {
     Ok(server_addr.port())
 }
 
+const EMPTY_QUERIES: &[&str] = &[
+    "",
+    " \t\r\n",
+    ";",
+    ";;;",
+    "-- ping",
+    "-- ping\n",
+    "/* ping */",
+    "/* outer /* inner */ comment */",
+    "; -- ping\r\n /* comment */ ;",
+];
+
+#[tokio::test]
+async fn test_simple_query_empty_statements() -> Result<()> {
+    let server_port = start_test_server(Default::default()).await?;
+    let client = create_plain_connection(server_port, false).await.unwrap();
+
+    for query in EMPTY_QUERIES {
+        let messages = client
+            .simple_query(query)
+            .await
+            .unwrap_or_else(|err| panic!("query {query:?} failed: {err}"));
+        // tokio-postgres exposes EmptyQueryResponse as CommandComplete(0).
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [SimpleQueryMessage::CommandComplete(0)]
+            ),
+            "expected an empty query response for {query:?}, got {messages:?}"
+        );
+    }
+
+    let messages = client.simple_query("SELECT 1").await.unwrap();
+    assert_eq!(unwrap_results(&messages), vec!["1"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_extended_query_empty_statements() -> Result<()> {
+    let server_port = start_test_server(Default::default()).await?;
+    let client = create_plain_connection(server_port, false).await.unwrap();
+
+    for query in EMPTY_QUERIES {
+        let statement = client
+            .prepare(query)
+            .await
+            .unwrap_or_else(|err| panic!("prepare {query:?} failed: {err}"));
+        assert_eq!(client.execute(&statement, &[]).await.unwrap(), 0);
+        assert!(client.query(&statement, &[]).await.unwrap().is_empty());
+    }
+
+    let row = client
+        .query_one("SELECT $1::BIGINT", &[&42i64])
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, i64>(0), 42);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_simple_query_with_comments() -> Result<()> {
+    let server_port = start_test_server(Default::default()).await?;
+    let client = create_plain_connection(server_port, false).await.unwrap();
+
+    for (query, expected) in [
+        ("-- ping\nSELECT 1", vec!["1"]),
+        ("/* comment */ SELECT 1; -- trailing", vec!["1"]),
+        ("SELECT '-- ping'", vec!["-- ping"]),
+        ("SELECT '/* comment */'", vec!["/* comment */"]),
+        ("SELECT 1; /* between */ SELECT 2;", vec!["1", "2"]),
+    ] {
+        let messages = client.simple_query(query).await.unwrap();
+        assert_eq!(unwrap_results(&messages), expected, "query: {query}");
+    }
+
+    assert!(
+        client
+            .simple_query("/* comment */ SELECT missing_column FROM numbers")
+            .await
+            .is_err()
+    );
+    let messages = client.simple_query("SELECT 1").await.unwrap();
+    assert_eq!(unwrap_results(&messages), vec!["1"]);
+    Ok(())
+}
+
 async fn do_simple_query(server_tls: TlsOption, client_tls: bool) -> Result<()> {
     let server_port = start_test_server(server_tls).await?;
 
@@ -383,7 +681,7 @@ async fn do_simple_query(server_tls: TlsOption, client_tls: bool) -> Result<()> 
         let result = client.simple_query("SELECT uint32s FROM numbers").await;
         let _ = result.unwrap();
     } else {
-        let client = create_secure_connection(server_port, false).await.unwrap();
+        let client = create_secure_connection(server_port, None).await.unwrap();
         let result = client.simple_query("SELECT uint32s FROM numbers").await;
         let _ = result.unwrap();
     }
@@ -393,14 +691,15 @@ async fn do_simple_query(server_tls: TlsOption, client_tls: bool) -> Result<()> 
 
 async fn create_secure_connection(
     port: u16,
-    with_pwd: bool,
+    credentials: Option<(&str, &str)>,
 ) -> std::result::Result<Client, PgError> {
-    let url = if with_pwd {
-        format!(
-            "sslmode=require host=127.0.0.1 port={port} user=greptime password=greptime connect_timeout=2, dbname={DEFAULT_SCHEMA_NAME}",
-        )
-    } else {
-        format!("host=127.0.0.1 port={port} connect_timeout=2 dbname={DEFAULT_SCHEMA_NAME}")
+    let url = match credentials {
+        Some((user, password)) => format!(
+            "sslmode=require host=127.0.0.1 port={port} user={user} password={password} connect_timeout=2 dbname={DEFAULT_SCHEMA_NAME}",
+        ),
+        None => {
+            format!("host=127.0.0.1 port={port} connect_timeout=2 dbname={DEFAULT_SCHEMA_NAME}")
+        }
     };
 
     let mut config = rustls::ClientConfig::builder()
@@ -428,6 +727,19 @@ async fn create_plain_connection(
     } else {
         format!("host=127.0.0.1 port={port} connect_timeout=2 dbname={DEFAULT_SCHEMA_NAME}")
     };
+    let (client, conn) = tokio_postgres::connect(&url, NoTls).await?;
+    let _handle = tokio::spawn(conn);
+    Ok(client)
+}
+
+async fn create_plain_connection_with_credentials(
+    port: u16,
+    username: &str,
+    password: &str,
+) -> std::result::Result<Client, PgError> {
+    let url = format!(
+        "host=127.0.0.1 port={port} user={username} password={password} connect_timeout=2 dbname={DEFAULT_SCHEMA_NAME}",
+    );
     let (client, conn) = tokio_postgres::connect(&url, NoTls).await?;
     let _handle = tokio::spawn(conn);
     Ok(client)

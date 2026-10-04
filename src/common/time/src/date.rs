@@ -198,6 +198,10 @@ impl Date {
     pub fn negative(&self) -> Self {
         Self(-self.0)
     }
+
+    pub fn checked_negative(&self) -> Option<Self> {
+        self.0.checked_neg().map(Self)
+    }
 }
 
 #[cfg(test)]

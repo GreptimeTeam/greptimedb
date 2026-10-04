@@ -42,15 +42,17 @@ use api::v1::{
 };
 use base64::Engine as _;
 use base64::engine::general_purpose;
+use common_base::protocol::Channel;
 use common_catalog::{format_full_flow_name, format_full_table_name};
 use common_error::ext::BoxedError;
+pub use common_event_recorder::TriggerReason;
 use common_time::{DatabaseTimeToLive, Timestamp};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use serde_with::{DefaultOnNull, serde_as};
 use snafu::{OptionExt, ResultExt};
 use table::metadata::{TableId, TableInfo};
-use table::requests::validate_database_option;
+use table::requests::{validate_database_option, validate_database_option_value};
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
@@ -66,6 +68,17 @@ use crate::key::table_name::{TableNameKey, TableNameManager};
 
 /// Reserved query-context extension key for the frontend peer address that submitted a DDL request.
 pub const ORIGIN_FRONTEND_ADDR_EXTENSION_KEY: &str = "__greptime_origin_frontend.addr";
+/// Reserved query-context extension key for the authenticated database creator.
+pub const CREATE_DATABASE_CREATOR_EXTENSION_KEY: &str = "__greptime_create_database.creator";
+/// Internal gRPC metadata key for the authenticated database creator.
+pub const CREATE_DATABASE_CREATOR_METADATA_KEY: &str =
+    "x-greptime-internal-create-database-creator-bin";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreatorGrantIntent {
+    pub username: String,
+    pub created_at_ns: i64,
+}
 
 /// DDL tasks
 #[derive(Debug, Clone)]
@@ -171,12 +184,14 @@ impl DdlTask {
         schema: String,
         create_if_not_exists: bool,
         options: HashMap<String, String>,
+        creator: Option<CreatorGrantIntent>,
     ) -> Self {
         DdlTask::CreateDatabase(CreateDatabaseTask {
             catalog,
             schema,
             create_if_not_exists,
             options,
+            creator,
         })
     }
 
@@ -319,7 +334,6 @@ impl TryFrom<Task> for DdlTask {
 
 #[derive(Clone)]
 pub struct SubmitDdlTaskRequest {
-    pub query_context: QueryContext,
     pub wait: bool,
     pub timeout: Duration,
     pub task: DdlTask,
@@ -327,9 +341,8 @@ pub struct SubmitDdlTaskRequest {
 
 impl SubmitDdlTaskRequest {
     /// The default constructor for [`SubmitDdlTaskRequest`].
-    pub fn new(query_context: QueryContext, task: DdlTask) -> Self {
+    pub fn new(task: DdlTask) -> Self {
         Self {
-            query_context,
             wait: Self::default_wait(),
             timeout: Self::default_timeout(),
             task,
@@ -347,11 +360,25 @@ impl SubmitDdlTaskRequest {
     }
 }
 
+fn ddl_timeout_secs(timeout: Duration) -> u32 {
+    timeout
+        .as_nanos()
+        .div_ceil(Duration::from_secs(1).as_nanos())
+        .try_into()
+        .unwrap_or(u32::MAX)
+}
+
 impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
     type Error = error::Error;
 
     fn try_from(request: SubmitDdlTaskRequest) -> Result<Self> {
-        let task = match request.task {
+        let SubmitDdlTaskRequest {
+            wait,
+            timeout,
+            task,
+        } = request;
+
+        let task = match task {
             DdlTask::CreateTable(task) => Task::CreateTableTask(task.try_into()?),
             DdlTask::DropTable(task) => Task::DropTableTask(task.into()),
             DdlTask::UndropTable(task) => Task::UndropTableTask(task.into()),
@@ -398,10 +425,12 @@ impl TryFrom<SubmitDdlTaskRequest> for PbDdlTaskRequest {
 
         Ok(Self {
             header: None,
-            query_context: Some(request.query_context.into()),
-            timeout_secs: request.timeout.as_secs() as u32,
-            wait: request.wait,
+            query_context: None,
+            timeout_secs: ddl_timeout_secs(timeout),
+            wait,
             task: Some(task),
+            event_context: None,
+            actor: None,
         })
     }
 }
@@ -1027,6 +1056,8 @@ pub struct CreateDatabaseTask {
     pub create_if_not_exists: bool,
     #[serde_as(deserialize_as = "DefaultOnNull")]
     pub options: HashMap<String, String>,
+    #[serde(default)]
+    pub creator: Option<CreatorGrantIntent>,
 }
 
 impl TryFrom<PbCreateDatabaseTask> for CreateDatabaseTask {
@@ -1047,6 +1078,7 @@ impl TryFrom<PbCreateDatabaseTask> for CreateDatabaseTask {
             schema: schema_name,
             create_if_not_exists,
             options,
+            creator: None,
         })
     }
 }
@@ -1060,6 +1092,7 @@ impl TryFrom<CreateDatabaseTask> for PbCreateDatabaseTask {
             schema,
             create_if_not_exists,
             options,
+            creator: _,
         }: CreateDatabaseTask,
     ) -> Result<Self> {
         Ok(PbCreateDatabaseTask {
@@ -1189,7 +1222,9 @@ impl TryFrom<PbOption> for SetDatabaseOption {
                 Ok(SetDatabaseOption::Ttl(ttl))
             }
             _ => {
-                if validate_database_option(&key_lower) {
+                if validate_database_option(&key_lower)
+                    && validate_database_option_value(&key_lower, Some(&value)).is_ok()
+                {
                     Ok(SetDatabaseOption::Other(key_lower, value))
                 } else {
                     InvalidSetDatabaseOptionSnafu { key, value }.fail()
@@ -1263,6 +1298,13 @@ pub struct CreateFlowTask {
     /// Duration in seconds. Data older than this duration will not be used.
     pub expire_after: Option<i64>,
     pub eval_interval_secs: Option<i64>,
+    /// Phase offset of the evaluation schedule within `eval_interval_secs`,
+    /// in seconds. Must be in `[0, eval_interval_secs)`. `None` means a zero
+    /// offset (epoch-anchored schedule).
+    /// Transported through the transient option map (no proto field), see
+    /// `INTERNAL_EVAL_OFFSET_KEY`.
+    #[serde(default)]
+    pub eval_offset_secs: Option<i64>,
     pub comment: String,
     pub sql: String,
     pub flow_options: HashMap<String, String>,
@@ -1288,10 +1330,26 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
             eval_interval,
             comment,
             sql,
-            flow_options,
+            mut flow_options,
         } = pb.create_flow.context(error::InvalidProtoMsgSnafu {
             err_msg: "expected create_flow",
         })?;
+
+        // Parse and strip the trusted transient offset key inserted by the
+        // operator after user option validation. It must never persist in
+        // user-visible options.
+        let eval_offset_secs =
+            match flow_options.remove(crate::ddl::create_flow::INTERNAL_EVAL_OFFSET_KEY) {
+                Some(value) => Some(value.parse::<i64>().map_err(|_| {
+                    error::UnexpectedSnafu {
+                        err_msg: format!(
+                            "Invalid internal eval offset payload '{value}': expected whole seconds"
+                        ),
+                    }
+                    .build()
+                })?),
+                None => None,
+            };
 
         Ok(CreateFlowTask {
             catalog_name,
@@ -1306,6 +1364,7 @@ impl TryFrom<PbCreateFlowTask> for CreateFlowTask {
             create_if_not_exists,
             expire_after: expire_after.map(|e| e.value),
             eval_interval_secs: eval_interval.map(|e| e.seconds),
+            eval_offset_secs,
             comment,
             sql,
             flow_options,
@@ -1325,12 +1384,21 @@ impl From<CreateFlowTask> for PbCreateFlowTask {
             create_if_not_exists,
             expire_after,
             eval_interval_secs: eval_interval,
+            eval_offset_secs,
             comment,
             sql,
-            flow_options,
+            mut flow_options,
             ..
         }: CreateFlowTask,
     ) -> Self {
+        // Re-insert the transient offset key so the proto round-trip (e.g. DDL
+        // task submission between frontend and metasrv) preserves the offset.
+        if let Some(offset_secs) = eval_offset_secs {
+            flow_options.insert(
+                crate::ddl::create_flow::INTERNAL_EVAL_OFFSET_KEY.to_string(),
+                offset_secs.to_string(),
+            );
+        }
         PbCreateFlowTask {
             create_flow: Some(CreateFlowExpr {
                 catalog_name,
@@ -1644,6 +1712,12 @@ impl QueryContext {
         self.channel
     }
 
+    /// Returns the protocol derived from the typed query channel.
+    pub fn protocol(&self) -> Option<String> {
+        let channel = Channel::from(u32::from(self.channel));
+        (channel != Channel::Unknown).then(|| channel.as_ref().to_string())
+    }
+
     pub fn snapshot_seqs(&self) -> &HashMap<u64, u64> {
         &self.snapshot_seqs
     }
@@ -1818,6 +1892,55 @@ mod tests {
     use super::{AlterTableTask, CreateTableTask, *};
 
     #[test]
+    fn test_ddl_timeout_secs() {
+        assert_eq!(ddl_timeout_secs(Duration::ZERO), 0);
+        assert_eq!(ddl_timeout_secs(Duration::from_nanos(1)), 1);
+        assert_eq!(ddl_timeout_secs(Duration::from_secs(1)), 1);
+        assert_eq!(ddl_timeout_secs(Duration::from_millis(1500)), 2);
+        assert_eq!(
+            ddl_timeout_secs(Duration::from_secs(u32::MAX as u64 + 1)),
+            u32::MAX
+        );
+    }
+
+    #[test]
+    fn test_alter_database_rejects_invalid_trigger_values() {
+        let overflow = format!("{}0", usize::MAX);
+        for key in [
+            "compaction.twcs.trigger_file_num",
+            "compaction.twcs.active_window.trigger_file_num",
+            "compaction.twcs.inactive_window.trigger_file_num",
+            "compaction.twcs.active_window.l1_merge_trigger",
+            "compaction.twcs.inactive_window.l1_merge_trigger",
+        ] {
+            for invalid in ["invalid", "-1", overflow.as_str()] {
+                let kind = PbAlterDatabaseKind::SetDatabaseOptions(api::v1::SetDatabaseOptions {
+                    set_database_options: vec![PbOption {
+                        key: key.to_string(),
+                        value: invalid.to_string(),
+                    }],
+                });
+                let err = AlterDatabaseKind::try_from(kind).unwrap_err();
+                assert!(
+                    matches!(err, error::Error::InvalidSetDatabaseOption { .. }),
+                    "{key}: {invalid}"
+                );
+            }
+            for boundary in ["0", "1", "2"] {
+                let option = PbOption {
+                    key: key.to_string(),
+                    value: boundary.to_string(),
+                };
+                assert_eq!(
+                    SetDatabaseOption::try_from(option).is_ok(),
+                    !key.ends_with("l1_merge_trigger") || boundary == "2",
+                    "{key}: {boundary}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_basic_ser_de_create_table_task() {
         let schema = SchemaBuilder::default().build().unwrap();
         let table_info = test_table_info(1025, "foo", "bar", "baz", Arc::new(schema));
@@ -1844,10 +1967,7 @@ mod tests {
     #[test]
     fn test_undrop_table_task_pb_roundtrip() {
         let expected = UndropTableTask { table_id: 1024 };
-        let request = SubmitDdlTaskRequest::new(
-            QueryContext::default(),
-            DdlTask::UndropTable(expected.clone()),
-        );
+        let request = SubmitDdlTaskRequest::new(DdlTask::UndropTable(expected.clone()));
 
         let pb = PbDdlTaskRequest::try_from(request).unwrap();
         let pb_task = pb.task.unwrap();
@@ -1859,10 +1979,7 @@ mod tests {
     #[test]
     fn test_purge_dropped_table_task_pb_roundtrip() {
         let expected = PurgeDroppedTableTask { table_id: 1024 };
-        let request = SubmitDdlTaskRequest::new(
-            QueryContext::default(),
-            DdlTask::PurgeDroppedTable(expected.clone()),
-        );
+        let request = SubmitDdlTaskRequest::new(DdlTask::PurgeDroppedTable(expected.clone()));
 
         let pb = PbDdlTaskRequest::try_from(request).unwrap();
         let pb_task = pb.task.unwrap();
@@ -2130,5 +2247,11 @@ mod tests {
         assert_eq!(pb_roundtrip.extensions, pb.extensions);
         assert_eq!(pb_roundtrip.channel, pb.channel);
         assert_eq!(pb_roundtrip.snapshot_seqs, pb.snapshot_seqs);
+    }
+
+    #[test]
+    fn test_trigger_reason_deserializes_unknown_value() {
+        let reason: TriggerReason = serde_json::from_str("\"future_reason\"").unwrap();
+        assert_eq!(TriggerReason::Unknown, reason);
     }
 }

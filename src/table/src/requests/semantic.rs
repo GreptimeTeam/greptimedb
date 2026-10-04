@@ -30,6 +30,14 @@
 //! [`crate::requests::validate_table_option`], so they are accepted both on the
 //! ingestion auto-create path and on explicit `CREATE TABLE ... WITH (...)` DDL.
 
+use common_catalog::consts::{
+    RESOURCE_ATTRIBUTES_COLUMN, SCOPE_ATTRIBUTES_COLUMN, SPAN_ATTRIBUTES_COLUMN,
+};
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::{ColumnSchema, Schema};
+
+use crate::requests::TABLE_DATA_MODEL_TRACE_V2;
+
 /// Reserved prefix for every public semantic table-option key.
 pub const SEMANTIC_PREFIX: &str = "greptime.semantic.";
 
@@ -66,8 +74,8 @@ pub const SEMANTIC_METRIC_TYPE: &str = "greptime.semantic.metric.type";
 /// UCUM unit, e.g. `s`, `By`, `{request}`. Discarded by the row encoders, so it
 /// is unrecoverable once ingested.
 pub const SEMANTIC_METRIC_UNIT: &str = "greptime.semantic.metric.unit";
-/// `cumulative` / `delta` (OTel only). Invisible in the metric name, so it is
-/// unrecoverable from the table alone.
+/// Catalog-level `cumulative` / `delta` / `mixed` description for OTLP metrics.
+/// Per-series query behavior is determined from stored row identity instead.
 pub const SEMANTIC_METRIC_TEMPORALITY: &str = "greptime.semantic.metric.temporality";
 /// [`METADATA_QUALITY_DECLARED`] when the protocol stated the type, or
 /// [`METADATA_QUALITY_INFERRED`] when guessed from a name suffix.
@@ -75,6 +83,46 @@ pub const SEMANTIC_METRIC_METADATA_QUALITY: &str = "greptime.semantic.metric.met
 /// Pre-translation OTel name when the table name was Prometheus-ised; the key a
 /// consumer uses to look the metric up in the OTel semantic conventions.
 pub const SEMANTIC_METRIC_ORIGINAL_NAME: &str = "greptime.semantic.metric.original_name";
+
+// ---- Entity keys (open sub-namespace) ----
+
+/// Reserved prefix for the entity-identity sub-namespace:
+/// `greptime.semantic.entity.<type>.{id|descriptive|scope}`. Unlike the rest of
+/// the vocabulary (a closed whitelist), entity types are open-ended (`service`,
+/// `host`, `k8s.pod`, `process`, `agent`, custom, ...), so keys here are validated
+/// by prefix + shape rather than membership. See
+/// `docs/rfcs/2026-06-25-entity-relationships-and-graph-query.md`.
+pub const SEMANTIC_ENTITY_PREFIX: &str = "greptime.semantic.entity.";
+
+/// The well-known entity-identity key auto-stamped on OTLP trace tables; its value
+/// is the `service_name` tag column, declaring the logical `service` entity.
+pub const SEMANTIC_ENTITY_SERVICE_ID: &str = "greptime.semantic.entity.service.id";
+
+/// The role a set of columns plays for an entity: `id` (identifying
+/// attributes), `descriptive`, or `scope`. Columns may be tags or fields; DDL
+/// validation only requires that they exist and render as stable strings
+/// ([`has_stable_string_form`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntityRole {
+    /// Identifying columns. Their **order is part of the identity**: the
+    /// entity id is their values joined in the declared order, so two tables
+    /// naming the same entity must list them the same way (broad to narrow)
+    /// or they name two entities.
+    Id,
+    Descriptive,
+    Scope,
+}
+
+impl EntityRole {
+    fn parse(role: &str) -> Option<Self> {
+        match role {
+            "id" => Some(EntityRole::Id),
+            "descriptive" => Some(EntityRole::Descriptive),
+            "scope" => Some(EntityRole::Scope),
+            _ => None,
+        }
+    }
+}
 
 // ---- Value constants ----
 
@@ -92,6 +140,9 @@ pub const SOURCE_ELASTICSEARCH: &str = "elasticsearch";
 
 pub const METADATA_QUALITY_DECLARED: &str = "declared";
 pub const METADATA_QUALITY_INFERRED: &str = "inferred";
+
+pub const METRIC_TEMPORALITY_CUMULATIVE: &str = "cumulative";
+pub const METRIC_TEMPORALITY_DELTA: &str = "delta";
 
 /// Sentinel for a key that cannot be determined at stamp time.
 pub const SEMANTIC_VALUE_UNKNOWN: &str = "unknown";
@@ -115,13 +166,105 @@ pub const SEMANTIC_OPTION_KEYS: &[&str] = &[
     SEMANTIC_METRIC_ORIGINAL_NAME,
 ];
 
-/// Returns true if `key` is a recognised semantic table-option key (whitelist).
+/// Returns true if `ty` is a syntactically valid entity type, e.g. `service`,
+/// `host`, `k8s.pod`, `service.instance`. An entity type is one or more
+/// dot-separated segments, each a non-empty `[a-z0-9_]+` token. The dotted form
+/// carries the two-entity-layer convention (`service` vs `service.instance`).
+fn is_valid_entity_type(ty: &str) -> bool {
+    !ty.is_empty()
+        && ty.split('.').all(|seg| {
+            !seg.is_empty()
+                && seg
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        })
+}
+
+/// Parses a well-formed entity-identity option key of the shape
+/// `greptime.semantic.entity.<type>.{id|descriptive|scope}` into
+/// `(entity_type, role)`. The `<type>` may itself contain dots; the role is the
+/// final dot-separated segment. This is the single parser of the key format —
+/// DDL validation and the read-time derivation both go through it.
+pub fn parse_entity_option_key(key: &str) -> Option<(&str, EntityRole)> {
+    let rest = key.strip_prefix(SEMANTIC_ENTITY_PREFIX)?;
+    let (ty, role) = rest.rsplit_once('.')?;
+    if !is_valid_entity_type(ty) {
+        return None;
+    }
+    Some((ty, EntityRole::parse(role)?))
+}
+
+/// Returns true if `key` is a well-formed entity-identity option key.
+pub fn is_entity_option_key(key: &str) -> bool {
+    parse_entity_option_key(key).is_some()
+}
+
+/// Resolves a Trace V2 entity reference to a JSON2 root and a literal attribute key.
+/// Everything after the first dot belongs to the key, matching Trace V1's
+/// flattened column names. Existing physical columns take precedence.
+pub fn trace_v2_attribute<'a>(
+    schema: &Schema,
+    data_model: Option<&str>,
+    column: &'a str,
+) -> Option<(&'a str, &'a str)> {
+    if data_model != Some(TABLE_DATA_MODEL_TRACE_V2)
+        || schema.column_schema_by_name(column).is_some()
+    {
+        return None;
+    }
+    let (root, key) = column.split_once('.')?;
+    (!key.is_empty()
+        && schema
+            .column_schema_by_name(root)
+            .is_some_and(is_v2_attribute_column))
+    .then_some((root, key))
+}
+
+fn is_v2_attribute_column(schema: &ColumnSchema) -> bool {
+    matches!(
+        schema.name.as_str(),
+        RESOURCE_ATTRIBUTES_COLUMN | SCOPE_ATTRIBUTES_COLUMN | SPAN_ATTRIBUTES_COLUMN
+    ) && schema.data_type.is_json2()
+}
+
+/// Returns true if a column of `data_type` renders as a stable string — the
+/// requirement for entity id/descriptive/scope columns. The read-time
+/// derivation casts them to strings, so a type without a stable string form
+/// would fail only when the graph is scanned; DDL validation rejects it up
+/// front instead.
+pub fn has_stable_string_form(data_type: &ConcreteDataType) -> bool {
+    !matches!(
+        data_type,
+        ConcreteDataType::Binary(_)
+            | ConcreteDataType::Json(_)
+            | ConcreteDataType::Vector(_)
+            | ConcreteDataType::List(_)
+            | ConcreteDataType::Struct(_)
+            | ConcreteDataType::Dictionary(_)
+            | ConcreteDataType::Null(_)
+    )
+}
+
+/// Tokenizes an entity option's comma-separated column list (trimmed, empty
+/// tokens dropped). [`validate_semantic_option`] rejects empty tokens at DDL
+/// time, so readers only ever drop what validation already refused.
+pub fn parse_entity_columns(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|column| !column.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// Returns true if `key` is a recognised semantic table-option key.
 ///
-/// Note this is membership, not a prefix test: unknown keys under
-/// [`SEMANTIC_PREFIX`] are rejected, and the internal
-/// [`SEMANTIC_PER_TABLE_INDEX_KEY`] (outside the prefix) never matches.
+/// Two acceptance rules: membership in the closed [`SEMANTIC_OPTION_KEYS`]
+/// whitelist, OR the open entity sub-namespace ([`is_entity_option_key`], validated
+/// by prefix + shape). Everything else under [`SEMANTIC_PREFIX`] is rejected, and
+/// the internal [`SEMANTIC_PER_TABLE_INDEX_KEY`] (outside the prefix) never matches.
 pub fn is_semantic_option_key(key: &str) -> bool {
-    SEMANTIC_OPTION_KEYS.contains(&key)
+    SEMANTIC_OPTION_KEYS.contains(&key) || is_entity_option_key(key)
 }
 
 /// Validates a `greptime.semantic.*` option's `value` against its allowed domain.
@@ -129,9 +272,15 @@ pub fn is_semantic_option_key(key: &str) -> bool {
 /// Open-value keys (unit, original_name, pipeline, conventions) accept any
 /// non-empty string. Closed-domain keys accept a fixed set, plus the `unknown`
 /// sentinel, plus `mixed` for the keys where one long-lived table can
-/// legitimately see multiple values. Keys not in [`SEMANTIC_OPTION_KEYS`] are
-/// rejected.
+/// legitimately see multiple values. Entity keys ([`is_entity_option_key`]) take a
+/// comma-separated column-name list (each token non-empty); column existence and
+/// the stable-string-form rule for entity columns are enforced later against
+/// the table schema at DDL time, not here. Keys that are neither whitelisted nor a well-formed entity key
+/// are rejected.
 pub fn validate_semantic_option(key: &str, value: &str) -> bool {
+    if is_entity_option_key(key) {
+        return !value.is_empty() && value.split(',').all(|column| !column.trim().is_empty());
+    }
     match key {
         SEMANTIC_PIPELINE
         | SEMANTIC_SOURCE_VERSION
@@ -166,7 +315,10 @@ pub fn validate_semantic_option(key: &str, value: &str) -> bool {
                 | "unknown"
         ),
         SEMANTIC_METRIC_TEMPORALITY => {
-            matches!(value, "cumulative" | "delta" | "mixed" | "unknown")
+            matches!(
+                value,
+                METRIC_TEMPORALITY_CUMULATIVE | METRIC_TEMPORALITY_DELTA | "mixed" | "unknown"
+            )
         }
         SEMANTIC_METRIC_METADATA_QUALITY => matches!(value, "declared" | "inferred" | "unknown"),
 
@@ -176,7 +328,54 @@ pub fn validate_semantic_option(key: &str, value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use datatypes::types::JsonType;
+
     use super::*;
+
+    #[test]
+    fn test_trace_v2_attribute_references() {
+        let schema = Schema::new(vec![
+            ColumnSchema::new(
+                RESOURCE_ATTRIBUTES_COLUMN,
+                ConcreteDataType::Json(JsonType::null()),
+                true,
+            ),
+            ColumnSchema::new(
+                SCOPE_ATTRIBUTES_COLUMN,
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                "resource_attributes.physical",
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+        ]);
+        let model = Some(TABLE_DATA_MODEL_TRACE_V2);
+        for key in ["host.name", "host..name", "host[0]", "host.*", r#"a"b\c.d"#] {
+            let column = format!("resource_attributes.{key}");
+            assert_eq!(
+                trace_v2_attribute(&schema, model, &column),
+                Some((RESOURCE_ATTRIBUTES_COLUMN, key))
+            );
+        }
+        for column in [
+            "resource_attributes",
+            "resource_attributes.",
+            "scope_attributes.name",
+            "span_attributes.name",
+            "resource_attributes.physical",
+            "missing.key",
+        ] {
+            assert_eq!(trace_v2_attribute(&schema, model, column), None, "{column}");
+        }
+        for model in [None, Some(crate::requests::TABLE_DATA_MODEL_TRACE_V1)] {
+            assert_eq!(
+                trace_v2_attribute(&schema, model, "resource_attributes.host.name"),
+                None
+            );
+        }
+    }
 
     #[test]
     fn test_is_semantic_option_key() {
@@ -272,5 +471,68 @@ mod tests {
                 "empty value should never validate for {key}"
             );
         }
+    }
+
+    #[test]
+    fn test_entity_option_key() {
+        // Well-formed entity keys are accepted by the open sub-namespace, and are
+        // therefore recognised as semantic option keys.
+        for key in [
+            "greptime.semantic.entity.service.id",
+            "greptime.semantic.entity.k8s.pod.id",
+            "greptime.semantic.entity.service.instance.descriptive",
+            "greptime.semantic.entity.host.scope",
+            "greptime.semantic.entity.agent.id",
+        ] {
+            assert!(is_entity_option_key(key), "should accept {key}");
+            assert!(is_semantic_option_key(key), "should recognise {key}");
+        }
+
+        // Malformed: empty type segment, bogus role, missing role, bare prefix,
+        // invalid (uppercase) charset in the type.
+        for key in [
+            "greptime.semantic.entity..id",
+            "greptime.semantic.entity.service.bogusrole",
+            "greptime.semantic.entity.service",
+            "greptime.semantic.entity.",
+            "greptime.semantic.entity.Service.id",
+        ] {
+            assert!(!is_entity_option_key(key), "should reject {key}");
+            assert!(!is_semantic_option_key(key), "should not recognise {key}");
+        }
+
+        // A non-entity semantic key is not an entity key.
+        assert!(!is_entity_option_key(SEMANTIC_SIGNAL_TYPE));
+
+        // Drift guard: the auto-stamped constant is a well-formed entity key.
+        assert!(is_entity_option_key(SEMANTIC_ENTITY_SERVICE_ID));
+        assert!(is_semantic_option_key(SEMANTIC_ENTITY_SERVICE_ID));
+    }
+
+    #[test]
+    fn test_validate_entity_option() {
+        // Single- and composite-id column lists validate.
+        assert!(validate_semantic_option(
+            "greptime.semantic.entity.service.id",
+            "service_name"
+        ));
+        assert!(validate_semantic_option(
+            "greptime.semantic.entity.process.id",
+            "pid,start_time"
+        ));
+        // Empty value and blank/empty tokens do not.
+        assert!(!validate_semantic_option(
+            "greptime.semantic.entity.service.id",
+            ""
+        ));
+        assert!(!validate_semantic_option(
+            "greptime.semantic.entity.process.id",
+            "pid,"
+        ));
+        // A malformed entity key validates to false regardless of value.
+        assert!(!validate_semantic_option(
+            "greptime.semantic.entity.service.bogusrole",
+            "service_name"
+        ));
     }
 }

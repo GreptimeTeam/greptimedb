@@ -336,6 +336,9 @@ pub mod mock {
                     }),
                 )
                 .unwrap();
+            // The mock transport is a single in-memory duplex connection, so both lanes
+            // must resolve through this one pre-wired manager.
+            #[allow(deprecated)]
             Client::with_manager_and_urls(channel_manager, vec![datanode.addr.clone()])
         }
     }
@@ -547,6 +550,8 @@ pub mod test_data {
             leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
             region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
             soft_drop_enabled: false,
+            soft_drop_retention: None,
+            create_database_metadata_committer: None,
         }
     }
 }

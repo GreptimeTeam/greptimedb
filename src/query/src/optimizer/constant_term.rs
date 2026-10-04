@@ -17,7 +17,7 @@ use std::fmt::Formatter;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use arrow::array::{AsArray, BooleanArray};
+use arrow::array::BooleanArray;
 use common_function::scalars::matches_term::MatchesTermFinder;
 use datafusion::config::ConfigOptions;
 use datafusion::error::Result as DfResult;
@@ -29,6 +29,7 @@ use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_expr::ColumnarValue;
 use datafusion_physical_expr::expressions::Literal;
 use datafusion_physical_expr::{PhysicalExpr, ScalarFunctionExpr};
+use datatypes::arrow_array::string_array_value_at_index;
 
 /// A physical expression that uses a pre-compiled term finder for the `matches_term` function.
 ///
@@ -75,10 +76,6 @@ impl PartialEq for PreCompiledMatchesTermExpr {
 impl Eq for PreCompiledMatchesTermExpr {}
 
 impl PhysicalExpr for PreCompiledMatchesTermExpr {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn data_type(
         &self,
         _input_schema: &arrow_schema::Schema,
@@ -98,11 +95,10 @@ impl PhysicalExpr for PreCompiledMatchesTermExpr {
 
         let text_value = self.text.evaluate(batch)?;
         let array = text_value.into_array(num_rows)?;
-        let str_array = array.as_string::<i32>();
 
         let mut result = BooleanArray::builder(num_rows);
-        for text in str_array {
-            match text {
+        for index in 0..array.len() {
+            match string_array_value_at_index(&array, index) {
                 Some(text) => {
                     result.append_value(self.finder.find(text));
                 }
@@ -166,10 +162,10 @@ impl PhysicalOptimizerRule for MatchesConstantTermOptimizer {
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         let res = plan
             .transform_down(&|plan: Arc<dyn ExecutionPlan>| {
-                if let Some(filter) = plan.as_any().downcast_ref::<FilterExec>() {
+                if let Some(filter) = plan.downcast_ref::<FilterExec>() {
                     let pred = filter.predicate().clone();
                     let new_pred = pred.transform_down(&|expr: Arc<dyn PhysicalExpr>| {
-                        if let Some(func) = expr.as_any().downcast_ref::<ScalarFunctionExpr>() {
+                        if let Some(func) = expr.downcast_ref::<ScalarFunctionExpr>() {
                             if !func.name().eq_ignore_ascii_case("matches_term") {
                                 return Ok(Transformed::no(expr));
                             }
@@ -178,7 +174,7 @@ impl PhysicalOptimizerRule for MatchesConstantTermOptimizer {
                                 return Ok(Transformed::no(expr));
                             }
 
-                            if let Some(lit) = args[1].as_any().downcast_ref::<Literal>()
+                            if let Some(lit) = args[1].downcast_ref::<Literal>()
                                 && let ScalarValue::Utf8(Some(term)) = lit.value()
                             {
                                 let finder = MatchesTermFinder::new(term);
@@ -233,8 +229,8 @@ impl PhysicalOptimizerRule for MatchesConstantTermOptimizer {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{ArrayRef, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::array::{ArrayRef, StringArray, StringDictionaryBuilder};
+    use arrow::datatypes::{DataType, Field, Schema, UInt32Type};
     use arrow::record_batch::RecordBatch;
     use catalog::RegisterTableRequest;
     use catalog::memory::MemoryCatalogManager;
@@ -248,6 +244,7 @@ mod tests {
     use datafusion::physical_plan::get_plan_string;
     use datafusion_common::{Column, DFSchema};
     use datafusion_expr::expr::ScalarFunction;
+    use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
     use datafusion_expr::{Expr, Literal, ScalarUDF};
     use datafusion_physical_expr::{ScalarFunctionExpr, create_physical_expr};
     use datatypes::prelude::ConcreteDataType;
@@ -343,6 +340,7 @@ mod tests {
             )),
             &DFSchema::try_from(batch.schema().clone()).unwrap(),
             &Default::default(),
+            &PhysicalPlanningContext::default(),
         )
         .unwrap();
 
@@ -357,15 +355,39 @@ mod tests {
             .optimize(Arc::new(filter), &Default::default())
             .unwrap();
 
-        let optimized_filter = optimized_plan
-            .as_any()
-            .downcast_ref::<FilterExec>()
-            .unwrap();
+        let optimized_filter = optimized_plan.downcast_ref::<FilterExec>().unwrap();
         let predicate = optimized_filter.predicate();
 
         // The predicate should be a PreCompiledMatchesTermExpr
-        assert!(
-            std::any::TypeId::of::<PreCompiledMatchesTermExpr>() == predicate.as_any().type_id()
+        assert!(predicate.is::<PreCompiledMatchesTermExpr>());
+    }
+
+    #[test]
+    fn test_precompiled_matches_term_with_dictionary() {
+        let mut text = StringDictionaryBuilder::<UInt32Type>::new();
+        text.append_value("hello world");
+        text.append_value("greeting");
+        text.append_value("hello there");
+        text.append_null();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "text",
+            DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8)),
+            true,
+        )]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(text.finish())]).unwrap();
+        let expr = PreCompiledMatchesTermExpr {
+            text: Arc::new(datafusion_physical_expr::expressions::Column::new(
+                "text", 0,
+            )),
+            term: "hello".to_string(),
+            finder: MatchesTermFinder::new("hello"),
+            probes: vec!["hello".to_string()],
+        };
+
+        let result = expr.evaluate(&batch).unwrap().into_array(4).unwrap();
+        assert_eq!(
+            result.as_any().downcast_ref::<BooleanArray>().unwrap(),
+            &BooleanArray::from(vec![Some(true), Some(false), Some(true), None])
         );
     }
 
@@ -384,6 +406,7 @@ mod tests {
             )),
             &DFSchema::try_from(batch.schema().clone()).unwrap(),
             &Default::default(),
+            &PhysicalPlanningContext::default(),
         )
         .unwrap();
 
@@ -397,14 +420,11 @@ mod tests {
             .optimize(Arc::new(filter), &Default::default())
             .unwrap();
 
-        let optimized_filter = optimized_plan
-            .as_any()
-            .downcast_ref::<FilterExec>()
-            .unwrap();
+        let optimized_filter = optimized_plan.downcast_ref::<FilterExec>().unwrap();
         let predicate = optimized_filter.predicate();
 
         // The predicate should still be a ScalarFunctionExpr
-        assert!(std::any::TypeId::of::<ScalarFunctionExpr>() == predicate.as_any().type_id());
+        assert!(predicate.is::<ScalarFunctionExpr>());
     }
 
     #[tokio::test]

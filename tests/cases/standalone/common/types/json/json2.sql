@@ -6,18 +6,6 @@ create table json2_table (
     'sst_format' = 'flat',
 );
 
-insert into json2_table (ts, j) values (101, '[1, 2, 3]');
-
-insert into json2_table (ts, j) values (102, '"hello"');
-
-insert into json2_table (ts, j) values (103, '42');
-
-insert into json2_table (ts, j) values (104, 'true');
-
-insert into json2_table (ts, j) values (105, 'null');
-
-insert into json2_table (ts, j) values (1, '{}');
-
 insert into json2_table (ts, j)
 values (1, '{"a": {"b": 1}, "c": "s1", "d": [{"e": {"f": 0.1}}]}'),
        (2, '{"a": {"b": -2}, "c": "s2", "d": [{"e": {"f": 0.2}}]}');
@@ -56,68 +44,116 @@ select j.a.b from json2_table order by ts;
 
 select j.a, j.a.x from json2_table order by ts;
 
+select j, j.a from json2_table order by ts;
+
+select j from json2_table where j.a.b = 1;
+
 select j.c, j.y from json2_table order by ts;
 
 select j from json2_table order by ts;
 
 select * from json2_table order by ts;
 
+select count(*) from (select j from json2_table group by j);
+
+select count(*) from (select distinct j from json2_table);
+
+select ts, j from (select ts, j from json2_table) order by ts;
+
+select
+    ts,
+    j,
+    row_number() over (order by ts) as row_num
+from json2_table
+order by ts;
+
+select json_get(j, '') from json2_table order by ts;
+
+select json_get(j, '$') from json2_table order by ts;
+
+select json_get(j, '.') from json2_table order by ts;
+
+select json_get(j, '$.') from json2_table order by ts;
+
 select j.a.b + 1 from json2_table order by ts;
-
-select abs(j.a.b) from json2_table order by ts;
-
--- "j.c" is of type "String", "abs" is expected to be all "null"s.
-select abs(j.c) from json2_table order by ts;
 
 select j.d from json2_table order by ts;
 
 drop table json2_table;
 
-create table json2_without_append_mode (
-    ts timestamp time index,
-    j json2
-);
-
-create table json2_append_mode_false (
+-- A JSON null in a dynamically typed field must remain SQL NULL when the
+-- field is projected to the default string type, rather than becoming "null".
+create table json2_variant_null (
     ts timestamp time index,
     j json2
 ) with (
-    'append_mode' = 'false'
+    'append_mode' = 'true',
+    'sst_format' = 'flat'
 );
 
-create table json2_alter_non_append (
-    ts timestamp time index
-);
+insert into json2_variant_null values
+    (1, '{"payload":{"value":1}}'),
+    (2, '{"payload":"text"}'),
+    (3, '{"payload":null}');
 
-alter table json2_alter_non_append add column j json2;
+select ts, j.payload, j.payload is null as payload_is_null
+from json2_variant_null
+order by ts;
 
-drop table json2_alter_non_append;
+admin flush_table('json2_variant_null');
 
-create table json2_default_null_ok (
+select ts, j.payload, j.payload is null as payload_is_null
+from json2_variant_null
+order by ts;
+
+drop table json2_variant_null;
+
+create table json2_finite_paths (
     ts timestamp time index,
     j json2(
-        a int64 null default null
+        max_auto_expanded_paths = 1,
+        hint string
     )
-) with (
-    'append_mode' = 'true'
+)
+with (
+    'append_mode' = 'true',
+    'sst_format' = 'flat'
 );
 
-drop table json2_default_null_ok;
+show create table json2_finite_paths;
 
-create table json2_default_null_check (
-    ts timestamp time index,
-    j json2(
-        a int64 not null default null
-    )
-);
+insert into json2_finite_paths values
+    (1, '{"hint":"h1","alpha":1,"conflict":1}'),
+    (2, '{"hint":"h2","alpha":2,"conflict":"text"}');
 
-create table json2_set_append_mode_false (
-    ts timestamp time index,
-    j json2
-) with (
-    'append_mode' = 'true'
-);
+admin flush_table('json2_finite_paths');
 
-alter table json2_set_append_mode_false set 'append_mode' = 'false';
+insert into json2_finite_paths values
+    (3, '{"hint":"h3","beta":3,"conflict":true}'),
+    (4, '{"hint":"h4","beta":4,"conflict":"other"}');
 
-drop table json2_set_append_mode_false;
+admin flush_table('json2_finite_paths');
+
+select
+    ts,
+    j,
+    j.hint,
+    j.alpha::bigint as alpha,
+    j.beta::bigint as beta,
+    j.conflict
+from json2_finite_paths
+order by ts;
+
+admin compact_table('json2_finite_paths');
+
+select
+    ts,
+    j,
+    j.hint,
+    j.alpha::bigint as alpha,
+    j.beta::bigint as beta,
+    j.conflict
+from json2_finite_paths
+order by ts;
+
+drop table json2_finite_paths;

@@ -12,12 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(int_roundings)]
-#![feature(try_blocks)]
-#![feature(stmt_expr_attributes)]
-#![feature(iterator_try_collect)]
-#![feature(box_patterns)]
-
 mod analyze;
 pub mod datafusion;
 pub mod dist_plan;
@@ -45,7 +39,7 @@ pub(crate) mod test_util;
 #[cfg(test)]
 mod tests;
 
-pub use crate::analyze::analyze_plan_metrics_to_json_value;
+pub use crate::analyze::{analyze_plan_metrics_to_json_value, dist_analyze_output_schema};
 pub use crate::datafusion::DfContextProviderAdapter;
 pub use crate::query_engine::{
     QueryEngine, QueryEngineContext, QueryEngineFactory, QueryEngineRef,

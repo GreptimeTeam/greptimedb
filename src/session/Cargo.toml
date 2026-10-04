@@ -4,9 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-testing = []
-
 [lints]
 workspace = true
 
@@ -15,6 +12,7 @@ ahash.workspace = true
 api.workspace = true
 arc-swap = "1.5"
 auth.workspace = true
+common-base.workspace = true
 common-catalog.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
@@ -28,3 +26,9 @@ derive_more.workspace = true
 snafu.workspace = true
 sql.workspace = true
 uuid.workspace = true
+
+[package.metadata.cargo-shear]
+# `common-error` is required by `common-macro`'s `stack_trace_debug`: the
+# generated code references `::common_error` paths, so it must stay a direct
+# dependency.
+ignored = ["common-error"]

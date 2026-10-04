@@ -30,6 +30,8 @@ use crate::types::json_type::{JsonNativeType, JsonNumberType, is_include};
 use crate::types::{StructField, StructType};
 use crate::value::{ListValue, StructValue, Value};
 
+pub type JsonObjectVariant = BTreeMap<String, JsonVariant>;
+
 /// Number in json, can be a positive integer, a negative integer, or a floating number.
 /// Each of which is represented as `u64`, `i64` and `f64`.
 ///
@@ -42,7 +44,7 @@ pub enum JsonNumber {
 }
 
 impl JsonNumber {
-    fn as_u64(&self) -> Option<u64> {
+    pub(crate) fn as_u64(&self) -> Option<u64> {
         match self {
             JsonNumber::PosInt(n) => Some(*n),
             JsonNumber::NegInt(n) => (*n >= 0).then_some(*n as u64),
@@ -124,7 +126,7 @@ pub enum JsonVariant {
     Number(JsonNumber),
     String(String),
     Array(Vec<JsonVariant>),
-    Object(BTreeMap<String, JsonVariant>),
+    Object(JsonObjectVariant),
     /// A special "variant" value of JSON, to represent a union result of conflict JSON type values.
     Variant(Vec<u8>),
 }
@@ -160,7 +162,8 @@ impl JsonVariant {
         }
     }
 
-    fn contains_empty_object(&self) -> bool {
+    /// Returns whether this value recursively contains an empty object.
+    pub(crate) fn contains_empty_object(&self) -> bool {
         match self {
             JsonVariant::Array(array) => array.iter().any(JsonVariant::contains_empty_object),
             JsonVariant::Object(object) => {
@@ -317,13 +320,6 @@ impl JsonValue {
         }
     }
 
-    pub(crate) fn new_with(json_variant: JsonVariant, json_type: Arc<JsonNativeType>) -> Self {
-        Self {
-            json_type: OnceLock::from(json_type),
-            json_variant,
-        }
-    }
-
     pub(crate) fn data_type(&self) -> ConcreteDataType {
         ConcreteDataType::json2(self.json_type().clone())
     }
@@ -381,10 +377,6 @@ impl JsonValue {
 
     pub fn into_variant(self) -> JsonVariant {
         self.json_variant
-    }
-
-    pub(crate) fn variant(&self) -> &JsonVariant {
-        &self.json_variant
     }
 
     pub(crate) fn into_value(self) -> Value {
@@ -732,12 +724,7 @@ where
     I: IntoIterator<Item = (K, JsonNativeType)>,
     K: Into<String>,
 {
-    let mut fields = fields.into_iter().peekable();
-    if fields.peek().is_none() {
-        JsonNativeType::Null
-    } else {
-        JsonNativeType::Object(fields.map(|(k, v)| (k.into(), v)).collect())
-    }
+    JsonNativeType::Object(fields.into_iter().map(|(k, v)| (k.into(), v)).collect())
 }
 
 impl From<()> for JsonVariantRef<'_> {
@@ -826,6 +813,15 @@ pub struct JsonValueRef<'a> {
 impl<'a> JsonValueRef<'a> {
     pub fn null() -> Self {
         ().into()
+    }
+
+    /// Creates a JSON value reference with its precomputed native type.
+    /// The native type must describe `json_variant` exactly.
+    pub fn new_with_type(json_variant: JsonVariantRef<'a>, json_type: JsonNativeType) -> Self {
+        Self {
+            json_type: OnceLock::from(Arc::new(json_type)),
+            json_variant,
+        }
     }
 
     pub(crate) fn data_type(&self) -> ConcreteDataType {
@@ -974,11 +970,10 @@ mod tests {
             ])))
         );
 
-        // Empty objects have native type Null, but the value still needs alignment
-        // before converting into a typed struct value.
+        // Empty objects have an empty Object type and remain distinct from Null.
         let expected = JsonNativeType::Object(JsonObjectType::from([(
             "empty".to_string(),
-            JsonNativeType::Null,
+            JsonNativeType::Object(JsonObjectType::default()),
         )]));
         let mut value = parse_json_value(r#"{"empty":{}}"#);
         assert_eq!(value.json_type(), &expected);
@@ -987,7 +982,7 @@ mod tests {
             value,
             JsonValue::from(JsonVariant::Object(BTreeMap::from([(
                 "empty".to_string(),
-                JsonVariant::Null,
+                JsonVariant::Object(BTreeMap::default()),
             )])))
         );
 

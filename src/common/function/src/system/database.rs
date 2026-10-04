@@ -20,38 +20,90 @@ use crate::function::{Function, find_function_context};
 use crate::system::define_nullary_udf;
 
 define_nullary_udf!(DatabaseFunction);
+define_nullary_udf!(SchemaFunction);
+define_nullary_udf!(UserFunction);
+define_nullary_udf!(CurrentUserFunction);
+define_nullary_udf!(SystemUserFunction);
 define_nullary_udf!(ReadPreferenceFunction);
 define_nullary_udf!(PgBackendPidFunction);
 define_nullary_udf!(ConnectionIdFunction);
 
 const DATABASE_FUNCTION_NAME: &str = "database";
+const SCHEMA_FUNCTION_NAME: &str = "schema";
+const USER_FUNCTION_NAME: &str = "user";
+const CURRENT_USER_FUNCTION_NAME: &str = "current_user";
+const SYSTEM_USER_FUNCTION_NAME: &str = "system_user";
 const READ_PREFERENCE_FUNCTION_NAME: &str = "read_preference";
 const PG_BACKEND_PID: &str = "pg_backend_pid";
 const CONNECTION_ID: &str = "connection_id";
 
-impl Function for DatabaseFunction {
-    fn name(&self) -> &str {
-        DATABASE_FUNCTION_NAME
-    }
+macro_rules! impl_current_schema_function {
+    ($name: ident, $fn_name: expr) => {
+        impl Function for $name {
+            fn name(&self) -> &str {
+                $fn_name
+            }
 
-    fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
-        Ok(DataType::Utf8View)
-    }
+            fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+                Ok(DataType::Utf8View)
+            }
 
-    fn signature(&self) -> &Signature {
-        &self.signature
-    }
+            fn signature(&self) -> &Signature {
+                &self.signature
+            }
 
-    fn invoke_with_args(
-        &self,
-        args: ScalarFunctionArgs,
-    ) -> datafusion_common::Result<ColumnarValue> {
-        let func_ctx = find_function_context(&args)?;
-        let db = func_ctx.query_ctx.current_schema();
+            fn invoke_with_args(
+                &self,
+                args: ScalarFunctionArgs,
+            ) -> datafusion_common::Result<ColumnarValue> {
+                let func_ctx = find_function_context(&args)?;
+                let db = func_ctx.query_ctx.current_schema();
 
-        Ok(ColumnarValue::Scalar(ScalarValue::Utf8View(Some(db))))
-    }
+                Ok(ColumnarValue::Scalar(ScalarValue::Utf8View(Some(db))))
+            }
+        }
+    };
 }
+
+impl_current_schema_function!(DatabaseFunction, DATABASE_FUNCTION_NAME);
+// MySQL's `SCHEMA()` is a synonym for `DATABASE()`.
+impl_current_schema_function!(SchemaFunction, SCHEMA_FUNCTION_NAME);
+
+macro_rules! impl_current_user_function {
+    ($name: ident, $fn_name: expr) => {
+        impl Function for $name {
+            fn name(&self) -> &str {
+                $fn_name
+            }
+
+            fn return_type(&self, _: &[DataType]) -> datafusion_common::Result<DataType> {
+                Ok(DataType::Utf8View)
+            }
+
+            fn signature(&self) -> &Signature {
+                &self.signature
+            }
+
+            fn invoke_with_args(
+                &self,
+                args: ScalarFunctionArgs,
+            ) -> datafusion_common::Result<ColumnarValue> {
+                let func_ctx = find_function_context(&args)?;
+                let user = func_ctx.query_ctx.current_user();
+
+                Ok(ColumnarValue::Scalar(ScalarValue::Utf8View(Some(
+                    user.username().to_string(),
+                ))))
+            }
+        }
+    };
+}
+
+// GreptimeDB has no notion of a user switching identity mid-session, so `USER()`,
+// `CURRENT_USER()` and `SYSTEM_USER()` all report the authenticated user.
+impl_current_user_function!(UserFunction, USER_FUNCTION_NAME);
+impl_current_user_function!(CurrentUserFunction, CURRENT_USER_FUNCTION_NAME);
+impl_current_user_function!(SystemUserFunction, SYSTEM_USER_FUNCTION_NAME);
 
 impl Function for ReadPreferenceFunction {
     fn name(&self) -> &str {

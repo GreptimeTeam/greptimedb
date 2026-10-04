@@ -17,6 +17,7 @@ mod memory_table;
 pub mod numbers_table_provider;
 pub mod pg_catalog;
 pub mod predicate;
+pub mod semantic_graph;
 mod utils;
 
 use std::collections::HashMap;
@@ -144,12 +145,8 @@ impl DataSource for SystemTableDataSource {
         &self,
         request: ScanRequest,
     ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
-        let projection = request
-            .projection_input
-            .as_ref()
-            .map(|input| input.projection.clone());
-
-        let projected_schema = match projection.as_ref() {
+        let projection = request.projection.clone();
+        let projected_schema = match request.projection.as_ref() {
             Some(projection) => self.try_project(projection)?,
             None => self.table.schema(),
         };

@@ -12,6 +12,10 @@ We highly recommend using the self-monitoring feature provided by [GreptimeDB Op
 
   - `dashboards/metrics/standalone/dashboard.json`: The Grafana dashboard for the standalone GreptimeDB instance. **It's generated from the `cluster/dashboard.json` by removing the instance filter through the `make dashboards` command**. Read the [dashboard.md](./dashboards/metrics/standalone/dashboard.md) for more details.
 
+- **Events Dashboards**
+
+  - `dashboards/events/dashboard.json`: The Grafana dashboard for procedure and maintenance events. It includes DDL, Batch GC, WAL Prune, Repartition, and Region Migration views.
+
 - **Logs Dashboard**
 
   The `dashboards/logs/dashboard.json` provides a comprehensive Grafana dashboard for visualizing GreptimeDB logs. To utilize this dashboard effectively, you need to collect logs in JSON format from your GreptimeDB instances and store them in a dedicated GreptimeDB instance.
@@ -51,6 +55,7 @@ For easier dashboard maintenance, we utilize the [`dac`](https://github.com/zyy1
 
 - `dashboards/metrics/cluster/dashboard.yaml`: The intermediate dashboard file for the GreptimeDB cluster.
 - `dashboards/metrics/standalone/dashboard.yaml`: The intermediate dashboard file for standalone GreptimeDB instances.
+
 
 ## Data Sources
 

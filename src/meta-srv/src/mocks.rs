@@ -88,11 +88,51 @@ pub async fn mock(
     datanode_clients: Option<Arc<NodeClients>>,
     in_memory: Option<ResettableKvBackendRef>,
 ) -> MockInfo {
+    mock_inner(
+        opts,
+        kv_backend,
+        selector,
+        datanode_clients,
+        in_memory,
+        None,
+    )
+    .await
+}
+
+pub async fn mock_with_client_channel_config(
+    opts: MetasrvOptions,
+    kv_backend: KvBackendRef,
+    selector: Option<SelectorRef>,
+    datanode_clients: Option<Arc<NodeClients>>,
+    in_memory: Option<ResettableKvBackendRef>,
+    client_channel_config: ChannelConfig,
+) -> MockInfo {
+    mock_inner(
+        opts,
+        kv_backend,
+        selector,
+        datanode_clients,
+        in_memory,
+        Some(client_channel_config),
+    )
+    .await
+}
+
+async fn mock_inner(
+    opts: MetasrvOptions,
+    kv_backend: KvBackendRef,
+    selector: Option<SelectorRef>,
+    datanode_clients: Option<Arc<NodeClients>>,
+    in_memory: Option<ResettableKvBackendRef>,
+    client_channel_config: Option<ChannelConfig>,
+) -> MockInfo {
     let server_addr = opts.grpc.server_addr.clone();
     let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
 
     table_metadata_manager.init().await.unwrap();
 
+    let grpc_config = opts.grpc.as_config();
+    let grpc_options = opts.grpc.clone();
     let builder = MetasrvBuilder::new()
         .options(opts)
         .kv_backend(kv_backend.clone());
@@ -121,22 +161,43 @@ pub async fn mock(
 
     let _handle = tokio::spawn(async move {
         let mut router = tonic::transport::Server::builder();
-        let router = add_compressed_service!(router, HeartbeatServer::from_arc(service.clone()));
-        let router = add_compressed_service!(router, StoreServer::from_arc(service.clone()));
+        let router = add_compressed_service!(
+            router,
+            HeartbeatServer::from_arc(service.clone()),
+            grpc_config
+        );
         let router =
-            add_compressed_service!(router, ProcedureServiceServer::from_arc(service.clone()));
-        let router = add_compressed_service!(router, ClusterServer::from_arc(service.clone()));
-        let router = add_compressed_service!(router, ConfigServer::from_arc(service.clone()));
+            add_compressed_service!(router, StoreServer::from_arc(service.clone()), grpc_config);
+        let router = add_compressed_service!(
+            router,
+            ProcedureServiceServer::from_arc(service.clone()),
+            grpc_config
+        );
+        let router = add_compressed_service!(
+            router,
+            ClusterServer::from_arc(service.clone()),
+            grpc_config
+        );
+        let router =
+            add_compressed_service!(router, ConfigServer::from_arc(service.clone()), grpc_config);
         router
             .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))
             .await
     });
 
-    let config = ChannelConfig::new()
-        // Use an long timeout to prevent test failures due to slow operations (e.g., when testing with S3).
-        .timeout(Some(Duration::from_secs(60)))
-        .connect_timeout(Duration::from_secs(10))
-        .tcp_nodelay(true);
+    // Keep the mock client's codec limits aligned with the server by default.
+    let config = client_channel_config.unwrap_or_else(|| {
+        let config = ChannelConfig::new()
+            // Use an long timeout to prevent test failures due to slow operations (e.g., when testing with S3).
+            .timeout(Some(Duration::from_secs(60)))
+            .connect_timeout(Duration::from_secs(10))
+            .tcp_nodelay(true);
+        ChannelConfig {
+            max_recv_message_size: grpc_options.max_recv_message_size,
+            max_send_message_size: grpc_options.max_send_message_size,
+            ..config
+        }
+    });
     let channel_manager = ChannelManager::with_config(config, None);
 
     // Move client to an option so we can _move_ the inner value

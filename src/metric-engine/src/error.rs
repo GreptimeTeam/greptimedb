@@ -43,6 +43,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to clean up mito region, region type: {}", region_type))]
+    CleanUpMitoRegion {
+        region_type: String,
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to batch open mito region"))]
     BatchOpenMitoRegion {
         source: BoxedError,
@@ -165,6 +173,13 @@ pub enum Error {
 
     #[snafu(display("Mito flush operation fails"))]
     MitoFlushOperation {
+        source: BoxedError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Mito truncate operation fails"))]
+    MitoTruncateOperation {
         source: BoxedError,
         #[snafu(implicit)]
         location: Location,
@@ -438,10 +453,12 @@ impl ErrorExt for Error {
 
             CreateMitoRegion { source, .. }
             | OpenMitoRegion { source, .. }
+            | CleanUpMitoRegion { source, .. }
             | CloseMitoRegion { source, .. }
             | MitoReadOperation { source, .. }
             | MitoWriteOperation { source, .. }
             | MitoFlushOperation { source, .. }
+            | MitoTruncateOperation { source, .. }
             | MitoSyncOperation { source, .. }
             | MitoEnterStagingOperation { source, .. }
             | BatchOpenMitoRegion { source, .. }
@@ -471,12 +488,14 @@ impl ErrorExt for Error {
         match self {
             CreateMitoRegion { source, .. }
             | OpenMitoRegion { source, .. }
+            | CleanUpMitoRegion { source, .. }
             | BatchOpenMitoRegion { source, .. }
             | BatchCatchupMitoRegion { source, .. }
             | CloseMitoRegion { source, .. }
             | MitoReadOperation { source, .. }
             | MitoWriteOperation { source, .. }
             | MitoFlushOperation { source, .. }
+            | MitoTruncateOperation { source, .. }
             | MitoSyncOperation { source, .. }
             | MitoEnterStagingOperation { source, .. }
             | MitoCopyRegionFromOperation { source, .. }

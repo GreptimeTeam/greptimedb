@@ -30,7 +30,8 @@ The architecture is documented at the top of `src/metric-engine/src/lib.rs`.
 | `state` | `src/metric-engine/src/engine/state.rs` | In-memory cache of physical columns and logical column metadata |
 | `repeated_task` | `src/metric-engine/src/repeated_task.rs` | Periodic metadata-region flush task |
 | `utils` | `src/metric-engine/src/utils.rs` | `RegionId` conversions (data vs metadata group), manifest encoding |
-| `config` | `src/metric-engine/src/config.rs` | `EngineConfig` (metadata flush interval, sparse PK) |
+| `config` | `src/metric-engine/src/config.rs` | `EngineConfig` (metadata flush interval) |
+| `engine/options` | `src/metric-engine/src/engine/options.rs` | Physical data-region options, including the default sparse primary-key encoding |
 | `test_util` | `src/metric-engine/src/test_util.rs` | `TestEnv` building the Mito2 + Metric stack |
 
 ## Write path
@@ -77,8 +78,9 @@ cargo nextest run -p metric-engine
   writes; operate on logical region ids.
 - TSID must be stable for the same tag set — it is a hash over sorted tag names
   + values and may be stored in `__tsid` or encoded into `__primary_key`.
-- Metadata is cached (LRU with a TTL); after an alter, stale reads are possible
-  until invalidation/expiry.
+- Metadata reads use an LRU cache. Metadata writes take the per-region cache
+  write lock and invalidate the cache after the Mito2 write succeeds; preserve
+  that ordering when adding a metadata mutation path.
 - Always convert ids via `utils::to_data_region_id` / `to_metadata_region_id`.
 
 ## Maintenance contract

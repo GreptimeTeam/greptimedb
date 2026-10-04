@@ -15,10 +15,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
+use auth::{
+    OPENTSDB_WRITE, PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
+    PermissionTableTargets,
+};
 use common_error::ext::BoxedError;
 use common_telemetry::tracing;
-use servers::error::{self as server_error, AuthSnafu, ExecuteGrpcQuerySnafu};
+use servers::error::{AuthSnafu, ExecuteGrpcQuerySnafu, Result as ServerResult};
 use servers::opentsdb::codec::DataPoint;
 use servers::opentsdb::data_point_to_grpc_row_insert_requests;
 use servers::query_handler::OpentsdbProtocolHandler;
@@ -28,21 +31,63 @@ use table::requests::{SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SIGNAL_TYPE_METRIC,
 
 use crate::instance::Instance;
 
+fn permission_targets(data_points: &[DataPoint], ctx: &QueryContextRef) -> PermissionTableTargets {
+    let catalog = ctx.current_catalog();
+    let schema = ctx.current_schema();
+    PermissionTableTargets::resolved(
+        data_points
+            .iter()
+            .map(|data_point| PermissionTableTarget::new(catalog, &schema, data_point.metric()))
+            .collect(),
+    )
+}
+
 #[async_trait]
 impl OpentsdbProtocolHandler for Instance {
+    async fn preflight(&self, data_points: &[DataPoint], ctx: QueryContextRef) -> ServerResult<()> {
+        self.check_table_permission(
+            &ctx,
+            PermissionReq::Action(OPENTSDB_WRITE),
+            permission_targets(data_points, &ctx),
+        )
+        .context(AuthSnafu)?;
+        Ok(())
+    }
+
     #[tracing::instrument(skip_all, fields(protocol = "opentsdb"))]
-    async fn exec(
+    async fn exec(&self, data_points: Vec<DataPoint>, ctx: QueryContextRef) -> ServerResult<usize> {
+        // Keep diagnostic per-point errors independent of other batched writes.
+        let mut ctx = ctx.fork();
+        ctx.set_batching_enabled(false);
+        self.execute_opentsdb_write(data_points, Arc::new(ctx))
+            .await
+    }
+
+    #[tracing::instrument(skip_all, fields(protocol = "opentsdb"))]
+    async fn exec_batch(
         &self,
         data_points: Vec<DataPoint>,
         ctx: QueryContextRef,
-    ) -> server_error::Result<usize> {
+    ) -> ServerResult<usize> {
+        self.execute_opentsdb_write(data_points, ctx).await
+    }
+}
+
+impl Instance {
+    async fn execute_opentsdb_write(
+        &self,
+        data_points: Vec<DataPoint>,
+        ctx: QueryContextRef,
+    ) -> ServerResult<usize> {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
-            .check_permission(ctx.current_user(), PermissionReq::Opentsdb)
+            .check_permission(ctx.current_user(), PermissionReq::Action(OPENTSDB_WRITE))
             .context(AuthSnafu)?;
 
         let (requests, _) = data_point_to_grpc_row_insert_requests(data_points)?;
+        self.check_row_insert_permission(&requests, &ctx, PermissionReq::Action(OPENTSDB_WRITE))
+            .context(AuthSnafu)?;
 
         let ctx = {
             let mut c = (*ctx).clone();
@@ -62,5 +107,34 @@ impl OpentsdbProtocolHandler for Instance {
             common_query::OutputData::AffectedRows(rows) => rows,
             _ => unreachable!(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use session::context::QueryContext;
+
+    use crate::instance::opentsdb::*;
+
+    #[test]
+    fn test_permission_targets_do_not_require_row_conversion() {
+        let data_points = [
+            DataPoint::new("cpu".to_string(), 0, 1.0, vec![]),
+            DataPoint::new(
+                "mem".to_string(),
+                0,
+                1.0,
+                vec![("greptime_value".to_string(), "tag".to_string())],
+            ),
+        ];
+        assert!(data_point_to_grpc_row_insert_requests(data_points.to_vec()).is_err());
+
+        assert_eq!(
+            PermissionTableTargets::Resolved(vec![
+                PermissionTableTarget::new("greptime", "public", "cpu"),
+                PermissionTableTarget::new("greptime", "public", "mem"),
+            ]),
+            permission_targets(&data_points, &QueryContext::arc())
+        );
     }
 }

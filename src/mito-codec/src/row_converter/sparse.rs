@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod checked;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -21,16 +23,20 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{Value, ValueRef};
 use memcomparable::{Deserializer, Serializer};
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
 use store_api::storage::consts::ReservedColumnId;
 
-use crate::error::{DeserializeFieldSnafu, Result, SerializeFieldSnafu, UnsupportedOperationSnafu};
+use crate::error::{
+    DeserializeFieldSnafu, InvalidSparsePrimaryKeySnafu, Result, SerializeFieldSnafu,
+    UnsupportedOperationSnafu,
+};
 use crate::key_values::KeyValue;
 use crate::primary_key_filter::SparsePrimaryKeyFilter;
 use crate::row_converter::dense::SortField;
+pub use crate::row_converter::sparse::checked::SparsePrimaryKeyView;
 use crate::row_converter::{CompositeValues, PrimaryKeyCodec, PrimaryKeyFilter};
 
 /// A codec for sparse key of metrics.
@@ -304,7 +310,7 @@ impl SparsePrimaryKeyCodec {
     {
         for (tag_column_id, tag_value) in row {
             let value_len = tag_value.len();
-            buffer.reserve(6 + value_len / 8 * 9);
+            buffer.reserve(6 + value_len.div_ceil(8) * 9);
             buffer.put_u32(tag_column_id);
             buffer.put_u8(1);
             buffer.put_u8(!tag_value.is_empty() as u8);
@@ -344,6 +350,57 @@ impl SparsePrimaryKeyCodec {
         buffer.put_u8(1);
         buffer.put_u64(tsid);
         Ok(())
+    }
+
+    /// Decodes the reserved `(table_id, tsid)` prefix from a sparse primary key.
+    pub fn decode_ids(&self, bytes: &[u8]) -> Result<(u32, u64)> {
+        // Two column IDs, two non-null markers, a u32 table ID, and a u64 TSID.
+        const INTERNAL_PREFIX_LEN: usize = 4 + 1 + 4 + 4 + 1 + 8;
+        ensure!(
+            bytes.len() >= INTERNAL_PREFIX_LEN,
+            InvalidSparsePrimaryKeySnafu {
+                reason: format!(
+                    "internal prefix requires at least {INTERNAL_PREFIX_LEN} bytes, got {}",
+                    bytes.len()
+                ),
+            }
+        );
+
+        let mut deserializer = Deserializer::new(bytes);
+
+        let table_id_column = u32::deserialize(&mut deserializer).context(DeserializeFieldSnafu)?;
+        ensure!(
+            table_id_column == RESERVED_COLUMN_ID_TABLE_ID,
+            InvalidSparsePrimaryKeySnafu {
+                reason: format!(
+                    "expected table id column {}, got {}",
+                    RESERVED_COLUMN_ID_TABLE_ID, table_id_column
+                ),
+            }
+        );
+        let table_id = self.inner.table_id_field.deserialize(&mut deserializer)?;
+
+        let tsid_column = u32::deserialize(&mut deserializer).context(DeserializeFieldSnafu)?;
+        ensure!(
+            tsid_column == RESERVED_COLUMN_ID_TSID,
+            InvalidSparsePrimaryKeySnafu {
+                reason: format!(
+                    "expected tsid column {}, got {}",
+                    RESERVED_COLUMN_ID_TSID, tsid_column
+                ),
+            }
+        );
+        let tsid = self.inner.tsid_field.deserialize(&mut deserializer)?;
+
+        match (table_id, tsid) {
+            (Value::UInt32(table_id), Value::UInt64(tsid)) => Ok((table_id, tsid)),
+            (table_id, tsid) => InvalidSparsePrimaryKeySnafu {
+                reason: format!(
+                    "expected UInt32 table id and UInt64 tsid, got {table_id:?} and {tsid:?}"
+                ),
+            }
+            .fail(),
+        }
     }
 
     /// Decodes the given bytes into a [`SparseValues`].
@@ -521,40 +578,6 @@ impl PrimaryKeyCodec for SparsePrimaryKeyCodec {
 
     fn decode_leftmost(&self, bytes: &[u8]) -> Result<Option<Value>> {
         self.decode_leftmost(bytes)
-    }
-}
-
-/// Field with column id.
-pub struct FieldWithId {
-    pub field: SortField,
-    pub column_id: ColumnId,
-}
-
-/// A special encoder for memtable.
-pub struct SparseEncoder {
-    fields: Vec<FieldWithId>,
-}
-
-impl SparseEncoder {
-    pub fn new(fields: Vec<FieldWithId>) -> Self {
-        Self { fields }
-    }
-
-    pub fn encode_to_vec<'a, I>(&self, row: I, buffer: &mut Vec<u8>) -> Result<()>
-    where
-        I: Iterator<Item = ValueRef<'a>>,
-    {
-        let mut serializer = Serializer::new(buffer);
-        for (value, field) in row.zip(self.fields.iter()) {
-            if !value.is_null() {
-                field
-                    .column_id
-                    .serialize(&mut serializer)
-                    .context(SerializeFieldSnafu)?;
-                field.field.serialize(&mut serializer, &value)?;
-            }
-        }
-        Ok(())
     }
 }
 
@@ -758,6 +781,26 @@ mod tests {
     }
 
     #[test]
+    fn raw_encoding_matches_serde_at_chunk_boundaries() {
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        let mut actual = Vec::new();
+        for len in [0, 7, 8, 9, 15, 16, 17, 1024] {
+            let label = "x".repeat(len);
+            let mut expected = Vec::new();
+            codec.encode_internal(42, 7, &mut expected).unwrap();
+            codec
+                .encode_to_vec([(1, ValueRef::String(&label))].into_iter(), &mut expected)
+                .unwrap();
+            actual.clear();
+            codec.encode_internal(42, 7, &mut actual).unwrap();
+            codec
+                .encode_raw_tag_value([(1, label.as_bytes())].into_iter(), &mut actual)
+                .unwrap();
+            assert_eq!(actual, expected, "label length {len}");
+        }
+    }
+
+    #[test]
     fn test_encode_to_vec() {
         let region_metadata = test_region_metadata();
         let codec = SparsePrimaryKeyCodec::new(&region_metadata);
@@ -803,6 +846,21 @@ mod tests {
         assert!(!buffer.is_empty());
         let result = codec.decode_leftmost(&buffer).unwrap().unwrap();
         assert_eq!(result, Value::UInt32(42));
+    }
+
+    #[test]
+    fn test_decode_ids() {
+        let region_metadata = test_region_metadata();
+        let codec = SparsePrimaryKeyCodec::new(&region_metadata);
+        let mut buffer = Vec::new();
+        codec.encode_internal(42, 100, &mut buffer).unwrap();
+
+        assert_eq!((42, 100), codec.decode_ids(&buffer).unwrap());
+
+        let mut invalid = buffer.clone();
+        invalid[0..4].copy_from_slice(&1_u32.to_be_bytes());
+        assert!(codec.decode_ids(&invalid).is_err());
+        assert!(codec.decode_ids(&buffer[..buffer.len() - 1]).is_err());
     }
 
     #[test]

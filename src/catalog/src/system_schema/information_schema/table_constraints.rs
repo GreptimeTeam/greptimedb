@@ -27,7 +27,7 @@ use datatypes::prelude::{ConcreteDataType, MutableVector};
 use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
-use datatypes::vectors::{ConstantVector, StringVector, StringVectorBuilder, VectorRef};
+use datatypes::vectors::{StringVector, StringVectorBuilder, VectorRef};
 use futures::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::{ScanRequest, TableId};
@@ -242,14 +242,8 @@ impl InformationSchemaTableConstraintsBuilder {
     fn finish(&mut self) -> Result<RecordBatch> {
         let rows_num = self.constraint_names.len();
 
-        let constraint_catalogs = Arc::new(ConstantVector::new(
-            Arc::new(StringVector::from(vec!["def"])),
-            rows_num,
-        ));
-        let enforceds = Arc::new(ConstantVector::new(
-            Arc::new(StringVector::from(vec!["YES"])),
-            rows_num,
-        ));
+        let constraint_catalogs = Arc::new(StringVector::from(vec!["def"; rows_num]));
+        let enforceds = Arc::new(StringVector::from(vec!["YES"; rows_num]));
 
         let columns: Vec<VectorRef> = vec![
             constraint_catalogs,

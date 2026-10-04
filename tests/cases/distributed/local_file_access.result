@@ -1,0 +1,49 @@
+CREATE TABLE local_file_access_distributed (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY,
+    val DOUBLE
+);
+
+Affected Rows: 0
+
+INSERT INTO local_file_access_distributed VALUES (1, 'host-1', 1.0);
+
+Affected Rows: 1
+
+COPY local_file_access_distributed
+TO 'local_file_access/table.parquet';
+
+Error: 1004(InvalidArguments), SQL access to the local filesystem is disabled for 'local_file_access/table.parquet'; use S3, OSS, GCS, or AzBlob instead
+
+COPY local_file_access_distributed
+FROM 'local_file_access/table.parquet';
+
+Error: 1004(InvalidArguments), SQL access to the local filesystem is disabled for 'local_file_access/table.parquet'; use S3, OSS, GCS, or AzBlob instead
+
+COPY (SELECT * FROM local_file_access_distributed)
+TO 'local_file_access/query.parquet';
+
+Error: 1004(InvalidArguments), SQL access to the local filesystem is disabled for 'local_file_access/query.parquet'; use S3, OSS, GCS, or AzBlob instead
+
+COPY DATABASE public
+TO 'local_file_access/database/';
+
+Error: 1004(InvalidArguments), SQL access to the local filesystem is disabled for 'local_file_access/database/'; use S3, OSS, GCS, or AzBlob instead
+
+COPY DATABASE public
+FROM 'local_file_access/database/';
+
+Error: 1004(InvalidArguments), SQL access to the local filesystem is disabled for 'local_file_access/database/'; use S3, OSS, GCS, or AzBlob instead
+
+CREATE EXTERNAL TABLE local_file_access_external
+WITH (
+    location = 'local_file_access/table.parquet',
+    format = 'parquet'
+);
+
+Error: 1004(InvalidArguments), SQL access to the local filesystem is disabled for 'local_file_access/table.parquet'; use S3, OSS, GCS, or AzBlob instead
+
+DROP TABLE local_file_access_distributed;
+
+Affected Rows: 0
+

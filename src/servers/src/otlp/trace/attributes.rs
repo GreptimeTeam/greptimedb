@@ -13,9 +13,11 @@
 // limitations under the License.
 
 use std::fmt::Display;
+use std::sync::Arc;
 
 use opentelemetry_proto::tonic::common::v1::any_value::Value::{
     ArrayValue, BoolValue, BytesValue, DoubleValue, IntValue, KvlistValue, StringValue,
+    StringValueStrindex,
 };
 use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
 use serde::Serialize;
@@ -78,6 +80,11 @@ impl Serialize for OtlpAnyValue<'_> {
                     map.end()
                 }
                 BytesValue(v) => zer.serialize_bytes(v),
+                // `StringValueStrindex` is profiling-signal-only and references the
+                // Profiling `ProfilesDictionary.string_table`, which is unavailable
+                // here. Per the OTLP spec, non-Profiling receivers must treat it as
+                // a non-fatal issue and process the value as if it were absent.
+                StringValueStrindex(_) => zer.serialize_none(),
             },
             None => zer.serialize_none(),
         }
@@ -138,6 +145,39 @@ impl Attributes {
 
     pub fn get_mut(&mut self) -> &mut Vec<KeyValue> {
         &mut self.0
+    }
+}
+
+/// Attributes shared by every span of one resource or scope.
+///
+/// Empty attributes are kept as `None` so that the common case of a resource or
+/// scope without attributes costs no allocation and no atomic refcounting.
+#[derive(Debug, Clone)]
+pub struct SharedAttributes(Option<Arc<Attributes>>);
+
+impl From<Attributes> for SharedAttributes {
+    fn from(attributes: Attributes) -> Self {
+        Self((!attributes.0.is_empty()).then(|| Arc::new(attributes)))
+    }
+}
+
+impl AsRef<Attributes> for SharedAttributes {
+    fn as_ref(&self) -> &Attributes {
+        static EMPTY: Attributes = Attributes(Vec::new());
+        self.0.as_deref().unwrap_or(&EMPTY)
+    }
+}
+
+impl SharedAttributes {
+    /// Returns owned attributes, copying them unless this is the last holder.
+    pub fn into_owned(self) -> Attributes {
+        match self.0 {
+            // Spans usually still share with their group, so skip the
+            // compare-exchange that would fail inside `unwrap_or_clone`.
+            Some(attributes) if Arc::strong_count(&attributes) > 1 => attributes.as_ref().clone(),
+            Some(attributes) => Arc::unwrap_or_clone(attributes),
+            None => Attributes(Vec::new()),
+        }
     }
 }
 
@@ -293,6 +333,7 @@ mod tests {
                 vec![KeyValue {
                     key: "key1".into(),
                     value: None,
+                    ..Default::default()
                 }],
             ),
             (
@@ -300,6 +341,7 @@ mod tests {
                 vec![KeyValue {
                     key: "key1".into(),
                     value: Some(AnyValue { value: None }),
+                    ..Default::default()
                 }],
             ),
             (
@@ -309,6 +351,7 @@ mod tests {
                     value: Some(AnyValue {
                         value: Some(Value::StringValue(String::from("val1"))),
                     }),
+                    ..Default::default()
                 }],
             ),
         ];
@@ -331,6 +374,7 @@ mod tests {
                 vec![KeyValue {
                     key: "key1".into(),
                     value: None,
+                    ..Default::default()
                 }],
             ),
             (
@@ -338,6 +382,7 @@ mod tests {
                 vec![KeyValue {
                     key: "key1".into(),
                     value: Some(AnyValue { value: None }),
+                    ..Default::default()
                 }],
             ),
             (
@@ -347,6 +392,7 @@ mod tests {
                     value: Some(AnyValue {
                         value: Some(Value::StringValue(String::from("val1"))),
                     }),
+                    ..Default::default()
                 }],
             ),
         ];

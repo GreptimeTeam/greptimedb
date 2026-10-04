@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
+use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{DatanodeWorkloads, HeartbeatRequest, NodeInfo, Peer, RegionRole, RegionStat};
 use common_base::Plugins;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
@@ -121,6 +122,7 @@ impl HeartbeatTask {
 
     pub async fn create_streams(
         meta_client: &MetaClient,
+        local_gc_enabled: bool,
         running: Arc<AtomicBool>,
         handler_executor: HeartbeatResponseHandlerExecutorRef,
         mailbox: MailboxRef,
@@ -129,6 +131,13 @@ impl HeartbeatTask {
     ) -> Result<(HeartbeatSender, HeartbeatConfig)> {
         let client_id = meta_client.id();
         let (tx, mut rx, config) = meta_client.heartbeat().await.context(MetaClientInitSnafu)?;
+        if config.gc_enabled != local_gc_enabled {
+            return error::GcConfigMismatchSnafu {
+                metasrv_gc_enabled: config.gc_enabled,
+                datanode_gc_enabled: local_gc_enabled,
+            }
+            .fail();
+        }
 
         let mut last_received_lease = Instant::now();
 
@@ -138,7 +147,15 @@ impl HeartbeatTask {
                 None
             }) {
                 if let Some(msg) = res.mailbox_message.as_ref() {
-                    info!("Received mailbox message: {msg:?}, meta_client id: {client_id:?}");
+                    let payload_len = msg
+                        .payload
+                        .as_ref()
+                        .map(|Payload::Json(payload)| payload.len())
+                        .unwrap_or_default();
+                    info!(
+                        message_id = msg.id,
+                        payload_len, client_id, "Received mailbox message"
+                    );
                 }
                 if let Some(lease) = res.region_lease.as_ref() {
                     metrics::LAST_RECEIVED_HEARTBEAT_ELAPSED
@@ -185,7 +202,8 @@ impl HeartbeatTask {
         ctx: HeartbeatResponseHandlerContext,
         handler_executor: HeartbeatResponseHandlerExecutorRef,
     ) -> Result<()> {
-        trace!("Heartbeat response: {:?}", ctx.response);
+        let mailbox_message_id = ctx.response.mailbox_message.as_ref().map(|msg| msg.id);
+        trace!(?mailbox_message_id, "Handling heartbeat response");
         handler_executor
             .handle(ctx)
             .await
@@ -220,9 +238,17 @@ impl HeartbeatTask {
         let mailbox = Arc::new(HeartbeatMailbox::new(outgoing_tx));
 
         let quit_signal = Arc::new(Notify::new());
+        let local_gc_enabled = self
+            .region_server
+            .mito_engine()
+            .context(RegionEngineNotFoundSnafu { name: "mito" })?
+            .mito_config()
+            .gc
+            .enable;
 
         let (mut tx, config) = Self::create_streams(
             &meta_client,
+            local_gc_enabled,
             running.clone(),
             handler_executor.clone(),
             mailbox.clone(),
@@ -363,11 +389,13 @@ impl HeartbeatTask {
                         .set(last_sent.elapsed().as_millis() as i64);
                     // Resets the timer.
                     last_sent = Instant::now();
-                    debug!("Sending heartbeat request: {:?}", req);
+                    let mailbox_message_id = req.mailbox_message.as_ref().map(|msg| msg.id);
+                    debug!(?mailbox_message_id, "Sending heartbeat request");
                     if let Err(e) = tx.send(req).await {
                         error!(e; "Failed to send heartbeat to metasrv");
                         match Self::create_streams(
                             &meta_client,
+                            local_gc_enabled,
                             running.clone(),
                             handler_executor.clone(),
                             mailbox.clone(),

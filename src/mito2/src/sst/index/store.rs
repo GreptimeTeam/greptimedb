@@ -262,6 +262,9 @@ impl<W: AsyncWrite + Unpin + Send> AsyncWrite for InstrumentedAsyncWrite<'_, W> 
     }
 }
 
+/// Ranges fetched in parallel by one `read_vec`, as for parquet reads.
+const FETCH_CONCURRENCY: usize = 8;
+
 /// Implements `RangeReader` for `ObjectStore` and record metrics.
 pub(crate) struct InstrumentedRangeReader<'a> {
     store: ObjectStore,
@@ -309,9 +312,16 @@ impl RangeReader for InstrumentedRangeReader<'_> {
     }
 
     async fn read_vec(&self, ranges: &[Range<u64>]) -> io::Result<Vec<Bytes>> {
+        // OpenDAL merges ranges less than 1 MiB apart by default without bounding the merged
+        // length, so sparse page reads could fetch most of the file. Only merge adjacent
+        // ranges, and fetch the rest in parallel like parquet reads do.
+        // TODO: decide whether to merge across small gaps based on object store latency,
+        // bytes read and query latency.
         let bufs = self
             .store
-            .reader(&self.path)
+            .reader_with(&self.path)
+            .gap(0)
+            .concurrent(FETCH_CONCURRENCY)
             .await?
             .fetch(ranges.to_owned())
             .await?;
@@ -358,7 +368,7 @@ mod tests {
     #[tokio::test]
     async fn test_instrumented_store_read_write() {
         let instrumented_store =
-            InstrumentedStore::new(ObjectStore::new(Memory::default()).unwrap().finish());
+            InstrumentedStore::new(ObjectStore::new(Memory::default()).unwrap());
 
         let read_byte_count = IntCounter::new("read_byte_count", "read_byte_count").unwrap();
         let read_count = IntCounter::new("read_count", "read_count").unwrap();

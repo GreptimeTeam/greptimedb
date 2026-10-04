@@ -21,9 +21,14 @@ use futures::stream::BoxStream;
 use humantime_serde::re::humantime;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
+use store_api::mito_engine_options::{
+    TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_TRIGGER_FILE_NUM, normalize_twcs_trigger_options,
+};
 
 use crate::ensure_values;
-use crate::error::{self, Error, InvalidMetadataSnafu, ParseOptionSnafu, Result};
+use crate::error::{
+    self, ConflictingSchemaOptionsSnafu, Error, InvalidMetadataSnafu, ParseOptionSnafu, Result,
+};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{
     DeserializedValueWithBytes, MetadataKey, SCHEMA_NAME_KEY_PATTERN, SCHEMA_NAME_KEY_PREFIX,
@@ -60,6 +65,9 @@ pub struct SchemaNameValue {
     pub ttl: Option<DatabaseTimeToLive>,
     #[serde(default)]
     pub extra_options: BTreeMap<String, String>,
+    /// Identifies the create-database procedure that wrote this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_procedure_id: Option<String>,
 }
 
 impl Display for SchemaNameValue {
@@ -79,6 +87,17 @@ impl TryFrom<&HashMap<String, String>> for SchemaNameValue {
     type Error = Error;
 
     fn try_from(value: &HashMap<String, String>) -> std::result::Result<Self, Self::Error> {
+        let mut value = value.clone();
+        normalize_twcs_trigger_options(&mut value).map_err(|conflict| {
+            ConflictingSchemaOptionsSnafu {
+                first_key: TWCS_TRIGGER_FILE_NUM,
+                first_value: conflict.legacy_value,
+                second_key: TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM,
+                second_value: conflict.canonical_value,
+            }
+            .build()
+        })?;
+
         let ttl = value
             .get(OPT_KEY_TTL)
             .map(|ttl_str| {
@@ -103,7 +122,11 @@ impl TryFrom<&HashMap<String, String>> for SchemaNameValue {
             })
             .collect();
 
-        Ok(Self { ttl, extra_options })
+        Ok(Self {
+            ttl,
+            extra_options,
+            ..Default::default()
+        })
     }
 }
 
@@ -311,6 +334,21 @@ impl SchemaManager {
 
         Box::pin(stream)
     }
+
+    /// Returns schema names and values belonging to the target `catalog`.
+    /// Legacy `null` values are returned as [`SchemaNameValue::default()`].
+    pub fn schemas(&self, catalog: &str) -> BoxStream<'static, Result<(String, SchemaNameValue)>> {
+        let start_key = SchemaNameKey::range_start_key(catalog);
+        let req = RangeRequest::new().with_prefix(start_key.as_bytes());
+
+        let stream = PaginationStream::new(self.kv_backend.clone(), req, DEFAULT_PAGE_SIZE, |kv| {
+            let value = SchemaNameValue::try_from_raw_value(&kv.value)?.unwrap_or_default();
+            Ok((schema_decoder(kv)?, value))
+        })
+        .into_stream();
+
+        Box::pin(stream)
+    }
 }
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Deserialize, Serialize)]
@@ -333,8 +371,126 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
+    use futures::TryStreamExt;
+    use store_api::mito_engine_options::{
+        TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_TRIGGER_FILE_NUM,
+    };
+
     use super::*;
+    use crate::kv_backend::KvBackend;
     use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::rpc::store::PutRequest;
+
+    #[tokio::test]
+    async fn test_schemas() {
+        let manager = SchemaManager::new(Arc::new(MemoryKvBackend::default()));
+        assert!(
+            manager
+                .schemas("catalog")
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let mut expected = BTreeMap::new();
+        for i in 0..=DEFAULT_PAGE_SIZE {
+            let name = format!("schema_{i}");
+            let value = if i == 0 {
+                SchemaNameValue::default()
+            } else {
+                SchemaNameValue {
+                    ttl: Some(Duration::from_secs(i as u64).into()),
+                    extra_options: BTreeMap::from([("foo".to_string(), i.to_string())]),
+                    create_procedure_id: Some(format!("procedure_{i}")),
+                }
+            };
+            manager
+                .create(
+                    SchemaNameKey::new("catalog", &name),
+                    Some(value.clone()),
+                    false,
+                )
+                .await
+                .unwrap();
+            expected.insert(name, value);
+        }
+        manager
+            .create(SchemaNameKey::new("catalog_other", "schema"), None, false)
+            .await
+            .unwrap();
+
+        let schemas = manager
+            .schemas("catalog")
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(schemas, expected.into_iter().collect::<Vec<_>>());
+        assert_eq!(
+            manager
+                .schema_names("catalog")
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap(),
+            schemas
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_schemas_legacy_and_invalid_values() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let manager = SchemaManager::new(kv_backend.clone());
+        let key = SchemaNameKey::new("catalog", "schema").to_bytes();
+
+        for (raw, expected) in [
+            (b"null".as_slice(), SchemaNameValue::default()),
+            (
+                br#"{"ttl":"10s"}"#.as_slice(),
+                SchemaNameValue {
+                    ttl: Some(Duration::from_secs(10).into()),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            kv_backend
+                .put(PutRequest::new().with_key(key.clone()).with_value(raw))
+                .await
+                .unwrap();
+            assert_eq!(
+                manager
+                    .schemas("catalog")
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .unwrap(),
+                vec![("schema".to_string(), expected)]
+            );
+        }
+
+        kv_backend
+            .put(PutRequest::new().with_key(key).with_value(b"invalid"))
+            .await
+            .unwrap();
+        assert!(
+            manager
+                .schemas("catalog")
+                .try_collect::<Vec<_>>()
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            manager
+                .schema_names("catalog")
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap(),
+            vec!["schema".to_string()]
+        );
+    }
 
     #[test]
     fn test_display_schema_value() {
@@ -404,6 +560,48 @@ mod tests {
     }
 
     #[test]
+    fn test_schema_value_normalizes_twcs_trigger_aliases() {
+        for options in [
+            HashMap::from([(
+                TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM.to_string(),
+                "4".to_string(),
+            )]),
+            HashMap::from([
+                (TWCS_TRIGGER_FILE_NUM.to_string(), "4".to_string()),
+                (
+                    TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM.to_string(),
+                    "4".to_string(),
+                ),
+            ]),
+        ] {
+            let value = SchemaNameValue::try_from(&options).unwrap();
+            assert_eq!(
+                BTreeMap::from([(TWCS_TRIGGER_FILE_NUM.to_string(), "4".to_string())]),
+                value.extra_options
+            );
+        }
+    }
+
+    #[test]
+    fn test_schema_value_rejects_conflicting_twcs_trigger_aliases() {
+        let options = HashMap::from([
+            (TWCS_TRIGGER_FILE_NUM.to_string(), "4".to_string()),
+            (
+                TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM.to_string(),
+                "8".to_string(),
+            ),
+        ]);
+
+        let error = SchemaNameValue::try_from(&options).unwrap_err();
+
+        assert_eq!(StatusCode::InvalidArguments, error.status_code());
+        assert_eq!(
+            "Conflicting schema options: compaction.twcs.trigger_file_num=4 and compaction.twcs.active_window.trigger_file_num=8",
+            error.to_string()
+        );
+    }
+
+    #[test]
     fn test_extra_options_compatibility() {
         // Test with extra_options only
         let mut opts: HashMap<String, String> = HashMap::new();
@@ -452,6 +650,7 @@ mod tests {
             Some(SchemaNameValue {
                 ttl: Some(Duration::from_secs(10).into()),
                 extra_options: BTreeMap::new(),
+                create_procedure_id: None,
             })
         );
 
@@ -474,7 +673,28 @@ mod tests {
             Some(SchemaNameValue {
                 ttl: Some(Duration::from_secs(15).into()),
                 extra_options: expected_options,
+                create_procedure_id: None,
             })
+        );
+    }
+
+    #[test]
+    fn test_create_procedure_id_serialization() {
+        let value = SchemaNameValue {
+            create_procedure_id: Some("4ee0ba94-11f0-4d4d-9468-5ebf732e3ab2".to_string()),
+            ..Default::default()
+        };
+        let raw = value.try_as_raw_value().unwrap();
+        assert_eq!(
+            SchemaNameValue::try_from_raw_value(&raw).unwrap(),
+            Some(value)
+        );
+
+        let raw = SchemaNameValue::default().try_as_raw_value().unwrap();
+        assert!(
+            !String::from_utf8(raw)
+                .unwrap()
+                .contains("create_procedure_id")
         );
     }
 

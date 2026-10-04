@@ -228,6 +228,11 @@ impl ConcreteDataType {
         matches!(self, ConcreteDataType::Json(_))
     }
 
+    /// Returns whether this is a JSON2 data type.
+    pub fn is_json2(&self) -> bool {
+        self.as_json().is_some_and(|json_type| json_type.is_json2())
+    }
+
     pub fn is_vector(&self) -> bool {
         matches!(self, ConcreteDataType::Vector(_))
     }
@@ -370,6 +375,17 @@ impl ConcreteDataType {
         }
     }
 
+    /// Returns true if both types are timestamps and `to_type`'s unit is strictly
+    /// finer (e.g. `Second -> Millisecond`). Such a change is lossless for
+    /// values that fit the target unit's `i64` range; the narrowing direction
+    /// truncates values.
+    pub fn is_timestamp_unit_widening_to(&self, to_type: &ConcreteDataType) -> bool {
+        match (self.as_timestamp(), to_type.as_timestamp()) {
+            (Some(from), Some(to)) => to.unit() > from.unit(),
+            _ => false,
+        }
+    }
+
     /// Try to cast data type as a [`DurationType`].
     pub fn as_duration(&self) -> Option<DurationType> {
         match self {
@@ -476,7 +492,9 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Decimal128(precision, scale) => {
                 ConcreteDataType::decimal128_datatype(*precision, *scale)
             }
-            ArrowDataType::Struct(fields) => ConcreteDataType::Struct(StructType::from(fields)),
+            ArrowDataType::Struct(fields) => {
+                ConcreteDataType::Struct(StructType::try_from_arrow_fields(fields)?)
+            }
             ArrowDataType::Float16
             | ArrowDataType::Date64
             | ArrowDataType::FixedSizeBinary(_)
@@ -719,6 +737,22 @@ mod tests {
     use arrow::datatypes::Field;
 
     use super::*;
+
+    #[test]
+    fn test_is_timestamp_unit_widening_to() {
+        let second = ConcreteDataType::timestamp_second_datatype();
+        let milli = ConcreteDataType::timestamp_millisecond_datatype();
+        let nano = ConcreteDataType::timestamp_nanosecond_datatype();
+
+        assert!(second.is_timestamp_unit_widening_to(&milli));
+        assert!(second.is_timestamp_unit_widening_to(&nano));
+        // Same unit and narrowing are not widening.
+        assert!(!milli.is_timestamp_unit_widening_to(&milli));
+        assert!(!nano.is_timestamp_unit_widening_to(&milli));
+        // Either side being a non-timestamp type disqualifies.
+        assert!(!milli.is_timestamp_unit_widening_to(&ConcreteDataType::int64_datatype()));
+        assert!(!ConcreteDataType::int64_datatype().is_timestamp_unit_widening_to(&nano));
+    }
 
     #[test]
     fn test_concrete_type_as_datatype_trait() {

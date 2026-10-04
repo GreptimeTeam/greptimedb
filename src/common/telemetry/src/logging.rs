@@ -13,13 +13,18 @@
 // limitations under the License.
 
 //! logging stuffs, inspired by databend
+mod file_retention;
+
 use std::collections::HashMap;
 use std::env;
 use std::io::IsTerminal;
-use std::sync::{Arc, Mutex, Once, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
+use common_base::readable_size::ReadableSize;
 use common_base::serde::empty_string_as_default;
+use file_retention::{DirectoryRetention, LogFileKind, build_file_appender};
 use once_cell::sync::{Lazy, OnceCell};
 use opentelemetry::trace::TracerProvider;
 use opentelemetry::{KeyValue, global};
@@ -31,7 +36,6 @@ use serde::{Deserialize, Serialize};
 use tracing::callsite;
 use tracing::metadata::LevelFilter;
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_log::LogTracer;
 use tracing_subscriber::filter::{FilterFn, Targets};
 use tracing_subscriber::fmt::Layer;
@@ -57,35 +61,55 @@ pub static LOG_RELOAD_HANDLE: OnceCell<tracing_subscriber::reload::Handle<Target
 type DynSubscriber = Layered<tracing_subscriber::reload::Layer<Targets, Registry>, Registry>;
 type OtelTraceLayer = tracing_opentelemetry::OpenTelemetryLayer<DynSubscriber, Tracer>;
 
+struct TraceLayerState {
+    enabled: AtomicBool,
+    layer: OnceCell<OtelTraceLayer>,
+}
+
 #[derive(Clone)]
 pub struct TraceReloadHandle {
-    inner: Arc<RwLock<Option<OtelTraceLayer>>>,
+    inner: Arc<TraceLayerState>,
 }
 
 impl TraceReloadHandle {
-    fn new(inner: Arc<RwLock<Option<OtelTraceLayer>>>) -> Self {
+    fn new(inner: Arc<TraceLayerState>) -> Self {
         Self { inner }
     }
 
-    pub fn reload(&self, new_layer: Option<OtelTraceLayer>) {
-        let mut guard = self.inner.write().unwrap();
-        *guard = new_layer;
-        drop(guard);
+    /// Enables or disables OTLP data collection, initializing it on first enable.
+    /// Disabling stops new spans, events, fields and links. Existing spans still
+    /// finish their lifecycle and export on close.
+    pub fn set_enabled(&self, enabled: bool) -> Result<(), &'static str> {
+        self.set_enabled_with(enabled, || {
+            get_or_init_tracer().map(|tracer| tracing_opentelemetry::layer().with_tracer(tracer))
+        })
+    }
 
+    fn set_enabled_with(
+        &self,
+        enabled: bool,
+        init: impl FnOnce() -> Result<OtelTraceLayer, &'static str>,
+    ) -> Result<(), &'static str> {
+        if enabled {
+            self.inner.layer.get_or_try_init(init)?;
+        }
+        self.inner.enabled.store(enabled, Ordering::Release);
         callsite::rebuild_interest_cache();
+        Ok(())
     }
 }
 
-/// A tracing layer that can be dynamically reloaded.
-///
-/// Mostly copied from [`tracing_subscriber::reload::Layer`].
+/// An OTLP layer with a runtime switch and a stable address for downcasts.
 struct TraceLayer {
-    inner: Arc<RwLock<Option<OtelTraceLayer>>>,
+    inner: Arc<TraceLayerState>,
 }
 
 impl TraceLayer {
     fn new(initial: Option<OtelTraceLayer>) -> (Self, TraceReloadHandle) {
-        let inner = Arc::new(RwLock::new(initial));
+        let inner = Arc::new(TraceLayerState {
+            enabled: AtomicBool::new(initial.is_some()),
+            layer: initial.map(OnceCell::with_value).unwrap_or_default(),
+        });
         (
             Self {
                 inner: inner.clone(),
@@ -95,27 +119,17 @@ impl TraceLayer {
     }
 
     fn with_layer<R>(&self, f: impl FnOnce(&OtelTraceLayer) -> R) -> Option<R> {
-        self.inner
-            .read()
-            .ok()
-            .and_then(|guard| guard.as_ref().map(f))
+        self.inner.layer.get().map(f)
     }
 
-    fn with_layer_mut<R>(&self, f: impl FnOnce(&mut OtelTraceLayer) -> R) -> Option<R> {
-        self.inner
-            .write()
-            .ok()
-            .and_then(|mut guard| guard.as_mut().map(f))
+    fn is_enabled(&self) -> bool {
+        self.inner.enabled.load(Ordering::Acquire)
     }
 }
 
 impl tracing_subscriber::Layer<DynSubscriber> for TraceLayer {
     fn on_register_dispatch(&self, subscriber: &tracing::Dispatch) {
         let _ = self.with_layer(|layer| layer.on_register_dispatch(subscriber));
-    }
-
-    fn on_layer(&mut self, subscriber: &mut DynSubscriber) {
-        let _ = self.with_layer_mut(|layer| layer.on_layer(subscriber));
     }
 
     fn register_callsite(
@@ -141,7 +155,9 @@ impl tracing_subscriber::Layer<DynSubscriber> for TraceLayer {
         id: &tracing::span::Id,
         ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>,
     ) {
-        let _ = self.with_layer(|layer| layer.on_new_span(attrs, id, ctx));
+        if self.is_enabled() {
+            let _ = self.with_layer(|layer| layer.on_new_span(attrs, id, ctx));
+        }
     }
 
     fn max_level_hint(&self) -> Option<LevelFilter> {
@@ -154,7 +170,9 @@ impl tracing_subscriber::Layer<DynSubscriber> for TraceLayer {
         values: &tracing::span::Record<'_>,
         ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>,
     ) {
-        let _ = self.with_layer(|layer| layer.on_record(span, values, ctx));
+        if self.is_enabled() {
+            let _ = self.with_layer(|layer| layer.on_record(span, values, ctx));
+        }
     }
 
     fn on_follows_from(
@@ -163,7 +181,9 @@ impl tracing_subscriber::Layer<DynSubscriber> for TraceLayer {
         follows: &tracing::span::Id,
         ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>,
     ) {
-        let _ = self.with_layer(|layer| layer.on_follows_from(span, follows, ctx));
+        if self.is_enabled() {
+            let _ = self.with_layer(|layer| layer.on_follows_from(span, follows, ctx));
+        }
     }
 
     fn event_enabled(
@@ -180,7 +200,9 @@ impl tracing_subscriber::Layer<DynSubscriber> for TraceLayer {
         event: &tracing::Event<'_>,
         ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>,
     ) {
-        let _ = self.with_layer(|layer| layer.on_event(event, ctx));
+        if self.is_enabled() {
+            let _ = self.with_layer(|layer| layer.on_event(event, ctx));
+        }
     }
 
     fn on_enter(
@@ -217,11 +239,13 @@ impl tracing_subscriber::Layer<DynSubscriber> for TraceLayer {
     }
 
     unsafe fn downcast_raw(&self, id: std::any::TypeId) -> Option<*const ()> {
-        self.inner.read().ok().and_then(|guard| {
-            guard
-                .as_ref()
-                .and_then(|layer| unsafe { layer.downcast_raw(id) })
-        })
+        // Keep downcasts available while disabled: an in-flight WithContext
+        // callback may still need the layer. OnceCell keeps both addresses valid
+        // for the subscriber's lifetime, even across concurrent toggles.
+        self.inner
+            .layer
+            .get()
+            .and_then(|layer| unsafe { layer.downcast_raw(id) })
     }
 }
 
@@ -253,8 +277,14 @@ pub struct LoggingOptions {
     /// The maximum number of log files set by default.
     pub max_log_files: usize,
 
+    /// The maximum total size of managed log files in `dir`. Zero disables size-based retention.
+    pub max_log_dir_size: ReadableSize,
+
     /// Whether to append logs to stdout. Default is true.
     pub append_stdout: bool,
+
+    /// Whether to write logs to files in `dir`. Default is true.
+    pub enable_file_logging: bool,
 
     /// Whether to enable tracing with OTLP. Default is false.
     pub enable_otlp_tracing: bool,
@@ -318,7 +348,7 @@ impl Default for SlowQueryOptions {
             record_type: SlowQueriesRecordType::SystemTable,
             threshold: Duration::from_secs(30),
             sample_ratio: 1.0,
-            ttl: Duration::from_days(90),
+            ttl: Duration::from_secs(90 * 86400),
         }
     }
 }
@@ -359,8 +389,10 @@ impl Default for LoggingOptions {
             otlp_endpoint: None,
             tracing_sample_ratio: None,
             append_stdout: true,
+            enable_file_logging: true,
             // Rotation hourly, 24 files per day, keeps info log files of 30 days
             max_log_files: 720,
+            max_log_dir_size: ReadableSize::default(),
             otlp_export_protocol: None,
             otlp_headers: HashMap::new(),
             enable_per_region_metrics: false,
@@ -455,19 +487,18 @@ pub fn init_global_logging(
             None
         };
 
+        let file_logging_enabled = opts.enable_file_logging && !opts.dir.is_empty();
+
+        let retention = file_logging_enabled
+            .then(|| {
+                DirectoryRetention::new(opts.dir.clone(), opts.max_log_dir_size, opts.max_log_files)
+            })
+            .flatten();
+
         // Configure the file logging layer with rolling policy.
-        let file_logging_layer = if !opts.dir.is_empty() {
-            let rolling_appender = RollingFileAppender::builder()
-                .rotation(Rotation::HOURLY)
-                .filename_prefix("greptimedb")
-                .max_log_files(opts.max_log_files)
-                .build(&opts.dir)
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "initializing rolling file appender at {} failed: {}",
-                        &opts.dir, e
-                    )
-                });
+        let file_logging_layer = if file_logging_enabled {
+            let rolling_appender =
+                build_file_appender(opts, LogFileKind::Default, retention.as_ref());
             let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
             guards.push(guard);
 
@@ -487,18 +518,9 @@ pub fn init_global_logging(
         };
 
         // Configure the error file logging layer with rolling policy.
-        let err_file_logging_layer = if !opts.dir.is_empty() {
-            let rolling_appender = RollingFileAppender::builder()
-                .rotation(Rotation::HOURLY)
-                .filename_prefix("greptimedb-err")
-                .max_log_files(opts.max_log_files)
-                .build(&opts.dir)
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "initializing rolling file appender at {} failed: {}",
-                        &opts.dir, e
-                    )
-                });
+        let err_file_logging_layer = if file_logging_enabled {
+            let rolling_appender =
+                build_file_appender(opts, LogFileKind::Error, retention.as_ref());
             let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
             guards.push(guard);
 
@@ -524,7 +546,12 @@ pub fn init_global_logging(
             None
         };
 
-        let slow_query_logging_layer = build_slow_query_logger(opts, slow_query_opts, &mut guards);
+        let slow_query_logging_layer =
+            build_slow_query_logger(opts, slow_query_opts, retention.as_ref(), &mut guards);
+
+        if let Some(retention) = &retention {
+            retention.initialize();
+        }
 
         // resolve log level settings from:
         // - options from command line or config files
@@ -703,6 +730,7 @@ fn build_otlp_exporter(opts: &LoggingOptions) -> SpanExporter {
 fn build_slow_query_logger<S>(
     opts: &LoggingOptions,
     slow_query_opts: Option<&SlowQueryOptions>,
+    retention: Option<&DirectoryRetention>,
     guards: &mut Vec<WorkerGuard>,
 ) -> Option<Box<dyn tracing_subscriber::Layer<S> + Send + Sync + 'static>>
 where
@@ -712,21 +740,12 @@ where
         + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
 {
     if let Some(slow_query_opts) = slow_query_opts {
-        if !opts.dir.is_empty()
+        if opts.enable_file_logging
+            && !opts.dir.is_empty()
             && slow_query_opts.enable
             && slow_query_opts.record_type == SlowQueriesRecordType::Log
         {
-            let rolling_appender = RollingFileAppender::builder()
-                .rotation(Rotation::HOURLY)
-                .filename_prefix("greptimedb-slow-queries")
-                .max_log_files(opts.max_log_files)
-                .build(&opts.dir)
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "initializing rolling file appender at {} failed: {}",
-                        &opts.dir, e
-                    )
-                });
+            let rolling_appender = build_file_appender(opts, LogFileKind::SlowQuery, retention);
             let (writer, guard) = tracing_appender::non_blocking(rolling_appender);
             guards.push(guard);
 
@@ -766,7 +785,233 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Barrier;
+    use std::sync::atomic::AtomicUsize;
+
+    use opentelemetry::trace::TraceContextExt;
+    use opentelemetry_sdk::trace::SdkTracerProvider;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
     use super::*;
+
+    #[test]
+    fn test_trace_switch_preserves_active_spans() {
+        let provider = SdkTracerProvider::builder()
+            .with_sampler(Sampler::AlwaysOn)
+            .build();
+        for initially_enabled in [false, true] {
+            let new_layer =
+                || tracing_opentelemetry::layer().with_tracer(provider.tracer("switch"));
+            let (filter, _) = tracing_subscriber::reload::Layer::new(
+                Targets::new().with_default(tracing::Level::INFO),
+            );
+            let (layer, handle) = TraceLayer::new(initially_enabled.then(new_layer));
+            let dispatch = tracing::Dispatch::new(Registry::default().with(filter).with(layer));
+            tracing::dispatcher::with_default(&dispatch, || {
+                let initial = tracing::info_span!("initial");
+                assert!(!initial.is_disabled());
+                assert_eq!(
+                    initial.context().span().span_context().is_valid(),
+                    initially_enabled
+                );
+                handle.set_enabled_with(true, || Ok(new_layer())).unwrap();
+                let parent = tracing::info_span!("parent");
+                let parent_context = parent.context();
+                assert!(parent_context.span().span_context().is_valid());
+                let previous_context = opentelemetry::Context::current();
+                let entered = parent.enter();
+                handle.set_enabled(false).unwrap();
+                let disabled = tracing::info_span!("disabled");
+                assert!(!disabled.is_disabled());
+                assert!(!disabled.context().span().span_context().is_valid());
+                assert_eq!(
+                    parent.context().span().span_context(),
+                    parent_context.span().span_context()
+                );
+                assert!(dispatch.downcast_ref::<OtelTraceLayer>().is_some());
+                drop(entered);
+                assert_eq!(
+                    opentelemetry::Context::current().span().span_context(),
+                    previous_context.span().span_context()
+                );
+                let disabled_entered = disabled.enter();
+                handle
+                    .set_enabled_with(true, || panic!("layer must not be replaced"))
+                    .unwrap();
+                drop(disabled_entered);
+                let child = tracing::info_span!(parent: &parent, "child");
+                assert_eq!(
+                    child.context().span().span_context().trace_id(),
+                    parent_context.span().span_context().trace_id()
+                );
+                assert!(!disabled.context().span().span_context().is_valid());
+            });
+        }
+    }
+
+    #[test]
+    fn test_trace_switch_retries_initialization() {
+        let (filter, _) = tracing_subscriber::reload::Layer::new(
+            Targets::new().with_default(tracing::Level::INFO),
+        );
+        let (layer, handle) = TraceLayer::new(None);
+        let subscriber = Registry::default().with(filter).with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            handle
+                .set_enabled_with(false, || panic!("disabling must not initialize OTLP"))
+                .unwrap();
+            assert_eq!(
+                handle.set_enabled_with(true, || Err("initialization failed")),
+                Err("initialization failed")
+            );
+            let failed = tracing::info_span!("after_failed_enable");
+            assert!(!failed.context().span().span_context().is_valid());
+            let provider = SdkTracerProvider::builder()
+                .with_sampler(Sampler::AlwaysOn)
+                .build();
+            handle
+                .set_enabled_with(true, || {
+                    Ok(tracing_opentelemetry::layer().with_tracer(provider.tracer("retry")))
+                })
+                .unwrap();
+            let enabled = tracing::info_span!("after_successful_enable");
+            assert!(enabled.context().span().span_context().is_valid());
+        });
+    }
+
+    #[test]
+    fn test_trace_switch_stops_collecting_fields_when_disabled() {
+        struct CountFormatting(AtomicUsize);
+
+        impl std::fmt::Debug for CountFormatting {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                f.write_str("value")
+            }
+        }
+
+        let value = CountFormatting(AtomicUsize::new(0));
+        let provider = SdkTracerProvider::builder()
+            .with_sampler(Sampler::AlwaysOn)
+            .build();
+        let (filter, _) = tracing_subscriber::reload::Layer::new(
+            Targets::new().with_default(tracing::Level::INFO),
+        );
+        let (layer, handle) = TraceLayer::new(Some(
+            tracing_opentelemetry::layer().with_tracer(provider.tracer("fields")),
+        ));
+        tracing::subscriber::with_default(Registry::default().with(filter).with(layer), || {
+            let admitted = tracing::info_span!("admitted", field = tracing::field::Empty);
+            admitted.record("field", tracing::field::debug(&value));
+            admitted.in_scope(|| tracing::info!(value = ?value));
+            assert_eq!(value.0.load(Ordering::Relaxed), 2);
+
+            handle.set_enabled(false).unwrap();
+            let unadmitted = tracing::info_span!("unadmitted", field = tracing::field::Empty);
+            for span in [&admitted, &unadmitted] {
+                span.record("field", tracing::field::debug(&value));
+                span.in_scope(|| tracing::info!(value = ?value));
+            }
+            assert_eq!(value.0.load(Ordering::Relaxed), 2);
+
+            handle
+                .set_enabled_with(true, || panic!("layer must not be replaced"))
+                .unwrap();
+            admitted.record("field", tracing::field::debug(&value));
+            admitted.in_scope(|| tracing::info!(value = ?value));
+            assert_eq!(value.0.load(Ordering::Relaxed), 4);
+        });
+    }
+
+    #[test]
+    fn test_trace_switch_finishes_admitted_spans() {
+        #[derive(Debug)]
+        struct Exporter(std::sync::mpsc::Sender<String>);
+
+        impl opentelemetry_sdk::trace::SpanExporter for Exporter {
+            async fn export(
+                &self,
+                batch: Vec<opentelemetry_sdk::trace::SpanData>,
+            ) -> opentelemetry_sdk::error::OTelSdkResult {
+                for span in batch {
+                    self.0.send(span.name.into_owned()).unwrap();
+                }
+                Ok(())
+            }
+        }
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let provider = SdkTracerProvider::builder()
+            .with_sampler(Sampler::AlwaysOn)
+            .with_simple_exporter(Exporter(sender))
+            .build();
+        let (filter, _) = tracing_subscriber::reload::Layer::new(
+            Targets::new().with_default(tracing::Level::INFO),
+        );
+        let (layer, handle) = TraceLayer::new(Some(
+            tracing_opentelemetry::layer().with_tracer(provider.tracer("export")),
+        ));
+        tracing::subscriber::with_default(Registry::default().with(filter).with(layer), || {
+            let active = tracing::info_span!("admitted");
+            handle.set_enabled(false).unwrap();
+            let disabled = tracing::info_span!("not_admitted");
+            drop(active);
+            drop(disabled);
+        });
+        provider.force_flush().unwrap();
+        assert_eq!(receiver.try_iter().collect::<Vec<_>>(), ["admitted"]);
+    }
+
+    #[test]
+    fn test_trace_switch_concurrent_context_access() {
+        let provider = SdkTracerProvider::builder()
+            .with_sampler(Sampler::AlwaysOn)
+            .build();
+        let (filter, _) = tracing_subscriber::reload::Layer::new(
+            Targets::new().with_default(tracing::Level::INFO),
+        );
+        let (layer, handle) = TraceLayer::new(Some(
+            tracing_opentelemetry::layer().with_tracer(provider.tracer("concurrent")),
+        ));
+        let dispatch = tracing::Dispatch::new(Registry::default().with(filter).with(layer));
+        let parent = tracing::dispatcher::with_default(&dispatch, || {
+            tracing::info_span!("concurrent_parent")
+        });
+        let context = parent.context();
+        let barrier = Barrier::new(4);
+        std::thread::scope(|scope| {
+            for _ in 0..3 {
+                scope.spawn(|| {
+                    tracing::dispatcher::with_default(&dispatch, || {
+                        let _entered = parent.enter();
+                        barrier.wait();
+                        for _ in 0..500 {
+                            assert_eq!(
+                                parent.context().span().span_context(),
+                                context.span().span_context()
+                            );
+                            {
+                                let child = tracing::info_span!("concurrent_child");
+                                let _entered = child.enter();
+                                let _ = child.context();
+                                tracing::info!("concurrent event");
+                            }
+                            assert_eq!(
+                                opentelemetry::Context::current().span().span_context(),
+                                context.span().span_context()
+                            );
+                        }
+                    });
+                });
+            }
+            barrier.wait();
+            for i in 0..1000 {
+                handle
+                    .set_enabled_with(i % 2 == 0, || panic!("layer must not be replaced"))
+                    .unwrap();
+            }
+        });
+    }
 
     #[test]
     fn test_logging_options_deserialization_default() {
@@ -777,6 +1022,23 @@ mod tests {
         assert_eq!(opts.dir, "");
         assert_eq!(opts.level, None);
         assert!(opts.append_stdout);
+        assert!(opts.enable_file_logging);
+    }
+
+    #[test]
+    fn test_logging_options_deserialization_enable_file_logging() {
+        let json = r#"{"enable_file_logging": false}"#;
+        let opts: LoggingOptions = serde_json::from_str(json).unwrap();
+
+        assert!(!opts.enable_file_logging);
+    }
+
+    #[test]
+    fn test_logging_options_deserialization_max_log_dir_size() {
+        let json = r#"{"max_log_dir_size": "1MiB"}"#;
+        let opts: LoggingOptions = serde_json::from_str(json).unwrap();
+
+        assert_eq!(opts.max_log_dir_size, ReadableSize::mb(1));
     }
 
     #[test]
@@ -872,6 +1134,10 @@ mod tests {
         let mut max_log_files = base.clone();
         max_log_files.max_log_files += 1;
         assert_ne!(base, max_log_files);
+
+        let mut max_log_dir_size = base.clone();
+        max_log_dir_size.max_log_dir_size = ReadableSize::mb(1);
+        assert_ne!(base, max_log_dir_size);
 
         let mut otlp_export_protocol = base.clone();
         otlp_export_protocol.otlp_export_protocol = Some(OtlpExportProtocol::Http);

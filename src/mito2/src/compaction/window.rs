@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 
 use common_telemetry::info;
@@ -20,27 +20,39 @@ use common_time::Timestamp;
 use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp_millis::BucketAligned;
+use snafu::ResultExt;
 use store_api::storage::RegionId;
 
+use crate::compaction::CompactionOutput;
 use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::{CompactionRegion, CompactionVersion};
-use crate::compaction::picker::{Picker, PickerOutput};
-use crate::compaction::{CompactionOutput, get_expired_ssts};
+use crate::compaction::last_non_null::inputs_precede_memtables;
+use crate::compaction::picker::{Picker, PickerOutput, get_expired_ssts};
+use crate::error::{JoinSnafu, Result};
+use crate::region::options::{CompactionOptions, MergeMode};
 use crate::sst::file::FileHandle;
 
-/// Compaction picker that splits the time range of all involved files to windows, and merges
-/// the data segments intersects with those windows of files together so that the output files
-/// never overlaps.
-#[derive(Debug)]
+/// Compaction picker that splits input files into disjoint time windows and merges the
+/// segments within each window. Outputs may be split further by the configured file size
+/// threshold, at series boundaries for regions with a primary key.
+#[derive(Clone, Debug)]
 pub struct WindowedCompactionPicker {
     compaction_time_window_seconds: Option<i64>,
+    time_range: Option<TimestampRange>,
 }
 
 impl WindowedCompactionPicker {
     pub fn new(window_seconds: Option<i64>) -> Self {
         Self {
             compaction_time_window_seconds: window_seconds,
+            time_range: None,
         }
+    }
+
+    /// Sets the time range used to select compaction windows.
+    pub(crate) fn with_time_range(mut self, time_range: Option<TimestampRange>) -> Self {
+        self.time_range = time_range;
+        self
     }
 
     // Computes compaction time window. First we respect user specified parameter, then
@@ -86,38 +98,134 @@ impl WindowedCompactionPicker {
         );
         if !expired_ssts.is_empty() {
             info!("Expired SSTs in region {}: {:?}", region_id, expired_ssts);
-            // here we mark expired SSTs as compacting to avoid them being picked.
-            expired_ssts.iter().for_each(|f| f.set_compacting(true));
         }
+        let expired_file_ids = expired_ssts
+            .iter()
+            .map(|file| file.file_id())
+            .collect::<HashSet<_>>();
 
+        let last_non_null = current_version.options.merge_mode() == MergeMode::LastNonNull;
+        // Busy SSTs remain LastNonNull dependencies: skipping an intermediate
+        // version would allow older fields to be promoted above it.
         let windows = assign_files_to_time_windows(
             time_window,
             current_version
                 .ssts
                 .levels()
                 .iter()
-                .flat_map(|level| level.files.values()),
+                .flat_map(|level| level.files.values())
+                .filter(|file| !expired_file_ids.contains(&file.file_id()))
+                .filter(|file| last_non_null || !file.compacting()),
         );
+        let windows = filter_time_windows(windows, self.time_range);
+
+        // One SST can span several outputs. Deferring only an unsafe window
+        // would remove that SST without rewriting all its remaining segments.
+        if last_non_null
+            && windows.values().any(|(_, inputs)| {
+                inputs.iter().any(FileHandle::compacting)
+                    || !inputs_precede_memtables(inputs, current_version.memtable_min_sequence)
+            })
+        {
+            return (vec![], expired_ssts, time_window);
+        }
 
         (build_output(windows), expired_ssts, time_window)
     }
 }
 
+#[async_trait::async_trait]
 impl Picker for WindowedCompactionPicker {
-    fn pick(&self, compaction_region: &CompactionRegion) -> Option<PickerOutput> {
-        let (outputs, expired_ssts, time_window) = self.pick_inner(
-            compaction_region.current_version.metadata.region_id,
-            &compaction_region.current_version,
-            Timestamp::current_millis(),
-        );
+    async fn pick(&self, compaction_region: &CompactionRegion) -> Result<Option<PickerOutput>> {
+        // TODO: With per-region compaction concurrency, the scheduler must wait
+        // for all running compactions to finish and apply their SST edits, and
+        // drain or cancel queued compactions before capturing current_version
+        // for SWCS. Block new compactions through snapshot capture and picking
+        // so the strict-window plan sees the complete SST view.
+        let picker = self.clone();
+        let region_id = compaction_region.current_version.metadata.region_id;
+        let current_version = compaction_region.current_version.clone();
+        let CompactionOptions::Twcs(options) = &compaction_region.region_options.compaction;
+        // Use the same output size threshold as TWCS, including zero meaning unlimited.
+        let max_file_size = options
+            .max_output_file_size
+            .map(|size| size.as_bytes())
+            .filter(|size| *size > 0)
+            .map(|size| size as usize);
+        let (outputs, expired_ssts, time_window) =
+            common_runtime::spawn_blocking_compact(move || {
+                picker.pick_inner(region_id, &current_version, Timestamp::current_millis())
+            })
+            .await
+            .context(JoinSnafu)?;
 
-        Some(PickerOutput {
+        Ok(Some(PickerOutput {
             outputs,
             expired_ssts,
             time_window_size: time_window,
-            max_file_size: None, // todo (hl): we may need to support `max_file_size` parameter in manual compaction.
-        })
+            max_file_size,
+        }))
     }
+}
+
+/// Keeps windows that overlap the requested range and their transitive dependencies.
+///
+/// [`assign_files_to_time_windows`] adds an SST to every time window that the SST covers. If a
+/// selected window contains such a cross-window SST, compaction will remove that input SST after
+/// rewriting it. Keeping only the directly selected window would therefore omit the SST's rows in
+/// the other windows. We must include every window covered by the SST, then repeat the process for
+/// other cross-window SSTs in those windows, until the complete dependency closure is selected.
+fn filter_time_windows(
+    mut windows: BTreeMap<i64, (i64, Vec<FileHandle>)>,
+    time_range: Option<TimestampRange>,
+) -> BTreeMap<i64, (i64, Vec<FileHandle>)> {
+    let Some(time_range) = time_range else {
+        return windows;
+    };
+
+    let mut selected_windows = windows
+        .iter()
+        .filter_map(|(lower_bound, (upper_bound, _))| {
+            let window_start = Timestamp::new_second(*lower_bound);
+            let window_end = Timestamp::new_second(*upper_bound);
+            let starts_before_range_end = time_range
+                .end()
+                .is_none_or(|range_end| window_start < range_end);
+            let ends_after_range_start = time_range
+                .start()
+                .is_none_or(|range_start| range_start < window_end);
+            (starts_before_range_end && ends_after_range_start).then_some(*lower_bound)
+        })
+        .collect::<HashSet<_>>();
+
+    let mut file_windows = HashMap::new();
+    for (lower_bound, (_, files)) in &windows {
+        for file in files {
+            file_windows
+                .entry(file.file_id())
+                .or_insert_with(Vec::new)
+                .push(*lower_bound);
+        }
+    }
+
+    let mut pending_windows = selected_windows.iter().copied().collect::<VecDeque<_>>();
+    let mut visited_files = HashSet::new();
+    while let Some(lower_bound) = pending_windows.pop_front() {
+        let (_, files) = &windows[&lower_bound];
+        for file in files {
+            if !visited_files.insert(file.file_id()) {
+                continue;
+            }
+            for dependent_window in &file_windows[&file.file_id()] {
+                if selected_windows.insert(*dependent_window) {
+                    pending_windows.push_back(*dependent_window);
+                }
+            }
+        }
+    }
+
+    windows.retain(|lower_bound, _| selected_windows.contains(lower_bound));
+    windows
 }
 
 fn build_output(windows: BTreeMap<i64, (i64, Vec<FileHandle>)>) -> Vec<CompactionOutput> {
@@ -154,9 +262,6 @@ fn assign_files_to_time_windows<'a>(
     let mut buckets = BTreeMap::new();
 
     for file in files {
-        if file.compacting() {
-            continue;
-        }
         let (start, end) = file.time_range();
         let bounds = file_time_bucket_span(
             // safety: converting whatever timestamp to seconds will not overflow.
@@ -201,16 +306,20 @@ fn file_time_bucket_span(start_sec: i64, end_sec: i64, bucket_sec: i64) -> Vec<(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::Arc;
     use std::time::Duration;
 
+    use common_base::readable_size::ReadableSize;
     use common_time::Timestamp;
     use common_time::range::TimestampRange;
     use store_api::storage::{FileId, RegionId};
 
     use crate::compaction::compactor::CompactionVersion;
+    use crate::compaction::picker::Picker;
+    use crate::compaction::test_util::compaction_region_with_ssts;
     use crate::compaction::window::{WindowedCompactionPicker, file_time_bucket_span};
-    use crate::region::options::RegionOptions;
+    use crate::region::options::{CompactionOptions, MergeMode, RegionOptions};
     use crate::sst::file::{FileMeta, Level};
     use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::version::SstVersion;
@@ -223,7 +332,7 @@ mod tests {
         let metadata = metadata_for_test();
         let file_purger_ref = Arc::new(NoopFilePurger);
 
-        let mut ssts = SstVersion::new();
+        let mut ssts = SstVersion::new(metadata.clone());
 
         ssts.add_files(
             file_purger_ref,
@@ -241,6 +350,7 @@ mod tests {
         CompactionVersion {
             metadata,
             ssts: Arc::new(ssts),
+            memtable_min_sequence: None,
             options: RegionOptions {
                 ttl: ttl.map(|t| t.into()),
                 auto_flush_interval: None,
@@ -248,30 +358,59 @@ mod tests {
                 compaction_override: false,
                 storage: None,
                 append_mode: false,
+                skip_wal: false,
                 wal_options: Default::default(),
                 index_options: Default::default(),
                 memtable: None,
                 merge_mode: None,
                 sst_format: None,
+                max_row_group_row_count: None,
                 primary_key_encoding: None,
+                write_buffer_size: None,
+                preserve_row_sequence: false,
+                float_field_encoding: Default::default(),
             },
             compaction_time_window: None,
         }
     }
 
+    #[tokio::test]
+    async fn test_pick_output_file_size_threshold() {
+        let mut region = compaction_region_with_ssts(
+            [FileMeta {
+                file_id: FileId::random(),
+                time_range: (Timestamp::new_second(0), Timestamp::new_second(1)),
+                ..Default::default()
+            }],
+            Duration::from_secs(3600),
+        )
+        .await;
+        let picker = WindowedCompactionPicker::new(Some(3600));
+
+        for (size, expected) in [(None, None), (Some(0), None), (Some(1024), Some(1024))] {
+            let CompactionOptions::Twcs(options) = &mut region.region_options.compaction;
+            options.max_output_file_size = size.map(ReadableSize);
+
+            let output = picker.pick(&region).await.unwrap().unwrap();
+            assert_eq!(1, output.outputs.len());
+            assert_eq!(expected, output.max_file_size);
+        }
+    }
+
     #[test]
-    fn test_pick_expired() {
+    fn test_pick_expired_ssts_without_marking_compacting() {
         let picker = WindowedCompactionPicker::new(None);
         let files = vec![(FileId::random(), 0, 10, 0)];
-
         let version = build_version(&files, Some(Duration::from_millis(1)));
-        let (outputs, expired_ssts, _window) = picker.pick_inner(
+        let (outputs, expired_ssts, _) = picker.pick_inner(
             RegionId::new(0, 0),
             &version,
             Timestamp::new_millisecond(12),
         );
+
         assert!(outputs.is_empty());
         assert_eq!(1, expired_ssts.len());
+        assert!(expired_ssts.iter().all(|file| !file.compacting()));
     }
 
     const HOUR: i64 = 60 * 60 * 1000;
@@ -347,6 +486,70 @@ mod tests {
     }
 
     #[test]
+    fn test_pick_time_range_expands_for_cross_window_files() {
+        let time_range = TimestampRange::new(
+            Timestamp::new_millisecond(HOUR / 2),
+            Timestamp::new_millisecond(HOUR * 3 / 4),
+        )
+        .unwrap();
+        let picker =
+            WindowedCompactionPicker::new(Some(HOUR / 1000)).with_time_range(Some(time_range));
+        let files = vec![
+            (FileId::random(), 0, 2 * HOUR - 1, 0),
+            (FileId::random(), HOUR, HOUR * 3 - 1, 0),
+            (FileId::random(), 4 * HOUR, 5 * HOUR - 1, 0),
+        ];
+        let version = build_version(&files, None);
+
+        let (outputs, _, _) = picker.pick_inner(
+            RegionId::new(0, 0),
+            &version,
+            Timestamp::new_millisecond(6 * HOUR),
+        );
+
+        assert_eq!(3, outputs.len());
+        assert_eq!(
+            Some(TimestampRange::new(
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(HOUR),
+            )),
+            outputs.first().map(|output| output.output_time_range)
+        );
+        assert_eq!(
+            Some(TimestampRange::new(
+                Timestamp::new_millisecond(2 * HOUR),
+                Timestamp::new_millisecond(3 * HOUR),
+            )),
+            outputs.last().map(|output| output.output_time_range)
+        );
+    }
+
+    #[test]
+    fn test_pick_time_range_expands_long_dependency_chain() {
+        const CHAIN_LEN: i64 = 128;
+
+        let time_range = TimestampRange::new(
+            Timestamp::new_millisecond(0),
+            Timestamp::new_millisecond(HOUR / 2),
+        )
+        .unwrap();
+        let picker =
+            WindowedCompactionPicker::new(Some(HOUR / 1000)).with_time_range(Some(time_range));
+        let files = (0..CHAIN_LEN)
+            .map(|window| (FileId::random(), window * HOUR, (window + 2) * HOUR - 1, 0))
+            .collect::<Vec<_>>();
+        let version = build_version(&files, None);
+
+        let (outputs, _, _) = picker.pick_inner(
+            RegionId::new(0, 0),
+            &version,
+            Timestamp::new_millisecond((CHAIN_LEN + 2) * HOUR),
+        );
+
+        assert_eq!(CHAIN_LEN as usize + 1, outputs.len());
+    }
+
+    #[test]
     fn test_assign_compacting_files_to_windows() {
         let picker = WindowedCompactionPicker::new(Some(HOUR / 1000));
         let files = vec![
@@ -366,6 +569,75 @@ mod tests {
         assert!(expired_ssts.is_empty());
         assert_eq!(HOUR / 1000, window_seconds);
         assert!(outputs.is_empty());
+    }
+
+    #[rstest::rstest]
+    #[case::requested_window(0)]
+    #[case::transitive_window(1)]
+    #[case::unrelated_window(3)]
+    fn test_busy_dependencies_defer_last_non_null_plan_until_released(
+        #[case] busy_window: i64,
+        #[values(MergeMode::LastRow, MergeMode::LastNonNull)] merge_mode: MergeMode,
+    ) {
+        // A and C span both output windows. Skipping a busy intermediate B
+        // would allow an unsafe A+C merge; deferring just one output would
+        // lose the other segment of these shared inputs when they are removed.
+        let [a, b, c, expired] = std::array::from_fn(|_| FileId::random());
+        let files = [
+            (a, 0, 2 * HOUR - 1, 0),
+            (b, busy_window * HOUR, (busy_window + 1) * HOUR - 1, 1),
+            (c, 0, 2 * HOUR - 1, 0),
+            (expired, -2 * HOUR, -2 * HOUR, 0),
+        ];
+        let mut version = build_version(&files, Some(Duration::from_millis(3 * HOUR as u64)));
+        version.options.merge_mode = Some(merge_mode);
+        // No memtable barrier: only the busy SST dependency may defer this plan.
+        assert_eq!(None, version.memtable_min_sequence);
+        let busy_file = version.ssts.levels()[1].files().next().unwrap();
+        let picker =
+            WindowedCompactionPicker::new(Some(HOUR / 1000)).with_time_range(TimestampRange::new(
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(HOUR),
+            ));
+
+        for busy in [true, false] {
+            busy_file.set_compacting(busy);
+            let (outputs, expired_ssts, _) = picker.pick_inner(
+                version.metadata.region_id,
+                &version,
+                Timestamp::new_millisecond(2 * HOUR),
+            );
+            assert_eq!(1, expired_ssts.len());
+            assert_eq!(expired, expired_ssts[0].meta_ref().file_id);
+            assert!(!expired_ssts[0].compacting());
+
+            if busy && merge_mode == MergeMode::LastNonNull && busy_window < 2 {
+                assert!(outputs.is_empty(), "the entire dependent plan must wait");
+                continue;
+            }
+
+            assert_eq!(2, outputs.len());
+            for (window, output) in outputs.iter().enumerate() {
+                let window = window as i64;
+                let mut expected = HashSet::from([a, c]);
+                if !busy && busy_window == window {
+                    expected.insert(b);
+                }
+                let actual: HashSet<_> = output
+                    .inputs
+                    .iter()
+                    .map(|file| file.meta_ref().file_id)
+                    .collect();
+                assert_eq!(expected, actual);
+                assert_eq!(
+                    TimestampRange::new(
+                        Timestamp::new_millisecond(window * HOUR),
+                        Timestamp::new_millisecond((window + 1) * HOUR),
+                    ),
+                    output.output_time_range
+                );
+            }
+        }
     }
 
     #[test]

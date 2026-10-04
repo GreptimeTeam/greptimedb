@@ -19,9 +19,9 @@ use common_telemetry::debug;
 use datafusion::config::{ConfigExtension, ExtensionOptions};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
-use datafusion_common::Column;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
+use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::expr::{Exists, InSubquery};
 use datafusion_expr::utils::expr_to_columns;
 use datafusion_expr::{Expr, LogicalPlan, LogicalPlanBuilder, Subquery, col as col_fn};
@@ -167,6 +167,9 @@ impl AnalyzerRule for DistPlannerAnalyzer {
                 }
             }
         };
+        let plan = plan
+            .transform_down_with_subqueries(&unwrap_dictionary_literals)?
+            .data;
 
         let result = match self.try_push_down(plan.clone()) {
             Ok(plan) => plan,
@@ -224,11 +227,32 @@ fn pre_merge_scan_optimizer() -> Optimizer {
     ])
 }
 
+fn unwrap_dictionary_literals(plan: LogicalPlan) -> DfResult<Transformed<LogicalPlan>> {
+    // A Values plan derives its schema from its expressions. Rewriting only the expressions would
+    // leave that schema inconsistent, which affects DML planning.
+    if matches!(&plan, LogicalPlan::Values(_)) {
+        return Ok(Transformed::no(plan));
+    }
+
+    plan.map_expressions(|expr| {
+        expr.transform_up(|expr| match expr {
+            Expr::Literal(ScalarValue::Dictionary(_, value), metadata) => {
+                Ok(Transformed::yes(Expr::Literal(*value, metadata)))
+            }
+            _ => Ok(Transformed::no(expr)),
+        })
+    })
+}
+
 impl DistPlannerAnalyzer {
     /// Try push down as many nodes as possible
     fn try_push_down(&self, plan: LogicalPlan) -> DfResult<LogicalPlan> {
-        let plan = plan.transform(&Self::inspect_plan_with_subquery)?;
-        let mut rewriter = PlanRewriter::default();
+        // Use the subquery-aware transform so expression subqueries (including
+        // nested scalar subqueries left in place by DataFusion 55's
+        // `enable_physical_uncorrelated_scalar_subquery`) are visited at every
+        // depth and their table scans get wrapped in `MergeScan`.
+        let plan = plan.transform_with_subqueries(&Self::inspect_plan_with_subquery)?;
+        let mut rewriter = PlanRewriter::new(&plan.data);
         let result = plan.data.rewrite(&mut rewriter)?.data;
         Self::assign_merge_scan_remote_dyn_filter_producer_ids(result)
     }
@@ -282,7 +306,7 @@ impl DistPlannerAnalyzer {
     }
 
     fn handle_subquery(subquery: Subquery) -> DfResult<Subquery> {
-        let mut rewriter = PlanRewriter::default();
+        let mut rewriter = PlanRewriter::new(&subquery.subquery);
         let mut rewrote_subquery = subquery
             .subquery
             .as_ref()
@@ -371,6 +395,9 @@ enum RewriterStatus {
 
 #[derive(Debug, Default)]
 struct PlanRewriter {
+    /// Whether the whole plan this rewriter walks can be encoded to Substrait.
+    /// Used by [`PlanRewriter::should_expand`] to skip the per-node encoding check.
+    whole_plan_encodable: bool,
     /// Current level in the tree
     level: usize,
     /// Simulated stack for the `rewrite` recursion
@@ -427,6 +454,17 @@ struct PlanRewriter {
 }
 
 impl PlanRewriter {
+    /// `plan` must be the root of the tree that is about to be rewritten, otherwise
+    /// [`PlanRewriter::should_expand`] may skip a check it has to perform.
+    fn new(plan: &LogicalPlan) -> Self {
+        Self {
+            whole_plan_encodable: DFLogicalSubstraitConvertor
+                .encode(plan, DefaultSerializer)
+                .is_ok(),
+            ..Default::default()
+        }
+    }
+
     fn get_parent(&self) -> Option<&LogicalPlan> {
         // level starts from 1, it's safe to minus by 1
         self.stack
@@ -447,7 +485,16 @@ impl PlanRewriter {
                 .collect::<Vec<String>>()
                 .join("\n"),
         );
-        if let Err(e) = DFLogicalSubstraitConvertor.encode(plan, DefaultSerializer) {
+        // Substrait encoding recurses from the root to the leaves, so a root that encodes
+        // proves that every node below it encodes as well. `plan` here always comes from
+        // `self.stack`, which holds untouched sub-trees of that root, so one check on the
+        // root covers the whole descent. Each check builds a fresh `SessionState`, which
+        // is the dominant cost on deep PromQL plans.
+        // When the root does not encode, the plan holds at least one node that has to stay
+        // on the frontend and only the per-node check locates it.
+        if !self.whole_plan_encodable
+            && let Err(e) = DFLogicalSubstraitConvertor.encode(plan, DefaultSerializer)
+        {
             debug!(
                 "PlanRewriter: plan cannot be converted to substrait with error={e:?}, expanding now: {plan}"
             );
@@ -625,13 +672,9 @@ impl PlanRewriter {
         }
 
         if let LogicalPlan::TableScan(table_scan) = plan
-            && let Some(source) = table_scan
-                .source
-                .as_any()
-                .downcast_ref::<DefaultTableSource>()
+            && let Some(source) = table_scan.source.downcast_ref::<DefaultTableSource>()
             && let Some(provider) = source
                 .table_provider
-                .as_any()
                 .downcast_ref::<DfTableProviderAdapter>()
         {
             let table = provider.table();

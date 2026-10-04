@@ -17,7 +17,8 @@ use snafu::OptionExt;
 
 use crate::error::{InvalidConfigSnafu, Result};
 use crate::user_provider::{
-    UserInfoMap, authenticate_with_credential, load_credential_from_file, parse_credential_line,
+    PgAuthInfo, UserInfoMap, authenticate_with_credential, load_credential_from_file,
+    parse_credential_line, postgres_auth_info_with_credential, warn_if_pg_scram_disabled,
 };
 use crate::{Identity, Password, UserInfoRef, UserProvider};
 
@@ -47,7 +48,10 @@ impl StaticUserProvider {
                     })
                 })
                 .collect::<Result<UserInfoMap>>()
-                .map(|users| StaticUserProvider { users }),
+                .map(|users| {
+                    warn_if_pg_scram_disabled(&users);
+                    StaticUserProvider { users }
+                }),
             _ => InvalidConfigSnafu {
                 value: mode.to_string(),
                 msg: "StaticUserProviderOption must be in format `file:<path>` or `cmd:<values>`",
@@ -65,6 +69,10 @@ impl UserProvider for StaticUserProvider {
 
     async fn authenticate(&self, id: Identity<'_>, pwd: Password<'_>) -> Result<UserInfoRef> {
         authenticate_with_credential(&self.users, id, pwd)
+    }
+
+    async fn postgres_auth_info(&self, id: Identity<'_>, _catalog: &str) -> Result<PgAuthInfo> {
+        postgres_auth_info_with_credential(&self.users, id)
     }
 
     async fn authorize(
@@ -139,6 +147,8 @@ pub mod test {
         let provider = StaticUserProvider::new("cmd:root=123456,admin=654321").unwrap();
         test_authenticate(&provider, "root", "123456").await;
         test_authenticate(&provider, "admin", "654321").await;
+
+        assert!(StaticUserProvider::new("cmd:user:readonyl=password").is_err());
     }
 
     #[tokio::test]
@@ -163,6 +173,7 @@ pub mod test {
             assert!(
                 lw.write_all(
                     b"root=123456
+invalid:readonyl=password
 admin=654321",
                 )
                 .is_ok()
@@ -174,5 +185,6 @@ admin=654321",
         let provider = StaticUserProvider::new(param.as_str()).unwrap();
         test_authenticate(&provider, "root", "123456").await;
         test_authenticate(&provider, "admin", "654321").await;
+        test_authenticate_fails(&provider, "invalid", "password").await;
     }
 }

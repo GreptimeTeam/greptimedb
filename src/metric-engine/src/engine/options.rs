@@ -60,10 +60,7 @@ pub enum IndexOptions {
 }
 
 /// Sets data region specific options.
-pub fn set_data_region_options(
-    options: &mut HashMap<String, String>,
-    sparse_primary_key_encoding_if_absent: bool,
-) {
+pub fn set_data_region_options(options: &mut HashMap<String, String>) {
     options.remove(METRIC_ENGINE_INDEX_TYPE_OPTION);
     options.remove(METRIC_ENGINE_INDEX_SKIPPING_INDEX_GRANULARITY_OPTION);
     options.remove(METRIC_ENGINE_INDEX_SKIPPING_INDEX_FALSE_POSITIVE_RATE_OPTION);
@@ -83,11 +80,11 @@ pub fn set_data_region_options(
     options.insert("sst_format".to_string(), "flat".to_string());
 
     // Decide the top-level primary key encoding: caller-supplied top-level key wins,
-    // then extracted legacy value, then the `sparse` default if requested.
+    // then extracted legacy value, then the `sparse` default.
     if !options.contains_key(PRIMARY_KEY_ENCODING) {
         if let Some(encoding) = legacy_encoding {
             options.insert(PRIMARY_KEY_ENCODING.to_string(), encoding);
-        } else if sparse_primary_key_encoding_if_absent {
+        } else {
             options.insert(PRIMARY_KEY_ENCODING.to_string(), "sparse".to_string());
         }
     }
@@ -175,7 +172,7 @@ mod tests {
             METRIC_ENGINE_INDEX_SKIPPING_INDEX_FALSE_POSITIVE_RATE_OPTION.to_string(),
             "0.01".to_string(),
         );
-        set_data_region_options(&mut options, false);
+        set_data_region_options(&mut options);
 
         for key in [
             METRIC_ENGINE_INDEX_TYPE_OPTION,
@@ -227,7 +224,7 @@ mod tests {
     fn test_set_data_region_options_default_compaction_time_window() {
         // Test that default time window is set when not specified
         let mut options = HashMap::new();
-        set_data_region_options(&mut options, false);
+        set_data_region_options(&mut options);
 
         assert_eq!(options.get("memtable.type"), Some(&"bulk".to_string()));
         assert_eq!(options.get("sst_format"), Some(&"flat".to_string()));
@@ -241,7 +238,7 @@ mod tests {
     #[test]
     fn test_set_data_region_options_sparse_primary_key_encoding() {
         let mut options = HashMap::new();
-        set_data_region_options(&mut options, true);
+        set_data_region_options(&mut options);
 
         assert_eq!(options.get("memtable.type"), Some(&"bulk".to_string()));
         assert_eq!(options.get("sst_format"), Some(&"flat".to_string()));
@@ -264,7 +261,7 @@ mod tests {
             "memtable.partition_tree.index_max_keys_per_shard".to_string(),
             "2048".to_string(),
         );
-        set_data_region_options(&mut options, false);
+        set_data_region_options(&mut options);
 
         assert_eq!(options.get("memtable.type"), Some(&"bulk".to_string()));
         assert_eq!(options.get("sst_format"), Some(&"flat".to_string()));
@@ -282,7 +279,7 @@ mod tests {
         let mut options = HashMap::new();
         options.insert(PRIMARY_KEY_ENCODING.to_string(), "dense".to_string());
         // Sparse flag is on but caller already specified dense.
-        set_data_region_options(&mut options, true);
+        set_data_region_options(&mut options);
 
         assert_eq!(
             options.get(PRIMARY_KEY_ENCODING),
@@ -296,7 +293,7 @@ mod tests {
         let mut options = HashMap::new();
         options.insert(TWCS_TIME_WINDOW.to_string(), "2h".to_string());
         options.insert(COMPACTION_TYPE.to_string(), "twcs".to_string());
-        set_data_region_options(&mut options, false);
+        set_data_region_options(&mut options);
 
         // User's time window should be preserved
         assert_eq!(options.get(TWCS_TIME_WINDOW), Some(&"2h".to_string()));

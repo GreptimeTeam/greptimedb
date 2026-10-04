@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::{Debug, Display};
 use std::ops::Bound;
 use std::sync::{Arc, Mutex};
@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 
 use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{
-    HeartbeatRequest, HeartbeatResponse, MailboxMessage, PROTOCOL_VERSION, RegionLease,
-    ResponseHeader, Role,
+    HeartbeatConfig, HeartbeatRequest, HeartbeatResponse, MailboxMessage, PROTOCOL_VERSION,
+    RegionLease, ResponseHeader, Role,
 };
 use check_leader_handler::CheckLeaderHandler;
 use collect_cluster_info_handler::{
@@ -119,6 +119,8 @@ pub struct HeartbeatAccumulator {
     pub stat: Option<Stat>,
     pub inactive_region_ids: HashSet<RegionId>,
     pub region_lease: Option<RegionLease>,
+    /// Generic heartbeat response extensions accumulated by handlers.
+    pub extensions: HashMap<String, Vec<u8>>,
 }
 
 impl HeartbeatAccumulator {
@@ -387,7 +389,8 @@ impl HeartbeatHandlerGroup {
 
         // Populate heartbeat_config during handshake
         let heartbeat_config = if is_handshake {
-            let config = ctx.heartbeat_options_for(role).into();
+            let mut config: HeartbeatConfig = ctx.heartbeat_options_for(role).into();
+            config.gc_enabled = ctx.gc_enabled;
 
             info!(
                 "Handshake with {:?} node, sending config: {:?}",
@@ -404,6 +407,7 @@ impl HeartbeatHandlerGroup {
             region_lease: acc.region_lease,
             mailbox_message,
             heartbeat_config,
+            extensions: std::mem::take(&mut acc.extensions),
         };
         Ok(res)
     }
@@ -424,9 +428,11 @@ impl HeartbeatMailbox {
                 .as_ref()
                 .with_context(|| UnexpectedInstructionReplySnafu {
                     mailbox_message: msg.to_string(),
-                    reason: format!("empty payload, msg: {msg:?}"),
+                    reason: "empty JSON payload".to_string(),
                 })?;
-        serde_json::from_str(payload).context(DeserializeFromJsonSnafu { input: payload })
+        serde_json::from_str(payload).context(DeserializeFromJsonSnafu {
+            input_len: payload.len(),
+        })
     }
 
     /// Parses the [Instruction] from [MailboxMessage].
@@ -439,9 +445,11 @@ impl HeartbeatMailbox {
                 .as_ref()
                 .with_context(|| UnexpectedInstructionReplySnafu {
                     mailbox_message: msg.to_string(),
-                    reason: format!("empty payload, msg: {msg:?}"),
+                    reason: "empty JSON payload".to_string(),
                 })?;
-        serde_json::from_str(payload).context(DeserializeFromJsonSnafu { input: payload })
+        serde_json::from_str(payload).context(DeserializeFromJsonSnafu {
+            input_len: payload.len(),
+        })
     }
 
     pub fn create(pushers: Pushers, sequence: Sequence) -> MailboxRef {
@@ -522,7 +530,12 @@ impl Mailbox for HeartbeatMailbox {
         msg.id = message_id;
 
         let pusher_id = ch.pusher_id();
-        debug!("Sending mailbox message {msg:?} to {pusher_id}");
+        let payload_len = msg
+            .payload
+            .as_ref()
+            .map(|Payload::Json(payload)| payload.len())
+            .unwrap_or_default();
+        debug!(message_id, payload_len, %pusher_id, "Sending mailbox message");
 
         let (tx, rx) = oneshot::channel();
         let _ = self.senders.insert(message_id, tx);
@@ -544,7 +557,12 @@ impl Mailbox for HeartbeatMailbox {
         msg.id = message_id;
 
         let pusher_id = ch.pusher_id();
-        debug!("Sending mailbox message {msg:?} to {pusher_id}");
+        let payload_len = msg
+            .payload
+            .as_ref()
+            .map(|Payload::Json(payload)| payload.len())
+            .unwrap_or_default();
+        debug!(message_id, payload_len, %pusher_id, "Sending one-way mailbox message");
 
         self.pushers.push(pusher_id, msg).await?;
 
@@ -556,7 +574,18 @@ impl Mailbox for HeartbeatMailbox {
     }
 
     async fn on_recv(&self, id: MessageId, maybe_msg: Result<MailboxMessage>) -> Result<()> {
-        debug!("Received mailbox message {maybe_msg:?}");
+        let payload_len = maybe_msg
+            .as_ref()
+            .ok()
+            .and_then(|msg| msg.payload.as_ref())
+            .map(|Payload::Json(payload)| payload.len())
+            .unwrap_or_default();
+        debug!(
+            message_id = id,
+            payload_len,
+            success = maybe_msg.is_ok(),
+            "Received mailbox message"
+        );
 
         let _ = self.timeouts.remove(&id);
 
@@ -564,7 +593,15 @@ impl Mailbox for HeartbeatMailbox {
             tx.send(maybe_msg)
                 .map_err(|_| error::MailboxClosedSnafu { id }.build())?;
         } else if let Ok(finally_msg) = maybe_msg {
-            warn!("The response arrived too late: {finally_msg:?}");
+            let payload_len = finally_msg
+                .payload
+                .as_ref()
+                .map(|Payload::Json(payload)| payload.len())
+                .unwrap_or_default();
+            warn!(
+                message_id = id,
+                payload_len, "The mailbox response arrived too late"
+            );
         }
 
         Ok(())
@@ -886,16 +923,21 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use api::v1::meta::{MailboxMessage, Role};
+    use api::v1::meta::{HeartbeatRequest, MailboxMessage, RequestHeader, Role};
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::sequence::SequenceBuilder;
     use tokio::sync::mpsc;
 
-    use super::{HeartbeatHandlerGroupBuilder, PusherId, Pushers};
+    use super::{
+        HandleControl, HeartbeatAccumulator, HeartbeatHandler, HeartbeatHandlerGroupBuilder,
+        PusherId, Pushers,
+    };
     use crate::error;
     use crate::handler::collect_stats_handler::CollectStatsHandler;
     use crate::handler::response_header_handler::ResponseHeaderHandler;
+    use crate::handler::test_utils::TestEnv;
     use crate::handler::{HeartbeatHandlerGroup, HeartbeatMailbox, Pusher};
+    use crate::metasrv::Context;
     use crate::service::mailbox::{Channel, MailboxReceiver, MailboxRef};
 
     #[tokio::test]
@@ -1313,5 +1355,45 @@ mod tests {
 
         drop(pusher);
         deregister_signal_tx.changed().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_custom_handler_extension_reaches_response() {
+        struct CustomExtensionHandler;
+
+        #[async_trait::async_trait]
+        impl HeartbeatHandler for CustomExtensionHandler {
+            fn is_acceptable(&self, role: Role) -> bool {
+                role == Role::Frontend
+            }
+
+            async fn handle(
+                &self,
+                _req: &HeartbeatRequest,
+                _ctx: &mut Context,
+                acc: &mut HeartbeatAccumulator,
+            ) -> crate::error::Result<HandleControl> {
+                acc.extensions
+                    .insert("custom.key".to_string(), b"custom-value".to_vec());
+                Ok(HandleControl::Continue)
+            }
+        }
+
+        let mut builder =
+            HeartbeatHandlerGroupBuilder::new(Pushers::default()).add_default_handlers();
+        builder.add_handler_last(CustomExtensionHandler);
+
+        let group = builder.build().unwrap();
+
+        let req = HeartbeatRequest {
+            header: Some(RequestHeader::new(1, Role::Frontend, Default::default())),
+            ..Default::default()
+        };
+        let ctx = TestEnv::new().ctx();
+
+        let res = group.handle(req, ctx).await.unwrap();
+
+        let extensions = res.extensions;
+        assert_eq!(extensions.get("custom.key").unwrap(), b"custom-value");
     }
 }

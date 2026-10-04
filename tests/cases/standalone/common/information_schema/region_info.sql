@@ -11,7 +11,7 @@ INSERT INTO region_info_case VALUES (1, 1), (2, 2);
 ADMIN FLUSH_TABLE('region_info_case');
 
 -- SQLNESS REPLACE (\s+\d+\s+) <NUM>
--- SQLNESS REPLACE (\{".*"\}) <JSON>
+-- SQLNESS REPLACE (\{.*\}) <JSON>
 -- SQLNESS REPLACE (-{40,}) ----------------
 -- SQLNESS REPLACE (region_options\s+\|) region_options |
 SELECT region_id, state, role, writable, committed_sequence, flushed_sequence, manifest_version, compaction_time_window, region_options, sst_format

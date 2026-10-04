@@ -17,7 +17,6 @@ use std::sync::Arc;
 use crate::error::Result;
 use crate::flow_name::FlowName;
 use crate::instruction::{CacheIdent, DropFlow};
-use crate::key::MetadataKey;
 use crate::key::flow::flow_info::FlowInfoKey;
 use crate::key::flow::flow_name::FlowNameKey;
 use crate::key::flow::flow_route::FlowRouteKey;
@@ -28,7 +27,11 @@ use crate::key::schema_name::SchemaNameKey;
 use crate::key::table_info::TableInfoKey;
 use crate::key::table_name::TableNameKey;
 use crate::key::table_route::TableRouteKey;
+use crate::key::tombstone::to_tombstone_key;
 use crate::key::view_info::ViewInfoKey;
+use crate::key::{
+    MetadataKey, drop_generation_key, dropped_at_key, purging_key, retention_expires_at_key,
+};
 
 /// KvBackend cache invalidator
 #[async_trait::async_trait]
@@ -100,6 +103,15 @@ where
 
                     let key = ViewInfoKey::new(*table_id);
                     self.invalidate_key(&key.to_bytes()).await;
+
+                    for key in [
+                        dropped_at_key(*table_id),
+                        retention_expires_at_key(*table_id),
+                        drop_generation_key(*table_id),
+                        purging_key(*table_id),
+                    ] {
+                        self.invalidate_key(&to_tombstone_key(&key)).await;
+                    }
                 }
                 CacheIdent::TableName(table_name) => {
                     let key: TableNameKey = table_name.into();

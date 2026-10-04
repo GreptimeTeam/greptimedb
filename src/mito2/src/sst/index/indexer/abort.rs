@@ -20,11 +20,10 @@ use crate::sst::index::Indexer;
 
 impl Indexer {
     pub(crate) async fn do_abort(&mut self) {
+        self.dense_pk_decoder = None;
         self.do_abort_inverted_index().await;
         self.do_abort_fulltext_index().await;
         self.do_abort_bloom_filter().await;
-        #[cfg(feature = "vector_index")]
-        self.do_abort_vector_index().await;
         self.do_prune_intm_sst_dir().await;
         if self.write_cache_enabled {
             self.do_abort_clean_fs_temp_dir().await;
@@ -102,32 +101,10 @@ impl Indexer {
         let fs_accessor = puffin_manager.file_accessor();
 
         let fs_handle = RegionIndexId::new(
-            RegionFileId::new(self.region_id, self.file_id),
+            RegionFileId::new(self.physical_region_id, self.file_id),
             self.index_version,
         )
         .to_string();
         TempFileCleaner::clean_atomic_dir_files(fs_accessor.store().store(), &[&fs_handle]).await;
-    }
-
-    #[cfg(feature = "vector_index")]
-    async fn do_abort_vector_index(&mut self) {
-        let Some(mut indexer) = self.vector_indexer.take() else {
-            return;
-        };
-        let Err(err) = indexer.abort().await else {
-            return;
-        };
-
-        if cfg!(any(test, feature = "test")) {
-            panic!(
-                "Failed to abort vector index, region_id: {}, file_id: {}, err: {:?}",
-                self.region_id, self.file_id, err
-            );
-        } else {
-            warn!(
-                err; "Failed to abort vector index, region_id: {}, file_id: {}",
-                self.region_id, self.file_id,
-            );
-        }
     }
 }

@@ -39,6 +39,11 @@ use servers::http::HttpOptions;
 pub struct StorageConfig {
     /// The working directory of database
     pub data_home: String,
+    /// Root directory for standalone SQL access to local files.
+    ///
+    /// Defaults to `<data_home>/copy` when `data_home` is a local path.
+    /// Distributed deployments always disable SQL access to local files.
+    pub copy_root: Option<String>,
     #[serde(flatten)]
     pub store: ObjectStoreConfig,
     /// Object storage providers
@@ -56,6 +61,7 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             data_home: DEFAULT_DATA_HOME.to_string(),
+            copy_root: None,
             store: ObjectStoreConfig::default(),
             providers: vec![],
         }

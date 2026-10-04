@@ -40,11 +40,23 @@ impl<E: ErrorExt> Display for ErrorFormatter<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let status_code = self.0.status_code();
         let root_cause = self.0.output_msg();
+        let root_cause = normalize_meta_client_error(&root_cause, status_code);
         write!(
             f,
             "Error: {}({status_code}), {root_cause}",
             status_code as u32
         )
+    }
+}
+
+fn normalize_meta_client_error(
+    root_cause: &str,
+    status_code: common_error::status_code::StatusCode,
+) -> &str {
+    let details_prefix = format!(", code: {status_code}, tonic code: ");
+    match root_cause.rsplit_once(&details_prefix) {
+        Some((message, tonic_code)) if !tonic_code.is_empty() => message,
+        _ => root_cause,
     }
 }
 
@@ -191,7 +203,7 @@ pub fn build_recordbatches_from_mysql_rows(rows: &[MySqlRow]) -> RecordBatches {
         names
             .iter()
             .map(|name| {
-                ColumnSchema::new(name.to_string(), ConcreteDataType::string_datatype(), false)
+                ColumnSchema::new(name.to_string(), ConcreteDataType::string_datatype(), true)
             })
             .collect(),
     ));
@@ -202,7 +214,9 @@ pub fn build_recordbatches_from_mysql_rows(rows: &[MySqlRow]) -> RecordBatches {
         .collect();
     for row in rows.iter() {
         for (i, name) in names.iter().enumerate() {
-            columns[i].push(row.get::<String, &str>(name).as_deref());
+            // `get::<String, _>` panics on NULL values, so fetch as Option.
+            let value: Option<String> = row.get::<Option<String>, &str>(name).flatten();
+            columns[i].push(value.as_deref());
         }
     }
     let columns: Vec<VectorRef> = columns
@@ -213,4 +227,53 @@ pub fn build_recordbatches_from_mysql_rows(rows: &[MySqlRow]) -> RecordBatches {
     // construct recordbatch
     RecordBatches::try_from_columns(schema, columns)
         .expect("Failed to construct recordbatches from columns. Please check the schema.")
+}
+
+#[cfg(test)]
+mod tests {
+    use common_error::ext::PlainError;
+    use common_error::status_code::StatusCode;
+
+    use super::*;
+
+    #[test]
+    fn test_normalize_meta_client_error() {
+        let error = PlainError::new(
+            "Invalid options, code: InvalidArguments, tonic code: Client specified an invalid argument"
+                .to_string(),
+            StatusCode::InvalidArguments,
+        );
+
+        assert_eq!(
+            "Error: 1004(InvalidArguments), Invalid options",
+            ErrorFormatter::from(error).to_string()
+        );
+    }
+
+    #[test]
+    fn test_preserve_regular_error() {
+        let error = PlainError::new(
+            "Invalid options without transport details".to_string(),
+            StatusCode::InvalidArguments,
+        );
+
+        assert_eq!(
+            "Error: 1004(InvalidArguments), Invalid options without transport details",
+            ErrorFormatter::from(error).to_string()
+        );
+    }
+
+    #[test]
+    fn test_preserve_error_with_mismatched_code() {
+        let error = PlainError::new(
+            "Invalid options, code: Unsupported, tonic code: Operation is not supported"
+                .to_string(),
+            StatusCode::InvalidArguments,
+        );
+
+        assert_eq!(
+            "Error: 1004(InvalidArguments), Invalid options, code: Unsupported, tonic code: Operation is not supported",
+            ErrorFormatter::from(error).to_string()
+        );
+    }
 }

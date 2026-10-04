@@ -34,3 +34,7 @@ tokio.workspace = true
 [[bench]]
 name = "iter_record_batch_rows"
 harness = false
+
+[[bench]]
+name = "memory_accounting"
+harness = false

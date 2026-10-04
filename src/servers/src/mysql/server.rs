@@ -42,6 +42,12 @@ use crate::tls::ReloadableTlsServerConfig;
 // Default size of ResultSet write buffer: 100KB
 const DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE: usize = 100 * 1024;
 
+const CLIENT_DISCONNECT_ERROR_KINDS: &[std::io::ErrorKind] = &[
+    std::io::ErrorKind::ConnectionAborted,
+    std::io::ErrorKind::ConnectionReset,
+    std::io::ErrorKind::BrokenPipe,
+];
+
 /// [`MysqlSpawnRef`] stores arc refs
 /// that should be passed to new [`MysqlInstanceShim`]s.
 pub struct MysqlSpawnRef {
@@ -80,6 +86,7 @@ pub struct MysqlSpawnConfig {
     reject_no_database: bool,
     // prepared statement cache capacity
     prepared_stmt_cache_size: usize,
+    batching_enabled: bool,
 }
 
 impl MysqlSpawnConfig {
@@ -96,7 +103,14 @@ impl MysqlSpawnConfig {
             keep_alive_secs,
             reject_no_database,
             prepared_stmt_cache_size,
+            batching_enabled: false,
         }
+    }
+
+    /// Enables ordinary-table batching for connections accepted by this server.
+    pub fn with_batching_enabled(mut self, enabled: bool) -> Self {
+        self.batching_enabled = enabled;
+        self
     }
 
     fn tls(&self) -> Option<Arc<ServerConfig>> {
@@ -181,7 +195,7 @@ impl MysqlServer {
         crate::metrics::METRIC_MYSQL_CONNECTIONS.inc();
         if let Err(e) = Self::do_handle(stream, spawn_ref, spawn_config, process_id).await {
             if let Error::InternalIo { error } = &e
-                && error.kind() == std::io::ErrorKind::ConnectionAborted
+                && CLIENT_DISCONNECT_ERROR_KINDS.contains(&error.kind())
             {
                 // This is a client-side error, we don't need to log it.
             } else {
@@ -207,7 +221,8 @@ impl MysqlServer {
             stream.peer_addr()?,
             process_id,
             spawn_config.prepared_stmt_cache_size,
-        );
+        )
+        .with_batching_enabled(spawn_config.batching_enabled);
         let (mut r, w) = stream.into_split();
         let mut w = BufWriter::with_capacity(DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE, w);
 
@@ -269,5 +284,17 @@ impl Server for MysqlServer {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CLIENT_DISCONNECT_ERROR_KINDS;
+
+    #[test]
+    fn test_client_disconnect_error_kinds() {
+        assert!(CLIENT_DISCONNECT_ERROR_KINDS.contains(&std::io::ErrorKind::ConnectionAborted));
+        assert!(CLIENT_DISCONNECT_ERROR_KINDS.contains(&std::io::ErrorKind::ConnectionReset));
+        assert!(CLIENT_DISCONNECT_ERROR_KINDS.contains(&std::io::ErrorKind::BrokenPipe));
     }
 }

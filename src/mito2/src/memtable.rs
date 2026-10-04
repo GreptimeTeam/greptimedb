@@ -14,7 +14,7 @@
 
 //! Memtables are write buffers for regions.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -30,13 +30,13 @@ pub use mito_codec::key_values::KeyValues;
 use mito_codec::row_converter::{PrimaryKeyCodec, build_primary_key_codec};
 use snafu::ensure;
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
+use store_api::metadata::{RegionMetadata, RegionMetadataRef};
+use store_api::storage::{ColumnId, RegionId, SequenceNumber, SequenceRange};
 
 use crate::config::MitoConfig;
-use crate::error::{Result, UnsupportedOperationSnafu};
+use crate::error::{InvalidRegionOptionsSnafu, Result, UnsupportedOperationSnafu};
 use crate::flush::WriteBufferManagerRef;
-use crate::memtable::bulk::{BulkMemtableBuilder, CompactDispatcher};
+use crate::memtable::bulk::{BulkMemtableBuilder, BulkMemtableConfig, CompactDispatcher};
 use crate::memtable::time_series::TimeSeriesMemtableBuilder;
 use crate::metrics::WRITE_BUFFER_BYTES;
 use crate::read::Batch;
@@ -80,6 +80,8 @@ pub struct RangesOptions {
     pub predicate: PredicateGroup,
     /// Sequence range to filter the data.
     pub sequence: Option<SequenceRange>,
+    /// Maximum number of rows readers should produce in one batch.
+    pub batch_size: usize,
 }
 
 impl Default for RangesOptions {
@@ -89,6 +91,7 @@ impl Default for RangesOptions {
             pre_filter_mode: PreFilterMode::All,
             predicate: PredicateGroup::default(),
             sequence: None,
+            batch_size: crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
         }
     }
 }
@@ -101,6 +104,7 @@ impl RangesOptions {
             pre_filter_mode: PreFilterMode::All,
             predicate: PredicateGroup::default(),
             sequence: None,
+            batch_size: crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
         }
     }
 
@@ -124,6 +128,13 @@ impl RangesOptions {
         self.sequence = sequence;
         self
     }
+
+    /// Sets the maximum number of rows readers should produce in one batch.
+    #[must_use]
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = batch_size.clamp(1, crate::sst::parquet::DEFAULT_READ_BATCH_SIZE);
+        self
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -139,6 +150,10 @@ pub struct MemtableStats {
     pub num_ranges: usize,
     /// The maximum sequence number in the memtable.
     pub max_sequence: SequenceNumber,
+    /// Lower bound of the row sequences written to this memtable or range.
+    /// May remain below the actual minimum after deduplication. Zero is conservative
+    /// when a range does not track its minimum; the value is unused for empty memtables.
+    pub min_sequence: SequenceNumber,
     /// Number of estimated timeseries in memtable.
     pub series_count: usize,
 }
@@ -272,6 +287,11 @@ pub trait Memtable: Send + Sync + fmt::Debug {
     /// Returns the [MemtableStats] info of Memtable.
     fn stats(&self) -> MemtableStats;
 
+    /// Returns a conservative row-sequence lower bound without computing full statistics.
+    /// Returns zero when write statistics are unavailable. Callers must ignore
+    /// empty memtables when using this bound to constrain compaction.
+    fn min_sequence(&self) -> SequenceNumber;
+
     /// Forks this (immutable) memtable and returns a new mutable memtable with specific memtable `id`.
     ///
     /// A region must freeze the memtable before invoking this method.
@@ -387,7 +407,28 @@ impl Drop for AllocTracker {
 pub(crate) struct MemtableBuilderProvider {
     write_buffer_manager: Option<WriteBufferManagerRef>,
     config: Arc<MitoConfig>,
+    default_bulk_memtable_config: BulkMemtableConfig,
     compact_dispatcher: Arc<CompactDispatcher>,
+}
+
+/// Ensures JSON2 columns are not used with [`TimeSeriesMemtable`].
+pub(crate) fn ensure_json2_not_use_time_series_memtable(
+    metadata: &RegionMetadata,
+    options: &RegionOptions,
+) -> Result<()> {
+    if metadata
+        .column_metadatas
+        .iter()
+        .any(|x| x.column_schema.data_type.is_json2())
+    {
+        ensure!(
+            !matches!(&options.memtable, Some(MemtableOptions::TimeSeries)),
+            InvalidRegionOptionsSnafu {
+                reason: "JSON2 columns only support BulkMemtable",
+            }
+        );
+    }
+    Ok(())
 }
 
 impl MemtableBuilderProvider {
@@ -397,12 +438,29 @@ impl MemtableBuilderProvider {
     ) -> Self {
         let compact_dispatcher =
             Arc::new(CompactDispatcher::new(config.max_background_compactions));
+        let default_bulk_memtable_config = BulkMemtableConfig::default_for_write_buffer_size(
+            config.global_write_buffer_size.as_bytes() as usize,
+        );
 
         Self {
             write_buffer_manager,
             config,
+            default_bulk_memtable_config,
             compact_dispatcher,
         }
+    }
+
+    /// Parses region options with this provider's default bulk memtable config.
+    pub(crate) fn parse_options(
+        &self,
+        region_id: RegionId,
+        options: &HashMap<String, String>,
+    ) -> Result<RegionOptions> {
+        RegionOptions::try_from_options_with_bulk_config(
+            region_id,
+            options,
+            &self.default_bulk_memtable_config,
+        )
     }
 
     pub(crate) fn builder_for_options(&self, options: &RegionOptions) -> MemtableBuilderRef {
@@ -441,6 +499,8 @@ impl MemtableBuilderProvider {
             Some(MemtableOptions::Bulk(config)) => Arc::new(
                 BulkMemtableBuilder::new(self.write_buffer_manager.clone(), !dedup, merge_mode)
                     .with_config(config.clone())
+                    .with_row_group_size(options.row_group_size())
+                    .with_float_field_encoding(options.float_field_encoding)
                     .with_compact_dispatcher(self.compact_dispatcher.clone()),
             ),
             Some(MemtableOptions::TimeSeries) => Arc::new(TimeSeriesMemtableBuilder::new(
@@ -463,6 +523,9 @@ impl MemtableBuilderProvider {
             !dedup, // append_mode: true if not dedup, false if dedup
             merge_mode,
         )
+        .with_config(self.default_bulk_memtable_config.clone())
+        .with_row_group_size(options.row_group_size())
+        .with_float_field_encoding(options.float_field_encoding)
         .with_compact_dispatcher(self.compact_dispatcher.clone());
 
         if let Some(MemtableOptions::Bulk(config)) = &options.memtable {
@@ -757,11 +820,20 @@ impl MemtableRange {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
+
+    use common_base::readable_size::ReadableSize;
+    use common_error::ext::WhateverResult;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
+    use store_api::metadata::RegionMetadataBuilder;
+    use store_api::storage::RegionId;
 
     use super::*;
     use crate::flush::{WriteBufferManager, WriteBufferManagerImpl};
     use crate::memtable::bulk::BulkMemtableConfig;
+    use crate::test_util::sst_util::sst_region_metadata;
 
     #[test]
     fn test_alloc_tracker_without_manager() {
@@ -834,5 +906,87 @@ mod tests {
             provider.bulk_memtable_builder(options.need_dedup(), options.merge_mode(), &options);
 
         assert_eq!(&config, builder.config());
+    }
+
+    #[test]
+    fn test_provider_uses_adaptive_config_for_implicit_bulk_builder() {
+        let config = MitoConfig {
+            global_write_buffer_size: ReadableSize::gb(8),
+            ..Default::default()
+        };
+        let provider = MemtableBuilderProvider::new(None, Arc::new(config));
+        let options = RegionOptions::default();
+
+        let builder =
+            provider.bulk_memtable_builder(options.need_dedup(), options.merge_mode(), &options);
+
+        assert_eq!(256 * 1024 * 1024, builder.config().encode_bytes_threshold);
+    }
+
+    #[test]
+    fn test_provider_parses_bulk_memtable_with_adaptive_config() {
+        let config = MitoConfig {
+            global_write_buffer_size: ReadableSize::gb(8),
+            ..Default::default()
+        };
+        let provider = MemtableBuilderProvider::new(None, Arc::new(config));
+        let options = HashMap::from([("memtable.type".to_string(), "bulk".to_string())]);
+
+        let options = provider
+            .parse_options(RegionId::new(0, 0), &options)
+            .unwrap();
+
+        let Some(MemtableOptions::Bulk(config)) = options.memtable else {
+            panic!("expected bulk memtable options");
+        };
+        assert_eq!(256 * 1024 * 1024, config.encode_bytes_threshold);
+    }
+
+    #[test]
+    fn test_provider_preserves_explicit_bulk_encode_bytes_threshold() {
+        let config = MitoConfig {
+            global_write_buffer_size: ReadableSize::gb(8),
+            ..Default::default()
+        };
+        let provider = MemtableBuilderProvider::new(None, Arc::new(config));
+        let options = HashMap::from([
+            ("memtable.type".to_string(), "bulk".to_string()),
+            (
+                "memtable.bulk.encode_bytes_threshold".to_string(),
+                "13".to_string(),
+            ),
+        ]);
+
+        let options = provider
+            .parse_options(RegionId::new(0, 0), &options)
+            .unwrap();
+
+        let Some(MemtableOptions::Bulk(config)) = options.memtable else {
+            panic!("expected bulk memtable options");
+        };
+        assert_eq!(13, config.encode_bytes_threshold);
+    }
+
+    #[test]
+    fn test_json2_requires_bulk_memtable() -> WhateverResult<()> {
+        let mut metadata = sst_region_metadata();
+        metadata.column_metadatas[2].column_schema.data_type =
+            ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new()));
+        let metadata = RegionMetadataBuilder::from_existing(metadata).build()?;
+        let mut options = RegionOptions {
+            sst_format: Some(FormatType::PrimaryKey),
+            memtable: Some(MemtableOptions::TimeSeries),
+            ..Default::default()
+        };
+
+        let err = ensure_json2_not_use_time_series_memtable(&metadata, &options).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("JSON2 columns only support BulkMemtable")
+        );
+
+        options.memtable = Some(MemtableOptions::Bulk(BulkMemtableConfig::default()));
+        ensure_json2_not_use_time_series_memtable(&metadata, &options)?;
+        Ok(())
     }
 }

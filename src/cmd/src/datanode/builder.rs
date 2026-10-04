@@ -61,9 +61,6 @@ impl InstanceBuilder {
     }
 
     async fn init(opts: &mut DatanodeOptions, plugins: &mut Plugins) -> Result<Vec<WorkerGuard>> {
-        common_runtime::init_global_runtimes(&opts.runtime);
-        common_runtime::init_datanode_runtimes(&opts.runtime);
-
         let dn_opts = &mut opts.component;
         let guard = common_telemetry::init_global_logging(
             APP_NAME,
@@ -73,6 +70,9 @@ impl InstanceBuilder {
             None,
         );
 
+        common_runtime::init_datanode_runtimes(&opts.runtime);
+
+        crate::options::flush_dropped_plugin_warnings();
         log_versions(verbose_version(), short_version(), APP_NAME);
         maybe_activate_heap_profile(&dn_opts.memory);
         create_resource_limit_metrics(APP_NAME);

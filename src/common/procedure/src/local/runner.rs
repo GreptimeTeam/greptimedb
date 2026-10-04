@@ -28,12 +28,14 @@ use snafu::ResultExt;
 use tokio::time;
 
 use crate::error::{self, ProcedurePanicSnafu, Result, RollbackTimesExceededSnafu};
+use crate::event::ProcedureEvent;
 use crate::local::{ManagerContext, ProcedureMeta, ProcedureMetaRef};
 use crate::procedure::{Output, StringKey};
 use crate::rwlock::OwnedKeyRwLockGuard;
 use crate::store::{ProcedureMessage, ProcedureStore};
 use crate::{
-    BoxedProcedure, Context, Error, Procedure, ProcedureId, ProcedureState, ProcedureWithId, Status,
+    BoxedProcedure, ChildSubmissionOutcome, Context, Error, EventContext, EventTrigger, Procedure,
+    ProcedureId, ProcedureState, ProcedureWithId, RetryPhase, Status,
 };
 
 /// A guard to cleanup procedure state.
@@ -141,6 +143,8 @@ pub(crate) struct Runner {
     pub(crate) store: Arc<ProcedureStore>,
     pub(crate) rolling_back: bool,
     pub(crate) event_recorder: Option<EventRecorderRef>,
+    pub(crate) execute_retry_attempt: u32,
+    pub(crate) rollback_retry_attempt: u32,
 }
 
 impl Runner {
@@ -223,6 +227,7 @@ impl Runner {
         let ctx = Context {
             procedure_id: self.meta.id,
             provider: self.manager_ctx.clone(),
+            event_context: self.meta.context.event_context.clone(),
         };
 
         self.rolling_back = false;
@@ -239,7 +244,7 @@ impl Runner {
         loop {
             // Don't store state if `ProcedureManager` is stopped.
             if !self.running() {
-                self.meta.set_state(ProcedureState::failed(Arc::new(
+                self.set_state_and_record(ProcedureState::failed(Arc::new(
                     error::ManagerNotStartSnafu {}.build(),
                 )));
                 return;
@@ -270,14 +275,14 @@ impl Runner {
                 | ProcedureState::RollingBack { error } => {
                     rollback_times += 1;
                     if let Some(d) = rollback.next() {
-                        self.wait_on_err(d, rollback_times).await;
+                        self.wait_on_err(d, rollback_times as u64).await;
                     } else {
                         let err = Err::<(), Arc<Error>>(error)
                             .context(RollbackTimesExceededSnafu {
                                 procedure_id: self.meta.id,
                             })
                             .unwrap_err();
-                        self.meta.set_state(ProcedureState::failed(Arc::new(err)));
+                        self.set_state_and_record(ProcedureState::failed(Arc::new(err)));
                         return;
                     }
                 }
@@ -315,11 +320,10 @@ impl Runner {
         if self.procedure.rollback_supported()
             && let Err(e) = self.procedure.rollback(ctx).await
         {
-            self.meta
-                .set_state(ProcedureState::rolling_back(Arc::new(e)));
+            self.set_state_and_record(ProcedureState::rolling_back(Arc::new(e)));
             return;
         }
-        self.meta.set_state(ProcedureState::failed(err));
+        self.set_state_and_record(ProcedureState::failed(err));
     }
 
     async fn prepare_rollback(&mut self, err: Arc<Error>) {
@@ -329,9 +333,9 @@ impl Runner {
             return;
         }
         if self.procedure.rollback_supported() {
-            self.meta.set_state(ProcedureState::rolling_back(err));
+            self.set_state_and_record(ProcedureState::rolling_back(err));
         } else {
-            self.meta.set_state(ProcedureState::failed(err));
+            self.set_state_and_record(ProcedureState::failed(err));
         }
     }
 
@@ -350,7 +354,7 @@ impl Runner {
 
                         // Don't store state if `ProcedureManager` is stopped.
                         if !self.running() {
-                            self.meta.set_state(ProcedureState::failed(Arc::new(
+                            self.set_state_and_record(ProcedureState::failed(Arc::new(
                                 error::ManagerNotStartSnafu {}.build(),
                             )));
                             return;
@@ -361,7 +365,7 @@ impl Runner {
                             && let Err(e) = self.clean_poisons().await
                         {
                             error!(e; "Failed to clean poison for procedure: {}", self.meta.id);
-                            self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
+                            self.set_state_and_record(ProcedureState::retrying(Arc::new(e)));
                             return;
                         }
 
@@ -369,7 +373,7 @@ impl Runner {
                             && let Err(e) = self.persist_procedure().await
                         {
                             error!(e; "Failed to persist procedure: {}", self.meta.id);
-                            self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
+                            self.set_state_and_record(ProcedureState::retrying(Arc::new(e)));
                             return;
                         }
 
@@ -402,7 +406,9 @@ impl Runner {
                             Status::Done { output } => {
                                 if let Err(e) = self.commit_procedure().await {
                                     error!(e; "Failed to commit procedure: {}", self.meta.id);
-                                    self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
+                                    self.set_state_and_record(ProcedureState::retrying(Arc::new(
+                                        e,
+                                    )));
                                     return;
                                 }
 
@@ -416,8 +422,10 @@ impl Runner {
                                     self.meta.id,
                                     keys,
                                 );
-                                self.meta
-                                    .set_state(ProcedureState::poisoned(keys, Arc::new(error)));
+                                self.set_state_and_record(ProcedureState::poisoned(
+                                    keys,
+                                    Arc::new(error),
+                                ));
                             }
                         }
                     }
@@ -433,7 +441,7 @@ impl Runner {
 
                         // Don't store state if `ProcedureManager` is stopped.
                         if !self.running() {
-                            self.meta.set_state(ProcedureState::failed(Arc::new(
+                            self.set_state_and_record(ProcedureState::failed(Arc::new(
                                 error::ManagerNotStartSnafu {}.build(),
                             )));
                             return;
@@ -442,7 +450,7 @@ impl Runner {
                         if e.need_clean_poisons() {
                             if let Err(e) = self.clean_poisons().await {
                                 error!(e; "Failed to clean poison for procedure: {}", self.meta.id);
-                                self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
+                                self.set_state_and_record(ProcedureState::retrying(Arc::new(e)));
                                 return;
                             }
                             debug!(
@@ -453,7 +461,7 @@ impl Runner {
                         }
 
                         if e.is_retry_later() {
-                            self.meta.set_state(ProcedureState::retrying(Arc::new(e)));
+                            self.set_state_and_record(ProcedureState::retrying(Arc::new(e)));
                             return;
                         }
 
@@ -461,7 +469,7 @@ impl Runner {
                             self.meta
                                 .set_state(ProcedureState::prepare_rollback(Arc::new(e)));
                         } else {
-                            self.meta.set_state(ProcedureState::failed(Arc::new(e)));
+                            self.set_state_and_record(ProcedureState::failed(Arc::new(e)));
                         }
                     }
                 }
@@ -480,19 +488,19 @@ impl Runner {
         procedure_id: ProcedureId,
         procedure_state: ProcedureState,
         procedure: BoxedProcedure,
-    ) {
+    ) -> (ChildSubmissionOutcome, Option<ProcedureEvent>) {
         if !self.running() {
             warn!(
                 "ProcedureManager is not running, skip submitting subprocedure {}-{}",
                 procedure.type_name(),
                 procedure_id
             );
-            return;
+            return (ChildSubmissionOutcome::ManagerStopped, None);
         }
 
         if self.manager_ctx.contains_procedure(procedure_id) {
             // If the parent has already submitted this procedure, don't submit it again.
-            return;
+            return (ChildSubmissionOutcome::AlreadyAccepted, None);
         }
 
         let step = 0;
@@ -501,11 +509,10 @@ impl Runner {
             procedure_id,
             procedure_state,
             Some(self.meta.id),
+            self.meta.context.clone(),
             procedure.lock_key(),
             procedure.poison_keys(),
             procedure.type_name(),
-            self.event_recorder.clone(),
-            procedure.user_metadata(),
         ));
         let runner = Runner {
             meta: meta.clone(),
@@ -516,6 +523,8 @@ impl Runner {
             store: self.store.clone(),
             rolling_back: false,
             event_recorder: self.event_recorder.clone(),
+            execute_retry_attempt: 0,
+            rollback_retry_attempt: 0,
         };
 
         // Insert the procedure. We already check the procedure existence before inserting
@@ -530,6 +539,7 @@ impl Runner {
             procedure_id,
         );
 
+        let submitted_event = runner.build_event(EventTrigger::Submitted);
         let parent_id = self.meta.id;
 
         let tracing_context = TracingContext::from_current_span();
@@ -548,11 +558,12 @@ impl Runner {
             })
         }) {
             self.manager_ctx.remove_procedure(procedure_id);
-            return;
+            return (ChildSubmissionOutcome::SpawnFailed, None);
         }
 
         // Add the id of the subprocedure to the metadata.
         self.meta.push_child(procedure_id);
+        (ChildSubmissionOutcome::Accepted, submitted_event)
     }
 
     /// Extend the retry time to wait for the next retry.
@@ -598,7 +609,7 @@ impl Runner {
                 if self.procedure.rollback_supported() {
                     self.meta.set_state(ProcedureState::prepare_rollback(err));
                 } else {
-                    self.meta.set_state(ProcedureState::failed(err));
+                    self.set_state_and_record(ProcedureState::failed(err));
                 }
                 return;
             }
@@ -613,11 +624,21 @@ impl Runner {
                 subprocedure.id,
             );
 
-            self.submit_subprocedure(
+            let child_id = subprocedure.id;
+            let (outcome, submitted_event) = self.submit_subprocedure(
                 subprocedure.id,
                 ProcedureState::Running,
                 subprocedure.procedure,
             );
+            if let Some(event) = submitted_event
+                && let Some(recorder) = self.event_recorder.as_ref()
+            {
+                recorder.record(Box::new(event));
+            }
+            self.record_event(EventTrigger::ChildSubmitted {
+                procedure_id: child_id,
+                outcome,
+            });
         }
 
         info!(
@@ -643,12 +664,13 @@ impl Runner {
         let data = self.procedure.dump()?;
 
         self.store
-            .store_procedure(
+            .store_procedure_with_context(
                 self.meta.id,
                 self.step,
                 type_name,
                 data,
                 self.meta.parent_id,
+                self.meta.context.clone(),
             )
             .await
             .map_err(|e| {
@@ -689,6 +711,7 @@ impl Runner {
             parent_id: self.meta.parent_id,
             step: self.step,
             error: Some(error),
+            context: self.meta.context.clone(),
         };
         self.store
             .rollback_procedure(self.meta.id, message)
@@ -705,7 +728,7 @@ impl Runner {
         Ok(())
     }
 
-    fn done(&self, output: Option<Output>) {
+    fn done(&mut self, output: Option<Output>) {
         // TODO(yingwen): Add files to remove list.
         info!(
             "Procedure {}-{} done",
@@ -714,7 +737,75 @@ impl Runner {
         );
 
         // Mark the state of this procedure to done.
-        self.meta.set_state(ProcedureState::Done { output });
+        self.set_state_and_record(ProcedureState::Done { output });
+    }
+
+    /// Updates framework state and records the lifecycle event implied by that state.
+    fn set_state_and_record(&mut self, state: ProcedureState) {
+        let trigger = match &state {
+            ProcedureState::Retrying { .. } => {
+                self.execute_retry_attempt += 1;
+                Some(EventTrigger::Retrying {
+                    phase: RetryPhase::Execute,
+                    attempt: self.execute_retry_attempt,
+                })
+            }
+            ProcedureState::RollingBack { .. } => {
+                if self.rolling_back {
+                    self.rollback_retry_attempt += 1;
+                    Some(EventTrigger::Retrying {
+                        phase: RetryPhase::Rollback,
+                        attempt: self.rollback_retry_attempt,
+                    })
+                } else {
+                    self.rolling_back = true;
+                    Some(EventTrigger::RollingBack)
+                }
+            }
+            ProcedureState::Done { .. } => Some(EventTrigger::Succeeded),
+            ProcedureState::Failed { .. } => Some(EventTrigger::Failed),
+            ProcedureState::Poisoned { .. } => Some(EventTrigger::Poisoned),
+            ProcedureState::Running => None,
+            // We don't record the prepare rollback state.
+            // The final result will be recorded as ProcedureState::Failed or ProcedureState::Succeeded.
+            ProcedureState::PrepareRollback { .. } => None,
+        };
+        self.meta.set_state(state);
+        if let Some(trigger) = trigger {
+            self.record_event(trigger);
+        }
+    }
+
+    /// Builds an event from the live procedure.
+    pub(crate) fn build_event(&self, trigger: EventTrigger) -> Option<ProcedureEvent> {
+        let recorder = self.event_recorder.as_ref()?;
+        let state = self.meta.state();
+        let context = EventContext {
+            procedure_id: self.meta.id,
+            lifecycle_state: &state,
+            trigger: trigger.clone(),
+            event_type_filter: recorder.event_type_filter(),
+            event_context: self.meta.context.event_context.as_ref(),
+        };
+        self.procedure.event(&context).map(|event| {
+            ProcedureEvent::new_with_context(
+                self.meta.id,
+                event,
+                state,
+                trigger,
+                self.meta.context.clone(),
+            )
+        })
+    }
+
+    /// Builds and dispatches an event from the live procedure. Delivery is best effort and is
+    /// intentionally not part of procedure execution or persistence.
+    pub(crate) fn record_event(&self, trigger: EventTrigger) {
+        if let Some(event) = self.build_event(trigger)
+            && let Some(recorder) = self.event_recorder.as_ref()
+        {
+            recorder.record(Box::new(event));
+        }
     }
 }
 
@@ -767,6 +858,8 @@ mod tests {
             store,
             rolling_back: false,
             event_recorder: None,
+            execute_retry_attempt: 0,
+            rollback_retry_attempt: 0,
         }
     }
 
@@ -794,6 +887,7 @@ mod tests {
         Context {
             procedure_id,
             provider,
+            event_context: None,
         }
     }
 
@@ -832,6 +926,7 @@ mod tests {
         Context {
             procedure_id,
             provider: Arc::new(MockProvider),
+            event_context: None,
         }
     }
 
@@ -1018,6 +1113,7 @@ mod tests {
         ProcedureWithId {
             id: procedure_id,
             procedure: Box::new(child),
+            context: Default::default(),
         }
     }
 
@@ -1398,6 +1494,7 @@ mod tests {
                         subprocedures: vec![ProcedureWithId {
                             id: child_id,
                             procedure: Box::new(fail),
+                            context: Default::default(),
                         }],
                         persist: true,
                     })
@@ -1590,6 +1687,7 @@ mod tests {
                         subprocedures: vec![ProcedureWithId {
                             id: child_id,
                             procedure: Box::new(fail),
+                            context: Default::default(),
                         }],
                         persist: true,
                     })
@@ -2110,6 +2208,7 @@ mod tests {
                     subprocedures: vec![ProcedureWithId {
                         id: child_id,
                         procedure: Box::new(child),
+                        context: Default::default(),
                     }],
                     persist: false,
                 })
@@ -2166,6 +2265,7 @@ mod tests {
                     subprocedures: vec![ProcedureWithId {
                         id: child_id,
                         procedure: Box::new(child),
+                        context: Default::default(),
                     }],
                     persist: false,
                 })

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use common_telemetry::error;
@@ -24,6 +24,7 @@ use store_api::storage::RegionId;
 use tokio::sync::mpsc::Sender;
 use uuid::Uuid;
 
+use crate::compaction::CompactionExecution;
 use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::PickerOutput;
 use crate::error::{CompactRegionSnafu, Error, ParseJobIdSnafu, Result};
@@ -134,9 +135,20 @@ pub struct CompactionJobResult {
 pub(crate) struct DefaultNotifier {
     /// The sender to send WorkerRequest to the mito engine. This is used to notify the mito engine when a remote job is completed.
     pub(crate) request_sender: Sender<WorkerRequestWithTime>,
+    execution: Mutex<Option<CompactionExecution>>,
 }
 
 impl DefaultNotifier {
+    pub(crate) fn new(
+        request_sender: Sender<WorkerRequestWithTime>,
+        execution: CompactionExecution,
+    ) -> Self {
+        Self {
+            request_sender,
+            execution: Mutex::new(Some(execution)),
+        }
+    }
+
     fn on_failure(&self, err: Arc<Error>, region_id: RegionId, mut waiters: Vec<OutputTx>) {
         COMPACTION_FAILURE_COUNT.inc();
         for waiter in waiters.drain(..) {
@@ -148,6 +160,15 @@ impl DefaultNotifier {
 #[async_trait::async_trait]
 impl Notifier for DefaultNotifier {
     async fn notify(&self, result: RemoteJobResult, waiters: Vec<OutputTx>) {
+        let Some(execution) = self
+            .execution
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        else {
+            error!("Remote compaction notifier invoked more than once");
+            return;
+        };
         INFLIGHT_COMPACTION_COUNT.dec();
         match result {
             RemoteJobResult::CompactionJobResult(result) => {
@@ -155,6 +176,7 @@ impl Notifier for DefaultNotifier {
                     match result.region_edit {
                         Ok(edit) => BackgroundNotify::CompactionFinished(CompactionFinished {
                             region_id: result.region_id,
+                            execution,
                             senders: waiters,
                             start_time: result.start_time,
                             edit,
@@ -168,6 +190,7 @@ impl Notifier for DefaultNotifier {
                             self.on_failure(err.clone(), result.region_id, waiters);
                             BackgroundNotify::CompactionFailed(CompactionFailed {
                                 region_id: result.region_id,
+                                execution,
                                 err,
                             })
                         }

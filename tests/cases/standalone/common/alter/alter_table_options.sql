@@ -50,10 +50,53 @@ ALTER TABLE ato SET 'compaction.twcs.trigger_file_num'='';
 
 SHOW CREATE TABLE ato;
 
+ALTER TABLE ato SET 'compaction.twcs.trigger_file_num'='4';
+
+ALTER TABLE ato SET 'compaction.twcs.active_window.trigger_file_num'='1';
+
+ALTER TABLE ato SET 'compaction.twcs.active_window.l1_merge_trigger'='8';
+
+ALTER TABLE ato SET 'compaction.twcs.inactive_window.trigger_file_num'='1';
+
+ALTER TABLE ato SET 'compaction.twcs.inactive_window.l1_merge_trigger'='12';
+
+SHOW CREATE TABLE ato;
+
+CREATE TABLE write_buffer_size_options(
+    i INTEGER,
+    ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY(i)
+);
+
+ALTER TABLE write_buffer_size_options SET 'write_buffer_size' = '128MiB';
+
+SHOW CREATE TABLE write_buffer_size_options;
+
+-- SQLNESS ARG restart=true
+SHOW CREATE TABLE ato;
+
+SHOW CREATE TABLE write_buffer_size_options;
+
+ALTER TABLE ato UNSET 'compaction.twcs.active_window.trigger_file_num';
+
+ALTER TABLE ato UNSET 'compaction.twcs.active_window.l1_merge_trigger';
+
+ALTER TABLE ato UNSET 'compaction.twcs.inactive_window.trigger_file_num';
+
+ALTER TABLE ato UNSET 'compaction.twcs.inactive_window.l1_merge_trigger';
+
+SHOW CREATE TABLE ato;
+
 -- SQLNESS ARG restart=true
 SHOW CREATE TABLE ato;
 
 DROP TABLE ato;
+
+ALTER TABLE write_buffer_size_options UNSET 'write_buffer_size';
+
+SHOW CREATE TABLE write_buffer_size_options;
+
+DROP TABLE write_buffer_size_options;
 
 CREATE TABLE phy (ts timestamp time index, val double) engine=metric with ("physical_metric_table" = "");
 

@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use common_telemetry::info;
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::SequenceNumber;
+use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::error::Result;
 use crate::manifest::action::{RegionEdit, TruncateKind};
@@ -64,6 +64,11 @@ impl VersionControl {
                 is_dropped: false,
             }),
         }
+    }
+
+    /// Returns the id of the region controlled by this instance.
+    pub(crate) fn region_id(&self) -> RegionId {
+        self.data.read().unwrap().version.metadata.region_id
     }
 
     /// Returns current copy of data.
@@ -282,6 +287,28 @@ impl VersionControl {
         };
     }
 
+    /// Discards all memtables while preserving persisted SST files.
+    pub(crate) fn discard_unflushed(
+        &self,
+        discarded_entry_id: EntryId,
+        discarded_sequence: SequenceNumber,
+    ) {
+        let version = self.current().version;
+        let memtable_builder = version.memtables.mutable.memtable_builder().clone();
+        let new_mutable =
+            Self::new_mutable_from_version(&version, version.metadata.clone(), memtable_builder);
+        let new_version = Arc::new(
+            VersionBuilder::from_version(version)
+                .memtables(MemtableVersion::new(new_mutable))
+                .flushed_entry_id(discarded_entry_id)
+                .flushed_sequence(discarded_sequence)
+                .build(),
+        );
+
+        let mut version_data = self.data.write().unwrap();
+        version_data.version = new_version;
+    }
+
     /// Overwrites the current version with a new version.
     pub(crate) fn overwrite_current(&self, version: VersionRef) {
         let mut version_data = self.data.write().unwrap();
@@ -377,9 +404,9 @@ impl VersionBuilder {
     /// Returns a new builder.
     pub(crate) fn new(metadata: RegionMetadataRef, mutable: TimePartitionsRef) -> Self {
         VersionBuilder {
-            metadata,
+            metadata: metadata.clone(),
             memtables: Arc::new(MemtableVersion::new(mutable)),
-            ssts: Arc::new(SstVersion::new()),
+            ssts: Arc::new(SstVersion::new(metadata)),
             flushed_entry_id: 0,
             flushed_sequence: 0,
             truncated_entry_id: None,
@@ -410,6 +437,9 @@ impl VersionBuilder {
 
     /// Sets metadata.
     pub(crate) fn metadata(mut self, metadata: RegionMetadataRef) -> Self {
+        if !Arc::ptr_eq(&self.metadata, &metadata) {
+            Arc::make_mut(&mut self.ssts).set_metadata(metadata.clone());
+        }
         self.metadata = metadata;
         self
     }
@@ -498,7 +528,7 @@ impl VersionBuilder {
 
     /// Clear all files in the builder.
     pub(crate) fn clear_files(mut self) -> Self {
-        self.ssts = Arc::new(SstVersion::new());
+        self.ssts = Arc::new(SstVersion::new(self.metadata.clone()));
         self
     }
 

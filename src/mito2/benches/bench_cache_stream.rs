@@ -36,6 +36,8 @@ use mito2::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 use mito2::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 use mito2::test_util::bench_util::{CpuDataGenerator, cpu_metadata};
 
+const DEFAULT_BATCH_SIZE: usize = 8 * 1024;
+
 fn cache_flat_range_stream_bench(c: &mut Criterion) {
     let metadata = Arc::new(cpu_metadata());
     let region_id = metadata.region_id;
@@ -73,6 +75,7 @@ fn cache_flat_range_stream_bench(c: &mut Criterion) {
             None, // No projection
             None, // No predicate
             false,
+            DEFAULT_BATCH_SIZE,
         )
         .unwrap(),
     );

@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use common_base::secrets::SecretString;
 use digest::Digest;
+use hmac::{Hmac, Mac};
 use pbkdf2::pbkdf2_hmac;
 use sha1::Sha1;
 use sha2::Sha256;
 use snafu::{OptionExt, ensure};
+use subtle::ConstantTimeEq;
 
 use crate::error::{IllegalParamSnafu, InvalidConfigSnafu, Result, UserPasswordMismatchSnafu};
 use crate::user_info::DefaultUserInfo;
@@ -31,9 +33,17 @@ use crate::{UserInfoRef, UserProviderRef};
 
 pub(crate) const DEFAULT_USERNAME: &str = "greptime";
 pub const DEFAULT_PBKDF2_SHA256_ITERATIONS: u32 = 4096;
+pub const DEFAULT_PBKDF2_SHA256_SALT_LEN: usize = 16;
 pub const PBKDF2_SHA256_HASH_LEN: usize = 32;
 pub const MAX_PBKDF2_SHA256_ITERATIONS: u32 = 1_000_000;
 pub const MAX_PBKDF2_SHA256_SALT_LEN: usize = 1024;
+pub const PG_SCRAM_SHA256_KEY_LEN: usize = 32;
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Process-wide secret used to derive a stable mock salt for unknown users, so
+/// the SCRAM `server-first-message` can't be used to enumerate usernames.
+static PG_SCRAM_MOCK_SECRET: LazyLock<[u8; PG_SCRAM_SHA256_KEY_LEN]> = LazyLock::new(rand::random);
 
 /// construct a [`UserInfo`](crate::user_info::UserInfo) impl with name
 /// use default username `greptime` if None is provided
@@ -119,6 +129,46 @@ pub fn auth_mysql(
     auth_mysql_with_hash_stage_2(auth_data, salt, username, &hash_stage_2)
 }
 
+/// Authenticates a MySQL native password response against an encoded verifier.
+pub fn auth_mysql_with_verifier(
+    auth_data: HashedPassword,
+    salt: Salt,
+    username: &str,
+    verifier: &str,
+) -> Result<()> {
+    let hash_stage_2 = parse_mysql_native_password_verifier(verifier)?;
+    auth_mysql_with_hash_stage_2(auth_data, salt, username, &hash_stage_2)
+}
+
+pub fn validate_mysql_native_password_verifier(verifier: &str) -> Result<()> {
+    parse_mysql_native_password_verifier(verifier).map(|_| ())
+}
+
+pub(crate) fn parse_mysql_native_password_verifier(verifier: &str) -> Result<Vec<u8>> {
+    let Some(verifier) = verifier.strip_prefix("mysql_native_password:") else {
+        return InvalidConfigSnafu {
+            value: "mysql_native_password".to_string(),
+            msg: "Invalid mysql native password verifier format",
+        }
+        .fail();
+    };
+    let Ok(hash_stage_2) = hex::decode(verifier) else {
+        return InvalidConfigSnafu {
+            value: "mysql_native_password".to_string(),
+            msg: "Invalid mysql native password verifier encoding",
+        }
+        .fail();
+    };
+    ensure!(
+        hash_stage_2.len() == 20,
+        InvalidConfigSnafu {
+            value: "mysql_native_password".to_string(),
+            msg: "Illegal mysql native password verifier length",
+        }
+    );
+    Ok(hash_stage_2)
+}
+
 pub(crate) fn auth_mysql_with_hash_stage_2(
     auth_data: HashedPassword,
     salt: Salt,
@@ -200,6 +250,251 @@ pub fn format_pbkdf2_sha256_password_verifier(
     ))
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct PgScramSha256Verifier {
+    iterations: u32,
+    salt: Vec<u8>,
+    stored_key: Vec<u8>,
+    server_key: Vec<u8>,
+}
+
+impl std::fmt::Debug for PgScramSha256Verifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PgScramSha256Verifier")
+            .field("iterations", &self.iterations)
+            .field("salt", &"<REDACTED>")
+            .field("stored_key", &"<REDACTED>")
+            .field("server_key", &"<REDACTED>")
+            .finish()
+    }
+}
+
+impl PgScramSha256Verifier {
+    pub fn new(
+        iterations: u32,
+        salt: Vec<u8>,
+        stored_key: Vec<u8>,
+        server_key: Vec<u8>,
+    ) -> Result<Self> {
+        ensure!(
+            iterations > 0 && iterations <= MAX_PBKDF2_SHA256_ITERATIONS,
+            IllegalParamSnafu {
+                msg: format!(
+                    "pg_scram_sha256 iterations must be in 1..={}",
+                    MAX_PBKDF2_SHA256_ITERATIONS
+                )
+            }
+        );
+        ensure!(
+            !salt.is_empty() && salt.len() <= MAX_PBKDF2_SHA256_SALT_LEN,
+            IllegalParamSnafu {
+                msg: format!(
+                    "pg_scram_sha256 salt length must be in 1..={}",
+                    MAX_PBKDF2_SHA256_SALT_LEN
+                )
+            }
+        );
+        ensure!(
+            stored_key.len() == PG_SCRAM_SHA256_KEY_LEN,
+            IllegalParamSnafu {
+                msg: "pg_scram_sha256 stored key must be 32 bytes"
+            }
+        );
+        ensure!(
+            server_key.len() == PG_SCRAM_SHA256_KEY_LEN,
+            IllegalParamSnafu {
+                msg: "pg_scram_sha256 server key must be 32 bytes"
+            }
+        );
+
+        Ok(Self {
+            iterations,
+            salt,
+            stored_key,
+            server_key,
+        })
+    }
+
+    pub fn from_password(password: &[u8], salt: &[u8], iterations: u32) -> Result<Self> {
+        let salted_password = pg_scram_sha256_salted_password(password, salt, iterations)?;
+        Self::from_salted_password(salted_password, salt.to_vec(), iterations)
+    }
+
+    pub fn from_salted_password(
+        salted_password: Vec<u8>,
+        salt: Vec<u8>,
+        iterations: u32,
+    ) -> Result<Self> {
+        ensure!(
+            salted_password.len() == PG_SCRAM_SHA256_KEY_LEN,
+            IllegalParamSnafu {
+                msg: "pg_scram_sha256 salted password must be 32 bytes"
+            }
+        );
+        let client_key = hmac_sha256(&salted_password, b"Client Key");
+        let stored_key = sha256(&client_key);
+        let server_key = hmac_sha256(&salted_password, b"Server Key");
+        Self::new(iterations, salt, stored_key, server_key)
+    }
+
+    /// Builds a throwaway verifier for an unknown user. The salt is derived
+    /// deterministically from the username and a process-wide secret, so the
+    /// SCRAM `server-first-message` (salt + iterations) stays stable per
+    /// username and indistinguishable from a real user across reconnects. No
+    /// PBKDF2 is run (avoids a CPU-exhaustion DoS keyed on unknown usernames),
+    /// and the random keys guarantee the client proof never matches.
+    pub fn mock_for_unknown_user(username: &[u8]) -> Self {
+        let mock_salt = hmac_sha256(PG_SCRAM_MOCK_SECRET.as_slice(), username);
+        Self {
+            iterations: DEFAULT_PBKDF2_SHA256_ITERATIONS,
+            salt: mock_salt[..DEFAULT_PBKDF2_SHA256_SALT_LEN].to_vec(),
+            stored_key: rand::random::<[u8; PG_SCRAM_SHA256_KEY_LEN]>().to_vec(),
+            server_key: rand::random::<[u8; PG_SCRAM_SHA256_KEY_LEN]>().to_vec(),
+        }
+    }
+
+    pub fn iterations(&self) -> u32 {
+        self.iterations
+    }
+
+    pub fn salt(&self) -> &[u8] {
+        &self.salt
+    }
+
+    pub fn verify_plain_password(&self, password: &[u8]) -> Result<bool> {
+        let salted_password =
+            pg_scram_sha256_salted_password(password, &self.salt, self.iterations)?;
+        let client_key = hmac_sha256(&salted_password, b"Client Key");
+        let stored_key = sha256(&client_key);
+        Ok(self.stored_key.ct_eq(&stored_key).into())
+    }
+
+    pub fn verify_client_proof(
+        &self,
+        auth_message: &[u8],
+        client_proof: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        if client_proof.len() != PG_SCRAM_SHA256_KEY_LEN {
+            return Ok(None);
+        }
+
+        let client_signature = hmac_sha256(&self.stored_key, auth_message);
+        let client_key = xor(client_proof, &client_signature);
+        let stored_key = sha256(&client_key);
+        if self.stored_key.ct_eq(&stored_key).into() {
+            Ok(Some(hmac_sha256(&self.server_key, auth_message)))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+pub fn format_pg_scram_sha256_password_verifier(
+    password: &[u8],
+    salt: &[u8],
+    iterations: u32,
+) -> Result<String> {
+    let verifier = PgScramSha256Verifier::from_password(password, salt, iterations)?;
+    Ok(format!(
+        "pg_scram_sha256:{iterations}:{}:{}:{}",
+        hex::encode(verifier.salt),
+        hex::encode(verifier.stored_key),
+        hex::encode(verifier.server_key)
+    ))
+}
+
+/// Parses and validates an encoded PostgreSQL SCRAM-SHA-256 verifier.
+pub fn parse_pg_scram_sha256_password_verifier(verifier: &str) -> Result<PgScramSha256Verifier> {
+    let Some(verifier) = verifier.strip_prefix("pg_scram_sha256:") else {
+        return InvalidConfigSnafu {
+            value: "pg_scram_sha256".to_string(),
+            msg: "Invalid pg scram sha256 verifier format",
+        }
+        .fail();
+    };
+    let mut parts = verifier.split(':');
+    let (Some(iterations), Some(salt), Some(stored_key), Some(server_key), None) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return InvalidConfigSnafu {
+            value: "pg_scram_sha256".to_string(),
+            msg: "Invalid pg scram sha256 verifier format",
+        }
+        .fail();
+    };
+    let (Ok(iterations), Ok(salt), Ok(stored_key), Ok(server_key)) = (
+        iterations.parse::<u32>(),
+        hex::decode(salt),
+        hex::decode(stored_key),
+        hex::decode(server_key),
+    ) else {
+        return InvalidConfigSnafu {
+            value: "pg_scram_sha256".to_string(),
+            msg: "Invalid pg scram sha256 verifier encoding",
+        }
+        .fail();
+    };
+
+    PgScramSha256Verifier::new(iterations, salt, stored_key, server_key)
+}
+
+fn pg_scram_sha256_salted_password(
+    password: &[u8],
+    salt: &[u8],
+    iterations: u32,
+) -> Result<Vec<u8>> {
+    ensure!(
+        iterations > 0 && iterations <= MAX_PBKDF2_SHA256_ITERATIONS,
+        IllegalParamSnafu {
+            msg: format!(
+                "pg_scram_sha256 iterations must be in 1..={}",
+                MAX_PBKDF2_SHA256_ITERATIONS
+            )
+        }
+    );
+    ensure!(
+        !salt.is_empty() && salt.len() <= MAX_PBKDF2_SHA256_SALT_LEN,
+        IllegalParamSnafu {
+            msg: format!(
+                "pg_scram_sha256 salt length must be in 1..={}",
+                MAX_PBKDF2_SHA256_SALT_LEN
+            )
+        }
+    );
+
+    let prepared_password = std::str::from_utf8(password)
+        .ok()
+        .and_then(|password| stringprep::saslprep(password).ok());
+    let password = prepared_password
+        .as_deref()
+        .map(str::as_bytes)
+        .unwrap_or(password);
+
+    let mut salted_password = [0u8; PG_SCRAM_SHA256_KEY_LEN];
+    pbkdf2_hmac::<Sha256>(password, salt, iterations, &mut salted_password);
+    Ok(salted_password.to_vec())
+}
+
+fn hmac_sha256(key: &[u8], msg: &[u8]) -> Vec<u8> {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(msg);
+    mac.finalize().into_bytes().to_vec()
+}
+
+fn sha256(data: &[u8]) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().to_vec()
+}
+
+fn xor(lhs: &[u8], rhs: &[u8]) -> Vec<u8> {
+    lhs.iter().zip(rhs).map(|(l, r)| l ^ r).collect()
+}
+
 fn sha1_two(input_1: &[u8], input_2: &[u8]) -> Vec<u8> {
     let mut hasher = Sha1::new();
     hasher.update(input_1);
@@ -220,6 +515,17 @@ fn double_sha1(data: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mysql_native_password_auth_data(password: &[u8], salt: &[u8]) -> Vec<u8> {
+        let hash_stage_1 = sha1_one(password);
+        let hash_stage_2 = mysql_native_password_hash(password);
+        let scramble = sha1_two(salt, &hash_stage_2);
+        hash_stage_1
+            .iter()
+            .zip(scramble)
+            .map(|(lhs, rhs)| lhs ^ rhs)
+            .collect()
+    }
 
     #[test]
     fn test_sha() {
@@ -252,6 +558,24 @@ mod tests {
             "mysql_native_password:6bb4837eb74329105ee4568dda7dc67ed2ca2ad9",
             verifier
         );
+        assert_eq!(
+            mysql_native_password_hash(b"123456"),
+            parse_mysql_native_password_verifier(&verifier).unwrap()
+        );
+        assert!(parse_mysql_native_password_verifier("mysql_native_password:00").is_err());
+
+        let salt = b"01234567890123456789";
+        let auth_data = mysql_native_password_auth_data(b"123456", salt);
+        auth_mysql_with_verifier(&auth_data, salt, "greptime", &verifier).unwrap();
+        assert!(
+            auth_mysql_with_verifier(
+                &auth_data,
+                salt,
+                "greptime",
+                &format_mysql_native_password_verifier(b"wrong")
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -272,6 +596,68 @@ mod tests {
                 MAX_PBKDF2_SHA256_ITERATIONS + 1,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn test_format_pg_scram_sha256_password_verifier() {
+        let verifier =
+            format_pg_scram_sha256_password_verifier("password".as_bytes(), b"salt", 4096).unwrap();
+        assert_eq!(
+            "pg_scram_sha256:4096:73616c74:945e1c466fc9932efadc23781edc5d1e78d5e10f005933652af1a6105154f084:b9bf0e811b1fb6793671c0cc3adedf7c75cd72291191092ad65878c5a02aad2c",
+            verifier
+        );
+        let parsed = parse_pg_scram_sha256_password_verifier(&verifier).unwrap();
+        assert_eq!(4096, parsed.iterations());
+        assert_eq!(b"salt", parsed.salt());
+        assert!(parse_pg_scram_sha256_password_verifier("pg_scram_sha256:bad").is_err());
+    }
+
+    #[test]
+    fn test_pg_scram_sha256_applies_saslprep() {
+        let normalized = PgScramSha256Verifier::from_password(b"pass word", b"salt", 4096).unwrap();
+        let non_breaking_space =
+            PgScramSha256Verifier::from_password("pass\u{00a0}word".as_bytes(), b"salt", 4096)
+                .unwrap();
+
+        assert_eq!(normalized, non_breaking_space);
+        assert!(
+            non_breaking_space
+                .verify_plain_password(b"pass word")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_pg_scram_sha256_uses_original_bytes_when_saslprep_is_not_possible() {
+        let invalid_utf8 = b"password\xff";
+        let prohibited = b"password\x07";
+
+        for password in [invalid_utf8.as_slice(), prohibited.as_slice()] {
+            let verifier = PgScramSha256Verifier::from_password(password, b"salt", 4096).unwrap();
+            assert!(verifier.verify_plain_password(password).unwrap());
+        }
+    }
+
+    #[test]
+    fn test_mock_verifier_is_stable_per_username() {
+        let alice = PgScramSha256Verifier::mock_for_unknown_user(b"alice");
+        let alice_again = PgScramSha256Verifier::mock_for_unknown_user(b"alice");
+        let bob = PgScramSha256Verifier::mock_for_unknown_user(b"bob");
+
+        // Same username must yield the same salt and iterations across reconnects,
+        // otherwise the SCRAM server-first message leaks user (non-)existence.
+        assert_eq!(alice.salt(), alice_again.salt());
+        assert_ne!(alice.salt(), bob.salt());
+        assert_eq!(alice.iterations(), DEFAULT_PBKDF2_SHA256_ITERATIONS);
+        assert_eq!(alice.salt().len(), DEFAULT_PBKDF2_SHA256_SALT_LEN);
+
+        // The mock verifier must never accept a client proof.
+        assert!(
+            alice
+                .verify_client_proof(b"auth-message", &[0u8; PG_SCRAM_SHA256_KEY_LEN])
+                .unwrap()
+                .is_none()
         );
     }
 }

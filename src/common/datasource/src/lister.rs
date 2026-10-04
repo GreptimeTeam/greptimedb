@@ -72,7 +72,7 @@ impl Lister {
                 // make sure this file exists
                 let _ = self.object_store.stat(filename).await.with_context(|_| {
                     error::ListObjectsSnafu {
-                        path: format!("{}{}", &self.root, filename),
+                        path: self.root.clone(),
                     }
                 })?;
 

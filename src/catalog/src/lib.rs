@@ -17,7 +17,7 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
 use api::v1::CreateTableExpr;
-use common_catalog::consts::{INFORMATION_SCHEMA_NAME, PG_CATALOG_NAME};
+use common_catalog::consts::system_schema_name;
 use futures::future::BoxFuture;
 use futures_util::stream::BoxStream;
 use session::context::QueryContext;
@@ -125,7 +125,10 @@ pub trait CatalogManager: Send + Sync {
         // We need this rather than use schema_exists directly because `pg_catalog` is
         // only visible via postgres protocol. So if we don't check, a mysql client may
         // create a schema named `pg_catalog` which is somehow malformed.
-        schema == INFORMATION_SCHEMA_NAME || schema == PG_CATALOG_NAME
+        //
+        // Case-insensitive, otherwise `CREATE DATABASE "INFORMATION_SCHEMA"` keeps its
+        // case and creates a schema shadowed by the system one.
+        system_schema_name(schema).is_some()
     }
 }
 

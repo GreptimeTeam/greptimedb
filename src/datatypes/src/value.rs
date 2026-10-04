@@ -543,20 +543,20 @@ impl Value {
                     None
                 }
             }
-            Value::Int8(x) => Some(Value::Int8(-*x)),
-            Value::Int16(x) => Some(Value::Int16(-*x)),
-            Value::Int32(x) => Some(Value::Int32(-*x)),
-            Value::Int64(x) => Some(Value::Int64(-*x)),
+            Value::Int8(x) => x.checked_neg().map(Value::Int8),
+            Value::Int16(x) => x.checked_neg().map(Value::Int16),
+            Value::Int32(x) => x.checked_neg().map(Value::Int32),
+            Value::Int64(x) => x.checked_neg().map(Value::Int64),
             Value::Float32(x) => Some(Value::Float32(-*x)),
             Value::Float64(x) => Some(Value::Float64(-*x)),
             Value::Decimal128(x) => Some(Value::Decimal128(x.negative())),
-            Value::Date(x) => Some(Value::Date(x.negative())),
-            Value::Timestamp(x) => Some(Value::Timestamp(x.negative())),
-            Value::Time(x) => Some(Value::Time(x.negative())),
-            Value::Duration(x) => Some(Value::Duration(x.negative())),
-            Value::IntervalYearMonth(x) => Some(Value::IntervalYearMonth(x.negative())),
-            Value::IntervalDayTime(x) => Some(Value::IntervalDayTime(x.negative())),
-            Value::IntervalMonthDayNano(x) => Some(Value::IntervalMonthDayNano(x.negative())),
+            Value::Date(x) => x.checked_negative().map(Value::Date),
+            Value::Timestamp(x) => x.checked_negative().map(Value::Timestamp),
+            Value::Time(x) => x.checked_negative().map(Value::Time),
+            Value::Duration(x) => x.checked_negative().map(Value::Duration),
+            Value::IntervalYearMonth(x) => x.checked_negative().map(Value::IntervalYearMonth),
+            Value::IntervalDayTime(x) => x.checked_negative().map(Value::IntervalDayTime),
+            Value::IntervalMonthDayNano(x) => x.checked_negative().map(Value::IntervalMonthDayNano),
 
             Value::Binary(_)
             | Value::String(_)
@@ -1085,11 +1085,21 @@ impl StructValue {
     }
 
     fn try_to_scalar_value(&self, output_type: &StructType) -> Result<ScalarValue> {
+        let output_fields = output_type.fields();
+        ensure!(
+            self.items.len() == output_fields.len(),
+            InconsistentStructFieldsAndItemsSnafu {
+                field_len: output_fields.len(),
+                item_len: self.items.len()
+            }
+        );
         let arrays = self
             .items
             .iter()
-            .map(|value| {
-                let scalar_value = value.try_to_scalar_value(&value.data_type())?;
+            .zip(output_fields.iter())
+            .map(|(value, field)| {
+                // Null values need the declared field type to produce a typed null array.
+                let scalar_value = value.try_to_scalar_value(field.data_type())?;
                 scalar_value
                     .to_array()
                     .context(ConvertScalarToArrowArraySnafu)
@@ -1097,7 +1107,13 @@ impl StructValue {
             .collect::<Result<Vec<Arc<dyn Array>>>>()?;
 
         let fields = output_type.as_arrow_fields();
-        let struct_array = StructArray::new(fields, arrays, None);
+        let struct_array =
+            StructArray::try_new_with_length(fields, arrays, None, 1).map_err(|error| {
+                error::ToScalarValueSnafu {
+                    reason: error.to_string(),
+                }
+                .build()
+            })?;
         Ok(ScalarValue::Struct(Arc::new(struct_array)))
     }
 }
@@ -1136,12 +1152,13 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::UInt16(u) => Value::from(u),
             ScalarValue::UInt32(u) => Value::from(u),
             ScalarValue::UInt64(u) => Value::from(u),
-            ScalarValue::Utf8(s) | ScalarValue::LargeUtf8(s) => {
+            ScalarValue::Utf8(s) | ScalarValue::LargeUtf8(s) | ScalarValue::Utf8View(s) => {
                 Value::from(s.map(StringBytes::from))
             }
             ScalarValue::Binary(b)
             | ScalarValue::LargeBinary(b)
-            | ScalarValue::FixedSizeBinary(_, b) => Value::from(b.map(Bytes::from)),
+            | ScalarValue::FixedSizeBinary(_, b)
+            | ScalarValue::BinaryView(b) => Value::from(b.map(Bytes::from)),
             ScalarValue::List(array) => {
                 // this is for item type
                 let datatype = ConcreteDataType::try_from(&array.value_type())?;
@@ -1205,7 +1222,15 @@ impl TryFrom<ScalarValue> for Value {
                 .map(|v| Value::Decimal128(Decimal128::new(v, p, s)))
                 .unwrap_or(Value::Null),
             ScalarValue::Struct(struct_array) => {
-                let struct_type = StructType::from(struct_array.fields());
+                // A struct scalar carries a single element; a null (or empty)
+                // element means the struct itself is null, for example a null
+                // struct inside a list.
+                if struct_array.is_empty() || struct_array.is_null(0) {
+                    return Ok(Value::Null);
+                }
+                // Build the struct type fallibly: an unrepresentable arrow
+                // field type must surface as an error, not a panic.
+                let struct_type = StructType::try_from_arrow_fields(struct_array.fields())?;
                 let items = struct_array
                     .columns()
                     .iter()
@@ -1218,16 +1243,16 @@ impl TryFrom<ScalarValue> for Value {
                     .collect::<Result<Vec<Value>>>()?;
                 Value::Struct(StructValue::try_new(items, struct_type)?)
             }
+            ScalarValue::Dictionary(_, value) => (*value).try_into()?,
             ScalarValue::Decimal32(_, _, _)
             | ScalarValue::Decimal64(_, _, _)
             | ScalarValue::Decimal256(_, _, _)
             | ScalarValue::FixedSizeList(_)
             | ScalarValue::LargeList(_)
-            | ScalarValue::Dictionary(_, _)
+            | ScalarValue::ListView(_)
+            | ScalarValue::LargeListView(_)
             | ScalarValue::Union(_, _, _)
             | ScalarValue::Float16(_)
-            | ScalarValue::Utf8View(_)
-            | ScalarValue::BinaryView(_)
             | ScalarValue::Map(_)
             | ScalarValue::Date64(_)
             | ScalarValue::RunEndEncoded(_, _, _) => {
@@ -1239,6 +1264,21 @@ impl TryFrom<ScalarValue> for Value {
         };
         Ok(v)
     }
+}
+
+/// Converts the value at `index` of an arrow array into a [`Value`].
+///
+/// Unlike the unchecked conversion in [`crate::vectors::StructVector`]'s `get`,
+/// this propagates conversion errors (for example arrow types greptimedb
+/// cannot represent, such as `Decimal256`) instead of panicking, so callers
+/// can surface a proper error to the user.
+pub fn try_value_from_array(array: &dyn Array, index: usize) -> Result<Value> {
+    if array.is_null(index) {
+        return Ok(Value::Null);
+    }
+    let scalar =
+        ScalarValue::try_from_array(array, index).context(ConvertArrowArrayToScalarsSnafu)?;
+    Value::try_from(scalar)
 }
 
 impl From<ValueRef<'_>> for Value {
@@ -1744,6 +1784,49 @@ pub(crate) mod tests {
     use crate::types::json_type::{JsonNativeType, JsonObjectType};
     use crate::vectors::ListVectorBuilder;
 
+    #[test]
+    fn test_try_negative_overflow() {
+        // Negating a MIN value overflows, so try_negative returns None instead
+        // of panicking (consistent with the unsigned arms).
+        assert_eq!(Value::Int8(i8::MIN).try_negative(), None);
+        assert_eq!(Value::Int16(i16::MIN).try_negative(), None);
+        assert_eq!(Value::Int32(i32::MIN).try_negative(), None);
+        assert_eq!(Value::Int64(i64::MIN).try_negative(), None);
+        assert_eq!(
+            Value::Timestamp(Timestamp::new_nanosecond(i64::MIN)).try_negative(),
+            None
+        );
+        assert_eq!(Value::Date(Date::new(i32::MIN)).try_negative(), None);
+        assert_eq!(
+            Value::Time(Time::new_nanosecond(i64::MIN)).try_negative(),
+            None
+        );
+        assert_eq!(
+            Value::Duration(Duration::new_nanosecond(i64::MIN)).try_negative(),
+            None
+        );
+        assert_eq!(
+            Value::IntervalYearMonth(IntervalYearMonth::new(i32::MIN)).try_negative(),
+            None
+        );
+        assert_eq!(
+            Value::IntervalDayTime(IntervalDayTime::new(i32::MIN, i32::MIN)).try_negative(),
+            None
+        );
+        assert_eq!(
+            Value::IntervalMonthDayNano(IntervalMonthDayNano::new(i32::MIN, i32::MIN, i64::MIN))
+                .try_negative(),
+            None
+        );
+
+        // Non-MIN values still negate.
+        assert_eq!(Value::Int64(5).try_negative(), Some(Value::Int64(-5)));
+        assert_eq!(
+            Value::Timestamp(Timestamp::new_nanosecond(5)).try_negative(),
+            Some(Value::Timestamp(Timestamp::new_nanosecond(-5)))
+        );
+    }
+
     pub(crate) fn build_struct_type() -> StructType {
         StructType::new(Arc::new(vec![
             StructField::new("id".to_string(), ConcreteDataType::int32_datatype(), false),
@@ -1884,6 +1967,16 @@ pub(crate) mod tests {
                 .unwrap()
         );
         assert_eq!(Value::Null, ScalarValue::Utf8(None).try_into().unwrap());
+
+        assert_eq!(
+            Value::from("dictionary"),
+            ScalarValue::Dictionary(
+                Box::new(ArrowDataType::UInt32),
+                Box::new(ScalarValue::Utf8(Some("dictionary".to_string()))),
+            )
+            .try_into()
+            .unwrap()
+        );
 
         assert_eq!(
             Value::from("large_hello"),
@@ -2086,6 +2179,73 @@ pub(crate) mod tests {
             Value::Struct(struct_value),
             scalar_struct_value.try_into().unwrap()
         );
+
+        // view-typed strings and binaries convert like their non-view forms
+        assert_eq!(
+            Value::String("abc".into()),
+            ScalarValue::Utf8View(Some("abc".into()))
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Utf8View(None).try_into().unwrap());
+        assert_eq!(
+            Value::Binary(Bytes::from(vec![1, 2])),
+            ScalarValue::BinaryView(Some(vec![1, 2]))
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::BinaryView(None).try_into().unwrap()
+        );
+
+        // a null struct scalar is a null value, not a struct of null fields
+        let null_struct = ScalarStructBuilder::new_null(build_struct_type().as_arrow_fields());
+        assert_eq!(Value::Null, null_struct.try_into().unwrap());
+    }
+
+    #[test]
+    fn test_try_value_from_array() {
+        use arrow_array::Int32Array;
+        use datafusion_common::arrow::datatypes::i256;
+
+        let array = Int32Array::from(vec![Some(1), None]);
+        assert_eq!(Value::Int32(1), try_value_from_array(&array, 0).unwrap());
+        assert_eq!(Value::Null, try_value_from_array(&array, 1).unwrap());
+
+        // a struct with representable fields converts
+        let supported = ScalarStructBuilder::new()
+            .with_name_and_scalar("i", ScalarValue::Int32(Some(7)))
+            .build()
+            .unwrap();
+        let ScalarValue::Struct(array) = supported else {
+            unreachable!();
+        };
+        assert_eq!(
+            Value::Struct(StructValue::new(
+                vec![Value::Int32(7)],
+                StructType::new(std::sync::Arc::new(vec![StructField::new(
+                    "i",
+                    ConcreteDataType::int32_datatype(),
+                    false,
+                )]))
+            )),
+            try_value_from_array(array.as_ref(), 0).unwrap()
+        );
+
+        // an unsupported arrow field type errors instead of panicking
+        let unsupported = ScalarStructBuilder::new()
+            .with_name_and_scalar(
+                "d",
+                ScalarValue::Decimal256(Some(i256::from_i128(1)), 38, 10),
+            )
+            .build()
+            .unwrap();
+        let ScalarValue::Struct(array) = unsupported else {
+            unreachable!();
+        };
+        let error = try_value_from_array(array.as_ref(), 0).unwrap_err();
+        assert!(error.to_string().contains("Unsupported arrow data type"));
     }
 
     #[test]
@@ -3027,6 +3187,66 @@ pub(crate) mod tests {
             }
             _ => panic!("Unexpected value type"),
         }
+    }
+
+    #[test]
+    fn test_struct_scalar_null_fields() {
+        let struct_type = StructType::from([
+            StructField::new("x", ConcreteDataType::int32_datatype(), true),
+            StructField::new("name", ConcreteDataType::string_datatype(), true),
+        ]);
+        let value = StructValue::new(vec![Value::Null, Value::from("hello")], struct_type.clone());
+        let ScalarValue::Struct(array) = value.try_to_scalar_value(&struct_type).unwrap() else {
+            panic!("Expected struct scalar");
+        };
+        assert_eq!(1, array.len());
+        assert_eq!(0, array.null_count());
+        assert_eq!(&struct_type.as_arrow_fields(), array.fields());
+        assert_eq!(
+            ScalarValue::Int32(None),
+            ScalarValue::try_from_array(array.column(0), 0).unwrap()
+        );
+
+        let nested_type = StructType::from([StructField::new(
+            "nested",
+            ConcreteDataType::struct_datatype(struct_type),
+            true,
+        )]);
+        for child in [Value::Struct(value), Value::Null] {
+            let nested = StructValue::new(vec![child.clone()], nested_type.clone());
+            let ScalarValue::Struct(array) = nested.try_to_scalar_value(&nested_type).unwrap()
+            else {
+                panic!("Expected struct scalar");
+            };
+            let vector = crate::vectors::Helper::try_into_vector(array.column(0).clone()).unwrap();
+            assert_eq!(child, vector.get(0));
+        }
+
+        let empty_type = StructType::default();
+        let empty = StructValue::new(vec![], empty_type.clone());
+        let ScalarValue::Struct(array) = empty.try_to_scalar_value(&empty_type).unwrap() else {
+            panic!("Expected struct scalar");
+        };
+        assert_eq!(1, array.len());
+        assert_eq!(0, array.num_columns());
+        assert_eq!(0, array.null_count());
+    }
+
+    #[test]
+    fn test_struct_scalar_invalid_fields() {
+        let struct_type = StructType::from([StructField::new(
+            "x",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]);
+        for child in [Value::Null, Value::from("wrong type")] {
+            let value = StructValue::new(vec![child], struct_type.clone());
+            assert!(value.try_to_scalar_value(&struct_type).is_err());
+        }
+        let value = StructValue::new(vec![Value::Int32(1)], struct_type.clone());
+        assert!(value.try_to_scalar_value(&StructType::default()).is_err());
+        let empty = StructValue::new(vec![], StructType::default());
+        assert!(empty.try_to_scalar_value(&struct_type).is_err());
     }
 
     #[test]

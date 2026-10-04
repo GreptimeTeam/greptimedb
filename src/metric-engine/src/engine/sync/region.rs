@@ -304,7 +304,7 @@ mod tests {
         metric_engine
             .handle_request(
                 target_physical_region_id,
-                RegionRequest::Close(RegionCloseRequest {}),
+                RegionRequest::Close(RegionCloseRequest::default()),
             )
             .await
             .unwrap();

@@ -1,8 +1,16 @@
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
 
+[target.riscv64gc-unknown-linux-gnu]
+linker = "riscv64-linux-gnu-gcc"
+
 [alias]
 sqlness = "run --bin sqlness-runner --target-dir target/sqlness --"
+
+[registry]
+# Requires cargo 1.100+; older cargo ignores this key. Only registry crates
+# carry a publish time, so git dependencies (our GreptimeTeam forks) are exempt.
+global-min-publish-age = "7 days"
 
 [unstable.git]
 shallow_index = true

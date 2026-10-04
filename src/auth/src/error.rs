@@ -88,6 +88,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Unsupported authentication method: {}", method))]
+    UnsupportedAuthMethod {
+        method: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -105,6 +112,7 @@ impl ErrorExt for Error {
             Error::UserPasswordMismatch { .. } => StatusCode::UserPasswordMismatch,
             Error::AccessDenied { .. } => StatusCode::AccessDenied,
             Error::PermissionDenied { .. } => StatusCode::PermissionDenied,
+            Error::UnsupportedAuthMethod { .. } => StatusCode::UserPasswordMismatch,
         }
     }
 

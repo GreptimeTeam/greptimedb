@@ -58,12 +58,31 @@ warmup = 0
 iterations = 1
 ```
 
+### Query kinds
+
+`kind = "prom_http"` runs a Prometheus range query by POSTing form fields to
+`/v1/prometheus/api/v1/query_range`. `query`, `start`, `end`, and `step` are
+sent as form fields; `start` and `end` define the range, and `step` defines its
+evaluation interval. `start`, `end`, and `step` are optional in the case model
+and default to empty form values when omitted. The table database is sent as the
+`db` URL query parameter, rather than as a form field.
+
+The measurement starts before the HTTP request is sent and ends after the full
+response body is read and parsed as JSON. It therefore includes request send,
+server-side Prometheus JSON response building, and response-body read and JSON
+parsing; it is not server-side-only latency.
+
 `series_layout = "round_robin"` advances the timestamp once per generated row and
 cycles series labels across rows. `series_layout = "timestamp_major"` writes all
 series for one timestamp before advancing to the next timestamp; use it for
 Prometheus-like high-cardinality scrape fixtures where short query windows should
 still contain many raw samples. `timestamp_major` requires `rows_per_sst` to be
-divisible by `series_count`.
+divisible by `series_count`. `per_sst` uses one series selected from the SST
+index. These describe logical generation order. Before either flat or primary-key
+SST format is written, each completed generated batch is physically sorted by
+encoded primary key ascending, timestamp ascending, and sequence descending, as
+required by the Mito Parquet writer; sorting preserves every generated column and
+row, including deterministic-wave values.
 
 `[scenario]` is required. Other scenario variants are intentionally unsupported
 for now, but `scenario.kind` leaves room for future `write_then_query` and

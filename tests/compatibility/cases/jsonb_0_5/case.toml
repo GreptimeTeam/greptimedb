@@ -1,0 +1,8 @@
+name = "jsonb_0_5"
+reason = "Verify jsonb 0.5 can read persisted JSONB from older binaries and query old and newly written rows together."
+introduced_by = "jsonb 0.5 upgrade"
+topologies = ["standalone", "distributed"]
+from_range = ["*"]
+to_range = [">=v1.3.0-alpha.1"]
+features = ["json", "table"]
+owner = "query"

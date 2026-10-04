@@ -34,12 +34,13 @@ use tonic::codegen::Service;
 use tonic::service::RoutesBuilder;
 use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Identity, ServerTlsConfig};
-use tower::Layer;
+use tower::{Layer, ServiceBuilder};
 
 use crate::grpc::database::DatabaseService;
 use crate::grpc::flight::{FlightCraftRef, FlightCraftWrapper};
 use crate::grpc::frontend_grpc_handler::FrontendGrpcHandler;
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
+use crate::grpc::memory_limit::{MemoryLimiterExtensionLayer, MemoryLimiterExtensionService};
 use crate::grpc::prom_query_gateway::PrometheusGatewayService;
 use crate::grpc::region_server::{RegionServerHandlerRef, RegionServerRequestHandler};
 use crate::grpc::{GrpcServer, GrpcServerConfig};
@@ -71,6 +72,7 @@ macro_rules! add_service {
         let service_with_limiter = $crate::tower::ServiceBuilder::new()
             .layer(MemoryLimiterExtensionLayer::new(
                 $builder.memory_limiter().clone(),
+                max_recv_message_size,
             ))
             .service(service_builder);
 
@@ -87,12 +89,15 @@ pub struct GrpcServerBuilder {
     routes_builder: RoutesBuilder,
     tls_config: Option<ServerTlsConfig>,
     otel_arrow_service: Option<
-        InterceptedService<
-            ArrowMetricsServiceServer<OtelArrowServiceHandler<OpenTelemetryProtocolHandlerRef>>,
-            HeaderInterceptor,
+        MemoryLimiterExtensionService<
+            InterceptedService<
+                ArrowMetricsServiceServer<OtelArrowServiceHandler<OpenTelemetryProtocolHandlerRef>>,
+                HeaderInterceptor,
+            >,
         >,
     >,
     memory_limiter: ServerMemoryLimiter,
+    cors_allowed_origins: Option<Vec<String>>,
 }
 
 impl GrpcServerBuilder {
@@ -108,7 +113,14 @@ impl GrpcServerBuilder {
             tls_config: None,
             otel_arrow_service: None,
             memory_limiter,
+            cors_allowed_origins: None,
         }
+    }
+
+    /// Enables CORS for gRPC-Web clients in browsers. An empty list allows any origin.
+    pub fn with_cors(mut self, allowed_origins: Vec<String>) -> Self {
+        self.cors_allowed_origins = Some(allowed_origins);
+        self
     }
 
     /// Set a global memory limiter for all server protocols.
@@ -185,6 +197,13 @@ impl GrpcServerBuilder {
             .accept_compressed(CompressionEncoding::Zstd)
             .send_compressed(CompressionEncoding::Zstd);
         let svc = InterceptedService::new(server, HeaderInterceptor {});
+        // Same pre-decode memory admission as `add_service!`.
+        let svc = ServiceBuilder::new()
+            .layer(MemoryLimiterExtensionLayer::new(
+                self.memory_limiter.clone(),
+                self.config.max_recv_message_size,
+            ))
+            .service(svc);
         self.otel_arrow_service = Some(svc);
         self
     }
@@ -246,6 +265,7 @@ impl GrpcServerBuilder {
             bind_addr: None,
             name: self.name,
             config: self.config,
+            cors_allowed_origins: self.cors_allowed_origins,
         }
     }
 }

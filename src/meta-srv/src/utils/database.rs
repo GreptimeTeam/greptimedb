@@ -17,6 +17,7 @@ use std::sync::Arc;
 use client::error::{ExternalSnafu, Result as ClientResult};
 use client::{Client, Database, Output};
 use common_error::ext::BoxedError;
+use common_grpc::channel_manager::ChannelManager;
 use common_meta::peer::PeerDiscoveryRef;
 use common_telemetry::{debug, warn};
 use snafu::{ResultExt, ensure};
@@ -43,6 +44,9 @@ impl<'a> DatabaseContext<'a> {
 }
 
 /// A cached frontend database operator used by metasrv.
+///
+/// Its cached clients use independent query and control channel-manager pools;
+/// the legacy single-manager client constructors intentionally remain shared.
 pub struct DatabaseOperator {
     peer_discovery: PeerDiscoveryRef,
     client: RwLock<Option<Client>>,
@@ -110,7 +114,11 @@ impl DatabaseOperator {
 
         debug!("Available frontend addresses: {:?}", urls);
 
-        Ok(Client::with_urls(urls))
+        Ok(Client::with_query_and_control_managers(
+            ChannelManager::new(),
+            ChannelManager::new(),
+            urls,
+        ))
     }
 
     async fn maybe_init_client(&self) -> ClientResult<Client> {
@@ -146,4 +154,63 @@ fn should_reset_client<T>(result: &client::error::Result<T>) -> bool {
         .err()
         .map(|err| err.is_connection_error())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use api::v1::meta::heartbeat_request::NodeWorkloads;
+    use common_meta::cluster::{FrontendStatus, NodeInfo, NodeStatus};
+    use common_meta::peer::{Peer, PeerDiscovery};
+
+    use super::*;
+
+    struct TestPeerDiscovery;
+
+    #[async_trait::async_trait]
+    impl PeerDiscovery for TestPeerDiscovery {
+        async fn active_frontends(&self) -> common_meta::error::Result<Vec<NodeInfo>> {
+            Ok(vec![NodeInfo {
+                peer: Peer::new(1, "127.0.0.1:3001".to_string()),
+                last_activity_ts: 0,
+                status: NodeStatus::Frontend(FrontendStatus::default()),
+                version: String::new(),
+                git_commit: String::new(),
+                start_time_ms: 0,
+                total_cpu_millicores: 0,
+                total_memory_bytes: 0,
+                cpu_usage_millicores: 0,
+                memory_usage_bytes: 0,
+                hostname: String::new(),
+                env_vars: Default::default(),
+            }])
+        }
+
+        async fn active_datanodes(
+            &self,
+            _filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
+        ) -> common_meta::error::Result<Vec<NodeInfo>> {
+            unreachable!()
+        }
+
+        async fn active_flownodes(
+            &self,
+            _filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
+        ) -> common_meta::error::Result<Vec<NodeInfo>> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_build_client_uses_isolated_reused_channel_pools() {
+        let operator = DatabaseOperator::new(Arc::new(TestPeerDiscovery));
+        let client = operator.build_client().await.unwrap();
+
+        client.make_flight_client(false, false).unwrap();
+        client.make_flight_client(false, false).unwrap();
+        assert_eq!((1, 0), client.channel_pool_sizes());
+
+        client.find_channel().unwrap();
+        client.find_channel().unwrap();
+        assert_eq!((1, 1), client.channel_pool_sizes());
+    }
 }

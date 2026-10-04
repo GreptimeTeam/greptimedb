@@ -1,0 +1,1221 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Candidate metric-series discovery for the two-stage series scan.
+
+use std::cmp::Reverse;
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::Instant;
+
+use async_stream::try_stream;
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool};
+use datafusion::physical_expr::{LexOrdering, PhysicalSortExpr};
+use datafusion::physical_plan::expressions::Column;
+use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricBuilder};
+use datafusion::physical_plan::sorts::streaming_merge::StreamingMergeBuilder;
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion_common::DataFusionError;
+use datatypes::arrow::array::{Array, BinaryArray, BinaryBuilder};
+use datatypes::arrow::compute::SortOptions;
+use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::prelude::ConcreteDataType;
+use futures::{StreamExt, TryStreamExt};
+use mito_codec::row_converter::{PrimaryKeyFilter, SparsePrimaryKeyCodec};
+use snafu::{OptionExt, ResultExt, ensure};
+use store_api::codec::PrimaryKeyEncoding;
+use store_api::region_engine::PartitionRange;
+use store_api::storage::consts::{PRIMARY_KEY_COLUMN_NAME, ReservedColumnId};
+use tokio::sync::Semaphore;
+
+use crate::error::{
+    InvalidRequestSnafu, JoinSnafu, MergeCandidateSeriesSnafu, NewRecordBatchSnafu, Result,
+    UnexpectedSnafu,
+};
+use crate::read::BoxedRecordBatchStream;
+use crate::read::pruner::{PartitionPruner, Pruner};
+use crate::read::range::RowGroupIndex;
+use crate::read::range_cache::{
+    build_candidate_range_cache_key, cache_flat_range_stream, cached_flat_range_stream,
+};
+use crate::read::scan_region::StreamContext;
+use crate::read::scan_util::{PartitionMetrics, new_filter_metrics, scan_flat_mem_ranges};
+use crate::series_index::{
+    METRIC_SERIES_ID_BATCH_SIZE, MetricSeriesId, MetricSeriesIdStream, SeriesIndexFileHandle,
+    SeriesIndexReadContext, SeriesIndexSearcher,
+};
+use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
+use crate::sst::parquet::format::PrimaryKeyArray;
+use crate::sst::parquet::prefilter::{
+    CachedPrimaryKeyFilter, build_primary_key_filter, prefilter_flat_batch_by_primary_key,
+};
+use crate::sst::parquet::reader::ReaderMetrics;
+use crate::sst::parquet::row_group::ParquetFetchMetrics;
+
+/// Builds candidate metric series from the ranges assigned to a [`SeriesScan`](super::series_scan::SeriesScan).
+pub(crate) struct SeriesCandidateScanner {
+    stream_ctx: Arc<StreamContext>,
+    partitions: Vec<Vec<PartitionRange>>,
+    partition_pruner: Arc<PartitionPruner>,
+    candidate_pruner: Arc<PartitionPruner>,
+    coverage: Arc<SeriesIndexCoverage>,
+    range_semaphore: Arc<Semaphore>,
+    memory_pool: Arc<dyn MemoryPool>,
+    metrics_set: ExecutionPlanMetricsSet,
+    part_metrics: PartitionMetrics,
+}
+
+impl SeriesCandidateScanner {
+    /// Creates a candidate-series scanner for native memtable and SST ranges.
+    ///
+    /// Callers must fall back to the legacy series-scan path when the scan contains
+    /// extension ranges. Candidate-series discovery does not support other range types.
+    ///
+    /// `pruner` must be built with `PrunerOptions::enable_predicate_prefilter` set to
+    /// `false`: both scan phases share its file range builders, and the two-stage path
+    /// applies simple filters on the precise-filter path instead.
+    pub(crate) fn try_new(
+        stream_ctx: Arc<StreamContext>,
+        partitions: Vec<Vec<PartitionRange>>,
+        pruner: Arc<Pruner>,
+        range_semaphore: Arc<Semaphore>,
+        memory_pool: Arc<dyn MemoryPool>,
+        metrics_set: ExecutionPlanMetricsSet,
+        part_metrics: PartitionMetrics,
+    ) -> Result<Self> {
+        validate_metric_metadata(&stream_ctx)?;
+        #[cfg(feature = "enterprise")]
+        ensure!(
+            stream_ctx.input.extension_ranges().is_empty(),
+            InvalidRequestSnafu {
+                region_id: stream_ctx.input.region_metadata().region_id,
+                reason: "candidate-series scan does not support extension ranges; use the legacy series-scan path",
+            }
+        );
+        ensure!(
+            !pruner.predicate_prefilter_enabled(),
+            UnexpectedSnafu {
+                reason: format!(
+                    "candidate-series scan for region {} requires a pruner without predicate prefiltering",
+                    stream_ctx.input.region_metadata().region_id
+                ),
+            }
+        );
+        let all_ranges = partitions.iter().flatten().copied().collect::<Vec<_>>();
+        pruner.add_partition_ranges(&all_ranges);
+        let coverage = Arc::new(SeriesIndexCoverage::new(&stream_ctx, &all_ranges));
+        let partition_pruner = Arc::new(PartitionPruner::new(pruner.clone(), &all_ranges));
+        let candidate_pruner = if coverage.covered_files.is_empty() {
+            partition_pruner.clone()
+        } else {
+            Arc::new(
+                PartitionPruner::new(pruner, &all_ranges).excluding_files(&coverage.covered_files),
+            )
+        };
+        Ok(Self {
+            stream_ctx,
+            partitions,
+            partition_pruner,
+            candidate_pruner,
+            coverage,
+            range_semaphore,
+            memory_pool,
+            metrics_set,
+            part_metrics,
+        })
+    }
+
+    /// Builds a globally sorted stream of candidate metric-series IDs.
+    pub(crate) async fn build_stream(&self) -> Result<MetricSeriesIdStream> {
+        let all_ranges = self
+            .partitions
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        let range_builder = SeriesCandidateRangeBuilder {
+            stream_ctx: self.stream_ctx.clone(),
+            partition_pruner: self.candidate_pruner.clone(),
+            coverage: self.coverage.clone(),
+            range_semaphore: self.range_semaphore.clone(),
+            memory_pool: self.memory_pool.clone(),
+            metrics_set: self.metrics_set.clone(),
+            part_metrics: self.part_metrics.clone(),
+        };
+        let mut tasks = Vec::with_capacity(all_ranges.len());
+        for (range_idx, part_range) in all_ranges.into_iter().enumerate() {
+            let range_builder = range_builder.clone();
+            tasks.push(common_runtime::spawn_query(async move {
+                let _permit = range_builder
+                    .range_semaphore
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|error| {
+                        UnexpectedSnafu {
+                            reason: format!("failed to acquire candidate range permit: {error}"),
+                        }
+                        .build()
+                    })?;
+                range_builder
+                    .build_range_stream(part_range, range_idx)
+                    .await
+            }));
+        }
+
+        let mut range_streams = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            range_streams.push(task.await.context(JoinSnafu)??);
+        }
+
+        if let Some(context) = &self.stream_ctx.input.series_index {
+            MetricBuilder::new(&self.metrics_set)
+                .counter("candidate_index_files", self.partitions.len())
+                .add(self.coverage.indexes.len());
+            MetricBuilder::new(&self.metrics_set)
+                .counter("candidate_index_covered_ssts", self.partitions.len())
+                .add(self.coverage.covered_files.len());
+            for index in &self.coverage.indexes {
+                range_streams.push(index_primary_key_stream(
+                    self.stream_ctx.clone(),
+                    context.clone(),
+                    index.clone(),
+                    self.range_semaphore.clone(),
+                ));
+            }
+        }
+
+        // Keep scanner-level merge metrics in the same synthetic partition as
+        // SeriesDistributor. Output partitions occupy 0..self.partitions.len().
+        let merged = merge_primary_key_streams(
+            range_streams,
+            self.memory_pool.clone(),
+            &self.metrics_set,
+            self.partitions.len(),
+            "SeriesCandidateScanner::final_merge",
+        )?;
+        decode_metric_series(merged, self.stream_ctx.input.region_metadata().clone())
+    }
+
+    /// Returns the partition pruner shared with the data phase.
+    pub(crate) fn partition_pruner(&self) -> Arc<PartitionPruner> {
+        self.partition_pruner.clone()
+    }
+}
+
+/// A scanner-wide replacement plan, independent of partition-range boundaries.
+#[derive(Default)]
+struct SeriesIndexCoverage {
+    indexes: Vec<SeriesIndexFileHandle>,
+    /// Indices into `ScanInput.files`, shared by every occurrence of an SST.
+    covered_files: HashSet<usize>,
+}
+
+impl SeriesIndexCoverage {
+    fn new(stream_ctx: &StreamContext, ranges: &[PartitionRange]) -> Self {
+        let Some(context) = &stream_ctx.input.series_index else {
+            return Self::default();
+        };
+        let mut uncovered: HashSet<_> = ranges
+            .iter()
+            .flat_map(|range| {
+                stream_ctx.ranges[range.identifier]
+                    .row_group_indices
+                    .iter()
+                    .filter(|index| stream_ctx.is_file_range_index(**index))
+                    .map(|index| index.index - stream_ctx.input.num_memtables())
+            })
+            .collect();
+        let region_id = stream_ctx.input.region_metadata().region_id;
+        let mut candidates: Vec<_> = context
+            .version
+            .series_indexes
+            .values()
+            .map(|index| {
+                let files: HashSet<_> = uncovered
+                    .iter()
+                    .copied()
+                    .filter(|file_index| {
+                        index
+                            .entry()
+                            .covers_file(stream_ctx.input.files[*file_index].meta_ref(), region_id)
+                    })
+                    .collect();
+                (index, files)
+            })
+            .collect();
+        let mut coverage = Self::default();
+        while let Some((position, count)) = candidates
+            .iter()
+            .enumerate()
+            .map(|(position, (index, files))| {
+                (
+                    position,
+                    files.intersection(&uncovered).count(),
+                    index.entry(),
+                )
+            })
+            .max_by_key(|(_, count, entry)| {
+                (
+                    *count,
+                    entry.max_file_sequence,
+                    Reverse(entry.index_uuid.as_bytes()),
+                )
+            })
+            .map(|(position, count, _)| (position, count))
+        {
+            if count == 0 {
+                break;
+            }
+            let (index, files) = candidates.swap_remove(position);
+            for file in files {
+                if uncovered.remove(&file) {
+                    coverage.covered_files.insert(file);
+                }
+            }
+            coverage.indexes.push(index.clone());
+        }
+        coverage
+    }
+
+    fn covers_source(&self, stream_ctx: &StreamContext, index: RowGroupIndex) -> bool {
+        stream_ctx.is_file_range_index(index)
+            && self
+                .covered_files
+                .contains(&(index.index - stream_ctx.input.num_memtables()))
+    }
+}
+
+/// Reads an index once for the entire scan, rather than once per partition range.
+fn index_primary_key_stream(
+    stream_ctx: Arc<StreamContext>,
+    context: SeriesIndexReadContext,
+    index: SeriesIndexFileHandle,
+    semaphore: Arc<Semaphore>,
+) -> BoxedRecordBatchStream {
+    Box::pin(try_stream! {
+        let metadata = stream_ctx.input.region_metadata();
+        let codec = SparsePrimaryKeyCodec::new(metadata);
+        let mut series = {
+            let _permit = semaphore.acquire().await.map_err(|error| UnexpectedSnafu {
+                reason: format!("failed to acquire candidate index permit: {error}"),
+            }.build())?;
+            SeriesIndexSearcher::try_new(
+                metadata.clone(),
+                context.store.clone(),
+                index,
+                stream_ctx.input.predicate_group().predicate(),
+                stream_ctx.input.time_range,
+            ).await?.search()?
+        };
+        loop {
+            let batch = {
+                let _permit = semaphore.acquire().await.map_err(|error| UnexpectedSnafu {
+                    reason: format!("failed to acquire candidate index permit: {error}"),
+                }.build())?;
+                series.try_next().await?
+            };
+            let Some(batch) = batch else { break };
+            let mut builder = BinaryBuilder::new();
+            let mut key = Vec::new();
+            for series in batch {
+                key.clear();
+                codec.encode_internal(series.table_id, series.tsid, &mut key)
+                    .context(crate::error::EncodeSnafu)?;
+                builder.append_value(&key);
+            }
+            yield RecordBatch::try_new(primary_key_schema(), vec![Arc::new(builder.finish())])
+                .context(NewRecordBatchSnafu)?;
+        }
+    })
+}
+
+#[derive(Clone)]
+struct SeriesCandidateRangeBuilder {
+    stream_ctx: Arc<StreamContext>,
+    coverage: Arc<SeriesIndexCoverage>,
+    partition_pruner: Arc<PartitionPruner>,
+    range_semaphore: Arc<Semaphore>,
+    memory_pool: Arc<dyn MemoryPool>,
+    metrics_set: ExecutionPlanMetricsSet,
+    part_metrics: PartitionMetrics,
+}
+
+impl SeriesCandidateRangeBuilder {
+    async fn build_range_stream(
+        &self,
+        part_range: PartitionRange,
+        merge_partition: usize,
+    ) -> Result<BoxedRecordBatchStream> {
+        let range_meta = &self.stream_ctx.ranges[part_range.identifier];
+        // A cache entry describes the complete original range. Never cache a
+        // partial range whose missing candidates are supplied by a global index.
+        let replaced_sources = range_meta
+            .row_group_indices
+            .iter()
+            .any(|index| self.coverage.covers_source(&self.stream_ctx, *index));
+        let cache_key = if replaced_sources {
+            None
+        } else {
+            build_candidate_range_cache_key(&self.stream_ctx, &part_range)
+        };
+        if let Some(key) = cache_key.as_ref() {
+            if let Some(value) = self.stream_ctx.input.cache_strategy.get_range_result(key) {
+                self.part_metrics.inc_range_cache_hit();
+                return Ok(cached_flat_range_stream(value));
+            }
+            self.part_metrics.inc_range_cache_miss();
+        }
+
+        let mut sources = Vec::with_capacity(range_meta.row_group_indices.len());
+        for index in &range_meta.row_group_indices {
+            let source = self.build_source(*index, range_meta.time_range).await?;
+            if let Some(source) = source {
+                sources.push(source);
+            }
+        }
+
+        let sources = self.stream_ctx.input.create_parallel_flat_sources(
+            sources,
+            self.range_semaphore.clone(),
+            2,
+        )?;
+        let stream = merge_primary_key_streams(
+            sources,
+            self.memory_pool.clone(),
+            &self.metrics_set,
+            merge_partition,
+            "SeriesCandidateScanner::range_merge",
+        )?;
+
+        Ok(match cache_key {
+            Some(key) => cache_flat_range_stream(
+                stream,
+                self.stream_ctx.input.cache_strategy.clone(),
+                key,
+                self.part_metrics.clone(),
+            ),
+            None => stream,
+        })
+    }
+
+    async fn build_source(
+        &self,
+        index: RowGroupIndex,
+        time_range: crate::sst::file::FileTimeRange,
+    ) -> Result<Option<BoxedRecordBatchStream>> {
+        let metadata = self.stream_ctx.input.region_metadata().clone();
+        if self.stream_ctx.is_mem_range_index(index) {
+            let raw = scan_flat_mem_ranges(
+                self.stream_ctx.clone(),
+                self.part_metrics.clone(),
+                index,
+                time_range,
+            );
+            let filter = build_primary_key_filter(
+                &metadata,
+                None,
+                self.stream_ctx.input.predicate_group().predicate(),
+            );
+            return Ok(Some(candidate_primary_key_stream(Box::pin(raw), filter)));
+        }
+
+        if self.stream_ctx.is_file_range_index(index) {
+            if self.coverage.covers_source(&self.stream_ctx, index) {
+                // Leave the range reference for the data phase so its first
+                // read can cache the builder. Retaining builders only prevents
+                // eviction; it does not allow caching at zero references.
+                return Ok(None);
+            }
+            let file = self.stream_ctx.input.file_from_index(index);
+            let predicate = self.stream_ctx.input.predicate_for_file(file);
+            if self
+                .partition_pruner
+                .try_skip_manifest_pruned_file_range(index, &self.part_metrics)
+            {
+                return Ok(None);
+            }
+            let mut reader_metrics = ReaderMetrics {
+                filter_metrics: new_filter_metrics(self.part_metrics.explain_verbose()),
+                ..Default::default()
+            };
+            let ranges = self
+                .partition_pruner
+                .build_file_ranges(index, &self.part_metrics, &mut reader_metrics)
+                .await?;
+            self.part_metrics.inc_num_file_ranges(ranges.len());
+            self.part_metrics
+                .merge_reader_metrics(&reader_metrics, None);
+
+            // Build a fresh encoded-PK filter from this SST's metadata so schema
+            // compatibility is evaluated independently for each file.
+            let filter = ranges.first().and_then(|range| {
+                build_primary_key_filter(
+                    range.region_metadata(),
+                    Some(metadata.as_ref()),
+                    predicate.as_ref(),
+                )
+            });
+            let part_metrics = self.part_metrics.clone();
+            let raw = Box::pin(try_stream! {
+                let fetch_metrics = part_metrics
+                    .explain_verbose()
+                    .then(|| Arc::new(ParquetFetchMetrics::default()));
+                let mut reader_metrics = ReaderMetrics {
+                    fetch_metrics: fetch_metrics.clone(),
+                    ..Default::default()
+                };
+                for range in ranges {
+                    let build_start = Instant::now();
+                    let Some(mut reader) = range
+                        .primary_key_reader(fetch_metrics.as_deref())
+                        .await?
+                    else {
+                        continue;
+                    };
+                    reader_metrics.build_cost += build_start.elapsed();
+
+                    let scan_start = Instant::now();
+                    while let Some(batch) = reader.try_next().await? {
+                        reader_metrics.num_record_batches += 1;
+                        reader_metrics.num_batches += 1;
+                        reader_metrics.num_rows += batch.num_rows();
+                        yield batch;
+                    }
+                    reader_metrics.scan_cost += scan_start.elapsed();
+                }
+                reader_metrics.observe_rows("candidate_series");
+                part_metrics.merge_reader_metrics(&reader_metrics, None);
+            });
+            return Ok(Some(candidate_primary_key_stream(raw, filter)));
+        }
+
+        UnexpectedSnafu {
+            reason: format!(
+                "candidate-series scan received unsupported range index {}",
+                index.index
+            ),
+        }
+        .fail()
+    }
+}
+
+pub(crate) fn is_sparse_metric_metadata(metadata: &store_api::metadata::RegionMetadataRef) -> bool {
+    let valid_prefix = metadata
+        .primary_key
+        .starts_with(&[ReservedColumnId::table_id(), ReservedColumnId::tsid()]);
+    let valid_types = metadata
+        .column_by_id(ReservedColumnId::table_id())
+        .zip(metadata.column_by_id(ReservedColumnId::tsid()))
+        .is_some_and(|(table_id, tsid)| {
+            table_id.column_schema.data_type == ConcreteDataType::uint32_datatype()
+                && tsid.column_schema.data_type == ConcreteDataType::uint64_datatype()
+        });
+
+    metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse && valid_prefix && valid_types
+}
+
+pub(crate) fn validate_metric_metadata(stream_ctx: &StreamContext) -> Result<()> {
+    let metadata = stream_ctx.input.region_metadata();
+    ensure!(
+        is_sparse_metric_metadata(metadata),
+        InvalidRequestSnafu {
+            region_id: metadata.region_id,
+            reason: "candidate-series scan requires sparse (__table_id, __tsid) primary keys",
+        }
+    );
+    Ok(())
+}
+
+fn primary_key_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![Field::new(
+        PRIMARY_KEY_COLUMN_NAME,
+        DataType::Binary,
+        false,
+    )]))
+}
+
+/// Filters a source by encoded-primary-key predicates and emits one binary row per local key.
+fn candidate_primary_key_stream(
+    mut input: BoxedRecordBatchStream,
+    mut filter: Option<CachedPrimaryKeyFilter>,
+) -> BoxedRecordBatchStream {
+    Box::pin(try_stream! {
+        let mut last_primary_key = Vec::new();
+        let mut has_last = false;
+        while let Some(batch) = input.try_next().await? {
+            if let Some(batch) = normalize_candidate_batch(
+                batch,
+                filter.as_mut(),
+                &mut last_primary_key,
+                &mut has_last,
+            )? {
+                yield batch;
+            }
+        }
+    })
+}
+
+fn normalize_candidate_batch(
+    mut batch: RecordBatch,
+    filter: Option<&mut CachedPrimaryKeyFilter>,
+    last_primary_key: &mut Vec<u8>,
+    has_last: &mut bool,
+) -> Result<Option<RecordBatch>> {
+    let pk_idx = batch
+        .schema()
+        .column_with_name(PRIMARY_KEY_COLUMN_NAME)
+        .map(|(idx, _)| idx)
+        .context(UnexpectedSnafu {
+            reason: "candidate source does not contain __primary_key",
+        })?;
+    if let Some(filter) = filter {
+        let Some(filtered) = prefilter_flat_batch_by_primary_key(
+            batch,
+            pk_idx,
+            filter as &mut dyn PrimaryKeyFilter,
+        )?
+        else {
+            return Ok(None);
+        };
+        batch = filtered;
+    }
+
+    let pk_column = batch.column(pk_idx);
+    let mut builder = BinaryBuilder::new();
+    if let Some(array) = pk_column.as_any().downcast_ref::<PrimaryKeyArray>() {
+        let values = array
+            .values()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .context(UnexpectedSnafu {
+                reason: "dictionary primary-key values are not binary",
+            })?;
+        for key in array.keys().values() {
+            append_unique_primary_key(
+                values.value(*key as usize),
+                &mut builder,
+                last_primary_key,
+                has_last,
+            );
+        }
+    } else if let Some(array) = pk_column.as_any().downcast_ref::<BinaryArray>() {
+        for value in array.iter().flatten() {
+            append_unique_primary_key(value, &mut builder, last_primary_key, has_last);
+        }
+    } else {
+        return UnexpectedSnafu {
+            reason: format!(
+                "primary-key column is neither binary nor dictionary, got {:?}",
+                pk_column.data_type()
+            ),
+        }
+        .fail();
+    }
+
+    let array = builder.finish();
+    if array.is_empty() {
+        return Ok(None);
+    }
+    let batch = RecordBatch::try_new(primary_key_schema(), vec![Arc::new(array)])
+        .context(NewRecordBatchSnafu)?;
+    Ok(Some(batch))
+}
+
+fn append_unique_primary_key(
+    value: &[u8],
+    builder: &mut BinaryBuilder,
+    last_primary_key: &mut Vec<u8>,
+    has_last: &mut bool,
+) {
+    if !*has_last || last_primary_key != value {
+        builder.append_value(value);
+        last_primary_key.clear();
+        last_primary_key.extend_from_slice(value);
+        *has_last = true;
+    }
+}
+
+fn merge_primary_key_streams(
+    sources: Vec<BoxedRecordBatchStream>,
+    memory_pool: Arc<dyn MemoryPool>,
+    metrics_set: &ExecutionPlanMetricsSet,
+    partition: usize,
+    consumer_name: &'static str,
+) -> Result<BoxedRecordBatchStream> {
+    if sources.is_empty() {
+        return Ok(Box::pin(futures::stream::empty()));
+    }
+    if sources.len() == 1 {
+        return Ok(sources.into_iter().next().unwrap());
+    }
+
+    let schema = primary_key_schema();
+    let df_sources = sources
+        .into_iter()
+        .map(|source| {
+            let stream = source.map_err(|error| DataFusionError::External(Box::new(error)));
+            Box::pin(RecordBatchStreamAdapter::new(schema.clone(), stream)) as _
+        })
+        .collect();
+    let ordering = LexOrdering::new([PhysicalSortExpr {
+        expr: Arc::new(Column::new(PRIMARY_KEY_COLUMN_NAME, 0)),
+        options: SortOptions {
+            descending: false,
+            nulls_first: false,
+        },
+    }])
+    // Safe to unwrap because `LexOrdering::new` returns `None` only for empty
+    // input, and this array always contains one sort expression.
+    .unwrap();
+    let reservation = MemoryConsumer::new(consumer_name).register(&memory_pool);
+    let mut merged = StreamingMergeBuilder::new()
+        .with_streams(df_sources)
+        .with_schema(schema)
+        .with_expressions(&ordering)
+        .with_metrics(BaselineMetrics::new(metrics_set, partition))
+        .with_batch_size(DEFAULT_READ_BATCH_SIZE)
+        .with_reservation(reservation)
+        .build()
+        .context(MergeCandidateSeriesSnafu)?;
+
+    Ok(Box::pin(try_stream! {
+        while let Some(batch) = merged.next().await {
+            yield batch.context(MergeCandidateSeriesSnafu)?;
+        }
+    }))
+}
+
+fn decode_metric_series(
+    mut input: BoxedRecordBatchStream,
+    metadata: store_api::metadata::RegionMetadataRef,
+) -> Result<MetricSeriesIdStream> {
+    let codec = SparsePrimaryKeyCodec::new(&metadata);
+    Ok(Box::pin(try_stream! {
+        let mut last_series = None;
+        let mut output = Vec::with_capacity(METRIC_SERIES_ID_BATCH_SIZE);
+        while let Some(batch) = input.try_next().await? {
+            let array = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .context(UnexpectedSnafu {
+                    reason: "merged candidate primary key is not binary",
+                })?;
+            for primary_key in array.iter().flatten() {
+                let (table_id, tsid) = codec
+                    .decode_ids(primary_key)
+                    .context(crate::error::DecodeSnafu)?;
+                let series = MetricSeriesId { table_id, tsid };
+                if last_series == Some(series) {
+                    continue;
+                }
+                last_series = Some(series);
+                output.push(series);
+                if output.len() == METRIC_SERIES_ID_BATCH_SIZE {
+                    yield std::mem::replace(
+                        &mut output,
+                        Vec::with_capacity(METRIC_SERIES_ID_BATCH_SIZE),
+                    );
+                }
+            }
+        }
+        if !output.is_empty() {
+            yield output;
+        }
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU64;
+    use std::time::Instant;
+
+    use common_time::Timestamp;
+    use datafusion::execution::memory_pool::UnboundedMemoryPool;
+    use datafusion_expr::{col, lit};
+    use datatypes::arrow::array::{
+        ArrayRef, DictionaryArray, TimestampMillisecondArray, UInt8Array, UInt32Array, UInt64Array,
+    };
+    use datatypes::arrow::datatypes::UInt32Type;
+    use futures::TryStreamExt;
+    use store_api::codec::PrimaryKeyEncoding;
+    use store_api::storage::FileId;
+    use table::predicate::Predicate;
+
+    use super::*;
+    use crate::cache::{CacheManager, CacheStrategy};
+    use crate::read::flat_projection::FlatProjectionMapper;
+    use crate::read::pruner::PrunerOptions;
+    use crate::read::scan_region::ScanInput;
+    use crate::read::scan_util::PartitionMetrics;
+    use crate::series_index::{
+        SeriesIndexEntry, SeriesIndexVersion, SeriesIndexWriter, SeriesIndexWriterOptions,
+        series_index_channel, series_index_path,
+    };
+    use crate::sst::file::{FileHandle, FileMeta};
+    use crate::test_util::new_noop_file_purger;
+    use crate::test_util::scheduler_util::SchedulerEnv;
+    use crate::test_util::sst_util::sst_region_metadata_with_encoding;
+
+    /// Uses absent SST objects so any covered-SST read fails the test.
+    async fn indexed_scanner() -> (SchedulerEnv, SeriesCandidateScanner, Arc<Pruner>) {
+        let env = SchedulerEnv::new().await;
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let store = env.access_layer.object_store().clone();
+        let entry = SeriesIndexEntry {
+            file_size: 0,
+            index_uuid: FileId::random(),
+            bucket_start: Timestamp::new_millisecond(0),
+            bucket_end: Timestamp::new_millisecond(20),
+            source_file_ids: Vec::new(),
+            min_file_sequence: 1,
+            max_file_sequence: 2,
+            compaction_window_secs: 1,
+            window_sequences: Default::default(),
+        };
+        let path = series_index_path(metadata.region_id, entry.index_uuid);
+        let codec = SparsePrimaryKeyCodec::new(&metadata);
+        let keys: Vec<_> = (0..1001)
+            .map(|tsid| {
+                let mut key = Vec::new();
+                codec.encode_internal(1, tsid, &mut key).unwrap();
+                key
+            })
+            .collect();
+        let batch = RecordBatch::try_from_iter(vec![
+            (
+                "ts",
+                Arc::new(TimestampMillisecondArray::from(vec![10; keys.len()])) as ArrayRef,
+            ),
+            (
+                "__primary_key",
+                Arc::new(BinaryArray::from_iter_values(&keys)),
+            ),
+            (
+                "__sequence",
+                Arc::new(UInt64Array::from_value(1, keys.len())),
+            ),
+            ("__op_type", Arc::new(UInt8Array::from_value(0, keys.len()))),
+        ])
+        .unwrap();
+        let mut writer = SeriesIndexWriter::try_new(
+            metadata.clone(),
+            store.clone(),
+            &path,
+            SeriesIndexWriterOptions {
+                row_group_size: 500,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        writer.write(&batch).await.unwrap();
+        writer.finish().await.unwrap();
+        let (purger, _receiver) = series_index_channel(store.clone());
+        let handle = SeriesIndexFileHandle::new(metadata.region_id, entry.clone(), purger);
+        let context = SeriesIndexReadContext {
+            store,
+            version: Arc::new(SeriesIndexVersion {
+                series_indexes: [(entry.index_uuid, handle)].into(),
+                ..Default::default()
+            }),
+        };
+        let files = (0..2)
+            .map(|i| {
+                FileHandle::new(
+                    FileMeta {
+                        region_id: metadata.region_id,
+                        file_id: FileId::random(),
+                        time_range: (
+                            Timestamp::new_millisecond(i * 10),
+                            Timestamp::new_millisecond(i * 10 + 9),
+                        ),
+                        sequence: NonZeroU64::new(i as u64 + 1),
+                        num_row_groups: 1,
+                        ..Default::default()
+                    },
+                    new_noop_file_purger(),
+                )
+            })
+            .collect();
+        let mapper =
+            FlatProjectionMapper::new(&metadata, 0..metadata.column_metadatas.len()).unwrap();
+        let input = ScanInput::builder(env.access_layer.clone(), mapper)
+            .with_predicate(
+                crate::read::scan_region::PredicateGroup::new(
+                    &metadata,
+                    &[col("__table_id").eq(lit(1_u32))],
+                )
+                .unwrap(),
+            )
+            .with_files(files)
+            .with_series_index(Some(context))
+            .with_cache(CacheStrategy::EnableAll(Arc::new(
+                CacheManager::builder()
+                    .range_result_cache_size(1024 * 1024)
+                    .build(),
+            )))
+            .build();
+        let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(input));
+        let ranges = stream_ctx.partition_ranges();
+        assert_eq!(2, ranges.len());
+        let metrics_set = ExecutionPlanMetricsSet::new();
+        let part_metrics = PartitionMetrics::new(
+            metadata.region_id,
+            2,
+            "candidate-test",
+            Instant::now(),
+            false,
+            &metrics_set,
+        );
+        let pruner = Arc::new(Pruner::new_with_options(
+            stream_ctx.clone(),
+            1,
+            PrunerOptions {
+                retain_builders: true,
+                enable_predicate_prefilter: false,
+            },
+        ));
+        let scanner = SeriesCandidateScanner::try_new(
+            stream_ctx,
+            ranges.into_iter().map(|range| vec![range]).collect(),
+            pruner.clone(),
+            Arc::new(Semaphore::new(1)),
+            Arc::new(UnboundedMemoryPool::default()),
+            metrics_set,
+            part_metrics,
+        )
+        .unwrap();
+        (env, scanner, pruner)
+    }
+
+    #[tokio::test]
+    async fn index_is_shared_across_ranges_without_caching_partial_candidates() {
+        let (_env, scanner, pruner) = indexed_scanner().await;
+        let keys: Vec<_> = scanner
+            .partitions
+            .iter()
+            .flatten()
+            .map(|range| build_candidate_range_cache_key(&scanner.stream_ctx, range).unwrap())
+            .collect();
+        let groups = scanner
+            .build_stream()
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(
+            (0..1001)
+                .map(|tsid| MetricSeriesId { table_id: 1, tsid })
+                .collect::<Vec<_>>(),
+            groups.into_iter().flatten().collect::<Vec<_>>()
+        );
+        // Covered SSTs have no builder yet. Keep their references so the data
+        // phase can cache each builder on its first read and reuse it later.
+        for file_index in 0..2 {
+            assert_eq!(1, pruner.test_remaining_ranges(file_index));
+        }
+        assert_eq!(
+            1,
+            scanner
+                .metrics_set
+                .clone_inner()
+                .sum_by_name("candidate_index_files")
+                .unwrap()
+                .as_usize()
+        );
+        assert_eq!(
+            2,
+            scanner
+                .metrics_set
+                .clone_inner()
+                .sum_by_name("candidate_index_covered_ssts")
+                .unwrap()
+                .as_usize()
+        );
+        // Index-backed ranges must not publish their empty residual streams as
+        // complete candidate results for a future scan without the index.
+        assert!(!format!("{:?}", scanner.part_metrics).contains("range_cache_miss"));
+        for key in keys {
+            assert!(
+                scanner
+                    .stream_ctx
+                    .input
+                    .cache_strategy
+                    .get_range_result(&key)
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn index_read_failure_after_output_is_propagated() {
+        let (_env, scanner, _pruner) = indexed_scanner().await;
+        let context = scanner.stream_ctx.input.series_index.clone().unwrap();
+        let index = scanner.coverage.indexes[0].clone();
+        let path = series_index_path(
+            scanner.stream_ctx.input.region_metadata().region_id,
+            index.entry().index_uuid,
+        );
+        let mut stream = index_primary_key_stream(
+            scanner.stream_ctx.clone(),
+            context.clone(),
+            index,
+            scanner.range_semaphore.clone(),
+        );
+        assert_eq!(500, stream.try_next().await.unwrap().unwrap().num_rows());
+        context.store.delete(&path).await.unwrap();
+        assert!(stream.try_collect::<Vec<_>>().await.is_err());
+        // Opening the missing selected index must also fail, rather than emit
+        // an incomplete candidate set or fall back to the absent SSTs.
+        assert!(
+            scanner
+                .build_stream()
+                .await
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn candidate_scanner_rejects_predicate_prefilter_pruner() {
+        let env = SchedulerEnv::new().await;
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let mapper =
+            FlatProjectionMapper::new(&metadata, 0..metadata.column_metadatas.len()).unwrap();
+        let stream_ctx = Arc::new(StreamContext::seq_scan_ctx(
+            ScanInput::builder(env.access_layer.clone(), mapper).build(),
+        ));
+        let pruner = Arc::new(Pruner::new(stream_ctx.clone(), 1));
+        let metrics_set = ExecutionPlanMetricsSet::new();
+        let part_metrics = PartitionMetrics::new(
+            metadata.region_id,
+            0,
+            "candidate-test",
+            Instant::now(),
+            false,
+            &metrics_set,
+        );
+
+        let error = SeriesCandidateScanner::try_new(
+            stream_ctx,
+            Vec::new(),
+            pruner,
+            Arc::new(Semaphore::new(1)),
+            Arc::new(UnboundedMemoryPool::default()),
+            metrics_set,
+            part_metrics,
+        )
+        .err()
+        .unwrap();
+
+        assert!(matches!(error, crate::error::Error::Unexpected { .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("requires a pruner without predicate prefiltering")
+        );
+    }
+
+    fn binary_batch(values: &[&[u8]]) -> RecordBatch {
+        RecordBatch::try_new(
+            primary_key_schema(),
+            vec![Arc::new(BinaryArray::from_iter_values(
+                values.iter().copied(),
+            ))],
+        )
+        .unwrap()
+    }
+
+    fn dictionary_batch(values: &[&[u8]], keys: &[u32]) -> RecordBatch {
+        let dict_values: ArrayRef = Arc::new(BinaryArray::from_iter_values(values.iter().copied()));
+        let dict =
+            DictionaryArray::<UInt32Type>::try_new(UInt32Array::from(keys.to_vec()), dict_values)
+                .unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new_dictionary(
+            PRIMARY_KEY_COLUMN_NAME,
+            DataType::UInt32,
+            DataType::Binary,
+            false,
+        )]));
+        RecordBatch::try_new(schema, vec![Arc::new(dict)]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn candidate_stream_normalizes_and_deduplicates_primary_keys() {
+        let input = Box::pin(futures::stream::iter(vec![
+            Ok(dictionary_batch(&[b"a", b"b"], &[0, 0, 1])),
+            Ok(binary_batch(&[b"b", b"c", b"c"])),
+        ]));
+        let batches = candidate_primary_key_stream(input, None)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        let actual = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<BinaryArray>()
+                    .unwrap()
+                    .iter()
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, vec![b"a".as_slice(), b"b", b"c"]);
+    }
+
+    #[tokio::test]
+    async fn candidate_stream_filters_primary_keys_before_merge() {
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let codec = SparsePrimaryKeyCodec::new(&metadata);
+        let mut table_1 = Vec::new();
+        let mut table_2 = Vec::new();
+        codec.encode_internal(1, 10, &mut table_1).unwrap();
+        codec.encode_internal(2, 20, &mut table_2).unwrap();
+
+        let predicate = Predicate::new(vec![
+            col(store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME).eq(lit(1_u32)),
+        ]);
+        let filter = build_primary_key_filter(&metadata, None, Some(&predicate));
+        let input = Box::pin(futures::stream::iter(vec![Ok(dictionary_batch(
+            &[table_1.as_slice(), table_2.as_slice()],
+            &[0, 1],
+        ))]));
+        let batches = candidate_primary_key_stream(input, filter)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+
+        assert_eq!(batches.len(), 1);
+        let array = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        assert_eq!(array.len(), 1);
+        assert_eq!(array.value(0), table_1);
+    }
+
+    #[tokio::test]
+    async fn decode_metric_series_yields_groups_of_500() {
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let codec = SparsePrimaryKeyCodec::new(&metadata);
+        let primary_keys = (0..501_u64)
+            .map(|tsid| {
+                let mut primary_key = Vec::new();
+                codec.encode_internal(1, tsid, &mut primary_key).unwrap();
+                primary_key
+            })
+            .collect::<Vec<_>>();
+        let batch = binary_batch(&primary_keys.iter().map(Vec::as_slice).collect::<Vec<_>>());
+        let source = Box::pin(futures::stream::iter(vec![Ok(batch)]));
+        let metrics = ExecutionPlanMetricsSet::new();
+        let pool = Arc::new(UnboundedMemoryPool::default());
+        let merged =
+            merge_primary_key_streams(vec![source], pool, &metrics, 0, "candidate-test").unwrap();
+        let groups = decode_metric_series(merged, metadata)
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+
+        assert_eq!(groups.iter().map(Vec::len).collect::<Vec<_>>(), [500, 1]);
+        assert_eq!(
+            groups[0][0],
+            MetricSeriesId {
+                table_id: 1,
+                tsid: 0
+            }
+        );
+        assert_eq!(
+            groups[1][0],
+            MetricSeriesId {
+                table_id: 1,
+                tsid: 500
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_primary_keys_globally_sorts_and_deduplicates_series() {
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        ));
+        let codec = SparsePrimaryKeyCodec::new(&metadata);
+        let encode = |tsid| {
+            let mut primary_key = Vec::new();
+            codec.encode_internal(1, tsid, &mut primary_key).unwrap();
+            primary_key
+        };
+        let keys_1 = [encode(1), encode(3)];
+        let mut alternate_key_for_series_1 = encode(1);
+        alternate_key_for_series_1.push(0);
+        let keys_2 = [alternate_key_for_series_1, encode(2)];
+        let sources = vec![
+            Box::pin(futures::stream::iter(vec![Ok(binary_batch(
+                &keys_1.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+            ))])) as BoxedRecordBatchStream,
+            Box::pin(futures::stream::iter(vec![Ok(binary_batch(
+                &keys_2.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+            ))])),
+        ];
+
+        let merged = merge_primary_key_streams(
+            sources,
+            Arc::new(UnboundedMemoryPool::default()),
+            &ExecutionPlanMetricsSet::new(),
+            0,
+            "candidate-merge-test",
+        )
+        .unwrap();
+        let groups = decode_metric_series(merged, metadata)
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            groups,
+            vec![vec![
+                MetricSeriesId {
+                    table_id: 1,
+                    tsid: 1,
+                },
+                MetricSeriesId {
+                    table_id: 1,
+                    tsid: 2,
+                },
+                MetricSeriesId {
+                    table_id: 1,
+                    tsid: 3,
+                },
+            ]]
+        );
+    }
+}

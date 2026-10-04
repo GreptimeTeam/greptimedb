@@ -18,16 +18,13 @@ use std::collections::HashMap;
 
 use arrow_schema::extension::ExtensionType;
 use common_meta::SchemaOptions;
-use datatypes::extension::json::JsonExtensionType;
+use datatypes::extension::json::{Json2ExtensionType, parse_legacy_json2_settings};
 use datatypes::schema::{
     COLUMN_FULLTEXT_OPT_KEY_ANALYZER, COLUMN_FULLTEXT_OPT_KEY_BACKEND,
     COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE,
     COLUMN_FULLTEXT_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE,
-    COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE,
-    COLUMN_VECTOR_INDEX_OPT_KEY_CONNECTIVITY, COLUMN_VECTOR_INDEX_OPT_KEY_ENGINE,
-    COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_ADD, COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_SEARCH,
-    COLUMN_VECTOR_INDEX_OPT_KEY_METRIC, COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema,
-    FulltextBackend, SchemaRef,
+    COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE, COMMENT_KEY,
+    ColumnDefaultConstraint, ColumnSchema, FulltextBackend, SchemaRef,
 };
 use datatypes::types::JsonFormat;
 use snafu::ResultExt;
@@ -39,12 +36,13 @@ use sql::statements::{self, OptionMap, concrete_data_type_to_sql_data_type};
 use store_api::metric_engine_consts::{is_metric_engine, is_metric_engine_internal_column};
 use table::metadata::{TableInfoRef, TableMeta};
 use table::requests::{
-    COMMENT_KEY as TABLE_COMMENT_KEY, FILE_TABLE_META_KEY, TTL_KEY, WRITE_BUFFER_SIZE_KEY,
+    COMMENT_KEY as TABLE_COMMENT_KEY, FILE_TABLE_META_KEY, SKIP_WAL_KEY, TTL_KEY,
+    WRITE_BUFFER_SIZE_KEY,
 };
 
 use crate::error::{
     ConvertSqlTypeSnafu, ConvertSqlValueSnafu, GetFulltextOptionsSnafu,
-    GetSkippingIndexOptionsSnafu, GetVectorIndexOptionsSnafu, Result, SqlSnafu,
+    GetSkippingIndexOptionsSnafu, Result, SqlSnafu,
 };
 
 /// Generates CREATE TABLE options from given table metadata and schema-level options.
@@ -66,13 +64,15 @@ fn create_sql_options(table_meta: &TableMeta, schema_options: Option<SchemaOptio
     {
         options.insert(TTL_KEY.to_string(), database_ttl);
     };
-
     for (k, v) in table_opts
         .extra_options
         .iter()
         .filter(|(k, _)| k != &FILE_TABLE_META_KEY)
     {
         options.insert(k.clone(), v.clone());
+    }
+    if table_opts.skip_wal {
+        options.insert(SKIP_WAL_KEY.to_string(), true.to_string());
     }
     options
 }
@@ -165,35 +165,6 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
         extensions.skipping_index_options = Some(map.into());
     }
 
-    if let Some(opt) = column_schema
-        .vector_index_options()
-        .context(GetVectorIndexOptionsSnafu)?
-    {
-        let map = HashMap::from([
-            (
-                COLUMN_VECTOR_INDEX_OPT_KEY_ENGINE.to_string(),
-                opt.engine.to_string(),
-            ),
-            (
-                COLUMN_VECTOR_INDEX_OPT_KEY_METRIC.to_string(),
-                opt.metric.to_string(),
-            ),
-            (
-                COLUMN_VECTOR_INDEX_OPT_KEY_CONNECTIVITY.to_string(),
-                opt.connectivity.to_string(),
-            ),
-            (
-                COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_ADD.to_string(),
-                opt.expansion_add.to_string(),
-            ),
-            (
-                COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_SEARCH.to_string(),
-                opt.expansion_search.to_string(),
-            ),
-        ]);
-        extensions.vector_index_options = Some(map.into());
-    }
-
     if column_schema.is_inverted_indexed() {
         extensions.inverted_index_options = Some(HashMap::new().into());
     }
@@ -211,12 +182,12 @@ fn create_column(column_schema: &ColumnSchema, quote_style: char) -> Result<Colu
         data_type = DataType::Custom(ObjectName::from(vec![Ident::new("JSON2")]), vec![]);
     }
 
-    if let Some(json_extension) = column_schema.extension_type::<JsonExtensionType>()? {
-        let settings = json_extension
-            .metadata()
-            .json_settings
-            .clone()
-            .unwrap_or_default();
+    let settings = if let Some(extension) = column_schema.extension_type::<Json2ExtensionType>()? {
+        Some(extension.metadata().json_settings().clone())
+    } else {
+        parse_legacy_json2_settings(column_schema.metadata())?
+    };
+    if let Some(settings) = settings {
         extensions.set_json_settings(settings).context(SqlSnafu)?;
     }
 
@@ -321,10 +292,9 @@ mod tests {
     use std::time::Duration;
 
     use common_time::timestamp::TimeUnit;
+    use datatypes::extension::json::JsonExtensionType;
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{
-        FulltextOptions, Schema, SchemaRef, SkippingIndexOptions, VectorIndexOptions,
-    };
+    use datatypes::schema::{FulltextOptions, Schema, SchemaRef, SkippingIndexOptions};
     use table::metadata::*;
     use table::requests::{
         FILE_TABLE_FORMAT_KEY, FILE_TABLE_LOCATION_KEY, FILE_TABLE_META_KEY, TableOptions,
@@ -351,9 +321,7 @@ mod tests {
                     ..Default::default()
                 })
                 .unwrap(),
-            ColumnSchema::new("embedding", ConcreteDataType::vector_datatype(4), true)
-                .with_vector_index_options(&VectorIndexOptions::default())
-                .unwrap(),
+            ColumnSchema::new("embedding", ConcreteDataType::vector_datatype(4), true),
             ColumnSchema::new(
                 "ts",
                 ConcreteDataType::timestamp_datatype(TimeUnit::Millisecond),
@@ -373,6 +341,7 @@ mod tests {
 
         let mut options = table::requests::TableOptions {
             ttl: Some(Duration::from_secs(30).into()),
+            skip_wal: true,
             ..Default::default()
         };
 
@@ -416,7 +385,7 @@ CREATE TABLE IF NOT EXISTS "system_metrics" (
   "cpu" DOUBLE NULL,
   "disk" FLOAT NULL,
   "msg" STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false', false_positive_rate = '0.01', granularity = '10240'),
-  "embedding" VECTOR(4) NULL VECTOR INDEX WITH(connectivity = '16', engine = 'usearch', expansion_add = '128', expansion_search = '64', metric = 'l2sq'),
+  "embedding" VECTOR(4) NULL,
   "ts" TIMESTAMP(3) NOT NULL DEFAULT current_timestamp(),
   TIME INDEX ("ts"),
   PRIMARY KEY ("id", "host")
@@ -424,20 +393,37 @@ CREATE TABLE IF NOT EXISTS "system_metrics" (
 ENGINE=mito
 WITH(
   'compaction.type' = 'twcs',
+  skip_wal = 'true',
   ttl = '30s'
 )"#,
             sql
+        );
+
+        let mut table_meta = info.meta.clone();
+        table_meta.options.skip_wal = false;
+        table_meta
+            .options
+            .extra_options
+            .insert(SKIP_WAL_KEY.to_string(), false.to_string());
+        assert_eq!(
+            Some("false"),
+            create_sql_options(&table_meta, None).get(SKIP_WAL_KEY)
+        );
+
+        let mut schema_options = SchemaOptions::default();
+        schema_options
+            .extra_options
+            .insert(SKIP_WAL_KEY.to_string(), true.to_string());
+        assert_eq!(
+            Some("false"),
+            create_sql_options(&table_meta, Some(schema_options)).get(SKIP_WAL_KEY)
         );
     }
 
     #[test]
     fn test_show_create_legacy_json_with_json_extension() {
         let mut json_column = ColumnSchema::new("j", ConcreteDataType::json_datatype(), true);
-        json_column
-            .with_extension_type(&JsonExtensionType::new(Arc::new(
-                datatypes::extension::json::JsonMetadata::default(),
-            )))
-            .unwrap();
+        json_column.with_extension_type(&JsonExtensionType);
 
         let table_schema = SchemaRef::new(Schema::new(vec![
             json_column,

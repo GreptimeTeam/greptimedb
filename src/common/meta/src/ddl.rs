@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use store_api::storage::{RegionId, TableId};
 
@@ -43,7 +44,9 @@ pub mod drop_database;
 pub mod drop_flow;
 pub mod drop_table;
 pub mod drop_view;
+pub(crate) mod event;
 pub mod flow_meta;
+#[cfg(feature = "enterprise")]
 pub mod purge_dropped_table;
 pub mod table_meta;
 #[cfg(any(test, feature = "testing"))]
@@ -51,6 +54,7 @@ pub mod test_util;
 #[cfg(test)]
 pub(crate) mod tests;
 pub mod truncate_table;
+#[cfg(feature = "enterprise")]
 pub mod undrop_table;
 pub mod utils;
 
@@ -121,6 +125,11 @@ pub struct DdlContext {
     pub region_failure_detector_controller: RegionFailureDetectorControllerRef,
     /// Whether table drops should stop after tombstoning metadata.
     pub soft_drop_enabled: bool,
+    /// Fixed retention used to calculate new soft-drop deadlines.
+    pub soft_drop_retention: Option<Duration>,
+    /// Commits create-database metadata and the creator grant atomically.
+    pub create_database_metadata_committer:
+        Option<create_database::CreateDatabaseMetadataCommitterRef>,
 }
 
 impl DdlContext {

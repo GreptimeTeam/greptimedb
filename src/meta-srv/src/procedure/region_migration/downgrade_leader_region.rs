@@ -389,9 +389,10 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
-    use crate::procedure::region_migration::manager::RegionMigrationTriggerReason;
     use crate::procedure::region_migration::test_util::{TestingEnv, new_procedure_context};
-    use crate::procedure::region_migration::{ContextFactory, PersistentContext};
+    use crate::procedure::region_migration::{
+        ContextFactory, PersistentContext, RegionMigrationTriggerReason,
+    };
     use crate::procedure::test_util::{
         new_close_region_reply, new_downgrade_region_reply, send_mock_reply,
     };
@@ -403,7 +404,7 @@ mod tests {
             Peer::empty(2),
             vec![RegionId::new(1024, 1)],
             Duration::from_millis(1000),
-            RegionMigrationTriggerReason::Manual,
+            RegionMigrationTriggerReason::Unknown,
         )
     }
 

@@ -17,7 +17,7 @@ use std::sync::Arc;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequests, SemanticType};
 use async_trait::async_trait;
-use auth::{PermissionChecker, PermissionCheckerRef, PermissionReq};
+use auth::{INFLUXDB_WRITE, PermissionChecker, PermissionCheckerRef, PermissionReq};
 use catalog::CatalogManagerRef;
 use client::Output;
 use common_error::ext::BoxedError;
@@ -60,13 +60,15 @@ impl InfluxdbLineProtocolHandler for Instance {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
-            .check_permission(ctx.current_user(), PermissionReq::LineProtocol)
+            .check_permission(ctx.current_user(), PermissionReq::Action(INFLUXDB_WRITE))
             .context(AuthSnafu)?;
 
         let interceptor_ref = self.plugins.get::<LineProtocolInterceptorRef<Error>>();
         interceptor_ref.pre_execute(&request.lines, ctx.clone())?;
 
         let requests = request.try_into()?;
+        self.check_row_insert_permission(&requests, &ctx, PermissionReq::Action(INFLUXDB_WRITE))
+            .context(AuthSnafu)?;
 
         let aligner = InfluxdbLineTimestampAligner {
             catalog_manager: self.catalog_manager(),
@@ -76,6 +78,10 @@ impl InfluxdbLineProtocolHandler for Instance {
         let requests = interceptor_ref
             .post_lines_conversion(requests, ctx.clone())
             .await?;
+
+        let ctx = Arc::new(ctx.fork());
+        self.check_row_insert_permission(&requests, &ctx, PermissionReq::Action(INFLUXDB_WRITE))
+            .context(AuthSnafu)?;
 
         let ctx = ctx_with_default_merge_mode(ctx, self.influxdb_default_merge_mode);
         let ctx = {
@@ -202,7 +208,7 @@ mod tests {
     use session::context::QueryContext;
     use store_api::mito_engine_options::MERGE_MODE_KEY;
 
-    use super::*;
+    use crate::instance::influxdb::*;
     use crate::service_config::influxdb::InfluxdbMergeMode;
 
     #[test]

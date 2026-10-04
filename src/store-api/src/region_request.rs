@@ -16,30 +16,37 @@ use std::collections::HashMap;
 use std::fmt::{self, Display};
 use std::time::Duration;
 
-use api::helper::{ColumnDataTypeWrapper, from_pb_time_ranges};
+use api::helper::{ColumnDataTypeWrapper, from_pb_time_ranges, from_pb_time_unit};
 use api::v1::add_column_location::LocationType;
 use api::v1::column_def::{
     as_fulltext_option_analyzer, as_fulltext_option_backend, as_skipping_index_type,
 };
 use api::v1::region::bulk_insert_request::Body;
 use api::v1::region::{
-    AlterRequest, AlterRequests, BuildIndexRequest, BulkInsertRequest, CloseRequest,
-    CompactRequest, CreateRequest, CreateRequests, DeleteRequests, DropRequest, DropRequests,
-    FlushRequest, InsertRequests, OpenRequest, TruncateRequest, alter_request, compact_request,
+    AlterRequest, AlterRequests, BuildIndexRequest, BulkInsertRequest,
+    CleanUpRequest as PbCleanUpRequest, CloseRequest, CompactRequest, CreateRequest,
+    CreateRequests, DeleteRequests, DropRequest, DropRequests, FlushRequest, InsertRequests,
+    OpenRequest, TruncateRequest, alter_request, build_index_request, compact_request,
     region_request, truncate_request,
 };
 use api::v1::{
     self, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
     SemanticType, SkippingIndexType as PbSkippingIndexType, WriteHint,
 };
+use arrow_schema::extension::ExtensionType;
 pub use common_base::AffectedRows;
+use common_base::readable_size::ReadableSize;
 use common_grpc::flight::FlightDecoder;
 use common_recordbatch::DfRecordBatch;
+use common_time::range::TimestampRange;
 use common_time::{TimeToLive, Timestamp};
+use datatypes::error::time_index_not_widening_error;
+use datatypes::extension::json::Json2ExtensionType;
+use datatypes::json::{JsonSettings, JsonTypeHint};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use num_enum::TryFromPrimitive;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use snafu::{OptionExt, ResultExt, ensure};
 use strum::{AsRefStr, IntoStaticStr};
 
@@ -53,11 +60,14 @@ use crate::metadata::{
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
-    APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, SST_FORMAT_KEY, TTL_KEY, TWCS_MAX_OUTPUT_FILE_SIZE,
-    TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM,
+    APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, MAX_ROW_GROUP_ROW_COUNT,
+    MAX_ROW_GROUP_ROW_COUNT_LIMIT, PRESERVE_ROW_SEQUENCE, SKIP_WAL_KEY, SST_FORMAT_KEY, TTL_KEY,
+    TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM,
+    TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER, TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM,
+    TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM, WRITE_BUFFER_SIZE_KEY,
 };
 use crate::path_utils::table_dir;
-use crate::storage::{ColumnId, RegionId, ScanRequest};
+use crate::storage::{ColumnId, RegionId};
 
 /// The type of path to generate.
 #[derive(Debug, Clone, Copy, PartialEq, TryFromPrimitive)]
@@ -145,6 +155,7 @@ pub enum RegionRequest {
     Create(RegionCreateRequest),
     Drop(RegionDropRequest),
     Open(RegionOpenRequest),
+    CleanUp(RegionCleanUpRequest),
     Close(RegionCloseRequest),
     Alter(RegionAlterRequest),
     Flush(RegionFlushRequest),
@@ -167,6 +178,7 @@ impl RegionRequest {
             region_request::Body::Create(create) => make_region_create(create),
             region_request::Body::Drop(drop) => make_region_drop(drop),
             region_request::Body::Open(open) => make_region_open(open),
+            region_request::Body::CleanUp(clean_up) => make_region_clean_up(clean_up),
             region_request::Body::Close(close) => make_region_close(close),
             region_request::Body::Alter(alter) => make_region_alter(alter),
             region_request::Body::Flush(flush) => make_region_flush(flush),
@@ -213,6 +225,7 @@ fn make_region_puts(inserts: InsertRequests) -> Result<Vec<(RegionId, RegionRequ
                     RegionRequest::Put(RegionPutRequest {
                         rows,
                         hint: None,
+                        skip_wal: r.skip_wal,
                         partition_expr_version: r.partition_expr_version.map(|v| v.value),
                     }),
                 )
@@ -325,11 +338,27 @@ fn make_region_open(open: OpenRequest) -> Result<Vec<(RegionId, RegionRequest)>>
     )])
 }
 
+fn make_region_clean_up(clean_up: PbCleanUpRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
+    let region_id = RegionId::from(clean_up.region_id);
+    let table_dir = table_dir(&clean_up.path, region_id.table_id());
+    Ok(vec![(
+        region_id,
+        RegionRequest::CleanUp(RegionCleanUpRequest {
+            engine: clean_up.engine,
+            table_dir,
+            path_type: PathType::Bare,
+            options: clean_up.options,
+        }),
+    )])
+}
+
 fn make_region_close(close: CloseRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
     let region_id = close.region_id.into();
     Ok(vec![(
         region_id,
-        RegionRequest::Close(RegionCloseRequest {}),
+        RegionRequest::Close(RegionCloseRequest {
+            flush_on_close: close.flush_on_close,
+        }),
     )])
 }
 
@@ -371,11 +400,41 @@ fn make_region_compact(compact: CompactRequest) -> Result<Vec<(RegionId, RegionR
     } else {
         Some(compact.parallelism)
     };
+    let time_range = compact
+        .time_range
+        .map(|range| {
+            let time_unit = v1::TimeUnit::try_from(range.time_unit).map_err(|_| {
+                InvalidRegionRequestSnafu {
+                    region_id,
+                    err: format!("invalid compaction time unit: {}", range.time_unit),
+                }
+                .build()
+            })?;
+            let time_unit = from_pb_time_unit(time_unit);
+            let start = Timestamp::new(range.start, time_unit);
+            let end = Timestamp::new(range.end, time_unit);
+            ensure!(
+                start < end,
+                InvalidRegionRequestSnafu {
+                    region_id,
+                    err: format!(
+                        "compaction start time must be earlier than end time: {} >= {}",
+                        range.start, range.end
+                    ),
+                }
+            );
+            TimestampRange::new(start, end).with_context(|| InvalidRegionRequestSnafu {
+                region_id,
+                err: "invalid compaction time range".to_string(),
+            })
+        })
+        .transpose()?;
     Ok(vec![(
         region_id,
         RegionRequest::Compact(RegionCompactRequest {
             options,
             parallelism,
+            time_range,
         }),
     )])
 }
@@ -384,7 +443,9 @@ fn make_region_build_index(index: BuildIndexRequest) -> Result<Vec<(RegionId, Re
     let region_id = index.region_id.into();
     Ok(vec![(
         region_id,
-        RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
+        RegionRequest::BuildIndex(RegionBuildIndexRequest {
+            options: index.options,
+        }),
     )])
 }
 
@@ -407,12 +468,17 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
                 RegionRequest::Truncate(RegionTruncateRequest::ByTimeRanges { time_ranges }),
             )])
         }
+        Some(truncate_request::Kind::Unflushed(_)) => Ok(vec![(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
+        )]),
     }
 }
 
 /// Convert [BulkInsertRequest] to [RegionRequest] and group by [RegionId].
 fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
     let region_id = request.region_id.into();
+    let skip_wal = request.skip_wal;
     let partition_expr_version = request.partition_expr_version.map(|v| v.value);
     let aligned_schema_version = request.aligned_schema_version.map(|v| v.schema_version);
     let Some(Body::ArrowIpc(request)) = request.body else {
@@ -434,6 +500,7 @@ fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId,
             region_id,
             payload,
             raw_data: request,
+            skip_wal,
             partition_expr_version,
             aligned_schema_version,
         }),
@@ -466,13 +533,11 @@ pub struct RegionPutRequest {
     pub rows: Rows,
     /// Write hint.
     pub hint: Option<WriteHint>,
+    /// Skip WAL for this insert without changing region options.
+    /// Metadata writes must not inherit this option from user inserts.
+    pub skip_wal: bool,
     /// Partition expression version for the region.
     pub partition_expr_version: Option<u64>,
-}
-
-#[derive(Debug)]
-pub struct RegionReadRequest {
-    pub request: ScanRequest,
 }
 
 /// Request to delete data from a region.
@@ -646,9 +711,32 @@ impl RegionOpenRequest {
     }
 }
 
+/// Offline region cleanup request.
+#[derive(Debug, Clone)]
+pub struct RegionCleanUpRequest {
+    /// Region engine name
+    pub engine: String,
+    /// Directory for table's data home. Usually is composed by catalog and table id
+    pub table_dir: String,
+    /// Path type for generating paths
+    pub path_type: PathType,
+    /// Options of the cleaned region.
+    pub options: HashMap<String, String>,
+}
+
+impl RegionCleanUpRequest {
+    /// Returns true when the region belongs to the metric engine's physical table.
+    pub fn is_physical_table(&self) -> bool {
+        self.options.contains_key(PHYSICAL_TABLE_METADATA_KEY)
+    }
+}
+
 /// Close region request.
-#[derive(Debug)]
-pub struct RegionCloseRequest {}
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RegionCloseRequest {
+    /// Whether to flush the region before closing it.
+    pub flush_on_close: bool,
+}
 
 /// Alter metadata of a region.
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -700,10 +788,20 @@ pub enum AlterKind {
         /// Name of columns to drop.
         names: Vec<String>,
     },
-    /// Change columns datatype form the region, only fields are allowed to change.
+    /// Change columns datatype of the region. Field columns can change to any
+    /// Arrow-castable type; the time index column only supports widening its
+    /// timestamp unit (e.g. `TimestampMillisecond -> TimestampMicrosecond`),
+    /// which is lossless for values that fit the target unit's `i64` range.
     ModifyColumnTypes {
         /// Columns to change.
         columns: Vec<ModifyColumnType>,
+    },
+    /// Set JSON2 settings of a region column.
+    SetJsonSettings {
+        /// Column name.
+        column_name: String,
+        /// Target JSON2 settings.
+        settings: JsonSettings,
     },
     /// Set region options.
     SetRegionOptions { options: Vec<SetRegionOption> },
@@ -885,6 +983,9 @@ impl AlterKind {
                     col_to_change.validate(metadata)?;
                 }
             }
+            AlterKind::SetJsonSettings { column_name, .. } => {
+                Self::validate_set_json_settings(column_name, metadata)?
+            }
             AlterKind::SetRegionOptions { .. } => {}
             AlterKind::UnsetRegionOptions { .. } => {}
             AlterKind::SetIndexes { options } => {
@@ -994,6 +1095,18 @@ impl AlterKind {
             AlterKind::ModifyColumnTypes { columns } => columns
                 .iter()
                 .any(|col_to_change| col_to_change.need_alter(metadata)),
+            AlterKind::SetJsonSettings {
+                column_name,
+                settings,
+            } => metadata.column_by_name(column_name).is_some_and(|col| {
+                col.column_schema
+                    .extension_type::<Json2ExtensionType>()
+                    .ok()
+                    .flatten()
+                    .is_none_or(|extension| {
+                        !extension.metadata().json_settings().equivalent(settings)
+                    })
+            }),
             AlterKind::SetRegionOptions { .. } => true,
             AlterKind::UnsetRegionOptions { .. } => true,
             AlterKind::SetIndexes { options, .. } => options
@@ -1070,6 +1183,34 @@ impl AlterKind {
 
         Ok(())
     }
+
+    fn validate_set_json_settings(col_name: &String, metadata: &RegionMetadata) -> Result<()> {
+        let region_id = metadata.region_id;
+
+        let col = metadata
+            .column_by_name(col_name)
+            .with_context(|| InvalidRegionRequestSnafu {
+                region_id,
+                err: format!("column {} not found", col_name),
+            })?;
+
+        ensure!(
+            col.semantic_type == SemanticType::Field,
+            InvalidRegionRequestSnafu {
+                region_id,
+                err: format!("column {} is not a field column", col_name),
+            }
+        );
+        ensure!(
+            col.column_schema.data_type.is_json2(),
+            InvalidRegionRequestSnafu {
+                region_id,
+                err: format!("column {} is not a JSON2 column", col_name),
+            }
+        );
+
+        Ok(())
+    }
 }
 
 impl TryFrom<alter_request::Kind> for AlterKind {
@@ -1092,6 +1233,15 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                     .map(|x| x.into())
                     .collect::<Vec<_>>();
                 AlterKind::ModifyColumnTypes { columns }
+            }
+            alter_request::Kind::SetJsonSettings(x) => {
+                let settings = x.settings.context(InvalidRawRegionRequestSnafu {
+                    err: "missing settings in SetJsonSettings",
+                })?;
+                AlterKind::SetJsonSettings {
+                    column_name: x.column_name,
+                    settings: json_settings_from_proto(settings)?,
+                }
             }
             alter_request::Kind::DropColumns(x) => {
                 let names = x.drop_columns.into_iter().map(|x| x.name).collect();
@@ -1316,34 +1466,66 @@ impl ModifyColumnType {
                 err: format!("column {} not found", self.column_name),
             })?;
 
-        ensure!(
-            matches!(column_meta.semantic_type, SemanticType::Field),
-            InvalidRegionRequestSnafu {
-                region_id: metadata.region_id,
-                err: "'timestamp' or 'tag' column cannot change type".to_string()
+        match column_meta.semantic_type {
+            SemanticType::Field => {
+                ensure!(
+                    column_meta
+                        .column_schema
+                        .data_type
+                        .can_arrow_type_cast_to(&self.target_type),
+                    InvalidRegionRequestSnafu {
+                        region_id: metadata.region_id,
+                        err: format!(
+                            "column '{}' cannot be cast automatically to type '{}'",
+                            self.column_name, self.target_type
+                        ),
+                    }
+                );
             }
-        );
-        ensure!(
-            column_meta
-                .column_schema
-                .data_type
-                .can_arrow_type_cast_to(&self.target_type),
-            InvalidRegionRequestSnafu {
-                region_id: metadata.region_id,
-                err: format!(
-                    "column '{}' cannot be cast automatically to type '{}'",
-                    self.column_name, self.target_type
-                ),
+            // The time index column only supports widening its timestamp
+            // unit; historical SST data is cast to the new unit on read.
+            // A same-type change validates so a retried alter procedure is a
+            // no-op instead of failing the retry forever.
+            SemanticType::Timestamp => {
+                ensure!(
+                    column_meta.column_schema.data_type == self.target_type
+                        || column_meta
+                            .column_schema
+                            .data_type
+                            .is_timestamp_unit_widening_to(&self.target_type),
+                    InvalidRegionRequestSnafu {
+                        region_id: metadata.region_id,
+                        err: time_index_not_widening_error(
+                            &column_meta.column_schema.name,
+                            &column_meta.column_schema.data_type,
+                            &self.target_type,
+                        ),
+                    }
+                );
             }
-        );
+            SemanticType::Tag => {
+                return InvalidRegionRequestSnafu {
+                    region_id: metadata.region_id,
+                    err: format!(
+                        "tag column '{}' cannot change type, it is part of the primary key",
+                        self.column_name
+                    ),
+                }
+                .fail();
+            }
+        }
 
         Ok(())
     }
 
     /// Returns true if no column's datatype to change to the region.
+    /// A column already in the target type needs no alteration, so a retried
+    /// alter is a successful no-op.
     pub fn need_alter(&self, metadata: &RegionMetadata) -> bool {
         debug_assert!(self.validate(metadata).is_ok());
-        metadata.column_by_name(&self.column_name).is_some()
+        metadata
+            .column_by_name(&self.column_name)
+            .is_some_and(|column| column.column_schema.data_type != self.target_type)
     }
 }
 
@@ -1362,8 +1544,43 @@ impl From<v1::ModifyColumnType> for ModifyColumnType {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
+fn json_settings_from_proto(settings: v1::JsonSettings) -> Result<JsonSettings> {
+    let type_hints = settings
+        .type_hints
+        .into_iter()
+        .map(|hint| {
+            let wrapper = ColumnDataTypeWrapper::try_new(hint.data_type, hint.datatype_extension)
+                .map_err(|err| {
+                InvalidRawRegionRequestSnafu {
+                    err: err.to_string(),
+                }
+                .build()
+            })?;
+            let data_type = ConcreteDataType::from(wrapper);
+
+            Ok(JsonTypeHint {
+                path: hint.path,
+                data_type,
+                inverted_index: false,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    JsonSettings::try_new(type_hints, settings.max_auto_expanded_paths).map_err(|err| {
+        InvalidRawRegionRequestSnafu {
+            err: err.to_string(),
+        }
+        .build()
+    })
+}
+
+/// Region option changes used by ALTER requests.
+///
+/// This type is serialized for request persistence. Keep future changes backward
+/// compatible with previously serialized variants.
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub enum SetRegionOption {
+    WriteBufferSize(Option<ReadableSize>),
     Ttl(Option<TimeToLive>),
     // Modifying TwscOptions with values as (option name, new value).
     Twsc(String, String),
@@ -1373,6 +1590,93 @@ pub enum SetRegionOption {
     AppendMode(bool),
     // Modifying the per-region auto flush interval override.
     AutoFlushInterval(Option<Duration>),
+    // Modifying the max number of rows in a parquet row group.
+    MaxRowGroupRowCount(Option<usize>),
+    PreserveRowSequence(bool),
+    // Whether to skip writing new WAL entries.
+    SkipWal(bool),
+}
+
+#[derive(Serialize, Deserialize)]
+enum SetRegionOptionSerde {
+    WriteBufferSize(Option<ReadableSize>),
+    Ttl(Option<TimeToLive>),
+    Twsc(String, String),
+    Format(String),
+    AppendMode(bool),
+    AutoFlushInterval(Option<Duration>),
+    MaxRowGroupRowCount(Option<usize>),
+    PreserveRowSequence(bool),
+    SkipWal(bool),
+}
+
+impl Serialize for SetRegionOption {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Older binaries deserialize the disable request as a unit variant.
+        if matches!(self, Self::SkipWal(true)) {
+            return serializer.serialize_unit_variant("SetRegionOption", 8, "SkipWal");
+        }
+
+        let option = match self {
+            Self::WriteBufferSize(value) => SetRegionOptionSerde::WriteBufferSize(*value),
+            Self::Ttl(value) => SetRegionOptionSerde::Ttl(*value),
+            Self::Twsc(key, value) => SetRegionOptionSerde::Twsc(key.clone(), value.clone()),
+            Self::Format(value) => SetRegionOptionSerde::Format(value.clone()),
+            Self::AppendMode(value) => SetRegionOptionSerde::AppendMode(*value),
+            Self::AutoFlushInterval(value) => SetRegionOptionSerde::AutoFlushInterval(*value),
+            Self::MaxRowGroupRowCount(value) => SetRegionOptionSerde::MaxRowGroupRowCount(*value),
+            Self::PreserveRowSequence(value) => SetRegionOptionSerde::PreserveRowSequence(*value),
+            Self::SkipWal(value) => SetRegionOptionSerde::SkipWal(*value),
+        };
+        option.serialize(serializer)
+    }
+}
+
+#[derive(Deserialize)]
+enum LegacySetRegionOption {
+    SkipWal,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum BackwardCompatibleSetRegionOption {
+    Current(SetRegionOptionSerde),
+    Legacy(LegacySetRegionOption),
+}
+
+impl From<SetRegionOptionSerde> for SetRegionOption {
+    fn from(option: SetRegionOptionSerde) -> Self {
+        match option {
+            SetRegionOptionSerde::WriteBufferSize(value) => Self::WriteBufferSize(value),
+            SetRegionOptionSerde::Ttl(value) => Self::Ttl(value),
+            SetRegionOptionSerde::Twsc(key, value) => Self::Twsc(key, value),
+            SetRegionOptionSerde::Format(value) => Self::Format(value),
+            SetRegionOptionSerde::AppendMode(value) => Self::AppendMode(value),
+            SetRegionOptionSerde::AutoFlushInterval(value) => Self::AutoFlushInterval(value),
+            SetRegionOptionSerde::MaxRowGroupRowCount(value) => Self::MaxRowGroupRowCount(value),
+            SetRegionOptionSerde::PreserveRowSequence(value) => Self::PreserveRowSequence(value),
+            SetRegionOptionSerde::SkipWal(value) => Self::SkipWal(value),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SetRegionOption {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(
+            match BackwardCompatibleSetRegionOption::deserialize(deserializer)? {
+                BackwardCompatibleSetRegionOption::Current(option) => option.into(),
+                BackwardCompatibleSetRegionOption::Legacy(LegacySetRegionOption::SkipWal) => {
+                    Self::SkipWal(true)
+                }
+            },
+        )
+    }
 }
 
 impl TryFrom<&PbOption> for SetRegionOption {
@@ -1381,15 +1685,25 @@ impl TryFrom<&PbOption> for SetRegionOption {
     fn try_from(value: &PbOption) -> std::result::Result<Self, Self::Error> {
         let PbOption { key, value } = value;
         match key.as_str() {
+            WRITE_BUFFER_SIZE_KEY => {
+                let size = value
+                    .parse::<ReadableSize>()
+                    .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+                Ok(Self::WriteBufferSize(Some(size)))
+            }
             TTL_KEY => {
                 let ttl = TimeToLive::from_humantime_or_str(value)
                     .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
 
                 Ok(Self::Ttl(Some(ttl)))
             }
-            TWCS_TRIGGER_FILE_NUM | TWCS_MAX_OUTPUT_FILE_SIZE | TWCS_TIME_WINDOW => {
-                Ok(Self::Twsc(key.clone(), value.clone()))
-            }
+            TWCS_TRIGGER_FILE_NUM
+            | TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM
+            | TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER
+            | TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM
+            | TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER
+            | TWCS_MAX_OUTPUT_FILE_SIZE
+            | TWCS_TIME_WINDOW => Ok(Self::Twsc(key.clone(), value.clone())),
             SST_FORMAT_KEY => Ok(Self::Format(value.clone())),
             APPEND_MODE_KEY => {
                 let append_mode = value
@@ -1411,6 +1725,31 @@ impl TryFrom<&PbOption> for SetRegionOption {
                 }
                 Ok(Self::AutoFlushInterval(Some(interval)))
             }
+            MAX_ROW_GROUP_ROW_COUNT => {
+                if value.is_empty() {
+                    return Ok(Self::MaxRowGroupRowCount(None));
+                }
+                let row_count = value
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|row_count| {
+                        *row_count > 0 && *row_count <= MAX_ROW_GROUP_ROW_COUNT_LIMIT
+                    })
+                    .ok_or_else(|| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+                Ok(Self::MaxRowGroupRowCount(Some(row_count)))
+            }
+            PRESERVE_ROW_SEQUENCE => {
+                let preserve = value
+                    .parse::<bool>()
+                    .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+                Ok(Self::PreserveRowSequence(preserve))
+            }
+            SKIP_WAL_KEY => {
+                let skip_wal = value
+                    .parse::<bool>()
+                    .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+                Ok(Self::SkipWal(skip_wal))
+            }
             _ => InvalidSetRegionOptionRequestSnafu { key, value }.fail(),
         }
     }
@@ -1422,6 +1761,18 @@ impl From<&UnsetRegionOption> for SetRegionOption {
             UnsetRegionOption::TwcsTriggerFileNum => {
                 SetRegionOption::Twsc(unset_option.to_string(), String::new())
             }
+            UnsetRegionOption::TwcsActiveWindowTriggerFileNum => {
+                SetRegionOption::Twsc(unset_option.to_string(), String::new())
+            }
+            UnsetRegionOption::TwcsActiveWindowL1MergeTrigger => {
+                SetRegionOption::Twsc(unset_option.to_string(), String::new())
+            }
+            UnsetRegionOption::TwcsInactiveWindowTriggerFileNum => {
+                SetRegionOption::Twsc(unset_option.to_string(), String::new())
+            }
+            UnsetRegionOption::TwcsInactiveWindowL1MergeTrigger => {
+                SetRegionOption::Twsc(unset_option.to_string(), String::new())
+            }
             UnsetRegionOption::TwcsMaxOutputFileSize => {
                 SetRegionOption::Twsc(unset_option.to_string(), String::new())
             }
@@ -1429,6 +1780,9 @@ impl From<&UnsetRegionOption> for SetRegionOption {
                 SetRegionOption::Twsc(unset_option.to_string(), String::new())
             }
             UnsetRegionOption::Ttl => SetRegionOption::Ttl(Default::default()),
+            UnsetRegionOption::MaxRowGroupRowCount => SetRegionOption::MaxRowGroupRowCount(None),
+            UnsetRegionOption::WriteBufferSize => SetRegionOption::WriteBufferSize(None),
+            UnsetRegionOption::PreserveRowSequence => SetRegionOption::PreserveRowSequence(false),
         }
     }
 }
@@ -1439,9 +1793,16 @@ impl TryFrom<&str> for UnsetRegionOption {
     fn try_from(key: &str) -> Result<Self> {
         match key.to_ascii_lowercase().as_str() {
             TTL_KEY => Ok(Self::Ttl),
+            WRITE_BUFFER_SIZE_KEY => Ok(Self::WriteBufferSize),
             TWCS_TRIGGER_FILE_NUM => Ok(Self::TwcsTriggerFileNum),
+            TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM => Ok(Self::TwcsActiveWindowTriggerFileNum),
+            TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER => Ok(Self::TwcsActiveWindowL1MergeTrigger),
+            TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM => Ok(Self::TwcsInactiveWindowTriggerFileNum),
+            TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER => Ok(Self::TwcsInactiveWindowL1MergeTrigger),
             TWCS_MAX_OUTPUT_FILE_SIZE => Ok(Self::TwcsMaxOutputFileSize),
             TWCS_TIME_WINDOW => Ok(Self::TwcsTimeWindow),
+            MAX_ROW_GROUP_ROW_COUNT => Ok(Self::MaxRowGroupRowCount),
+            PRESERVE_ROW_SEQUENCE => Ok(Self::PreserveRowSequence),
             _ => InvalidUnsetRegionOptionRequestSnafu { key }.fail(),
         }
     }
@@ -1450,18 +1811,32 @@ impl TryFrom<&str> for UnsetRegionOption {
 #[derive(Debug, Eq, PartialEq, Clone, Serialize, Deserialize)]
 pub enum UnsetRegionOption {
     TwcsTriggerFileNum,
+    TwcsActiveWindowTriggerFileNum,
+    TwcsInactiveWindowTriggerFileNum,
+    TwcsInactiveWindowL1MergeTrigger,
     TwcsMaxOutputFileSize,
     TwcsTimeWindow,
     Ttl,
+    MaxRowGroupRowCount,
+    WriteBufferSize,
+    PreserveRowSequence,
+    TwcsActiveWindowL1MergeTrigger,
 }
 
 impl UnsetRegionOption {
     pub fn as_str(&self) -> &str {
         match self {
             Self::Ttl => TTL_KEY,
+            Self::WriteBufferSize => WRITE_BUFFER_SIZE_KEY,
             Self::TwcsTriggerFileNum => TWCS_TRIGGER_FILE_NUM,
+            Self::TwcsActiveWindowTriggerFileNum => TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM,
+            Self::TwcsActiveWindowL1MergeTrigger => TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER,
+            Self::TwcsInactiveWindowTriggerFileNum => TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM,
+            Self::TwcsInactiveWindowL1MergeTrigger => TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER,
             Self::TwcsMaxOutputFileSize => TWCS_MAX_OUTPUT_FILE_SIZE,
             Self::TwcsTimeWindow => TWCS_TIME_WINDOW,
+            Self::MaxRowGroupRowCount => MAX_ROW_GROUP_ROW_COUNT,
+            Self::PreserveRowSequence => PRESERVE_ROW_SEQUENCE,
         }
     }
 }
@@ -1496,6 +1871,7 @@ pub struct RegionFlushRequest {
 pub struct RegionCompactRequest {
     pub options: compact_request::Options,
     pub parallelism: Option<u32>,
+    pub time_range: Option<TimestampRange>,
 }
 
 impl Default for RegionCompactRequest {
@@ -1504,18 +1880,32 @@ impl Default for RegionCompactRequest {
             // Default to regular compaction.
             options: compact_request::Options::Regular(Default::default()),
             parallelism: None,
+            time_range: None,
         }
     }
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct RegionBuildIndexRequest {}
+pub struct RegionBuildIndexRequest {
+    /// The index build mode. Absent options select SST indexes.
+    pub options: Option<build_index_request::Options>,
+}
 
 /// Truncate region request.
 #[derive(Debug)]
 pub enum RegionTruncateRequest {
     /// Truncate all data in the region.
     All,
+    /// Discard all unflushed data while preserving persisted SST files.
+    ///
+    /// This destroys the region's in-memory data irreversibly. Persisted SST files and
+    /// the writable state are preserved, and the WAL is obsoleted up to the discard point
+    /// so a restart won't replay the discarded data.
+    ///
+    /// An error may be returned after the data has already been discarded, because the
+    /// WAL is obsoleted last. Retrying is safe: a request against a region with nothing
+    /// left to discard only re-attempts the WAL obsoletion.
+    Unflushed,
     ByTimeRanges {
         /// Time ranges to truncate. Both bound are inclusive.
         /// only files that are fully contained in the time range will be truncated.
@@ -1547,6 +1937,8 @@ pub struct RegionCatchupRequest {
 
 #[derive(Debug, Clone)]
 pub struct RegionBulkInsertsRequest {
+    /// Whether this request should skip WAL.
+    pub skip_wal: bool,
     pub region_id: RegionId,
     pub payload: DfRecordBatch,
     pub raw_data: ArrowIpc,
@@ -1633,6 +2025,7 @@ impl fmt::Display for RegionRequest {
             RegionRequest::Create(_) => write!(f, "Create"),
             RegionRequest::Drop(_) => write!(f, "Drop"),
             RegionRequest::Open(_) => write!(f, "Open"),
+            RegionRequest::CleanUp(_) => write!(f, "CleanUp"),
             RegionRequest::Close(_) => write!(f, "Close"),
             RegionRequest::Alter(_) => write!(f, "Alter"),
             RegionRequest::Flush(_) => write!(f, "Flush"),
@@ -1652,11 +2045,135 @@ mod tests {
 
     use api::v1::region::RegionColumnDef;
     use api::v1::{ColumnDataType, ColumnDef};
+    use common_time::range::TimestampRange;
+    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+    use datatypes::json::JsonSettings;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextBackend};
+    use datatypes::types::JsonType;
 
     use super::*;
     use crate::metadata::RegionMetadataBuilder;
+
+    #[test]
+    fn test_build_index_options_round_trip() {
+        use prost::Message;
+
+        for options in [
+            None,
+            Some(build_index_request::Options::SstIndex(Default::default())),
+            Some(build_index_request::Options::SeriesIndex(Default::default())),
+        ] {
+            let request = BuildIndexRequest {
+                region_id: 42,
+                options,
+            };
+            let decoded = BuildIndexRequest::decode(request.encode_to_vec().as_slice()).unwrap();
+            let requests = make_region_build_index(decoded).unwrap();
+            assert_eq!(1, requests.len());
+            assert_eq!(RegionId::from_u64(42), requests[0].0);
+            let RegionRequest::BuildIndex(request) = &requests[0].1 else {
+                panic!("expected build-index request");
+            };
+            assert_eq!(options, request.options);
+        }
+        // The legacy wire message contains only region_id (field 1).
+        let legacy = BuildIndexRequest::decode(&[0x08, 42][..]).unwrap();
+        assert!(legacy.options.is_none());
+    }
+
+    #[test]
+    fn test_make_region_puts_preserves_skip_wal() {
+        let region_id = RegionId::new(42, 3);
+        let rows = Rows::default();
+        let requests = make_region_puts(InsertRequests {
+            requests: [false, true, false]
+                .into_iter()
+                .map(|skip_wal| api::v1::region::InsertRequest {
+                    region_id: region_id.as_u64(),
+                    rows: Some(rows.clone()),
+                    partition_expr_version: Some(api::v1::PartitionExprVersion { value: 7 }),
+                    skip_wal,
+                })
+                .collect(),
+        })
+        .unwrap();
+
+        assert_eq!(3, requests.len());
+        for ((id, request), skip_wal) in requests.into_iter().zip([false, true, false]) {
+            assert_eq!(region_id, id);
+            let RegionRequest::Put(request) = request else {
+                panic!("expected a put request");
+            };
+            assert_eq!(rows, request.rows);
+            assert_eq!(skip_wal, request.skip_wal);
+            assert_eq!(Some(7), request.partition_expr_version);
+            assert!(request.hint.is_none());
+        }
+    }
+
+    #[test]
+    fn test_make_region_compact_with_time_range() {
+        let requests = make_region_compact(CompactRequest {
+            region_id: 42,
+            time_range: Some(api::v1::region::CompactionTimeRange {
+                start: 1_000,
+                end: 2_000,
+                time_unit: api::v1::TimeUnit::Microsecond as i32,
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let RegionRequest::Compact(request) = &requests[0].1 else {
+            unreachable!();
+        };
+        assert_eq!(
+            Some(
+                TimestampRange::new(
+                    Timestamp::new_microsecond(1_000),
+                    Timestamp::new_microsecond(2_000),
+                )
+                .unwrap()
+            ),
+            request.time_range
+        );
+    }
+
+    #[test]
+    fn test_make_region_truncate_unflushed() {
+        let region_id = RegionId::new(42, 3);
+        let requests =
+            RegionRequest::try_from_request_body(region_request::Body::Truncate(TruncateRequest {
+                region_id: region_id.as_u64(),
+                kind: Some(truncate_request::Kind::Unflushed(
+                    api::v1::region::Unflushed {},
+                )),
+            }))
+            .unwrap();
+
+        assert_eq!(region_id, requests[0].0);
+        assert!(matches!(
+            requests[0].1,
+            RegionRequest::Truncate(RegionTruncateRequest::Unflushed)
+        ));
+    }
+
+    #[test]
+    fn test_make_region_truncate_requires_kind() {
+        let error =
+            RegionRequest::try_from_request_body(region_request::Body::Truncate(TruncateRequest {
+                region_id: RegionId::new(42, 3).as_u64(),
+                kind: None,
+            }))
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("missing kind in TruncateRequest")
+        );
+    }
 
     #[test]
     fn test_from_proto_location() {
@@ -1734,6 +2251,189 @@ mod tests {
     }
 
     #[test]
+    fn test_set_region_option_skip_wal_try_from() {
+        let pb = PbOption {
+            key: SKIP_WAL_KEY.to_string(),
+            value: "true".to_string(),
+        };
+        assert_eq!(
+            SetRegionOption::SkipWal(true),
+            SetRegionOption::try_from(&pb).unwrap()
+        );
+
+        let pb = PbOption {
+            key: SKIP_WAL_KEY.to_string(),
+            value: "false".to_string(),
+        };
+        assert_eq!(
+            SetRegionOption::SkipWal(false),
+            SetRegionOption::try_from(&pb).unwrap()
+        );
+
+        for value in ["", "invalid"] {
+            let pb = PbOption {
+                key: SKIP_WAL_KEY.to_string(),
+                value: value.to_string(),
+            };
+            assert!(SetRegionOption::try_from(&pb).is_err());
+        }
+
+        assert!(UnsetRegionOption::try_from(SKIP_WAL_KEY).is_err());
+    }
+
+    #[test]
+    fn test_set_region_option_skip_wal_serde_compatibility() {
+        let legacy = serde_json::from_str::<SetRegionOption>(r#""SkipWal""#).unwrap();
+        assert_eq!(SetRegionOption::SkipWal(true), legacy);
+
+        check_set_region_option_skip_wal_serde_compatibility(false);
+        check_set_region_option_skip_wal_serde_compatibility(true);
+    }
+
+    fn check_set_region_option_skip_wal_serde_compatibility(skip_wal: bool) {
+        let option = SetRegionOption::SkipWal(skip_wal);
+        let serialized = serde_json::to_string(&option).unwrap();
+        let expected = if skip_wal {
+            r#""SkipWal""#
+        } else {
+            r#"{"SkipWal":false}"#
+        };
+        assert_eq!(expected, serialized);
+        assert_eq!(
+            option,
+            serde_json::from_str::<SetRegionOption>(&serialized).unwrap()
+        );
+        if skip_wal {
+            assert!(serde_json::from_str::<LegacySetRegionOption>(&serialized).is_ok());
+            assert_eq!(
+                option,
+                serde_json::from_str::<SetRegionOption>(r#"{"SkipWal":true}"#).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn test_set_region_option_max_row_group_row_count_try_from() {
+        let pb = PbOption {
+            key: MAX_ROW_GROUP_ROW_COUNT.to_string(),
+            value: "512".to_string(),
+        };
+        assert_eq!(
+            SetRegionOption::MaxRowGroupRowCount(Some(512)),
+            SetRegionOption::try_from(&pb).unwrap()
+        );
+
+        let pb = PbOption {
+            key: MAX_ROW_GROUP_ROW_COUNT.to_string(),
+            value: String::new(),
+        };
+        assert_eq!(
+            SetRegionOption::MaxRowGroupRowCount(None),
+            SetRegionOption::try_from(&pb).unwrap()
+        );
+
+        for value in [
+            "0".to_string(),
+            (MAX_ROW_GROUP_ROW_COUNT_LIMIT + 1).to_string(),
+            "invalid".to_string(),
+        ] {
+            let pb = PbOption {
+                key: MAX_ROW_GROUP_ROW_COUNT.to_string(),
+                value,
+            };
+            assert!(SetRegionOption::try_from(&pb).is_err());
+        }
+
+        assert_eq!(
+            UnsetRegionOption::MaxRowGroupRowCount,
+            UnsetRegionOption::try_from(MAX_ROW_GROUP_ROW_COUNT).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_set_region_option_preserve_row_sequence_try_from() {
+        for (value, expected) in [("true", true), ("false", false)] {
+            let pb = PbOption {
+                key: PRESERVE_ROW_SEQUENCE.to_string(),
+                value: value.to_string(),
+            };
+            assert_eq!(
+                SetRegionOption::PreserveRowSequence(expected),
+                SetRegionOption::try_from(&pb).unwrap()
+            );
+        }
+
+        for value in ["1", "invalid"] {
+            let pb = PbOption {
+                key: PRESERVE_ROW_SEQUENCE.to_string(),
+                value: value.to_string(),
+            };
+            assert!(SetRegionOption::try_from(&pb).is_err());
+        }
+
+        assert_eq!(
+            UnsetRegionOption::PreserveRowSequence,
+            UnsetRegionOption::try_from(PRESERVE_ROW_SEQUENCE).unwrap()
+        );
+        assert_eq!(
+            SetRegionOption::PreserveRowSequence(false),
+            (&UnsetRegionOption::PreserveRowSequence).into()
+        );
+    }
+
+    #[test]
+    fn test_set_twcs_window_trigger_options_try_from() {
+        for key in [
+            "compaction.twcs.active_window.trigger_file_num",
+            "compaction.twcs.active_window.l1_merge_trigger",
+            "compaction.twcs.inactive_window.trigger_file_num",
+            "compaction.twcs.inactive_window.l1_merge_trigger",
+        ] {
+            let option = PbOption {
+                key: key.to_string(),
+                value: "8".to_string(),
+            };
+            assert_eq!(
+                SetRegionOption::Twsc(key.to_string(), "8".to_string()),
+                SetRegionOption::try_from(&option).unwrap(),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unset_twcs_window_trigger_options_try_from() {
+        for (key, expected) in [
+            (
+                "compaction.twcs.active_window.trigger_file_num",
+                UnsetRegionOption::TwcsActiveWindowTriggerFileNum,
+            ),
+            (
+                "compaction.twcs.active_window.l1_merge_trigger",
+                UnsetRegionOption::TwcsActiveWindowL1MergeTrigger,
+            ),
+            (
+                "compaction.twcs.inactive_window.trigger_file_num",
+                UnsetRegionOption::TwcsInactiveWindowTriggerFileNum,
+            ),
+        ] {
+            assert_eq!(expected, UnsetRegionOption::try_from(key).unwrap());
+            assert_eq!(
+                SetRegionOption::Twsc(key.to_string(), String::new()),
+                SetRegionOption::from(&expected)
+            );
+        }
+
+        let key = "compaction.twcs.inactive_window.l1_merge_trigger";
+        let option = UnsetRegionOption::try_from(key).unwrap();
+        assert_eq!(key, option.to_string());
+        assert_eq!(
+            SetRegionOption::Twsc(key.to_string(), String::new()),
+            SetRegionOption::from(&option)
+        );
+    }
+
+    #[test]
     fn test_from_proto_alter_request() {
         RegionAlterRequest::try_from(AlterRequest {
             region_id: 0,
@@ -1787,6 +2487,69 @@ mod tests {
                 },
             }
         );
+
+        let request = RegionAlterRequest::try_from(AlterRequest {
+            region_id: 0,
+            schema_version: 1,
+            kind: Some(alter_request::Kind::SetJsonSettings(v1::SetJsonSettings {
+                column_name: "payload".to_string(),
+                settings: Some(v1::JsonSettings {
+                    type_hints: vec![v1::JsonTypeHint {
+                        path: vec!["service".to_string()],
+                        data_type: ColumnDataType::String as i32,
+                        datatype_extension: None,
+                    }],
+                    max_auto_expanded_paths: Some(10),
+                }),
+            })),
+        })
+        .unwrap();
+
+        let AlterKind::SetJsonSettings {
+            column_name,
+            settings,
+        } = request.kind
+        else {
+            unreachable!()
+        };
+        assert_eq!("payload", column_name);
+        assert_eq!(Some(10), settings.max_auto_expanded_paths());
+        assert_eq!(1, settings.type_hints().len());
+    }
+
+    #[test]
+    fn test_write_buffer_size_region_options() {
+        let option = PbOption {
+            key: WRITE_BUFFER_SIZE_KEY.to_string(),
+            value: "128MiB".to_string(),
+        };
+        assert_eq!(
+            SetRegionOption::WriteBufferSize(Some(ReadableSize::mb(128))),
+            SetRegionOption::try_from(&option).unwrap()
+        );
+
+        let option = PbOption {
+            key: WRITE_BUFFER_SIZE_KEY.to_string(),
+            value: "invalid".to_string(),
+        };
+        SetRegionOption::try_from(&option).unwrap_err();
+
+        // Clearing the option uses UNSET. Empty SET values, including SQL NULL,
+        // remain invalid because the SQL layer does not distinguish NULL from ''.
+        let option = PbOption {
+            key: WRITE_BUFFER_SIZE_KEY.to_string(),
+            value: String::new(),
+        };
+        SetRegionOption::try_from(&option).unwrap_err();
+
+        assert_eq!(
+            UnsetRegionOption::WriteBufferSize,
+            UnsetRegionOption::try_from(WRITE_BUFFER_SIZE_KEY).unwrap()
+        );
+        assert_eq!(
+            SetRegionOption::WriteBufferSize(None),
+            SetRegionOption::from(&UnsetRegionOption::WriteBufferSize)
+        );
     }
 
     /// Returns a new region metadata for testing. Metadata:
@@ -1832,6 +2595,15 @@ mod tests {
             })
             .primary_key(vec![2]);
         builder.build().unwrap()
+    }
+
+    fn json2_column_schema(name: &str, settings: JsonSettings) -> ColumnSchema {
+        let mut column_schema =
+            ColumnSchema::new(name, ConcreteDataType::Json(JsonType::null()), true);
+        column_schema.with_extension_type(&Json2ExtensionType::new(std::sync::Arc::new(
+            JsonMetadata::new(settings),
+        )));
+        column_schema
     }
 
     #[test]
@@ -2048,6 +2820,57 @@ mod tests {
         .validate(&metadata)
         .unwrap_err();
 
+        // Time index unit widening is allowed.
+        let kind = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnType {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::timestamp_microsecond_datatype(),
+            }],
+        };
+        kind.validate(&metadata).unwrap();
+        assert!(kind.need_alter(&metadata));
+
+        // Narrowing the time index unit is rejected.
+        let metadata_nano = {
+            let mut metadata = new_metadata();
+            for col in metadata.column_metadatas.iter_mut() {
+                if col.column_schema.name == "ts" {
+                    col.column_schema.data_type = ConcreteDataType::timestamp_nanosecond_datatype();
+                }
+            }
+            metadata
+        };
+        AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnType {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::timestamp_millisecond_datatype(),
+            }],
+        }
+        .validate(&metadata_nano)
+        .unwrap_err();
+
+        // Changing the time index to the same type is a validated no-op, so a
+        // retried alter procedure (region already altered) succeeds and is
+        // skipped by `need_alter`.
+        let same_type = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnType {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::timestamp_millisecond_datatype(),
+            }],
+        };
+        same_type.validate(&metadata).unwrap();
+        assert!(!same_type.need_alter(&metadata));
+
+        // Changing the time index to a non-timestamp type is rejected.
+        AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnType {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::string_datatype(),
+            }],
+        }
+        .validate(&metadata)
+        .unwrap_err();
+
         AlterKind::ModifyColumnTypes {
             columns: vec![ModifyColumnType {
                 column_name: "tag_0".to_string(),
@@ -2065,6 +2888,40 @@ mod tests {
         };
         kind.validate(&metadata).unwrap();
         assert!(kind.need_alter(&metadata));
+    }
+
+    #[test]
+    fn test_validate_set_json_settings() {
+        let mut metadata = new_metadata();
+        let current_schema = json2_column_schema("field_0", JsonSettings::new_v2());
+        let target_settings = JsonSettings::try_new(vec![], Some(10)).unwrap();
+        metadata
+            .column_metadatas
+            .iter_mut()
+            .find(|column| column.column_schema.name == "field_0")
+            .unwrap()
+            .column_schema = current_schema.clone();
+
+        let kind = AlterKind::SetJsonSettings {
+            column_name: "field_0".to_string(),
+            settings: target_settings.clone(),
+        };
+        kind.validate(&metadata).unwrap();
+        assert!(kind.need_alter(&metadata));
+
+        let no_op = AlterKind::SetJsonSettings {
+            column_name: "field_0".to_string(),
+            settings: JsonSettings::new_v2(),
+        };
+        no_op.validate(&metadata).unwrap();
+        assert!(!no_op.need_alter(&metadata));
+
+        AlterKind::SetJsonSettings {
+            column_name: "tag_0".to_string(),
+            settings: target_settings,
+        }
+        .validate(&metadata)
+        .unwrap_err();
     }
 
     #[test]
@@ -2192,6 +3049,28 @@ mod tests {
         };
 
         assert_eq!(request.requirements, RegionRequirements::object_storage());
+    }
+
+    #[test]
+    fn test_parse_region_cleanup_from_proto() {
+        let clean_up = api::v1::region::CleanUpRequest {
+            region_id: RegionId::new(42, 3).as_u64(),
+            engine: "mito".to_string(),
+            path: "test".to_string(),
+            options: HashMap::from([("k".to_string(), "v".to_string())]),
+        };
+
+        let requests =
+            RegionRequest::try_from_request_body(region_request::Body::CleanUp(clean_up)).unwrap();
+        let RegionRequest::CleanUp(request) = &requests[0].1 else {
+            unreachable!()
+        };
+
+        assert_eq!(requests[0].0, RegionId::new(42, 3));
+        assert_eq!(request.engine, "mito");
+        assert_eq!(request.table_dir, "data/test/42/");
+        assert_eq!(request.path_type, PathType::Bare);
+        assert_eq!(request.options.get("k"), Some(&"v".to_string()));
     }
 
     #[test]

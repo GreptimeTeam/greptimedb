@@ -331,13 +331,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to get VECTOR index options"))]
-    GetVectorIndexOptions {
-        source: datatypes::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display(
         "Column schema mismatch in CTE {}, original: {:?}, expected: {:?}",
         cte_name,
@@ -424,7 +417,8 @@ impl ErrorExt for Error {
             | InvalidQueryContextExtension { .. }
             | ConflictingSnapshotSequence { .. } => StatusCode::InvalidArguments,
 
-            BuildBackend { .. } | ListObjects { .. } => StatusCode::StorageUnavailable,
+            BuildBackend { source, .. } => source.status_code(),
+            ListObjects { .. } => StatusCode::StorageUnavailable,
 
             TableNotFound { .. } => StatusCode::TableNotFound,
 
@@ -454,7 +448,6 @@ impl ErrorExt for Error {
 
             GetFulltextOptions { source, .. }
             | GetSkippingIndexOptions { source, .. }
-            | GetVectorIndexOptions { source, .. }
             | Datatypes { source, .. } => source.status_code(),
         }
     }
@@ -480,7 +473,6 @@ impl ErrorExt for Error {
             TableMutation { source, .. } => source.retry_hint(),
             GetFulltextOptions { source, .. }
             | GetSkippingIndexOptions { source, .. }
-            | GetVectorIndexOptions { source, .. }
             | Datatypes { source, .. } => source.retry_hint(),
             _ => RetryHint::NonRetryable,
         }
@@ -492,5 +484,40 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl From<Error> for DataFusionError {
     fn from(e: Error) -> DataFusionError {
         DataFusionError::External(Box::new(e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_error::ext::PlainError;
+
+    use super::*;
+
+    #[test]
+    fn test_datafusion_external_boxed_error_status_code() {
+        let error = Error::DataFusion {
+            error: DataFusionError::External(Box::new(BoxedError::new(PlainError::new(
+                "neutral error".to_string(),
+                StatusCode::RequestOutdated,
+            )))),
+            location: Location::default(),
+        };
+
+        assert_eq!(error.status_code(), StatusCode::RequestOutdated);
+    }
+
+    #[test]
+    fn test_build_backend_delegates_error_metadata() {
+        let source = common_datasource::error::LocalFileAccessDisabledSnafu {
+            path: "file:///tmp/data.parquet",
+        }
+        .build();
+        let error = Error::BuildBackend {
+            source,
+            location: Location::default(),
+        };
+
+        assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+        assert_eq!(error.retry_hint(), RetryHint::NonRetryable);
     }
 }

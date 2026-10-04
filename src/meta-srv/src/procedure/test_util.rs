@@ -289,6 +289,23 @@ pub fn new_sync_region_reply(
     exists: bool,
     error: Option<String>,
 ) -> MailboxMessage {
+    new_sync_region_reply_with_error(
+        id,
+        region_id,
+        ready,
+        exists,
+        legacy_instruction_error(error),
+    )
+}
+
+/// Generates a [InstructionReply::SyncRegions] reply with a structured error.
+pub fn new_sync_region_reply_with_error(
+    id: u64,
+    region_id: RegionId,
+    ready: bool,
+    exists: bool,
+    error: Option<InstructionError>,
+) -> MailboxMessage {
     MailboxMessage {
         id,
         subject: "mock".to_string(),
@@ -301,7 +318,7 @@ pub fn new_sync_region_reply(
                     region_id,
                     ready,
                     exists,
-                    error: legacy_instruction_error(error),
+                    error,
                 },
             ])))
             .unwrap(),

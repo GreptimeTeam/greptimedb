@@ -21,9 +21,13 @@ use datafusion::physical_plan::filter::FilterExec;
 use datafusion::physical_plan::limit::GlobalLimitExec;
 use datafusion::physical_plan::repartition::RepartitionExec;
 use datafusion::physical_plan::sorts::sort_preserving_merge::SortPreservingMergeExec;
-use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
+use datafusion::physical_plan::{
+    ChildrenPropertiesMode, ExecutionPlan, ExecutionPlanProperties, ReplaceChildrenOptions,
+};
 use datafusion_common::Result as DfResult;
 use datafusion_physical_expr::{Distribution, OrderingRequirements, Partitioning};
+
+use crate::dist_plan::MergeSortExec;
 
 #[derive(Debug)]
 pub struct EnsureGlobalLimitForFetch;
@@ -55,7 +59,7 @@ impl EnsureGlobalLimitForFetch {
         let plan = if children.is_empty() {
             plan
         } else {
-            let required_input_distribution = plan.required_input_distribution();
+            let required_input_distribution = plan.input_distribution_requirements();
             let required_input_ordering = plan.required_input_ordering();
             let maintains_input_order = plan.maintains_input_order();
             let child_parent = ParentContext {
@@ -70,7 +74,7 @@ impl EnsureGlobalLimitForFetch {
                 .enumerate()
                 .map(|(idx, child)| {
                     let required_distribution = required_input_distribution
-                        .get(idx)
+                        .child_distribution(idx)
                         .cloned()
                         .unwrap_or(Distribution::UnspecifiedDistribution);
                     let partitioning_to_restore =
@@ -99,7 +103,10 @@ impl EnsureGlobalLimitForFetch {
                     Self::optimize_plan(Arc::clone(child), parent)
                 })
                 .collect::<DfResult<Vec<_>>>()?;
-            plan.with_new_children(children)?
+            plan.replace_children(
+                children,
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )?
         };
 
         let Some(fetch) = plan.fetch() else {
@@ -109,7 +116,7 @@ impl EnsureGlobalLimitForFetch {
         if parent
             .global_fetch
             .is_some_and(|parent_fetch| parent_fetch <= fetch)
-            || !plan.as_any().is::<FilterExec>()
+            || !plan.is::<FilterExec>()
             || plan.output_partitioning().partition_count() <= 1
         {
             return Ok(plan);
@@ -147,9 +154,10 @@ impl Default for ParentContext {
 
 fn provided_global_fetch(plan: &Arc<dyn ExecutionPlan>) -> Option<usize> {
     let fetch = plan.fetch()?;
-    (plan.as_any().is::<GlobalLimitExec>()
-        || plan.as_any().is::<CoalescePartitionsExec>()
-        || plan.as_any().is::<SortPreservingMergeExec>())
+    (plan.is::<GlobalLimitExec>()
+        || plan.is::<CoalescePartitionsExec>()
+        || plan.is::<SortPreservingMergeExec>()
+        || plan.is::<MergeSortExec>())
     .then_some(fetch)
 }
 
@@ -193,7 +201,7 @@ fn partitioning_to_restore_for(
     child: &Arc<dyn ExecutionPlan>,
     required_distribution: &Distribution,
 ) -> Option<Partitioning> {
-    if !matches!(required_distribution, Distribution::HashPartitioned(_))
+    if !matches!(required_distribution, Distribution::KeyPartitioned(_))
         || child.output_partitioning().partition_count() <= 1
     {
         return None;
@@ -230,7 +238,7 @@ fn inherited_partitioning_to_restore(
 
     let satisfies_parent_distribution = matches!(
         parent.required_distribution,
-        Distribution::HashPartitioned(_)
+        Distribution::KeyPartitioned(_)
     ) && plan
         .output_partitioning()
         .satisfaction(
@@ -246,21 +254,214 @@ fn inherited_partitioning_to_restore(
 
 #[cfg(test)]
 mod tests {
-    use datafusion::arrow::array::Int32Array;
+    use datafusion::arrow::array::{Array, Int32Array};
     use datafusion::arrow::compute::SortOptions;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::arrow::record_batch::RecordBatch;
+    use datafusion::execution::TaskContext;
     use datafusion::physical_expr::expressions::{col, lit};
+    use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
+    use datafusion::physical_plan::aggregates::{
+        AggregateExec, AggregateMode, LimitOptions, PhysicalGroupBy,
+    };
     use datafusion::physical_plan::filter::FilterExecBuilder;
     use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
-    use datafusion::physical_plan::limit::GlobalLimitExec;
+    use datafusion::physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
     use datafusion::physical_plan::projection::ProjectionExec;
     use datafusion::physical_plan::repartition::RepartitionExec;
+    use datafusion::physical_plan::sorts::sort::SortExec;
     use datafusion::physical_plan::test::TestMemoryExec;
     use datafusion_common::{JoinType, NullEquality};
     use datafusion_physical_expr::{LexOrdering, Partitioning, PhysicalSortExpr};
 
     use super::*;
+
+    async fn optimize_and_collect_twice(
+        mut plan: Arc<dyn ExecutionPlan>,
+        config: &ConfigOptions,
+    ) -> Vec<Vec<i32>> {
+        let mut results = Vec::with_capacity(2);
+        for _ in 0..2 {
+            for rule in PhysicalOptimizer::new().rules {
+                plan = rule.optimize(plan, config).unwrap();
+            }
+            let batches = datafusion::physical_plan::collect(
+                Arc::clone(&plan),
+                Arc::new(TaskContext::default()),
+            )
+            .await
+            .unwrap();
+            results.push(
+                batches
+                    .iter()
+                    .flat_map(|batch| {
+                        batch
+                            .column(0)
+                            .as_any()
+                            .downcast_ref::<Int32Array>()
+                            .unwrap()
+                            .values()
+                            .to_vec()
+                    })
+                    .collect(),
+            );
+        }
+        results
+    }
+
+    #[tokio::test]
+    async fn physical_optimizer_keeps_global_distinct_limit_across_two_passes() {
+        for soft_limit in [false, true] {
+            let mut config = ConfigOptions::new();
+            config.execution.target_partitions = 3;
+            config.optimizer.enable_distinct_aggregation_soft_limit = soft_limit;
+
+            for mode in [
+                AggregateMode::FinalPartitioned,
+                AggregateMode::SinglePartitioned,
+            ] {
+                // The query limit is the only initial limit.
+                let input = input_with_all_hash_partitions();
+                let aggregate = match mode {
+                    AggregateMode::FinalPartitioned => {
+                        agg(agg(input, AggregateMode::Partial), mode)
+                    }
+                    AggregateMode::SinglePartitioned => agg(hash_repartition(input), mode),
+                    _ => unreachable!(),
+                };
+                let plan =
+                    Arc::new(GlobalLimitExec::new(aggregate, 0, Some(1))) as Arc<dyn ExecutionPlan>;
+
+                let results = optimize_and_collect_twice(plan, &config).await;
+                assert_eq!(
+                    results.iter().map(Vec::len).collect::<Vec<_>>(),
+                    vec![1, 1],
+                    "soft limit enabled: {soft_limit}, mode: {mode:?}",
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn physical_optimizer_keeps_count_over_distinct_limit_across_two_passes() {
+        use datafusion::datasource::MemTable;
+        use datafusion::execution::context::{SessionConfig, SessionContext as DFSessionContext};
+        use datafusion_common::ScalarValue;
+
+        for soft_limit in [false, true] {
+            let mut config = SessionConfig::new().with_target_partitions(3);
+            config
+                .options_mut()
+                .optimizer
+                .enable_distinct_aggregation_soft_limit = soft_limit;
+            let ctx = DFSessionContext::new_with_config(config.clone());
+            let schema = schema();
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(Int32Array::from((0..100).collect::<Vec<_>>()))],
+            )
+            .unwrap();
+            let table = MemTable::try_new(schema, vec![vec![batch]; 3]).unwrap();
+            ctx.register_table("t", Arc::new(table)).unwrap();
+            let mut plan = ctx
+                .sql("SELECT COUNT(*) FROM (SELECT DISTINCT a FROM t LIMIT 1) AS limited")
+                .await
+                .unwrap()
+                .create_physical_plan()
+                .await
+                .unwrap();
+
+            for pass in 0..=2 {
+                if pass > 0 {
+                    for rule in PhysicalOptimizer::new().rules {
+                        plan = rule.optimize(plan, config.options()).unwrap();
+                    }
+                }
+                let batches = datafusion::physical_plan::collect(Arc::clone(&plan), ctx.task_ctx())
+                    .await
+                    .unwrap();
+                let values = batches
+                    .iter()
+                    .flat_map(|batch| {
+                        (0..batch.num_rows()).map(|row| {
+                            ScalarValue::try_from_array(batch.column(0).as_ref(), row).unwrap()
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    values,
+                    vec![ScalarValue::Int64(Some(1))],
+                    "soft limit enabled: {soft_limit}, additional optimizer passes: {pass}",
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn physical_optimizer_keeps_local_limit_per_partition_across_two_passes() {
+        let mut config = ConfigOptions::new();
+        config.execution.target_partitions = 3;
+        let input = input_with_all_hash_partitions();
+        let local_limit = Arc::new(LocalLimitExec::new(
+            agg(hash_repartition(input), AggregateMode::SinglePartitioned),
+            1,
+        )) as Arc<dyn ExecutionPlan>;
+
+        let results = optimize_and_collect_twice(local_limit, &config).await;
+        assert_eq!(results.iter().map(Vec::len).collect::<Vec<_>>(), vec![3, 3]);
+    }
+
+    #[tokio::test]
+    async fn physical_optimizer_keeps_ordered_topk_across_two_passes() {
+        let schema = schema();
+        let losing =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(vec![100]))])
+                .unwrap();
+        let winning =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(vec![1]))])
+                .unwrap();
+        let input = Arc::new(
+            TestMemoryExec::try_new(&[vec![losing], vec![winning]], schema.clone(), None).unwrap(),
+        );
+        let ordering = ordering(schema.as_ref(), false);
+        let topk = Arc::new(
+            SortExec::new(
+                ordering,
+                agg_with_limit_options(
+                    input,
+                    AggregateMode::FinalPartitioned,
+                    Some(LimitOptions::new_with_order(1, false)),
+                ),
+            )
+            .with_fetch(Some(1)),
+        ) as Arc<dyn ExecutionPlan>;
+
+        let mut config = ConfigOptions::new();
+        config.execution.target_partitions = 3;
+        assert_eq!(
+            optimize_and_collect_twice(topk, &config).await,
+            vec![vec![1], vec![1]],
+        );
+    }
+
+    #[tokio::test]
+    async fn physical_optimizer_keeps_ordered_offset_limit_across_two_passes() {
+        let mut config = ConfigOptions::new();
+        config.execution.target_partitions = 3;
+        let offset = Arc::new(GlobalLimitExec::new(
+            Arc::new(SortExec::new(
+                ordering(schema().as_ref(), false),
+                unordered_input(),
+            )),
+            3,
+            Some(1),
+        )) as Arc<dyn ExecutionPlan>;
+
+        assert_eq!(
+            optimize_and_collect_twice(offset, &config).await,
+            vec![vec![2], vec![2]],
+        );
+    }
 
     #[test]
     fn adds_global_limit_for_multi_partition_filter_fetch() {
@@ -269,7 +470,7 @@ mod tests {
         let optimized =
             EnsureGlobalLimitForFetch::optimize_plan(filter, ParentContext::default()).unwrap();
 
-        assert!(optimized.as_any().is::<CoalescePartitionsExec>());
+        assert!(optimized.is::<CoalescePartitionsExec>());
         assert_eq!(optimized.fetch(), Some(1));
         assert_eq!(optimized.output_partitioning().partition_count(), 1);
     }
@@ -292,7 +493,7 @@ mod tests {
         let projection = optimized.children()[0];
         let coalesce = projection.children()[0];
 
-        assert!(coalesce.as_any().is::<CoalescePartitionsExec>());
+        assert!(coalesce.is::<CoalescePartitionsExec>());
         assert_eq!(coalesce.fetch(), Some(5));
     }
 
@@ -307,8 +508,8 @@ mod tests {
             EnsureGlobalLimitForFetch::optimize_plan(merge, ParentContext::default()).unwrap();
         let child = optimized.children()[0];
 
-        assert!(optimized.as_any().is::<SortPreservingMergeExec>());
-        assert!(child.as_any().is::<FilterExec>());
+        assert!(optimized.is::<SortPreservingMergeExec>());
+        assert!(child.is::<FilterExec>());
     }
 
     #[test]
@@ -322,9 +523,39 @@ mod tests {
             EnsureGlobalLimitForFetch::optimize_plan(merge, ParentContext::default()).unwrap();
         let child = optimized.children()[0];
 
-        assert!(optimized.as_any().is::<SortPreservingMergeExec>());
-        assert!(child.as_any().is::<SortPreservingMergeExec>());
+        assert!(optimized.is::<SortPreservingMergeExec>());
+        assert!(child.is::<SortPreservingMergeExec>());
         assert_eq!(child.fetch(), Some(5));
+    }
+
+    #[test]
+    fn keeps_filter_under_parent_merge_sort_fetch() {
+        let (input, ordering) = ordered_input();
+        let filter = filter_fetch(input, 1);
+        let merge = merge_sort_fetch(ordering, filter, 1);
+
+        let optimized =
+            EnsureGlobalLimitForFetch::optimize_plan(merge, ParentContext::default()).unwrap();
+        let child = optimized.children()[0];
+
+        assert!(optimized.is::<MergeSortExec>());
+        assert!(child.is::<FilterExec>());
+    }
+
+    #[test]
+    fn adds_tighter_global_fetch_under_looser_merge_sort_fetch() {
+        let (input, ordering) = ordered_input();
+        let filter = filter_fetch(input, 5);
+        let merge = merge_sort_fetch(ordering, filter, 10);
+
+        let optimized =
+            EnsureGlobalLimitForFetch::optimize_plan(merge, ParentContext::default()).unwrap();
+        let child = optimized.children()[0];
+
+        assert!(optimized.is::<MergeSortExec>());
+        assert!(child.is::<SortPreservingMergeExec>());
+        assert_eq!(child.fetch(), Some(5));
+        assert!(child.children()[0].is::<FilterExec>());
     }
 
     #[test]
@@ -338,8 +569,8 @@ mod tests {
             EnsureGlobalLimitForFetch::optimize_plan(merge, ParentContext::default()).unwrap();
         let child = optimized.children()[0];
 
-        assert!(optimized.as_any().is::<SortPreservingMergeExec>());
-        assert!(child.as_any().is::<SortPreservingMergeExec>());
+        assert!(optimized.is::<SortPreservingMergeExec>());
+        assert!(child.is::<SortPreservingMergeExec>());
         assert_eq!(child.fetch(), Some(1));
     }
 
@@ -363,10 +594,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let merge = optimized
-            .as_any()
-            .downcast_ref::<SortPreservingMergeExec>()
-            .unwrap();
+        let merge = optimized.downcast_ref::<SortPreservingMergeExec>().unwrap();
 
         assert_eq!(merge.expr(), &actual_ordering);
     }
@@ -390,9 +618,9 @@ mod tests {
         let projection = optimized.children()[0];
         let child = projection.children()[0];
 
-        assert!(optimized.as_any().is::<SortPreservingMergeExec>());
-        assert!(projection.as_any().is::<ProjectionExec>());
-        assert!(child.as_any().is::<SortPreservingMergeExec>());
+        assert!(optimized.is::<SortPreservingMergeExec>());
+        assert!(projection.is::<ProjectionExec>());
+        assert!(child.is::<SortPreservingMergeExec>());
         assert_eq!(child.fetch(), Some(1));
     }
 
@@ -422,13 +650,13 @@ mod tests {
         let optimized =
             EnsureGlobalLimitForFetch::optimize_plan(join, ParentContext::default()).unwrap();
         let left = optimized.children()[0];
-        let repartition = left.as_any().downcast_ref::<RepartitionExec>().unwrap();
+        let repartition = left.downcast_ref::<RepartitionExec>().unwrap();
 
         assert!(matches!(
             repartition.partitioning(),
             Partitioning::Hash(_, 3)
         ));
-        assert!(repartition.input().as_any().is::<CoalescePartitionsExec>());
+        assert!(repartition.input().is::<CoalescePartitionsExec>());
         assert_eq!(repartition.input().fetch(), Some(1));
     }
 
@@ -466,16 +694,15 @@ mod tests {
             EnsureGlobalLimitForFetch::optimize_plan(join, ParentContext::default()).unwrap();
         let projection = optimized.children()[0];
         let repartition = projection.children()[0]
-            .as_any()
             .downcast_ref::<RepartitionExec>()
             .unwrap();
 
-        assert!(projection.as_any().is::<ProjectionExec>());
+        assert!(projection.is::<ProjectionExec>());
         assert!(matches!(
             repartition.partitioning(),
             Partitioning::Hash(_, 3)
         ));
-        assert!(repartition.input().as_any().is::<CoalescePartitionsExec>());
+        assert!(repartition.input().is::<CoalescePartitionsExec>());
         assert_eq!(repartition.input().fetch(), Some(1));
     }
 
@@ -509,17 +736,16 @@ mod tests {
         let outer_projection = optimized.children()[0];
         let inner_projection = outer_projection.children()[0];
         let repartition = inner_projection.children()[0]
-            .as_any()
             .downcast_ref::<RepartitionExec>()
             .unwrap();
 
-        assert!(outer_projection.as_any().is::<ProjectionExec>());
-        assert!(inner_projection.as_any().is::<ProjectionExec>());
+        assert!(outer_projection.is::<ProjectionExec>());
+        assert!(inner_projection.is::<ProjectionExec>());
         assert!(matches!(
             repartition.partitioning(),
             Partitioning::Hash(_, 3)
         ));
-        assert!(repartition.input().as_any().is::<CoalescePartitionsExec>());
+        assert!(repartition.input().is::<CoalescePartitionsExec>());
         assert_eq!(repartition.input().fetch(), Some(1));
     }
 
@@ -528,6 +754,38 @@ mod tests {
         let batch = batch(schema.clone());
         let partitions = vec![vec![batch.clone()], vec![batch.clone()], vec![batch]];
         Arc::new(TestMemoryExec::try_new(&partitions, schema, None).unwrap())
+    }
+
+    fn input_with_all_hash_partitions() -> Arc<dyn ExecutionPlan> {
+        let schema = schema();
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from((0..100).collect::<Vec<_>>()))],
+        )
+        .unwrap();
+        let partitions = vec![vec![batch.clone()], vec![batch.clone()], vec![batch]];
+        Arc::new(TestMemoryExec::try_new(&partitions, schema, None).unwrap())
+    }
+
+    fn agg(input: Arc<dyn ExecutionPlan>, mode: AggregateMode) -> Arc<dyn ExecutionPlan> {
+        agg_with_limit_options(input, mode, None)
+    }
+
+    fn agg_with_limit_options(
+        input: Arc<dyn ExecutionPlan>,
+        mode: AggregateMode,
+        limit_options: Option<LimitOptions>,
+    ) -> Arc<dyn ExecutionPlan> {
+        let schema = input.schema();
+        let group_by = PhysicalGroupBy::new_single(vec![(
+            col("a", schema.as_ref()).unwrap(),
+            "a".to_string(),
+        )]);
+        Arc::new(
+            AggregateExec::try_new(mode, group_by, vec![], vec![], input, schema)
+                .unwrap()
+                .with_limit_options(limit_options),
+        )
     }
 
     fn ordered_input() -> (Arc<dyn ExecutionPlan>, LexOrdering) {
@@ -550,6 +808,14 @@ mod tests {
                 .build()
                 .unwrap(),
         )
+    }
+
+    fn merge_sort_fetch(
+        ordering: LexOrdering,
+        input: Arc<dyn ExecutionPlan>,
+        fetch: usize,
+    ) -> Arc<dyn ExecutionPlan> {
+        Arc::new(MergeSortExec::new(ordering, input, Some(fetch)))
     }
 
     fn hash_repartition(input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {

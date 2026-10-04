@@ -22,6 +22,6 @@ pub trait ArrowSchemaExt {
 
 impl ArrowSchemaExt for arrow_schema::Schema {
     fn has_json_extension_field(&self) -> bool {
-        self.fields().iter().any(json::is_json_extension_type)
+        self.fields().iter().any(json::is_any_json_extension_type)
     }
 }

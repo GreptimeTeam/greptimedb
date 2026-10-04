@@ -36,18 +36,20 @@ use datafusion_common::ScalarValue;
 use datatypes::arrow::array::{
     ArrayRef, BinaryArray, BinaryDictionaryBuilder, DictionaryArray, UInt64Array,
 };
-use datatypes::arrow::datatypes::{SchemaRef, UInt32Type};
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, SchemaRef, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::DataType;
+use datatypes::types::json_type::JsonNativeType;
 use datatypes::vectors::Helper;
 use mito_codec::row_converter::{
     CompositeValues, PrimaryKeyCodec, SortField, build_primary_key_codec_with_fields,
 };
 use parquet::file::metadata::{ParquetMetaData, RowGroupMetaData};
 use parquet::file::statistics::Statistics;
+use parquet::schema::types::SchemaDescriptor;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
-use store_api::storage::{ColumnId, SequenceNumber};
+use store_api::storage::{ColumnId, NestedPath, SequenceNumber};
 
 use crate::error::{
     ConvertVectorSnafu, DecodeSnafu, InvalidRecordBatchSnafu, NewRecordBatchSnafu, Result,
@@ -135,12 +137,25 @@ pub(crate) fn column_values(
     column_index: usize,
     is_min: bool,
 ) -> Option<ArrayRef> {
-    let null_scalar: ScalarValue = column
-        .column_schema
-        .data_type
-        .as_arrow_type()
-        .try_into()
-        .ok()?;
+    column_values_by_type(
+        row_groups,
+        &column.column_schema.data_type.as_arrow_type(),
+        column_index,
+        is_min,
+    )
+}
+
+/// Returns min/max values for a top-level column with the given Arrow data type.
+/// Resolves its leaf from the actual Parquet schema, not an inferred Arrow layout.
+pub(crate) fn column_values_by_type(
+    row_groups: &[impl Borrow<RowGroupMetaData>],
+    data_type: &ArrowDataType,
+    column_index: usize,
+    is_min: bool,
+) -> Option<ArrayRef> {
+    let column_index =
+        scalar_leaf_index(row_groups.first()?.borrow().schema_descr(), column_index)?;
+    let null_scalar: ScalarValue = data_type.try_into().ok()?;
     let scalar_values = row_groups
         .iter()
         .map(|meta| {
@@ -151,16 +166,22 @@ pub(crate) fn column_values(
                 } else {
                     *s.max_opt()?
                 }))),
-                Statistics::Int32(s) => Some(ScalarValue::Int32(Some(if is_min {
-                    *s.min_opt()?
-                } else {
-                    *s.max_opt()?
-                }))),
-                Statistics::Int64(s) => Some(ScalarValue::Int64(Some(if is_min {
-                    *s.min_opt()?
-                } else {
-                    *s.max_opt()?
-                }))),
+                Statistics::Int32(s) => {
+                    let value = if is_min { *s.min_opt()? } else { *s.max_opt()? };
+                    if data_type == &ArrowDataType::UInt32 {
+                        Some(ScalarValue::UInt32(Some(value as u32)))
+                    } else {
+                        Some(ScalarValue::Int32(Some(value)))
+                    }
+                }
+                Statistics::Int64(s) => {
+                    let value = if is_min { *s.min_opt()? } else { *s.max_opt()? };
+                    if data_type == &ArrowDataType::UInt64 {
+                        Some(ScalarValue::UInt64(Some(value as u64)))
+                    } else {
+                        Some(ScalarValue::Int64(Some(value)))
+                    }
+                }
                 Statistics::Int96(_) => None,
                 Statistics::Float(s) => Some(ScalarValue::Float32(Some(if is_min {
                     *s.min_opt()?
@@ -190,18 +211,35 @@ pub(crate) fn column_values(
     ScalarValue::iter_to_array(scalar_values).ok()
 }
 
-/// Returns null counts of specific columns.
+/// Returns null counts of a top-level column.
 /// The column should not be encoded as a part of a primary key.
 pub(crate) fn column_null_counts(
     row_groups: &[impl Borrow<RowGroupMetaData>],
     column_index: usize,
 ) -> Option<ArrayRef> {
+    let column_index =
+        scalar_leaf_index(row_groups.first()?.borrow().schema_descr(), column_index)?;
     let values = row_groups.iter().map(|meta| {
         let col = meta.borrow().column(column_index);
         let stat = col.statistics()?;
         stat.null_count_opt()
     });
     Some(Arc::new(UInt64Array::from_iter(values)))
+}
+
+/// Maps a scalar root to its physical leaf. Nested roots have no root-level
+/// statistics, even with one leaf: child null counts do not describe parents.
+/// All row groups of a file share the same schema.
+fn scalar_leaf_index(schema: &SchemaDescriptor, root_index: usize) -> Option<usize> {
+    if !schema
+        .root_schema()
+        .get_fields()
+        .get(root_index)?
+        .is_primitive()
+    {
+        return None;
+    }
+    (0..schema.num_columns()).find(|&leaf| schema.get_column_root_idx(leaf) == root_index)
 }
 
 /// Helper for reading the SST format.
@@ -233,6 +271,7 @@ impl PrimaryKeyReadFormat {
         let arrow_schema = to_sst_arrow_schema(&metadata);
 
         let format_projection = FormatProjection::compute_format_projection(
+            &metadata,
             &field_id_to_index,
             arrow_schema.fields.len(),
             read_cols,
@@ -521,11 +560,12 @@ impl PrimaryKeyReadFormat {
             .into_iter(),
         );
 
+        let primary_key_leaf = scalar_leaf_index(
+            row_groups.first()?.borrow().schema_descr(),
+            self.primary_key_position(),
+        )?;
         let values = row_groups.iter().map(|meta| {
-            let stats = meta
-                .borrow()
-                .column(self.primary_key_position())
-                .statistics()?;
+            let stats = meta.borrow().column(primary_key_leaf).statistics()?;
             match stats {
                 Statistics::Boolean(_) => None,
                 Statistics::Int32(_) => None,
@@ -592,18 +632,20 @@ impl FormatProjection {
     ///
     /// `id_to_index` is a mapping from column id to the index of the column in the SST.
     pub(crate) fn compute_format_projection(
+        metadata: &RegionMetadataRef,
         id_to_index: &HashMap<ColumnId, usize>,
         sst_column_num: usize,
         cols: ReadColumns,
     ) -> Self {
         let mut projected_columns: Vec<_> = cols
-            .cols
-            .into_iter()
-            .filter_map(|col| {
-                id_to_index
-                    .get(&col.column_id)
-                    .copied()
-                    .map(|index_of_sst| (col.column_id, index_of_sst, col.nested_paths))
+            .col_ids
+            .iter()
+            .copied()
+            .filter_map(|col_id| {
+                id_to_index.get(&col_id).copied().map(|index_of_sst| {
+                    let nested_paths = json_target_nested_paths(metadata, &cols, col_id);
+                    (col_id, index_of_sst, nested_paths)
+                })
             })
             .collect();
         // Sorts columns by their indices in the SST. SST uses a bitmap for projection.
@@ -681,6 +723,45 @@ impl FormatProjection {
     }
 }
 
+fn json_target_nested_paths(
+    metadata: &RegionMetadataRef,
+    read_columns: &ReadColumns,
+    column_id: ColumnId,
+) -> Vec<NestedPath> {
+    let Some(target_type) = read_columns.json_target_type(column_id) else {
+        return Vec::new();
+    };
+    let Some(column) = metadata.column_by_id(column_id) else {
+        return Vec::new();
+    };
+
+    json_nested_paths(&column.column_schema.name, target_type)
+}
+
+fn json_nested_paths(column_name: &str, json_type: &JsonNativeType) -> Vec<NestedPath> {
+    let mut paths = Vec::new();
+    let mut current = vec![column_name.to_string()];
+    collect_json_nested_paths(json_type, &mut current, &mut paths);
+    paths
+}
+
+fn collect_json_nested_paths(
+    json_type: &JsonNativeType,
+    current: &mut NestedPath,
+    paths: &mut Vec<NestedPath>,
+) {
+    match json_type {
+        JsonNativeType::Object(fields) if !fields.is_empty() => {
+            for (field, child) in fields {
+                current.push(field.clone());
+                collect_json_nested_paths(child, current, paths);
+                current.pop();
+            }
+        }
+        _ => paths.push(current.clone()),
+    }
+}
+
 /// Values of column statistics of the SST.
 ///
 /// It also distinguishes the case that a column is not found and
@@ -710,9 +791,7 @@ impl PrimaryKeyReadFormat {
     pub fn new_with_all_columns(metadata: RegionMetadataRef) -> PrimaryKeyReadFormat {
         Self::new(
             Arc::clone(&metadata),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
         )
     }
 }
@@ -818,6 +897,7 @@ pub(crate) fn need_override_sequence(parquet_meta: &ParquetMetaData) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use api::v1::OpType;
@@ -840,9 +920,9 @@ mod tests {
 
     use super::*;
     use crate::error::InvalidMetadataSnafu;
-    use crate::read::read_columns::ReadColumn;
     use crate::sst::parquet::flat_format::{
-        FlatReadFormat, FlatWriteFormat, sequence_column_index, sst_column_id_indices,
+        FlatReadFormat, FlatWriteFormat, decode_primary_keys, sequence_column_index,
+        sst_column_id_indices,
     };
     use crate::sst::{
         FlatSchemaOptions, OP_TYPE_PARQUET_FIELD_ID, PRIMARY_KEY_PARQUET_FIELD_ID,
@@ -986,29 +1066,25 @@ mod tests {
     fn test_projection_indices() {
         let metadata = build_test_region_metadata();
         // Only read tag1
-        let read_format =
-            PrimaryKeyReadFormat::new(metadata.clone(), ReadColumns::from_deduped_column_ids([3]));
+        let read_format = PrimaryKeyReadFormat::new(metadata.clone(), ReadColumns::new([3]));
         assert_eq!(
             &[2, 3, 4, 5],
             read_format.parquet_read_columns().root_indices()
         );
         // Only read field1
-        let read_format =
-            PrimaryKeyReadFormat::new(metadata.clone(), ReadColumns::from_deduped_column_ids([4]));
+        let read_format = PrimaryKeyReadFormat::new(metadata.clone(), ReadColumns::new([4]));
         assert_eq!(
             &[0, 2, 3, 4, 5],
             read_format.parquet_read_columns().root_indices()
         );
         // Only read ts
-        let read_format =
-            PrimaryKeyReadFormat::new(metadata.clone(), ReadColumns::from_deduped_column_ids([5]));
+        let read_format = PrimaryKeyReadFormat::new(metadata.clone(), ReadColumns::new([5]));
         assert_eq!(
             &[2, 3, 4, 5],
             read_format.parquet_read_columns().root_indices()
         );
         // Read field0, tag0, ts
-        let read_format =
-            PrimaryKeyReadFormat::new(metadata, ReadColumns::from_deduped_column_ids([2, 1, 5]));
+        let read_format = PrimaryKeyReadFormat::new(metadata, ReadColumns::new([2, 1, 5]));
         assert_eq!(
             &[1, 2, 3, 4, 5],
             read_format.parquet_read_columns().root_indices()
@@ -1049,14 +1125,16 @@ mod tests {
         let metadata = Arc::new(builder.build().context(InvalidMetadataSnafu)?);
         let column_id_to_parquet_index = sst_column_id_indices(&metadata);
         let projection = FormatProjection::compute_format_projection(
+            &metadata,
             &column_id_to_parquet_index,
             metadata.column_metadatas.len() + FIXED_POS_COLUMN_NUM,
-            ReadColumns {
-                cols: vec![ReadColumn::new(
-                    4,
-                    vec![vec!["j".to_string(), "a".to_string()]],
-                )],
-            },
+            ReadColumns::new([4]).with_json_target_types(BTreeMap::from([(
+                4,
+                JsonNativeType::Object(JsonObjectType::from([(
+                    "a".to_string(),
+                    JsonNativeType::i64(),
+                )])),
+            )])),
         );
 
         let columns = projection.parquet_read_cols.columns();
@@ -1111,8 +1189,7 @@ mod tests {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let read_format =
-            PrimaryKeyReadFormat::new(metadata, ReadColumns::from_deduped_column_ids(column_ids));
+        let read_format = PrimaryKeyReadFormat::new(metadata, ReadColumns::new(column_ids));
         assert_eq!(arrow_schema, *read_format.arrow_schema());
 
         let record_batch = RecordBatch::new_empty(arrow_schema);
@@ -1131,8 +1208,7 @@ mod tests {
             .iter()
             .map(|col| col.column_id)
             .collect();
-        let read_format =
-            PrimaryKeyReadFormat::new(metadata, ReadColumns::from_deduped_column_ids(column_ids));
+        let read_format = PrimaryKeyReadFormat::new(metadata, ReadColumns::new(column_ids));
 
         let columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![1, 1, 10, 10])), // field1
@@ -1160,9 +1236,7 @@ mod tests {
         let metadata = build_test_region_metadata();
         let read_format = PrimaryKeyReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
         );
 
         let columns: Vec<ArrayRef> = vec![
@@ -1330,56 +1404,36 @@ mod tests {
         // The projection includes all "fixed position" columns: ts(4), __primary_key(5), __sequence(6), __op_type(7)
 
         // Only read tag1 (column_id=3, index=1) + fixed columns
-        let read_format = FlatReadFormat::new(
-            metadata.clone(),
-            ReadColumns::from_deduped_column_ids([3]),
-            None,
-            "test",
-            false,
-        )
-        .unwrap();
+        let read_format =
+            FlatReadFormat::new(metadata.clone(), ReadColumns::new([3]), None, "test", false)
+                .unwrap();
         assert_eq!(
             &[1, 4, 5, 6, 7],
             read_format.parquet_read_columns().root_indices()
         );
 
         // Only read field1 (column_id=4, index=2) + fixed columns
-        let read_format = FlatReadFormat::new(
-            metadata.clone(),
-            ReadColumns::from_deduped_column_ids([4]),
-            None,
-            "test",
-            false,
-        )
-        .unwrap();
+        let read_format =
+            FlatReadFormat::new(metadata.clone(), ReadColumns::new([4]), None, "test", false)
+                .unwrap();
         assert_eq!(
             &[2, 4, 5, 6, 7],
             read_format.parquet_read_columns().root_indices()
         );
 
         // Only read ts (column_id=5, index=4) + fixed columns (ts is already included in fixed)
-        let read_format = FlatReadFormat::new(
-            metadata.clone(),
-            ReadColumns::from_deduped_column_ids([5]),
-            None,
-            "test",
-            false,
-        )
-        .unwrap();
+        let read_format =
+            FlatReadFormat::new(metadata.clone(), ReadColumns::new([5]), None, "test", false)
+                .unwrap();
         assert_eq!(
             &[4, 5, 6, 7],
             read_format.parquet_read_columns().root_indices()
         );
 
         // Read field0(column_id=2, index=3), tag0(column_id=1, index=0), ts(column_id=5, index=4) + fixed columns
-        let read_format = FlatReadFormat::new(
-            metadata,
-            ReadColumns::from_deduped_column_ids([2, 1, 5]),
-            None,
-            "test",
-            false,
-        )
-        .unwrap();
+        let read_format =
+            FlatReadFormat::new(metadata, ReadColumns::new([2, 1, 5]), None, "test", false)
+                .unwrap();
         assert_eq!(
             &[0, 3, 4, 5, 6, 7],
             read_format.parquet_read_columns().root_indices()
@@ -1391,7 +1445,7 @@ mod tests {
         let metadata = build_test_region_metadata();
         let mut format = FlatReadFormat::new(
             metadata,
-            ReadColumns::from_deduped_column_ids(std::iter::once(1)), // Just read tag0
+            ReadColumns::new(std::iter::once(1)), // Just read tag0
             Some(build_test_flat_sst_schema()),
             "test",
             false,
@@ -1608,7 +1662,7 @@ mod tests {
             .collect();
         let format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(column_ids),
+            ReadColumns::new(column_ids),
             Some(build_test_arrow_schema()),
             "test",
             false,
@@ -1674,7 +1728,7 @@ mod tests {
             .collect();
         let format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(column_ids.clone()),
+            ReadColumns::new(column_ids.clone()),
             None,
             "test",
             false,
@@ -1744,7 +1798,7 @@ mod tests {
 
         let format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(column_ids),
+            ReadColumns::new(column_ids),
             None,
             "test",
             true,
@@ -1753,6 +1807,123 @@ mod tests {
         // Test conversion with sparse encoding and skip convert.
         let result = format.convert_batch(record_batch.clone(), None).unwrap();
         assert_eq!(record_batch, result);
+    }
+
+    #[test]
+    fn test_sparse_tag_materialization_matches_full_decode_on_slices() {
+        let metadata = build_test_sparse_region_metadata();
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        let long = "中文\0abcdefgh".repeat(8);
+        let mut encoded = Vec::new();
+        for (table_id, tsid, tags) in [
+            (u32::MAX, u64::MAX, vec![(1, long.as_str()), (3, "tail")]),
+            (7, 0, vec![(3, "标签"), (1, "")]),
+            (0, 31, vec![]),
+            (42, 999, vec![(1, "s"), (9, "outside metadata")]),
+        ] {
+            let mut pk = Vec::new();
+            codec.encode_internal(table_id, tsid, &mut pk).unwrap();
+            codec
+                .encode_raw_tag_value(tags.iter().map(|(id, tag)| (*id, tag.as_bytes())), &mut pk)
+                .unwrap();
+            encoded.push(pk);
+        }
+        // Distinguish an omitted tag from an explicitly encoded NULL.
+        encoded[2].extend_from_slice(&3_u32.to_be_bytes());
+        encoded[2].push(0);
+        encoded.push(encoded[0].clone());
+        // Unreferenced dictionary values must never be decoded.
+        encoded.push(b"invalid unused key".to_vec());
+        let dictionary_values = BinaryArray::from_iter_values(encoded.iter());
+        let pk = DictionaryArray::<UInt32Type>::new(
+            UInt32Array::from(vec![0, 0, 1, 2, 4, 3, 0, 0]),
+            Arc::new(dictionary_values),
+        );
+        let batch = RecordBatch::try_new(
+            build_test_arrow_schema(),
+            vec![
+                Arc::new(Int64Array::from_iter_values(0..8)),
+                Arc::new(Int64Array::from_iter_values(10..18)),
+                Arc::new(TimestampMillisecondArray::from_iter_values(0..8)),
+                Arc::new(pk),
+                Arc::new(UInt64Array::from(vec![TEST_SEQUENCE; 8])),
+                Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; 8])),
+            ],
+        )
+        .unwrap();
+        let columns: Vec<_> = metadata
+            .primary_key_columns()
+            .map(|column| (column.column_id, column.column_schema.data_type.clone()))
+            .collect();
+        let format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+
+        // Explicit run mappings form an oracle independent of the new run collector.
+        for (offset, len, runs, row_to_run) in [
+            (0, 8, vec![0, 1, 2, 4, 3, 0], vec![0, 0, 1, 2, 3, 4, 5, 5]),
+            (1, 6, vec![0, 1, 2, 4, 3, 0], vec![0, 1, 2, 3, 4, 5]),
+            (0, 2, vec![0], vec![0, 0]),
+            (4, 1, vec![4], vec![0]),
+            (3, 0, vec![], vec![]),
+        ] {
+            let input = batch.slice(offset, len);
+            let decoded: Vec<_> = runs
+                .iter()
+                .map(|&key| codec.decode(&encoded[key]).unwrap().into_sparse())
+                .collect();
+            let indices = UInt32Array::from(row_to_run);
+            let expected: Vec<ArrayRef> = columns
+                .iter()
+                .map(|(id, ty)| {
+                    let mut builder = ty.create_mutable_vector(decoded.len());
+                    for pk in &decoded {
+                        builder.push_value_ref(&pk.get_or_null(*id).as_value_ref());
+                    }
+                    let values = builder.to_vector().to_arrow_array();
+                    if ty.is_string() {
+                        Arc::new(DictionaryArray::new(indices.clone(), values)) as ArrayRef
+                    } else {
+                        datatypes::arrow::compute::take(&values, &indices, None).unwrap()
+                    }
+                })
+                .collect();
+
+            let mut lazy = decode_primary_keys(&codec, &input).unwrap();
+            for order in [vec![0, 1, 2, 3], vec![3, 2, 1, 0], vec![3, 2, 3]] {
+                let requested: Vec<_> = order.iter().map(|&idx| columns[idx].clone()).collect();
+                let arrays = lazy.get_sparse_tag_columns(&requested).unwrap();
+                assert_eq!(arrays.len(), requested.len());
+                for (&idx, array) in order.iter().zip(arrays) {
+                    let single = lazy
+                        .get_tag_column(columns[idx].0, None, &columns[idx].1)
+                        .unwrap();
+                    assert_eq!(array.to_data(), expected[idx].to_data());
+                    assert_eq!(single.to_data(), expected[idx].to_data());
+                }
+            }
+            let mut expected_columns = expected;
+            expected_columns.extend_from_slice(input.columns());
+            let expected_batch = RecordBatch::try_new(
+                to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default()),
+                expected_columns,
+            )
+            .unwrap();
+            let actual = format.convert_batch(input, None).unwrap();
+            assert_eq!(actual.schema(), expected_batch.schema());
+            for (actual, expected) in actual.columns().iter().zip(expected_batch.columns()) {
+                assert_eq!(
+                    actual.to_data(),
+                    expected.to_data(),
+                    "offset={offset}, len={len}"
+                );
+            }
+        }
     }
 
     #[test]

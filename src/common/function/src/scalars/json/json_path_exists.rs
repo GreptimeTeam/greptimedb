@@ -88,7 +88,7 @@ impl Function for JsonPathExistsFunction {
                                     )));
                                 }
                             };
-                            jsonb::path_exists(json, json_path).ok()
+                            jsonb::RawJsonb::new(json).path_exists(&json_path).ok()
                         }
                         _ => None,
                     };

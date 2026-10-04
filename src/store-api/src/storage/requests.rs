@@ -15,74 +15,23 @@
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 
-use common_error::ext::BoxedError;
 use common_recordbatch::OrderOption;
 use datafusion_expr::expr::Expr;
-// Re-export vector types from datatypes to avoid duplication
-pub use datatypes::schema::{VectorDistanceMetric, VectorIndexEngineType};
 use datatypes::types::json_type::JsonNativeType;
 use itertools::Itertools;
 use strum::Display;
 
-use crate::storage::{ColumnId, ProjectionInput, SequenceNumber};
-
-/// A hint for KNN vector search.
-#[derive(Debug, Clone, PartialEq)]
-pub struct VectorSearchRequest {
-    /// Column ID of the vector column to search.
-    pub column_id: ColumnId,
-    /// The query vector to search for.
-    pub query_vector: Vec<f32>,
-    /// Number of nearest neighbors to return.
-    pub k: usize,
-    /// Distance metric to use (matches the index metric).
-    pub metric: VectorDistanceMetric,
-}
-
-/// Search results from vector index.
-#[derive(Debug, Clone, PartialEq)]
-pub struct VectorSearchMatches {
-    /// Keys (row offsets in the index).
-    pub keys: Vec<u64>,
-    /// Distances from the query vector.
-    pub distances: Vec<f32>,
-}
-
-/// Trait for vector index engines (HNSW implementations).
-///
-/// This trait defines the interface for pluggable vector index engines.
-/// Implementations (e.g., UsearchEngine) are provided by storage engines like mito2.
-pub trait VectorIndexEngine: Send + Sync {
-    /// Adds a vector with the given key.
-    fn add(&mut self, key: u64, vector: &[f32]) -> Result<(), BoxedError>;
-
-    /// Searches for k nearest neighbors.
-    fn search(&self, query: &[f32], k: usize) -> Result<VectorSearchMatches, BoxedError>;
-
-    /// Returns the serialized length.
-    fn serialized_length(&self) -> usize;
-
-    /// Serializes the index to a buffer.
-    fn save_to_buffer(&self, buffer: &mut [u8]) -> Result<(), BoxedError>;
-
-    /// Reserves capacity for vectors.
-    fn reserve(&mut self, capacity: usize) -> Result<(), BoxedError>;
-
-    /// Returns current size (number of vectors).
-    fn size(&self) -> usize;
-
-    /// Returns current capacity.
-    fn capacity(&self) -> usize;
-
-    /// Returns memory usage in bytes.
-    fn memory_usage(&self) -> usize;
-}
+use crate::storage::SequenceNumber;
 
 /// A hint on how to select rows from a time-series.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display)]
 pub enum TimeSeriesRowSelector {
     /// Only keep the last row of each time-series.
-    LastRow,
+    #[strum(to_string = "LastRow {{ after_merge: {after_merge} }}")]
+    LastRow {
+        /// Whether selection runs after cross-source merge and deduplication.
+        after_merge: bool,
+    },
 }
 
 /// A hint on how to distribute time-series data on the scan output.
@@ -100,7 +49,7 @@ pub enum TimeSeriesDistribution {
 pub struct ScanRequest {
     /// Optional projection information for the scan. `None` reads all root
     /// columns.
-    pub projection_input: Option<ProjectionInput>,
+    pub projection: Option<Vec<usize>>,
     /// Filters pushed down
     pub filters: Vec<Expr>,
     /// Expected output ordering. This is only a hint and isn't guaranteed.
@@ -129,22 +78,21 @@ pub struct ScanRequest {
     pub skip_sst_files: bool,
     /// Whether to bind the effective snapshot upper bound when opening the scan.
     pub snapshot_on_scan: bool,
+    /// Explicit intent to read an exact row-level sequence delta `(min, max]`
+    /// across memtables and all SST files (Flow's `sequence_range` incremental
+    /// mode). The engine performs exact row-level filtering only when the region
+    /// preserves per-row sequences and every participating SST file is trusted;
+    /// otherwise it returns a structured stale/unsupported error so the caller
+    /// falls back instead of silently approximating.
+    ///
+    /// Historical `memtable_only` reads must never set this flag.
+    pub exact_sequence_range: bool,
     /// Optional hint for the distribution of time-series data.
     pub distribution: Option<TimeSeriesDistribution>,
-    /// Optional hint for KNN vector search. When set, the scan should use
-    /// vector index to find the k nearest neighbors.
-    pub vector_search: Option<VectorSearchRequest>,
     /// Optional hint from query-driven JSON type concretization.
     pub json_type_hint: HashMap<String, JsonNativeType>,
-}
-
-impl ScanRequest {
-    /// Returns the top-level projected column indices.
-    pub fn projection_indices(&self) -> Option<&[usize]> {
-        self.projection_input
-            .as_ref()
-            .map(|projection_input| projection_input.projection.as_slice())
-    }
+    /// Whether Mito should keep string primary-key columns dictionary encoded in its output.
+    pub preserve_pk_dictionary_encoding: bool,
 }
 
 impl Display for ScanRequest {
@@ -169,7 +117,7 @@ impl Display for ScanRequest {
         let mut delimiter = Delimiter::None;
 
         write!(f, "ScanRequest {{ ")?;
-        if let Some(projection) = &self.projection_input {
+        if let Some(projection) = &self.projection {
             write!(f, "{}projection: {:?}", delimiter.as_str(), projection)?;
         }
         if !self.filters.is_empty() {
@@ -230,18 +178,18 @@ impl Display for ScanRequest {
                 self.snapshot_on_scan
             )?;
         }
-        if let Some(distribution) = &self.distribution {
-            write!(f, "{}distribution: {}", delimiter.as_str(), distribution)?;
+        if self.exact_sequence_range {
+            write!(f, "{}exact_sequence_range: true", delimiter.as_str())?;
         }
-        if let Some(vector_search) = &self.vector_search {
+        if self.preserve_pk_dictionary_encoding {
             write!(
                 f,
-                "{}vector_search: column_id={}, k={}, metric={}",
-                delimiter.as_str(),
-                vector_search.column_id,
-                vector_search.k,
-                vector_search.metric
+                "{}preserve_pk_dictionary_encoding: true",
+                delimiter.as_str()
             )?;
+        }
+        if let Some(distribution) = &self.distribution {
+            write!(f, "{}distribution: {}", delimiter.as_str(), distribution)?;
         }
         if !self.json_type_hint.is_empty() {
             write!(
@@ -271,9 +219,9 @@ mod tests {
         };
         assert_eq!(request.to_string(), "ScanRequest {  }");
 
-        let projection_input = Some(vec![1, 2].into());
+        let projection = Some(vec![1, 2]);
         let request = ScanRequest {
-            projection_input,
+            projection,
             filters: vec![
                 binary_expr(col("i"), Operator::Gt, lit(1)),
                 binary_expr(col("s"), Operator::Eq, lit("x")),
@@ -283,7 +231,7 @@ mod tests {
         };
         assert_eq!(
             request.to_string(),
-            r#"ScanRequest { projection: ProjectionInput { projection: [1, 2], nested_paths: [] }, filters: [i > Int32(1), s = Utf8("x")], limit: 10 }"#
+            r#"ScanRequest { projection: [1, 2], filters: [i > Int32(1), s = Utf8("x")], limit: 10 }"#
         );
 
         let request = ScanRequest {
@@ -299,38 +247,31 @@ mod tests {
             r#"ScanRequest { filters: [i > Int32(1), s = Utf8("x")], limit: 10 }"#
         );
 
-        let projection_input = Some(vec![1, 2].into());
+        let projection = Some(vec![1, 2]);
         let request = ScanRequest {
-            projection_input,
+            projection,
             limit: Some(10),
             ..Default::default()
         };
         assert_eq!(
             request.to_string(),
-            "ScanRequest { projection: ProjectionInput { projection: [1, 2], nested_paths: [] }, limit: 10 }"
-        );
-
-        let projection_input = Some(ProjectionInput::new(vec![1, 2]).with_nested_paths(vec![
-            vec!["j".to_string(), "a".to_string(), "b".to_string()],
-            vec!["s".to_string(), "x".to_string()],
-        ]));
-        let request = ScanRequest {
-            projection_input,
-            limit: Some(10),
-            ..Default::default()
-        };
-        assert_eq!(
-            request.to_string(),
-            r#"ScanRequest { projection: ProjectionInput { projection: [1, 2], nested_paths: [["j", "a", "b"], ["s", "x"]] }, limit: 10 }"#
+            "ScanRequest { projection: [1, 2], limit: 10 }"
         );
 
         let request = ScanRequest {
+            series_row_selector: Some(TimeSeriesRowSelector::LastRow { after_merge: true }),
             snapshot_on_scan: true,
+            exact_sequence_range: true,
             ..Default::default()
         };
         assert_eq!(
             request.to_string(),
-            "ScanRequest { snapshot_on_scan: true }"
+            "ScanRequest { series_row_selector: LastRow { after_merge: true }, snapshot_on_scan: true, exact_sequence_range: true }"
+        );
+
+        assert_eq!(
+            TimeSeriesRowSelector::LastRow { after_merge: false }.to_string(),
+            "LastRow { after_merge: false }"
         );
 
         let request = ScanRequest {

@@ -22,10 +22,11 @@ use cache::{
 use catalog::information_schema::NoopInformationExtension;
 use catalog::kvbackend::KvBackendCatalogManagerBuilder;
 use catalog::process_manager::ProcessManager;
-use cmd::error::StartFlownodeSnafu;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_config::KvBackendConfig;
+use common_datasource::object_store::LocalFileAccess;
+use common_event_recorder::EventRecorderOptions;
 use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::TableMetadataAllocator;
@@ -40,30 +41,35 @@ use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::SequenceBuilder;
 use common_meta::wal_provider::build_wal_provider;
 use common_procedure::ProcedureManagerRef;
+use common_procedure::local::EventRecorderHandle;
 use common_procedure::options::ProcedureConfig;
 use common_telemetry::logging::SlowQueryOptions;
+use common_test_util::find_workspace_path;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::datanode::DatanodeBuilder;
 use flow::{FlownodeBuilder, FrontendClient, GrpcQueryHandlerWithBoxedError};
 use frontend::frontend::Frontend;
+use frontend::instance::Instance;
 use frontend::instance::builder::FrontendBuilder;
-use frontend::instance::{Instance, StandaloneDatanodeManager};
 use frontend::server::Services;
+use frontend::service_config::{BatcherOptions, PendingRowsBatcherOptions};
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use servers::grpc::GrpcOptions;
-use snafu::ResultExt;
-use standalone::StandaloneRepartitionProcedureFactory;
 use standalone::options::StandaloneOptions;
+use standalone::{StandaloneDatanodeManager, StandaloneRepartitionProcedureFactory};
 
 use crate::test_util::{self, StorageType, TestGuard, create_tmp_dir_and_datanode_opts};
 
 pub struct GreptimeDbStandalone {
+    /// Storage engine for assertions across protocol and storage boundaries.
+    pub mito_engine: mito2::engine::MitoEngine,
     pub frontend: Arc<Frontend>,
     pub opts: StandaloneOptions,
     pub guard: TestGuard,
     // Used in rebuild.
     pub kv_backend: KvBackendRef,
     pub procedure_manager: ProcedureManagerRef,
+    pub event_recorder_handle: EventRecorderHandle,
 }
 
 impl GreptimeDbStandalone {
@@ -80,7 +86,12 @@ pub struct GreptimeDbStandaloneBuilder {
     default_store: Option<StorageType>,
     plugin: Option<Plugins>,
     slow_query_options: SlowQueryOptions,
+    event_recorder_options: EventRecorderOptions,
     auto_create_table: bool,
+    experimental_metric_export: bool,
+    logical_batcher: Option<BatcherOptions>,
+    table_batcher: BatcherOptions,
+    mito_config: Option<mito2::config::MitoConfig>,
 }
 
 impl GreptimeDbStandaloneBuilder {
@@ -98,13 +109,56 @@ impl GreptimeDbStandaloneBuilder {
                 threshold: Duration::from_secs(1),
                 ..Default::default()
             },
+            event_recorder_options: EventRecorderOptions::default(),
             auto_create_table: true,
+            experimental_metric_export: false,
+            logical_batcher: None,
+            table_batcher: BatcherOptions::default(),
+            mito_config: None,
         }
+    }
+
+    /// Overrides the Mito configuration for this test instance.
+    #[must_use]
+    pub fn with_mito_config(mut self, config: mito2::config::MitoConfig) -> Self {
+        self.mito_config = Some(config);
+        self
+    }
+
+    /// Enables experimental Metric export for the standalone test instance.
+    #[must_use]
+    pub fn with_experimental_metric_export(mut self) -> Self {
+        self.experimental_metric_export = true;
+        self
+    }
+
+    /// Configures ordinary-table batching for protocol integration tests.
+    #[must_use]
+    pub fn with_table_batcher(mut self, options: BatcherOptions) -> Self {
+        self.table_batcher = options;
+        self
+    }
+
+    /// Configures logical-table batching for integration tests.
+    #[must_use]
+    pub fn with_logical_batcher(mut self, options: BatcherOptions) -> Self {
+        self.logical_batcher = Some(options);
+        self
     }
 
     #[must_use]
     pub fn with_auto_create_table(mut self, auto_create_table: bool) -> Self {
         self.auto_create_table = auto_create_table;
+        self
+    }
+
+    /// Sets the event recorder options for the standalone instance.
+    #[must_use]
+    pub fn with_event_recorder_options(
+        mut self,
+        event_recorder_options: EventRecorderOptions,
+    ) -> Self {
+        self.event_recorder_options = event_recorder_options;
         self
     }
 
@@ -157,6 +211,7 @@ impl GreptimeDbStandaloneBuilder {
         guard: TestGuard,
         opts: StandaloneOptions,
         procedure_manager: ProcedureManagerRef,
+        event_recorder_handle: EventRecorderHandle,
         register_procedure_loaders: bool,
     ) -> GreptimeDbStandalone {
         let plugins = self.plugin.clone().unwrap_or_default();
@@ -169,7 +224,9 @@ impl GreptimeDbStandaloneBuilder {
 
         let mut builder =
             DatanodeBuilder::new(opts.datanode_options(), plugins.clone(), kv_backend.clone());
+        let local_file_access = LocalFileAccess::sandboxed(find_workspace_path(".")).unwrap();
         builder.with_cache_registry(layered_cache_registry);
+        builder.with_local_file_access(local_file_access.clone());
         let datanode = builder.build().await.unwrap();
 
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
@@ -238,26 +295,27 @@ impl GreptimeDbStandaloneBuilder {
         ));
 
         let repartition_procedure_factory = Arc::new(StandaloneRepartitionProcedureFactory);
-        let ddl_manager = Arc::new(
-            DdlManager::try_new(
-                DdlContext {
-                    node_manager: node_manager.clone(),
-                    cache_invalidator: cache_registry.clone(),
-                    memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
-                    leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
-                    table_metadata_manager,
-                    table_metadata_allocator,
-                    flow_metadata_manager,
-                    flow_metadata_allocator,
-                    region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
-                    soft_drop_enabled: false,
-                },
-                procedure_manager.clone(),
-                repartition_procedure_factory,
-                register_procedure_loaders,
-            )
-            .unwrap(),
-        );
+        let ddl_manager = Arc::new(DdlManager::new(
+            DdlContext {
+                node_manager: node_manager.clone(),
+                cache_invalidator: cache_registry.clone(),
+                memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),
+                leader_region_registry: Arc::new(LeaderRegionRegistry::default()),
+                table_metadata_manager,
+                table_metadata_allocator,
+                flow_metadata_manager,
+                flow_metadata_allocator,
+                region_failure_detector_controller: Arc::new(NoopRegionFailureDetectorControl),
+                soft_drop_enabled: false,
+                soft_drop_retention: None,
+                create_database_metadata_committer: None,
+            },
+            procedure_manager.clone(),
+            repartition_procedure_factory,
+        ));
+        if register_procedure_loaders {
+            ddl_manager.register_loaders().unwrap();
+        }
         let procedure_executor = Arc::new(LocalProcedureExecutor::new(
             ddl_manager,
             procedure_manager.clone(),
@@ -274,11 +332,14 @@ impl GreptimeDbStandaloneBuilder {
             procedure_executor.clone(),
             Arc::new(ProcessManager::new(server_addr, None)),
         )
+        .with_local_file_access(local_file_access)
         .with_plugin(plugins.clone())
         .try_build()
         .await
         .unwrap();
         let instance = Arc::new(instance);
+
+        event_recorder_handle.install(instance.event_recorder());
 
         // set the frontend client for flownode
         let grpc_handler = instance.clone() as Arc<dyn GrpcQueryHandlerWithBoxedError>;
@@ -286,23 +347,6 @@ impl GreptimeDbStandaloneBuilder {
         frontend_instance_handler
             .set_handler(weak_grpc_handler)
             .await;
-
-        let flow_streaming_engine = flownode.flow_engine().streaming_engine();
-        let invoker = flow::FrontendInvoker::build_from(
-            flow_streaming_engine.clone(),
-            catalog_manager.clone(),
-            kv_backend.clone(),
-            cache_registry.clone(),
-            procedure_executor.clone(),
-            node_manager.clone(),
-            instance.frontend_peer_addr().to_string(),
-        )
-        .await
-        .context(StartFlownodeSnafu)
-        .unwrap();
-
-        flow_streaming_engine.set_frontend_invoker(invoker).await;
-
         procedure_manager.start().await.unwrap();
         wal_provider.start().await.unwrap();
 
@@ -318,11 +362,13 @@ impl GreptimeDbStandaloneBuilder {
         };
 
         GreptimeDbStandalone {
+            mito_engine: datanode.region_server().mito_engine().unwrap(),
             frontend: Arc::new(frontend),
             opts,
             guard,
             kv_backend,
             procedure_manager,
+            event_recorder_handle,
         }
     }
 
@@ -346,21 +392,47 @@ impl GreptimeDbStandaloneBuilder {
             kv_backend_config,
         )
         .unwrap();
-        let procedure_manager =
+        let (procedure_manager, event_recorder_handle) =
             standalone::build_procedure_manager(kv_backend.clone(), procedure_config);
 
-        let standalone_opts = StandaloneOptions {
+        let mut standalone_opts = StandaloneOptions {
             storage: opts.storage,
             procedure: procedure_config,
             metadata_store: kv_backend_config,
             wal: self.metasrv_wal_config.clone().into(),
             grpc: GrpcOptions::default().with_server_addr("127.0.0.1:4001"),
             slow_query: self.slow_query_options.clone(),
+            event_recorder: self.event_recorder_options.clone(),
             auto_create_table: self.auto_create_table,
+            experimental_metric_export: self.experimental_metric_export,
+            pending_rows_batcher: PendingRowsBatcherOptions {
+                logical_table: self.logical_batcher.clone(),
+                table: self.table_batcher.clone(),
+            },
+            // Tests cover the descriptor, so they run with it enabled.
+            otlp: frontend::service_config::OtlpOptions {
+                experimental_enable_resource_info: true,
+                ..Default::default()
+            },
             ..StandaloneOptions::default()
         };
 
-        self.build_with(kv_backend, guard, standalone_opts, procedure_manager, true)
-            .await
+        if let Some(config) = &self.mito_config {
+            for engine in &mut standalone_opts.region_engine {
+                if let datanode::config::RegionEngineConfig::Mito(mito) = engine {
+                    *mito = config.clone();
+                }
+            }
+        }
+
+        self.build_with(
+            kv_backend,
+            guard,
+            standalone_opts,
+            procedure_manager,
+            event_recorder_handle,
+            true,
+        )
+        .await
     }
 }

@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::data_type::{ConcreteDataType, DataType};
 use crate::type_id::LogicalTypeId;
 use crate::value::Value;
-use crate::vectors::MutableVector;
+use crate::vectors::{MutableVector, StringDictionaryVectorBuilder};
 
 /// Used to represent the Dictionary datatype.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -85,8 +85,14 @@ impl DataType for DictionaryType {
         )
     }
 
-    fn create_mutable_vector(&self, _capacity: usize) -> Box<dyn MutableVector> {
-        unimplemented!()
+    fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
+        if self.key_type.as_ref() == &ConcreteDataType::uint32_datatype()
+            && self.value_type.as_ref() == &ConcreteDataType::string_datatype()
+        {
+            Box::new(StringDictionaryVectorBuilder::with_capacity(capacity))
+        } else {
+            unimplemented!()
+        }
     }
 
     fn try_cast(&self, _: Value) -> Option<Value> {

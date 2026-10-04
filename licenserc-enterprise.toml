@@ -10,8 +10,10 @@
 
 headerPath = "licenses/enterprise-header.txt"
 
-# Only the enterprise-gated sources. Keep this list in sync with the
-# "# enterprise" block in `licenserc.toml`'s `excludes`.
+# Only the enterprise-gated sources: every file reachable solely through
+# `#[cfg(feature = "enterprise")] mod ...;` belongs here. Keep this list in sync
+# with the "# enterprise" block in `licenserc.toml`'s `excludes` — both are
+# enforced by `make check-enterprise-license`.
 includes = [
     "src/common/meta/src/rpc/ddl/trigger.rs",
     "src/operator/src/expr_helper/trigger.rs",
@@ -23,6 +25,11 @@ includes = [
     "src/sql/src/parsers/create_parser/trigger.rs",
     "src/sql/src/parsers/show_parser/trigger.rs",
     "src/mito2/src/extension.rs",
+    "src/common/function/src/admin/purge_table.rs",
+    "src/catalog/src/system_schema/information_schema/recycle_bin.rs",
+    "src/common/meta/src/ddl/purge_dropped_table.rs",
+    "src/common/meta/src/ddl/undrop_table.rs",
+    "src/catalog/src/system_schema/information_schema/recycle_bin_test.rs",
 ]
 
 [properties]

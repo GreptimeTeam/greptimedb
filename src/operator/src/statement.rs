@@ -19,10 +19,15 @@ mod copy_query_to;
 mod copy_table_from;
 mod copy_table_to;
 mod cursor;
+mod database_copy;
 pub mod ddl;
 mod describe;
 mod dml;
+pub mod export_database;
+pub mod export_logical_tables;
+pub mod import_packed;
 mod kill;
+pub mod semantic_graph;
 mod set;
 mod show;
 mod tql;
@@ -37,6 +42,7 @@ use catalog::process_manager::ProcessManagerRef;
 use client::RecordBatches;
 use client::error::{ExternalSnafu as ClientExternalSnafu, Result as ClientResult};
 use client::inserter::{InsertOptions, Inserter};
+use common_datasource::object_store::LocalFileAccess;
 use common_error::ext::BoxedError;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::key::flow::{FlowMetadataManager, FlowMetadataManagerRef};
@@ -45,6 +51,8 @@ use common_meta::key::view_info::{ViewInfoManager, ViewInfoManagerRef};
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::procedure_executor::ProcedureExecutorRef;
+#[cfg(feature = "enterprise")]
+use common_meta::rpc::ddl::CreatorGrantIntent;
 use common_query::Output;
 use common_telemetry::{debug, tracing, warn};
 use common_time::Timestamp;
@@ -59,7 +67,7 @@ use query::QueryEngineRef;
 use query::parser::QueryStatement;
 use session::context::{Channel, QueryContextBuilder, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
-use set::{set_query_timeout, set_read_preference};
+use set::{set_query_timeout, set_read_preference, set_skip_wal};
 use snafu::{OptionExt, ResultExt, ensure};
 use sql::ast::ObjectNamePartExt;
 use sql::statements::OptionMap;
@@ -77,9 +85,13 @@ use table::requests::{CopyDatabaseRequest, CopyDirection, CopyQueryToRequest, Co
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
+pub use self::admin::{
+    AdminEventRecorderHandle, AdminFunctionLayer, AdminFunctionLayerRef,
+    AdminFunctionRecordingLayer, AdminFunctionRequest, AdminFunctionResponse, AdminFunctionService,
+    AdminFunctionServiceRef, admin_output_schema,
+};
 use self::set::{
-    set_bytea_output, set_datestyle, set_intervalstyle, set_search_path, set_timezone,
-    validate_client_encoding,
+    set_bytea_output, set_datestyle, set_intervalstyle, set_timezone, validate_client_encoding,
 };
 use crate::error::{
     self, CatalogSnafu, ExecLogicalPlanSnafu, ExternalSnafu, InvalidSqlSnafu, NotSupportedSnafu,
@@ -102,6 +114,23 @@ pub trait StatementExecutorConfigurator: Send + Sync {
 
 pub type StatementExecutorConfiguratorRef = Arc<dyn StatementExecutorConfigurator>;
 
+#[cfg(feature = "enterprise")]
+#[async_trait::async_trait]
+pub trait CreateDatabaseHandler: Send + Sync {
+    fn creator(
+        &self,
+        query_ctx: &QueryContextRef,
+    ) -> std::result::Result<Option<CreatorGrantIntent>, BoxedError>;
+
+    async fn refresh_current_user(
+        &self,
+        query_ctx: &QueryContextRef,
+    ) -> std::result::Result<(), BoxedError>;
+}
+
+#[cfg(feature = "enterprise")]
+pub type CreateDatabaseHandlerRef = Arc<dyn CreateDatabaseHandler>;
+
 pub struct ExecutorConfigureContext {
     pub kv_backend: KvBackendRef,
 }
@@ -119,6 +148,10 @@ pub struct StatementExecutor {
     inserter: InserterRef,
     process_manager: Option<ProcessManagerRef>,
     origin_frontend_addr: String,
+    admin_function_service: AdminFunctionServiceRef,
+    pub(crate) local_file_access: LocalFileAccess,
+    #[cfg(feature = "enterprise")]
+    create_database_handler: Option<CreateDatabaseHandlerRef>,
     #[cfg(feature = "enterprise")]
     trigger_querier: Option<TriggerQuerierRef>,
 }
@@ -155,7 +188,9 @@ impl StatementExecutor {
         partition_manager: PartitionRuleManagerRef,
         process_manager: Option<ProcessManagerRef>,
         origin_frontend_addr: String,
+        local_file_access: LocalFileAccess,
     ) -> Self {
+        let admin_function_service = admin::new_admin_function_service(query_engine.clone());
         Self {
             catalog_manager,
             query_engine,
@@ -168,14 +203,32 @@ impl StatementExecutor {
             inserter,
             process_manager,
             origin_frontend_addr,
+            admin_function_service,
+            local_file_access,
+            #[cfg(feature = "enterprise")]
+            create_database_handler: None,
             #[cfg(feature = "enterprise")]
             trigger_querier: None,
         }
     }
 
+    /// Adds a layer around the ADMIN function execution service.
+    ///
+    /// The last added layer is the outermost layer.
+    pub fn with_admin_function_layer(mut self, layer: AdminFunctionLayerRef) -> Self {
+        self.admin_function_service = layer.layer(self.admin_function_service);
+        self
+    }
+
     #[cfg(feature = "enterprise")]
     pub fn with_trigger_querier(mut self, querier: TriggerQuerierRef) -> Self {
         self.trigger_querier = Some(querier);
+        self
+    }
+
+    #[cfg(feature = "enterprise")]
+    pub fn with_create_database_handler(mut self, handler: CreateDatabaseHandlerRef) -> Self {
+        self.create_database_handler = Some(handler);
         self
     }
 
@@ -227,6 +280,7 @@ impl StatementExecutor {
             Statement::ShowViews(stmt) => self.show_views(stmt, query_ctx).await,
 
             Statement::ShowFlows(stmt) => self.show_flows(stmt, query_ctx).await,
+            Statement::ShowFlowStatus(stmt) => self.show_flow_status(stmt, query_ctx).await,
 
             #[cfg(feature = "enterprise")]
             Statement::ShowTriggers(stmt) => self.show_triggers(stmt, query_ctx).await,
@@ -346,6 +400,15 @@ impl StatementExecutor {
                     table_names.push(TableName::new(catalog, schema, table));
                 }
                 self.drop_tables(&table_names[..], stmt.drop_if_exists(), query_ctx.clone())
+                    .await
+            }
+            #[cfg(feature = "enterprise")]
+            Statement::UndropTable(stmt) => {
+                let (catalog, schema, table) =
+                    table_idents_to_full_name(stmt.table_name(), &query_ctx)
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)?;
+                self.undrop_table(TableName::new(catalog, schema, table), query_ctx)
                     .await
             }
             Statement::DropDatabase(stmt) => {
@@ -475,6 +538,7 @@ impl StatementExecutor {
 
         match var_name.as_str() {
             "READ_PREFERENCE" => set_read_preference(set_var.value, query_ctx)?,
+            "SKIP_WAL" => set_skip_wal(set_var.value, query_ctx)?,
 
             "@@TIME_ZONE" | "@@SESSION.TIME_ZONE" | "TIMEZONE" | "TIME_ZONE" => {
                 set_timezone(set_var.value, query_ctx)?
@@ -528,7 +592,10 @@ impl StatementExecutor {
             },
             "SEARCH_PATH" => {
                 if query_ctx.channel() == Channel::Postgres {
-                    set_search_path(set_var.value, query_ctx)?
+                    let search_path = set_var.search_path().context(NotSupportedSnafu {
+                        feat: "Unsupported search path in set variable statement",
+                    })?;
+                    query_ctx.set_current_schema(search_path);
                 } else {
                     return NotSupportedSnafu {
                         feat: format!("Unsupported set variable {}", var_name),
@@ -804,7 +871,7 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
 
 /// Converts [CopyDatabaseArgument] to [CopyDatabaseRequest].
 /// This function extracts the necessary info including catalog/database name, time range, etc.
-fn to_copy_database_request(
+pub fn to_copy_database_request(
     arg: CopyDatabaseArgument,
     query_ctx: &QueryContextRef,
 ) -> Result<CopyDatabaseRequest> {

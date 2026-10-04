@@ -13,9 +13,11 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use common_base::memory_limit::MemoryLimit;
+use common_base::readable_size::ReadableSize;
 use datafusion::config::{ConfigEntry, ConfigExtension, ExtensionOptions};
 use serde::{Deserialize, Serialize};
 use session::context::QueryContextRef;
@@ -37,6 +39,42 @@ pub const QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN: &str =
     "query.enable_remote_dynamic_filter_pushdown";
 
 pub const FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY: &str = "memtable_only";
+pub const FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE: &str = "sequence_range";
+
+/// Query spill mode controlling disk manager behavior.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QuerySpillMode {
+    /// Preserve DataFusion default disk manager behavior (OS temp directory).
+    Default,
+    /// Explicitly configure spill path, quota, and compression.
+    Custom,
+    /// Explicitly disable disk spilling; temporary file creation will error.
+    Disabled,
+}
+
+/// Compression for spilled data files.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QuerySpillCompression {
+    /// No compression (default, matches DataFusion default).
+    Uncompressed,
+    /// LZ4 frame compression.
+    Lz4Frame,
+    /// Zstandard compression.
+    Zstd,
+}
+
+/// Memory pool allocation policy.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryMemoryPoolPolicy {
+    /// Greedy first-come-first-served (default).
+    Greedy,
+    /// Fair divides memory available after unspillable reservations evenly among
+    /// spillable reservations and may trigger earlier spills.
+    Fair,
+}
 
 /// Query engine config
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -53,6 +91,25 @@ pub struct QueryOptions {
     /// Whether to expose per-region query load metrics.
     #[serde(skip)]
     pub enable_per_region_metrics: bool,
+    /// Experimental: spill-to-disk mode.
+    /// - `default`: preserve DataFusion built-in OS temp directory behavior.
+    /// - `custom`: explicitly configure spill path, max directory size, and compression.
+    /// - `disabled`: explicitly disable disk spilling.
+    pub experimental_spill_mode: QuerySpillMode,
+    /// Experimental: spill directory path. Ignored unless `experimental_spill_mode` is
+    /// `"custom"`. When set, spill files are written into this directory.
+    pub experimental_spill_path: Option<PathBuf>,
+    /// Experimental: maximum total size of the spill directory (data written to spill files).
+    /// Ignored unless `experimental_spill_mode` is `"custom"`. Default: `1GiB`.
+    pub experimental_spill_max_temp_directory_size: ReadableSize,
+    /// Experimental: compression algorithm applied to spilled data.
+    /// Ignored unless `experimental_spill_mode` is `"custom"`. Default: `uncompressed`.
+    pub experimental_spill_compression: QuerySpillCompression,
+    /// Experimental: memory pool allocation policy.
+    /// - `greedy`: Greedy first-come-first-served (default).
+    /// - `fair`: Fair divides memory available after unspillable reservations
+    ///   evenly among spillable reservations and may trigger earlier spills.
+    pub experimental_memory_pool_policy: QueryMemoryPoolPolicy,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -63,6 +120,11 @@ impl Default for QueryOptions {
             allow_query_fallback: false,
             memory_pool_size: MemoryLimit::default(),
             enable_per_region_metrics: false,
+            experimental_spill_mode: QuerySpillMode::Default,
+            experimental_spill_path: None,
+            experimental_spill_max_temp_directory_size: ReadableSize::gb(1),
+            experimental_spill_compression: QuerySpillCompression::Uncompressed,
+            experimental_memory_pool_policy: QueryMemoryPoolPolicy::Greedy,
         }
     }
 }
@@ -70,6 +132,7 @@ impl Default for QueryOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FlowIncrementalMode {
     MemtableOnly,
+    SequenceRange,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -106,6 +169,9 @@ impl FlowQueryExtensions {
                 v if v.eq_ignore_ascii_case(FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY) => {
                     Ok(FlowIncrementalMode::MemtableOnly)
                 }
+                v if v.eq_ignore_ascii_case(FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE) => {
+                    Ok(FlowIncrementalMode::SequenceRange)
+                }
                 _ => Err(invalid_query_context_extension(format!(
                     "Invalid value for {}: {}",
                     FLOW_INCREMENTAL_MODE, value
@@ -136,21 +202,25 @@ impl FlowQueryExtensions {
             })
             .transpose()?;
 
-        if matches!(incremental_mode, Some(FlowIncrementalMode::MemtableOnly)) {
+        if matches!(
+            incremental_mode,
+            Some(FlowIncrementalMode::MemtableOnly | FlowIncrementalMode::SequenceRange)
+        ) {
+            let mode = if incremental_mode == Some(FlowIncrementalMode::MemtableOnly) {
+                FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY
+            } else {
+                FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE
+            };
             let after_seqs = incremental_after_seqs.as_ref().ok_or_else(|| {
                 invalid_query_context_extension(format!(
                     "{} is required when {}={}.",
-                    FLOW_INCREMENTAL_AFTER_SEQS,
-                    FLOW_INCREMENTAL_MODE,
-                    FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY
+                    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, mode
                 ))
             })?;
             if after_seqs.is_empty() {
                 return Err(invalid_query_context_extension(format!(
                     "{} must not be empty when {}={}.",
-                    FLOW_INCREMENTAL_AFTER_SEQS,
-                    FLOW_INCREMENTAL_MODE,
-                    FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY
+                    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, mode
                 )));
             }
         }
@@ -170,19 +240,24 @@ impl FlowQueryExtensions {
 
         if matches!(
             self.incremental_mode,
-            Some(FlowIncrementalMode::MemtableOnly)
+            Some(FlowIncrementalMode::MemtableOnly | FlowIncrementalMode::SequenceRange)
         ) {
+            let mode = if self.incremental_mode == Some(FlowIncrementalMode::MemtableOnly) {
+                FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY
+            } else {
+                FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE
+            };
             let after_seqs = self.incremental_after_seqs.as_ref().ok_or_else(|| {
                 invalid_query_context_extension(format!(
-                    "{} is required when {}=memtable_only.",
-                    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE
+                    "{} is required when {}={}.",
+                    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, mode
                 ))
             })?;
 
             if !after_seqs.contains_key(&source_region_id.as_u64()) {
                 return Err(invalid_query_context_extension(format!(
-                    "Missing region {} in {} when {}=memtable_only.",
-                    source_region_id, FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE
+                    "Missing region {} in {} when {}={}.",
+                    source_region_id, FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, mode
                 )));
             }
         }
@@ -450,6 +525,57 @@ mod flow_extension_tests {
     }
 
     #[test]
+    fn test_parse_flow_extensions_sequence_range_success() {
+        let exts = HashMap::from([
+            (
+                FLOW_INCREMENTAL_MODE.to_string(),
+                FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE.to_string(),
+            ),
+            (
+                FLOW_INCREMENTAL_AFTER_SEQS.to_string(),
+                r#"{"1":10}"#.to_string(),
+            ),
+        ]);
+
+        let parsed = FlowQueryExtensions::parse_flow_extensions(&exts)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.incremental_mode,
+            Some(FlowIncrementalMode::SequenceRange)
+        );
+        assert_eq!(
+            parsed.incremental_after_seqs,
+            Some(HashMap::from([(1, 10)]))
+        );
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_sequence_range_rejects_empty_after_seqs() {
+        let exts = HashMap::from([
+            (
+                FLOW_INCREMENTAL_MODE.to_string(),
+                FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE.to_string(),
+            ),
+            (FLOW_INCREMENTAL_AFTER_SEQS.to_string(), "{}".to_string()),
+        ]);
+
+        let err = FlowQueryExtensions::parse_flow_extensions(&exts).unwrap_err();
+        assert!(format!("{err}").contains(FLOW_INCREMENTAL_AFTER_SEQS));
+    }
+
+    #[test]
+    fn test_parse_flow_extensions_sequence_range_requires_after_seqs() {
+        let exts = HashMap::from([(
+            FLOW_INCREMENTAL_MODE.to_string(),
+            FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE.to_string(),
+        )]);
+
+        let err = FlowQueryExtensions::parse_flow_extensions(&exts).unwrap_err();
+        assert!(format!("{err}").contains(FLOW_INCREMENTAL_AFTER_SEQS));
+    }
+
+    #[test]
     fn test_parse_flow_extensions_mode_requires_after_seqs() {
         let exts = HashMap::from([(
             FLOW_INCREMENTAL_MODE.to_string(),
@@ -698,5 +824,53 @@ mod flow_extension_tests {
         let exts = HashMap::from([(FLOW_SCHEDULED_TIME_MILLIS.to_string(), i64::MAX.to_string())]);
         let err = parse_scheduled_time_datetime(&exts).unwrap_err();
         assert!(format!("{err}").contains("Out-of-range"));
+    }
+}
+
+#[cfg(test)]
+mod query_options_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_spill_options_from_toml() {
+        let toml_str = r#"
+experimental_spill_mode = "custom"
+experimental_spill_path = "/tmp/spill"
+experimental_spill_max_temp_directory_size = "50GiB"
+experimental_spill_compression = "zstd"
+experimental_memory_pool_policy = "fair"
+"#;
+        let opts: QueryOptions = toml::from_str(toml_str).unwrap();
+        assert_eq!(opts.experimental_spill_mode, QuerySpillMode::Custom);
+        assert_eq!(
+            opts.experimental_spill_path,
+            Some(PathBuf::from("/tmp/spill"))
+        );
+        assert_eq!(
+            opts.experimental_spill_max_temp_directory_size,
+            ReadableSize::gb(50)
+        );
+        assert_eq!(
+            opts.experimental_spill_compression,
+            QuerySpillCompression::Zstd
+        );
+        assert_eq!(
+            opts.experimental_memory_pool_policy,
+            QueryMemoryPoolPolicy::Fair
+        );
+    }
+
+    #[test]
+    fn test_parse_invalid_spill_option_values() {
+        for toml_str in [
+            r#"experimental_spill_mode = "invalid""#,
+            r#"experimental_spill_compression = "gzip""#,
+            r#"experimental_memory_pool_policy = "none""#,
+        ] {
+            assert!(
+                toml::from_str::<QueryOptions>(toml_str).is_err(),
+                "{toml_str}"
+            );
+        }
     }
 }

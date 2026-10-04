@@ -12,8 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_grpc::channel_manager::ChannelManager;
+use std::sync::Arc;
+
+use common_base::readable_size::ReadableSize;
+use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
+use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
+use meta_srv::metasrv::MetasrvOptions;
 use meta_srv::mocks as server_mock;
 use meta_srv::mocks::MockInfo;
 
@@ -32,6 +37,50 @@ pub async fn mock_client_with_memstore() -> (MetaClient, MockMetaContext) {
         in_memory,
         ..
     } = server_mock::mock_with_memstore().await;
+    (
+        mock_client_by(server_addr, channel_manager).await,
+        MockMetaContext {
+            kv_backend,
+            in_memory,
+        },
+    )
+}
+
+pub async fn mock_client_with_memstore_and_grpc_message_sizes(
+    server_max_recv_message_size: ReadableSize,
+    server_max_send_message_size: ReadableSize,
+    client_max_recv_message_size: ReadableSize,
+    client_max_send_message_size: ReadableSize,
+) -> (MetaClient, MockMetaContext) {
+    let mut opts = MetasrvOptions::default();
+    opts.grpc.server_addr = "127.0.0.1:3002".to_string();
+    opts.grpc.max_recv_message_size = server_max_recv_message_size;
+    opts.grpc.max_send_message_size = server_max_send_message_size;
+
+    let client_channel_config = ChannelConfig {
+        max_recv_message_size: client_max_recv_message_size,
+        max_send_message_size: client_max_send_message_size,
+        ..ChannelConfig::new()
+    };
+
+    let kv_backend = Arc::new(MemoryKvBackend::new());
+    let in_memory = Arc::new(MemoryKvBackend::new());
+    let MockInfo {
+        server_addr,
+        channel_manager,
+        kv_backend,
+        in_memory,
+        ..
+    } = server_mock::mock_with_client_channel_config(
+        opts,
+        kv_backend,
+        None,
+        None,
+        Some(in_memory),
+        client_channel_config,
+    )
+    .await;
+
     (
         mock_client_by(server_addr, channel_manager).await,
         MockMetaContext {

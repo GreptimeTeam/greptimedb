@@ -27,6 +27,18 @@ use url::ParseError;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Invalid packed snapshot: {reason}"))]
+    InvalidPackedSnapshot { reason: String },
+
+    #[snafu(display("Parquet write cancelled"))]
+    ParquetWriteCancelled {},
+
+    #[snafu(display("Parquet writer limits must be positive"))]
+    InvalidParquetWriterLimits {},
+
+    #[snafu(display("Parquet writer resource limit exceeded: {reason}"))]
+    ParquetWriterResource { reason: String },
+
     #[snafu(display("Unsupported compression type: {}", compression_type))]
     UnsupportedCompressionType {
         compression_type: String,
@@ -61,6 +73,62 @@ pub enum Error {
         url: String,
         #[snafu(source)]
         error: ParseError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "SQL access to the local filesystem is disabled for '{}'; use S3, OSS, GCS, or AzBlob instead",
+        path
+    ))]
+    LocalFileAccessDisabled {
+        path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Local filesystem path '{}' is outside the configured copy root or is unsafe: {}; use a path relative to the copy root or use S3, OSS, GCS, or AzBlob",
+        path,
+        reason
+    ))]
+    LocalFileAccessDenied {
+        path: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Local filesystem path '{}' does not exist within the configured copy root",
+        path
+    ))]
+    LocalFilePathNotFound {
+        path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Location must include a file or object name: '{}'", path))]
+    MissingObjectName {
+        path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid local filesystem root '{}'", root))]
+    InvalidLocalFileRoot {
+        root: String,
+        #[snafu(source)]
+        error: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid local filesystem root '{}': {}", root, reason))]
+    InvalidLocalFileRootConfig {
+        root: String,
+        reason: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -219,6 +287,10 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
+            ParquetWriteCancelled {} => StatusCode::Cancelled,
+            InvalidPackedSnapshot { .. } => StatusCode::InvalidArguments,
+            InvalidParquetWriterLimits {} => StatusCode::InvalidArguments,
+            ParquetWriterResource { .. } => StatusCode::Suspended,
             BuildBackend { .. }
             | ListObjects { .. }
             | ReadObject { .. }
@@ -231,6 +303,12 @@ impl ErrorExt for Error {
             | UnsupportedFormat { .. }
             | InvalidConnection { .. }
             | InvalidUrl { .. }
+            | LocalFileAccessDisabled { .. }
+            | LocalFileAccessDenied { .. }
+            | LocalFilePathNotFound { .. }
+            | MissingObjectName { .. }
+            | InvalidLocalFileRoot { .. }
+            | InvalidLocalFileRootConfig { .. }
             | EmptyHostPath { .. }
             | InferSchema { .. }
             | ReadParquetSnafu { .. }

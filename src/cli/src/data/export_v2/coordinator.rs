@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_telemetry::info;
+use common_telemetry::{error, info};
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 
@@ -39,6 +39,9 @@ struct ExportContext<'a> {
     schemas: Vec<String>,
     format: DataFormat,
     parallelism: usize,
+    experimental_metric_export: bool,
+    packed: bool,
+    resume: bool,
 }
 
 pub struct ExportDataOptions<'a> {
@@ -46,6 +49,8 @@ pub struct ExportDataOptions<'a> {
     pub storage_config: &'a ObjectStoreConfig,
     pub parallelism: usize,
     pub chunk_parallelism: usize,
+    pub experimental_metric_export: bool,
+    pub resume: bool,
 }
 
 pub async fn export_data(
@@ -67,7 +72,10 @@ pub async fn export_data(
         catalog: manifest.catalog.clone(),
         schemas: manifest.schemas.clone(),
         format: manifest.format,
+        packed: manifest.is_packed(),
         parallelism: options.parallelism,
+        experimental_metric_export: options.experimental_metric_export,
+        resume: options.resume,
     };
 
     // One progress unit per chunk. Already completed/skipped chunks from a
@@ -88,11 +96,11 @@ pub async fn export_data(
         export_data_serial(&context, storage, manifest, progress).await
     } else {
         export_data_concurrent(
-            &context,
             storage,
             manifest,
             options.chunk_parallelism,
             progress,
+            |id, range| export_chunk(&context, id, range),
         )
         .await
     };
@@ -134,11 +142,17 @@ async fn export_data_serial(
         };
 
         manifest.touch();
-        storage.write_manifest(manifest).await?;
-        // The chunk is finalized (completed, skipped, or failed) and persisted.
-        progress.inc(1);
-
-        result?;
+        let persistence = storage.write_manifest(manifest).await;
+        if persistence.is_ok() {
+            progress.inc(1);
+        }
+        if let Err(err) = result {
+            if let Err(secondary) = persistence {
+                error!(secondary; "Failed to persist failed export chunk");
+            }
+            return Err(err);
+        }
+        persistence?;
     }
 
     Ok(())
@@ -155,39 +169,44 @@ async fn export_data_serial(
 /// On the first chunk failure we stop scheduling new chunks but let already
 /// in-flight chunks finish and persist their final status, then return the
 /// first error.
-async fn export_data_concurrent(
-    context: &ExportContext<'_>,
+async fn export_data_concurrent<F, Fut>(
     storage: &dyn SnapshotStorage,
     manifest: &mut Manifest,
     chunk_parallelism: usize,
     progress: &dyn ProgressReporter,
-) -> Result<()> {
+    export: F,
+) -> Result<()>
+where
+    F: Fn(u32, TimeRange) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<String>>>,
+{
     let mut pending = FuturesUnordered::new();
     let mut next_idx = 0;
     let mut first_error: Option<Error> = None;
 
     loop {
-        let mut scheduled = false;
-
+        let mut admitted = Vec::new();
         // Schedule eligible chunks in order up to the parallelism limit. Once a
         // failure is seen, stop scheduling but keep draining in-flight chunks.
-        while first_error.is_none() && pending.len() < chunk_parallelism {
+        while first_error.is_none() && pending.len() + admitted.len() < chunk_parallelism {
             let Some(idx) = next_eligible_chunk(manifest, &mut next_idx) else {
                 break;
             };
 
             let (chunk_id, time_range) = mark_chunk_in_progress(manifest, idx);
-            scheduled = true;
-
-            pending.push(async move {
-                let result = export_chunk(context, chunk_id, time_range).await;
-                (idx, result)
-            });
+            admitted.push((idx, chunk_id, time_range));
         }
-
-        if scheduled {
+        if !admitted.is_empty() {
             manifest.touch();
-            storage.write_manifest(manifest).await?;
+            match storage.write_manifest(manifest).await {
+                Ok(()) => {
+                    for (idx, chunk_id, time_range) in admitted {
+                        let export = &export;
+                        pending.push(async move { (idx, export(chunk_id, time_range).await) });
+                    }
+                }
+                Err(err) => first_error = Some(err),
+            }
         }
 
         let Some((idx, export_result)) = pending.next().await else {
@@ -204,9 +223,11 @@ async fn export_data_concurrent(
             }
         }
         manifest.touch();
-        storage.write_manifest(manifest).await?;
-        // The chunk is finalized (completed, skipped, or failed) and persisted.
-        progress.inc(1);
+        match storage.write_manifest(manifest).await {
+            Ok(()) => progress.inc(1),
+            Err(err) if first_error.is_none() => first_error = Some(err),
+            Err(err) => error!(err; "Failed to persist export chunk while draining"),
+        }
     }
 
     match first_error {
@@ -257,12 +278,20 @@ async fn export_chunk(
     chunk_id: u32,
     time_range: TimeRange,
 ) -> Result<Vec<String>> {
+    if context.experimental_metric_export {
+        context
+            .storage
+            .prepare_export_chunk(&context.schemas, chunk_id, context.resume, context.packed)
+            .await?;
+    }
     let scheme = StorageScheme::from_uri(context.snapshot_uri)?;
     let needs_dir = matches!(scheme, StorageScheme::File);
     let copy_options = CopyOptions {
         format: context.format,
         time_range,
         parallelism: context.parallelism,
+        experimental_metric_export: context.experimental_metric_export,
+        packed: context.packed,
     };
 
     for schema in &context.schemas {
@@ -288,6 +317,39 @@ async fn export_chunk(
     }
 
     let files = list_chunk_files(context.storage, &context.schemas, chunk_id).await?;
+    if context.packed {
+        use common_datasource::packed_snapshot::{PACK_INDEX_FILE, PackIndex};
+        let mut expected = Vec::new();
+        for schema in &context.schemas {
+            let prefix = data_dir_for_schema_chunk(schema, chunk_id);
+            let index_path = format!("{prefix}{PACK_INDEX_FILE}");
+            let text = context.storage.read_text(&index_path).await?;
+            let index: PackIndex = serde_json::from_str(&text).map_err(|e| {
+                crate::data::export_v2::error::InvalidUriSnafu {
+                    uri: context.snapshot_uri,
+                    reason: e.to_string(),
+                }
+                .build()
+            })?;
+            index.validate().map_err(|e| {
+                crate::data::export_v2::error::InvalidUriSnafu {
+                    uri: context.snapshot_uri,
+                    reason: e.to_string(),
+                }
+                .build()
+            })?;
+            expected.push(index_path);
+            expected.extend(index.objects.iter().map(|o| format!("{prefix}{}", o.path)));
+        }
+        expected.sort();
+        if files != expected {
+            return crate::data::export_v2::error::InvalidUriSnafu {
+                uri: context.snapshot_uri,
+                reason: "chunk inventory differs from packed indexes",
+            }
+            .fail();
+        }
+    }
     info!("Collected {} files for chunk {}", files.len(), chunk_id);
     Ok(files)
 }
@@ -324,6 +386,268 @@ mod tests {
             .map(|id| ChunkMeta::new(id, TimeRange::unbounded()))
             .collect();
         manifest
+    }
+
+    struct FailingManifest {
+        fail_at: usize,
+        writes: std::sync::atomic::AtomicUsize,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl SnapshotStorage for FailingManifest {
+        async fn write_manifest(&self, manifest: &Manifest) -> Result<()> {
+            use std::sync::atomic::Ordering;
+
+            let write = self.writes.fetch_add(1, Ordering::SeqCst) + 1;
+            if write == 1 {
+                assert_eq!(manifest.in_progress_count(), 2);
+            }
+            if write == self.fail_at {
+                self.release.notify_one();
+                return crate::data::export_v2::error::IoSnafu {
+                    operation: "injected manifest failure",
+                    error: std::io::Error::other("manifest failure"),
+                }
+                .fail();
+            }
+            Ok(())
+        }
+        async fn exists(&self) -> Result<bool> {
+            unreachable!()
+        }
+        async fn read_manifest(&self) -> Result<Manifest> {
+            unreachable!()
+        }
+        async fn file_size(&self, _: &str) -> Result<Option<u64>> {
+            unreachable!()
+        }
+        async fn write_schema(
+            &self,
+            _: &crate::data::export_v2::schema::SchemaSnapshot,
+        ) -> Result<()> {
+            unreachable!()
+        }
+        async fn write_text(&self, _: &str, _: &str) -> Result<()> {
+            unreachable!()
+        }
+        async fn read_text(&self, _: &str) -> Result<String> {
+            unreachable!()
+        }
+        async fn create_dir_all(&self, _: &str) -> Result<()> {
+            unreachable!()
+        }
+        async fn list_files_recursive(&self, _: &str) -> Result<Vec<String>> {
+            unreachable!()
+        }
+        async fn delete_snapshot(&self) -> Result<()> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_manifest_failure_stops_admission_and_drains_started_chunks() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for fail_at in [1, 2, 3] {
+            let storage = FailingManifest {
+                fail_at,
+                writes: AtomicUsize::new(0),
+                release: tokio::sync::Notify::new(),
+            };
+            let started = AtomicUsize::new(0);
+            let finished = AtomicUsize::new(0);
+            let second_started = tokio::sync::Notify::new();
+            let mut manifest = pending_manifest(4);
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                export_data_concurrent(
+                    &storage,
+                    &mut manifest,
+                    2,
+                    &crate::data::progress::NoopProgress,
+                    |id, _| {
+                        let (started, finished, second_started, storage) =
+                            (&started, &finished, &second_started, &storage);
+                        async move {
+                            started.fetch_add(1, Ordering::SeqCst);
+                            match id {
+                                1 => second_started.notified().await,
+                                2 => {
+                                    second_started.notify_one();
+                                    storage.release.notified().await;
+                                }
+                                _ => panic!("new chunk started after manifest persistence failed"),
+                            }
+                            finished.fetch_add(1, Ordering::SeqCst);
+                            Ok(vec![format!("data/public/{id}/a.parquet")])
+                        }
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("injected manifest failure")
+            );
+            let expected = if fail_at == 1 { 0 } else { 2 };
+            assert_eq!(started.load(Ordering::SeqCst), expected);
+            assert_eq!(finished.load(Ordering::SeqCst), expected);
+        }
+    }
+
+    struct PausedClose {
+        inner: Option<object_store::layers::mock::oio::Writer>,
+        started: std::sync::Arc<tokio::sync::Notify>,
+        release: std::sync::Arc<tokio::sync::Notify>,
+    }
+
+    impl object_store::layers::mock::oio::Write for PausedClose {
+        async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
+            self.inner.as_mut().unwrap().write(bytes).await
+        }
+
+        async fn close(&mut self) -> object_store::Result<object_store::layers::mock::Metadata> {
+            let mut inner = self.inner.take().unwrap();
+            let (started, release) = (self.started.clone(), self.release.clone());
+            // Model blocking storage I/O that survives dropping its caller.
+            let (inner, result) = tokio::spawn(async move {
+                started.notify_one();
+                release.notified().await;
+                let result = inner.close().await;
+                (inner, result)
+            })
+            .await
+            .unwrap();
+            self.inner = Some(inner);
+            result
+        }
+
+        async fn abort(&mut self) -> object_store::Result<()> {
+            self.inner.as_mut().unwrap().abort().await
+        }
+    }
+
+    #[tokio::test]
+    async fn packed_cancellation_drains_close_before_failing_chunk() {
+        use std::sync::Arc;
+
+        use common_datasource::packed_snapshot::PACK_INDEX_FILE;
+        use common_datasource::packed_writer::{PackedTableWriter, PackedWriter};
+        use common_datasource::parquet_writer::ParquetFileWriter;
+        use datatypes::arrow::datatypes::{DataType, Field, Schema};
+        use object_store::layers::mock::{MockLayerBuilder, MockWriterFactory};
+        use tokio_util::sync::CancellationToken;
+
+        use crate::data::snapshot_storage::OpenDalStorage;
+
+        for paused_path in ["pack-000000.bin", PACK_INDEX_FILE] {
+            let directory = tempfile::tempdir().unwrap();
+            let uri = url::Url::from_directory_path(directory.path()).unwrap();
+            let storage =
+                OpenDalStorage::from_uri(uri.as_str(), &ObjectStoreConfig::default()).unwrap();
+            let started = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let factory: MockWriterFactory = Arc::new({
+                let (started, release) = (started.clone(), release.clone());
+                move |path, _, inner| {
+                    if path.trim_start_matches('/') == paused_path {
+                        Box::new(PausedClose {
+                            inner: Some(inner),
+                            started: started.clone(),
+                            release: release.clone(),
+                        })
+                    } else {
+                        inner
+                    }
+                }
+            });
+            let store = object_store::secure_fs::SecureFsRoot::open(directory.path())
+                .unwrap()
+                .build_operator()
+                .layer(
+                    MockLayerBuilder::default()
+                        .writer_factory(factory)
+                        .build()
+                        .unwrap(),
+                );
+            let packed = PackedWriter::new(store.clone()).unwrap();
+            let schema = Arc::new(Schema::new(vec![Field::new(
+                "value",
+                DataType::Int64,
+                true,
+            )]));
+            let mut table = ParquetFileWriter::open_packed(
+                schema,
+                store.clone(),
+                "unused",
+                None,
+                PackedTableWriter::new(packed.clone(), "empty".into(), 1, false),
+            )
+            .unwrap();
+            table.finish(None).await.unwrap();
+            let token = CancellationToken::new();
+            let mut manifest = pending_manifest(1);
+            manifest.version = 2;
+            manifest.data_layout = Some(common_datasource::packed_snapshot::PACKED_LAYOUT.into());
+            let export = export_data_concurrent(
+                &storage,
+                &mut manifest,
+                2,
+                &crate::data::progress::NoopProgress,
+                |_, _| async {
+                    let mut packed = packed.lock().await;
+                    let result = packed.finish(&token).await;
+                    if result.is_err() {
+                        packed.abort().await.unwrap();
+                    }
+                    result.map_err(|error| {
+                        crate::data::export_v2::error::IoSnafu {
+                            operation: "exporting packed chunk",
+                            error: std::io::Error::other(error),
+                        }
+                        .build()
+                    })
+                },
+            );
+            tokio::pin!(export);
+            tokio::select! {
+                _ = started.notified() => {},
+                result = &mut export => panic!("completed while close paused: {result:?}"),
+            }
+            token.cancel();
+            assert!(futures::poll!(&mut export).is_pending());
+            assert_eq!(
+                storage.read_manifest().await.unwrap().chunks[0].status,
+                ChunkStatus::InProgress
+            );
+            release.notify_one();
+            assert!(export.await.unwrap_err().to_string().contains("cancelled"));
+            let persisted = storage.read_manifest().await.unwrap();
+            assert_eq!(persisted.chunks[0].status, ChunkStatus::Failed);
+            assert!(!persisted.is_complete());
+            assert!(persisted.chunks[0].files.is_empty());
+            assert!(
+                store
+                    .stat("pack-000000.bin")
+                    .await
+                    .unwrap()
+                    .content_length()
+                    > 0
+            );
+            assert_eq!(
+                store.exists(PACK_INDEX_FILE).await.unwrap(),
+                paused_path == PACK_INDEX_FILE
+            );
+            if paused_path == PACK_INDEX_FILE {
+                let index: common_datasource::packed_snapshot::PackIndex =
+                    serde_json::from_slice(&store.read(PACK_INDEX_FILE).await.unwrap().to_bytes())
+                        .unwrap();
+                index.validate_membership(["empty"]).unwrap();
+            }
+        }
     }
 
     #[test]

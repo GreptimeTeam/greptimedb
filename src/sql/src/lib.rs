@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(box_patterns)]
-
 pub mod ast;
 pub mod dialect;
 pub mod error;
@@ -23,6 +21,6 @@ pub mod partition;
 pub mod statements;
 pub mod util;
 
-pub use parsers::create_parser::{ENGINE, MAXVALUE};
+pub use parsers::create_parser::{ENGINE, MAXVALUE, parse_json2_type_hint_path};
 pub use parsers::tql_parser::TQL;
 pub use parsers::with_tql_parser::{CteContent, HybridCteWith};

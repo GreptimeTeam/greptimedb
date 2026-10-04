@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt::Write as FmtWrite;
 use std::io;
 use std::time::Duration;
 
@@ -22,11 +23,14 @@ use arrow::datatypes::{
     UInt16Type, UInt32Type, UInt64Type,
 };
 use arrow_schema::{DataType, IntervalUnit};
+use chrono::{Datelike, NaiveDateTime};
 use common_decimal::Decimal128;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::{Output, OutputData};
-use common_recordbatch::{RecordBatch, SendableRecordBatchStream};
+use common_recordbatch::{
+    RecordBatch, SendableRecordBatchStream, map_dictionary_to_values_data_type,
+};
 use common_telemetry::{debug, error};
 use common_time::{Date, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth};
 use datafusion_common::ScalarValue;
@@ -36,14 +40,21 @@ use datatypes::types::jsonb_to_string;
 use futures::StreamExt;
 use opensrv_mysql::{
     Column, ColumnFlags, ColumnType, ErrorKind, OkResponse, QueryResultWriter, RowWriter,
+    ToMysqlValue,
 };
 use session::SessionRef;
 use session::context::QueryContextRef;
 use snafu::prelude::*;
 use tokio::io::AsyncWrite;
 
-use crate::error::{self, ConvertSqlValueSnafu, DataFusionSnafu, NotSupportedSnafu, Result};
+use crate::error::{
+    self, ConvertSqlValueSnafu, DataFusionSnafu, InternalSnafu, NotSupportedSnafu, Result,
+    TimestampOverflowSnafu,
+};
 use crate::metrics::*;
+
+const MYSQL_DATETIME_MIN_YEAR: i32 = 1000;
+const MYSQL_DATETIME_MAX_YEAR: i32 = 9999;
 
 /// Try to write multiple output to the writer if possible.
 pub async fn write_output<W: AsyncWrite + Send + Sync + Unpin>(
@@ -165,6 +176,35 @@ pub fn handle_err(e: impl ErrorExt, query_ctx: QueryContextRef) -> (ErrorKind, S
 
 struct MysqlResultWriter;
 
+struct PrecisionTimestamp<'a> {
+    formatted: &'a str,
+    datetime: chrono::NaiveDateTime,
+}
+
+struct StagedTimestamp {
+    datetime: Option<NaiveDateTime>,
+    formatted: String,
+}
+
+impl StagedTimestamp {
+    fn new() -> Self {
+        Self {
+            datetime: None,
+            formatted: String::with_capacity(32),
+        }
+    }
+}
+
+impl<'a> ToMysqlValue for PrecisionTimestamp<'a> {
+    fn to_mysql_text<W: std::io::Write>(&self, w: &mut W) -> io::Result<()> {
+        self.formatted.to_mysql_text(w)
+    }
+
+    fn to_mysql_bin<W: std::io::Write>(&self, w: &mut W, c: &Column) -> io::Result<()> {
+        self.datetime.to_mysql_bin(w, c)
+    }
+}
+
 impl MysqlResultWriter {
     async fn write_affected_rows<'a, W: AsyncWrite + Unpin>(
         w: QueryResultWriter<'a, W>,
@@ -190,7 +230,63 @@ impl MysqlResultWriter {
     ) -> Result<()> {
         let schema = record_batch.schema.clone();
         let record_batch = record_batch.into_df_record_batch();
+        let mut timestamp_slots = vec![None; record_batch.num_columns()];
+        let mut staged_timestamps = record_batch
+            .columns()
+            .iter()
+            .enumerate()
+            .filter(|(_, column)| matches!(column.data_type(), DataType::Timestamp(_, _)))
+            .enumerate()
+            .map(|(slot, (column_index, column))| {
+                timestamp_slots[column_index] = Some(slot);
+                (column, StagedTimestamp::new())
+            })
+            .collect::<Vec<_>>();
         for i in 0..record_batch.num_rows() {
+            for (column, staged_timestamp) in &mut staged_timestamps {
+                let column = *column;
+                staged_timestamp.datetime = None;
+                staged_timestamp.formatted.clear();
+                if !column.is_null(i) {
+                    let timestamp = datatypes::arrow_array::timestamp_array_value(column, i);
+                    let datetime = timestamp
+                        .to_chrono_datetime_with_timezone(Some(&query_context.timezone()))
+                        .with_context(|| TimestampOverflowSnafu {
+                            error: format!(
+                                "timestamp {} overflow with unit {}",
+                                timestamp.value(),
+                                timestamp.unit()
+                            ),
+                        })?;
+                    let year = datetime.year();
+                    if !(MYSQL_DATETIME_MIN_YEAR..=MYSQL_DATETIME_MAX_YEAR).contains(&year) {
+                        return TimestampOverflowSnafu {
+                            error: format!(
+                                "timestamp {} with unit {} has local year {}, outside MySQL DATETIME range {}..={}",
+                                timestamp.value(),
+                                timestamp.unit(),
+                                year,
+                                MYSQL_DATETIME_MIN_YEAR,
+                                MYSQL_DATETIME_MAX_YEAR,
+                            ),
+                        }
+                        .fail();
+                    }
+                    write!(
+                        &mut staged_timestamp.formatted,
+                        "{}",
+                        datetime.format("%Y-%m-%d %H:%M:%S%.f")
+                    )
+                    .map_err(|_| {
+                        InternalSnafu {
+                            err_msg: "timestamp formatting failed",
+                        }
+                        .build()
+                    })?;
+                    staged_timestamp.datetime = Some(datetime);
+                }
+            }
+
             for (j, column) in record_batch.columns().iter().enumerate() {
                 if column.is_null(i) {
                     row_writer.write_col(None::<u8>)?;
@@ -264,9 +360,26 @@ impl MysqlResultWriter {
                         row_writer.write_col(v.to_chrono_date())?;
                     }
                     DataType::Timestamp(_, _) => {
-                        let v = datatypes::arrow_array::timestamp_array_value(column, i);
-                        let v = v.to_chrono_datetime_with_timezone(Some(&query_context.timezone()));
-                        row_writer.write_col(v)?;
+                        let slot = timestamp_slots
+                            .get(j)
+                            .context(InternalSnafu {
+                                err_msg: "timestamp column index is invalid",
+                            })?
+                            .as_ref()
+                            .context(InternalSnafu {
+                                err_msg: "timestamp column has no staging slot",
+                            })?;
+                        let (_, staged_timestamp) =
+                            staged_timestamps.get(*slot).context(InternalSnafu {
+                                err_msg: "timestamp staging slot is missing",
+                            })?;
+                        let datetime = staged_timestamp.datetime.context(InternalSnafu {
+                            err_msg: "timestamp staging value is missing",
+                        })?;
+                        row_writer.write_col(PrecisionTimestamp {
+                            formatted: staged_timestamp.formatted.as_str(),
+                            datetime,
+                        })?;
                     }
                     DataType::Interval(interval_unit) => match interval_unit {
                         IntervalUnit::YearMonth => {
@@ -333,10 +446,8 @@ impl MysqlResultWriter {
     }
 }
 
-pub(crate) fn create_mysql_column(
-    data_type: &ConcreteDataType,
-    column_name: &str,
-) -> Result<Column> {
+pub fn create_mysql_column(data_type: &ConcreteDataType, column_name: &str) -> Result<Column> {
+    let data_type = &map_dictionary_to_values_data_type(data_type);
     let column_type = match data_type {
         ConcreteDataType::Null(_) => Ok(ColumnType::MYSQL_TYPE_NULL),
         ConcreteDataType::Boolean(_) | ConcreteDataType::Int8(_) | ConcreteDataType::UInt8(_) => {

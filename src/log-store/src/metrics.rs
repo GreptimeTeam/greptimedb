@@ -54,6 +54,10 @@ lazy_static! {
         "greptime_logstore_op_elapsed",
         "logstore operation elapsed",
         &[LOGSTORE_LABEL, OPTYPE_LABEL],
+        vec![
+            0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
+            45.0, 60.0,
+        ],
     )
     .unwrap();
     /// Timer of the append_batch operation on the kafka logstore.

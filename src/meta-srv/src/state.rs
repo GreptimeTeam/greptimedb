@@ -98,7 +98,11 @@ impl State {
 
 pub fn become_leader(enable_leader_cache: bool) -> impl FnOnce(&State) -> State {
     move |prev| match prev {
-        State::Leader(leader) => State::Leader(LeaderState { ..leader.clone() }),
+        State::Leader(leader) => {
+            let mut new_leader = leader.clone();
+            new_leader.enable_leader_cache = enable_leader_cache;
+            State::Leader(new_leader)
+        }
         State::Follower(follower) => State::Leader(LeaderState {
             server_addr: follower.server_addr.clone(),
             enable_leader_cache,

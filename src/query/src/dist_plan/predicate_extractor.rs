@@ -433,16 +433,16 @@ impl DataFusionExprConverter {
             Expr::Cast(cast_expr) => {
                 // For safe casts, unwrap to the inner expression
                 // For unsafe casts, skip with debug logging
-                if Self::is_safe_cast_for_partition_pruning(&cast_expr.data_type) {
+                if Self::is_safe_cast_for_partition_pruning(cast_expr.field.data_type()) {
                     Self::convert_to_operand(&cast_expr.expr)
                 } else {
                     debug!(
                         "Skipping unsafe cast for partition pruning: {:?}",
-                        cast_expr.data_type
+                        cast_expr.field.data_type()
                     );
                     Err(datafusion_common::DataFusionError::Plan(format!(
                         "Cast to {:?} not supported for partition pruning",
-                        cast_expr.data_type
+                        cast_expr.field.data_type()
                     )))
                 }
             }
@@ -503,6 +503,11 @@ impl DataFusionExprConverter {
             // String casts might be safe in some cases
             DataType::Utf8 => true,
             DataType::LargeUtf8 => true,
+            // Dictionary encoding does not change the logical value. DataFusion inserts this cast
+            // when a predicate literal is compared with a dictionary-encoded scan column.
+            DataType::Dictionary(_, value_type) => {
+                Self::is_safe_cast_for_partition_pruning(value_type)
+            }
 
             // Date/time casts might be safe if they don't change precision significantly
             DataType::Date32 => true,
@@ -626,6 +631,26 @@ mod tests {
                 RestrictedOp::GtEq,
                 Operand::Value(Value::Int64(100)),
             )]
+        );
+    }
+
+    #[test]
+    fn test_dictionary_cast_preserves_partition_constraint() {
+        let dictionary_type =
+            DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8));
+        let filter = col("tag").eq(Expr::Cast(datafusion_expr::Cast::new(
+            Box::new(lit("b")),
+            dictionary_type,
+        )));
+
+        let partition_expr = DataFusionExprConverter::convert(&filter).unwrap();
+        assert_eq!(
+            partition_expr,
+            PartitionExpr::new(
+                Operand::Column("tag".to_string()),
+                RestrictedOp::Eq,
+                Operand::Value(Value::String("b".into())),
+            )
         );
     }
 
@@ -986,10 +1011,10 @@ mod tests {
         let cases = vec![
             FilterTestCase::new(
                 "safe_cast",
-                Expr::Cast(datafusion_expr::Cast {
-                    expr: Box::new(col("user_id")),
-                    data_type: DataType::Int64,
-                })
+                Expr::Cast(datafusion_expr::Cast::new(
+                    Box::new(col("user_id")),
+                    DataType::Int64,
+                ))
                 .eq(lit(100i64)),
                 vec![PartitionExpr::new(
                     Operand::Column("user_id".to_string()),
@@ -1000,10 +1025,10 @@ mod tests {
             ),
             FilterTestCase::new(
                 "cast_with_alias",
-                Expr::Cast(datafusion_expr::Cast {
-                    expr: Box::new(col("user_id").alias("uid")),
-                    data_type: DataType::Int64,
-                })
+                Expr::Cast(datafusion_expr::Cast::new(
+                    Box::new(col("user_id").alias("uid")),
+                    DataType::Int64,
+                ))
                 .eq(lit(100i64)),
                 vec![PartitionExpr::new(
                     Operand::Column("user_id".to_string()),
@@ -1014,12 +1039,12 @@ mod tests {
             ),
             FilterTestCase::new(
                 "unsafe_cast",
-                Expr::Cast(datafusion_expr::Cast {
-                    expr: Box::new(col("user_id")),
-                    data_type: DataType::List(std::sync::Arc::new(
+                Expr::Cast(datafusion_expr::Cast::new(
+                    Box::new(col("user_id")),
+                    DataType::List(std::sync::Arc::new(
                         datafusion::arrow::datatypes::Field::new("item", DataType::Int32, true),
                     )),
-                })
+                ))
                 .eq(lit(100i64)),
                 vec![],
                 vec!["user_id"],
@@ -1097,10 +1122,10 @@ mod tests {
                     let in_expr = col("user_id")
                         .alias("uid")
                         .in_list(vec![lit(100i64), lit(200i64)], false);
-                    let cast_expr = Expr::Cast(datafusion_expr::Cast {
-                        expr: Box::new(col("user_id")),
-                        data_type: DataType::Int64,
-                    });
+                    let cast_expr = Expr::Cast(datafusion_expr::Cast::new(
+                        Box::new(col("user_id")),
+                        DataType::Int64,
+                    ));
                     let between_expr = cast_expr.between(lit(300i64), lit(400i64));
                     in_expr.or(between_expr)
                 },

@@ -42,6 +42,7 @@ use session::context::{QueryContext, QueryContextRef};
 
 use crate::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
+pub(crate) use crate::test_util::MockInstanceImpl;
 use crate::test_util::StorageType;
 use crate::tests::{MockDistributedInstance, create_distributed_instance};
 
@@ -85,33 +86,9 @@ pub(crate) enum MockInstanceBuilder {
     Distributed(GreptimeDbClusterBuilder),
 }
 
-pub(crate) enum MockInstanceImpl {
-    Standalone(GreptimeDbStandalone),
-    Distributed(GreptimeDbCluster),
-}
-
-impl MockInstanceImpl {
-    pub(crate) fn metasrv(&self) -> &Arc<Metasrv> {
-        match self {
-            MockInstanceImpl::Standalone(_) => unreachable!(),
-            MockInstanceImpl::Distributed(instance) => &instance.metasrv,
-        }
-    }
-
-    pub(crate) fn datanodes(&self) -> &HashMap<DatanodeId, Datanode> {
-        match self {
-            MockInstanceImpl::Standalone(_) => unreachable!(),
-            MockInstanceImpl::Distributed(instance) => &instance.datanode_instances,
-        }
-    }
-}
-
 impl MockInstance for MockInstanceImpl {
     fn frontend(&self) -> Arc<Instance> {
-        match self {
-            MockInstanceImpl::Standalone(instance) => instance.frontend(),
-            MockInstanceImpl::Distributed(instance) => instance.fe_instance().clone(),
-        }
+        MockInstanceImpl::frontend(self)
     }
 
     fn is_distributed_mode(&self) -> bool {
@@ -142,11 +119,19 @@ impl MockInstanceBuilder {
                     guard,
                     kv_backend,
                     procedure_manager,
+                    event_recorder_handle,
                     ..
                 } = instance;
                 MockInstanceImpl::Standalone(
                     builder
-                        .build_with(kv_backend, guard, opts, procedure_manager, false)
+                        .build_with(
+                            kv_backend,
+                            guard,
+                            opts,
+                            procedure_manager,
+                            event_recorder_handle,
+                            false,
+                        )
                         .await,
                 )
             }
@@ -429,6 +414,16 @@ pub fn prepare_path(p: &str) -> String {
     };
 
     p.to_string()
+}
+
+/// Creates a temporary local-file test directory inside the standalone test sandbox.
+pub fn create_local_file_test_dir(prefix: &str) -> tempfile::TempDir {
+    let parent = find_workspace_path("target/local-file-tests");
+    std::fs::create_dir_all(&parent).unwrap();
+    tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(parent)
+        .unwrap()
 }
 
 /// Find the testing file resource under workspace root to be used in object store.

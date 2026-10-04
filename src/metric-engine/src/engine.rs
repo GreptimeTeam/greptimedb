@@ -51,7 +51,7 @@ use store_api::region_engine::{
 };
 use store_api::region_request::{
     AffectedRows, BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionPutRequest,
-    RegionRequest,
+    RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
@@ -237,6 +237,9 @@ impl RegionEngine for MetricEngine {
             }
             RegionRequest::Drop(drop) => self.inner.drop_region(region_id, drop).await,
             RegionRequest::Open(open) => self.inner.open_region(region_id, open).await,
+            RegionRequest::CleanUp(clean_up) => {
+                self.inner.clean_up_region(region_id, clean_up).await
+            }
             RegionRequest::Close(close) => self.inner.close_region(region_id, close).await,
             RegionRequest::Alter(alter) => {
                 self.inner
@@ -268,7 +271,28 @@ impl RegionEngine for MetricEngine {
                     UnsupportedRegionRequestSnafu { request }.fail()
                 }
             }
-            RegionRequest::Truncate(_) => UnsupportedRegionRequestSnafu { request }.fail(),
+            RegionRequest::Truncate(RegionTruncateRequest::Unflushed) => {
+                if self.inner.is_physical_region(region_id) {
+                    self.inner
+                        .mito
+                        .handle_request(
+                            utils::to_data_region_id(region_id),
+                            RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
+                        )
+                        .await
+                        .context(error::MitoTruncateOperationSnafu)
+                        .map(|response| response.affected_rows)
+                } else {
+                    UnsupportedRegionRequestSnafu {
+                        request: RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
+                    }
+                    .fail()
+                }
+            }
+            RegionRequest::Truncate(request) => UnsupportedRegionRequestSnafu {
+                request: RegionRequest::Truncate(request),
+            }
+            .fail(),
             RegionRequest::Delete(delete) => self.inner.delete_region(region_id, delete).await,
             RegionRequest::Catchup(_) => {
                 let mut response = self
@@ -476,7 +500,6 @@ impl MetricEngine {
             metadata_region,
             data_region,
             state: state.clone(),
-            config,
             row_modifier: RowModifier::default(),
             flush_task: RepeatedTask::new(
                 flush_interval,
@@ -556,11 +579,6 @@ impl MetricEngine {
     ) -> Result<common_recordbatch::SendableRecordBatchStream, BoxedError> {
         self.inner.scan_to_stream(region_id, request).await
     }
-
-    /// Returns the configuration of the engine.
-    pub fn config(&self) -> &EngineConfig {
-        &self.inner.config
-    }
 }
 
 struct MetricEngineInner {
@@ -568,7 +586,6 @@ struct MetricEngineInner {
     metadata_region: MetadataRegion,
     data_region: DataRegion,
     state: Arc<RwLock<MetricEngineState>>,
-    config: EngineConfig,
     row_modifier: RowModifier,
     flush_task: RepeatedTask<Error>,
 }
@@ -578,6 +595,8 @@ mod test {
     use std::assert_matches;
     use std::collections::HashMap;
 
+    use api::v1::Rows;
+    use common_recordbatch::RecordBatches;
     use common_telemetry::info;
     use common_wal::options::{KafkaWalOptions, WalOptions};
     use mito2::sst::location::region_dir_from_table_dir;
@@ -585,13 +604,120 @@ mod test {
     use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
     use store_api::mito_engine_options::WAL_OPTIONS_KEY;
     use store_api::region_request::{
-        PathType, RegionCloseRequest, RegionDropRequest, RegionFlushRequest, RegionOpenRequest,
-        RegionRequest,
+        PathType, RegionCleanUpRequest, RegionCloseRequest, RegionDropRequest, RegionFlushRequest,
+        RegionOpenRequest, RegionPutRequest, RegionRequest, RegionTruncateRequest,
     };
 
     use super::*;
     use crate::maybe_skip_kafka_log_store_integration_test;
-    use crate::test_util::{TestEnv, create_logical_region_request};
+    use crate::test_util::{
+        TestEnv, build_rows, create_logical_region_request, row_schema_with_tags,
+    };
+
+    #[tokio::test]
+    async fn test_build_series_index_forwarding() {
+        use api::v1::region::build_index_request;
+        use store_api::region_request::RegionBuildIndexRequest;
+
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let request = || {
+            RegionRequest::BuildIndex(RegionBuildIndexRequest {
+                options: Some(build_index_request::Options::SeriesIndex(Default::default())),
+            })
+        };
+        // Default Mito config disables series indexes: reaching that error proves forwarding.
+        let error = env
+            .metric()
+            .handle_request(env.default_physical_region_id(), request())
+            .await
+            .unwrap_err();
+        let error = format!("{error:?}");
+        assert!(error.contains("series index is disabled"), "{error}");
+        let error = env
+            .metric()
+            .handle_request(env.default_logical_region_id(), request())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            common_error::status_code::StatusCode::Unsupported,
+            error.status_code()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_discard_unflushed_data_only() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+
+        let engine = env.metric();
+        let mito = env.mito();
+        let physical_region_id = env.default_physical_region_id();
+        let logical_region_id = env.default_logical_region_id();
+        let data_region_id = utils::to_data_region_id(physical_region_id);
+        let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
+
+        let metadata_memtable_size = mito
+            .region_statistic(metadata_region_id)
+            .unwrap()
+            .memtable_size;
+        assert!(metadata_memtable_size > 0);
+
+        engine
+            .handle_request(
+                logical_region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
+                    rows: Rows {
+                        schema: row_schema_with_tags(&["job"]),
+                        rows: build_rows(1, 5),
+                    },
+                    hint: None,
+                    partition_expr_version: None,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(mito.region_statistic(data_region_id).unwrap().memtable_size > 0);
+
+        engine
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            0,
+            mito.region_statistic(data_region_id).unwrap().memtable_size
+        );
+        assert_eq!(
+            metadata_memtable_size,
+            mito.region_statistic(metadata_region_id)
+                .unwrap()
+                .memtable_size
+        );
+
+        let stream = engine
+            .scan_to_stream(logical_region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(
+            0,
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+        );
+
+        // This maintenance operation applies to a physical region group only.
+        engine
+            .handle_request(
+                logical_region_id,
+                RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
+            )
+            .await
+            .unwrap_err();
+    }
 
     #[tokio::test]
     async fn close_open_regions() {
@@ -604,7 +730,7 @@ mod test {
         engine
             .handle_request(
                 physical_region_id,
-                RegionRequest::Close(RegionCloseRequest {}),
+                RegionRequest::Close(RegionCloseRequest::default()),
             )
             .await
             .unwrap();
@@ -632,7 +758,7 @@ mod test {
         engine
             .handle_request(
                 nonexistent_region_id,
-                RegionRequest::Close(RegionCloseRequest {}),
+                RegionRequest::Close(RegionCloseRequest::default()),
             )
             .await
             .unwrap();
@@ -654,6 +780,58 @@ mod test {
             )
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_offline_cleanup_physical_region() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let engine = env.metric();
+        let mito = env.mito();
+        let physical_region_id = env.default_physical_region_id();
+        let metadata_region_id = crate::utils::to_metadata_region_id(physical_region_id);
+        let data_region_id = crate::utils::to_data_region_id(physical_region_id);
+
+        engine
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Close(RegionCloseRequest::default()),
+            )
+            .await
+            .unwrap();
+
+        let object_store = env.get_object_store().unwrap();
+        let metadata_region_dir = region_dir_from_table_dir(
+            &TestEnv::default_table_dir(),
+            metadata_region_id,
+            PathType::Metadata,
+        );
+        let data_region_dir = region_dir_from_table_dir(
+            &TestEnv::default_table_dir(),
+            data_region_id,
+            PathType::Data,
+        );
+        assert!(object_store.exists(&metadata_region_dir).await.unwrap());
+        assert!(object_store.exists(&data_region_dir).await.unwrap());
+
+        let physical_region_option = [(PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new())]
+            .into_iter()
+            .collect();
+        let clean_up_request = RegionCleanUpRequest {
+            engine: METRIC_ENGINE_NAME.to_string(),
+            table_dir: TestEnv::default_table_dir(),
+            path_type: PathType::Bare,
+            options: physical_region_option,
+        };
+        engine
+            .handle_request(physical_region_id, RegionRequest::CleanUp(clean_up_request))
+            .await
+            .unwrap();
+
+        assert!(!mito.is_region_exists(metadata_region_id));
+        assert!(!mito.is_region_exists(data_region_id));
+        assert!(!object_store.exists(&metadata_region_dir).await.unwrap());
+        assert!(!object_store.exists(&data_region_dir).await.unwrap());
     }
 
     #[tokio::test]
@@ -736,7 +914,7 @@ mod test {
         metric_engine
             .handle_request(
                 physical_region_id,
-                RegionRequest::Close(RegionCloseRequest {}),
+                RegionRequest::Close(RegionCloseRequest::default()),
             )
             .await
             .unwrap();
@@ -828,7 +1006,10 @@ mod test {
         // Closes all regions
         for region_id in logical_region_ids.iter().chain(physical_region_ids.iter()) {
             metric_engine
-                .handle_request(*region_id, RegionRequest::Close(RegionCloseRequest {}))
+                .handle_request(
+                    *region_id,
+                    RegionRequest::Close(RegionCloseRequest::default()),
+                )
                 .await
                 .unwrap();
         }

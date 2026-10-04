@@ -22,13 +22,11 @@ use client::region::{
 use common_error::ext::BoxedError;
 use common_meta::node_manager::NodeManagerRef;
 use common_query::request::QueryRequest;
-use common_recordbatch::SendableRecordBatchStream;
 use partition::manager::PartitionRuleManagerRef;
 use query::error::{RegionQuerySnafu, Result as QueryResult};
-use query::region_query::RegionQueryHandler;
+use query::region_query::{RegionQueryHandler, RegionQueryTarget};
 use session::ReadPreference;
 use snafu::ResultExt;
-use store_api::storage::RegionId;
 
 use crate::error::{FindRegionPeerSnafu, RequestQuerySnafu, Result};
 
@@ -51,12 +49,23 @@ impl FrontendRegionQueryHandler {
 
 #[async_trait]
 impl RegionQueryHandler for FrontendRegionQueryHandler {
-    async fn do_get(
+    async fn select_target(
         &self,
         read_preference: ReadPreference,
+        region_id: store_api::storage::RegionId,
+    ) -> QueryResult<RegionQueryTarget> {
+        self.select_target_inner(read_preference, region_id)
+            .await
+            .map_err(BoxedError::new)
+            .context(RegionQuerySnafu)
+    }
+
+    async fn do_get(
+        &self,
+        target: &RegionQueryTarget,
         request: QueryRequest,
-    ) -> QueryResult<SendableRecordBatchStream> {
-        self.do_get_inner(read_preference, request)
+    ) -> QueryResult<common_recordbatch::SendableRecordBatchStream> {
+        self.do_get_inner(target, request)
             .await
             .map_err(BoxedError::new)
             .context(RegionQuerySnafu)
@@ -64,11 +73,11 @@ impl RegionQueryHandler for FrontendRegionQueryHandler {
 
     async fn handle_remote_dyn_filter_update(
         &self,
-        region_id: RegionId,
+        target: &RegionQueryTarget,
         query_id: String,
         update: RemoteDynFilterUpdate,
     ) -> QueryResult<()> {
-        self.handle_remote_dyn_filter_update_inner(region_id, query_id, update)
+        self.handle_remote_dyn_filter_update_inner(target, query_id, update)
             .await
             .map_err(BoxedError::new)
             .context(RegionQuerySnafu)
@@ -76,11 +85,11 @@ impl RegionQueryHandler for FrontendRegionQueryHandler {
 
     async fn handle_remote_dyn_filter_unregister(
         &self,
-        region_id: RegionId,
+        target: &RegionQueryTarget,
         query_id: String,
         unregister: RemoteDynFilterUnregister,
     ) -> QueryResult<()> {
-        self.handle_remote_dyn_filter_unregister_inner(region_id, query_id, unregister)
+        self.handle_remote_dyn_filter_unregister_inner(target, query_id, unregister)
             .await
             .map_err(BoxedError::new)
             .context(RegionQuerySnafu)
@@ -88,14 +97,12 @@ impl RegionQueryHandler for FrontendRegionQueryHandler {
 }
 
 impl FrontendRegionQueryHandler {
-    async fn do_get_inner(
+    async fn select_target_inner(
         &self,
         read_preference: ReadPreference,
-        request: QueryRequest,
-    ) -> Result<SendableRecordBatchStream> {
-        let region_id = request.region_id;
-
-        let peer = &self
+        region_id: store_api::storage::RegionId,
+    ) -> Result<RegionQueryTarget> {
+        let peer = self
             .partition_manager
             .find_region_leader(region_id)
             .await
@@ -104,9 +111,17 @@ impl FrontendRegionQueryHandler {
                 read_preference,
             })?;
 
-        let client = self.node_manager.datanode(peer).await;
+        Ok(RegionQueryTarget::new(peer))
+    }
 
-        client
+    async fn do_get_inner(
+        &self,
+        target: &RegionQueryTarget,
+        request: QueryRequest,
+    ) -> Result<common_recordbatch::SendableRecordBatchStream> {
+        self.node_manager
+            .datanode(target.peer())
+            .await
             .handle_query(request)
             .await
             .context(RequestQuerySnafu)
@@ -114,19 +129,11 @@ impl FrontendRegionQueryHandler {
 
     async fn handle_remote_dyn_filter_update_inner(
         &self,
-        region_id: RegionId,
+        target: &RegionQueryTarget,
         query_id: String,
         update: RemoteDynFilterUpdate,
     ) -> Result<()> {
-        let peer = &self
-            .partition_manager
-            .find_region_leader(region_id)
-            .await
-            .context(FindRegionPeerSnafu {
-                region_id,
-                read_preference: ReadPreference::Leader,
-            })?;
-        let client = self.node_manager.datanode(peer).await;
+        let client = self.node_manager.datanode(target.peer()).await;
         client
             .handle(build_remote_dyn_filter_update_request(query_id, update))
             .await
@@ -136,19 +143,11 @@ impl FrontendRegionQueryHandler {
 
     async fn handle_remote_dyn_filter_unregister_inner(
         &self,
-        region_id: RegionId,
+        target: &RegionQueryTarget,
         query_id: String,
         unregister: RemoteDynFilterUnregister,
     ) -> Result<()> {
-        let peer = &self
-            .partition_manager
-            .find_region_leader(region_id)
-            .await
-            .context(FindRegionPeerSnafu {
-                region_id,
-                read_preference: ReadPreference::Leader,
-            })?;
-        let client = self.node_manager.datanode(peer).await;
+        let client = self.node_manager.datanode(target.peer()).await;
         client
             .handle(build_remote_dyn_filter_unregister_request(
                 query_id, unregister,

@@ -17,7 +17,7 @@
 pub use common_meta::key::flow::flow_info::{FlowMissedTickPolicy, FlowScheduleConfig};
 use snafu::ensure;
 
-use crate::error::{InvalidQuerySnafu, Result};
+use crate::error::{InvalidQuerySnafu, Result, UnexpectedSnafu};
 
 /// Schedule for an `EVAL INTERVAL` flow.
 #[derive(Debug, Clone, PartialEq)]
@@ -72,6 +72,29 @@ impl EvalSchedule {
                         )
                     }
                 );
+                // The anchor defines the epoch phase `anchor + k * interval`; it
+                // must be a valid offset within one interval.
+                ensure!(
+                    c.anchor_secs >= 0 && c.anchor_secs < interval_secs,
+                    InvalidQuerySnafu {
+                        reason: format!(
+                            "Invalid FlowScheduleConfig.anchor_secs: must be in [0, {interval_secs}), got {}",
+                            c.anchor_secs
+                        )
+                    }
+                );
+                // The start must be phase-consistent with the anchor (on an
+                // `anchor + k * interval` boundary) and not before the anchor.
+                ensure!(
+                    c.start_secs >= c.anchor_secs
+                        && (c.start_secs - c.anchor_secs) % interval_secs == 0,
+                    InvalidQuerySnafu {
+                        reason: format!(
+                            "Invalid FlowScheduleConfig.start_secs: must be on an anchor + k * interval boundary and >= anchor, got start={}, anchor={}, interval={}",
+                            c.start_secs, c.anchor_secs, interval_secs
+                        )
+                    }
+                );
 
                 Self {
                     interval_secs,
@@ -96,30 +119,53 @@ impl EvalSchedule {
         }))
     }
 
-    /// Returns the next scheduled time strictly after `cursor_secs`.
-    pub fn next_scheduled_time_after(&self, cursor_secs: i64) -> i64 {
+    /// Returns the next scheduled time strictly after `cursor_secs`, on the
+    /// `anchor + k * interval` lattice.
+    ///
+    /// Fallible: a non-positive interval or a next boundary that does not fit
+    /// in `i64` yields an explicit error instead of a saturated non-phase
+    /// value such as `i64::MAX`.
+    pub fn next_scheduled_time_after(&self, cursor_secs: i64) -> Result<i64> {
         next_in_sequence(cursor_secs, self.start_secs, self.interval_secs)
     }
 }
 
-fn next_in_sequence(cursor: i64, start: i64, interval: i64) -> i64 {
-    if interval <= 0 {
-        return cursor.saturating_add(1).max(start);
-    }
-    if cursor < start {
-        return start;
-    }
+/// The smallest `start + k * interval` value that is strictly after `cursor`
+/// (`start` itself lies on the `anchor + k * interval` lattice, so every
+/// result is phase-consistent with the anchor). All arithmetic happens in
+/// `i128`: `cursor - start` cannot overflow and the result is either exactly
+/// on the lattice or an explicit error.
+fn next_in_sequence(cursor: i64, start: i64, interval: i64) -> Result<i64> {
+    ensure!(
+        interval > 0,
+        InvalidQuerySnafu {
+            reason: format!("Invalid eval interval: must be positive, got {interval}")
+        }
+    );
+    let interval = i128::from(interval);
+    let start = i128::from(start);
+    let cursor = i128::from(cursor);
 
-    let k = (cursor - start) / interval;
-    start.saturating_add((k + 1).saturating_mul(interval))
+    let next = if cursor < start {
+        start
+    } else {
+        let k = (cursor - start) / interval;
+        start + (k + 1) * interval
+    };
+
+    i64::try_from(next).map_err(|_| {
+        UnexpectedSnafu {
+            reason: format!(
+                "Cannot advance the eval schedule past cursor {cursor}: the next scheduled time {next} does not fit in i64 (start={start}, interval={interval})"
+            ),
+        }
+        .build()
+    })
 }
 
-fn first_due_in_sequence(cursor: i64, start: i64, interval: i64) -> i64 {
-    if interval <= 0 {
-        return cursor.saturating_add(1).max(start);
-    }
+fn first_due_in_sequence(cursor: i64, start: i64, interval: i64) -> Result<i64> {
     if cursor < start {
-        start
+        Ok(start)
     } else {
         next_in_sequence(cursor, start, interval)
     }
@@ -139,59 +185,112 @@ pub struct DueScheduledTimes {
 }
 
 /// Select due scheduled times `<= wall_now_secs` without materializing all missed ticks.
+///
+/// Fallible: a non-positive interval or a scheduled time that does not fit in
+/// `i64` yields an explicit error instead of silently producing saturated
+/// non-phase timestamps.
 pub fn select_due_scheduled_times(
     schedule: &EvalSchedule,
     cursor_secs: i64,
     wall_now_secs: i64,
-) -> Option<DueScheduledTimes> {
-    if schedule.interval_secs <= 0 {
-        return None;
-    }
+) -> Result<DueScheduledTimes> {
+    let interval = schedule.interval_secs;
+    ensure!(
+        interval > 0,
+        InvalidQuerySnafu {
+            reason: format!("Invalid eval interval: must be positive, got {interval}")
+        }
+    );
 
-    let first_due = first_due_in_sequence(cursor_secs, schedule.start_secs, schedule.interval_secs);
+    let first_due = first_due_in_sequence(cursor_secs, schedule.start_secs, interval)?;
     if first_due > wall_now_secs {
-        return Some(DueScheduledTimes {
+        return Ok(DueScheduledTimes {
             scheduled_times_secs: vec![],
             skipped: 0,
         });
     }
 
-    let total_count = ((wall_now_secs - first_due) / schedule.interval_secs) as u64 + 1;
+    // Count and select due scheduled times in i128 so every value stays
+    // exactly on the `anchor + k * interval` lattice; a value beyond `i64` is
+    // an explicit error, never a saturated non-phase timestamp.
+    let first_due = i128::from(first_due);
+    let wall_now = i128::from(wall_now_secs);
+    let interval = i128::from(interval);
+
+    let total_count = (wall_now - first_due) / interval + 1;
+    // `first_due >= 0` and `wall_now <= i64::MAX`, so this always fits in u64.
+    let total_count = u64::try_from(total_count).map_err(|_| {
+        UnexpectedSnafu {
+            reason: format!(
+                "Cannot count due eval scheduled times up to {wall_now}: {total_count} does not fit in u64"
+            ),
+        }
+        .build()
+    })?;
+
     match schedule.missed_tick_policy {
         FlowMissedTickPolicy::Skip => {
-            let last = first_due + (total_count as i64 - 1) * schedule.interval_secs;
-            Some(DueScheduledTimes {
+            // Keep only the latest due scheduled time; it is still on-lattice
+            // and `<= wall_now`.
+            let last = i64::try_from(first_due + i128::from(total_count - 1) * interval)
+                .map_err(|_| {
+                    UnexpectedSnafu {
+                        reason: format!(
+                            "Cannot compute the latest due eval scheduled time (first_due={first_due}, interval={interval}, count={total_count}): result does not fit in i64"
+                        ),
+                    }
+                    .build()
+                })?;
+            Ok(DueScheduledTimes {
                 scheduled_times_secs: vec![last],
-                skipped: total_count.saturating_sub(1),
+                skipped: total_count - 1,
             })
         }
         FlowMissedTickPolicy::BoundedCatchUp => {
-            let cutoff = wall_now_secs.saturating_sub(schedule.max_lag_secs);
+            // The cutoff is computed in i128: `wall_now - max_lag` may
+            // legitimately underflow i64 (a cutoff before the Unix epoch) and
+            // must not saturate to a wrong value.
+            let cutoff = wall_now - i128::from(schedule.max_lag_secs);
             let skipped_by_cutoff = if first_due >= cutoff {
                 0
             } else {
-                ((cutoff - first_due + schedule.interval_secs - 1) / schedule.interval_secs) as u64
+                // ceil((cutoff - first_due) / interval), capped at u64::MAX
+                // before the `.min(total_count)` below.
+                let skipped = (cutoff - first_due + interval - 1) / interval;
+                u64::try_from(skipped).unwrap_or(u64::MAX)
             }
             .min(total_count);
 
-            let remaining = total_count.saturating_sub(skipped_by_cutoff);
+            let remaining = total_count - skipped_by_cutoff;
             if remaining == 0 {
-                return Some(DueScheduledTimes {
+                return Ok(DueScheduledTimes {
                     scheduled_times_secs: vec![],
                     skipped: total_count,
                 });
             }
 
-            // max_lag_secs decides which missed scheduled times are recent enough to
-            // run; max_runs caps how many of those times we execute
-            // back-to-back in one scheduler pass.
-            let keep_count = remaining.min(schedule.max_runs as u64);
-            let keep_start = skipped_by_cutoff + remaining.saturating_sub(keep_count);
-            let scheduled_times_secs = (0..keep_count)
-                .map(|i| first_due + (keep_start as i64 + i as i64) * schedule.interval_secs)
-                .collect::<Vec<_>>();
+            // max_lag decides which missed scheduled times are recent enough to
+            // run; max_runs caps how many of those times execute back-to-back
+            // in one scheduler pass.
+            let keep_count = remaining.min(u64::from(schedule.max_runs));
+            let keep_start = skipped_by_cutoff + remaining - keep_count;
+            let mut scheduled_times_secs = Vec::with_capacity(keep_count as usize);
+            for i in 0..keep_count {
+                let t = i64::try_from(
+                    first_due + (i128::from(keep_start) + i128::from(i)) * interval,
+                )
+                .map_err(|_| {
+                    UnexpectedSnafu {
+                        reason: format!(
+                            "Cannot compute a due eval scheduled time (first_due={first_due}, interval={interval}, index={i}): result does not fit in i64"
+                        ),
+                    }
+                    .build()
+                })?;
+                scheduled_times_secs.push(t);
+            }
 
-            Some(DueScheduledTimes {
+            Ok(DueScheduledTimes {
                 scheduled_times_secs,
                 skipped: total_count - keep_count,
             })
@@ -200,12 +299,15 @@ pub fn select_due_scheduled_times(
 }
 
 /// Ceils `time` to the next `anchor + k * interval` boundary.
-pub fn ceil_to_boundary(time: i64, anchor: i64, interval: i64) -> i64 {
+///
+/// Fallible: if the next boundary does not fit in `i64`, an explicit error is
+/// returned instead of clamping to a non-phase value such as `i64::MAX`.
+pub fn ceil_to_boundary(time: i64, anchor: i64, interval: i64) -> Result<i64> {
     if interval <= 0 {
-        return time;
+        return Ok(time);
     }
     if time <= anchor {
-        return anchor;
+        return Ok(anchor);
     }
 
     let diff = i128::from(time) - i128::from(anchor);
@@ -213,7 +315,14 @@ pub fn ceil_to_boundary(time: i64, anchor: i64, interval: i64) -> i64 {
     let k = (diff + interval - 1) / interval;
     let boundary = i128::from(anchor) + k * interval;
 
-    boundary.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+    i64::try_from(boundary).map_err(|_| {
+        crate::error::UnexpectedSnafu {
+            reason: format!(
+                "Cannot align time {time} to the next `anchor + k * interval` boundary (anchor={anchor}, interval={interval}): result {boundary} does not fit in i64"
+            ),
+        }
+        .build()
+    })
 }
 
 #[cfg(test)]
@@ -239,7 +348,8 @@ mod test {
     fn config(policy: FlowMissedTickPolicy) -> FlowScheduleConfig {
         FlowScheduleConfig {
             anchor_secs: 10,
-            start_secs: 70,
+            // phase-consistent: 310 = anchor(10) + 1 * interval(300)
+            start_secs: 310,
             missed_tick_policy: policy,
             catchup_max_runs: 4,
             catchup_max_lag_secs: 600,
@@ -248,14 +358,15 @@ mod test {
 
     #[test]
     fn ceil_to_boundary_handles_anchor_and_interval_edges() {
-        assert_eq!(ceil_to_boundary(-10, 0, 60), 0);
-        assert_eq!(ceil_to_boundary(0, 0, 60), 0);
-        assert_eq!(ceil_to_boundary(1, 0, 60), 60);
-        assert_eq!(ceil_to_boundary(60, 0, 60), 60);
-        assert_eq!(ceil_to_boundary(101, 100, 60), 160);
-        assert_eq!(ceil_to_boundary(50, 0, 0), 50);
-        assert_eq!(ceil_to_boundary(i64::MAX, 0, 60), i64::MAX);
-        assert_eq!(ceil_to_boundary(i64::MAX - 1, i64::MIN, 60), i64::MAX);
+        assert_eq!(ceil_to_boundary(-10, 0, 60).unwrap(), 0);
+        assert_eq!(ceil_to_boundary(0, 0, 60).unwrap(), 0);
+        assert_eq!(ceil_to_boundary(1, 0, 60).unwrap(), 60);
+        assert_eq!(ceil_to_boundary(60, 0, 60).unwrap(), 60);
+        assert_eq!(ceil_to_boundary(101, 100, 60).unwrap(), 160);
+        assert_eq!(ceil_to_boundary(50, 0, 0).unwrap(), 50);
+        // Never clamp to the non-phase i64::MAX: the next boundary does not fit.
+        assert!(ceil_to_boundary(i64::MAX, 0, 60).is_err());
+        assert!(ceil_to_boundary(i64::MAX - 1, i64::MIN, 60).is_err());
     }
 
     #[test]
@@ -269,7 +380,7 @@ mod test {
                 .unwrap();
         assert_eq!(from_typed.interval_secs, 300);
         assert_eq!(from_typed.anchor_secs, 10);
-        assert_eq!(from_typed.start_secs, 70);
+        assert_eq!(from_typed.start_secs, 310);
         assert_eq!(from_typed.missed_tick_policy, FlowMissedTickPolicy::Skip);
         assert_eq!(from_typed.max_runs, 4);
         assert_eq!(from_typed.max_lag_secs, 600);
@@ -292,11 +403,71 @@ mod test {
     }
 
     #[test]
+    fn nonzero_anchor_due_selection_follows_phase() {
+        // anchor=120 (i.e. `EVAL OFFSET '2 minutes'`), interval=3600:
+        // boundaries at :02 every hour. start=3720 (120 + 3600).
+        let s = EvalSchedule {
+            interval_secs: 3600,
+            anchor_secs: 120,
+            start_secs: 3720,
+            missed_tick_policy: FlowMissedTickPolicy::BoundedCatchUp,
+            max_runs: 3,
+            max_lag_secs: 3600,
+        };
+        assert_eq!(
+            select_due_scheduled_times(&s, 0, 100)
+                .unwrap()
+                .scheduled_times_secs,
+            Vec::<i64>::new()
+        );
+        // From 3720 on, every selected time must be on the :02 phase.
+        let due = select_due_scheduled_times(&s, 0, 3720).unwrap();
+        assert_eq!(due.scheduled_times_secs, vec![3720]);
+        let due = select_due_scheduled_times(&s, 3720, 7320).unwrap();
+        assert_eq!(due.scheduled_times_secs, vec![7320]);
+        for t in &due.scheduled_times_secs {
+            assert_eq!((t - 120) % 3600, 0);
+        }
+        assert_eq!(s.next_scheduled_time_after(3720).unwrap(), 7320);
+        assert_eq!(s.next_scheduled_time_after(7300).unwrap(), 7320);
+    }
+
+    #[test]
     fn next_scheduled_time_after_respects_start_sequence() {
         let s = schedule(50, FlowMissedTickPolicy::BoundedCatchUp, 3, 300);
-        assert_eq!(s.next_scheduled_time_after(0), 50);
-        assert_eq!(s.next_scheduled_time_after(50), 110);
-        assert_eq!(s.next_scheduled_time_after(100), 110);
+        assert_eq!(s.next_scheduled_time_after(0).unwrap(), 50);
+        assert_eq!(s.next_scheduled_time_after(50).unwrap(), 110);
+        assert_eq!(s.next_scheduled_time_after(100).unwrap(), 110);
+    }
+
+    #[test]
+    fn near_i64_max_advancement_is_exact_or_explicit_error() {
+        // anchor=0, interval=60: the next boundary after i64::MAX - 60 is
+        // 9223372036854775800, still in range and exactly on the lattice.
+        let s = schedule(0, FlowMissedTickPolicy::Skip, 5, 3600);
+        let cursor = i64::MAX - 60;
+        let next = s.next_scheduled_time_after(cursor).unwrap();
+        assert_eq!(next, 9223372036854775800);
+        assert_eq!(next % 60, 0);
+
+        // Advancing past the last representable boundary is an explicit error,
+        // never a saturated non-phase value like i64::MAX.
+        let err = s
+            .next_scheduled_time_after(9223372036854775800)
+            .unwrap_err();
+        assert!(err.to_string().contains("does not fit in i64"));
+
+        // A non-positive interval is an explicit error, not a saturating
+        // `cursor + 1` result.
+        let invalid = EvalSchedule {
+            interval_secs: 0,
+            anchor_secs: 0,
+            start_secs: 0,
+            missed_tick_policy: FlowMissedTickPolicy::Skip,
+            max_runs: 3,
+            max_lag_secs: 900,
+        };
+        assert!(invalid.next_scheduled_time_after(0).is_err());
     }
 
     #[test]

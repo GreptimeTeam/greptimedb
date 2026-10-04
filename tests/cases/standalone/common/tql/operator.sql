@@ -23,7 +23,7 @@ tql eval (60, 60, '1s') trigy atan2 trigx;
 
 -- eval instant at 1m trigy atan2 trigNaN
 --     trigy{} NaN
--- This query doesn't have result because `trignan` is NaN and will be filtered out.
+-- Ordinary NaN is a valid sample and propagates through `atan2`.
 tql eval (60, 60, '1s') trigy atan2 trignan;
 
 -- eval instant at 1m 10 atan2 20
@@ -73,4 +73,3 @@ VALUES
 tql eval (1743465600.5, 1743465610, '1s') irate(t[2s]);
 
 drop table t;
-

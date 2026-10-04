@@ -318,7 +318,47 @@ lazy_static! {
 
 // Index metrics.
 lazy_static! {
+    /// Approximate published index bytes in open regions, refreshed by maintenance.
+    pub static ref SERIES_INDEX_DISK_BYTES: IntGauge = register_int_gauge!(
+        "greptime_mito_series_index_disk_bytes", "estimated series and range index bytes in open regions"
+    ).unwrap();
+    /// Maintenance passes deferred by the estimated disk usage.
+    pub static ref SERIES_INDEX_CAPACITY_DEFERRED: IntCounter = register_int_counter!(
+        "greptime_mito_series_index_capacity_deferred_total", "series-index capacity deferrals"
+    ).unwrap();
     // Index metrics.
+    /// Outcomes of series-index reconciliation passes.
+    pub static ref SERIES_INDEX_RECONCILE_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_series_index_reconcile_total",
+        "series-index reconciliation passes",
+        &["result"],
+    ).unwrap();
+    /// Elapsed time of series-index reconciliation phases.
+    pub static ref SERIES_INDEX_RECONCILE_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_mito_series_index_reconcile_elapsed",
+        "series-index reconciliation elapsed time",
+        &["phase"],
+        exponential_buckets(0.01, 10.0, 7).unwrap(),
+    ).unwrap();
+    /// Series and range index file operations.
+    pub static ref SERIES_INDEX_FILE_OPERATION_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_series_index_file_operation_total",
+        "series-index file operations",
+        &["index_type", "operation", "result"],
+    ).unwrap();
+    /// Number of stale index publications rejected at each publication stage.
+    pub static ref INDEX_PUBLICATION_STALE_TOTAL: IntCounterVec =
+        register_int_counter_vec!(
+            "greptime_mito_index_publication_stale_total",
+            "stale index publications rejected",
+            &[STAGE_LABEL],
+        ).unwrap();
+    /// Number of failures while cleaning local state for stale index artifacts.
+    pub static ref INDEX_ARTIFACT_CLEANUP_FAILURE_TOTAL: IntCounter =
+        register_int_counter!(
+            "greptime_mito_index_artifact_cleanup_failure_total",
+            "failures while cleaning local state for stale index artifacts",
+        ).unwrap();
     /// Timer of index application.
     pub static ref INDEX_APPLY_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_index_apply_elapsed",

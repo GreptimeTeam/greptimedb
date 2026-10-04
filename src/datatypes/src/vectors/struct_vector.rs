@@ -143,25 +143,6 @@ impl Vector for StructVector {
 }
 
 impl VectorOp for StructVector {
-    fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        let column_arrays = self
-            .array
-            .columns()
-            .iter()
-            .map(|col| {
-                let vector = Helper::try_into_vector(col)
-                    .expect("Failed to replicate struct vector columns");
-                vector.replicate(offsets).to_arrow_array()
-            })
-            .collect::<Vec<_>>();
-        let replicated_array = StructArray::new(
-            self.array.fields().clone(),
-            column_arrays,
-            self.array.nulls().cloned(),
-        );
-        Arc::new(StructVector::try_new(self.fields.clone(), replicated_array).unwrap())
-    }
-
     fn cast(&self, _to_type: &ConcreteDataType) -> Result<VectorRef> {
         UnsupportedOperationSnafu {
             op: "cast",
@@ -461,6 +442,8 @@ impl ScalarVectorBuilder for StructVectorBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::json::JsonSettings;
+    use crate::schema::{ColumnDefaultConstraint, ColumnSchema};
     use crate::types::StructField;
     use crate::value::ListValue;
     use crate::value::tests::*;
@@ -540,6 +523,28 @@ mod tests {
             ))
         );
         assert_eq!(vector.get(1), Value::Null);
+    }
+
+    #[test]
+    fn test_default_vector_preserves_json2_identity() {
+        let json = JsonSettings::default()
+            .encode(serde_json::json!({"answer": 42}))
+            .unwrap();
+        let fields = StructType::new(Arc::new(vec![StructField::new(
+            "payload",
+            json.data_type(),
+            true,
+        )]));
+        let data_type = ConcreteDataType::struct_datatype(fields.clone());
+        let value = Value::Struct(StructValue::new(vec![json], fields));
+        let schema = ColumnSchema::new("nested", data_type.clone(), true)
+            .with_default_constraint(Some(ColumnDefaultConstraint::Value(value)))
+            .unwrap();
+
+        let replicated = schema.create_default_vector(2).unwrap().unwrap();
+
+        assert_eq!(replicated.data_type(), data_type);
+        assert_eq!(replicated.len(), 2);
     }
 
     #[test]

@@ -20,7 +20,6 @@ from
 ORDER BY
        val;
 
--- SQLNESS SLEEP 2s
 ADMIN flush_table('test_ttl');
 
 ADMIN compact_table('test_ttl');
@@ -55,7 +54,7 @@ CREATE TABLE test_ttl(
        ts TIMESTAMP TIME INDEX,
        val INT,
        PRIMARY KEY (`val`)
-) WITH (ttl = '1s');
+) WITH (ttl = '5s');
 
 SHOW CREATE TABLE test_ttl;
 
@@ -83,6 +82,11 @@ from
        test_ttl
 ORDER BY
        val;
+
+ALTER TABLE
+       test_ttl
+SET
+       ttl = '1s';
 
 -- SQLNESS SLEEP 2s
 ADMIN flush_table('test_ttl');
@@ -135,7 +139,7 @@ ORDER BY
 ALTER TABLE
        test_ttl
 SET
-       ttl = '1s';
+       ttl = '5s';
 
 INSERT INTO
        test_ttl
@@ -150,6 +154,11 @@ from
        test_ttl
 ORDER BY
        val;
+
+ALTER TABLE
+       test_ttl
+SET
+       ttl = '1s';
 
 -- SQLNESS SLEEP 2s
 ADMIN flush_table('test_ttl');

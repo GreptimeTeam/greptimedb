@@ -20,7 +20,7 @@ use common_decimal::decimal128::{DECIMAL128_DEFAULT_SCALE, DECIMAL128_MAX_PRECIS
 use common_time::time::Time;
 use common_time::timestamp::TimeUnit;
 use common_time::{Date, IntervalDayTime, IntervalMonthDayNano, IntervalYearMonth, Timestamp};
-use datatypes::json::value::{JsonNumber, JsonValue, JsonValueRef, JsonVariant};
+use datatypes::json::value::{JsonNumber, JsonValue, JsonValueRef, JsonVariant, JsonVariantRef};
 use datatypes::prelude::{ConcreteDataType, ValueRef};
 use datatypes::types::json_type::JsonNativeType;
 use datatypes::types::{
@@ -84,6 +84,28 @@ impl ColumnDataTypeWrapper {
 
     pub fn into_parts(self) -> (ColumnDataType, Option<ColumnDataTypeExtension>) {
         (self.datatype, self.datatype_ext)
+    }
+}
+
+/// Returns the time unit if `datatype` is a timestamp type.
+pub fn timestamp_unit(datatype: ColumnDataType) -> Option<TimeUnit> {
+    match datatype {
+        ColumnDataType::TimestampSecond => Some(TimeUnit::Second),
+        ColumnDataType::TimestampMillisecond => Some(TimeUnit::Millisecond),
+        ColumnDataType::TimestampMicrosecond => Some(TimeUnit::Microsecond),
+        ColumnDataType::TimestampNanosecond => Some(TimeUnit::Nanosecond),
+        _ => None,
+    }
+}
+
+/// Returns the timestamp [ColumnDataType] for the given time unit.
+/// This is the inverse of [timestamp_unit].
+pub fn timestamp_datatype(unit: TimeUnit) -> ColumnDataType {
+    match unit {
+        TimeUnit::Second => ColumnDataType::TimestampSecond,
+        TimeUnit::Millisecond => ColumnDataType::TimestampMillisecond,
+        TimeUnit::Microsecond => ColumnDataType::TimestampMicrosecond,
+        TimeUnit::Nanosecond => ColumnDataType::TimestampNanosecond,
     }
 }
 
@@ -449,7 +471,14 @@ impl TryFrom<ConcreteDataType> for ColumnDataTypeWrapper {
                         }),
                         JsonFormat::Json2(native_type) => {
                             if native_type.is_null() {
-                                None
+                                Some(ColumnDataTypeExtension {
+                                    type_ext: Some(TypeExt::JsonNativeType(Box::new(
+                                        JsonNativeTypeExtension {
+                                            datatype: ColumnDataType::Json as i32,
+                                            datatype_extension: None,
+                                        },
+                                    ))),
+                                })
                             } else {
                                 let concrete_type =
                                     ConcreteDataType::from_arrow_type(&native_type.as_arrow_type());
@@ -931,33 +960,59 @@ pub fn encode_json_value(value: JsonValue) -> v1::JsonValue {
 }
 
 fn decode_json_value(value: &v1::JsonValue) -> JsonValueRef<'_> {
+    let (variant, json_type) = decode_json_value_parts(value);
+    JsonValueRef::new_with_type(variant, json_type)
+}
+
+fn decode_json_value_parts(value: &v1::JsonValue) -> (JsonVariantRef<'_>, JsonNativeType) {
     let Some(value) = &value.value else {
-        return JsonValueRef::null();
+        return (JsonVariantRef::Null, JsonNativeType::Null);
     };
     match value {
-        json_value::Value::Boolean(x) => (*x).into(),
-        json_value::Value::Int(x) => (*x).into(),
-        json_value::Value::Uint(x) => (*x).into(),
-        json_value::Value::Float(x) => (*x).into(),
-        json_value::Value::Str(x) => (x.as_str()).into(),
-        json_value::Value::Array(array) => array
-            .items
-            .iter()
-            .map(|x| decode_json_value(x).into_variant())
-            .collect::<Vec<_>>()
-            .into(),
-        json_value::Value::Object(x) => x
-            .entries
-            .iter()
-            .filter_map(|entry| {
-                entry
-                    .value
-                    .as_ref()
-                    .map(|v| (entry.key.as_str(), decode_json_value(v).into_variant()))
-            })
-            .collect::<BTreeMap<_, _>>()
-            .into(),
-        json_value::Value::Variant(x) => x.as_slice().into(),
+        json_value::Value::Boolean(x) => (JsonVariantRef::Bool(*x), JsonNativeType::Bool),
+        json_value::Value::Int(x) => ((*x).into(), JsonNativeType::i64()),
+        json_value::Value::Uint(x) => ((*x).into(), JsonNativeType::u64()),
+        json_value::Value::Float(x) => ((*x).into(), JsonNativeType::f64()),
+        json_value::Value::Str(x) => (x.as_str().into(), JsonNativeType::String),
+        json_value::Value::Array(array) => {
+            let mut variants = Vec::with_capacity(array.items.len());
+            let mut item_type = JsonNativeType::Null;
+            for item in &array.items {
+                let (variant, ty) = decode_json_value_parts(item);
+                variants.push(variant);
+                if !matches!(item_type, JsonNativeType::Variant) {
+                    item_type.merge(&ty);
+                }
+            }
+            (
+                JsonVariantRef::Array(variants),
+                JsonNativeType::Array(Box::new(item_type)),
+            )
+        }
+        json_value::Value::Object(object) => {
+            let mut variants = Vec::with_capacity(object.entries.len());
+            let mut fields = Vec::with_capacity(object.entries.len());
+            for entry in &object.entries {
+                let Some(value) = &entry.value else {
+                    continue;
+                };
+                let (variant, json_type) = decode_json_value_parts(value);
+                variants.push((entry.key.as_str(), variant));
+                fields.push((entry.key.clone(), json_type));
+            }
+            let variants = variants.into_iter().collect::<BTreeMap<_, _>>();
+            let fields = fields.into_iter().collect::<BTreeMap<_, _>>();
+            let json_type = if fields.is_empty() {
+                JsonNativeType::Null
+            } else {
+                JsonNativeType::Object(fields)
+            };
+            (JsonVariantRef::Object(variants), json_type)
+        }
+        json_value::Value::Variant(x) => (
+            JsonVariantRef::Variant(x.as_slice()),
+            JsonNativeType::Variant,
+        ),
     }
 }
 
@@ -998,6 +1053,17 @@ pub fn proto_value_type(value: &v1::Value) -> Option<ColumnDataType> {
         ValueData::JsonValue(_) => ColumnDataType::Json,
     };
     Some(value_type)
+}
+
+/// Checks protobuf value types using the write-path compatibility rules.
+/// Binary values also represent JSON and vector columns.
+pub fn proto_value_type_match(column_type: ColumnDataType, value_type: ColumnDataType) -> bool {
+    match (column_type, value_type) {
+        (ct, vt) if ct == vt => true,
+        (ColumnDataType::Vector, ColumnDataType::Binary) => true,
+        (ColumnDataType::Json, ColumnDataType::Binary) => true,
+        _ => false,
+    }
 }
 
 pub fn vectors_to_rows<'a>(
@@ -1172,6 +1238,21 @@ mod tests {
     use crate::v1::Column;
 
     #[test]
+    fn test_timestamp_unit_roundtrip() {
+        for unit in [
+            TimeUnit::Second,
+            TimeUnit::Millisecond,
+            TimeUnit::Microsecond,
+            TimeUnit::Nanosecond,
+        ] {
+            assert_eq!(timestamp_unit(timestamp_datatype(unit)), Some(unit));
+        }
+        // Non-timestamp types have no time unit.
+        assert_eq!(timestamp_unit(ColumnDataType::String), None);
+        assert_eq!(timestamp_unit(ColumnDataType::Datetime), None);
+    }
+
+    #[test]
     fn test_values_with_capacity() {
         let values = values_with_capacity(ColumnDataType::Int8, 2);
         let values = values.i8_values;
@@ -1263,6 +1344,32 @@ mod tests {
 
         let values = values_with_capacity(ColumnDataType::Dictionary, 2);
         assert!(values.bool_values.is_empty());
+    }
+
+    #[test]
+    fn test_json2_unknown_type_encoding() {
+        let datatype = ConcreteDataType::json2(JsonNativeType::Null);
+        let wrapper = ColumnDataTypeWrapper::try_from(datatype.clone()).unwrap();
+        assert_eq!(
+            wrapper.to_parts(),
+            (
+                ColumnDataType::Json,
+                Some(ColumnDataTypeExtension {
+                    type_ext: Some(TypeExt::JsonNativeType(Box::new(JsonNativeTypeExtension {
+                        datatype: ColumnDataType::Json as i32,
+                        datatype_extension: None,
+                    }))),
+                }),
+            )
+        );
+        assert_eq!(ConcreteDataType::from(wrapper), datatype);
+
+        for extension in [None, Some(ColumnDataTypeExtension::default())] {
+            assert_eq!(
+                ConcreteDataType::from(ColumnDataTypeWrapper::new(ColumnDataType::Json, extension)),
+                datatype
+            );
+        }
     }
 
     #[test]
@@ -1854,14 +1961,39 @@ mod tests {
                 ]
             }))
         );
+        assert_eq!(
+            JsonNativeType::Array(Box::new(JsonNativeType::i64())),
+            decode_json_value_parts(&proto).1
+        );
         let value = decode_json_value(&proto);
         assert_eq!(json.as_ref(), value);
+
+        let proto = v1::JsonValue {
+            value: Some(json_value::Value::Array(JsonList {
+                items: vec![
+                    v1::JsonValue {
+                        value: Some(json_value::Value::Int(1)),
+                    },
+                    v1::JsonValue {
+                        value: Some(json_value::Value::Float(2.0)),
+                    },
+                ],
+            })),
+        };
+        assert_eq!(
+            JsonNativeType::Array(Box::new(JsonNativeType::Variant)),
+            decode_json_value_parts(&proto).1
+        );
 
         let json: JsonValue = [(); 0].into();
         let proto = encode_json_value(json.clone());
         assert_eq!(
             proto.value,
             Some(json_value::Value::Array(JsonList { items: vec![] }))
+        );
+        assert_eq!(
+            JsonNativeType::Array(Box::new(JsonNativeType::Null)),
+            decode_json_value_parts(&proto).1
         );
         let value = decode_json_value(&proto);
         assert_eq!(json.as_ref(), value);
@@ -1893,6 +2025,14 @@ mod tests {
                 ]
             }))
         );
+        assert_eq!(
+            JsonNativeType::Object(JsonObjectType::from([
+                ("k1".to_string(), JsonNativeType::i64()),
+                ("k2".to_string(), JsonNativeType::i64()),
+                ("k3".to_string(), JsonNativeType::i64()),
+            ])),
+            decode_json_value_parts(&proto).1
+        );
         let value = decode_json_value(&proto);
         assert_eq!(json.as_ref(), value);
 
@@ -1902,6 +2042,7 @@ mod tests {
             proto.value,
             Some(json_value::Value::Object(JsonObject { entries: vec![] }))
         );
+        assert_eq!(JsonNativeType::Null, decode_json_value_parts(&proto).1);
         let value = decode_json_value(&proto);
         assert_eq!(json.as_ref(), value);
 
@@ -1991,5 +2132,19 @@ mod tests {
         );
         let value = decode_json_value(&proto);
         assert_eq!(json.as_ref(), value);
+    }
+
+    #[test]
+    fn test_proto_value_type_match() {
+        for (column, value, expected) in [
+            (ColumnDataType::Int32, ColumnDataType::Int32, true),
+            (ColumnDataType::Json, ColumnDataType::Binary, true),
+            (ColumnDataType::Vector, ColumnDataType::Binary, true),
+            (ColumnDataType::Float64, ColumnDataType::List, false),
+            (ColumnDataType::Float64, ColumnDataType::Struct, false),
+            (ColumnDataType::Binary, ColumnDataType::Json, false),
+        ] {
+            assert_eq!(expected, proto_value_type_match(column, value));
+        }
     }
 }

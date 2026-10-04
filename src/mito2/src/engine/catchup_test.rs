@@ -498,7 +498,10 @@ async fn test_catchup_with_manifest_update(factory: Option<LogStoreFactory>) {
 
 async fn close_region(engine: &MitoEngine, region_id: RegionId) {
     engine
-        .handle_request(region_id, RegionRequest::Close(RegionCloseRequest {}))
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
         .await
         .unwrap();
 }

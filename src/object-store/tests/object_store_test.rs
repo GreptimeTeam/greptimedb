@@ -114,7 +114,7 @@ async fn test_object_list_start_after(store: &ObjectStore) -> Result<()> {
     // `start_after` is a service-level capability. Skip the checks when the
     // backend (e.g. the local Fs service) doesn't honor it natively — the
     // bound would be silently ignored and the full listing returned.
-    if !store.info().native_capability().list_with_start_after {
+    if !store.info().capability().list_with_start_after {
         info!("Skip test_object_list_start_after: backend {scheme} lacks start_after support");
         return Ok(());
     }
@@ -231,7 +231,7 @@ fn create_temp_dir(prefix: &str) -> Result<TempDir> {
 
 #[tokio::test]
 async fn test_opendal_memory_smoke() -> Result<()> {
-    let op = opendal::Operator::new(Memory::default())?.finish();
+    let op = opendal::Operator::new(Memory::default())?;
     let store: OpendalStore = OpendalStore::new(op);
     assert_eq!("memory", store.info().scheme());
     assert!(format!("{store}").contains("memory"));
@@ -262,7 +262,7 @@ async fn test_fs_backend() -> Result<()> {
         .root(&data_dir.path().to_string_lossy())
         .atomic_write_dir(&tmp_dir.path().to_string_lossy());
 
-    let store = ObjectStore::new(builder).unwrap().finish();
+    let store = ObjectStore::new(builder).unwrap();
     let store = object_store::util::with_instrument_layers(store, false);
 
     test_object_crud(&store).await?;
@@ -284,25 +284,105 @@ async fn test_s3_backend() -> Result<()> {
 
         let root = uuid::Uuid::new_v4().to_string();
 
-        let builder = S3::default()
+        let mut builder = S3::default()
             .root(&root)
             .access_key_id(&env::var("GT_S3_ACCESS_KEY_ID")?)
             .secret_access_key(&env::var("GT_S3_ACCESS_KEY")?)
             .region(&env::var("GT_S3_REGION")?)
             .bucket(&bucket);
+        if let Ok(endpoint) = env::var("GT_S3_ENDPOINT_URL") {
+            builder = builder.endpoint(&endpoint);
+        }
 
-        let store = ObjectStore::new(builder).unwrap().finish();
+        // Honors an S3-compatible endpoint (MinIO in CI) so the test does not
+        // fall back to resolving the bucket against real AWS.
+        if let Ok(endpoint) = env::var("GT_S3_ENDPOINT_URL")
+            && !endpoint.is_empty()
+        {
+            builder = builder.endpoint(&endpoint);
+        }
+
+        let store = ObjectStore::new(builder).unwrap();
         let store = object_store::util::with_instrument_layers(store, false);
 
         let guard = TempFolder::new(&store, "/");
         test_object_crud(&store).await?;
         test_object_list(&store).await?;
         test_object_list_start_after(&store).await?;
+        test_conditional_creation(&store).await?;
         assert_opendal_metrics();
         guard.remove_all().await?;
     }
 
     Ok(())
+}
+
+async fn test_conditional_creation(store: &ObjectStore) -> Result<()> {
+    const PART: usize = 8 * 1024 * 1024;
+    for size in [32, 2 * PART + 17] {
+        let payload = Bytes::from(vec![42; size]);
+        for preexisting in [false, true] {
+            let path = format!("conditional-{size}-{preexisting}");
+            if preexisting {
+                store.write(&path, "original").await?;
+            }
+            let attempt = |value: Bytes| {
+                let path = &path;
+                async move {
+                    let mut writer = store
+                        .writer_with(path)
+                        .if_not_exists(true)
+                        .concurrent(1)
+                        .chunk(PART)
+                        .await
+                        .unwrap();
+                    let result = async {
+                        for offset in (0..value.len()).step_by(PART) {
+                            writer
+                                .write(value.slice(offset..(offset + PART).min(value.len())))
+                                .await?;
+                        }
+                        writer.close().await
+                    }
+                    .await;
+                    if result.is_err() {
+                        writer.abort().await.unwrap();
+                    }
+                    result
+                }
+            };
+            let (a, b) = tokio::join!(attempt(payload.clone()), attempt(payload.clone()));
+            assert_eq!(
+                usize::from(a.is_ok()) + usize::from(b.is_ok()),
+                usize::from(!preexisting)
+            );
+            for error in [a.err(), b.err()].into_iter().flatten() {
+                assert!(
+                    matches!(
+                        error.kind(),
+                        object_store::ErrorKind::ConditionNotMatch
+                            | object_store::ErrorKind::AlreadyExists
+                    ),
+                    "{error:?}"
+                );
+            }
+            let expected = if preexisting {
+                Bytes::from_static(b"original")
+            } else {
+                payload.clone()
+            };
+            assert_eq!(store.read(&path).await?.to_bytes(), expected);
+            store.delete(&path).await?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_secure_fs_conditional_creation() -> Result<()> {
+    let dir = TempDir::new()?;
+    let store = object_store::secure_fs::SecureFsRoot::open(dir.path())?.build_operator();
+    test_conditional_creation(&store).await
 }
 
 #[tokio::test]
@@ -321,7 +401,7 @@ async fn test_oss_backend() -> Result<()> {
             .access_key_secret(&env::var("GT_OSS_ACCESS_KEY")?)
             .bucket(&bucket);
 
-        let store = ObjectStore::new(builder).unwrap().finish();
+        let store = ObjectStore::new(builder).unwrap();
         let store = object_store::util::with_instrument_layers(store, false);
 
         let guard = TempFolder::new(&store, "/");
@@ -351,7 +431,7 @@ async fn test_azblob_backend() -> Result<()> {
             .account_key(&env::var("GT_AZBLOB_ACCOUNT_KEY")?)
             .container(&container);
 
-        let store = ObjectStore::new(builder).unwrap().finish();
+        let store = ObjectStore::new(builder).unwrap();
         let store = object_store::util::with_instrument_layers(store, false);
 
         let guard = TempFolder::new(&store, "/");
@@ -380,7 +460,7 @@ async fn test_gcs_backend() -> Result<()> {
             .credential(&env::var("GT_GCS_CREDENTIAL").unwrap())
             .endpoint(&env::var("GT_GCS_ENDPOINT").unwrap());
 
-        let store = ObjectStore::new(builder).unwrap().finish();
+        let store = ObjectStore::new(builder).unwrap();
         let store = object_store::util::with_instrument_layers(store, false);
 
         let guard = TempFolder::new(&store, "/");

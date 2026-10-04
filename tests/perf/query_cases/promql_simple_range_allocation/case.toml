@@ -1,0 +1,143 @@
+# Bounded PromQL simple-range allocation regression coverage.
+#
+# 128 series × 780 samples at a 15-second cadence = 99,840 rows. Linear
+# values are `base + series_idx % 97 + local_ordinal`; the host0000 HTTP
+# control therefore has last values 240, 480, and 720 at its hourly evaluations.
+
+[case]
+name = "promql_simple_range_allocation"
+description = "Bounded PromQL simple-range UDF allocation regression coverage"
+
+[scenario]
+kind = "prom_remote_write_then_query"
+
+[scenario.remote_write]
+database = "public"
+metric = "promql_simple_range_allocation"
+physical_table = "greptime_physical_table"
+series_count = 128
+samples_per_series = 780
+sample_chunk_size = 195
+flush_every_sample_chunks = 1
+start_unix_millis = 1704067200000
+step_millis = 15000
+chunk_series_count = 128
+timeout_seconds = 600
+visibility_timeout_seconds = 300
+
+[scenario.remote_write.value]
+pattern = "linear"
+base = 0
+step = 1
+
+[scenario.remote_write.prom_store]
+pending_rows_flush_interval = "1s"
+max_batch_rows = 100000
+
+[[scenario.queries]]
+name = "selector_2h15s_control"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') promql_simple_range_allocation{host=~'host.*'}"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10
+
+[[scenario.queries]]
+name = "count_over_time_1m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') count_over_time(promql_simple_range_allocation{host=~'host.*'}[1m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10
+
+[[scenario.queries]]
+name = "count_over_time_1h"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') count_over_time(promql_simple_range_allocation{host=~'host.*'}[1h])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10
+
+[[scenario.queries]]
+name = "last_over_time_1m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') last_over_time(promql_simple_range_allocation{host=~'host.*'}[1m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10
+
+[[scenario.queries]]
+name = "last_over_time_1h"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') last_over_time(promql_simple_range_allocation{host=~'host.*'}[1h])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10
+
+[[scenario.queries]]
+name = "present_over_time_1m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') present_over_time(promql_simple_range_allocation{host=~'host.*'}[1m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10
+
+[[scenario.queries]]
+name = "present_over_time_1h"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') present_over_time(promql_simple_range_allocation{host=~'host.*'}[1h])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10
+
+# This matcher is intentionally nonempty in the input but produces no output.
+# ANALYZE remains valid while exercising the absent-over-time allocation path.
+[[scenario.queries]]
+name = "absent_over_time_1m_empty"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') absent_over_time(promql_simple_range_allocation{host=~'host.*'}[1m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10
+
+[[scenario.queries]]
+name = "absent_over_time_1h_empty"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') absent_over_time(promql_simple_range_allocation{host=~'host.*'}[1h])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10
+
+# Inspect the retained response manually: the runner does not assert numeric values.
+# For host0000, last_over_time at the hourly evaluations should return 240, 480,
+# and 720 respectively.
+[[scenario.queries]]
+name = "prom_http_last_over_time_1h_numeric_control"
+kind = "prom_http"
+query = "last_over_time(promql_simple_range_allocation{host=\"host0000\"}[1h])"
+start = "1704070800"
+end = "1704078000"
+step = "1h"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10

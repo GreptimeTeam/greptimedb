@@ -18,13 +18,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use ::auth::{Identity, Password, UserProviderRef};
+use ::auth::{BEARER_TOKEN_USER, Identity, MysqlAuthMethod, Password, UserProviderRef};
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveDateTime};
 use common_catalog::parse_optional_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use common_query::Output;
 use common_telemetry::{debug, error, tracing, warn};
+use common_time::Timezone;
 use datafusion_common::ParamValues;
 use datafusion_expr::LogicalPlan;
 use datatypes::prelude::ConcreteDataType;
@@ -57,9 +58,6 @@ use crate::mysql::writer;
 use crate::mysql::writer::{create_mysql_column, handle_err};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
-const MYSQL_NATIVE_PASSWORD: &str = "mysql_native_password";
-const MYSQL_CLEAR_PASSWORD: &str = "mysql_clear_password";
-
 /// Parameters for the prepared statement
 enum Params<'a> {
     /// Parameters passed through protocol
@@ -87,6 +85,7 @@ pub struct MysqlInstanceShim {
     prepared_stmts_counter: AtomicU32,
     process_id: u32,
     prepared_stmt_cache_size: usize,
+    batching_enabled: bool,
 }
 
 impl MysqlInstanceShim {
@@ -124,7 +123,20 @@ impl MysqlInstanceShim {
             prepared_stmts_counter: AtomicU32::new(1),
             process_id,
             prepared_stmt_cache_size,
+            batching_enabled: false,
         }
+    }
+
+    /// Enables ordinary-table batching for this connection.
+    pub fn with_batching_enabled(mut self, enabled: bool) -> Self {
+        self.batching_enabled = enabled;
+        self
+    }
+
+    fn new_query_context(&self) -> QueryContextRef {
+        let mut ctx = self.session.new_query_context();
+        Arc::make_mut(&mut ctx).set_batching_enabled(self.batching_enabled);
+        ctx
     }
 
     #[tracing::instrument(skip_all, name = "mysql::do_query")]
@@ -289,12 +301,13 @@ impl MysqlInstanceShim {
                     .fail();
                 }
 
+                let timezone = query_ctx.timezone();
                 let replaced_plan = match params {
                     Params::ProtocolParams(params) => {
-                        replace_params_with_values(&plan, param_types, &params)
+                        replace_params_with_values(&plan, param_types, &params, &timezone)
                     }
                     Params::CliParams(params) => {
-                        replace_params_with_exprs(&plan, param_types, &params)
+                        replace_params_with_exprs(&plan, param_types, &params, &timezone)
                     }
                 }?;
 
@@ -347,16 +360,11 @@ impl MysqlInstanceShim {
     }
 
     fn auth_plugin(&self) -> &'static str {
-        if self
-            .user_provider
+        self.user_provider
             .as_ref()
-            .map(|x| x.external())
-            .unwrap_or(false)
-        {
-            MYSQL_CLEAR_PASSWORD
-        } else {
-            MYSQL_NATIVE_PASSWORD
-        }
+            .map(|provider| provider.mysql_auth_method())
+            .unwrap_or(MysqlAuthMethod::NativePassword)
+            .plugin_name()
     }
 }
 
@@ -376,7 +384,19 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         self.auth_plugin()
     }
 
-    async fn auth_plugin_for_username(&self, _user: &[u8]) -> &'static str {
+    async fn auth_plugin_for_username(&self, user: &[u8]) -> &'static str {
+        if user == BEARER_TOKEN_USER.as_bytes() {
+            return MysqlAuthMethod::ClearPassword.plugin_name();
+        }
+        if let Some(provider) = &self.user_provider {
+            let username = String::from_utf8_lossy(user);
+            match provider.mysql_auth_method_for_user(&username).await {
+                Ok(method) => return method.plugin_name(),
+                // This hook cannot return an error. Keep the default challenge;
+                // authentication still validates the credentials separately.
+                Err(e) => warn!(e; "Failed to select MySQL authentication method"),
+            }
+        }
         self.auth_plugin()
     }
 
@@ -391,6 +411,25 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         salt: &[u8],
         auth_data: &[u8],
     ) -> bool {
+        <Self as AsyncMysqlShim<W>>::authenticate_with_database(
+            self,
+            auth_plugin,
+            username,
+            salt,
+            auth_data,
+            None,
+        )
+        .await
+    }
+
+    async fn authenticate_with_database(
+        &self,
+        auth_plugin: &str,
+        username: &[u8],
+        salt: &[u8],
+        auth_data: &[u8],
+        database: Option<&[u8]>,
+    ) -> bool {
         // if not specified then **greptime** will be used
         let username = String::from_utf8_lossy(username);
 
@@ -401,26 +440,50 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
             .client_addr
             .map(|addr| addr.to_string());
         if let Some(user_provider) = &self.user_provider {
-            let user_id = Identity::UserId(&username, addr.as_deref());
-
-            let password = match auth_plugin {
-                MYSQL_NATIVE_PASSWORD => Password::MysqlNativePassword(auth_data, salt),
-                MYSQL_CLEAR_PASSWORD => {
-                    // The raw bytes received could be represented in C-like string, ended in '\0'.
-                    // We must "trim" it to get the real password string.
-                    let password = if let &[password @ .., 0] = &auth_data {
-                        password
-                    } else {
-                        auth_data
-                    };
-                    Password::PlainText(String::from_utf8_lossy(password).to_string().into())
-                }
-                other => {
-                    error!("Unsupported mysql auth plugin: {}", other);
+            let result = if username.as_ref() == BEARER_TOKEN_USER {
+                if auth_plugin != MysqlAuthMethod::CLEAR_PASSWORD_PLUGIN {
+                    warn!("Bearer-token MySQL authentication requires mysql_clear_password");
                     return false;
                 }
+                let token = auth_data.strip_suffix(&[0]).unwrap_or(auth_data);
+                let Ok(token) = std::str::from_utf8(token) else {
+                    warn!("Bearer token is not valid UTF-8");
+                    return false;
+                };
+                let catalog = if let Some(database) = database {
+                    let Ok(database) = std::str::from_utf8(database) else {
+                        warn!("MySQL database is not valid UTF-8");
+                        return false;
+                    };
+                    parse_optional_catalog_and_schema_from_db_string(database)
+                        .0
+                        .unwrap_or_else(|| self.session.catalog())
+                } else {
+                    self.session.catalog()
+                };
+                user_provider
+                    .authenticate_bearer_token(token, &catalog)
+                    .await
+            } else {
+                let user_id = Identity::UserId(&username, addr.as_deref());
+                let password = match auth_plugin {
+                    MysqlAuthMethod::NATIVE_PASSWORD_PLUGIN => {
+                        Password::MysqlNativePassword(auth_data, salt)
+                    }
+                    MysqlAuthMethod::CLEAR_PASSWORD_PLUGIN => {
+                        // The raw bytes received could be represented in C-like string, ended in '\0'.
+                        // We must "trim" it to get the real password string.
+                        let password = auth_data.strip_suffix(&[0]).unwrap_or(auth_data);
+                        Password::PlainText(String::from_utf8_lossy(password).to_string().into())
+                    }
+                    other => {
+                        error!("Unsupported mysql auth plugin: {}", other);
+                        return false;
+                    }
+                };
+                user_provider.authenticate(user_id, password).await
             };
-            match user_provider.authenticate(user_id, password).await {
+            match result {
                 Ok(userinfo) => {
                     user_info = Some(userinfo);
                 }
@@ -446,7 +509,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         raw_query: &'a str,
         w: StatementMetaWriter<'a, W>,
     ) -> Result<()> {
-        let query_ctx = self.session.new_query_context();
+        let query_ctx = self.new_query_context();
         let stmt_id = self.prepared_stmts_counter.fetch_add(1, Ordering::Relaxed);
         let stmt_key = uuid::Uuid::from_u128(stmt_id as u128).to_string();
         let (params, columns) = match self
@@ -476,7 +539,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
     ) -> Result<()> {
         self.session.clear_warnings();
 
-        let query_ctx = self.session.new_query_context();
+        let query_ctx = self.new_query_context();
         let db = query_ctx.get_db_string();
         let _timer = crate::metrics::METRIC_MYSQL_QUERY_TIMER
             .with_label_values(&[crate::metrics::METRIC_MYSQL_BINQUERY, db.as_str()])
@@ -520,7 +583,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         query: &'a str,
         writer: QueryResultWriter<'a, W>,
     ) -> Result<()> {
-        let query_ctx = self.session.new_query_context();
+        let query_ctx = self.new_query_context();
         let db = query_ctx.get_db_string();
         let _timer = crate::metrics::METRIC_MYSQL_QUERY_TIMER
             .with_label_values(&[crate::metrics::METRIC_MYSQL_TEXTQUERY, db.as_str()])
@@ -807,6 +870,7 @@ fn replace_params_with_values(
     plan: &LogicalPlan,
     param_types: HashMap<String, Option<ConcreteDataType>>,
     params: &[ParamValue],
+    timezone: &Timezone,
 ) -> Result<LogicalPlan> {
     debug_assert_eq!(param_types.len(), params.len());
 
@@ -824,7 +888,7 @@ fn replace_params_with_values(
 
     for (i, param) in params.iter().enumerate() {
         if let Some(Some(t)) = param_types.get(&format_placeholder(i + 1)) {
-            let value = helper::convert_value(param, t)?;
+            let value = helper::convert_value(param, t, timezone)?;
 
             values.push(value.into());
         }
@@ -839,6 +903,7 @@ fn replace_params_with_exprs(
     plan: &LogicalPlan,
     param_types: HashMap<String, Option<ConcreteDataType>>,
     params: &[sql::ast::Expr],
+    timezone: &Timezone,
 ) -> Result<LogicalPlan> {
     debug_assert_eq!(param_types.len(), params.len());
 
@@ -853,7 +918,7 @@ fn replace_params_with_exprs(
 
     for (i, param) in params.iter().enumerate() {
         if let Some(Some(t)) = param_types.get(&format_placeholder(i + 1)) {
-            let value = helper::convert_expr_to_scalar_value(param, t)?;
+            let value = helper::convert_expr_to_scalar_value(param, t, timezone)?;
 
             values.push(value.into());
         }
@@ -986,6 +1051,17 @@ mod tests {
             1,
             1024,
         )
+    }
+
+    #[test]
+    fn test_batching_context() {
+        for enabled in [false, true] {
+            let shim = create_shim().with_batching_enabled(enabled);
+            let ctx = shim.new_query_context();
+            assert_eq!(ctx.batching_enabled(), enabled);
+            assert!(!ctx.logical_batching_enabled());
+            assert_eq!(ctx.channel(), Channel::Mysql);
+        }
     }
 
     fn statement_with_transformed_placeholders(query: &str) -> Statement {

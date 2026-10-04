@@ -13,7 +13,7 @@ Enterprise License header generated from [`enterprise-header.txt`](enterprise-he
 
 ## How it's enforced
 
-CI (`license-header-check` in `.github/workflows/develop.yml`) runs
+CI (`license-header-check` in `.github/workflows/checks.yml`) runs
 [hawkeye](https://github.com/korandoru/hawkeye) twice:
 
 1. Default config — applies the Apache-2.0 header to all sources, **excluding**
