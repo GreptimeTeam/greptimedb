@@ -114,7 +114,7 @@ env:
   RUNTIME_CPUS: ${{ inputs.runtime_cpus }}
   RUNTIME_MEMORY: ${{ inputs.runtime_memory }}
   BENCHMARK_ROOT: ${{ inputs.benchmark_root }}
-  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || inputs.provider == 'AWS' && 'public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime:bc8fb1318d1e@sha256:52859b448649914ffc72871bbcab5cdad9fee89f590400008864c818944f7f7a' || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:bc8fb1318d1e@sha256:52859b448649914ffc72871bbcab5cdad9fee89f590400008864c818944f7f7a' }}
+  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || inputs.provider == 'AWS' && 'public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime:2c1de0dfb467@sha256:ec49a8179a369836a6e5ff268e5d13fc5ffbf761311d778c95ebb13f1ea6caa8' || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:2c1de0dfb467@sha256:ec49a8179a369836a6e5ff268e5d13fc5ffbf761311d778c95ebb13f1ea6caa8' }}
   PROVIDER: ${{ inputs.provider }}
   REQUESTED_INSTANCE_TYPE: ${{ inputs.instance_type }}
   SYSTEM_DISK_GIB: ${{ inputs.system_disk_gib }}
