@@ -2880,7 +2880,7 @@ async fn check_bulk_skip_wal_recovery(skip_wal: bool, flush: bool, close: bool) 
             .unwrap()
             .version()
             .memtables
-            .has_unlogged_writes()
+            .has_skip_wal_writes()
     );
     let stream = engine
         .scan_to_stream(region_id, ScanRequest::default())

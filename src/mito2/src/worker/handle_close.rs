@@ -36,11 +36,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         info!("Try to close region {}, worker: {}", region_id, self.id);
 
-        // Unlogged writes cannot be recovered from WAL, so flush them before closing.
+        // Memtables containing skip-WAL writes must be flushed before closing.
         // Followers cannot flush; explicit flush-on-close and region WAL options
         // retain their existing behavior.
         let version = region.version();
-        if (request.flush_on_close || region.skip_wal() || version.memtables.has_unlogged_writes())
+        if (request.flush_on_close || region.skip_wal() || version.memtables.has_skip_wal_writes())
             && !version.memtables.is_empty()
             && region.is_flushable()
         {

@@ -82,7 +82,7 @@ pub(crate) struct RegionWriteCtx {
     /// Source of the buffered writes.
     source: WriteSource,
     /// Whether accepted non-empty writes bypass WAL. WAL replay never sets this flag.
-    has_unlogged_writes: bool,
+    has_skip_wal_writes: bool,
     /// Id of region to write.
     region_id: RegionId,
     /// Version of the region while creating the context.
@@ -142,7 +142,7 @@ impl RegionWriteCtx {
 
         RegionWriteCtx {
             source,
-            has_unlogged_writes: false,
+            has_skip_wal_writes: false,
             region_id,
             version,
             version_control: version_control.clone(),
@@ -176,7 +176,7 @@ impl RegionWriteCtx {
             self.next_sequence = sequence;
         }
         let num_rows = rows.as_ref().map(|rows| rows.rows.len()).unwrap_or(0);
-        self.has_unlogged_writes |= num_rows > 0 && self.is_unlogged_write(skip_wal);
+        self.has_skip_wal_writes |= num_rows > 0 && self.is_skip_wal_write(skip_wal);
         let mutation = Mutation {
             op_type,
             sequence: self.next_sequence,
@@ -276,15 +276,15 @@ impl RegionWriteCtx {
             return;
         }
         // A failed installation may leave some rows in memory.
-        if self.has_unlogged_writes {
-            self.version.memtables.mutable.mark_unlogged_writes();
+        if self.has_skip_wal_writes {
+            self.version.memtables.mutable.mark_skip_wal_writes();
         }
         self.write_mutations().await;
         self.write_bulk().await;
         self.publish_sequence_and_entry_id();
     }
 
-    fn is_unlogged_write(&self, request_skip_wal: bool) -> bool {
+    fn is_skip_wal_write(&self, request_skip_wal: bool) -> bool {
         self.source == WriteSource::Request
             && (request_skip_wal
                 || self.provider == Provider::Noop
@@ -372,7 +372,7 @@ impl RegionWriteCtx {
             self.wal_entry.bulk_entries.push(entry);
         }
 
-        self.has_unlogged_writes |= bulk.num_rows() > 0 && self.is_unlogged_write(skip_wal);
+        self.has_skip_wal_writes |= bulk.num_rows() > 0 && self.is_skip_wal_write(skip_wal);
         self.bulk_notifiers
             .push(WriteNotify::new(sender, bulk.num_rows()));
 
@@ -838,7 +838,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_unlogged_writes_source_and_policy() {
+    async fn test_skip_wal_writes_source_and_policy() {
         use api::v1::helper::{tag_column_schema, time_index_column_schema};
         use api::v1::value::ValueData;
         use api::v1::{ColumnDataType, Row, Value};
@@ -904,7 +904,7 @@ mod tests {
                                 .current()
                                 .version
                                 .memtables
-                                .has_unlogged_writes(),
+                                .has_skip_wal_writes(),
                             source == WriteSource::Request && skip_wal && !fail_before_install,
                             "source={source:?}, skip_wal={skip_wal}, bulk={bulk}, failed={fail_before_install}",
                         );
@@ -927,7 +927,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unlogged_writes_region_policy_and_empty_requests() {
+    fn test_skip_wal_writes_region_policy_and_empty_requests() {
         for source in [WriteSource::Request, WriteSource::WalReplay] {
             for noop in [false, true] {
                 for region_skip_wal in [false, true] {
@@ -952,7 +952,7 @@ mod tests {
                         None,
                         true,
                     );
-                    assert!(!ctx.has_unlogged_writes);
+                    assert!(!ctx.has_skip_wal_writes);
                     ctx.push_mutation(
                         OpType::Put as i32,
                         Some(Rows {
@@ -965,7 +965,7 @@ mod tests {
                         false,
                     );
                     assert_eq!(
-                        ctx.has_unlogged_writes,
+                        ctx.has_skip_wal_writes,
                         source == WriteSource::Request && (noop || region_skip_wal)
                     );
                 }

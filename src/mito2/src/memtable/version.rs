@@ -41,9 +41,9 @@ pub(crate) struct MemtableVersion {
     /// might need to store more than one immutable memtable on the next time we
     /// flush the region.
     immutables: SmallMemtableVec,
-    /// Whether immutable memtables may contain writes not protected by WAL.
+    /// Whether immutable memtables may contain skip-WAL writes.
     /// Flushes are serialized per region and cover all immutable memtables.
-    immutable_has_unlogged_writes: bool,
+    immutable_has_skip_wal_writes: bool,
 }
 
 pub(crate) type MemtableVersionRef = Arc<MemtableVersion>;
@@ -54,13 +54,13 @@ impl MemtableVersion {
         MemtableVersion {
             mutable: Arc::new(MutableMemtables::new(mutable)),
             immutables: SmallVec::new(),
-            immutable_has_unlogged_writes: false,
+            immutable_has_skip_wal_writes: false,
         }
     }
 
-    /// Returns whether current memtables may contain writes not protected by WAL.
-    pub(crate) fn has_unlogged_writes(&self) -> bool {
-        self.mutable.has_unlogged_writes() || self.immutable_has_unlogged_writes
+    /// Returns whether current memtables may contain skip-WAL writes.
+    pub(crate) fn has_skip_wal_writes(&self) -> bool {
+        self.mutable.has_skip_wal_writes() || self.immutable_has_skip_wal_writes
     }
 
     /// Immutable memtables.
@@ -117,7 +117,7 @@ impl MemtableVersion {
             return Ok(Some(MemtableVersion {
                 mutable: Arc::new(MutableMemtables::new(mutable)),
                 immutables: self.immutables.clone(),
-                immutable_has_unlogged_writes: self.immutable_has_unlogged_writes,
+                immutable_has_skip_wal_writes: self.immutable_has_skip_wal_writes,
             }));
         }
 
@@ -147,8 +147,8 @@ impl MemtableVersion {
         Ok(Some(MemtableVersion {
             mutable,
             immutables,
-            immutable_has_unlogged_writes: self.immutable_has_unlogged_writes
-                || self.mutable.has_unlogged_writes(),
+            immutable_has_skip_wal_writes: self.immutable_has_skip_wal_writes
+                || self.mutable.has_skip_wal_writes(),
         }))
     }
 
@@ -161,7 +161,7 @@ impl MemtableVersion {
             .cloned()
             .collect();
         if self.immutables.is_empty() {
-            self.immutable_has_unlogged_writes = false;
+            self.immutable_has_skip_wal_writes = false;
         }
     }
 
@@ -215,7 +215,7 @@ impl MemtableVersion {
 pub(crate) struct MutableMemtables {
     partitions: TimePartitions,
     /// Set before installation because failed writes may install some rows.
-    has_unlogged_writes: AtomicBool,
+    has_skip_wal_writes: AtomicBool,
 }
 
 pub(crate) type MutableMemtablesRef = Arc<MutableMemtables>;
@@ -224,17 +224,17 @@ impl MutableMemtables {
     fn new(partitions: TimePartitions) -> Self {
         Self {
             partitions,
-            has_unlogged_writes: AtomicBool::new(false),
+            has_skip_wal_writes: AtomicBool::new(false),
         }
     }
 
-    /// Marks that these memtables may contain writes not protected by WAL.
-    pub(crate) fn mark_unlogged_writes(&self) {
-        self.has_unlogged_writes.store(true, Ordering::Relaxed);
+    /// Marks that these memtables may contain skip-WAL writes.
+    pub(crate) fn mark_skip_wal_writes(&self) {
+        self.has_skip_wal_writes.store(true, Ordering::Relaxed);
     }
 
-    fn has_unlogged_writes(&self) -> bool {
-        self.has_unlogged_writes.load(Ordering::Relaxed)
+    fn has_skip_wal_writes(&self) -> bool {
+        self.has_skip_wal_writes.load(Ordering::Relaxed)
     }
 
     /// Writes key values to the mutable time partitions.
@@ -308,8 +308,8 @@ mod tests {
     use crate::test_util::memtable_util;
 
     #[test]
-    fn test_unlogged_writes_follow_memtable_lifecycle() {
-        for new_unlogged_writes in [false, true] {
+    fn test_skip_wal_writes_follow_memtable_lifecycle() {
+        for new_skip_wal_writes in [false, true] {
             let metadata = memtable_util::metadata_for_test();
             let partitions = TimePartitions::new(
                 metadata.clone(),
@@ -319,7 +319,7 @@ mod tests {
             );
             let version = MemtableVersion::new(partitions);
             let snapshot = version.clone();
-            assert!(!version.has_unlogged_writes());
+            assert!(!version.has_skip_wal_writes());
 
             let kvs = memtable_util::build_key_values(
                 &metadata,
@@ -328,34 +328,34 @@ mod tests {
                 &[1000, 7000],
                 1,
             );
-            version.mutable.mark_unlogged_writes();
+            version.mutable.mark_skip_wal_writes();
             version.mutable.write(&kvs).unwrap();
-            assert!(snapshot.has_unlogged_writes());
+            assert!(snapshot.has_skip_wal_writes());
 
             let mut frozen = version
                 .freeze_mutable(&metadata, Some(Duration::from_secs(5)))
                 .unwrap()
                 .unwrap();
             assert_eq!(2, frozen.immutables().len());
-            assert!(frozen.has_unlogged_writes());
-            assert!(!frozen.mutable.has_unlogged_writes());
+            assert!(frozen.has_skip_wal_writes());
+            assert!(!frozen.mutable.has_skip_wal_writes());
             assert!(!Arc::ptr_eq(&version.mutable, &frozen.mutable));
 
             let during_flush = frozen.clone();
-            if new_unlogged_writes {
-                frozen.mutable.mark_unlogged_writes();
+            if new_skip_wal_writes {
+                frozen.mutable.mark_skip_wal_writes();
             }
             frozen.mutable.write(&kvs).unwrap();
             let ids: Vec<_> = frozen.immutables().iter().map(|mem| mem.id()).collect();
             frozen.remove_memtables(&ids);
-            assert_eq!(new_unlogged_writes, frozen.has_unlogged_writes());
+            assert_eq!(new_skip_wal_writes, frozen.has_skip_wal_writes());
             assert_eq!(
-                new_unlogged_writes,
-                during_flush.mutable.has_unlogged_writes()
+                new_skip_wal_writes,
+                during_flush.mutable.has_skip_wal_writes()
             );
             // Removing flushed memtables does not mutate the old flush snapshot.
             assert_eq!(2, during_flush.immutables().len());
-            assert!(during_flush.has_unlogged_writes());
+            assert!(during_flush.has_skip_wal_writes());
 
             let mut next_flush = frozen
                 .freeze_mutable(&metadata, Some(Duration::from_secs(5)))
@@ -363,12 +363,12 @@ mod tests {
                 .unwrap();
             let ids: Vec<_> = next_flush.immutables().iter().map(|mem| mem.id()).collect();
             next_flush.remove_memtables(&ids);
-            assert!(!next_flush.has_unlogged_writes());
+            assert!(!next_flush.has_skip_wal_writes());
         }
     }
 
     #[test]
-    fn test_unlogged_writes_survive_flush_retry() {
+    fn test_skip_wal_writes_survive_flush_retry() {
         let metadata = memtable_util::metadata_for_test();
         let partitions = TimePartitions::new(
             metadata.clone(),
@@ -378,7 +378,7 @@ mod tests {
         );
         let version = MemtableVersion::new(partitions);
         let kvs = memtable_util::build_key_values(&metadata, "hello".to_string(), 0, &[1000], 1);
-        version.mutable.mark_unlogged_writes();
+        version.mutable.mark_skip_wal_writes();
         version.mutable.write(&kvs).unwrap();
         let frozen = version
             .freeze_mutable(&metadata, Some(Duration::from_secs(5)))
@@ -391,8 +391,8 @@ mod tests {
             .freeze_mutable(&metadata, Some(Duration::from_secs(10)))
             .unwrap()
             .unwrap();
-        assert!(frozen.has_unlogged_writes());
-        assert!(!frozen.mutable.has_unlogged_writes());
+        assert!(frozen.has_skip_wal_writes());
+        assert!(!frozen.mutable.has_skip_wal_writes());
 
         // A retry includes the old immutable memtables and new logged writes.
         frozen.mutable.write(&kvs).unwrap();
@@ -401,10 +401,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(2, retried.immutables().len());
-        assert!(retried.has_unlogged_writes());
+        assert!(retried.has_skip_wal_writes());
         let ids: Vec<_> = retried.immutables().iter().map(|mem| mem.id()).collect();
         retried.remove_memtables(&ids);
-        assert!(!retried.has_unlogged_writes());
+        assert!(!retried.has_skip_wal_writes());
 
         let replacement = MemtableVersion::new(TimePartitions::new(
             metadata,
@@ -412,7 +412,7 @@ mod tests {
             frozen.mutable.next_memtable_id(),
             None,
         ));
-        assert!(!replacement.has_unlogged_writes());
-        assert!(frozen.has_unlogged_writes());
+        assert!(!replacement.has_skip_wal_writes());
+        assert!(frozen.has_skip_wal_writes());
     }
 }

@@ -960,7 +960,7 @@ async fn test_close_request_skip_wal(
         .unwrap();
     let region = engine.get_region(region_id).unwrap();
     assert!(!region.skip_wal());
-    assert_eq!(region.version().memtables.has_unlogged_writes(), skip_wal);
+    assert_eq!(region.version().memtables.has_skip_wal_writes(), skip_wal);
     let expected = common_recordbatch::RecordBatches::try_collect(
         engine
             .scan_to_stream(region_id, ScanRequest::default())
@@ -979,7 +979,7 @@ async fn test_close_request_skip_wal(
         if skip_wal { 3 } else { 0 }
     );
     let reopened = engine.get_region(region_id).unwrap();
-    assert!(!reopened.version().memtables.has_unlogged_writes());
+    assert!(!reopened.version().memtables.has_skip_wal_writes());
     let actual = common_recordbatch::RecordBatches::try_collect(
         engine
             .scan_to_stream(region_id, ScanRequest::default())
@@ -1095,7 +1095,7 @@ async fn test_close_request_skip_wal_during_flush(#[case] new_skip_wal: bool) {
         region.version().flushed_sequence,
         if new_skip_wal { 6 } else { 3 }
     );
-    assert!(!region.version().memtables.has_unlogged_writes());
+    assert!(!region.version().memtables.has_skip_wal_writes());
 
     reopen_region(&engine, region_id, request.table_dir, false, HashMap::new()).await;
     let actual = common_recordbatch::RecordBatches::try_collect(
