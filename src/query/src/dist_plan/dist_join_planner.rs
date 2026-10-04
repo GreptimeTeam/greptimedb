@@ -144,8 +144,11 @@ pub(crate) struct CandidateJoin {
 }
 
 /// Returns the candidate joins of `plan`, i.e. of its `EXPLAIN`/`EXPLAIN ANALYZE` input: the
-/// `INNER` joins whose sides each resolve to a single physical base table and whose condition
-/// compares the two sides.
+/// `INNER` joins whose condition compares two sides that each resolve to a single physical base
+/// table, with two different tables on the two sides.
+///
+/// A join of one table with itself, e.g. under two aliases, can never satisfy `N * B < B`, so it
+/// is left out and its statistics are never fetched.
 ///
 /// The plan is the one before the analyzers run: DataFusion's SQL planner leaves the whole `ON`
 /// clause of `LogicalPlanBuilder::join_on` in `filter`, and `ExtractEquijoinPredicate` only
@@ -161,6 +164,7 @@ pub(crate) fn candidate_joins(plan: &LogicalPlan) -> Vec<CandidateJoin> {
                 side_base_table_id(&join.left),
                 side_base_table_id(&join.right),
             )
+            && probe != build
         {
             candidates.push(CandidateJoin { probe, build });
         }
@@ -1480,6 +1484,56 @@ mod tests {
                 Vec::new()
             };
             assert_eq!(expected, candidates_of(on), "case: {name}");
+        }
+    }
+
+    /// The two sides of a candidate join must be two different physical tables: the aliased
+    /// self-join `logs AS l JOIN logs AS r` can never satisfy `N * B < B`, so it is no candidate,
+    /// while the same shape over two tables stays one. Rejecting a self-join keeps the candidates
+    /// of its inputs.
+    #[test]
+    fn candidate_joins_reject_same_physical_table() {
+        let self_join = inner_join(
+            table_scan("l", 7, "logs"),
+            table_scan("r", 7, "logs"),
+            col("l.number"),
+            col("r.number"),
+        );
+        let aliased_tables = inner_join(
+            table_scan("l", 7, "logs"),
+            table_scan("r", 8, "archive"),
+            col("l.number"),
+            col("r.number"),
+        );
+        let legitimate = inner_join(
+            table_scan("t1", 1, "t1"),
+            table_scan("t2", 2, "t2"),
+            col("t1.number"),
+            col("t2.number"),
+        );
+        let mixed = inner_join(
+            self_join.clone(),
+            legitimate,
+            col("l.number"),
+            col("t1.number"),
+        );
+
+        let cases = [
+            ("aliased self-join", self_join, vec![]),
+            (
+                "aliased different tables",
+                aliased_tables,
+                vec![CandidateJoin { probe: 7, build: 8 }],
+            ),
+            (
+                "self-join next to a legitimate join",
+                mixed,
+                vec![CandidateJoin { probe: 1, build: 2 }],
+            ),
+        ];
+
+        for (name, plan, expected) in cases {
+            assert_eq!(expected, candidate_joins(&plan), "case: {name}");
         }
     }
 
