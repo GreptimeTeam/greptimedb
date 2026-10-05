@@ -44,7 +44,12 @@ TQL EVAL (0, 0, '5s') counter_metric{device="eth0"} > on(host) gauge_metric{devi
 TQL EVAL (0, 0, '5s') counter_metric{device="eth0"} > bool on(host) gauge_metric{device="eth0"};
 
 -- `host1` carries two devices on both sides: the match group repeats on the one side.
+-- Both operands are invalid, so either concurrent check can report the error first.
+-- SQLNESS REPLACE (left|right)\shand-side invalid-hand-side
 TQL EVAL (0, 0, '5s') counter_metric / on(host) gauge_metric;
+
+-- Only the right operand repeats the matching key; its error must identify that side.
+TQL EVAL (0, 0, '5s') counter_metric{device="eth0"} / on(host) gauge_metric;
 
 -- The one side is unique here, the many side is not, and no group modifier makes it explicit.
 TQL EVAL (0, 0, '5s') counter_metric / on(host) gauge_metric{device="eth0"};
