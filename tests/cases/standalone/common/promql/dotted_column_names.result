@@ -384,23 +384,26 @@ TQL EXPLAIN (0, 10, '5s') {"otel.m"} and {"otel.m", "Host"="h1"};
 |_|_Aggregate: groupBy=[[otel.m.ts.time, otel.m.service.name, otel.m.Host, otel.m.host, otel.m.v.val]], aggr=[[]]_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| Distinct:_|
+|_|_Projection: otel.m.ts.time, CASE WHEN CAST(otel.m.service.name AS Utf8) IS NOT NULL THEN CAST(otel.m.service.name AS Utf8) ELSE Utf8("") END AS service.name, CASE WHEN CAST(otel.m.Host AS Utf8) IS NOT NULL THEN CAST(otel.m.Host AS Utf8) ELSE Utf8("") END AS Host, CASE WHEN CAST(otel.m.host AS Utf8) IS NOT NULL THEN CAST(otel.m.host AS Utf8) ELSE Utf8("") END AS host, otel.m.v.val |
 |_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts.time]_|
 |_|_PromSeriesDivide: tags=["service.name", "Host", "host"]_|
 |_|_Sort: otel.m.service.name ASC NULLS FIRST, otel.m.Host ASC NULLS FIRST, otel.m.host ASC NULLS FIRST, otel.m.ts.time ASC NULLS FIRST_|
 |_|_Filter: otel.m.ts.time >= TimestampMillisecond(-299999, None) AND otel.m.ts.time <= TimestampMillisecond(10000, None)_|
 |_|_TableScan: otel.m, partial_filters=[otel.m.ts.time >= TimestampMillisecond(-299999, None), otel.m.ts.time <= TimestampMillisecond(10000, None)]_|
 |_| ]]_|
-|_|_Projection: otel.m.ts.time, otel.m.service.name, otel.m.Host, otel.m.host_|
+|_|_Projection: otel.m.ts.time, CASE WHEN __common_expr_1 IS NOT NULL THEN __common_expr_1 ELSE Utf8("") END AS service.name, CASE WHEN __common_expr_2 IS NOT NULL THEN __common_expr_2 ELSE Utf8("") END AS Host, CASE WHEN __common_expr_3 IS NOT NULL THEN __common_expr_3 ELSE Utf8("") END AS host_|
+|_|_Projection: CAST(otel.m.service.name AS Utf8) AS __common_expr_1, CAST(otel.m.Host AS Utf8) AS __common_expr_2, CAST(otel.m.host AS Utf8) AS __common_expr_3, otel.m.ts.time_|
 |_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts.time]_|
 |_|_PromSeriesDivide: tags=["service.name", "Host", "host"]_|
 |_|_Sort: otel.m.service.name ASC NULLS FIRST, otel.m.Host ASC NULLS FIRST, otel.m.host ASC NULLS FIRST, otel.m.ts.time ASC NULLS FIRST_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| Filter: otel.m.Host = Utf8("h1") AND otel.m.ts.time >= TimestampMillisecond(-299999, None) AND otel.m.ts.time <= TimestampMillisecond(10000, None)_|
-|_|_TableScan: otel.m, partial_filters=[otel.m.Host = Utf8("h1"), otel.m.ts.time >= TimestampMillisecond(-299999, None), otel.m.ts.time <= TimestampMillisecond(10000, None)] |
+|_|_TableScan: otel.m, partial_filters=[otel.m.Host = Utf8("h1"), otel.m.ts.time >= TimestampMillisecond(-299999, None), otel.m.ts.time <= TimestampMillisecond(10000, None)]_|
 |_| ]]_|
 | physical_plan | HashJoinExec: mode=CollectLeft, join_type=RightSemi, on=[(Host@2, Host@2), (host@3, host@3), (service.name@1, service.name@1), (ts.time@0, ts.time@0)], NullsEqual: true_|
 |_|_CoalescePartitionsExec_|
-|_|_ProjectionExec: expr=[ts.time@0 as ts.time, service.name@1 as service.name, Host@2 as Host, host@3 as host]_|
+|_|_ProjectionExec: expr=[ts.time@3 as ts.time, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as service.name, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as Host, CASE WHEN __common_expr_3@2 IS NOT NULL THEN __common_expr_3@2 ELSE_END as host]_|
+|_|_ProjectionExec: expr=[CAST(service.name@1 AS Utf8) as __common_expr_1, CAST(Host@2 AS Utf8) as __common_expr_2, CAST(host@3 AS Utf8) as __common_expr_3, ts.time@0 as ts.time]_|
 |_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts.time]_|
 |_|_PromSeriesDivideExec: tags=["service.name", "Host", "host"]_|
 |_|_SortExec: expr=[service.name@1 ASC, Host@2 ASC, host@3 ASC, ts.time@0 ASC], preserve_REDACTED
@@ -428,7 +431,8 @@ TQL EXPLAIN (0, 10, '5s') topk(1, {"otel.m"});
 |_|_Filter: CAST(row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW AS Float64) <= Float64(1)_|
 |_|_WindowAggr: windowExpr=[[row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts.time]_|
+|_| Projection: otel.m.ts.time, CASE WHEN CAST(otel.m.service.name AS Utf8) IS NOT NULL THEN CAST(otel.m.service.name AS Utf8) ELSE Utf8("") END AS service.name, CASE WHEN CAST(otel.m.Host AS Utf8) IS NOT NULL THEN CAST(otel.m.Host AS Utf8) ELSE Utf8("") END AS Host, CASE WHEN CAST(otel.m.host AS Utf8) IS NOT NULL THEN CAST(otel.m.host AS Utf8) ELSE Utf8("") END AS host, otel.m.v.val_|
+|_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts.time]_|
 |_|_PromSeriesDivide: tags=["service.name", "Host", "host"]_|
 |_|_Sort: otel.m.service.name ASC NULLS FIRST, otel.m.Host ASC NULLS FIRST, otel.m.host ASC NULLS FIRST, otel.m.ts.time ASC NULLS FIRST_|
 |_|_Filter: otel.m.ts.time >= TimestampMillisecond(-299999, None) AND otel.m.ts.time <= TimestampMillisecond(10000, None)_|
@@ -453,12 +457,13 @@ TQL EXPLAIN (5, 10, '5s') sum by ("service.name") (increase({"otel.m"}[10s]));
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| logical_plan_| MergeSort: otel.m.service.name ASC NULLS LAST, otel.m.ts.time ASC NULLS LAST_|
+| logical_plan_| Sort: otel.m.service.name ASC NULLS LAST, otel.m.ts.time ASC NULLS LAST_|
+|_|_Aggregate: groupBy=[[otel.m.service.name, otel.m.ts.time]], aggr=[[__sum_merge(__sum_state(prom_increase(ts.time_range,v.val,ts.time,Int64(10000)))) AS sum(prom_increase(ts.time_range,v.val,ts.time,Int64(10000)))]]_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| Sort: otel.m.service.name ASC NULLS LAST, otel.m.ts.time ASC NULLS LAST_|
-|_|_Aggregate: groupBy=[[otel.m.service.name, otel.m.ts.time]], aggr=[[sum(prom_increase(ts.time_range,v.val,ts.time,Int64(10000)))]]_|
+|_| Aggregate: groupBy=[[otel.m.service.name, otel.m.ts.time]], aggr=[[__sum_state(prom_increase(ts.time_range,v.val,ts.time,Int64(10000)))]]_|
 |_|_Filter: prom_increase(ts.time_range,v.val,ts.time,Int64(10000)) IS NOT NULL_|
-|_|_Projection: otel.m.ts.time, prom_increase(ts.time_range, v.val, otel.m.ts.time, Int64(10000)) AS prom_increase(ts.time_range,v.val,ts.time,Int64(10000)), otel.m.service.name, otel.m.Host, otel.m.host |
+|_|_Projection: otel.m.ts.time, prom_increase(ts.time_range, v.val, otel.m.ts.time, Int64(10000)) AS prom_increase(ts.time_range,v.val,ts.time,Int64(10000)), otel.m.service.name, otel.m.Host, otel.m.host_|
+|_|_Projection: otel.m.ts.time, CASE WHEN CAST(otel.m.service.name AS Utf8) IS NOT NULL THEN CAST(otel.m.service.name AS Utf8) ELSE Utf8("") END AS service.name, CASE WHEN CAST(otel.m.Host AS Utf8) IS NOT NULL THEN CAST(otel.m.Host AS Utf8) ELSE Utf8("") END AS Host, CASE WHEN CAST(otel.m.host AS Utf8) IS NOT NULL THEN CAST(otel.m.host AS Utf8) ELSE Utf8("") END AS host, v.val, ts.time_range |
 |_|_PromRangeManipulate: req range=[5000..10000], interval=[5000], eval range=[10000], time index=[ts.time], values=["v.val"]_|
 |_|_PromSeriesNormalize: offset=[0], time index=[ts.time], filter NaN: [true]_|
 |_|_PromSeriesDivide: tags=["service.name", "Host", "host"]_|
@@ -466,7 +471,12 @@ TQL EXPLAIN (5, 10, '5s') sum by ("service.name") (increase({"otel.m"}[10s]));
 |_|_Filter: otel.m.ts.time >= TimestampMillisecond(-4999, None) AND otel.m.ts.time <= TimestampMillisecond(10000, None)_|
 |_|_TableScan: otel.m, partial_filters=[otel.m.ts.time >= TimestampMillisecond(-4999, None), otel.m.ts.time <= TimestampMillisecond(10000, None)]_|
 |_| ]]_|
-| physical_plan | MergeSortExec: [service.name@0 ASC NULLS LAST, ts.time@1 ASC NULLS LAST]_|
+| physical_plan | SortPreservingMergeExec: [service.name@0 ASC NULLS LAST, ts.time@1 ASC NULLS LAST]_|
+|_|_SortExec: expr=[service.name@0 ASC NULLS LAST, ts.time@1 ASC NULLS LAST], preserve_REDACTED
+|_|_AggregateExec: mode=FinalPartitioned, gby=[service.name@0 as service.name, ts.time@1 as ts.time], aggr=[__sum_merge(__sum_state(prom_increase(ts.time_range,v.val,ts.time,Int64(10000)))) as sum(prom_increase(ts.time_range,v.val,ts.time,Int64(10000)))]_|
+|_|_RepartitionExec: REDACTED
+|_|_AggregateExec: mode=Partial, gby=[service.name@0 as service.name, ts.time@1 as ts.time], aggr=[__sum_merge(__sum_state(prom_increase(ts.time_range,v.val,ts.time,Int64(10000)))) as sum(prom_increase(ts.time_range,v.val,ts.time,Int64(10000)))]_|
+|_|_RepartitionExec: REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -482,11 +492,12 @@ TQL EXPLAIN (0, 10, '5s') histogram_quantile(0.5, {"otel.h"});
 +-+-+
 | logical_plan_| HistogramFold: le=le, field=v.val, quantile=0.5_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts.time]_|
+|_| Projection: otel.h.ts.time, CASE WHEN CAST(otel.h.service.name AS Utf8) IS NOT NULL THEN CAST(otel.h.service.name AS Utf8) ELSE Utf8("") END AS service.name, CASE WHEN CAST(otel.h.le AS Utf8) IS NOT NULL THEN CAST(otel.h.le AS Utf8) ELSE Utf8("") END AS le, otel.h.v.val |
+|_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts.time]_|
 |_|_PromSeriesDivide: tags=["service.name", "le"]_|
 |_|_Sort: otel.h.service.name ASC NULLS FIRST, otel.h.le ASC NULLS FIRST, otel.h.ts.time ASC NULLS FIRST_|
 |_|_Filter: otel.h.ts.time >= TimestampMillisecond(-299999, None) AND otel.h.ts.time <= TimestampMillisecond(10000, None)_|
-|_|_TableScan: otel.h, partial_filters=[otel.h.ts.time >= TimestampMillisecond(-299999, None), otel.h.ts.time <= TimestampMillisecond(10000, None)] |
+|_|_TableScan: otel.h, partial_filters=[otel.h.ts.time >= TimestampMillisecond(-299999, None), otel.h.ts.time <= TimestampMillisecond(10000, None)]_|
 |_| ]]_|
 | physical_plan | HistogramFoldExec: le=@2, field=@3, quantile=0.5_|
 |_|_RepartitionExec: REDACTED

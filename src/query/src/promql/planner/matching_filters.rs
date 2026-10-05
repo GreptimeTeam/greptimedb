@@ -52,10 +52,10 @@ const LABEL_PRESERVING_RANGE_FUNCTIONS: [&str; 20] = [
 /// Copies label matchers from one operand of `binary` to the other, so both scans discard
 /// non-joining series instead of the join.
 ///
-/// Arithmetic operands are inner-joined on their matching labels with plain column
-/// equality, so a matcher on a matching label already holds for every surviving pair. Copying it
-/// to the other operand can only drop rows that had no partner, whatever the matcher kind, and
-/// `NULL` pairs only with `NULL`. Nor can it split a match group, whose series agree on every
+/// Arithmetic operands are inner-joined on their PromQL-normalized matching labels, so a matcher
+/// on a matching label already holds for every surviving pair. Copying it to the other operand
+/// can only drop rows that had no partner, including when NULL and empty tags share a label.
+/// Nor can it split a match group, whose series agree on every
 /// matching label: a propagated matcher removes whole groups, so the cardinality check still
 /// sees every group that takes part in the matching. A duplicate in a group without a partner
 /// goes unreported as a result, where Prometheus fails the query on it.

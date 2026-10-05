@@ -792,6 +792,13 @@ fn assert_normal_metric_schema(plan: &LogicalPlan) {
 async fn build_test_table_provider_with_distinct_tags(
     table_tags: &[(&str, &[&str])],
 ) -> DfTableSourceProvider {
+    build_test_table_provider_with_nullable_distinct_tags(table_tags, false).await
+}
+
+async fn build_test_table_provider_with_nullable_distinct_tags(
+    table_tags: &[(&str, &[&str])],
+    nullable_tags: bool,
+) -> DfTableSourceProvider {
     let catalog_list = MemoryCatalogManager::with_default_setup();
     for (table_name, tags) in table_tags {
         let mut columns = tags
@@ -800,7 +807,7 @@ async fn build_test_table_provider_with_distinct_tags(
                 ColumnSchema::new(
                     (*tag).to_string(),
                     ConcreteDataType::string_datatype(),
-                    false,
+                    nullable_tags,
                 )
             })
             .collect::<Vec<_>>();
@@ -2498,8 +2505,7 @@ async fn at_modifier_rejects_unrepresentable_timestamp() {
     {
         let err = parser::parse("some_metric @ 1e16").unwrap_err();
         assert!(
-            err.to_string()
-                .contains("timestamp out of bounds for @ modifier"),
+            err.contains("timestamp out of bounds for @ modifier"),
             "{err}"
         );
     }
@@ -4517,9 +4523,9 @@ async fn mixed_histogram_helper_preserves_native_le_and_scans_once() {
     assert_eq!(
         actual,
         vec![
-            (1_000, None, 1.0),
+            (1_000, Some(String::new()), 1.0),
             (1_000, Some("native".to_string()), 0.0),
-            (2_000, None, 1.0),
+            (2_000, Some(String::new()), 1.0),
             (2_000, Some("native".to_string()), 0.0),
         ]
     );
@@ -5170,7 +5176,7 @@ async fn test_hash_join() {
         .unwrap();
     let expected = "Projection: http_server_requests_seconds_sum.uri, http_server_requests_seconds_count.greptime_timestamp, CAST(http_server_requests_seconds_sum.greptime_value AS Float64) / CAST(http_server_requests_seconds_count.greptime_value AS Float64) AS http_server_requests_seconds_sum.greptime_value / http_server_requests_seconds_count.greptime_value\
             \n  Projection: http_server_requests_seconds_sum.uri, http_server_requests_seconds_sum.kubernetes_namespace, http_server_requests_seconds_sum.kubernetes_pod_name, http_server_requests_seconds_sum.greptime_timestamp, http_server_requests_seconds_sum.greptime_value, http_server_requests_seconds_count.uri, http_server_requests_seconds_count.kubernetes_namespace, http_server_requests_seconds_count.kubernetes_pod_name, http_server_requests_seconds_count.greptime_timestamp, http_server_requests_seconds_count.greptime_value\
-            \n    Filter: prom_assert_unique_match_group(__promql_match_group_count, http_server_requests_seconds_sum.uri)\
+            \n    Filter: prom_assert_unique_match_group(__promql_match_group_count, Int64(2), Utf8(\"uri\"), http_server_requests_seconds_sum.uri)\
             \n      WindowAggr: windowExpr=[[count(Int64(1)) PARTITION BY [http_server_requests_seconds_sum.uri, http_server_requests_seconds_sum.greptime_timestamp] ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING AS __promql_match_group_count]]\
             \n        Inner Join: http_server_requests_seconds_sum.greptime_timestamp = http_server_requests_seconds_count.greptime_timestamp, http_server_requests_seconds_sum.uri = http_server_requests_seconds_count.uri\
             \n          SubqueryAlias: http_server_requests_seconds_sum\
@@ -5181,7 +5187,7 @@ async fn test_hash_join() {
             \n                    TableScan: http_server_requests_seconds_sum\
             \n          SubqueryAlias: http_server_requests_seconds_count\
             \n            Projection: http_server_requests_seconds_count.uri, http_server_requests_seconds_count.kubernetes_namespace, http_server_requests_seconds_count.kubernetes_pod_name, http_server_requests_seconds_count.greptime_timestamp, http_server_requests_seconds_count.greptime_value\
-            \n              Filter: prom_assert_unique_match_group(__promql_match_group_count, http_server_requests_seconds_count.uri)\
+            \n              Filter: prom_assert_unique_match_group(__promql_match_group_count, Int64(1), Utf8(\"uri\"), http_server_requests_seconds_count.uri)\
             \n                WindowAggr: windowExpr=[[count(Int64(1)) PARTITION BY [http_server_requests_seconds_count.uri, http_server_requests_seconds_count.greptime_timestamp] ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING AS __promql_match_group_count]]\
             \n                  PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp]\
             \n                    PromSeriesDivide: tags=[\"uri\", \"kubernetes_namespace\", \"kubernetes_pod_name\"]\
@@ -6297,10 +6303,10 @@ async fn test_direct_or_normalizes_missing_match_labels() {
     #[rustfmt::skip]
     let cases: &[Case<'_>] = &[
         (None, None, 1, 1, &[(1.0, None)]),
-        (None, Some(Some("")), 1, 1, &[(1.0, None)]),
+        (None, Some(Some("")), 1, 1, &[(1.0, Some(""))]),
         (Some(Some("")), None, 1, 1, &[(1.0, Some(""))]),
-        (None, Some(Some("r")), 1, 1, &[(1.0, None), (2.0, Some("r"))]),
-        (Some(Some("l")), None, 1, 1, &[(1.0, Some("l")), (2.0, None)]),
+        (None, Some(Some("r")), 1, 1, &[(1.0, Some("")), (2.0, Some("r"))]),
+        (Some(Some("l")), None, 1, 1, &[(1.0, Some("l")), (2.0, Some(""))]),
         (Some(None), Some(Some("")), 1, 1, &[(1.0, None)]),
         (Some(None), Some(Some("r")), 1, 1, &[(1.0, None), (2.0, Some("r"))]),
         (Some(Some("same")), Some(Some("same")), 1, 2, &[(1.0, Some("same")), (2.0, Some("same"))]),
@@ -6824,6 +6830,418 @@ async fn binary_matching_label_filter_reaches_both_operands() {
             "{query}\n{plan}"
         );
     }
+}
+
+#[tokio::test]
+async fn nullable_tags_are_normalized_for_promql_grouping() {
+    let provider = build_test_table_provider_with_nullable_distinct_tags(
+        &[("metric_a", &["host", "zone"])],
+        true,
+    )
+    .await;
+    let plan = PromPlanner::stmt_to_plan(
+        provider,
+        &build_eval_stmt("max by(host)(metric_a)"),
+        &build_query_engine_state(),
+    )
+    .await
+    .unwrap();
+    let display = plan.display_indent().to_string();
+    let normalization = display.find("coalesce(").expect(&display);
+    let selection = display.find("PromInstantManipulate").expect(&display);
+    assert!(normalization < selection, "{display}");
+    assert!(display.contains("PromSeriesDivide"), "{display}");
+}
+
+#[tokio::test]
+async fn nullable_match_groups_are_checked_even_with_all_tags_in_key() {
+    let provider = build_test_table_provider_with_nullable_distinct_tags(
+        &[("metric_a", &["host"]), ("metric_b", &["host"])],
+        true,
+    )
+    .await;
+    let plan = PromPlanner::stmt_to_plan(
+        provider,
+        &build_eval_stmt("metric_a / on(host) group_left metric_b"),
+        &build_query_engine_state(),
+    )
+    .await
+    .unwrap();
+    let display = plan.display_indent().to_string();
+    assert!(display.contains(MATCH_GROUP_COUNT_COLUMN), "{display}");
+}
+
+fn nullable_label_table(
+    name: &str,
+    table_id: u32,
+    tags: &[(&str, &[Option<&str>])],
+    values: &[Option<f64>],
+) -> table::TableRef {
+    let mut columns = tags
+        .iter()
+        .map(|(tag, _)| {
+            ColumnSchema::new(
+                (*tag).to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            )
+        })
+        .collect::<Vec<_>>();
+    columns.extend([
+        ColumnSchema::new(
+            "ts".to_string(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new("v".to_string(), ConcreteDataType::float64_datatype(), true),
+    ]);
+    let schema = Arc::new(Schema::new(columns));
+    let mut arrays = tags
+        .iter()
+        .map(|(_, labels)| Arc::new(StringArray::from(labels.to_vec())) as ArrayRef)
+        .collect::<Vec<_>>();
+    arrays.extend([
+        Arc::new(TimestampMillisecondArray::from(vec![0; values.len()])) as ArrayRef,
+        Arc::new(Float64Array::from(values.to_vec())) as ArrayRef,
+    ]);
+    let batch = RecordBatch::try_new(schema.arrow_schema().clone(), arrays).unwrap();
+    let backing = GreptimeMemTable::new_with_catalog(
+        name,
+        GreptimeRecordBatch::from_df_record_batch(schema.clone(), batch),
+        table_id,
+        DEFAULT_CATALOG_NAME.to_string(),
+        DEFAULT_SCHEMA_NAME.to_string(),
+    );
+    let meta = TableMetaBuilder::empty()
+        .schema(schema)
+        .primary_key_indices((0..tags.len()).collect())
+        .value_indices(vec![tags.len() + 1])
+        .next_column_id((tags.len() + 2) as u32)
+        .build()
+        .unwrap();
+    let info = Arc::new(
+        TableInfoBuilder::default()
+            .table_id(table_id)
+            .name(name)
+            .meta(meta)
+            .build()
+            .unwrap(),
+    );
+    Arc::new(Table::new(
+        info,
+        FilterPushDownType::Unsupported,
+        backing.data_source(),
+    ))
+}
+
+async fn nullable_label_query(tables: Vec<table::TableRef>, query: &str) -> LogicalPlan {
+    let catalog = MemoryCatalogManager::with_default_setup();
+    for table in tables {
+        let info = table.table_info();
+        catalog
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: info.name.clone(),
+                table_id: info.ident.table_id,
+                table,
+            })
+            .unwrap();
+    }
+    let provider = DfTableSourceProvider::new(
+        catalog,
+        false,
+        QueryContext::arc(),
+        DummyDecoder::arc(),
+        false,
+    );
+    let mut stmt = build_eval_stmt(query);
+    stmt.end = stmt.start;
+    PromPlanner::stmt_to_plan(provider, &stmt, &build_query_engine_state())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn one_to_one_rejects_normalized_collisions_on_either_side() {
+    for (query, side) in [
+        ("a / on(host) b", "left"),
+        ("a / b", "left"),
+        ("a > bool on(host) b", "left"),
+        ("b / on(host) a", "right"),
+        ("b / a", "right"),
+    ] {
+        let plan = nullable_label_query(
+            vec![
+                nullable_label_table(
+                    "a",
+                    2101,
+                    &[("host", &[None, Some("")])],
+                    &[Some(12.0), Some(24.0)],
+                ),
+                nullable_label_table("b", 2102, &[("host", &[Some("")])], &[Some(2.0)]),
+            ],
+            query,
+        )
+        .await;
+        let state = build_query_engine_state();
+        let (_, physical) = optimize_and_create_physical_plan(&state, plan).await;
+        let error = datafusion::physical_plan::collect(physical, state.session_state().task_ctx())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!("on the {side} hand-side")),
+            "{query}: {error}"
+        );
+        assert!(
+            error.contains("matching labels must be unique on one side"),
+            "{error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn or_missing_visible_labels_remain_empty_when_grouped() {
+    for query in ["max by(host)(a or b)", "max by(host)(b or a)"] {
+        let plan = nullable_label_query(
+            vec![
+                nullable_label_table(
+                    "a",
+                    2101,
+                    &[("host", &[None]), ("zone", &[Some("a")])],
+                    &[Some(3.0)],
+                ),
+                nullable_label_table("b", 2102, &[("zone", &[Some("b")])], &[Some(5.0)]),
+            ],
+            query,
+        )
+        .await;
+        let (_, batches) = execute(plan, &build_query_engine_state()).await;
+        assert_eq!(
+            batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+            1,
+            "{query}"
+        );
+        let batch = batches.iter().find(|batch| batch.num_rows() != 0).unwrap();
+        let host = batch
+            .column_by_name("host")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert!(!host.is_null(0));
+        assert_eq!(host.value(0), "");
+        let value = batch
+            .columns()
+            .iter()
+            .find_map(|column| column.as_any().downcast_ref::<Float64Array>())
+            .unwrap();
+        assert_eq!(value.value(0), 5.0, "{query}");
+    }
+}
+
+#[tokio::test]
+async fn or_schema_alignment_does_not_restore_raw_tsid_matching() {
+    let provider = build_test_table_provider_with_nullable_distinct_tags(
+        &[("metric_a", &["host", "zone"]), ("metric_b", &["zone"])],
+        false,
+    )
+    .await;
+    let plan = PromPlanner::stmt_to_plan(
+        provider,
+        &build_eval_stmt("(metric_a or metric_b) / metric_a"),
+        &build_query_engine_state(),
+    )
+    .await
+    .unwrap();
+    let display = plan.display_indent().to_string();
+    for line in display.lines().filter(|line| line.contains("Inner Join:")) {
+        assert!(!line.contains(DATA_SCHEMA_TSID_COLUMN_NAME), "{display}");
+    }
+    assert!(
+        display.contains("prom_assert_unique_match_group("),
+        "{display}"
+    );
+}
+
+#[tokio::test]
+async fn aggregated_matching_keys_skip_only_proven_unique_checks() {
+    for (query, expected_checks) in [
+        (
+            "sum by(host)(metric_a) / on(host) sum by(host)(metric_b)",
+            0,
+        ),
+        ("sum by(host)(metric_a) / sum by(host)(metric_b)", 0),
+        ("metric_a / on(host) group_left sum by(host)(metric_b)", 0),
+        ("sum by(host)(metric_a) / on(host) group_right metric_b", 0),
+        (
+            "metric_a / on(host) group_left sum by(host,zone)(metric_b)",
+            1,
+        ),
+        (
+            "metric_a / on(host) group_left topk(2, sum by(host,zone)(metric_b))",
+            1,
+        ),
+    ] {
+        let provider = build_test_table_provider_with_nullable_distinct_tags(
+            &[
+                ("metric_a", &["host", "zone"]),
+                ("metric_b", &["host", "zone"]),
+            ],
+            true,
+        )
+        .await;
+        let plan = PromPlanner::stmt_to_plan(
+            provider,
+            &build_eval_stmt(query),
+            &build_query_engine_state(),
+        )
+        .await
+        .unwrap();
+        let display = plan.display_indent().to_string();
+        assert_eq!(
+            display.matches("prom_assert_unique_match_group(").count(),
+            expected_checks,
+            "{query}\n{display}"
+        );
+        for line in display.lines().filter(|line| line.contains("Inner Join:")) {
+            assert!(
+                !line.contains(DATA_SCHEMA_TSID_COLUMN_NAME),
+                "{query}\n{display}"
+            );
+        }
+    }
+}
+
+#[test]
+fn matching_key_uniqueness_requires_unchanged_grouping_columns_and_timestamp() {
+    let input = scan(&source(
+        "a",
+        false,
+        0,
+        vec![("host", None)],
+        DirectOrValue::Float64(1.0),
+    ));
+    let grouped = LogicalPlanBuilder::from(input)
+        .aggregate(
+            vec![col("host"), col("ts")],
+            vec![sum_udaf().call(vec![col("v")]).alias("v")],
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+    assert!(PromPlanner::matching_key_is_unique(
+        &grouped,
+        &[Column::from_name("host"), Column::from_name("ts")],
+    ));
+    assert!(!PromPlanner::matching_key_is_unique(
+        &grouped,
+        &[Column::from_name("host")],
+    ));
+    let forwarded = LogicalPlanBuilder::from(grouped.clone())
+        .project(vec![col("host").alias("label"), col("ts").alias("time")])
+        .unwrap()
+        .filter(col("label").is_not_null())
+        .unwrap()
+        .alias("result")
+        .unwrap()
+        .build()
+        .unwrap();
+    assert!(PromPlanner::matching_key_is_unique(
+        &forwarded,
+        &[Column::from_name("label"), Column::from_name("time")],
+    ));
+    let collapsed = LogicalPlanBuilder::from(grouped)
+        .project(vec![
+            DfExpr::ScalarFunction(ScalarFunction {
+                func: coalesce(),
+                args: vec![col("host"), lit("")],
+            })
+            .alias("host"),
+            col("ts"),
+        ])
+        .unwrap()
+        .build()
+        .unwrap();
+    assert!(!PromPlanner::matching_key_is_unique(
+        &collapsed,
+        &[Column::from_name("host"), Column::from_name("ts")],
+    ));
+}
+
+#[tokio::test]
+async fn nested_count_rewrite_preserves_nullable_label_dependencies() {
+    for (query, expected_count) in [
+        ("count(max by(host)(a))", 2_i64),
+        ("count(count by(host)(a))", 3_i64),
+        ("count(max without(zone)(a))", 2_i64),
+    ] {
+        let plan = nullable_label_query(
+            vec![nullable_label_table(
+                "a",
+                2101,
+                &[
+                    ("host", &[None, Some(""), Some("x"), Some("y"), Some("z")]),
+                    (
+                        "zone",
+                        &[Some("a"), Some("b"), Some("c"), Some("d"), Some("e")],
+                    ),
+                ],
+                &[
+                    Some(3.0),
+                    Some(5.0),
+                    Some(7.0),
+                    None,
+                    Some(f64::from_bits(PROMETHEUS_STALE_NAN_BITS)),
+                ],
+            )],
+            query,
+        )
+        .await;
+        let state = build_query_engine_state();
+        let context = QueryEngineContext::new(state.session_state(), QueryContext::arc());
+        let rewritten = state
+            .optimize_by_extension_rules(plan.clone(), &context)
+            .unwrap();
+        let display = rewritten.display_indent().to_string();
+        assert!(display.contains("Distinct:"), "{query}\n{display}");
+        assert!(display.contains("coalesce(a.host"), "{query}\n{display}");
+        assert!(!display.contains("coalesce(a.zone"), "{query}\n{display}");
+        let (_, batches) = execute(plan, &state).await;
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+        let batch = batches
+            .iter()
+            .find(|batch| batch.num_rows() != 0)
+            .expect("nested count must return one row");
+        let value = batch
+            .columns()
+            .iter()
+            .find_map(|column| column.as_any().downcast_ref::<Int64Array>())
+            .expect("nested count must return an Int64 value");
+        assert!(!value.is_null(0), "{query}");
+        assert_eq!(value.value(0), expected_count, "{query}");
+    }
+}
+
+#[tokio::test]
+async fn missing_on_label_uses_empty_private_join_key() {
+    let provider = build_test_table_provider_with_nullable_distinct_tags(
+        &[("metric_a", &["host"]), ("metric_b", &["zone"])],
+        true,
+    )
+    .await;
+    let plan = PromPlanner::stmt_to_plan(
+        provider,
+        &build_eval_stmt("metric_a / on(host) group_left metric_b"),
+        &build_query_engine_state(),
+    )
+    .await
+    .unwrap();
+    let display = plan.display_indent().to_string();
+    assert!(display.contains("__promql_missing_match_"), "{display}");
+    assert!(!display.contains("Filter: false"), "{display}");
 }
 
 #[tokio::test]

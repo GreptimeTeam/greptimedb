@@ -14,6 +14,7 @@ Affected Rows: 0
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE CASE\sWHEN\st\.k\sIS\sNOT\sNULL\sTHEN\st\.k\sELSE\sUtf8\(""\)\sEND k
 tql analyze (0, 10, '1s') 100 - (avg by (k) (irate(t[1m])) * 100);
 
 +-+-+-+
@@ -26,9 +27,12 @@ tql analyze (0, 10, '1s') 100 - (avg by (k) (irate(t[1m])) * 100);
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_SortPreservingMergeExec: [k@0 ASC NULLS LAST, j@1 ASC NULLS LAST] REDACTED
 |_|_|_SortExec: expr=[k@0 ASC NULLS LAST, j@1 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_AggregateExec: mode=SinglePartitioned, gby=[k@2 as k, j@0 as j], aggr=[avg(prom_irate(j_range,i))] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[k@0 as k, j@1 as j], aggr=[avg(prom_irate(j_range,i))] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[k@2 as k, j@0 as j], aggr=[avg(prom_irate(j_range,i))] REDACTED
 |_|_|_FilterExec: prom_irate(j_range,i)@1 IS NOT NULL REDACTED
-|_|_|_ProjectionExec: expr=[j@1 as j, prom_irate(j_range@3, i@0) as prom_irate(j_range,i), k@2 as k] REDACTED
+|_|_|_ProjectionExec: expr=[j@2 as j, prom_irate(j_range@3, i@1) as prom_irate(j_range,i), CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as k] REDACTED
+|_|_|_ProjectionExec: expr=[CAST(k@2 AS Utf8) as __common_expr_1, i@0 as i, j@1 as j, j_range@3 as j_range] REDACTED
 |_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[1000], eval range=[60000], time index=[j] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k"] REDACTED
@@ -59,6 +63,7 @@ Affected Rows: 0
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE CASE\sWHEN\st\.k\sIS\sNOT\sNULL\sTHEN\st\.k\sELSE\sUtf8\(""\)\sEND k
 tql analyze (0, 10, '1s') 100 - (avg by (k) (irate(t[1m])) * 100);
 
 +-+-+-+
@@ -78,7 +83,8 @@ tql analyze (0, 10, '1s') 100 - (avg by (k) (irate(t[1m])) * 100);
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[k@2 as k, j@0 as j], aggr=[__avg_state(prom_irate(j_range,i))] REDACTED
 |_|_|_FilterExec: prom_irate(j_range,i)@1 IS NOT NULL REDACTED
-|_|_|_ProjectionExec: expr=[j@1 as j, prom_irate(j_range@4, i@0) as prom_irate(j_range,i), k@2 as k] REDACTED
+|_|_|_ProjectionExec: expr=[j@2 as j, prom_irate(j_range@3, i@1) as prom_irate(j_range,i), CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as k] REDACTED
+|_|_|_ProjectionExec: expr=[CAST(k@2 AS Utf8) as __common_expr_1, i@0 as i, j@1 as j, j_range@4 as j_range] REDACTED
 |_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[1000], eval range=[60000], time index=[j] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
@@ -88,7 +94,8 @@ tql analyze (0, 10, '1s') 100 - (avg by (k) (irate(t[1m])) * 100);
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[k@2 as k, j@0 as j], aggr=[__avg_state(prom_irate(j_range,i))] REDACTED
 |_|_|_FilterExec: prom_irate(j_range,i)@1 IS NOT NULL REDACTED
-|_|_|_ProjectionExec: expr=[j@1 as j, prom_irate(j_range@4, i@0) as prom_irate(j_range,i), k@2 as k] REDACTED
+|_|_|_ProjectionExec: expr=[j@2 as j, prom_irate(j_range@3, i@1) as prom_irate(j_range,i), CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as k] REDACTED
+|_|_|_ProjectionExec: expr=[CAST(k@2 AS Utf8) as __common_expr_1, i@0 as i, j@1 as j, j_range@4 as j_range] REDACTED
 |_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[1000], eval range=[60000], time index=[j] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
@@ -119,6 +126,7 @@ Affected Rows: 0
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE CASE\sWHEN\st\.k\sIS\sNOT\sNULL\sTHEN\st\.k\sELSE\sUtf8\(""\)\sEND k
 tql analyze (0, 10, '1s') 100 - (avg by (k) (irate(t[1m])) * 100);
 
 +-+-+-+
@@ -132,7 +140,8 @@ tql analyze (0, 10, '1s') 100 - (avg by (k) (irate(t[1m])) * 100);
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[k@2 as k, j@0 as j], aggr=[avg(prom_irate(j_range,i))] REDACTED
 |_|_|_FilterExec: prom_irate(j_range,i)@1 IS NOT NULL REDACTED
-|_|_|_ProjectionExec: expr=[j@1 as j, prom_irate(j_range@4, i@0) as prom_irate(j_range,i), k@2 as k] REDACTED
+|_|_|_ProjectionExec: expr=[j@2 as j, prom_irate(j_range@3, i@1) as prom_irate(j_range,i), CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as k] REDACTED
+|_|_|_ProjectionExec: expr=[CAST(k@2 AS Utf8) as __common_expr_1, i@0 as i, j@1 as j, j_range@4 as j_range] REDACTED
 |_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[1000], eval range=[60000], time index=[j] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
