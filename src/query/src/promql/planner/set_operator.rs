@@ -331,7 +331,7 @@ impl PromPlanner {
             .map(|field| field.name().clone())
             .collect::<HashSet<_>>();
 
-        // step 1: align schema using project, fill non-exist columns with null
+        // step 1: align schema using project, fill absent visible labels with the PromQL empty label
         let aligned_label_expr = |col: &String, source_types: &HashMap<String, ArrowDataType>| {
             let target_type = &target_tag_types[col];
             if let Some(source_type) = source_types.get(col) {
@@ -343,7 +343,7 @@ impl PromPlanner {
                 }
             } else {
                 DfExpr::Literal(
-                    Self::string_scalar_value(target_type, None)
+                    Self::string_scalar_value(target_type, Some(String::new()))
                         .expect("target label type is a string"),
                     None,
                 )
@@ -627,7 +627,8 @@ impl PromPlanner {
         } else {
             vec![output_field_col]
         };
-        output_context.normalized_nullable_tags |= right_context.normalized_nullable_tags;
+        output_context.normalized_nullable_tags |=
+            right_context.normalized_nullable_tags || left_tag_cols_set != right_tag_cols_set;
         output_context.use_tsid =
             left_has_tsid && right_has_tsid && !output_context.normalized_nullable_tags;
         self.ctx = output_context;
