@@ -191,7 +191,7 @@ struct PromPlannerContext {
     /// uses it internally (e.g. as the series key for [`SeriesDivide`]) and strips it from the
     /// final output.
     use_tsid: bool,
-    /// A nullable tag was mapped to the PromQL empty label after raw series selection.
+    /// A nullable or missing tag was mapped to the PromQL empty label after raw series selection.
     /// Its raw `__tsid` no longer identifies a unique set of visible labels.
     normalized_nullable_tags: bool,
     /// The matcher for field columns `__field__`.
@@ -5907,7 +5907,22 @@ impl PromPlanner {
             )
         } else {
             (
-                left,
+                if left_context.normalized_nullable_tags
+                    && modifier.as_ref().is_none_or(|modifier| {
+                        matches!(modifier.card, VectorMatchCardinality::OneToOne)
+                    })
+                {
+                    Self::assert_unique_one_side(
+                        left,
+                        &left_join_keys,
+                        &left_matched_tags,
+                        left_time_index_column.as_deref(),
+                        true,
+                        true,
+                    )?
+                } else {
+                    left
+                },
                 Self::assert_unique_one_side(
                     right,
                     &right_join_keys,
@@ -6035,6 +6050,15 @@ impl PromPlanner {
             return Ok(plan);
         }
 
+        let mut matching_columns = join_keys
+            .iter()
+            .map(|(_, column)| Column::from_name(column))
+            .collect::<Vec<_>>();
+        matching_columns.push(Column::from_name(time_index_column));
+        if Self::matching_key_is_unique(&plan, &matching_columns) {
+            return Ok(plan);
+        }
+
         let group_labels = join_keys.iter().map(|(label, _)| label.clone()).collect();
         let group_exprs = join_keys
             .iter()
@@ -6047,6 +6071,61 @@ impl PromPlanner {
             DfExpr::Column(Column::from_name(time_index_column)),
             MatchGroupViolation::DuplicateOnOneSide { one_side_is_left },
         )
+    }
+
+    /// An aggregate emits at most one row per complete grouping key. Only follow operators
+    /// that preserve this proof, and projections that forward the matching columns unchanged.
+    fn matching_key_is_unique(plan: &LogicalPlan, matching_columns: &[Column]) -> bool {
+        match plan {
+            LogicalPlan::Aggregate(aggregate) => {
+                if !aggregate
+                    .group_expr
+                    .iter()
+                    .all(|expr| matches!(expr, DfExpr::Column(_)))
+                {
+                    return false;
+                }
+                let Ok(indices) = matching_columns
+                    .iter()
+                    .map(|column| plan.schema().index_of_column(column))
+                    .collect::<std::result::Result<HashSet<_>, _>>()
+                else {
+                    return false;
+                };
+                (0..aggregate.group_expr.len()).all(|index| indices.contains(&index))
+            }
+            LogicalPlan::Projection(projection) => {
+                let mut input_columns = Vec::with_capacity(matching_columns.len());
+                for column in matching_columns {
+                    let Ok(index) = plan.schema().index_of_column(column) else {
+                        return false;
+                    };
+                    let mut expr = &projection.expr[index];
+                    while let DfExpr::Alias(alias) = expr {
+                        expr = alias.expr.as_ref();
+                    }
+                    let DfExpr::Column(column) = expr else {
+                        return false;
+                    };
+                    input_columns.push(column.clone());
+                }
+                Self::matching_key_is_unique(projection.input.as_ref(), &input_columns)
+            }
+            LogicalPlan::SubqueryAlias(alias) => {
+                let input_columns = matching_columns
+                    .iter()
+                    .map(|column| Column::from_name(&column.name))
+                    .collect::<Vec<_>>();
+                Self::matching_key_is_unique(alias.input.as_ref(), &input_columns)
+            }
+            LogicalPlan::Sort(sort) => {
+                Self::matching_key_is_unique(sort.input.as_ref(), matching_columns)
+            }
+            LogicalPlan::Filter(filter) => {
+                Self::matching_key_is_unique(filter.input.as_ref(), matching_columns)
+            }
+            _ => false,
+        }
     }
 
     fn selected_binary_match_labels(

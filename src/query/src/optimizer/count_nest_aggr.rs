@@ -144,11 +144,8 @@ impl CountNestAggrRule {
                 .map(|(_, expr)| expr.clone()),
         );
 
-        let mut required_input_columns =
+        let required_input_columns =
             Self::collect_required_input_columns(&presence_group_exprs, inner_value_expr);
-        required_input_columns.extend(Self::collect_required_instant_columns(
-            inner_agg.input.as_ref(),
-        ));
         let presence_source = Self::rebuild_projection_chain_to_instant(
             inner_agg.input.as_ref(),
             &required_input_columns,
@@ -264,12 +261,10 @@ impl CountNestAggrRule {
         loop {
             match current {
                 LogicalPlan::Projection(projection) => {
-                    // The rewrite prunes the selector input but reuses these projections.
-                    // A computed projection may still reference a pruned input column.
                     if !projection
                         .expr
                         .iter()
-                        .all(|expr| matches!(expr, Expr::Column(_)))
+                        .all(Self::is_selector_projection_expr)
                     {
                         return false;
                     }
@@ -283,24 +278,59 @@ impl CountNestAggrRule {
         }
     }
 
+    /// Selector normalization is a coalesce, possibly casting a dictionary-encoded tag.
+    /// Keep the rewrite limited to these expressions and simple column forwarding.
+    fn is_selector_projection_expr(expr: &Expr) -> bool {
+        match expr {
+            Expr::Column(_) => true,
+            Expr::Alias(alias) => Self::is_selector_projection_expr(alias.expr.as_ref()),
+            Expr::ScalarFunction(function) if function.func.name() == "coalesce" => {
+                if let [value, Expr::Literal(_, _)] = function.args.as_slice() {
+                    matches!(value, Expr::Column(_))
+                        || matches!(value, Expr::Cast(cast) if matches!(cast.expr.as_ref(), Expr::Column(_)))
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
     fn rebuild_projection_chain_to_instant(
         plan: &LogicalPlan,
         required_columns: &HashSet<String>,
     ) -> Result<LogicalPlan> {
         match plan {
             LogicalPlan::Projection(projection) => {
+                let required_exprs = projection
+                    .expr
+                    .iter()
+                    .zip(projection.schema.fields())
+                    .filter(|(_, field)| required_columns.contains(field.name()))
+                    .map(|(expr, _)| expr.clone())
+                    .collect::<Vec<_>>();
+                let input_columns = required_exprs
+                    .iter()
+                    .flat_map(|expr| {
+                        expr.column_refs()
+                            .into_iter()
+                            .map(|column| column.name.clone())
+                    })
+                    .collect::<HashSet<_>>();
                 let input = Self::rebuild_projection_chain_to_instant(
                     projection.input.as_ref(),
-                    required_columns,
+                    &input_columns,
                 )?;
                 LogicalPlanBuilder::from(input)
-                    .project(projection.expr.clone())?
+                    .project(required_exprs)?
                     .build()
             }
             LogicalPlan::Extension(extension) => {
                 if let Some(instant) = extension.node.as_any().downcast_ref::<InstantManipulate>() {
+                    let mut required_columns = required_columns.clone();
+                    required_columns.extend(Self::collect_required_instant_columns(plan));
                     let input =
-                        Self::prune_instant_input(extension.node.inputs()[0], required_columns)?;
+                        Self::prune_instant_input(extension.node.inputs()[0], &required_columns)?;
                     return Ok(LogicalPlan::Extension(Extension {
                         node: Arc::new(instant.with_exprs_and_inputs(vec![], vec![input])?),
                     }));

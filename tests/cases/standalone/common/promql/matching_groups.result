@@ -180,7 +180,97 @@ TQL EVAL (0, 0, '1s') matching_groups_no_host / on(host) group_right max by(host
 |      | 1970-01-01T00:00:00 | 0.03333333333333333                                                                                    |
 +------+---------------------+--------------------------------------------------------------------------------------------------------+
 
+-- OR must not reintroduce NULL for a missing visible label before aggregation.
+-- Distinct zones keep both operands' rows in the union.
+INSERT INTO matching_groups_no_host VALUES ('b', 0, 70);
+
+Affected Rows: 1
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') max by(host)(matching_groups_left{host=""} or matching_groups_no_host);
+
++------+---------------------+------------------------------------------+
+| host | ts                  | max(matching_groups_left.greptime_value) |
++------+---------------------+------------------------------------------+
+|      | 1970-01-01T00:00:00 | 70.0                                     |
++------+---------------------+------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') max by(host)(matching_groups_no_host or matching_groups_left{host=""});
+
++------+---------------------+---------------------------------------------+
+| host | ts                  | max(matching_groups_no_host.greptime_value) |
++------+---------------------+---------------------------------------------+
+|      | 1970-01-01T00:00:00 | 70.0                                        |
++------+---------------------+---------------------------------------------+
+
 DROP TABLE matching_groups_no_host;
+
+Affected Rows: 0
+
+-- One-to-one matching must reject normalized collisions on either side, even
+-- when the match key contains the complete tag set and only one other row matches.
+CREATE TABLE matching_groups_host_only_left (
+  host STRING NULL,
+  ts TIMESTAMP(3) TIME INDEX,
+  greptime_value DOUBLE,
+  PRIMARY KEY(host)
+);
+
+Affected Rows: 0
+
+CREATE TABLE matching_groups_host_only_right (
+  host STRING NULL,
+  ts TIMESTAMP(3) TIME INDEX,
+  greptime_value DOUBLE,
+  PRIMARY KEY(host)
+);
+
+Affected Rows: 0
+
+INSERT INTO matching_groups_host_only_left VALUES (NULL, 0, 12), ('', 0, 24);
+
+Affected Rows: 2
+
+INSERT INTO matching_groups_host_only_right VALUES ('', 0, 2);
+
+Affected Rows: 1
+
+TQL EVAL (0, 0, '1s') matching_groups_host_only_left / on(host) matching_groups_host_only_right;
+
+Error: 3001(EngineExecuteQuery), Execution error: found duplicate series for the match group {} on the left hand-side of the operation; many-to-many matching not allowed: matching labels must be unique on one side
+
+TQL EVAL (0, 0, '1s') matching_groups_host_only_right / on(host) matching_groups_host_only_left;
+
+Error: 3001(EngineExecuteQuery), Execution error: found duplicate series for the match group {} on the right hand-side of the operation; many-to-many matching not allowed: matching labels must be unique on one side
+
+TQL EVAL (0, 0, '1s') matching_groups_host_only_left / matching_groups_host_only_right;
+
+Error: 3001(EngineExecuteQuery), Execution error: found duplicate series for the match group {} on the left hand-side of the operation; many-to-many matching not allowed: matching labels must be unique on one side
+
+-- A preceding aggregation merges the collision and proves uniqueness instead.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') sum by(host)(matching_groups_host_only_left) / on(host) sum by(host)(matching_groups_host_only_right);
+
++------+---------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| host | ts                  | matching_groups_host_only_left.sum(matching_groups_host_only_left.greptime_value) / matching_groups_host_only_right.sum(matching_groups_host_only_right.greptime_value) |
++------+---------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|      | 1970-01-01T00:00:00 | 18.0                                                                                                                                                                    |
++------+---------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+TQL EVAL (0, 0, '1s') count(max by(host)(matching_groups_host_only_left));
+
++---------------------+-----------------------------------------------------------+
+| ts                  | count(max(matching_groups_host_only_left.greptime_value)) |
++---------------------+-----------------------------------------------------------+
+| 1970-01-01T00:00:00 | 1                                                         |
++---------------------+-----------------------------------------------------------+
+
+DROP TABLE matching_groups_host_only_left;
+
+Affected Rows: 0
+
+DROP TABLE matching_groups_host_only_right;
 
 Affected Rows: 0
 
