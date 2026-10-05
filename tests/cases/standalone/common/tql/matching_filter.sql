@@ -75,13 +75,19 @@ tql eval(0, 5, '5s') counter_metric offset 5s / on(host, device) gauge_metric{ho
 
 -- Matching on a subset of the labels: both operands hold several devices per host.
 -- SQLNESS SORT_RESULT 3 1
+-- Both checks can fail first; retain the duplicate group and error kind, not their order.
+-- SQLNESS REPLACE (left|right)\shand-side invalid-hand-side
 tql eval(0, 5, '5s') counter_metric / on(host) gauge_metric{host="host1"};
+
+-- With the left operand unique, the right-side attribution remains exact.
+tql eval(0, 5, '5s') counter_metric{device="eth0"} / on(host) gauge_metric{host="host1"};
 
 -- `ignoring(...)`: every label that is not ignored is a matching label.
 -- SQLNESS SORT_RESULT 3 1
 tql eval(0, 5, '5s') counter_metric / ignoring(missing_label) gauge_metric{host="host1"};
 
 -- SQLNESS SORT_RESULT 3 1
+-- SQLNESS REPLACE (left|right)\shand-side invalid-hand-side
 tql eval(0, 5, '5s') counter_metric / ignoring(device) gauge_metric{host="host1"};
 
 -- An ignored label is not a matching label: the left operand keeps its `eth1` series.

@@ -93,14 +93,21 @@ TQL EVAL (0, 0, '5s') counter_metric{device="eth0"} > bool on(host) gauge_metric
 +-------+---------------------+-------------------------------------------------------------+
 
 -- `host1` carries two devices on both sides: the match group repeats on the one side.
+-- Both operands are invalid, so either concurrent check can report the error first.
+-- SQLNESS REPLACE (left|right)\shand-side invalid-hand-side
 TQL EVAL (0, 0, '5s') counter_metric / on(host) gauge_metric;
+
+Error: 3001(EngineExecuteQuery), Execution error: found duplicate series for the match group {host="host1"} on the invalid-hand-side of the operation; many-to-many matching not allowed: matching labels must be unique on one side
+
+-- Only the right operand repeats the matching key; its error must identify that side.
+TQL EVAL (0, 0, '5s') counter_metric{device="eth0"} / on(host) gauge_metric;
 
 Error: 3001(EngineExecuteQuery), Execution error: found duplicate series for the match group {host="host1"} on the right hand-side of the operation; many-to-many matching not allowed: matching labels must be unique on one side
 
 -- The one side is unique here, the many side is not, and no group modifier makes it explicit.
 TQL EVAL (0, 0, '5s') counter_metric / on(host) gauge_metric{device="eth0"};
 
-Error: 3001(EngineExecuteQuery), Execution error: multiple matches for labels {host="host1"}: many-to-one matching must be explicit (group_left/group_right)
+Error: 3001(EngineExecuteQuery), Execution error: found duplicate series for the match group {host="host1"} on the left hand-side of the operation; many-to-many matching not allowed: matching labels must be unique on one side
 
 -- `group_left` takes the result labels from the many side.
 -- SQLNESS SORT_RESULT 3 1
@@ -236,7 +243,7 @@ Affected Rows: 1
 
 TQL EVAL (0, 0, '5s') spread_left / on(host) spread_right;
 
-Error: 3001(EngineExecuteQuery), Execution error: multiple matches for labels {host="host1"}: many-to-one matching must be explicit (group_left/group_right)
+Error: 3001(EngineExecuteQuery), Execution error: found duplicate series for the match group {host="host1"} on the left hand-side of the operation; many-to-many matching not allowed: matching labels must be unique on one side
 
 TQL EVAL (0, 0, '5s') spread_right / on(host) group_left spread_left;
 

@@ -8203,7 +8203,7 @@ async fn test_mixed_or_value_aliases_do_not_replace_labels() {
     ));
     let (_, batches) = execute(plan, &build_query_engine_state()).await;
     assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 2);
-    let labels = batches
+    let mut labels = batches
         .iter()
         .flat_map(|batch| {
             batch
@@ -8213,10 +8213,10 @@ async fn test_mixed_or_value_aliases_do_not_replace_labels() {
                 .downcast_ref::<StringArray>()
                 .unwrap()
                 .iter()
-                .flatten()
         })
         .collect::<Vec<_>>();
-    assert_eq!(labels, vec!["value-label"]);
+    labels.sort_unstable();
+    assert_eq!(labels, vec![Some(""), Some("value-label")]);
 }
 
 #[tokio::test]

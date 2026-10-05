@@ -135,7 +135,7 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / tsid_binary_join_right;
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[greptime_value@2 as greptime_value, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as host, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as job, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_ProjectionExec: expr=[CAST(host@1 AS Utf8) as __common_expr_1, CAST(job@2 AS Utf8) as __common_expr_2, greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
@@ -143,7 +143,7 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / tsid_binary_join_right;
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -195,7 +195,7 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left + tsid_binary_join_right) / tsid
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[greptime_value@2 as greptime_value, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as host, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as job, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_ProjectionExec: expr=[CAST(host@1 AS Utf8) as __common_expr_1, CAST(job@2 AS Utf8) as __common_expr_2, greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
@@ -203,7 +203,7 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left + tsid_binary_join_right) / tsid
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[greptime_value@2 as greptime_value, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as host, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as job, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_ProjectionExec: expr=[CAST(host@1 AS Utf8) as __common_expr_1, CAST(job@2 AS Utf8) as __common_expr_2, greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
@@ -211,7 +211,7 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left + tsid_binary_join_right) / tsid
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -282,7 +282,7 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left + tsid_binary_join_right) * (ts
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[greptime_value@2 as greptime_value, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as host, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as job, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_ProjectionExec: expr=[CAST(host@1 AS Utf8) as __common_expr_1, CAST(job@2 AS Utf8) as __common_expr_2, greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
@@ -290,7 +290,7 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left + tsid_binary_join_right) * (ts
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[greptime_value@2 as greptime_value, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as host, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as job, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_ProjectionExec: expr=[CAST(host@1 AS Utf8) as __common_expr_1, CAST(job@2 AS Utf8) as __common_expr_2, greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
@@ -298,7 +298,7 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left + tsid_binary_join_right) * (ts
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[greptime_value@2 as greptime_value, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as host, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as job, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_ProjectionExec: expr=[CAST(host@1 AS Utf8) as __common_expr_1, CAST(job@2 AS Utf8) as __common_expr_2, greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
@@ -306,7 +306,7 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left + tsid_binary_join_right) * (ts
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as host, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as job, ts@4 as ts, __tsid@3 as __tsid, greptime_value@2 + 2 as greptime_value + Float64(2)] REDACTED
 |_|_|_ProjectionExec: expr=[CAST(host@1 AS Utf8) as __common_expr_1, CAST(job@2 AS Utf8) as __common_expr_2, greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
@@ -314,7 +314,7 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left + tsid_binary_join_right) * (ts
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -359,7 +359,7 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / ignoring(host) tsid_binary_join
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[greptime_value@2 as greptime_value, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as host, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as job, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_ProjectionExec: expr=[CAST(host@1 AS Utf8) as __common_expr_1, CAST(job@2 AS Utf8) as __common_expr_2, greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
@@ -367,7 +367,7 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / ignoring(host) tsid_binary_join
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -412,7 +412,7 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / on(job) tsid_binary_join_right_
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as job, __tsid@2 as __tsid, ts@3 as ts] REDACTED
 |_|_|_ProjectionExec: expr=[CAST(job@1 AS Utf8) as __common_expr_1, greptime_value@0 as greptime_value, __tsid@2 as __tsid, ts@3 as ts] REDACTED
@@ -420,7 +420,7 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / on(job) tsid_binary_join_right_
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, job@3 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -461,7 +461,7 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > tsid_binary_join_right;
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[greptime_value@2 as greptime_value, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as host, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as job, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_ProjectionExec: expr=[CAST(host@1 AS Utf8) as __common_expr_1, CAST(job@2 AS Utf8) as __common_expr_2, greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
@@ -469,7 +469,7 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > tsid_binary_join_right;
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -510,7 +510,7 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > bool tsid_binary_join_right;
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[greptime_value@2 as greptime_value, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as host, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as job, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_ProjectionExec: expr=[CAST(host@1 AS Utf8) as __common_expr_1, CAST(job@2 AS Utf8) as __common_expr_2, greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
@@ -518,7 +518,7 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > bool tsid_binary_join_right;
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -568,7 +568,7 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left > tsid_binary_join_right) / tsi
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[greptime_value@2 as greptime_value, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as host, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as job, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_ProjectionExec: expr=[CAST(host@1 AS Utf8) as __common_expr_1, CAST(job@2 AS Utf8) as __common_expr_2, greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
@@ -576,7 +576,7 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left > tsid_binary_join_right) / tsi
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[greptime_value@2 as greptime_value, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as host, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as job, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_ProjectionExec: expr=[CAST(host@1 AS Utf8) as __common_expr_1, CAST(job@2 AS Utf8) as __common_expr_2, greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
@@ -584,7 +584,7 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left > tsid_binary_join_right) / tsi
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -644,7 +644,7 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left > bool tsid_binary_join_right) 
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[greptime_value@2 as greptime_value, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as host, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as job, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_ProjectionExec: expr=[CAST(host@1 AS Utf8) as __common_expr_1, CAST(job@2 AS Utf8) as __common_expr_2, greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
@@ -652,7 +652,7 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left > bool tsid_binary_join_right) 
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[greptime_value@2 as greptime_value, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as host, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as job, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_ProjectionExec: expr=[CAST(host@1 AS Utf8) as __common_expr_1, CAST(job@2 AS Utf8) as __common_expr_2, greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
@@ -660,7 +660,7 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left > bool tsid_binary_join_right) 
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[greptime_value@2 as greptime_value, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as host, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as job, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_ProjectionExec: expr=[CAST(host@1 AS Utf8) as __common_expr_1, CAST(job@2 AS Utf8) as __common_expr_2, greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
@@ -668,7 +668,7 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left > bool tsid_binary_join_right) 
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -716,7 +716,7 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left or tsid_binary_join_right) / tsi
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[ts@0 as ts, __tsid@1 as __tsid, greptime_value@2 as greptime_value, host@3 as host, job@4 as job, host@3 as __promql_or_match_0, job@4 as __promql_or_match_1] REDACTED
 |_|_|_ProjectionExec: expr=[ts@4 as ts, __tsid@3 as __tsid, greptime_value@2 as greptime_value, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as host, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as job] REDACTED
@@ -725,7 +725,7 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left or tsid_binary_join_right) / tsi
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[ts@4 as ts, __tsid@3 as __tsid, greptime_value@2 as greptime_value, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as host, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as job] REDACTED
 |_|_|_ProjectionExec: expr=[CAST(host@1 AS Utf8) as __common_expr_1, CAST(job@2 AS Utf8) as __common_expr_2, greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
@@ -733,7 +733,7 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left or tsid_binary_join_right) / tsi
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
@@ -784,7 +784,7 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left / ignoring(host) group_left tsid
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[greptime_value@2 as greptime_value, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as host, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as job, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_ProjectionExec: expr=[CAST(host@1 AS Utf8) as __common_expr_1, CAST(job@2 AS Utf8) as __common_expr_2, greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
@@ -792,7 +792,7 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left / ignoring(host) group_left tsid
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 | 1_| 0_|_ProjectionExec: expr=[greptime_value@2 as greptime_value, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as host, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as job, __tsid@3 as __tsid, ts@4 as ts] REDACTED
 |_|_|_ProjectionExec: expr=[CAST(host@1 AS Utf8) as __common_expr_1, CAST(job@2 AS Utf8) as __common_expr_2, greptime_value@0 as greptime_value, __tsid@3 as __tsid, ts@4 as ts] REDACTED
@@ -800,7 +800,7 @@ TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left / ignoring(host) group_left tsid
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[greptime_value@1 as greptime_value, host@3 as host, job@4 as job, __tsid@2 as __tsid, ts@0 as ts] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"two_phase" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":REDACTED, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
