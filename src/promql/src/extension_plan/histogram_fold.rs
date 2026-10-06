@@ -1278,6 +1278,29 @@ impl HistogramFoldStream {
         if !bucket.windows(2).all(|w| w[0] <= w[1]) {
             return Ok(f64::NAN);
         }
+        let coalesced = bucket
+            .windows(2)
+            .any(|bounds| bounds[0] == bounds[1])
+            .then(|| {
+                let mut bounds = Vec::with_capacity(bucket.len());
+                let mut counts = Vec::with_capacity(counter.len());
+                for (&bound, &count) in bucket.iter().zip(counter) {
+                    if bounds.last() == Some(&bound) {
+                        *counts.last_mut().unwrap() += count;
+                    } else {
+                        bounds.push(bound);
+                        counts.push(count);
+                    }
+                }
+                (bounds, counts)
+            });
+        let (bucket, counter) = match &coalesced {
+            Some((bounds, counts)) => (bounds.as_slice(), counts.as_slice()),
+            None => (bucket, counter),
+        };
+        if matches!(operation, HistogramFoldOperation::Quantile(_)) && bucket.len() == 1 {
+            return Ok(f64::NAN);
+        }
         let counter = match operation {
             HistogramFoldOperation::Quantile(_) => {
                 let needs_fix = counter.iter().any(|v| !v.is_finite())
@@ -1339,26 +1362,6 @@ impl HistogramFoldStream {
     }
 
     fn evaluate_fraction(lower: f64, upper: f64, bucket: &[f64], counter: &[f64]) -> f64 {
-        let coalesced = bucket
-            .windows(2)
-            .any(|bounds| bounds[0] == bounds[1])
-            .then(|| {
-                let mut bounds = Vec::with_capacity(bucket.len());
-                let mut counts = Vec::with_capacity(counter.len());
-                for (&bound, &count) in bucket.iter().zip(counter) {
-                    if bounds.last() == Some(&bound) {
-                        *counts.last_mut().unwrap() += count;
-                    } else {
-                        bounds.push(bound);
-                        counts.push(count);
-                    }
-                }
-                (bounds, counts)
-            });
-        let (bucket, counter) = match &coalesced {
-            Some((bounds, counts)) => (bounds.as_slice(), counts.as_slice()),
-            None => (bucket, counter),
-        };
         let total = *counter.last().unwrap();
         if total == 0.0 || lower.is_nan() || upper.is_nan() {
             return f64::NAN;
@@ -2131,6 +2134,29 @@ mod test {
         )
         .unwrap();
         assert_eq!(0.0, result);
+    }
+
+    #[test]
+    fn evaluate_quantile_coalesces_equal_bounds() {
+        // `sum by (le)` over le="10"/"10.0", "100"/"100.0", "1000.0", "+Inf" (#9443)
+        let bucket = [10.0, 10.0, 100.0, 100.0, 1000.0, f64::INFINITY];
+        let counters = [40.0, 40.0, 50.0, 50.0, 50.0, 100.0];
+        let result = HistogramFoldStream::evaluate_row(
+            HistogramFoldOperation::Quantile(0.95.into()),
+            &bucket,
+            &counters,
+        )
+        .unwrap();
+        assert_eq!(77.5, result);
+
+        // all bounds collapse into a single +Inf bucket
+        let result = HistogramFoldStream::evaluate_row(
+            HistogramFoldOperation::Quantile(0.5.into()),
+            &[f64::INFINITY, f64::INFINITY],
+            &[1.0, 2.0],
+        )
+        .unwrap();
+        assert!(result.is_nan());
     }
 
     #[test]
