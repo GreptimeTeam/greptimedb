@@ -223,6 +223,7 @@ macro_rules! http_tests {
                 test_loki_json_logs_with_pipeline,
                 test_elasticsearch_logs,
                 test_elasticsearch_logs_with_index,
+                test_elasticsearch_pipeline_version,
                 test_splunk_logs,
                 test_splunk_raw,
                 test_log_query,
@@ -10818,6 +10819,140 @@ pub async fn test_elasticsearch_logs_with_index(store_type: StorageType) {
         &client,
         "select foo, bar from test_index2;",
         expected,
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_elasticsearch_pipeline_version(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_elasticsearch_pipeline_version").await;
+
+    let client = TestClient::new(app).await;
+
+    // Create version 1 of the pipeline: it renames `name` to `name_v1`.
+    let pipeline_v1 = r#"
+processors:
+  - date:
+      field: ts
+      formats:
+        - "%Y-%m-%dT%H:%M:%S%.fZ"
+transform:
+  - field: name, name_v1
+    type: string
+  - field: ts
+    type: time
+    index: timestamp
+"#;
+    let res = client
+        .post("/v1/pipelines/esv")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline_v1)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let content: Value = serde_json::from_str(&res.text().await).unwrap();
+    let version_v1 = content
+        .get("pipelines")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .first()
+        .unwrap()
+        .get("version")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Create version 2: it renames `name` to `name_v2` instead.
+    let res = client
+        .post("/v1/pipelines/esv")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline_v1.replace("name_v1", "name_v2"))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let bulk_body = |index: &str| {
+        format!(
+            "{{\"create\":{{\"_index\":\"{index}\"}}}}\n{{\"name\":\"alice\",\"ts\":\"2024-01-01T00:00:00.000Z\"}}\n"
+        )
+    };
+
+    // 1. Select version 1 with the `x-greptime-pipeline-version` header.
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/json"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-pipeline-version"),
+                HeaderValue::from_str(&version_v1).unwrap(),
+            ),
+        ],
+        "/v1/elasticsearch/_bulk?pipeline_name=esv",
+        bulk_body("es_hdr").into_bytes(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    validate_data(
+        "es_pipeline_version_header",
+        &client,
+        "select name_v1 from es_hdr;",
+        "[[\"alice\"]]",
+    )
+    .await;
+
+    // 2. Select version 1 with the `version` query parameter.
+    let encoded_version: String =
+        url::form_urlencoded::byte_serialize(version_v1.as_bytes()).collect();
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        )],
+        &format!("/v1/elasticsearch/_bulk?pipeline_name=esv&version={encoded_version}"),
+        bulk_body("es_url").into_bytes(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    validate_data(
+        "es_pipeline_version_url_param",
+        &client,
+        "select name_v1 from es_url;",
+        "[[\"alice\"]]",
+    )
+    .await;
+
+    // 3. Without a version, the latest version (2) is used.
+    let res = send_req(
+        &client,
+        vec![(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        )],
+        "/v1/elasticsearch/_bulk?pipeline_name=esv",
+        bulk_body("es_latest").into_bytes(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    validate_data(
+        "es_pipeline_version_latest",
+        &client,
+        "select name_v2 from es_latest;",
+        "[[\"alice\"]]",
     )
     .await;
 
