@@ -70,6 +70,7 @@ headers = "0.4"
 hex.workspace = true
 hostname = "0.3"
 http.workspace = true
+http-body = "1"
 humantime.workspace = true
 humantime-serde.workspace = true
 hyper = { workspace = true, features = ["full"] }
@@ -165,7 +166,6 @@ permutation = "0.4"
 rand.workspace = true
 serde_json.workspace = true
 servers = { workspace = true, features = ["testing"] }
-session = { workspace = true, features = ["testing"] }
 simdutf8 = "0.1"
 table.workspace = true
 tempfile = "3.0.0"

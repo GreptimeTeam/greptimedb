@@ -12,9 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "hdfs-object-store")]
+mod hdfs;
 #[cfg(feature = "testing")]
 pub mod mock;
 
+#[cfg(feature = "hdfs-object-store")]
+pub use hdfs::HdfsCompatibilityLayer;
 pub use opendal::layers::*;
 pub use prometheus::build_prometheus_metrics_layer;
 

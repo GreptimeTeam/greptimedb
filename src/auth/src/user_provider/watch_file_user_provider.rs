@@ -199,4 +199,46 @@ pub mod test {
         test_authenticate(&provider, "root", "654321", false, Some(timeout)).await;
         test_authenticate(&provider, "admin", "654321", false, Some(timeout)).await;
     }
+
+    /// Regression test for #9310: the users file is reached through a chain
+    /// of symlinks and a directory symlink in the chain gets swapped
+    /// atomically (like `ln -sfn`, as done by sops-nix).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_file_provider_symlink_chain() {
+        use std::os::unix::fs::symlink;
+
+        common_telemetry::init_default_ut_logging();
+
+        let dir = create_temp_dir("test_file_provider_symlink_chain");
+        let base = dir.path();
+        let timeout = Duration::from_secs(10);
+
+        // secrets.1/users <- secrets (dir symlink) <- conf/users (file symlink)
+        std::fs::create_dir(base.join("secrets.1")).unwrap();
+        std::fs::write(base.join("secrets.1/users"), "root=123456\n").unwrap();
+        symlink(base.join("secrets.1"), base.join("secrets")).unwrap();
+        std::fs::create_dir(base.join("conf")).unwrap();
+        symlink(base.join("secrets/users"), base.join("conf/users")).unwrap();
+
+        let file_path = base.join("conf/users");
+        let provider = WatchFileUserProvider::new(file_path.to_str().unwrap()).unwrap();
+        test_authenticate(&provider, "root", "123456", true, None).await;
+
+        // Atomically swap the directory symlink to a new generation.
+        std::fs::create_dir(base.join("secrets.2")).unwrap();
+        std::fs::write(base.join("secrets.2/users"), "root=654321\n").unwrap();
+        symlink(base.join("secrets.2"), base.join("secrets.tmp")).unwrap();
+        std::fs::rename(base.join("secrets.tmp"), base.join("secrets")).unwrap();
+        std::fs::remove_dir_all(base.join("secrets.1")).unwrap();
+
+        test_authenticate(&provider, "root", "654321", true, Some(timeout)).await;
+        test_authenticate(&provider, "root", "123456", false, None).await;
+
+        // In-place edits of the new target are picked up too, which requires
+        // the watch to follow the chain to the new directory.
+        std::fs::write(base.join("secrets.2/users"), "root=abcdef\n").unwrap();
+        test_authenticate(&provider, "root", "abcdef", true, Some(timeout)).await;
+        test_authenticate(&provider, "root", "654321", false, None).await;
+    }
 }

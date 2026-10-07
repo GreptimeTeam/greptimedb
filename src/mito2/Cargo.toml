@@ -10,6 +10,7 @@ test = ["common-test-util", "rstest", "rstest_reuse", "rskafka"]
 testing = ["test"]
 test-shared-fs-region-migration = []
 enterprise = []
+hdfs-object-store = ["object-store/hdfs-object-store"]
 
 [lints]
 workspace = true
@@ -96,7 +97,7 @@ common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 criterion = { workspace = true, features = ["async", "async_tokio"] }
 dotenv.workspace = true
-log-store.workspace = true
+log-store = { workspace = true, features = ["testing"] }
 mito-codec = { workspace = true, features = ["testing"] }
 object-store = { workspace = true, features = ["services-memory"] }
 rskafka.workspace = true

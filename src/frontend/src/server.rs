@@ -215,11 +215,15 @@ where
         external: bool,
         request_memory_limiter: ServerMemoryLimiter,
     ) -> Result<GrpcServer> {
-        let builder = if let Some(builder) = self.grpc_server_builder.take() {
+        let mut builder = if let Some(builder) = self.grpc_server_builder.take() {
             builder
         } else {
             self.grpc_server_builder(grpc, request_memory_limiter)?
         };
+        // Browsers never talk to the internal server.
+        if external && grpc.enable_cors {
+            builder = builder.with_cors(grpc.cors_allowed_origins.clone());
+        }
 
         let user_provider = if external {
             self.plugins.get::<UserProviderRef>()
@@ -520,7 +524,9 @@ mod tests {
     use async_trait::async_trait;
     use auth::{UserProviderRef, static_user_provider_from_option};
     use client::{Client, Database};
+    use common_grpc::channel_manager::ChannelManager;
     use meta_client::client::MetaClientBuilder;
+    use reqwest::header::{ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_REQUEST_METHOD, ORIGIN};
     use servers::grpc::GRPC_SERVER;
     use servers::grpc::flight::{FlightCraft, FlightCraftRef, TonicStream};
     use tonic::{Code, Request, Response, Status, Streaming};
@@ -938,12 +944,20 @@ mod tests {
         let public_database = Database::new(
             "greptime",
             "public",
-            Client::with_urls([public_addr.to_string()]),
+            Client::with_query_and_control_managers(
+                ChannelManager::new(),
+                ChannelManager::new(),
+                [public_addr.to_string()],
+            ),
         );
         let internal_database = Database::new(
             "greptime",
             "public",
-            Client::with_urls([internal_addr.to_string()]),
+            Client::with_query_and_control_managers(
+                ChannelManager::new(),
+                ChannelManager::new(),
+                [internal_addr.to_string()],
+            ),
         );
 
         let internal_result = internal_database.sql("SELECT 1").await;
@@ -1019,5 +1033,69 @@ mod tests {
 
         // Assert
         assert!(health_check.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_internal_grpc_server_never_serves_cors() {
+        let options = FrontendOptions {
+            http: HttpOptions {
+                addr: "127.0.0.1:0".to_string(),
+                ..Default::default()
+            },
+            grpc: GrpcOptions {
+                enable_cors: true,
+                ..GrpcOptions::default().with_bind_addr("127.0.0.1:0")
+            },
+            internal_grpc: Some(GrpcOptions {
+                enable_cors: true,
+                ..GrpcOptions::default().with_bind_addr("127.0.0.1:0")
+            }),
+            mysql: crate::service_config::MysqlOptions {
+                enable: false,
+                ..Default::default()
+            },
+            postgres: crate::service_config::PostgresOptions {
+                enable: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let meta_client = Arc::new(
+            MetaClientBuilder::new(0, Role::Frontend)
+                .enable_procedure()
+                .build(),
+        );
+        let instance = Arc::new(
+            FrontendBuilder::new_test(&options, meta_client)
+                .try_build()
+                .await
+                .unwrap(),
+        );
+        let mut services = Services::new(options, instance, Default::default())
+            .build()
+            .unwrap();
+
+        services.start_all().await.unwrap();
+        let public_addr = services.addr(GRPC_SERVER).unwrap();
+        let internal_addr = services.addr("INTERNAL_GRPC_SERVER").unwrap();
+        let public = send_cors_preflight(public_addr).await;
+        let internal = send_cors_preflight(internal_addr).await;
+        services.shutdown_all().await.unwrap();
+
+        assert!(public.headers().contains_key(ACCESS_CONTROL_ALLOW_ORIGIN));
+        assert!(!internal.headers().contains_key(ACCESS_CONTROL_ALLOW_ORIGIN));
+    }
+
+    async fn send_cors_preflight(addr: std::net::SocketAddr) -> reqwest::Response {
+        reqwest::Client::new()
+            .request(
+                reqwest::Method::OPTIONS,
+                format!("http://{addr}/greptime.v1.HealthCheck/Check"),
+            )
+            .header(ORIGIN, "https://example.com")
+            .header(ACCESS_CONTROL_REQUEST_METHOD, "POST")
+            .send()
+            .await
+            .unwrap()
     }
 }

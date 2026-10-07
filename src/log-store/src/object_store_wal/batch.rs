@@ -45,7 +45,7 @@ pub(crate) const OBJECT_SEQ_LIMIT: u64 = 1 << (u64::BITS - POSITION_BITS);
 /// at one so that id zero, the watermark of a region without entries, is never
 /// assigned. A region's ids increase with the object sequence and have gaps
 /// wherever other regions or other positions took the sequence.
-pub(crate) fn entry_id(object_seq: u64, position: u64) -> EntryId {
+pub fn entry_id(object_seq: u64, position: u64) -> EntryId {
     debug_assert!(object_seq < OBJECT_SEQ_LIMIT && (1..POSITION_LIMIT).contains(&position));
     (object_seq << POSITION_BITS) | position
 }
@@ -143,6 +143,10 @@ impl OpenBatch {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    pub(crate) fn holds_region(&self, region_id: RegionId) -> bool {
+        self.positions.contains_key(&region_id)
     }
 
     /// Returns the estimated size of the admitted entries.

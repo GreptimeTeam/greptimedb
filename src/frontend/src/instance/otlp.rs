@@ -170,6 +170,9 @@ impl OpenTelemetryProtocolHandler for Instance {
             .extension(PHYSICAL_TABLE_PARAM)
             .unwrap_or(GREPTIME_PHYSICAL_TABLE)
             .to_string();
+        // The bulk path converts each request's time index unit to the
+        // destination table's unit during batch alignment, so no pre-gate
+        // alignment is needed here.
         let batcher = self.logical_batcher().filter(|_| {
             ctx.logical_batching_enabled() && !metric_ctx.is_legacy && metric_ctx.with_metric_engine
         });

@@ -61,7 +61,8 @@ pub struct FrontendOptions {
     pub http: HttpOptions,
     pub grpc: GrpcOptions,
     /// The internal gRPC options for the frontend service.
-    /// it provide the same service as the public gRPC service, just only for internal use.
+    /// It serves the same services as the public one plus the internal handler.
+    /// CORS is always off on it.
     pub internal_grpc: Option<GrpcOptions>,
     pub mysql: MysqlOptions,
     pub postgres: PostgresOptions,
@@ -643,7 +644,11 @@ max_batch_rows = 25
         expected: std::result::Result<&str, (StatusCode, &str)>,
     ) {
         let addr = frontend.server_handlers().addr(GRPC_SERVER).unwrap();
-        let client = Client::with_urls([addr.to_string()]);
+        let client = Client::with_query_and_control_managers(
+            ChannelManager::new(),
+            ChannelManager::new(),
+            [addr.to_string()],
+        );
         let client = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
         let response = client.sql("SELECT 1").await;
 
