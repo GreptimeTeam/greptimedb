@@ -225,7 +225,7 @@ impl InvertedIndexApplier {
             index_not_found_strategy: if self
                 .predicates
                 .keys()
-                .any(|target| matches!(target, IndexTarget::JsonPath { .. }))
+                .any(|target| matches!(target, IndexTarget::JsonPath(_)))
             {
                 IndexNotFoundStrategy::Ignore
             } else {

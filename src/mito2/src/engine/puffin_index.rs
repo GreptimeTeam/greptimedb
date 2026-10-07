@@ -368,13 +368,9 @@ fn decode_target_info(target_key: &str) -> (String, String) {
             TARGET_TYPE_COLUMN.to_string(),
             json!({ "column": id }).to_string(),
         ),
-        Ok(IndexTarget::JsonPath {
-            column_id,
-            path,
-            data_type,
-        }) => (
+        Ok(IndexTarget::JsonPath(target)) => (
             "json_path".to_string(),
-            json!({ "json_path": { "column": column_id, "path": path, "data_type": data_type } })
+            json!({ "json_path": { "column": target.column_id(), "path": target.path(), "data_type": target.data_type() } })
                 .to_string(),
         ),
         _ => (

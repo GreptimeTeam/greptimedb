@@ -238,15 +238,11 @@ impl InvertedIndexer {
         }
 
         for (target, key) in &self.json_targets {
-            let IndexTarget::JsonPath {
-                column_id,
-                path,
-                data_type,
-            } = target
-            else {
+            let IndexTarget::JsonPath(target) = target else {
                 continue;
             };
-            let column = self.metadata.column_by_id(*column_id).ok_or_else(|| {
+            let column_id = target.column_id();
+            let column = self.metadata.column_by_id(column_id).ok_or_else(|| {
                 crate::error::InvalidRecordBatchSnafu {
                     reason: format!("Missing JSON index column {column_id}"),
                 }
@@ -260,8 +256,8 @@ impl InvertedIndexer {
                     }
                     .build()
                 })?;
-            let leaf = json_index_leaf(root, path, data_type)?;
-            let field = SortField::new(data_type.clone());
+            let leaf = json_index_leaf(root, target.path(), target.data_type())?;
+            let field = SortField::new(target.data_type().clone());
             for row in 0..batch.num_rows() {
                 let value =
                     IndexValueCodec::encode_value(leaf.get_ref(row), &field, &mut self.value_buf)
@@ -400,16 +396,12 @@ impl InvertedIndexer {
         }
 
         for (target, key) in &self.json_targets {
-            let IndexTarget::JsonPath {
-                column_id,
-                path,
-                data_type,
-            } = target
-            else {
+            let IndexTarget::JsonPath(target) = target else {
                 continue;
             };
+            let column_id = target.column_id();
             let root = batch
-                .field_col_value(*column_id)
+                .field_col_value(column_id)
                 .ok_or_else(|| {
                     crate::error::InvalidRecordBatchSnafu {
                         reason: format!("Missing JSON index column {column_id} in batch"),
@@ -418,8 +410,8 @@ impl InvertedIndexer {
                 })?
                 .data
                 .to_arrow_array();
-            let leaf = json_index_leaf(&root, path, data_type)?;
-            let field = SortField::new(data_type.clone());
+            let leaf = json_index_leaf(&root, target.path(), target.data_type())?;
+            let field = SortField::new(target.data_type().clone());
             for row in 0..n {
                 let value =
                     IndexValueCodec::encode_value(leaf.get_ref(row), &field, &mut self.value_buf)

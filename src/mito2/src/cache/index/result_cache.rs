@@ -231,7 +231,8 @@ impl InvertedIndexKey {
                 let target_size = size_of::<IndexTarget>()
                     + match target {
                         IndexTarget::ColumnId(_) => 0,
-                        IndexTarget::JsonPath { path, .. } => path
+                        IndexTarget::JsonPath(target) => target
+                            .path()
                             .iter()
                             .map(|part| size_of::<String>() + part.len())
                             .sum(),
