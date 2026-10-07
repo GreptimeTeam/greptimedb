@@ -846,6 +846,8 @@ impl HistogramFoldStream {
         self.find_first_complete_bucket(&batch)
     }
 
+    /// Returns the first group's candidate bucket count once a group boundary is
+    /// observed. Optimistic validation checks its bounds before folding.
     fn find_first_complete_bucket(&self, batch: &RecordBatch) -> DataFusionResult<Option<usize>> {
         if batch.num_rows() == 0 {
             return Ok(None);
@@ -853,21 +855,14 @@ impl HistogramFoldStream {
 
         let vectors = Helper::try_into_vectors(batch.columns())
             .map_err(|e| DataFusionError::Execution(e.to_string()))?;
-        let le_array = batch.column(self.le_column_index);
-
         let mut tag_values_buf = Vec::with_capacity(self.normal_indices.len());
         self.collect_tag_values(&vectors, 0, &mut tag_values_buf);
-        let mut group_start = 0usize;
 
         for row in 1..batch.num_rows() {
             if !self.is_same_group(&vectors, row, &tag_values_buf) {
                 // A new series/timestamp proves that the previous group is
                 // complete, including any numerically equal +Inf boundaries.
-                if Self::is_positive_infinity(le_array, row - 1) {
-                    return Ok(Some(row - group_start));
-                }
-                self.collect_tag_values(&vectors, row, &mut tag_values_buf);
-                group_start = row;
+                return Ok(Some(row));
             }
         }
 
@@ -1937,6 +1932,79 @@ mod test {
             result[0].column(1).as_primitive::<Float64Type>().value(0),
             1.0
         );
+    }
+
+    #[tokio::test]
+    async fn trailing_invalid_bounds_fall_back_before_eof() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("host", DataType::Utf8, false),
+            Field::new("le", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, false),
+        ]));
+        for trailing_bound in [Some("bad"), None] {
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec![
+                        "a", "a", "a", "b", "b", "b", "c", "c", "c",
+                    ])),
+                    Arc::new(StringArray::from(
+                        [Some("1"), Some("+Inf"), trailing_bound].repeat(3),
+                    )),
+                    Arc::new(Float64Array::from([2.0, 4.0, 99.0].repeat(3))),
+                ],
+            )
+            .unwrap();
+            let fold = build_fold_exec_from_batches(vec![batch.clone()], schema.clone(), 0.5, 0);
+            let mut stream = HistogramFoldStream {
+                le_column_index: 1,
+                field_column_index: 2,
+                histogram_column_index: None,
+                operation: fold.operation,
+                normal_indices: vec![0],
+                bucket_size: None,
+                batch_size: 1,
+                output_schema: fold.output_schema.clone(),
+                input_schema: schema.clone(),
+                mode: FoldMode::Optimistic,
+                safe_group: None,
+                input_buffer: vec![],
+                input_buffered_rows: 0,
+                output_buffer: HistogramFoldStream::empty_output_buffer(&schema).unwrap(),
+                output_buffered_rows: 0,
+                input: fold
+                    .input
+                    .execute(0, SessionContext::default().task_ctx())
+                    .unwrap(),
+                metric: BaselineMetrics::new(&fold.metric, 0),
+            };
+
+            // Neither +Inf nor a batch boundary alone completes the group.
+            assert!(stream.fold_input(batch.slice(0, 2)).unwrap().is_none());
+            assert!(stream.fold_input(batch.slice(2, 1)).unwrap().is_none());
+            assert_eq!(stream.mode, FoldMode::Optimistic);
+
+            for (offset, host) in [(3, "a"), (6, "b")] {
+                let output = stream
+                    .fold_input(batch.slice(offset, 3))
+                    .unwrap()
+                    .expect("a completed group should produce output before EOF")
+                    .unwrap();
+                assert_eq!(stream.mode, FoldMode::Safe);
+                assert_eq!(stream.input_buffered_rows, 0);
+                assert!(stream.input_buffer.is_empty());
+                assert_eq!(output.num_rows(), 1);
+                assert_eq!(string_array_value_at_index(output.column(0), 0), Some(host));
+                assert_eq!(output.column(1).as_primitive::<Float64Type>().value(0), 1.0);
+            }
+
+            stream.flush_remaining().unwrap();
+            let output = stream.take_output_buf().unwrap().unwrap();
+            assert_eq!(output.num_rows(), 1);
+            assert_eq!(string_array_value_at_index(output.column(0), 0), Some("c"));
+            assert_eq!(output.column(1).as_primitive::<Float64Type>().value(0), 1.0);
+            assert!(stream.take_output_buf().unwrap().is_none());
+        }
     }
 
     #[tokio::test]
