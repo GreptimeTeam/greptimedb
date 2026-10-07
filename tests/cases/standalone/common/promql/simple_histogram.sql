@@ -253,3 +253,32 @@ insert into histogram5_bucket values
 tql eval (3000, 3015, '3s') histogram_quantile(0.5, histogram5_bucket);
 
 drop table histogram5_bucket;
+
+-- Issue #9443: string labels stay distinct during aggregation, but equal
+-- numeric bucket boundaries must be coalesced before monotonicity repair.
+CREATE TABLE equivalent_bounds_bucket (
+    ts TIMESTAMP TIME INDEX,
+    instance STRING,
+    le STRING,
+    val DOUBLE,
+    PRIMARY KEY (instance, le)
+);
+
+INSERT INTO equivalent_bounds_bucket VALUES
+    (3000000, 'a', '10', 40),
+    (3000000, 'a', '100', 50),
+    (3000000, 'a', '+Inf', 50),
+    (3000000, 'b', '10.0', 40),
+    (3000000, 'b', '100.0', 50),
+    (3000000, 'b', '1000.0', 50),
+    (3000000, 'b', '+Inf', 50);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') sum by (le) (equivalent_bounds_bucket);
+
+tql eval (3000, 3000, '1s') histogram_quantile(0.95, sum by (le) (equivalent_bounds_bucket));
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') histogram_quantile(0.95, sum by (instance, le) (equivalent_bounds_bucket));
+
+DROP TABLE equivalent_bounds_bucket;

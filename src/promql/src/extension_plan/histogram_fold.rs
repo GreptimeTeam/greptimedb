@@ -1274,8 +1274,31 @@ impl HistogramFoldStream {
             }
         }
 
-        // check input value
-        if !bucket.windows(2).all(|w| w[0] <= w[1]) {
+        // Detect equal numeric boundaries during validation so unique buckets
+        // need neither another scan nor an allocation.
+        let has_duplicates = !bucket.windows(2).all(|w| w[0] < w[1]);
+        if has_duplicates && !bucket.windows(2).all(|w| w[0] <= w[1]) {
+            return Ok(f64::NAN);
+        }
+        // Counts must be coalesced before repairing monotonicity.
+        let coalesced = has_duplicates.then(|| {
+            let mut bounds = Vec::with_capacity(bucket.len());
+            let mut counts = Vec::with_capacity(counter.len());
+            for (&bound, &count) in bucket.iter().zip(counter) {
+                if bounds.last() == Some(&bound) {
+                    *counts.last_mut().unwrap() += count;
+                } else {
+                    bounds.push(bound);
+                    counts.push(count);
+                }
+            }
+            (bounds, counts)
+        });
+        let (bucket, counter) = match &coalesced {
+            Some((bounds, counts)) => (bounds.as_slice(), counts.as_slice()),
+            None => (bucket, counter),
+        };
+        if matches!(operation, HistogramFoldOperation::Quantile(_)) && bucket.len() < 2 {
             return Ok(f64::NAN);
         }
         let counter = match operation {
@@ -1339,26 +1362,6 @@ impl HistogramFoldStream {
     }
 
     fn evaluate_fraction(lower: f64, upper: f64, bucket: &[f64], counter: &[f64]) -> f64 {
-        let coalesced = bucket
-            .windows(2)
-            .any(|bounds| bounds[0] == bounds[1])
-            .then(|| {
-                let mut bounds = Vec::with_capacity(bucket.len());
-                let mut counts = Vec::with_capacity(counter.len());
-                for (&bound, &count) in bucket.iter().zip(counter) {
-                    if bounds.last() == Some(&bound) {
-                        *counts.last_mut().unwrap() += count;
-                    } else {
-                        bounds.push(bound);
-                        counts.push(count);
-                    }
-                }
-                (bounds, counts)
-            });
-        let (bucket, counter) = match &coalesced {
-            Some((bounds, counts)) => (bounds.as_slice(), counts.as_slice()),
-            None => (bucket, counter),
-        };
         let total = *counter.last().unwrap();
         if total == 0.0 || lower.is_nan() || upper.is_nan() {
             return f64::NAN;
@@ -2043,6 +2046,106 @@ mod test {
         assert_eq!(values.len(), 2);
         assert!(values[0].is_nan());
         assert!((values[1] - 0.55).abs() < 1e-10, "{values:?}");
+    }
+
+    #[test]
+    fn evaluate_quantile_duplicate_bounds() {
+        let cases = [
+            // Issue #9443: coalesce before repairing the count at 1000.
+            (
+                vec![10.0, 10.0, 100.0, 100.0, 1000.0, f64::INFINITY],
+                vec![40.0, 40.0, 50.0, 50.0, 50.0, 100.0],
+                0.95,
+                77.5,
+            ),
+            // Repairing the split counts first would incorrectly inflate them.
+            (
+                vec![10.0, 10.0, 100.0, 100.0, f64::INFINITY],
+                vec![30.0, 10.0, 40.0, 20.0, 60.0],
+                0.5,
+                7.5,
+            ),
+            (
+                vec![10.0, f64::INFINITY, f64::INFINITY],
+                vec![40.0, 20.0, 30.0],
+                0.5,
+                6.25,
+            ),
+            (
+                vec![f64::INFINITY, f64::INFINITY],
+                vec![20.0, 30.0],
+                0.5,
+                f64::NAN,
+            ),
+            (
+                vec![-0.0, 0.0, 10.0, f64::INFINITY],
+                vec![10.0, 10.0, 40.0, 40.0],
+                0.75,
+                5.0,
+            ),
+        ];
+        for (bounds, counts, quantile, expected) in cases {
+            let actual = HistogramFoldStream::evaluate_row(
+                HistogramFoldOperation::Quantile(quantile.into()),
+                &bounds,
+                &counts,
+            )
+            .unwrap();
+            if expected.is_nan() {
+                assert!(actual.is_nan());
+            } else {
+                assert!((actual - expected).abs() < 1e-10, "{actual} != {expected}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_bounds_across_batches_and_safe_fallback() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("le", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+        ]));
+        // The first group establishes six buckets for optimistic folding. The
+        // shorter second group forces safe mode; both have duplicate bounds.
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    1000, 1000, 1000, 1000, 1000, 1000, 2000, 2000, 2000, 2000, 2000,
+                ])),
+                Arc::new(StringArray::from(vec![
+                    "10", "10.0", "100", "100.0", "1000", "+Inf", "10", "10.0", "100", "100.0",
+                    "+Inf",
+                ])),
+                Arc::new(Float64Array::from(vec![
+                    40.0, 40.0, 50.0, 50.0, 50.0, 100.0, 40.0, 40.0, 50.0, 50.0, 100.0,
+                ])),
+            ],
+        )
+        .unwrap();
+        // Split each pair of equal boundaries across an input batch boundary.
+        let batches = (0..batch.num_rows()).map(|i| batch.slice(i, 1)).collect();
+        let fold = build_fold_exec_from_batches(batches, schema, 0.95, 0);
+        let result = datafusion::physical_plan::collect(fold, SessionContext::default().task_ctx())
+            .await
+            .unwrap();
+        let values: Vec<_> = result
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column(1)
+                    .as_primitive::<Float64Type>()
+                    .values()
+                    .iter()
+                    .copied()
+            })
+            .collect();
+        assert_eq!(values, vec![77.5, 77.5]);
     }
 
     #[test]
