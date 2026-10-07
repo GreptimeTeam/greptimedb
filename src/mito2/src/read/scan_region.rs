@@ -2393,6 +2393,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_partition_time_filter_overflow_after_unit_widening() {
+        // Year 3000 fits milliseconds but overflows nanoseconds.
+        let bound = Value::Timestamp(Timestamp::new_millisecond(32_503_680_000_000));
+        let expr = partition_col("ts").lt(bound);
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        builder.push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 0,
+        });
+        builder.primary_key(vec![]);
+        builder.partition_expr_json(Some(expr.as_json_str().unwrap()));
+        let metadata = builder.build().unwrap();
+
+        let error = PredicateGroup::new(&metadata, &[])
+            .err()
+            .expect("an overflowing partition bound must fail scan construction");
+        let crate::error::Error::EvalPartitionFilter { error, .. } = error else {
+            panic!("unexpected error: {error:?}");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("converted value exceeds the representable i64 range"),
+            "{error}"
+        );
+    }
+
     #[tokio::test]
     async fn test_total_rows_is_exact_after_partition_filter() {
         let expr = partition_col("k0").gt_eq(Value::String("foo".into()));
