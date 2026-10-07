@@ -282,3 +282,21 @@ tql eval (3000, 3000, '1s') histogram_quantile(0.95, sum by (le) (equivalent_bou
 tql eval (3000, 3000, '1s') histogram_quantile(0.95, sum by (instance, le) (equivalent_bounds_bucket));
 
 DROP TABLE equivalent_bounds_bucket;
+
+-- Equivalent infinity labels belong to the same histogram until the group ends.
+CREATE TABLE infinity_bounds_bucket (
+    ts TIMESTAMP TIME INDEX,
+    le STRING,
+    val DOUBLE,
+    PRIMARY KEY (le)
+);
+
+INSERT INTO infinity_bounds_bucket VALUES
+    (3000000, '10', 20),
+    (3000000, '10.0', 20),
+    (3000000, '+Inf', 25),
+    (3000000, '+inf', 25);
+
+tql eval (3000, 3000, '1s') histogram_quantile(0.5, infinity_bounds_bucket);
+
+DROP TABLE infinity_bounds_bucket;

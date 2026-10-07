@@ -495,3 +495,33 @@ DROP TABLE equivalent_bounds_bucket;
 
 Affected Rows: 0
 
+-- Equivalent infinity labels belong to the same histogram until the group ends.
+CREATE TABLE infinity_bounds_bucket (
+    ts TIMESTAMP TIME INDEX,
+    le STRING,
+    val DOUBLE,
+    PRIMARY KEY (le)
+);
+
+Affected Rows: 0
+
+INSERT INTO infinity_bounds_bucket VALUES
+    (3000000, '10', 20),
+    (3000000, '10.0', 20),
+    (3000000, '+Inf', 25),
+    (3000000, '+inf', 25);
+
+Affected Rows: 4
+
+tql eval (3000, 3000, '1s') histogram_quantile(0.5, infinity_bounds_bucket);
+
++---------------------+------+
+| ts                  | val  |
++---------------------+------+
+| 1970-01-01T00:50:00 | 6.25 |
++---------------------+------+
+
+DROP TABLE infinity_bounds_bucket;
+
+Affected Rows: 0
+

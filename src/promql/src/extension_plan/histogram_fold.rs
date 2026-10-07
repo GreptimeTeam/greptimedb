@@ -859,15 +859,15 @@ impl HistogramFoldStream {
         self.collect_tag_values(&vectors, 0, &mut tag_values_buf);
         let mut group_start = 0usize;
 
-        for row in 0..batch.num_rows() {
+        for row in 1..batch.num_rows() {
             if !self.is_same_group(&vectors, row, &tag_values_buf) {
-                // new group begins
+                // A new series/timestamp proves that the previous group is
+                // complete, including any numerically equal +Inf boundaries.
+                if Self::is_positive_infinity(le_array, row - 1) {
+                    return Ok(Some(row - group_start));
+                }
                 self.collect_tag_values(&vectors, row, &mut tag_values_buf);
                 group_start = row;
-            }
-
-            if Self::is_positive_infinity(le_array, row) {
-                return Ok(Some(row - group_start + 1));
             }
         }
 
@@ -888,7 +888,10 @@ impl HistogramFoldStream {
         let field_array = field_array.as_primitive::<Float64Type>();
         let mut tag_values_buf = Vec::with_capacity(self.normal_indices.len());
 
-        while remaining_rows >= bucket_num && self.mode == FoldMode::Optimistic {
+        // Keep one row of lookahead: +Inf alone does not prove completion.
+        // A group ending at the batch boundary stays buffered until more input
+        // arrives, or flush_remaining completes it at EOF.
+        while remaining_rows > bucket_num && self.mode == FoldMode::Optimistic {
             self.collect_tag_values(&vectors, cursor, &mut tag_values_buf);
             if !self.validate_optimistic_group(
                 &vectors,
@@ -987,6 +990,9 @@ impl HistogramFoldStream {
         tag_values: &[ValueRef<'_>],
     ) -> bool {
         let inf_index = cursor + bucket_num - 1;
+        if self.is_same_group(vectors, inf_index + 1, tag_values) {
+            return false;
+        }
         if !Self::is_positive_infinity(le_array, inf_index) {
             return false;
         }
@@ -1469,8 +1475,8 @@ mod test {
 
         // 12 items
         let host_column_1 = Arc::new(StringArray::from(vec![
-            "host_1", "host_1", "host_1", "host_1", "host_1", "host_1", "host_1", "host_1",
-            "host_1", "host_1", "host_1", "host_1",
+            "host_1", "host_1", "host_1", "host_1", "host_1", "host_2", "host_2", "host_2",
+            "host_2", "host_2", "host_3", "host_3",
         ])) as _;
         let le_column_1 = Arc::new(StringArray::from(vec![
             "0.001", "0.1", "10", "1000", "+Inf", "0.001", "0.1", "10", "1000", "+inf", "0.001",
@@ -1481,14 +1487,14 @@ mod test {
         ])) as _;
 
         // 2 items
-        let host_column_2 = Arc::new(StringArray::from(vec!["host_1", "host_1"])) as _;
+        let host_column_2 = Arc::new(StringArray::from(vec!["host_3", "host_3"])) as _;
         let le_column_2 = Arc::new(StringArray::from(vec!["10", "1000"])) as _;
         let val_column_2 = Arc::new(Float64Array::from(vec![1.0, 1.0])) as _;
 
         // 11 items
         let host_column_3 = Arc::new(StringArray::from(vec![
-            "host_1", "host_2", "host_2", "host_2", "host_2", "host_2", "host_2", "host_2",
-            "host_2", "host_2", "host_2",
+            "host_3", "host_4", "host_4", "host_4", "host_4", "host_4", "host_5", "host_5",
+            "host_5", "host_5", "host_5",
         ])) as _;
         let le_column_3 = Arc::new(StringArray::from(vec![
             "+INF", "0.001", "0.1", "10", "1000", "+iNf", "0.001", "0.1", "10", "1000", "+Inf",
@@ -1654,10 +1660,10 @@ mod test {
 | host   | val               |
 +--------+-------------------+
 | host_1 | 257.5             |
-| host_1 | 5.05              |
-| host_1 | 0.0004            |
-| host_2 | NaN               |
-| host_2 | 6.040000000000001 |
+| host_2 | 5.05              |
+| host_3 | 0.0004            |
+| host_4 | NaN               |
+| host_5 | 6.040000000000001 |
 +--------+-------------------+",
         );
         assert_eq!(result_literal, expected);
@@ -1834,7 +1840,7 @@ mod test {
             Field::new("le", DataType::Utf8, true),
             Field::new("val", DataType::Float64, true),
         ]));
-        let host_column = Arc::new(StringArray::from(vec!["a", "a", "a", "a", "b", "b"])) as _;
+        let host_column = Arc::new(StringArray::from(vec!["a", "a", "b", "b", "c", "c"])) as _;
         let le_column = Arc::new(StringArray::from(vec![
             "0.1", "+Inf", "0.1", "1.0", "0.1", "+Inf",
         ])) as _;
@@ -1855,8 +1861,8 @@ mod test {
 | host | val |
 +------+-----+
 | a    | 0.1 |
-| a    | NaN |
-| b    | 0.1 |
+| b    | NaN |
+| c    | 0.1 |
 +------+-----+",
         );
         assert_eq!(result_literal, expected);
@@ -2095,6 +2101,71 @@ mod test {
                 assert!(actual.is_nan());
             } else {
                 assert!((actual - expected).abs() < 1e-10, "{actual} != {expected}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_infinity_bounds_across_batches() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("le", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+        ]));
+        let duplicate = [("10", 20.0), ("10.0", 20.0), ("+Inf", 25.0), ("+inf", 25.0)];
+        let regular = [("10", 20.0), ("10.0", 20.0), ("+Inf", 50.0)];
+        // Cover discovery, an already established optimistic bucket count,
+        // fallback, and the final group at EOF.
+        for groups in [
+            vec![duplicate.as_slice()],
+            vec![duplicate.as_slice(), regular.as_slice()],
+            vec![regular.as_slice(), duplicate.as_slice(), regular.as_slice()],
+        ] {
+            let mut timestamps = Vec::new();
+            let mut bounds = Vec::new();
+            let mut counts = Vec::new();
+            for (timestamp, group) in groups.iter().enumerate() {
+                for &(bound, count) in *group {
+                    timestamps.push(timestamp as i64);
+                    bounds.push(bound);
+                    counts.push(count);
+                }
+            }
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampMillisecondArray::from(timestamps)),
+                    Arc::new(StringArray::from(bounds)),
+                    Arc::new(Float64Array::from(counts)),
+                ],
+            )
+            .unwrap();
+            for batch_size in 1..=batch.num_rows() {
+                let batches = (0..batch.num_rows())
+                    .step_by(batch_size)
+                    .map(|offset| batch.slice(offset, batch_size.min(batch.num_rows() - offset)))
+                    .collect();
+                let fold = build_fold_exec_from_batches(batches, schema.clone(), 0.5, 0);
+                let result =
+                    datafusion::physical_plan::collect(fold, SessionContext::default().task_ctx())
+                        .await
+                        .unwrap();
+                let values: Vec<_> = result
+                    .iter()
+                    .flat_map(|batch| {
+                        batch
+                            .column(1)
+                            .as_primitive::<Float64Type>()
+                            .values()
+                            .iter()
+                            .copied()
+                    })
+                    .collect();
+                assert_eq!(values, vec![6.25; groups.len()], "batch size {batch_size}");
             }
         }
     }
