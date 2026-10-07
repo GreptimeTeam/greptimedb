@@ -253,3 +253,29 @@ insert into histogram5_bucket values
 tql eval (3000, 3015, '3s') histogram_quantile(0.5, histogram5_bucket);
 
 drop table histogram5_bucket;
+
+-- test case with numerically equal le labels written differently (#9443)
+create table histogram6_bucket (
+    ts timestamp time index,
+    instance string,
+    le string,
+    val double,
+    primary key (instance, le),
+);
+
+insert into histogram6_bucket values
+    (3000000, "a", "10", 40),
+    (3000000, "a", "100", 50),
+    (3000000, "a", "+Inf", 50),
+    (3000000, "b", "10.0", 40),
+    (3000000, "b", "100.0", 50),
+    (3000000, "b", "1000.0", 50),
+    (3000000, "b", "+Inf", 50);
+
+-- should be 77.5, same as Prometheus
+tql eval (3000, 3000, '1s') histogram_quantile(0.95, sum by (le) (histogram6_bucket));
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') histogram_quantile(0.95, sum by (instance, le) (histogram6_bucket));
+
+drop table histogram6_bucket;
