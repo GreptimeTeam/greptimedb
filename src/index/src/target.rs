@@ -88,7 +88,7 @@ impl Display for IndexTarget {
 
 impl IndexTarget {
     /// Creates an index target for a JSON object path.
-    pub fn json_path(
+    pub fn new_json_path(
         column_id: ColumnId,
         path: Vec<String>,
         data_type: ConcreteDataType,
@@ -105,7 +105,7 @@ impl IndexTarget {
     /// Parse a target key string back into an index target description.
     pub fn decode(key: &str) -> Result<Self, TargetKeyError> {
         if let Some(json_key) = key.strip_prefix("j:1:") {
-            let invalid = || InvalidJsonTargetSnafu { key }.build();
+            let invalid = || InvalidJsonTargetSnafu { target_key: key }.build();
             let (column, payload) = json_key.split_once(':').ok_or_else(invalid)?;
             validate_column_key(column)?;
             let column_id = column.parse::<ColumnId>().map_err(|_| invalid())?;
@@ -113,7 +113,7 @@ impl IndexTarget {
             let (path, data_type) =
                 serde_json::from_slice::<(Vec<String>, ConcreteDataType)>(&bytes)
                     .map_err(|_| invalid())?;
-            return Self::json_path(column_id, path, data_type);
+            return Self::new_json_path(column_id, path, data_type);
         }
         validate_column_key(key)?;
         let id = key
@@ -136,13 +136,11 @@ pub enum TargetKeyError {
     #[snafu(display("failed to parse column id from '{value}'"))]
     InvalidColumnId { value: String },
 
-    #[snafu(display("invalid JSON index target: {key}"))]
-    InvalidJsonTarget { key: String },
+    #[snafu(display("invalid JSON index target key: {target_key}"))]
+    InvalidJsonTarget { target_key: String },
 
-    #[snafu(display(
-        "JSON index path must be nonempty and contain no empty or reserved remainder segments"
-    ))]
-    InvalidJsonPath,
+    #[snafu(display("invalid JSON index path: {detail}"))]
+    InvalidJsonPath { detail: String },
 }
 
 fn deserialize_json_path<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -156,12 +154,25 @@ where
 
 fn validate_json_path(path: &[String]) -> Result<(), TargetKeyError> {
     ensure!(
-        !path.is_empty()
-            && path
-                .iter()
-                .all(|part| !part.is_empty() && part != JSON2_REMAINDER_FIELD_NAME),
-        InvalidJsonPathSnafu
+        !path.is_empty(),
+        InvalidJsonPathSnafu {
+            detail: "path must not be empty",
+        }
     );
+    for (index, part) in path.iter().enumerate() {
+        ensure!(
+            !part.is_empty(),
+            InvalidJsonPathSnafu {
+                detail: format!("path segment at index {index} must not be empty"),
+            }
+        );
+        ensure!(
+            part != JSON2_REMAINDER_FIELD_NAME,
+            InvalidJsonPathSnafu {
+                detail: format!("path segment at index {index} uses reserved name '{part}'"),
+            }
+        );
+    }
     Ok(())
 }
 
@@ -226,7 +237,7 @@ mod tests {
                 "j:1:7:W1sicmVzb3VyY2UiLCJzZXJ2aWNlLm5hbWUiXSx7IlN0cmluZyI6eyJzaXplX3R5cGUiOiJVdGY4In19XQ",
             ),
         ] {
-            let target = IndexTarget::json_path(7, path.clone(), data_type).unwrap();
+            let target = IndexTarget::new_json_path(7, path.clone(), data_type).unwrap();
             assert_eq!(target.to_string(), key);
             assert_eq!(IndexTarget::decode(key).unwrap(), target);
             assert_eq!(
@@ -235,7 +246,7 @@ mod tests {
                 target
             );
         }
-        let target = IndexTarget::json_path(
+        let target = IndexTarget::new_json_path(
             42,
             vec!["引号\".:[]".into()],
             ConcreteDataType::string_datatype(),
@@ -251,7 +262,7 @@ mod tests {
     #[test]
     fn json_target_serde_preserves_legacy_shape() {
         let json = r#"{"JsonPath":{"column_id":7,"path":["resource","service.name"],"data_type":{"Int64":{}}}}"#;
-        let target = IndexTarget::json_path(
+        let target = IndexTarget::new_json_path(
             7,
             vec!["resource".into(), "service.name".into()],
             ConcreteDataType::int64_datatype(),
@@ -273,8 +284,8 @@ mod tests {
         ] {
             let data_type = ConcreteDataType::int64_datatype();
             assert!(matches!(
-                IndexTarget::json_path(7, path.clone(), data_type.clone()),
-                Err(TargetKeyError::InvalidJsonPath)
+                IndexTarget::new_json_path(7, path.clone(), data_type.clone()),
+                Err(TargetKeyError::InvalidJsonPath { .. })
             ));
             let json = serde_json::json!({
                 "column_id": 7,

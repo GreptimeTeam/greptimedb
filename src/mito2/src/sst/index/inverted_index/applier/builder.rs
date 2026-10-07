@@ -306,7 +306,7 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
             return Ok(None);
         }
         Ok(
-            IndexTarget::json_path(column.column_id, path, hint.data_type.clone())
+            IndexTarget::new_json_path(column.column_id, path, hint.data_type.clone())
                 .ok()
                 .map(|target| (target, hint.data_type.clone())),
         )
@@ -445,7 +445,7 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 target,
-                IndexTarget::json_path(
+                IndexTarget::new_json_path(
                     1,
                     expected.into_iter().map(String::from).collect(),
                     ConcreteDataType::string_datatype()

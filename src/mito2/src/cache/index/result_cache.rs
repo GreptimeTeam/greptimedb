@@ -302,7 +302,7 @@ mod tests {
         use datatypes::data_type::ConcreteDataType;
         let key = |path: &str, ty| {
             PredicateKey::new_inverted(Arc::new(BTreeMap::from([(
-                IndexTarget::json_path(1, vec![path.into()], ty).unwrap(),
+                IndexTarget::new_json_path(1, vec![path.into()], ty).unwrap(),
                 vec![Predicate::Range(RangePredicate {
                     range: Range {
                         lower: None,

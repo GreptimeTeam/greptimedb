@@ -697,9 +697,12 @@ mod tests {
             let (dir, factory) = PuffinManagerFactory::new_for_test_async("json_hint_index").await;
             let metadata = mock_region_metadata();
             let file_id = FileId::random();
-            let target =
-                IndexTarget::json_path(4, vec!["value".into()], ConcreteDataType::int64_datatype())
-                    .unwrap();
+            let target = IndexTarget::new_json_path(
+                4,
+                vec!["value".into()],
+                ConcreteDataType::int64_datatype(),
+            )
+            .unwrap();
             let mut creator = InvertedIndexer::new(
                 file_id,
                 &metadata,
@@ -794,7 +797,7 @@ mod tests {
                 (target.clone(), 2, vec![]),
                 (target.clone(), 1, vec![0, 1]),
                 (
-                    IndexTarget::json_path(
+                    IndexTarget::new_json_path(
                         4,
                         vec!["missing".into()],
                         ConcreteDataType::int64_datatype(),
@@ -804,7 +807,7 @@ mod tests {
                     vec![0, 1],
                 ),
                 (
-                    IndexTarget::json_path(
+                    IndexTarget::new_json_path(
                         4,
                         vec!["value".into()],
                         ConcreteDataType::uint64_datatype(),

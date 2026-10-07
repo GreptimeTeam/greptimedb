@@ -535,7 +535,7 @@ impl IndexerBuilderImpl {
                     {
                         continue;
                     }
-                    match IndexTarget::json_path(
+                    match IndexTarget::new_json_path(
                         column.column_id,
                         hint.path.clone(),
                         hint.data_type.clone(),
