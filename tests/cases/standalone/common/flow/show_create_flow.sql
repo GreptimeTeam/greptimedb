@@ -45,6 +45,8 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 -- makesure it's not replaced in flownode
 INSERT INTO numbers_input_show VALUES (10, 0),(15, 1),(16, 2);
 
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('filter_numbers_show');
 
@@ -59,6 +61,8 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 -- makesure it's not replaced in flownode
 INSERT INTO numbers_input_show VALUES (4,4),(5,4),(10, 3),(11, 4);
 
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('filter_numbers_show');
 
@@ -73,6 +77,8 @@ SELECT flow_name, table_catalog, flow_definition, source_table_names FROM INFORM
 -- makesure it's replaced in flownode
 INSERT INTO numbers_input_show VALUES (3, 1),(4, 2),(10, 3),(11, 4);
 
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('filter_numbers_show');
 
@@ -118,6 +124,8 @@ SELECT * FROM out_num_cnt_show;
 
 INSERT INTO numbers_input_show VALUES(-4,0), (-3,1), (-2,2), (-1,3);
 
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('filter_numbers_show');
 
@@ -145,6 +153,8 @@ CREATE FLOW filter_numbers_show SINK TO out_num_cnt_show AS SELECT number as n1 
 
 INSERT INTO numbers_input_show VALUES (10, 0),(15, 1),(16, 2);
 
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('filter_numbers_show');
 
@@ -160,6 +170,8 @@ SELECT flow_definition, source_table_names FROM INFORMATION_SCHEMA.FLOWS WHERE f
 
 INSERT INTO numbers_input_show VALUES (10, 6),(11, 8),(15, 7),(18, 3);
 
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('filter_numbers_show');
 
