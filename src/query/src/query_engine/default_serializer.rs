@@ -1176,29 +1176,6 @@ mod tests {
     async fn test_serializer_decode_payload_observes_catalog_and_query_context() {
         let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
         let inner = catalog::memory::new_memory_catalog_manager().unwrap();
-        inner.register_catalog_sync("request_cat").unwrap();
-        inner.register_catalog_sync("explicit_catalog").unwrap();
-        for (catalog, schema) in [
-            ("request_cat", "request_schema"),
-            ("request_cat", "explicit_schema"),
-            ("explicit_catalog", "full_schema"),
-        ] {
-            inner
-                .register_schema_sync(catalog::RegisterSchemaRequest {
-                    catalog: catalog.to_string(),
-                    schema: schema.to_string(),
-                })
-                .unwrap();
-            inner
-                .register_table_sync(RegisterTableRequest {
-                    catalog: catalog.to_string(),
-                    schema: schema.to_string(),
-                    table_name: NUMBERS_TABLE_NAME.to_string(),
-                    table_id: NUMBERS_TABLE_ID,
-                    table: NumbersTable::table(NUMBERS_TABLE_ID),
-                })
-                .unwrap();
-        }
         let manager: CatalogManagerRef = Arc::new(InterceptingCatalogManager {
             inner,
             resolution: TableResolution::ObserveContext(observed.clone()),
@@ -1246,27 +1223,27 @@ mod tests {
         assert_eq!(
             *observed.lock().unwrap(),
             vec![
-                (
-                    "request_cat".into(),
-                    "request_schema".into(),
-                    NUMBERS_TABLE_NAME.into(),
-                    "request_cat".into(),
-                    "request_schema".into()
-                ),
-                (
-                    "request_cat".into(),
-                    "explicit_schema".into(),
-                    NUMBERS_TABLE_NAME.into(),
-                    "request_cat".into(),
-                    "request_schema".into()
-                ),
-                (
-                    DEFAULT_CATALOG_NAME.into(),
-                    DEFAULT_SCHEMA_NAME.into(),
-                    NUMBERS_TABLE_NAME.into(),
-                    "request_cat".into(),
-                    "request_schema".into()
-                ),
+                [
+                    "request_cat".to_string(),
+                    "request_schema".to_string(),
+                    NUMBERS_TABLE_NAME.to_string(),
+                    "request_cat".to_string(),
+                    "request_schema".to_string(),
+                ],
+                [
+                    "request_cat".to_string(),
+                    "explicit_schema".to_string(),
+                    NUMBERS_TABLE_NAME.to_string(),
+                    "request_cat".to_string(),
+                    "request_schema".to_string(),
+                ],
+                [
+                    DEFAULT_CATALOG_NAME.to_string(),
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    NUMBERS_TABLE_NAME.to_string(),
+                    "request_cat".to_string(),
+                    "request_schema".to_string(),
+                ],
             ],
         );
     }
@@ -1276,7 +1253,7 @@ mod tests {
         /// Fails with the frontend's cross-catalog access error.
         AccessDenied,
         /// Records catalog lookup and request context values.
-        ObserveContext(Arc<std::sync::Mutex<Vec<(String, String, String, String, String)>>>),
+        ObserveContext(Arc<std::sync::Mutex<Vec<[String; 5]>>>),
         /// Resolves once another task on the caller runtime signals.
         AwaitSignal {
             notify: Arc<tokio::sync::Notify>,
@@ -1357,13 +1334,13 @@ mod tests {
             match &self.resolution {
                 TableResolution::ObserveContext(observed) => {
                     let query_ctx = query_ctx.unwrap();
-                    observed.lock().unwrap().push((
+                    observed.lock().unwrap().push([
                         catalog.to_string(),
                         schema.to_string(),
                         table_name.to_string(),
                         query_ctx.current_catalog().to_string(),
                         query_ctx.current_schema(),
-                    ));
+                    ]);
                     Ok(Some(NumbersTable::table(NUMBERS_TABLE_ID)))
                 }
                 TableResolution::AccessDenied => QueryAccessDeniedSnafu {
@@ -1604,28 +1581,65 @@ mod tests {
         assert_eq!(decoded.schema().as_arrow(), plan.schema().as_arrow());
     }
 
-    /// Manual information-schema resolution uses the SessionState catalog and table functions.
+    /// Payload information-schema resolution exposes registered table functions as routines.
     #[tokio::test]
-    async fn test_serializer_decode_manual_state_information_schema() {
+    async fn test_serializer_payload_information_schema_exposes_table_functions() {
         let query_ctx = Arc::new(QueryContext::with("manual_cat", "manual_schema"));
-        let mut config = datafusion::execution::context::SessionConfig::new()
-            .with_information_schema(true)
-            .with_default_catalog_and_schema("manual_cat", "manual_schema");
-        config.set_extension(query_ctx.clone());
-        let state = SessionStateBuilder::new()
-            .with_default_features()
+        let engine = QueryEngineFactory::new(
+            numbers_catalog_manager(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine();
+        let state = engine.engine_context(query_ctx).state().clone();
+        let config = state.config().clone().with_information_schema(true);
+        let state = SessionStateBuilder::new_from_existing(state)
             .with_config(config)
             .with_table_function_list(datafusion::functions_table::all_default_table_functions())
             .build();
-        let functions = state.table_functions().clone();
-        assert!(functions.contains_key("generate_series"));
-        let bytes = encode_plan(&merge_scan(numbers_scan(), false));
-        let decoder = DefaultPlanDecoder::new(state, &query_ctx).unwrap();
-        let catalog = Arc::new(DummyCatalogList::with_table_provider(Arc::new(
-            MemTable::try_new(NumbersTable::schema().arrow_schema().clone(), vec![vec![]]).unwrap(),
-        )));
-        let decoded = decoder.decode(bytes, catalog, false).await.unwrap();
-        assert_eq!(decoded.to_string().matches("MergeScan [").count(), 1);
+
+        let extensions = Extensions::default();
+        let consumer = MergeScanSubstraitConsumer {
+            inner: DefaultSubstraitConsumer::new(&extensions, &state),
+            session_state: &state,
+            catalog_manager: state
+                .config()
+                .get_extension::<QueryEngineState>()
+                .map(|s| s.catalog_manager().clone()),
+            payload: true,
+        };
+        let provider = consumer
+            .resolve_table_ref(&TableReference::partial("information_schema", "routines"))
+            .await
+            .unwrap()
+            .unwrap();
+        let plan = provider.scan(&state, None, &[], None).await.unwrap();
+        let batches = datafusion::physical_plan::collect(plan, state.task_ctx())
+            .await
+            .unwrap();
+        let schema = provider.schema();
+        let routine_name_index = schema.index_of("routine_name").unwrap();
+        let function_type_index = schema.index_of("function_type").unwrap();
+        assert!(batches.iter().any(|batch| {
+            let routine_names = batch
+                .column(routine_name_index)
+                .as_any()
+                .downcast_ref::<datatypes::arrow::array::StringArray>()
+                .unwrap();
+            let function_types = batch
+                .column(function_type_index)
+                .as_any()
+                .downcast_ref::<datatypes::arrow::array::StringArray>()
+                .unwrap();
+            (0..batch.num_rows()).any(|row| {
+                routine_names.value(row) == "generate_series"
+                    && function_types.value(row) == "TABLE"
+            })
+        }));
     }
 
     /// `MergeScan` decodes under an ordinary single-input extension parent.
