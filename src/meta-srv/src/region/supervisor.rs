@@ -358,12 +358,9 @@ impl HeartbeatAcceptor {
         Self { sender }
     }
 
-    /// Accepts heartbeats from datanodes.
-    ///
-    /// Never waits for queue capacity: the region lease has already been decided
-    /// earlier in the heartbeat handler chain, so a full supervisor queue drops the
-    /// heartbeat (counted in [`METRIC_META_HEARTBEAT_DROPPED`]) instead of parking
-    /// the response path. A dropped heartbeat costs the failure detector one sample.
+    /// Accepts heartbeats from datanodes without waiting for queue capacity: a full queue
+    /// drops the heartbeat, counted in [`METRIC_META_HEARTBEAT_DROPPED`]. A dropped
+    /// heartbeat costs the failure detector one sample.
     pub(crate) fn accept(&self, heartbeat: DatanodeHeartbeat) {
         let datanode_id = heartbeat.datanode_id;
         match self.sender.try_send(Event::HeartbeatArrived(heartbeat)) {
@@ -930,8 +927,8 @@ pub(crate) mod tests {
     };
     use crate::procedure::region_migration::test_util::TestingEnv;
     use crate::region::supervisor::{
-        DatanodeHeartbeat, Event, RegionFailureDetectorControl, RegionSupervisor,
-        RegionSupervisorTicker,
+        DatanodeHeartbeat, Event, HeartbeatAcceptor, RegionFailureDetectorControl,
+        RegionSupervisor, RegionSupervisorTicker,
     };
     use crate::selector::test_utils::{RandomNodeSelector, new_test_selector_context};
 
@@ -963,6 +960,14 @@ pub(crate) mod tests {
             ),
             tx,
         )
+    }
+
+    fn filler_heartbeat() -> DatanodeHeartbeat {
+        DatanodeHeartbeat {
+            datanode_id: 1,
+            regions: vec![],
+            timestamp: 0,
+        }
     }
 
     #[tokio::test]
@@ -1398,208 +1403,38 @@ pub(crate) mod tests {
         assert!(supervisor.failover_counts.contains_key(&detecting_region));
     }
 
-    // Regression test for issue #9419: a busy region supervisor used to park the heartbeat
-    // response path, withholding region lease grants from every datanode.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn test_heartbeat_accept_does_not_block_on_full_queue() {
-        use std::any::Any;
+        // Regression test for #9419: a full queue used to park the caller.
+        // The supervisor is never run, so the queue stays full.
+        let (mut supervisor, sender) = new_test_supervisor();
 
-        use common_meta::kv_backend::txn::{Txn, TxnResponse};
-        use common_meta::kv_backend::{KvBackend, KvBackendRef, TxnService};
-        use common_meta::rpc::store::{
-            BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse,
-            BatchPutRequest, BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest,
-            PutResponse, RangeRequest, RangeResponse,
-        };
-        use tokio::sync::{Notify, watch};
-
-        use super::HeartbeatAcceptor;
-
-        /// KV backend whose `range` blocks until the test opens the gate.
-        struct GatedBackend {
-            inner: KvBackendRef,
-            gate: watch::Receiver<bool>,
-            entered: Arc<Notify>,
-        }
-
-        impl GatedBackend {
-            async fn wait_gate(&self) {
-                let mut gate = self.gate.clone();
-                while !*gate.borrow_and_update() {
-                    if gate.changed().await.is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-
-        #[async_trait::async_trait]
-        impl TxnService for GatedBackend {
-            type Error = common_meta::error::Error;
-
-            async fn txn(&self, txn: Txn) -> Result<TxnResponse, Self::Error> {
-                self.inner.txn(txn).await
-            }
-
-            fn max_txn_ops(&self) -> usize {
-                self.inner.max_txn_ops()
-            }
-        }
-
-        #[async_trait::async_trait]
-        impl KvBackend for GatedBackend {
-            fn name(&self) -> &str {
-                "poc_gated"
-            }
-
-            fn as_any(&self) -> &dyn Any {
-                self
-            }
-
-            async fn range(&self, req: RangeRequest) -> Result<RangeResponse, Self::Error> {
-                self.entered.notify_one();
-                self.wait_gate().await;
-                self.inner.range(req).await
-            }
-
-            async fn put(&self, req: PutRequest) -> Result<PutResponse, Self::Error> {
-                self.inner.put(req).await
-            }
-
-            async fn batch_put(
-                &self,
-                req: BatchPutRequest,
-            ) -> Result<BatchPutResponse, Self::Error> {
-                self.inner.batch_put(req).await
-            }
-
-            async fn batch_get(
-                &self,
-                req: BatchGetRequest,
-            ) -> Result<BatchGetResponse, Self::Error> {
-                self.inner.batch_get(req).await
-            }
-
-            async fn delete_range(
-                &self,
-                req: DeleteRangeRequest,
-            ) -> Result<DeleteRangeResponse, Self::Error> {
-                self.inner.delete_range(req).await
-            }
-
-            async fn batch_delete(
-                &self,
-                req: BatchDeleteRequest,
-            ) -> Result<BatchDeleteResponse, Self::Error> {
-                self.inner.batch_delete(req).await
-            }
-        }
-
-        let heartbeat = || DatanodeHeartbeat {
-            datanode_id: 1,
-            regions: vec![RegionId::new(1024, 1)],
-            timestamp: 0,
-        };
-
-        let env = TestingEnv::new();
-        let (gate_tx, gate_rx) = watch::channel(false);
-        let entered = Arc::new(Notify::new());
-        let gated: KvBackendRef = Arc::new(GatedBackend {
-            inner: env.kv_backend(),
-            gate: gate_rx,
-            entered: entered.clone(),
-        });
-
-        let selector_context = new_test_selector_context();
-        let selector = Arc::new(RandomNodeSelector::new(vec![Peer::empty(1)]));
-        let context_factory = env.context_factory();
-        let region_migration_manager = Arc::new(RegionMigrationManager::new(
-            env.procedure_manager().clone(),
-            context_factory,
-        ));
-        let runtime_switch_manager =
-            Arc::new(runtime_switch::RuntimeSwitchManager::new(gated.clone()));
-        let peer_resolver = Arc::new(NoopPeerResolver);
-        let (tx, rx) = RegionSupervisor::channel();
-        let mut supervisor = RegionSupervisor::new(
-            rx,
-            Default::default(),
-            selector_context,
-            RegionSupervisorSelector::NaiveSelector(selector),
-            region_migration_manager,
-            runtime_switch_manager,
-            peer_resolver,
-            gated,
-        );
-
-        // Drop a signal possibly left by setup-time KV reads.
-        entered.notify_one();
-        entered.notified().await;
-
-        tokio::spawn(async move { supervisor.run().await });
-
-        // Busy the supervisor: the initialization scan blocks inside its first KV read.
-        let (init_done_tx, init_done_rx) = oneshot::channel();
-        tx.send(Event::InitializeAllRegions(init_done_tx))
-            .await
-            .unwrap();
-        entered.notified().await;
-
-        // Fill the bounded event queue while the supervisor is blocked.
-        let capacity = tx.max_capacity();
         let mut queued = 0;
-        while tx.try_send(Event::HeartbeatArrived(heartbeat())).is_ok() {
+        while sender
+            .try_send(Event::HeartbeatArrived(filler_heartbeat()))
+            .is_ok()
+        {
             queued += 1;
         }
-        assert_eq!(
-            queued, capacity,
-            "the queue must fill up completely while the supervisor is blocked"
-        );
-        assert_eq!(tx.capacity(), 0, "the supervisor event queue must be full");
+        assert_eq!(queued, sender.max_capacity());
+        assert_eq!(sender.capacity(), 0);
 
-        // The heartbeat must be dropped instead of blocking, and counted as such.
-        let acceptor = HeartbeatAcceptor::new(tx.clone());
-        let dropped_before = METRIC_META_HEARTBEAT_DROPPED
-            .with_label_values(&["full"])
-            .get();
-        acceptor.accept(heartbeat());
-        assert_eq!(
+        let acceptor = HeartbeatAcceptor::new(sender.clone());
+        let dropped = || {
             METRIC_META_HEARTBEAT_DROPPED
                 .with_label_values(&["full"])
-                .get(),
-            dropped_before + 1,
-            "a heartbeat dropped on a full queue must be counted"
-        );
-        assert_eq!(
-            tx.capacity(),
-            0,
-            "the dropped heartbeat must not occupy a queue slot"
-        );
+                .get()
+        };
+        let dropped_before = dropped();
+        // The full queue drops the heartbeat and counts it.
+        acceptor.accept(filler_heartbeat());
+        assert_eq!(dropped(), dropped_before + 1);
+        assert_eq!(sender.capacity(), 0);
 
-        // Release the supervisor and let it drain the queue.
-        gate_tx.send(true).unwrap();
-        let _ = init_done_rx.await;
-        tokio::time::timeout(Duration::from_secs(30), async {
-            while tx.capacity() < capacity {
-                sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("the supervisor must drain the events queued while it was blocked");
-
-        // Once there is room again, heartbeats go through instead of being dropped.
-        // That an accepted heartbeat reaches the detector is covered by
-        // `failure_handler::tests::test_handle_heartbeat`.
-        let dropped_before = METRIC_META_HEARTBEAT_DROPPED
-            .with_label_values(&["full"])
-            .get();
-        acceptor.accept(heartbeat());
-        assert_eq!(
-            METRIC_META_HEARTBEAT_DROPPED
-                .with_label_values(&["full"])
-                .get(),
-            dropped_before,
-            "a heartbeat accepted with queue room must not be counted as dropped"
-        );
+        // Free one slot: the next heartbeat is accepted.
+        supervisor.receiver.try_recv().unwrap();
+        acceptor.accept(filler_heartbeat());
+        assert_eq!(dropped(), dropped_before + 1);
+        assert_eq!(sender.capacity(), 0);
     }
 }
