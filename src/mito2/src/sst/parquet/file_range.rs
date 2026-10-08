@@ -215,7 +215,7 @@ impl FileRange {
             selector,
             Some(TimeSeriesRowSelector::LastRow { after_merge: false })
         ) {
-            // Only use LastRowReader if row group does not contain DELETE, all
+            // Only use the last row reader if row group does not contain DELETE, all
             // rows are selected, and filters that still run after this reader
             // cannot change which row is last. Tag filters are safe because a
             // tag is constant within a series. Timestamp and field filters are

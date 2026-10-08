@@ -113,17 +113,17 @@ tql eval (0, 60, '30s') abs(timestamp(timestamp_test) - avg(timestamp(timestamp_
 -- Test Issue 6707
 tql eval timestamp(demo_memory_usage_bytes * 1);
 
-+------+--------------------+
-| time | value * Float64(1) |
-+------+--------------------+
-+------+--------------------+
++------+-------+
+| time | value |
++------+-------+
++------+-------+
 
 tql eval timestamp(-demo_memory_usage_bytes);
 
-+------+-----------+
-| time | (- value) |
-+------+-----------+
-+------+-----------+
++------+-------+
+| time | value |
++------+-------+
++------+-------+
 
 tql eval (0, 60, '30s') timestamp(timestamp_test) == 60;
 
@@ -132,6 +132,79 @@ tql eval (0, 60, '30s') timestamp(timestamp_test) == 60;
 +---------------------+-------+
 | 1970-01-01T00:01:00 | 60.0  |
 +---------------------+-------+
+
+-- timestamp() reports the timestamp of the selected sample, not the evaluation time
+tql eval (60, 60, '1s') timestamp(timestamp_test offset 30s);
+
++---------------------+-------+
+| ts                  | value |
++---------------------+-------+
+| 1970-01-01T00:01:00 | 1.0   |
++---------------------+-------+
+
+tql eval (60, 60, '1s') timestamp((timestamp_test offset 30s));
+
++---------------------+-------+
+| ts                  | value |
++---------------------+-------+
+| 1970-01-01T00:01:00 | 1.0   |
++---------------------+-------+
+
+-- The result of a function is sampled at the evaluation time
+tql eval (90, 90, '1s') timestamp(abs(timestamp_test));
+
++---------------------+-------+
+| ts                  | value |
++---------------------+-------+
+| 1970-01-01T00:01:30 | 90.0  |
++---------------------+-------+
+
+-- A row whose fields are all NULL holds no sample and gets no timestamp; a row with any
+-- non-NULL field does.
+create table timestamp_null (ts timestamp time index, host string primary key, a double, b double);
+
+Affected Rows: 0
+
+insert into timestamp_null values
+  (0, 'none', NULL, NULL),
+  (0, 'only_a', 1.0, NULL),
+  (0, 'only_b', NULL, 2.0);
+
+Affected Rows: 3
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (60, 60, '1s') timestamp(timestamp_null);
+
++---------------------+-------+--------+
+| ts                  | value | host   |
++---------------------+-------+--------+
+| 1970-01-01T00:01:00 | 0.0   | only_a |
+| 1970-01-01T00:01:00 | 0.0   | only_b |
++---------------------+-------+--------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (60, 60, '1s') timestamp(-timestamp_null);
+
++---------------------+-------+--------+
+| ts                  | value | host   |
++---------------------+-------+--------+
+| 1970-01-01T00:01:00 | 60.0  | only_a |
+| 1970-01-01T00:01:00 | 60.0  | only_b |
++---------------------+-------+--------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (60, 60, '1s') timestamp(abs(timestamp_null));
+
++---------------------+-------+--------+
+| ts                  | value | host   |
++---------------------+-------+--------+
+| 1970-01-01T00:01:00 | 60.0  | only_a |
+| 1970-01-01T00:01:00 | 60.0  | only_b |
++---------------------+-------+--------+
+
+drop table timestamp_null;
+
+Affected Rows: 0
 
 -- Test timestamp() with multiple metrics
 create table timestamp_test2 (ts timestamp time index, val double);

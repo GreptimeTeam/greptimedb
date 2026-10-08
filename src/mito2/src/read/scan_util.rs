@@ -1112,21 +1112,18 @@ impl PartitionMetrics {
     }
 
     /// Increments the total bytes added to the range cache.
-    #[allow(dead_code)]
     pub(crate) fn inc_range_cache_size(&self, size: usize) {
         let mut metrics = self.0.metrics.lock().unwrap();
         metrics.range_cache_size += size;
     }
 
     /// Increments the range cache hit counter.
-    #[allow(dead_code)]
     pub(crate) fn inc_range_cache_hit(&self) {
         let mut metrics = self.0.metrics.lock().unwrap();
         metrics.range_cache_hit += 1;
     }
 
     /// Increments the range cache miss counter.
-    #[allow(dead_code)]
     pub(crate) fn inc_range_cache_miss(&self) {
         let mut metrics = self.0.metrics.lock().unwrap();
         metrics.range_cache_miss += 1;

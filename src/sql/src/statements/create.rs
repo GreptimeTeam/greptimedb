@@ -25,7 +25,7 @@ use snafu::ResultExt;
 use sqlparser::ast::{ColumnOptionDef, DataType, Expr};
 use sqlparser_derive::{Visit, VisitMut};
 
-use crate::ast::{ColumnDef, Ident, ObjectName, Value as SqlValue};
+use crate::ast::{ColumnDef, Ident, ObjectName};
 use crate::error::{
     InvalidFlowQuerySnafu, InvalidSqlSnafu, Result, SetFulltextOptionSnafu,
     SetSkippingIndexOptionSnafu,
@@ -353,23 +353,6 @@ impl Partitions {
         self.column_list
             .iter_mut()
             .for_each(|c| c.quote_style = Some(quote_style));
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut)]
-pub struct PartitionEntry {
-    pub name: Ident,
-    pub value_list: Vec<SqlValue>,
-}
-
-impl Display for PartitionEntry {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "PARTITION {} VALUES LESS THAN ({})",
-            self.name,
-            format_list_comma!(self.value_list),
-        )
     }
 }
 

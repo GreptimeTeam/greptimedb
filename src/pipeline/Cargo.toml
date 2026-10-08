@@ -60,7 +60,6 @@ yaml-rust = "0.4"
 [dev-dependencies]
 catalog = { workspace = true, features = ["testing"] }
 criterion = { workspace = true, features = ["html_reports"] }
-session = { workspace = true, features = ["testing"] }
 
 [[bench]]
 name = "processor"

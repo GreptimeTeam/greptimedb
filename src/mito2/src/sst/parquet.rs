@@ -77,6 +77,18 @@ pub(crate) struct Json2TargetLayout {
 /// batching without changing the row group layout of newly written SSTs.
 pub const DEFAULT_ROW_GROUP_SIZE: usize = 100 * 1024;
 
+/// Truncation length of min/max values in the parquet column index.
+///
+/// Mito never reads the column index (it is skipped or stripped on load), so truncating
+/// it is safe. Chunk statistics stay untruncated because pruning decodes primary keys
+/// from them. Without truncation every page of a large string column stores its whole
+/// min and max values, uncompressed.
+///
+/// Truncated values are only bounds: code that starts reading the column index must not
+/// decode primary keys from it.
+pub(crate) const COLUMN_INDEX_TRUNCATE_LENGTH: Option<usize> =
+    parquet::file::properties::DEFAULT_COLUMN_INDEX_TRUNCATE_LENGTH;
+
 /// Applies the configured encoding to direct floating-point field columns.
 pub(crate) fn apply_float_field_encoding(
     mut builder: WriterPropertiesBuilder,
@@ -901,6 +913,82 @@ mod tests {
         .await;
     }
 
+    #[tokio::test]
+    async fn test_column_index_truncates_large_field_values() {
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let handle = sst_file_handle(0, 1000);
+        let file_path = FixedPathProvider {
+            region_file_id: handle.file_id(),
+        };
+        let metadata = build_test_binary_test_region_metadata();
+        // A tag long enough that the encoded primary key exceeds the 64-byte truncation length.
+        let tag = "t".repeat(100);
+        let values: Vec<Vec<u8>> = (0..64)
+            .map(|i| format!("{i:08}").into_bytes().repeat(4 * 1024))
+            .collect();
+        let batch = new_record_batch_with_binary_values(&tag, &values);
+        let mut metrics = Metrics::new(WriteType::Flush);
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store.clone(),
+            metadata.clone(),
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            file_path,
+            &mut metrics,
+        )
+        .await;
+        writer
+            .write_all_flat_as_primary_key(
+                new_flat_source_from_record_batches(vec![batch]),
+                None,
+                &WriteOptions::default(),
+            )
+            .await
+            .unwrap();
+
+        let path = handle.file_path(FILE_DIR, PathType::Bare);
+        let bytes = object_store.read(&path).await.unwrap().to_bytes();
+        let options = parquet::arrow::arrow_reader::ArrowReaderOptions::new()
+            .with_page_index_policy(PageIndexPolicy::Required);
+        let builder =
+            ParquetRecordBatchReaderBuilder::try_new_with_options(bytes, options).unwrap();
+        let parquet_meta = builder.metadata().clone();
+        let schema = parquet_meta.file_metadata().schema_descr();
+        let column = |name: &str| {
+            (0..schema.num_columns())
+                .find(|i| schema.column(*i).name() == name)
+                .unwrap()
+        };
+
+        let field_index = &parquet_meta.column_index().unwrap()[0][column("field_0")];
+        let parquet::file::page_index::column_index::ColumnIndexMetaData::BYTE_ARRAY(field_index) =
+            field_index
+        else {
+            panic!("unexpected column index: {field_index:?}");
+        };
+        let mut pages = 0;
+        for (min, max) in field_index
+            .min_values_iter()
+            .zip(field_index.max_values_iter())
+        {
+            assert!(min.unwrap().len() <= 64);
+            assert!(max.unwrap().len() <= 64);
+            pages += 1;
+        }
+        assert!(pages > 1, "values should span several pages");
+
+        // Chunk statistics keep exact primary keys; pruning decodes them.
+        let pk_stats = parquet_meta
+            .row_group(0)
+            .column(column(store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME))
+            .statistics()
+            .unwrap();
+        let pk = new_primary_key(&[&tag]);
+        assert!(pk.len() > 64);
+        assert_eq!(pk_stats.max_bytes_opt().unwrap(), pk.as_slice());
+    }
+
     #[rstest::rstest]
     #[tokio::test]
     async fn test_write_multiple_files(#[values(1024, 4096)] write_buffer_size: usize) {
@@ -1473,6 +1561,32 @@ mod tests {
         assert!(cached.contains_row_group(1));
         assert!(cached.contains_row_group(2));
         assert!(cached.contains_row_group(3));
+    }
+
+    fn new_record_batch_with_binary_values(tag: &str, values: &[Vec<u8>]) -> RecordBatch {
+        let metadata = build_test_binary_test_region_metadata();
+        let flat_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+        let num_rows = values.len();
+        let mut tag_0_builder = StringDictionaryBuilder::<UInt32Type>::new();
+        let mut pk_builder = BinaryDictionaryBuilder::<UInt32Type>::new();
+        let pk = new_primary_key(&[tag]);
+        for _ in 0..num_rows {
+            tag_0_builder.append_value(tag);
+            pk_builder.append(&pk).unwrap();
+        }
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(tag_0_builder.finish()),
+            Arc::new(datatypes::arrow::array::BinaryArray::from_iter_values(
+                values.iter().map(|v| v.as_slice()),
+            )),
+            Arc::new(TimestampMillisecondArray::from_iter_values(
+                0..num_rows as i64,
+            )),
+            Arc::new(pk_builder.finish()),
+            Arc::new(UInt64Array::from_value(1000, num_rows)),
+            Arc::new(UInt8Array::from_value(OpType::Put as u8, num_rows)),
+        ];
+        RecordBatch::try_new(flat_schema, columns).unwrap()
     }
 
     fn new_record_batch_with_binary(tags: &[&str], start: usize, end: usize) -> RecordBatch {

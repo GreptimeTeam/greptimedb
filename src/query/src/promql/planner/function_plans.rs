@@ -28,7 +28,7 @@ use datafusion::scalar::ScalarValue;
 use datafusion_common::DFSchema;
 use datafusion_expr::expr_fn::when;
 use datafusion_expr::simplify::SimplifyContext;
-use datafusion_expr::{col, lit};
+use datafusion_expr::{ident, lit};
 use datafusion_functions::core::coalesce;
 use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use promql::extension_plan::{
@@ -253,12 +253,12 @@ impl PromPlanner {
                 "vector contains a mix of classic and native histograms".to_string(),
                 self.promql_annotations.clone(),
             )),
-            args: vec![col(&float_field), col(&histogram_field)],
+            args: vec![ident(&float_field), ident(&histogram_field)],
         });
         let keep = when(
-            col(&float_field)
+            ident(&float_field)
                 .is_not_null()
-                .and(col(&histogram_field).is_not_null()),
+                .and(ident(&histogram_field).is_not_null()),
             record_collision,
         )
         .otherwise(lit(true))
@@ -268,7 +268,7 @@ impl PromPlanner {
         let output_field = native_expr.schema_name().to_string();
         let value = DfExpr::ScalarFunction(ScalarFunction {
             func: coalesce(),
-            args: vec![col(&float_field), native_expr],
+            args: vec![ident(&float_field), native_expr],
         });
         self.ctx.field_columns = vec![output_field.clone()];
         LogicalPlanBuilder::from(LogicalPlan::Extension(Extension {
@@ -277,9 +277,9 @@ impl PromPlanner {
         .filter(keep)
         .context(DataFusionPlanningSnafu)?
         .project(
-            std::iter::once(col(&time_index_column))
+            std::iter::once(ident(&time_index_column))
                 .chain(std::iter::once(value.alias(output_field)))
-                .chain(tag_columns.iter().map(col)),
+                .chain(tag_columns.iter().map(ident)),
         )
         .context(DataFusionPlanningSnafu)?
         .build()

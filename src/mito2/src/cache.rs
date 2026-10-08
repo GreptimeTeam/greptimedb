@@ -898,7 +898,6 @@ impl CacheStrategy {
 
     /// Calls [CacheManager::get_range_result()].
     /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
-    #[allow(dead_code)]
     pub(crate) fn get_range_result(
         &self,
         key: &RangeScanCacheKey,
@@ -1391,7 +1390,6 @@ impl CacheManager {
     }
 
     /// Gets cached result for range scan.
-    #[allow(dead_code)]
     pub(crate) fn get_range_result(
         &self,
         key: &RangeScanCacheKey,

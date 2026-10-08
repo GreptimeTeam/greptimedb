@@ -67,7 +67,7 @@ use crate::mito_engine_options::{
     TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM, WRITE_BUFFER_SIZE_KEY,
 };
 use crate::path_utils::table_dir;
-use crate::storage::{ColumnId, RegionId, ScanRequest};
+use crate::storage::{ColumnId, RegionId};
 
 /// The type of path to generate.
 #[derive(Debug, Clone, Copy, PartialEq, TryFromPrimitive)]
@@ -538,11 +538,6 @@ pub struct RegionPutRequest {
     pub skip_wal: bool,
     /// Partition expression version for the region.
     pub partition_expr_version: Option<u64>,
-}
-
-#[derive(Debug)]
-pub struct RegionReadRequest {
-    pub request: ScanRequest,
 }
 
 /// Request to delete data from a region.

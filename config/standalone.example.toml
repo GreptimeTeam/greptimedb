@@ -111,6 +111,11 @@ api_server_addr = "127.0.0.1:4006"
 bind_addr = "127.0.0.1:4001"
 ## The number of server worker threads.
 runtime_size = 8
+## Enable CORS for gRPC-Web clients in browsers. Disabled by default.
+#+ enable_cors = false
+## Origins allowed by gRPC CORS. An empty list allows any origin.
+## @toml2docs:none-default
+#+ cors_allowed_origins = ["https://example.com"]
 ## The maximum connection age for gRPC connection.
 ## The value can be a human-readable time string. For example: `10m` for ten minutes or `1h` for one hour.
 ## Refer to https://grpc.io/docs/guides/keepalive/ for more details.
@@ -299,7 +304,7 @@ prom_validation_mode = "strict"
 ## The provider of the WAL.
 ## - `raft_engine`: the wal is stored in the local file system by raft-engine.
 ## - `kafka`: it's remote wal that data is stored in Kafka.
-## - `experimental_object_store`: the wal is stored as objects in an object store.<br/>**Notes: experimental and not supported yet.**
+## - `experimental_object_store`: the wal is stored as objects in an object store.<br/>**Notes: experimental.**
 provider = "raft_engine"
 
 ## The directory to store the WAL files.
@@ -476,12 +481,6 @@ retry_delay = "500ms"
 ## The maximum number of procedures that can be running at the same time.
 ## If the number of running procedures exceeds this limit, the procedure will be rejected.
 max_running_procedures = 128
-
-## flow engine options.
-[flow]
-## The number of flow worker in flownode.
-## Not setting(or set to 0) this value will use the number of CPU cores divided by 2.
-#+num_workers=0
 
 # Example of using S3 as the storage.
 # [storage]
@@ -892,7 +891,7 @@ schedule_compaction_after_edit = true
 default_flat_format = true
 
 ## Whether to enable the experimental two-phase mode for eligible metric series scans.
-experimental_series_scan_v2 = true
+experimental_series_scan_v2 = false
 
 ## The options for index in Mito engine.
 [region_engine.mito.index]
