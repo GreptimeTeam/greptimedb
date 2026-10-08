@@ -181,7 +181,7 @@ WHERE table_name = 'logical_sem';
 -- Regular options still cannot be altered on logical tables.
 ALTER TABLE logical_sem SET 'ttl' = '7d';
 
-Error: 1004(InvalidArguments), Alter logical tables invalid arguments: Only support add columns operation
+Error: 1002(Unexpected), Failed to create logical tables: Retention TTL is not supported on metric logical tables; set `ttl` on the physical table instead
 
 ALTER TABLE logical_sem UNSET 'greptime.semantic.entity.host.id';
 
