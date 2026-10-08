@@ -130,13 +130,14 @@ ORDER BY p.p_val, p.p_id, b.b_val, b.b_id;
 |_|_TableScan: dist_join_build, partial_filters=[dist_join_build.b_key IS NOT NULL]_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [p_val@2 ASC NULLS LAST, p_id@0 ASC NULLS LAST, b_val@5 ASC NULLS LAST, b_id@3 ASC NULLS LAST]_|
-|_|_SortExec: expr=[p_val@2 ASC NULLS LAST, p_id@0 ASC NULLS LAST, b_val@5 ASC NULLS LAST, b_id@3 ASC NULLS LAST], preserve_partitioning=[true] |
+|_|_ProjectionExec: expr=[p_id@3 as p_id, p_key@4 as p_key, p_val@5 as p_val, b_id@0 as b_id, b_key@1 as b_key, b_val@2 as b_val]_|
+|_|_SortExec: expr=[p_val@5 ASC NULLS LAST, p_id@3 ASC NULLS LAST, b_val@2 ASC NULLS LAST, b_id@0 ASC NULLS LAST], preserve_partitioning=[true] |
 |_|_REDACTED
-|_|_RepartitionExec: partitioning=REDACTED
-|_|_ProjectionExec: expr=[p_id@0 as p_id, p_key@1 as p_key, p_val@2 as p_val]_|
+|_|_CoalescePartitionsExec_|
+|_|_ProjectionExec: expr=[b_id@0 as b_id, b_key@1 as b_key, b_val@2 as b_val]_|
 |_|_MergeScanExec: REDACTED
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_ProjectionExec: expr=[b_id@0 as b_id, b_key@1 as b_key, b_val@2 as b_val]_|
+|_|_ProjectionExec: expr=[p_id@0 as p_id, p_key@1 as p_key, p_val@2 as p_val]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -165,17 +166,18 @@ ORDER BY p.p_val, p.p_id, b.b_val, b.b_id;
 | logical_plan_| Sort: p.p_val ASC NULLS LAST, p.p_id ASC NULLS LAST, b.b_val ASC NULLS LAST, b.b_id ASC NULLS LAST_|
 |_|_Projection: p.p_id, p.p_key, p.p_val, b.b_id, b.b_key, b.b_val_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| Inner Join: p.p_key = b.b_key Filter: p.p_val + b.b_val > Int32(105)_|
-|_|_Projection: p.p_id, p.p_key, p.p_val, p.p_pad, p.ts_|
-|_|_SubqueryAlias: p_|
-|_|_Filter: dist_join_probe.p_key IS NOT NULL AND dist_join_probe.p_id < Int32(200)_|
-|_|_TableScan: dist_join_probe, partial_filters=[dist_join_probe.p_key IS NOT NULL, dist_join_probe.p_id < Int32(200)]_|
+|_| Projection: p.p_id, p.p_key, p.p_val, p.p_pad, p.ts, b.b_id, b.b_key, b.b_val, b.ts_|
+|_|_Inner Join: b.b_key = p.p_key Filter: p.p_val + b.b_val > Int32(105)_|
 |_|_Projection: b.b_id, b.b_key, b.b_val, b.ts_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| SubqueryAlias: b_|
 |_|_Filter: dist_join_build.b_key IS NOT NULL_|
 |_|_TableScan: dist_join_build, partial_filters=[dist_join_build.b_key IS NOT NULL]_|
 |_| ]]_|
+|_|_Projection: p.p_id, p.p_key, p.p_val, p.p_pad, p.ts_|
+|_|_SubqueryAlias: p_|
+|_|_Filter: dist_join_probe.p_key IS NOT NULL AND dist_join_probe.p_id < Int32(200)_|
+|_|_TableScan: dist_join_probe, partial_filters=[dist_join_probe.p_key IS NOT NULL, dist_join_probe.p_id < Int32(200)]_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [p_val@2 ASC NULLS LAST, p_id@0 ASC NULLS LAST, b_val@5 ASC NULLS LAST, b_id@3 ASC NULLS LAST]_|
 |_|_SortExec: expr=[p_val@2 ASC NULLS LAST, p_id@0 ASC NULLS LAST, b_val@5 ASC NULLS LAST, b_id@3 ASC NULLS LAST], preserve_partitioning=[true] |
@@ -238,13 +240,14 @@ ORDER BY p.p_val, p.p_id, b.b_val, b.b_id;
 |_|_TableScan: dist_join_build, partial_filters=[dist_join_build.b_key IS NOT NULL]_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [p_val@2 ASC NULLS LAST, p_id@0 ASC NULLS LAST, b_val@5 ASC NULLS LAST, b_id@3 ASC NULLS LAST]_|
-|_|_SortExec: expr=[p_val@2 ASC NULLS LAST, p_id@0 ASC NULLS LAST, b_val@5 ASC NULLS LAST, b_id@3 ASC NULLS LAST], preserve_partitioning=[true] |
+|_|_ProjectionExec: expr=[p_id@3 as p_id, p_key@4 as p_key, p_val@5 as p_val, b_id@0 as b_id, b_key@1 as b_key, b_val@2 as b_val]_|
+|_|_SortExec: expr=[p_val@5 ASC NULLS LAST, p_id@3 ASC NULLS LAST, b_val@2 ASC NULLS LAST, b_id@0 ASC NULLS LAST], preserve_partitioning=[true] |
 |_|_REDACTED
-|_|_RepartitionExec: partitioning=REDACTED
-|_|_ProjectionExec: expr=[p_id@0 as p_id, p_key@1 as p_key, p_val@2 as p_val]_|
+|_|_CoalescePartitionsExec_|
+|_|_ProjectionExec: expr=[b_id@0 as b_id, b_key@1 as b_key, b_val@2 as b_val]_|
 |_|_MergeScanExec: REDACTED
 |_|_RepartitionExec: partitioning=REDACTED
-|_|_ProjectionExec: expr=[b_id@0 as b_id, b_key@1 as b_key, b_val@2 as b_val]_|
+|_|_ProjectionExec: expr=[p_id@0 as p_id, p_key@1 as p_key, p_val@2 as p_val]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
