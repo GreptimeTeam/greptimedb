@@ -3792,7 +3792,7 @@ mod tests {
             DEFAULT_CATALOG_NAME,
             DEFAULT_SCHEMA_NAME,
         ));
-        let request = InstantAndNormalInsertRequests {
+        let instant_request = InstantAndNormalInsertRequests {
             normal_requests: RegionInsertRequests::default(),
             instant_requests: RegionInsertRequests {
                 requests: vec![RegionInsertRequest {
@@ -3805,6 +3805,15 @@ mod tests {
                 }],
             },
         };
+        let mut request = instant_request;
+        request.normal_requests.requests.push(RegionInsertRequest {
+            region_id: RegionId::new(1, 1).as_u64(),
+            rows: Some(Rows {
+                schema: vec![],
+                rows: vec![api::v1::Row::default()],
+            }),
+            ..Default::default()
+        });
         let error = inserter
             .do_request(request, &table_infos, &ctx)
             .await
@@ -3813,6 +3822,132 @@ mod tests {
         assert!(error.to_string().contains("ttl=instant"));
         assert!(datanode_rx.try_recv().is_err());
         assert!(flownode_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn dirty_marker_uses_native_time_index_and_preserves_row_order() {
+        use common_meta::instruction::{CacheIdent, CreateFlow};
+        use datatypes::schema::SchemaBuilder;
+
+        let backend = prepare_mocked_backend().await;
+        let cache = Arc::new(new_table_flownode_set_cache(
+            String::new(),
+            Cache::new(10),
+            backend,
+        ));
+        let peer = flownode_peer();
+        cache
+            .invalidate(&[CacheIdent::CreateFlow(CreateFlow {
+                flow_id: 1,
+                source_table_ids: vec![1],
+                partition_to_peer_mapping: vec![(0, peer.clone())],
+            })])
+            .await
+            .unwrap();
+
+        for (unit, datatype, values, expected) in [
+            (
+                TimeUnit::Second,
+                ColumnDataType::TimestampSecond,
+                vec![-2, -2, -3],
+                vec![-2, -2, -3],
+            ),
+            (
+                TimeUnit::Millisecond,
+                ColumnDataType::TimestampMillisecond,
+                vec![-23, -23, -31],
+                vec![-23, -23, -31],
+            ),
+            (
+                TimeUnit::Microsecond,
+                ColumnDataType::TimestampMicrosecond,
+                vec![-23_001, -23_001, -31_009],
+                vec![-23_001, -23_001, -31_009],
+            ),
+            (
+                TimeUnit::Nanosecond,
+                ColumnDataType::TimestampNanosecond,
+                vec![-23_000_001, -23_000_001, -31_000_009],
+                vec![-23_000_001, -23_000_001, -31_000_009],
+            ),
+        ] {
+            let mut info = new_test_table_info(1, "source", [1].into_iter());
+            info.meta.schema = Arc::new(
+                SchemaBuilder::try_from_columns(vec![
+                    ColumnSchema::new("b", ConcreteDataType::int32_datatype(), true),
+                    ColumnSchema::new(
+                        "actual_ts",
+                        ConcreteDataType::timestamp_datatype(unit),
+                        false,
+                    )
+                    .with_time_index(true),
+                ])
+                .unwrap()
+                .build()
+                .unwrap(),
+            );
+            let rows = Rows {
+                schema: vec![
+                    field_column_schema("payload", ColumnDataType::Int32),
+                    time_index_column_schema("unrelated_timestamp", datatype),
+                    time_index_column_schema("actual_ts", datatype),
+                ],
+                rows: values
+                    .iter()
+                    .map(|value| api::v1::Row {
+                        values: vec![
+                            Value {
+                                value_data: Some(ValueData::I32Value(7)),
+                            },
+                            Value {
+                                value_data: Some(match unit {
+                                    TimeUnit::Second => ValueData::TimestampSecondValue(999),
+                                    TimeUnit::Millisecond => {
+                                        ValueData::TimestampMillisecondValue(999)
+                                    }
+                                    TimeUnit::Microsecond => {
+                                        ValueData::TimestampMicrosecondValue(999)
+                                    }
+                                    TimeUnit::Nanosecond => {
+                                        ValueData::TimestampNanosecondValue(999)
+                                    }
+                                }),
+                            },
+                            Value {
+                                value_data: Some(match unit {
+                                    TimeUnit::Second => ValueData::TimestampSecondValue(*value),
+                                    TimeUnit::Millisecond => {
+                                        ValueData::TimestampMillisecondValue(*value)
+                                    }
+                                    TimeUnit::Microsecond => {
+                                        ValueData::TimestampMicrosecondValue(*value)
+                                    }
+                                    TimeUnit::Nanosecond => {
+                                        ValueData::TimestampNanosecondValue(*value)
+                                    }
+                                }),
+                            },
+                        ],
+                    })
+                    .collect(),
+            };
+            let request = RegionInsertRequest {
+                region_id: RegionId::new(1, 1).as_u64(),
+                rows: Some(rows),
+                ..Default::default()
+            };
+            let task = FlowMirrorTask::new(
+                &cache,
+                std::iter::once(&request),
+                &HashMap::from_iter([(1, Arc::new(info))]),
+            )
+            .await
+            .unwrap();
+            let marker = &task.requests[&peer].requests[0];
+            assert_eq!(1, marker.table_id);
+            assert_eq!(expected, marker.timestamps);
+            assert!(marker.time_ranges.is_empty());
+        }
     }
 
     #[tokio::test]
@@ -3874,63 +4009,10 @@ mod tests {
         use common_meta::instruction::{CacheIdent, CreateFlow};
         let backend = prepare_mocked_backend().await;
         let partition = create_partition_rule_manager(backend.clone()).await;
-        let peer1 = Peer {
-            id: 3,
-            addr: String::new(),
-        };
-        let peer2 = Peer {
-            id: 2,
-            addr: String::new(),
-        };
-        let table_metadata = common_meta::key::TableMetadataManager::new(backend.clone());
-        table_metadata
-            .create_table_metadata(
-                new_test_table_info(88, "route_for_marker_test", [1, 2, 3].into_iter()),
-                common_meta::key::table_route::TableRouteValue::physical(vec![
-                    common_meta::rpc::router::RegionRoute {
-                        region: common_meta::rpc::router::Region {
-                            id: 1.into(),
-                            name: "one".into(),
-                            attrs: Default::default(),
-                            partition_expr: String::new(),
-                        },
-                        leader_peer: Some(peer1.clone()),
-                        follower_peers: vec![],
-                        leader_state: None,
-                        leader_down_since: None,
-                        write_route_policy: None,
-                    },
-                    common_meta::rpc::router::RegionRoute {
-                        region: common_meta::rpc::router::Region {
-                            id: 2.into(),
-                            name: "two".into(),
-                            attrs: Default::default(),
-                            partition_expr: String::new(),
-                        },
-                        leader_peer: Some(peer2.clone()),
-                        follower_peers: vec![],
-                        leader_state: None,
-                        leader_down_since: None,
-                        write_route_policy: None,
-                    },
-                    common_meta::rpc::router::RegionRoute {
-                        region: common_meta::rpc::router::Region {
-                            id: 3.into(),
-                            name: "three".into(),
-                            attrs: Default::default(),
-                            partition_expr: String::new(),
-                        },
-                        leader_peer: Some(peer1.clone()),
-                        follower_peers: vec![],
-                        leader_state: None,
-                        leader_down_since: None,
-                        write_route_policy: None,
-                    },
-                ]),
-                Default::default(),
-            )
-            .await
-            .unwrap();
+        // The shared partition fixture routes region 1 to peer 1 and region 2
+        // to peer 2; these are the actual storage routes used by do_request.
+        let peer1 = Peer::new(1, "");
+        let peer2 = Peer::new(2, "");
         let (datanode_tx, mut datanode_rx) = tokio::sync::mpsc::unbounded_channel();
         let (flownode_tx, mut flownode_rx) = tokio::sync::mpsc::unbounded_channel();
         let flow_peer = Peer {
@@ -3974,47 +4056,28 @@ mod tests {
         ));
         let info = Arc::new(new_test_table_info(1, "source", [1].into_iter()));
         let table_infos = HashMap::from_iter([(1, info)]);
-        let make = |region| RegionInsertRequest {
+        let make = |region, timestamps: &[i64]| RegionInsertRequest {
             region_id: RegionId::new(1, region).as_u64(),
             rows: Some(Rows {
                 schema: vec![
                     field_column_schema("b", ColumnDataType::Int32),
                     time_index_column_schema("ts", ColumnDataType::TimestampMillisecond),
                 ],
-                rows: vec![api::v1::Row {
-                    values: vec![
-                        api::v1::value::ValueData::I32Value(7).into(),
-                        api::v1::value::ValueData::TimestampMillisecondValue(-23).into(),
-                    ],
-                }],
+                rows: timestamps
+                    .iter()
+                    .map(|timestamp| api::v1::Row {
+                        values: vec![
+                            api::v1::value::ValueData::I32Value(7).into(),
+                            api::v1::value::ValueData::TimestampMillisecondValue(*timestamp).into(),
+                        ],
+                    })
+                    .collect(),
             }),
             ..Default::default()
         };
         let requests = InstantAndNormalInsertRequests {
             normal_requests: RegionInsertRequests {
-                requests: vec![
-                    make(1),
-                    RegionInsertRequest {
-                        region_id: RegionId::new(1, 2).as_u64(),
-                        rows: Some(Rows {
-                            schema: vec![
-                                field_column_schema("b", ColumnDataType::Int32),
-                                time_index_column_schema(
-                                    "ts",
-                                    ColumnDataType::TimestampMillisecond,
-                                ),
-                            ],
-                            rows: vec![api::v1::Row {
-                                values: vec![
-                                    api::v1::value::ValueData::I32Value(7).into(),
-                                    api::v1::value::ValueData::TimestampMillisecondValue(-23)
-                                        .into(),
-                                ],
-                            }],
-                        }),
-                        ..Default::default()
-                    },
-                ],
+                requests: vec![make(1, &[-23, -23, -31]), make(2, &[79])],
             },
             instant_requests: RegionInsertRequests::default(),
         };
@@ -4036,7 +4099,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!([first_dispatch, second_dispatch].contains(&1));
+        assert!([first_dispatch, second_dispatch].contains(&3));
         assert!([first_dispatch, second_dispatch].contains(&usize::MAX));
         assert!(flownode_rx.try_recv().is_err());
         datanode_gates
@@ -4053,10 +4116,16 @@ mod tests {
                 .unwrap()
                 .unwrap()
         );
-        let recorded = dirty_requests.lock().unwrap();
-        assert_eq!(1, recorded.len());
-        assert_eq!(vec![-23], recorded[0].1.requests[0].timestamps);
-        drop(recorded);
+        {
+            let recorded = dirty_requests.lock().unwrap();
+            assert_eq!(1, recorded.len());
+            assert_eq!(flow_peer, recorded[0].0);
+            assert_eq!(1, recorded[0].1.requests.len());
+            assert_eq!(1, recorded[0].1.requests[0].table_id);
+            assert_eq!(vec![-23, -23, -31], recorded[0].1.requests[0].timestamps);
+            assert!(recorded[0].1.requests[0].time_ranges.is_empty());
+            assert!(!recorded[0].1.requests[0].timestamps.contains(&79));
+        }
         assert!(task.await.unwrap().is_err());
     }
 
