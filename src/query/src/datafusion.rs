@@ -155,8 +155,7 @@ impl DatafusionQueryEngine {
     /// Statistics of the candidate tables of `logical_plan`, or `None` when the nested broadcast
     /// join rewrite has to keep the existing plan.
     ///
-    /// Gated by the session opt-in and the registered distributed rules; the manual build table
-    /// option selects the build side by name and never consults statistics.
+    /// Gated by the session opt-in and the registered distributed rules.
     ///
     /// The candidate tables are resolved to their physical routes before the statistics of the
     /// query are fetched: the route must still describe the table the plan captured and at least
@@ -188,17 +187,6 @@ impl DatafusionQueryEngine {
         {
             return None;
         }
-        if state
-            .config()
-            .options()
-            .extensions
-            .get::<DistPlannerOptions>()
-            .and_then(|options| options.nested_broadcast_join_build_table.as_ref())
-            .is_some()
-        {
-            return None;
-        }
-
         let candidates = candidate_joins(logical_plan);
         if candidates.is_empty() {
             return None;
@@ -2232,8 +2220,7 @@ mod tests {
     }
 
     /// The gating of the automatic path: without the session opt-in, without the distributed
-    /// rules, with the manual build table option or without a candidate join the engine does not
-    /// fetch any statistics.
+    /// rules or without a candidate join the engine does not fetch any statistics.
     #[tokio::test]
     async fn test_dist_join_stats_gating() {
         common_telemetry::init_default_ut_logging();
@@ -2258,25 +2245,6 @@ mod tests {
             .downcast_ref::<DatafusionQueryEngine>()
             .unwrap();
         let ctx = query_engine.engine_context(dist_join_query_ctx(true));
-        assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
-        assert_eq!(0, calls.load(Ordering::SeqCst));
-
-        // With the manual build table option, which selects the build side by name.
-        let calls = Arc::new(AtomicUsize::new(0));
-        let engine = dist_join_engine(dist_join_reports(), calls.clone(), true).await;
-        let query_engine = engine
-            .as_any()
-            .downcast_ref::<DatafusionQueryEngine>()
-            .unwrap();
-        let mut ctx = query_engine.engine_context(dist_join_query_ctx(true));
-        ctx.state_mut()
-            .config_mut()
-            .options_mut()
-            .extensions
-            .insert(DistPlannerOptions {
-                nested_broadcast_join_build_table: Some("build".to_string()),
-                ..Default::default()
-            });
         assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
         assert_eq!(0, calls.load(Ordering::SeqCst));
 

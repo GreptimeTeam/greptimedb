@@ -478,6 +478,7 @@ fn partition_column_types(table_info: &TableInfo) -> Vec<(String, ConcreteDataTy
 }
 
 /// Returns the resolved name of the first base table found in `plan`.
+#[cfg(test)]
 pub(crate) fn table_name_of(plan: &LogicalPlan) -> Option<TableName> {
     let mut extractor = TableScanExtractor::default();
     let _ = plan.visit(&mut extractor).ok()?;

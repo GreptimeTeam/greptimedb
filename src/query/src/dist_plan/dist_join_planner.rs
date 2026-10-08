@@ -14,9 +14,7 @@
 
 //! Nested broadcast join rewrite for `INNER` joins of two distributed scans.
 //!
-//! Opt-in only, in two ways. The manual selector is enabled when
-//! [`DistPlannerOptions::nested_broadcast_join_build_table`] names the build side table. The
-//! cost heuristic is enabled per query when the session sets `experimental_dist_join`:
+//! The cost heuristic is enabled per query when the session sets `experimental_dist_join`:
 //! [`DatafusionQueryEngine::create_physical_plan`](crate::datafusion::DatafusionQueryEngine)
 //! then fetches the approximate disk sizes of the candidate tables into [`DistJoinStats`], a
 //! query-local config extension, and the heuristic rewrites the join only when those statistics
@@ -44,11 +42,8 @@ use store_api::region_engine::RegionRole;
 use store_api::storage::RegionId;
 use table::metadata::{TableId, TableType};
 use table::table::adapter::DfTableProviderAdapter;
-use table::table_name::TableName;
 
-use crate::dist_plan::analyzer::DistPlannerOptions;
 use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
-use crate::dist_plan::planner::table_name_of;
 
 /// Name of [`DistJoinPlanner`]. The query engine looks it up to check that this rewrite, the
 /// only consumer of [`DistJoinStats`], runs for the query at all.
@@ -65,7 +60,7 @@ pub(crate) struct DistJoinTableStats {
 
 /// Per-table statistics fetched for the cost heuristic of one query.
 ///
-/// A query-local `ConfigOptions` extension, like [`DistPlannerOptions`], built when
+/// A query-local `ConfigOptions` extension, built when
 /// [`DatafusionQueryEngine::create_physical_plan`](crate::datafusion::DatafusionQueryEngine)
 /// sees the session opt-in (`SET experimental_dist_join = true`) on a plausible candidate join.
 #[derive(Debug, Clone, Default)]
@@ -328,20 +323,11 @@ impl AnalyzerRule for DistJoinPlanner {
     }
 
     fn analyze(&self, plan: LogicalPlan, config: &ConfigOptions) -> DfResult<LogicalPlan> {
-        let manual = config
-            .extensions
-            .get::<DistPlannerOptions>()
-            .and_then(|options| options.nested_broadcast_join_build_table.as_deref());
-        let selector = if let Some(build_table) = manual {
-            // The manual opt-in keeps its exact name matching and never consults statistics.
-            BuildSideSelector::Manual { build_table }
-        } else if let Some(stats) = config.extensions.get::<DistJoinStats>() {
-            BuildSideSelector::Stats { stats }
-        } else {
+        let Some(stats) = config.extensions.get::<DistJoinStats>() else {
             return Ok(plan);
         };
 
-        let mut rewriter = NestedBroadcastJoinRewriter { selector };
+        let mut rewriter = NestedBroadcastJoinRewriter { stats };
         Ok(plan.rewrite(&mut rewriter)?.data)
     }
 }
@@ -349,48 +335,8 @@ impl AnalyzerRule for DistJoinPlanner {
 /// Rewriter nesting the build side `MergeScan` of a supported join inside the probe side's
 /// `MergeScan`.
 struct NestedBroadcastJoinRewriter<'a> {
-    /// How the build side of a supported join is selected.
-    selector: BuildSideSelector<'a>,
-}
-
-/// How the rewriter finds the build side of a supported join.
-enum BuildSideSelector<'a> {
-    /// Manual opt-in: the configured build table name has to be the right input.
-    Manual {
-        /// Name of the build side table, either bare (`device_limits`) or fully qualified.
-        build_table: &'a str,
-    },
-    /// Cost heuristic: only the right input is considered, and only when the statistics of the
-    /// query show that broadcasting its table to the probe regions is cheaper.
-    Stats {
-        /// Per-table statistics fetched for this query, see [`DistJoinStats`].
-        stats: &'a DistJoinStats,
-    },
-}
-
-impl BuildSideSelector<'_> {
-    /// Whether the build side of the supported join shape is its right input.
-    fn selects_right_build(&self, probe: &LogicalPlan, build: &LogicalPlan) -> bool {
-        match self {
-            Self::Manual { build_table } => {
-                let left_is_build =
-                    table_name_of(probe).is_some_and(|name| table_name_matches(&name, build_table));
-                let right_is_build =
-                    table_name_of(build).is_some_and(|name| table_name_matches(&name, build_table));
-
-                !left_is_build && right_is_build
-            }
-            Self::Stats { stats } => {
-                let (Some(probe), Some(build)) =
-                    (side_base_table_id(probe), side_base_table_id(build))
-                else {
-                    return false;
-                };
-
-                stats.favors_right_build(probe, build)
-            }
-        }
-    }
+    /// Per-table statistics fetched for this query, see [`DistJoinStats`].
+    stats: &'a DistJoinStats,
 }
 
 impl NestedBroadcastJoinRewriter<'_> {
@@ -429,14 +375,13 @@ impl NestedBroadcastJoinRewriter<'_> {
             return None;
         }
 
-        // The selector picks the build side: the manual opt-in requires the configured table
-        // to be exactly the right input, the cost heuristic only ever considers the right
-        // input. The build side has to be the right input, because moving a left build side
+        // The right input is the only candidate build side, because moving a left build side
         // would change the join schema.
-        if !self
-            .selector
-            .selects_right_build(probe_merge_scan.input(), build_merge_scan.input())
-        {
+        let (probe_table, build_table) = (
+            side_base_table_id(probe_merge_scan.input())?,
+            side_base_table_id(build_merge_scan.input())?,
+        );
+        if !self.stats.favors_right_build(probe_table, build_table) {
             return None;
         }
 
@@ -556,15 +501,6 @@ fn has_json2_boundary(merge_scan: &MergeScanLogicalPlan) -> bool {
         .any(is_json2_extension_type)
 }
 
-/// Whether the configured build side table name refers to `name`. Accepts the bare
-/// table name or the fully qualified `catalog.schema.table` form, ignoring case.
-fn table_name_matches(name: &TableName, configured: &str) -> bool {
-    let configured = configured.trim().trim_matches(&['\'', '"'][..]);
-    !configured.is_empty()
-        && (name.table_name.eq_ignore_ascii_case(configured)
-            || name.to_string().eq_ignore_ascii_case(configured))
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -592,6 +528,7 @@ mod tests {
 
     use super::*;
     use crate::dist_plan::DistPlannerAnalyzer;
+    use crate::dist_plan::planner::table_name_of;
 
     /// Two-column schema (`number`, `host`) shared by the test tables.
     fn test_schema() -> SchemaRef {
@@ -669,18 +606,20 @@ mod tests {
             .unwrap()
     }
 
-    fn rewrite_config(build_table: &str) -> ConfigOptions {
-        let mut config = ConfigOptions::default();
-        config.extensions.insert(DistPlannerOptions {
-            nested_broadcast_join_build_table: Some(build_table.to_string()),
-            ..Default::default()
-        });
-        config
+    fn rewrite_config(tables: &[(TableId, DistJoinTableStats)]) -> ConfigOptions {
+        stats_config(tables)
     }
 
-    fn rewrite(plan: LogicalPlan, build_table: &str) -> LogicalPlan {
+    fn rewrite(plan: LogicalPlan) -> LogicalPlan {
         DistJoinPlanner {}
-            .analyze(plan, &rewrite_config(build_table))
+            .analyze(
+                plan,
+                &rewrite_config(&[
+                    (1, table_stats(10_000, 2)),
+                    (2, table_stats(1_000, 1)),
+                    (3, table_stats(500, 1)),
+                ]),
+            )
             .unwrap()
     }
 
@@ -741,8 +680,8 @@ mod tests {
         assert_eq!(2, merge_scans(&result).len());
     }
 
-    /// With the build table option the build side `MergeScan` becomes the inner scan of
-    /// the outer `MergeScan`, which is routed by the probe table's regions.
+    /// When statistics favor the right build side, its `MergeScan` becomes the inner scan
+    /// of the outer `MergeScan`, which is routed by the probe table's regions.
     ///
     /// The rewrite must only move where the join runs: the join fields, the residual
     /// filter, the NULL semantics and the output schema stay as the join had them.
@@ -759,7 +698,7 @@ mod tests {
         });
         let probe_scan = merge_scans(&plan).first().cloned().unwrap();
 
-        let result = rewrite(plan.clone(), "t2");
+        let result = rewrite(plan.clone());
 
         let join = outer_join(&result);
         assert_eq!(JoinType::Inner, join.join_type);
@@ -805,7 +744,7 @@ mod tests {
         let build_id = scans[1].remote_dyn_filter_producer_id().unwrap();
         assert_ne!(probe_id, build_id);
 
-        let result = rewrite(plan, "t2");
+        let result = rewrite(plan);
 
         let scans = merge_scans(&result);
         assert_eq!(2, scans.len());
@@ -827,7 +766,7 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
-        let result = rewrite(plan.clone(), "t2");
+        let result = rewrite(plan.clone());
 
         let scans = merge_scans(&result);
         assert_eq!(2, scans.len());
@@ -862,7 +801,7 @@ mod tests {
     fn nested_broadcast_join_rewrite_handles_projection_wrappers() {
         let projected = projected_join_plan();
 
-        let result = rewrite(projected.clone(), "t2");
+        let result = rewrite(projected.clone());
 
         let join = outer_join(&result);
         assert!(matches!(*join.left, LogicalPlan::Projection(_)));
@@ -899,22 +838,13 @@ mod tests {
         })
     }
 
-    /// A build table matching neither side keeps the plan unchanged.
-    #[test]
-    fn nested_broadcast_join_rewrite_ignores_unknown_build_table() {
-        let plan = distributed_join_plan();
-        let result = rewrite(plan.clone(), "unknown_table");
-
-        assert_eq!(plan.to_string(), result.to_string());
-    }
-
     /// Only `INNER` joins are rewritten.
     #[test]
     fn nested_broadcast_join_rewrite_ignores_non_inner_join() {
         let plan = DistPlannerAnalyzer {}
             .analyze(join_plan(JoinType::Left), &ConfigOptions::default())
             .unwrap();
-        let result = rewrite(plan.clone(), "t2");
+        let result = rewrite(plan.clone());
 
         assert_eq!(plan.to_string(), result.to_string());
     }
@@ -942,48 +872,21 @@ mod tests {
             ..join.clone()
         });
 
-        let result = rewrite(plan.clone(), "t2");
+        let result = rewrite(plan.clone());
 
         assert_eq!(plan.to_string(), result.to_string());
-    }
-
-    /// Two sides resolving to the configured build table (e.g. a self join) are ambiguous.
-    #[test]
-    fn nested_broadcast_join_rewrite_ignores_ambiguous_build_side() {
-        let plan = DistPlannerAnalyzer {}
-            .analyze(
-                join_plan_with_matching_side_names(),
-                &ConfigOptions::default(),
-            )
-            .unwrap();
-        let result = rewrite(plan.clone(), "t1");
-
-        assert_eq!(plan.to_string(), result.to_string());
-    }
-
-    /// `l INNER JOIN r` where `l` and `r` read two base tables both named `t1`.
-    fn join_plan_with_matching_side_names() -> LogicalPlan {
-        LogicalPlanBuilder::from(table_scan("l", 1, "t1"))
-            .join_on(
-                table_scan("r", 2, "t1"),
-                JoinType::Inner,
-                vec![col("l.number").eq(col("r.number"))],
-            )
-            .unwrap()
-            .build()
-            .unwrap()
     }
 
     /// The rewrite stays at two levels: an already nested probe side is left alone.
     #[test]
     fn nested_broadcast_join_rewrite_ignores_more_than_two_levels() {
-        let nested = rewrite(distributed_join_plan(), "t2");
+        let nested = rewrite(distributed_join_plan());
         let build = DistPlannerAnalyzer {}
             .analyze(table_scan("t3", 3, "t3"), &ConfigOptions::default())
             .unwrap();
         let plan = inner_join(nested, build, col("t1.number"), col("t3.number"));
 
-        let result = rewrite(plan.clone(), "t3");
+        let result = rewrite(plan.clone());
 
         assert_eq!(plan.to_string(), result.to_string());
     }
@@ -1002,7 +905,7 @@ mod tests {
             nested_broadcast_join_probe_input(&plan).map(|plan| plan.to_string())
         );
 
-        let result = rewrite(plan.clone(), "t2");
+        let result = rewrite(plan.clone());
         let LogicalPlan::Extension(extension) = &result else {
             panic!("expected the rewritten plan to be a MergeScan, got: {result}");
         };
@@ -1044,7 +947,7 @@ mod tests {
             col("t2.number"),
         );
 
-        let result = rewrite(plan.clone(), "t2");
+        let result = rewrite(plan.clone());
 
         assert_eq!(plan.to_string(), result.to_string());
     }
@@ -1316,26 +1219,6 @@ mod tests {
         let partial = stats_config(&[(1, table_stats(10_000, 2))]);
         let result = DistJoinPlanner {}.analyze(plan.clone(), &partial).unwrap();
         assert_eq!(plan.to_string(), result.to_string());
-    }
-
-    /// The manual build table keeps its exact name matching and is preferred over the statistics,
-    /// which its option never consults.
-    #[test]
-    fn manual_build_table_precedes_stats() {
-        let plan = distributed_join_plan();
-        // These statistics do not favor the right build side.
-        let mut config = stats_config(&[(1, table_stats(1_000, 1)), (2, table_stats(10_000, 2))]);
-        config.extensions.insert(DistPlannerOptions {
-            nested_broadcast_join_build_table: Some("t2".to_string()),
-            ..Default::default()
-        });
-
-        let result = DistJoinPlanner {}.analyze(plan.clone(), &config).unwrap();
-
-        let join = outer_join(&result);
-        assert_eq!(2, merge_scans(&result).len());
-        assert!(!contains_merge_scan(&join.left));
-        assert!(contains_merge_scan(&join.right));
     }
 
     /// Both plan shapes the engine sees are covered: the equality in `on`, and the unanalyzed
