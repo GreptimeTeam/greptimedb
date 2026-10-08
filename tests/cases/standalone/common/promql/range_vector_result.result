@@ -90,6 +90,40 @@ tql eval (0, 30, '10s') range_vector_result[20s];
 
 Error: 1004(InvalidArguments), invalid expression type "range vector" for range query, must be Scalar or instant Vector
 
+-- SQLNESS SORT_RESULT 3 1
+tql eval (30, 30, '1s') range_vector_result[20s] as v;
+
++------+------+---------------------+
+| v    | host | ts                  |
++------+------+---------------------+
+| 3.0  | a    | 1970-01-01T00:00:20 |
+| 30.0 | b    | 1970-01-01T00:00:20 |
+| 4.0  | a    | 1970-01-01T00:00:30 |
++------+------+---------------------+
+
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+tql explain (30, 30, '1s') range_vector_result[20s];
+
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                               |
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                    |
+|               | PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [true]                                                                                                               |
+|               |   PromSeriesDivide: tags=["host"]                                                                                                                                                  |
+|               |     Sort: range_vector_result.host ASC NULLS FIRST, range_vector_result.ts ASC NULLS FIRST                                                                                         |
+|               |       Filter: range_vector_result.ts >= TimestampMillisecond(10001, None) AND range_vector_result.ts <= TimestampMillisecond(30000, None)                                          |
+|               |         TableScan: range_vector_result, partial_filters=[range_vector_result.ts >= TimestampMillisecond(10001, None), range_vector_result.ts <= TimestampMillisecond(30000, None)] |
+|               | ]]                                                                                                                                                                                 |
+| physical_plan | CooperativeExec                                                                                                                                                                    |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                                                                    |
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+tql eval (30, 30, '0') range_vector_result[30s:];
+
+Error: 1004(InvalidArguments), Subquery step must be positive
+
 drop table range_vector_result;
 
 Affected Rows: 0
