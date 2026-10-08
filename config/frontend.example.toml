@@ -130,12 +130,15 @@ key_path = ""
 watch = false
 
 ## The internal gRPC server options. Internal gRPC port for nodes inside cluster to access frontend.
+## The internal gRPC server starts only when this section is set.
 [internal_grpc]
 ## The address to bind the gRPC server.
+## If unset, it falls back to `127.0.0.1:4001`, the same address as `grpc.bind_addr`.
+## @toml2docs:none-default
 bind_addr = "127.0.0.1:4010"
 ## The address advertised to the metasrv, and used for connections from outside the host.
-## If left empty or unset, the server will automatically use the IP address of the first network interface
-## on the host, with the same port number as the one specified in `internal_grpc.bind_addr`.
+## Unlike `grpc.server_addr`, it is not detected automatically; set it explicitly.
+## @toml2docs:none-default
 server_addr = "127.0.0.1:4010"
 ## The number of server worker threads.
 runtime_size = 8

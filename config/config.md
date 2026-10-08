@@ -175,7 +175,7 @@
 | `storage.http_client.skip_ssl_validation` | Bool | `false` | To skip the ssl verification<br/>**Security Notice**: Setting `skip_ssl_validation = true` disables certificate verification, making connections vulnerable to man-in-the-middle attacks. Only use this in development or trusted private networks. |
 | `[[region_engine]]` | -- | -- | The region engine options. You can configure multiple region engines.<br/>Each engine type (mito, file, metric) may appear only once; duplicates cause startup to fail. |
 | `region_engine.mito` | -- | -- | The Mito engine options. |
-| `region_engine.mito.num_workers` | Integer | Auto | Number of region workers. Defaults to half of the CPU cores. |
+| `region_engine.mito.num_workers` | Integer | Auto | Number of region workers. Defaults to half of the available CPU cores, rounded up. |
 | `region_engine.mito.worker_channel_size` | Integer | `128` | Request channel size of each worker. |
 | `region_engine.mito.worker_request_batch_size` | Integer | `64` | Max batch size for a worker to handle requests. |
 | `region_engine.mito.manifest_checkpoint_distance` | Integer | `10` | Number of meta action updated to trigger a new checkpoint for the manifest. |
@@ -313,9 +313,9 @@
 | `grpc.tls.cert_path` | String | Unset | Certificate file path. |
 | `grpc.tls.key_path` | String | Unset | Private key file path. |
 | `grpc.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload.<br/>For now, gRPC tls config does not support auto reload. |
-| `internal_grpc` | -- | -- | The internal gRPC server options. Internal gRPC port for nodes inside cluster to access frontend. |
-| `internal_grpc.bind_addr` | String | `127.0.0.1:4010` | The address to bind the gRPC server. |
-| `internal_grpc.server_addr` | String | `127.0.0.1:4010` | The address advertised to the metasrv, and used for connections from outside the host.<br/>If left empty or unset, the server will automatically use the IP address of the first network interface<br/>on the host, with the same port number as the one specified in `internal_grpc.bind_addr`. |
+| `internal_grpc` | -- | -- | The internal gRPC server options. Internal gRPC port for nodes inside cluster to access frontend.<br/>The internal gRPC server starts only when this section is set. |
+| `internal_grpc.bind_addr` | String | Unset | The address to bind the gRPC server.<br/>If unset, it falls back to `127.0.0.1:4001`, the same address as `grpc.bind_addr`. |
+| `internal_grpc.server_addr` | String | Unset | The address advertised to the metasrv, and used for connections from outside the host.<br/>Unlike `grpc.server_addr`, it is not detected automatically; set it explicitly. |
 | `internal_grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
 | `internal_grpc.flight_compression` | String | `arrow_ipc` | Compression mode for frontend side Arrow IPC service. Available options:<br/>- `none`: disable all compression<br/>- `transport`: only enable gRPC transport compression (zstd)<br/>- `arrow_ipc`: only enable Arrow IPC compression (lz4)<br/>- `all`: enable all compression.<br/>Default to `arrow_ipc`. |
 | `internal_grpc.tls` | -- | -- | internal gRPC server TLS options, see `mysql.tls` section. |
@@ -644,7 +644,7 @@
 | `storage.http_client.skip_ssl_validation` | Bool | `false` | To skip the ssl verification<br/>**Security Notice**: Setting `skip_ssl_validation = true` disables certificate verification, making connections vulnerable to man-in-the-middle attacks. Only use this in development or trusted private networks. |
 | `[[region_engine]]` | -- | -- | The region engine options. You can configure multiple region engines.<br/>Each engine type (mito, file, metric) may appear only once; duplicates cause startup to fail. |
 | `region_engine.mito` | -- | -- | The Mito engine options. |
-| `region_engine.mito.num_workers` | Integer | Auto | Number of region workers. Defaults to half of the CPU cores. |
+| `region_engine.mito.num_workers` | Integer | Auto | Number of region workers. Defaults to half of the available CPU cores, rounded up. |
 | `region_engine.mito.worker_channel_size` | Integer | `128` | Request channel size of each worker. |
 | `region_engine.mito.worker_request_batch_size` | Integer | `64` | Max batch size for a worker to handle requests. |
 | `region_engine.mito.manifest_checkpoint_distance` | Integer | `10` | Number of meta action updated to trigger a new checkpoint for the manifest. |

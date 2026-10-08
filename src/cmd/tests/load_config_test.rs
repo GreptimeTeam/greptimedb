@@ -525,7 +525,23 @@ fn leaf_values(value: &toml::Value, prefix: &str, leaves: &mut Vec<(String, toml
     }
 }
 
-fn load_as_leaves<T>(config: Option<&str>) -> std::collections::HashMap<String, toml::Value>
+/// Removes the option at a dotted path produced by [`leaf_values`].
+fn remove_leaf(value: &mut toml::Value, path: &str) -> bool {
+    match value {
+        toml::Value::Array(array) => array.iter_mut().any(|element| remove_leaf(element, path)),
+        toml::Value::Table(table) => match path.split_once('.') {
+            None => table.remove(path).is_some(),
+            Some((head, rest)) => table
+                .get_mut(head)
+                .is_some_and(|value| remove_leaf(value, rest)),
+        },
+        _ => false,
+    }
+}
+
+fn load_as_leaves<T>(
+    config: Option<&str>,
+) -> common_config::error::Result<std::collections::HashMap<String, toml::Value>>
 where
     T: Configurable + serde::Serialize,
 {
@@ -537,11 +553,31 @@ where
     let options = GreptimeOptions::<T>::load_layered_options(
         file.as_ref().map(|file| file.path().to_str().unwrap()),
         "",
-    )
-    .unwrap();
+    )?;
     let mut leaves = Vec::new();
     leaf_values(&toml::Value::try_from(&options).unwrap(), "", &mut leaves);
-    leaves.into_iter().collect()
+    Ok(leaves.into_iter().collect())
+}
+
+/// Returns the default of an option inside the example's other settings, so
+/// that options in sections absent by default still have one to compare with.
+/// Removes the closest enclosing table that still loads without the option.
+fn default_within_example<T>(full: &toml::Value, path: &str) -> Option<toml::Value>
+where
+    T: Configurable + serde::Serialize,
+{
+    let mut removed = path;
+    loop {
+        let mut without = full.clone();
+        assert!(remove_leaf(&mut without, removed));
+        if let Ok(defaults) = load_as_leaves::<T>(Some(&toml::to_string(&without).unwrap())) {
+            return defaults.get(path).cloned();
+        }
+        removed = removed
+            .rsplit_once('.')
+            .unwrap_or_else(|| panic!("the example does not load without `{path}`"))
+            .0;
+    }
 }
 
 /// Checks that every option in an example config exists, and that every value
@@ -562,16 +598,16 @@ where
 
     // (options loaded from the example, options loaded without config) per variant
     let mut loaded = vec![(
-        load_as_leaves::<T>(Some(&toml::to_string(&full).unwrap())),
-        load_as_leaves::<T>(None),
+        load_as_leaves::<T>(Some(&toml::to_string(&full).unwrap())).unwrap(),
+        load_as_leaves::<T>(None).unwrap(),
     )];
     for (section, tag, values) in variants {
         for value in *values {
             let mut variant = full.clone();
             variant[section][tag] = toml::Value::String(value.to_string());
             loaded.push((
-                load_as_leaves::<T>(Some(&toml::to_string(&variant).unwrap())),
-                load_as_leaves::<T>(Some(&format!("[{section}]\n{tag} = \"{value}\"\n"))),
+                load_as_leaves::<T>(Some(&toml::to_string(&variant).unwrap())).unwrap(),
+                load_as_leaves::<T>(Some(&format!("[{section}]\n{tag} = \"{value}\"\n"))).unwrap(),
             ));
         }
     }
@@ -605,19 +641,58 @@ where
         }
     }
 
+    // Options left unset by default and resolved where they are used.
+    let resolved_at_runtime: [(&str, toml::Value); 7] = [
+        (
+            "logging.dir",
+            format!("{DEFAULT_DATA_HOME}/{DEFAULT_LOGGING_DIR}").into(),
+        ),
+        ("logging.otlp_endpoint", DEFAULT_OTLP_HTTP_ENDPOINT.into()),
+        ("logging.otlp_export_protocol", "http".into()),
+        ("logging.tracing_sample_ratio.default_ratio", 1.0.into()),
+        ("wal.sync_period", "5s".into()),
+        (
+            "storage.copy_root",
+            format!("{DEFAULT_DATA_HOME}/copy").into(),
+        ),
+        ("flow.batching_mode.frontend_tls.enabled", false.into()),
+    ];
+
     let mut documented_leaves = Vec::new();
     leaf_values(&documented, "", &mut documented_leaves);
-    for (path, _) in documented_leaves {
-        // Resolved from `data_home` at startup.
-        if path == "logging.dir" {
+    for (path, documented_value) in documented_leaves {
+        if SKIP_SERIALIZING.contains(&path.as_str()) {
             continue;
         }
-        let pairs = loaded
+        if let Some((_, resolved)) = resolved_at_runtime.iter().find(|(p, _)| *p == path) {
+            if &documented_value != resolved {
+                errors.push(format!(
+                    "{name}: `{path}` is documented as default `{documented_value}`, but resolves to `{resolved}`"
+                ));
+            }
+            continue;
+        }
+        let mut pairs = loaded
             .iter()
             .filter_map(|(example, default)| Some((example.get(&path)?, default.get(&path)?)))
+            .map(|(example, default)| (example.clone(), default.clone()))
             .collect::<Vec<_>>();
-        if !pairs.is_empty() && pairs.iter().all(|(example, default)| example != default) {
-            let (example, default) = pairs[0];
+        if pairs.is_empty() {
+            // The option sits in a section that is absent without config, or
+            // is itself optional.
+            match default_within_example::<T>(&full, &path) {
+                Some(default) => pairs.push((loaded[0].0[&path].clone(), default)),
+                None => {
+                    errors.push(format!(
+                        "{name}: `{path}` has no default to compare with; annotate it with \
+                         `@toml2docs:none-default` or list its runtime default in this test"
+                    ));
+                    continue;
+                }
+            }
+        }
+        if pairs.iter().all(|(example, default)| example != default) {
+            let (example, default) = &pairs[0];
             errors.push(format!(
                 "{name}: `{path}` is documented as default `{example}`, but the default is `{default}`; \
                  fix the value or annotate it with `@toml2docs:none-default`"

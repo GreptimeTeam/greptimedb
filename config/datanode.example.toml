@@ -514,7 +514,7 @@ skip_ssl_validation = false
 ## The Mito engine options.
 [region_engine.mito]
 
-## Number of region workers. Defaults to half of the CPU cores.
+## Number of region workers. Defaults to half of the available CPU cores, rounded up.
 ## @toml2docs:none-default="Auto"
 #+ num_workers = 8
 
