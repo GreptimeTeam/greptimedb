@@ -290,9 +290,10 @@ impl RegionServer {
         request: api::v1::region::QueryRequest,
         query_ctx: QueryContextRef,
     ) -> Result<SendableRecordBatchStream> {
-        let permit = match &self.inner.parallelism {
-            Some(p) => Some(p.acquire().await?),
-            None => None,
+        let permit = if let Some(p) = &self.inner.parallelism {
+            Some(p.acquire().await?)
+        } else {
+            None
         };
 
         let region_id = RegionId::from_u64(request.region_id);
@@ -347,9 +348,10 @@ impl RegionServer {
     }
 
     async fn handle_read_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
-        let permit = match &self.inner.parallelism {
-            Some(p) => Some(p.acquire().await?),
-            None => None,
+        let permit = if let Some(p) = &self.inner.parallelism {
+            Some(p.acquire().await?)
+        } else {
+            None
         };
 
         let ctx = request.header.as_ref().map(|h| h.into());

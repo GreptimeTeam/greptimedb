@@ -55,19 +55,9 @@ pub const PARTITION_INFO_CACHE_NAME: &str = "partition_info_cache";
 
 /// Builds the layered cache registry for datanode.
 ///
-/// The registry holds every cache a datanode needs:
-/// - Schema cache.
-/// - Table id to schema name cache.
-/// - Table info cache.
-/// - Table name cache.
-/// - Table cache.
-/// - Table route cache.
-/// - Partition info cache.
-///
-/// The first layer holds the caches the datanode reads from the kv backend: the schema cache, the
-/// table id to schema name cache, the table info cache, the table name cache and the table route
-/// cache. The second layer holds the caches derived from them: the table cache (from the table info
-/// and the table name caches) and the partition info cache (from the table route cache).
+/// Layers separate caches derived from kv-backed metadata. The first layer holds the schema, table
+/// id-to-schema-name, table info, table name and table route caches; the second holds the table cache
+/// (derived from table info and name) and partition info cache (derived from table routes).
 ///
 /// [LayeredCacheRegistry] invalidates a layer only after the previous layer finished invalidating
 /// (see [LayeredCacheRegistryBuilder::add_cache_registry]), so the derived caches are invalidated
@@ -263,34 +253,23 @@ mod tests {
         SchemaCacheRef, TableInfoCacheRef, TableNameCacheRef, TableRouteCacheRef,
         TableSchemaCacheRef,
     };
-    use common_meta::kv_backend::KvBackendRef;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use partition::cache::PartitionInfoCacheRef;
 
     use super::*;
 
-    fn memory_backend() -> KvBackendRef {
-        Arc::new(MemoryKvBackend::<common_meta::error::Error>::new())
-    }
-
-    /// Asserts that the registry holds every cache the catalog manager and the partition rule
-    /// manager of a datanode look up.
-    macro_rules! assert_datanode_caches {
-        ($registry:expr) => {
-            assert!($registry.get::<TableSchemaCacheRef>().is_some());
-            assert!($registry.get::<SchemaCacheRef>().is_some());
-            assert!($registry.get::<TableInfoCacheRef>().is_some());
-            assert!($registry.get::<TableNameCacheRef>().is_some());
-            assert!($registry.get::<TableCacheRef>().is_some());
-            assert!($registry.get::<TableRouteCacheRef>().is_some());
-            assert!($registry.get::<PartitionInfoCacheRef>().is_some());
-        };
-    }
-
     #[test]
     fn test_datanode_layered_cache_registry_holds_all_caches() {
-        let registry = build_datanode_layered_cache_registry(memory_backend());
+        let registry = build_datanode_layered_cache_registry(Arc::new(MemoryKvBackend::<
+            common_meta::error::Error,
+        >::new()));
 
-        assert_datanode_caches!(registry);
+        assert!(registry.get::<TableSchemaCacheRef>().is_some());
+        assert!(registry.get::<SchemaCacheRef>().is_some());
+        assert!(registry.get::<TableInfoCacheRef>().is_some());
+        assert!(registry.get::<TableNameCacheRef>().is_some());
+        assert!(registry.get::<TableCacheRef>().is_some());
+        assert!(registry.get::<TableRouteCacheRef>().is_some());
+        assert!(registry.get::<PartitionInfoCacheRef>().is_some());
     }
 }

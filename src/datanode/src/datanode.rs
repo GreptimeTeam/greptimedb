@@ -19,7 +19,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use catalog::CatalogManagerRef;
 use catalog::information_schema::NoopInformationExtension;
 use catalog::kvbackend::KvBackendCatalogManagerBuilder;
 use client::client_manager::NodeClients;
@@ -29,9 +28,7 @@ use common_datasource::object_store::LocalFileAccess;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
 use common_grpc::channel_manager::ChannelConfig;
-use common_meta::cache::{
-    LayeredCacheRegistry, SchemaCacheRef, TableRouteCacheRef, TableSchemaCacheRef,
-};
+use common_meta::cache::{LayeredCacheRegistry, SchemaCacheRef, TableSchemaCacheRef};
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::datanode::TopicStatsReporter;
 use common_meta::key::runtime_switch::RuntimeSwitchManager;
@@ -61,10 +58,9 @@ use mito2::sst::file_ref::{FileReferenceManager, FileReferenceManagerRef};
 use object_store::ObjectStore;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
-use partition::cache::PartitionInfoCacheRef;
-use partition::manager::PartitionRuleManager;
 use query::QueryEngineFactory;
 use query::dummy_catalog::TableProviderFactoryRef;
+use query::region_query::RegionQueryHandlerFactoryRef;
 use servers::server::ServerHandlers;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::logstore::LogStore;
@@ -79,9 +75,8 @@ use crate::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use crate::error::{
     self, BuildDatanodeSnafu, BuildMetricEngineSnafu, BuildMitoEngineSnafu, CreateDirSnafu,
     DataFusionSnafu, DuplicateRegionEngineConfigSnafu, GetMetadataSnafu,
-    InvalidObjectStoreWalConfigSnafu, MissingCacheSnafu, MissingNodeIdSnafu,
-    ObjectStoreWalNotStandaloneSnafu, OpenLogStoreSnafu, Result, ShutdownInstanceSnafu,
-    ShutdownServerSnafu, StartServerSnafu,
+    InvalidObjectStoreWalConfigSnafu, MissingNodeIdSnafu, ObjectStoreWalNotStandaloneSnafu,
+    OpenLogStoreSnafu, Result, ShutdownInstanceSnafu, ShutdownServerSnafu, StartServerSnafu,
 };
 use crate::event_listener::{
     NoopRegionServerEventListener, RegionServerEventListenerRef, RegionServerEventReceiver,
@@ -506,40 +501,16 @@ impl DatanodeBuilder {
     ) -> Result<RegionServer> {
         let opts: &DatanodeOptions = &self.opts;
 
-        // The datanode executes the plans of the region queries it receives. Such a plan may
-        // contain a `MergeScan` node: the dist planner of the datanode plans it into a
-        // `MergeScanExec`, which resolves the metadata of the target table from the catalog and the
-        // routes of its regions from the partition rule manager, then queries their leaders through
-        // the datanode client.
-        //
-        // Notes:
-        // - The `DistExtensionPlanner` is registered as long as both the partition rule manager and
-        //   the region query handler are given (see `DfQueryPlanner::new`), it doesn't depend on
-        //   `with_dist_planner`.
-        // - `with_dist_planner` stays `false` on purpose: the datanode only executes the plans it
-        //   receives, it must not rewrite its own plans into distributed ones.
-        let catalog_manager: CatalogManagerRef = KvBackendCatalogManagerBuilder::new(
+        // Keep `with_dist_planner` false: datanodes execute received MergeScan plans.
+        let catalog_manager = KvBackendCatalogManagerBuilder::new(
             Arc::new(NoopInformationExtension),
             self.kv_backend.clone(),
             cache_registry.clone(),
         )
         .build();
+        let partition_manager = catalog_manager.partition_manager();
 
-        let table_route_cache: TableRouteCacheRef =
-            cache_registry.get().context(MissingCacheSnafu)?;
-        let partition_info_cache: PartitionInfoCacheRef =
-            cache_registry.get().context(MissingCacheSnafu)?;
-        let partition_manager = Arc::new(PartitionRuleManager::new(
-            self.kv_backend.clone(),
-            table_route_cache,
-            partition_info_cache,
-        ));
-
-        // Clients to the other datanodes. They are only used when a plan contains a `MergeScan`
-        // node, i.e. they stay idle for the plans that the datanode executes locally.
-        //
-        // A region query is a streaming request, so it must not be cut off by the request timeout:
-        // same as the frontend to datanode client.
+        // MergeScan region requests stream until completion, so they have no client timeout.
         let mut channel_config = ChannelConfig {
             timeout: None,
             ..Default::default()
@@ -550,7 +521,11 @@ impl DatanodeBuilder {
         }
         let node_manager: NodeManagerRef = Arc::new(NodeClients::new(channel_config));
         let region_query_handler =
-            DatanodeRegionQueryHandler::arc(partition_manager.clone(), node_manager);
+            if let Some(factory) = self.plugins.get::<RegionQueryHandlerFactoryRef>() {
+                factory.build(partition_manager.clone(), node_manager)
+            } else {
+                DatanodeRegionQueryHandler::arc(partition_manager.clone(), node_manager)
+            };
 
         let query_engine_factory = QueryEngineFactory::try_new_with_plugins(
             // query engine in datanode only executes plan with resolved table source.
@@ -1122,6 +1097,7 @@ mod tests {
     use common_meta::key::datanode_table::DatanodeTableManager;
     use common_meta::kv_backend::KvBackendRef;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::node_manager::NodeManagerRef;
     use common_test_util::temp_dir::{create_named_temp_file, create_temp_dir};
     use common_wal::config::DatanodeWalConfig;
     use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATION};
@@ -1131,6 +1107,8 @@ mod tests {
     use mito2::engine::MITO_ENGINE_NAME;
     use object_store::ObjectStore;
     use object_store::manager::ObjectStoreManager;
+    use partition::manager::PartitionRuleManagerRef;
+    use query::region_query::{RegionQueryHandlerFactory, RegionQueryHandlerFactoryRef};
     use store_api::logstore::LogStore;
     use store_api::region_request::RegionRequest;
     use store_api::storage::RegionId;
@@ -1141,6 +1119,7 @@ mod tests {
         wal_object_store,
     };
     use crate::error::{self, Error};
+    use crate::region_query::DatanodeRegionQueryHandler;
     use crate::tests::{MockRegionEngine, mock_region_server};
 
     async fn setup_table_datanode(kv: &KvBackendRef) {
@@ -1491,6 +1470,38 @@ mod tests {
                 ..
             }
         );
+    }
+
+    struct CountingRegionQueryHandlerFactory(Arc<AtomicUsize>);
+
+    impl RegionQueryHandlerFactory for CountingRegionQueryHandlerFactory {
+        fn build(
+            &self,
+            partition_manager: PartitionRuleManagerRef,
+            node_manager: NodeManagerRef,
+        ) -> query::region_query::RegionQueryHandlerRef {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            DatanodeRegionQueryHandler::arc(partition_manager, node_manager)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_build_uses_installed_region_query_handler_factory() {
+        let data_home = create_temp_dir("region-query-handler-factory");
+        let builds = Arc::new(AtomicUsize::new(0));
+        let plugins = Plugins::new();
+        plugins.insert(Arc::new(CountingRegionQueryHandlerFactory(builds.clone()))
+            as RegionQueryHandlerFactoryRef);
+        let mut builder = datanode_builder(
+            data_home.path().to_str().unwrap(),
+            DatanodeWalConfig::default(),
+            Arc::new(MemoryKvBackend::new()),
+        );
+        builder.set_plugins(plugins);
+
+        let mut datanode = builder.build().await.unwrap();
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        datanode.shutdown().await.unwrap();
     }
 
     #[tokio::test]

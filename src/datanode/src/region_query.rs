@@ -12,13 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! A [`RegionQueryHandler`] implementation for the datanode.
-//!
-//! A datanode executes the plans it receives through region queries. Such a plan may contain a
-//! `MergeScan` node (see [`query::dist_plan::MergeScanLogicalPlan`]) that is planned into a
-//! `MergeScanExec` by the dist planner of the datanode, which then has to query the regions of
-//! that `MergeScan` from the datanodes that host them. This handler provides the datanode with the
-//! client side of those region queries.
+//! The datanode's [`RegionQueryHandler`] implementation for querying remote regions in a
+//! `MergeScan` plan.
 
 use std::sync::Arc;
 
@@ -35,13 +30,8 @@ use session::ReadPreference;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 
-/// Serves the region queries issued by the datanode itself.
-///
-/// Known limitation: [`RegionQueryHandler::select_target`] resolves a region leader through the
-/// version-checked table route cache, whose version is shared by the `CacheContainer`. An
-/// unrelated `TableId` invalidation can therefore add route loads and cold-load latency; sustained
-/// conflicts may exhaust the retry budget and fail the region query.
-pub struct DatanodeRegionQueryHandler {
+/// Serves region queries by resolving their leader and forwarding requests to its datanode.
+pub(crate) struct DatanodeRegionQueryHandler {
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
 }
@@ -67,8 +57,6 @@ impl RegionQueryHandler for DatanodeRegionQueryHandler {
     ) -> QueryResult<RegionQueryTarget> {
         // The leader of a region is the only peer that can serve a region query.
         //
-        // This lookup goes through the version checked table route cache: see the known limitation
-        // of `DatanodeRegionQueryHandler` about retries of unrelated invalidations.
         let peer = self
             .partition_manager
             .find_region_leader(region_id)
@@ -93,9 +81,7 @@ impl RegionQueryHandler for DatanodeRegionQueryHandler {
             .context(RegionQuerySnafu)
     }
 
-    /// The remote dynamic filter of a nested merge scan is not supported yet (PoC): a datanode only
-    /// dispatches region queries for the `MergeScan` nodes of the plans it receives, it doesn't
-    /// produce remote dynamic filters of its own.
+    /// Datanodes forward received region queries and do not produce remote dynamic filters.
     async fn handle_remote_dyn_filter_update(
         &self,
         _target: &RegionQueryTarget,
