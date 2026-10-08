@@ -105,6 +105,9 @@ struct LogicalTable {
 }
 
 fn classify(stmt: &DdlStatement, catalog: &str) -> crate::error::Result<Option<LogicalTable>> {
+    if stmt.sql.len() > MAX_LOGICAL_TABLE_DDL_BYTES {
+        return Ok(None);
+    }
     let parsed = parse_ddl(&stmt.sql)?;
     let [Statement::CreateTable(create)] = parsed.as_slice() else {
         return Ok(None);
@@ -144,14 +147,7 @@ fn classify(stmt: &DdlStatement, catalog: &str) -> crate::error::Result<Option<L
     }))
 }
 
-pub(super) fn parse_ddl(sql: &str) -> crate::error::Result<Vec<Statement>> {
-    // Bound parser input independently of HTTP admission, before tokenization.
-    if sql.len() > MAX_LOGICAL_TABLE_DDL_BYTES {
-        return crate::error::InvalidArgumentsSnafu {
-            msg: "import DDL exceeds 1 MiB parser limit",
-        }
-        .fail();
-    }
+pub(crate) fn parse_ddl(sql: &str) -> crate::error::Result<Vec<Statement>> {
     ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default()).map_err(
         |_| {
             crate::error::InvalidArgumentsSnafu {
@@ -267,7 +263,51 @@ mod tests {
         assert!(!batch.accepts(&table, "测"));
         let oversized =
             DdlStatement::new(logical("large", &"x".repeat(MAX_LOGICAL_TABLE_DDL_BYTES)));
-        assert!(classify(&oversized, "greptime").is_err());
+        assert!(classify(&oversized, "greptime").unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn oversized_ddl_uses_ordinary_sql_in_order() {
+        let large = "x".repeat(MAX_LOGICAL_TABLE_DDL_BYTES);
+        let statements = [
+            DdlStatement::new(logical("before", "p")),
+            DdlStatement::new(format!(
+                "CREATE TABLE ordinary (ts TIMESTAMP TIME INDEX, payload STRING DEFAULT '{large}')"
+            )),
+            DdlStatement::new(logical("between", "p")),
+            DdlStatement::new(format!("CREATE VIEW v AS SELECT '{large}' AS payload")),
+            DdlStatement::new(logical("oversized", &large)),
+            DdlStatement::new(logical("after", "p")),
+        ];
+        let (client, requests, server) = crate::database::tests::test_server(
+            200,
+            r#"{"execution_time_ms":0,"output":[{"affectedrows":0}]}"#,
+        )
+        .await;
+        DdlExecutor::new(&client)
+            .execute_strict(&statements, true)
+            .await
+            .unwrap();
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), statements.len());
+            for (i, (request, statement)) in requests.iter().zip(&statements).enumerate() {
+                let endpoint = if [0, 2, 5].contains(&i) {
+                    "ddl/logical-tables"
+                } else {
+                    "sql"
+                };
+                assert!(request.starts_with(&format!("POST /v1/{endpoint} ")));
+                let body = request.split_once("\r\n\r\n").unwrap().1;
+                let sql = url::form_urlencoded::parse(body.as_bytes())
+                    .find(|(key, _)| key == "sql")
+                    .unwrap()
+                    .1;
+                assert_eq!(sql, statement.sql);
+            }
+        }
+        server.abort();
+        let _ = server.await;
     }
 
     #[tokio::test]

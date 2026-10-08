@@ -423,7 +423,7 @@ fn parse_ddl_statements(content: &str) -> Vec<String> {
     iter_ddl_statements(content).collect()
 }
 
-pub(super) fn iter_ddl_statements(content: &str) -> impl Iterator<Item = String> + '_ {
+pub(crate) fn iter_ddl_statements(content: &str) -> impl Iterator<Item = String> + '_ {
     let mut chars = content.chars().peekable();
     let mut in_single_quote = false;
     let mut in_double_quote = false;
