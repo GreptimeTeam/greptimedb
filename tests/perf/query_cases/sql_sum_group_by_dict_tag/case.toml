@@ -23,8 +23,17 @@ name = "sql_sum_group_by_dict_tag"
 engine = "mito"
 append_mode = true
 sst_format = "flat"
-primary_key = ["dc", "device", "instance"]
+# Instance-first ordering keeps dc values mixed within sorted SST row groups.
+primary_key = ["instance", "dc", "device"]
 time_index = "ts"
+
+# instance in the primary key retains 4096 distinct series; dc/device alone
+# would represent only 16 actual keys. Column order matches the flat SST schema.
+[[scenario.tables.columns]]
+name = "instance"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 4096, prefix = "instance" }
 
 [[scenario.tables.columns]]
 name = "dc"
@@ -37,14 +46,6 @@ name = "device"
 type = "STRING"
 semantic = "tag"
 distribution = { kind = "cardinality", values = 4, prefix = "device" }
-
-# instance in the primary key retains 4096 distinct series; dc/device alone
-# would represent only 16 actual keys.
-[[scenario.tables.columns]]
-name = "instance"
-type = "STRING"
-semantic = "tag"
-distribution = { kind = "cardinality", values = 4096, prefix = "instance" }
 
 [[scenario.tables.columns]]
 name = "val"
