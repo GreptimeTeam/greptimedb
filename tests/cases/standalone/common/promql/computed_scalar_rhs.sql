@@ -32,6 +32,12 @@ tql eval (60, 60, '1s') computed_scalar_lhs * scalar(computed_scalar_rhs);
 -- SQLNESS SORT_RESULT 3 1
 tql eval (60, 60, '1s') computed_scalar_lhs < bool (time() * 2);
 
+-- SQLNESS SORT_RESULT 3 1
+tql eval (60, 60, '1s') (time() >= computed_scalar_lhs) ^ scalar(computed_scalar_rhs);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (60, 60, '1s') scalar(computed_scalar_rhs) * (time() >= computed_scalar_lhs);
+
 drop table computed_scalar_lhs;
 
 drop table computed_scalar_rhs;
