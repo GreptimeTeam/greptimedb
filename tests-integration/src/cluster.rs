@@ -874,7 +874,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_build_cluster_with_plugins() {
         let configured = Arc::new(AtomicBool::new(false));
-        let mut plugins = Plugins::default();
+        let plugins = Plugins::default();
         plugins.insert::<DdlManagerConfiguratorRef<DdlManagerConfigureContext>>(Arc::new(
             TestDdlManagerConfigurator(configured.clone()),
         ));
