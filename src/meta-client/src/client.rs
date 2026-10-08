@@ -130,6 +130,7 @@ impl MetaClientBuilder {
         Self::new(member_id, Role::Datanode)
             .enable_store()
             .enable_heartbeat()
+            .enable_access_cluster_info()
     }
 
     /// Returns the role of Flownode's default options.
@@ -1012,6 +1013,12 @@ mod tests {
         let client = TestClient::new(ns).await;
         client.clear_data().await;
         client
+    }
+
+    #[test]
+    fn test_datanode_default_options_enable_cluster_info_access() {
+        let builder = MetaClientBuilder::datanode_default_options(0);
+        assert!(builder.enable_access_cluster_info);
     }
 
     #[tokio::test]
