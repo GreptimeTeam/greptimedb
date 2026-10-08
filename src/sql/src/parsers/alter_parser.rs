@@ -381,6 +381,12 @@ impl ParserContext<'_> {
             self.parser.prev_token();
             let mut add_columns = vec![self.parse_add_column()?];
             while self.parser.consume_token(&Token::Comma) {
+                if matches!(
+                    self.parser.peek_token().token,
+                    Token::SemiColon | Token::EOF
+                ) {
+                    break;
+                }
                 add_columns.push(self.parse_add_column()?);
             }
             Ok(AlterTableOperation::AddColumns { add_columns })
