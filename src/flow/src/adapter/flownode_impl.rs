@@ -246,8 +246,29 @@ impl FlowDualEngine {
         let max_retry = 10;
         // keep trying to trigger consistent check
         while retry < max_retry {
-            if let Some(task) = self.check_task.lock().await.as_ref() {
-                task.trigger(false, allow_drop).await?;
+            let trigger_tx = self
+                .check_task
+                .lock()
+                .await
+                .as_ref()
+                .map(|task| task.trigger_tx.clone());
+            if let Some(trigger_tx) = trigger_tx {
+                let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+                trigger_tx
+                    .send((false, allow_drop, done_tx))
+                    .await
+                    .map_err(|_| {
+                        IllegalCheckTaskStateSnafu {
+                            reason: "Failed to send trigger signal",
+                        }
+                        .build()
+                    })?;
+                done_rx.await.map_err(|_| {
+                    IllegalCheckTaskStateSnafu {
+                        reason: "Failed to receive trigger signal",
+                    }
+                    .build()
+                })?;
                 break;
             }
             retry += 1;
@@ -422,7 +443,7 @@ impl FlowDualEngine {
                 let mut errors = vec![];
                 for flow_id in to_be_dropped {
                     let flow_id = *flow_id;
-                    if let Err(err) = self.remove_flow(flow_id).await {
+                    if let Err(err) = self.remove_flow_from_engines(flow_id).await {
                         errors.push((flow_id, err));
                     }
                 }
@@ -472,6 +493,25 @@ impl FlowDualEngine {
     /// Reconciles in-memory flow tasks from persisted metadata.
     pub async fn reconcile_flows_from_metadata(&self) -> Result<(), Error> {
         self.check_flow_consistent(true, true).await
+    }
+
+    async fn remove_flow_from_engines(&self, flow_id: FlowId) -> Result<(), Error> {
+        let mut error = None;
+        for result in [
+            self.streaming_engine.remove_flow(flow_id).await,
+            self.batching_engine.remove_flow(flow_id).await,
+        ] {
+            if let Err(err) = result {
+                if !matches!(&err, Error::FlowNotFound { .. }) && error.is_none() {
+                    error = Some(err);
+                }
+            }
+        }
+        self.src_table2flow.write().await.remove_flow(flow_id);
+        match error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     /// TODO(discord9): also add a `exists` api using flow metadata manager's `exists` method
@@ -553,26 +593,6 @@ impl ConsistentCheckTask {
         })
     }
 
-    async fn trigger(&self, allow_create: bool, allow_drop: bool) -> Result<(), Error> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.trigger_tx
-            .send((allow_create, allow_drop, tx))
-            .await
-            .map_err(|_| {
-                IllegalCheckTaskStateSnafu {
-                    reason: "Failed to send trigger signal",
-                }
-                .build()
-            })?;
-        rx.await.map_err(|_| {
-            IllegalCheckTaskStateSnafu {
-                reason: "Failed to receive trigger signal",
-            }
-            .build()
-        })?;
-        Ok(())
-    }
-
     async fn stop(self) -> Result<(), Error> {
         self.shutdown_tx.send(()).await.map_err(|_| {
             IllegalCheckTaskStateSnafu {
@@ -604,6 +624,7 @@ impl SrcTableToFlow {
         self.batch.contains_key(&table_id)
     }
     fn add_flow(&mut self, flow_id: FlowId, flow_type: FlowType, src_table_ids: Vec<TableId>) {
+        self.remove_flow(flow_id);
         let mapping = match flow_type {
             FlowType::Streaming => &mut self.stream,
             FlowType::Batching => &mut self.batch,
@@ -625,18 +646,15 @@ impl SrcTableToFlow {
     }
 
     fn remove_flow(&mut self, flow_id: FlowId) {
-        let mapping = match self.get_flow_type(flow_id) {
-            Some(FlowType::Streaming) => &mut self.stream,
-            Some(FlowType::Batching) => &mut self.batch,
-            None => return,
-        };
-        if let Some((_, src_table_ids)) = self.flow_infos.remove(&flow_id) {
-            for src_table in src_table_ids {
-                if let Some(flows) = mapping.get_mut(&src_table) {
-                    flows.remove(&flow_id);
-                }
-            }
-        }
+        self.stream.retain(|_, flows| {
+            flows.remove(&flow_id);
+            !flows.is_empty()
+        });
+        self.batch.retain(|_, flows| {
+            flows.remove(&flow_id);
+            !flows.is_empty()
+        });
+        self.flow_infos.remove(&flow_id);
     }
 
     fn get_flow_type(&self, flow_id: FlowId) -> Option<FlowType> {
@@ -669,46 +687,37 @@ impl FlowEngine for FlowDualEngine {
         let flow_id = args.flow_id;
         let src_table_ids = args.source_table_ids.clone();
 
-        let res = match flow_type {
-            FlowType::Batching => self.batching_engine.create_flow(args).await,
-            FlowType::Streaming => self.streaming_engine.create_flow(args).await,
-        }?;
+        let created = match flow_type {
+            FlowType::Batching => self.batching_engine.create_flow(args).await?,
+            FlowType::Streaming => self.streaming_engine.create_flow(args).await?,
+        };
+        if created.is_none() {
+            return Ok(None);
+        }
 
+        let opposite_result = match flow_type {
+            FlowType::Batching => self.streaming_engine.remove_flow(flow_id).await,
+            FlowType::Streaming => self.batching_engine.remove_flow(flow_id).await,
+        };
         self.src_table2flow
             .write()
             .await
             .add_flow(flow_id, flow_type, src_table_ids);
 
-        Ok(res)
+        match opposite_result {
+            Err(Error::FlowNotFound { .. }) | Ok(()) => Ok(created),
+            Err(err) => Err(err),
+        }
     }
 
     async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
-        let flow_type = self.src_table2flow.read().await.get_flow_type(flow_id);
-        let flow_type = match flow_type {
-            Some(flow_type) => Some(flow_type),
-            None if self.streaming_engine.flow_exist(flow_id).await? => Some(FlowType::Streaming),
-            None => None,
-        };
-
-        match flow_type {
-            Some(FlowType::Batching) => self.batching_engine.remove_flow(flow_id).await,
-            Some(FlowType::Streaming) => self.streaming_engine.remove_flow(flow_id).await,
-            None => {
-                // this can happen if flownode just restart, and is stilling creating the flow
-                // since now that this flow should dropped, we need to trigger the consistent check and allow drop
-                // this rely on drop flow ddl delete metadata first, see src/common/meta/src/ddl/drop_flow.rs
-                warn!(
-                    "Flow {} is not exist in the underlying engine, but exist in metadata",
-                    flow_id
-                );
-                self.try_sync_with_check_task(flow_id, true).await?;
-
-                Ok(())
-            }
-        }?;
-        // remove mapping
-        self.src_table2flow.write().await.remove_flow(flow_id);
-        Ok(())
+        let recovering = !self.is_recover_done();
+        let batching_exists = self.batching_engine.flow_exist(flow_id).await?;
+        let streaming_exists = self.streaming_engine.flow_exist(flow_id).await?;
+        if recovering || (!batching_exists && !streaming_exists) {
+            self.try_sync_with_check_task(flow_id, true).await?;
+        }
+        self.remove_flow_from_engines(flow_id).await
     }
 
     async fn flush_flow(&self, flow_id: FlowId) -> Result<usize, Error> {
@@ -734,7 +743,8 @@ impl FlowEngine for FlowDualEngine {
         match flow_type {
             Some(FlowType::Batching) => self.batching_engine.flow_exist(flow_id).await,
             Some(FlowType::Streaming) => self.streaming_engine.flow_exist(flow_id).await,
-            None => self.streaming_engine.flow_exist(flow_id).await,
+            None => Ok(self.streaming_engine.flow_exist(flow_id).await?
+                || self.batching_engine.flow_exist(flow_id).await?),
         }
     }
 
@@ -1002,11 +1012,200 @@ impl FlowEngine for StreamingEngine {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::Duration;
 
-    use common_meta::ddl::create_flow::INTERNAL_EVAL_SCHEDULE_KEY;
+    use common_base::Plugins;
+    use common_meta::ddl::create_flow::{FlowType, INTERNAL_EVAL_SCHEDULE_KEY};
+    use common_meta::key::TableMetadataManager;
+    use common_meta::key::flow::FlowMetadataManager;
+    use common_meta::key::table_route::TableRouteValue;
+    use common_meta::key::test_utils::new_test_table_info_with_name;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use query::options::QueryOptions;
+    use session::context::QueryContext;
+    use tokio::sync::oneshot;
 
-    use super::decode_internal_eval_schedule;
+    use super::{
+        ConsistentCheckTask, FlowDualEngine, SrcTableToFlow, decode_internal_eval_schedule,
+    };
+    use crate::batching_mode::BatchingModeOptions;
+    use crate::batching_mode::engine::BatchingEngine;
+    use crate::batching_mode::frontend_client::FrontendClient;
+    use crate::engine::FlowEngine;
     use crate::error::Error;
+    use crate::test_utils::create_test_query_engine;
+    use crate::{CreateFlowArgs, adapter::StreamingEngine};
+
+    #[test]
+    fn test_source_flow_mapping_clears_divergent_routes_on_replace() {
+        use common_meta::ddl::create_flow::FlowType;
+
+        let mut mapping = SrcTableToFlow::default();
+        mapping.add_flow(7, FlowType::Batching, vec![10, 11]);
+        mapping.stream.entry(12).or_default().insert(7);
+        mapping.add_flow(7, FlowType::Streaming, vec![13]);
+
+        assert!(!mapping.in_batch(10));
+        assert!(!mapping.in_batch(11));
+        assert!(!mapping.in_stream(12));
+        assert!(mapping.in_stream(13));
+        assert_eq!(mapping.get_flow_type(7), Some(FlowType::Streaming));
+        mapping.add_flow(8, FlowType::Streaming, vec![13]);
+        mapping.add_flow(7, FlowType::Streaming, vec![14]);
+        assert!(mapping.in_stream(13));
+        assert!(mapping.in_stream(14));
+        mapping.remove_flow(7);
+        assert!(mapping.in_stream(13));
+        assert!(!mapping.in_stream(14));
+        assert_eq!(mapping.get_flow_type(8), Some(FlowType::Streaming));
+
+        mapping.stream.entry(12).or_default().insert(7);
+        mapping.flow_infos.remove(&7);
+        mapping.remove_flow(7);
+        assert!(!mapping.in_stream(12));
+        assert!(mapping.in_stream(13));
+        assert!(!mapping.in_stream(14));
+    }
+
+    #[tokio::test]
+    async fn test_drop_waits_for_startup_recovery_before_cleaning_visible_batching_flow() {
+        const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let table_meta = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        table_meta.init().await.unwrap();
+        table_meta
+            .create_table_metadata(
+                new_test_table_info_with_name(1, "numbers_with_ts"),
+                TableRouteValue::physical(vec![]),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend));
+        let query_engine = create_test_query_engine();
+        let catalog_manager = query_engine.engine_state().catalog_manager().clone();
+        let (frontend_client, _handler) =
+            FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+        let frontend_client = Arc::new(frontend_client);
+        let batching_engine = Arc::new(BatchingEngine::new(
+            frontend_client.clone(),
+            query_engine.clone(),
+            flow_metadata_manager.clone(),
+            table_meta.clone(),
+            catalog_manager.clone(),
+            BatchingModeOptions::default(),
+        ));
+        let streaming_engine = Arc::new(StreamingEngine::new(
+            None,
+            query_engine,
+            table_meta,
+            frontend_client,
+        ));
+        let dual_engine = Arc::new(FlowDualEngine::new(
+            streaming_engine,
+            batching_engine.clone(),
+            flow_metadata_manager,
+            catalog_manager,
+            Plugins::new(),
+        ));
+        assert!(!dual_engine.is_recover_done());
+
+        batching_engine
+            .create_flow(CreateFlowArgs {
+                flow_id: 9424,
+                sink_table_name: [
+                    "greptime".to_string(),
+                    "public".to_string(),
+                    "numbers_with_ts".to_string(),
+                ],
+                source_table_ids: vec![1],
+                create_if_not_exists: false,
+                or_replace: false,
+                expire_after: None,
+                eval_interval: Some(10),
+                comment: None,
+                sql: "SELECT number, ts FROM numbers_with_ts".to_string(),
+                flow_options: HashMap::new(),
+                query_ctx: Some(QueryContext::arc().as_ref().clone()),
+                eval_schedule: None,
+            })
+            .await
+            .unwrap();
+        assert!(batching_engine.flow_exist(9424).await.unwrap());
+        assert!(
+            !dual_engine
+                .src_table2flow
+                .read()
+                .await
+                .flow_infos
+                .contains_key(&9424)
+        );
+
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel(1);
+        let (trigger_tx, mut trigger_rx) =
+            tokio::sync::mpsc::channel::<(bool, bool, oneshot::Sender<()>)>(1);
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let checker_engine = dual_engine.clone();
+        let checker_handle = common_runtime::spawn_global(async move {
+            let Some((allow_create, allow_drop, done_tx)) = trigger_rx.recv().await else {
+                return;
+            };
+            assert!(!allow_create);
+            assert!(allow_drop);
+            let _ = entered_tx.send(());
+            if release_rx.await.is_ok() {
+                checker_engine.src_table2flow.write().await.add_flow(
+                    9424,
+                    FlowType::Batching,
+                    vec![1],
+                );
+                checker_engine.set_done_recovering();
+                let _ = done_tx.send(());
+            }
+            let _ = shutdown_rx.recv().await;
+        });
+        *dual_engine.check_task.lock().await = Some(ConsistentCheckTask {
+            handle: checker_handle,
+            shutdown_tx,
+            trigger_tx,
+        });
+
+        let mut drop_flow = tokio::spawn({
+            let dual_engine = dual_engine.clone();
+            async move { FlowEngine::remove_flow(dual_engine.as_ref(), 9424).await }
+        });
+        tokio::time::timeout(TEST_TIMEOUT, entered_rx)
+            .await
+            .expect("DROP should trigger the checker during startup recovery")
+            .expect("checker should acknowledge trigger entry");
+        assert!(!dual_engine.is_recover_done());
+        assert!(
+            !drop_flow.is_finished(),
+            "DROP must wait for checker trigger"
+        );
+        let check_task_guard = tokio::time::timeout(TEST_TIMEOUT, dual_engine.check_task.lock())
+            .await
+            .expect("DROP must release the checker mutex while awaiting its trigger");
+        drop(check_task_guard);
+
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_TIMEOUT, &mut drop_flow)
+            .await
+            .expect("DROP should finish after recovery checker release")
+            .unwrap()
+            .unwrap();
+        assert!(dual_engine.is_recover_done());
+        assert!(!batching_engine.flow_exist(9424).await.unwrap());
+        let routing = dual_engine.src_table2flow.read().await;
+        assert!(!routing.flow_infos.contains_key(&9424));
+        assert!(!routing.in_batch(1));
+        drop(routing);
+
+        dual_engine.stop_flow_consistent_check_task().await.unwrap();
+    }
 
     #[test]
     fn test_malformed_internal_eval_schedule_json_is_error() {
