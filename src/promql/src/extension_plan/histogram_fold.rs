@@ -1218,7 +1218,7 @@ impl HistogramFoldStream {
 
     fn flush_remaining(&mut self) -> DataFusionResult<()> {
         if self.mode == FoldMode::Optimistic && self.input_buffered_rows > 0 {
-            let buffered_batches: Vec<_> = self.input_buffer.drain(..).collect();
+            let buffered_batches: Vec<_> = std::mem::take(&mut self.input_buffer);
             if !buffered_batches.is_empty() {
                 let batch = concat_batches(&self.input_schema, buffered_batches.as_slice())?;
                 self.switch_to_safe_mode(batch)?;

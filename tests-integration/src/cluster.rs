@@ -380,7 +380,7 @@ impl GreptimeDbClusterBuilder {
                 let home_dir = if let Some(home_dir) = &self.shared_home_dir {
                     home_dir.path().to_str().unwrap().to_string()
                 } else {
-                    let home_tmp_dir = create_temp_dir(&format!("gt_home_{}", &self.cluster_name));
+                    let home_tmp_dir = create_temp_dir(&format!("gt_home_{}", self.cluster_name));
                     let home_dir = home_tmp_dir.path().to_str().unwrap().to_string();
                     guards.push(TestGuard {
                         home_guard: FileDirGuard::new(home_tmp_dir),
