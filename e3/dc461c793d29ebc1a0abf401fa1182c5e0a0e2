@@ -1,0 +1,19 @@
+.github/workflows/tracesbench.yml
+  s_ba231bd42e1bf2::t_4686d625d8209d 117,372,380
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "e3dc461c793d29ebc1a0abf401fa1182c5e0a0e2",
+  "prompts": {},
+  "sessions": {
+    "s_ba231bd42e1bf2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a11b04-997d-7cb1-9bd1-c2da4474751a",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
