@@ -28,7 +28,7 @@ fn normalized_join_input(
     context: PromPlannerContext,
 ) -> (LogicalPlan, PromPlannerContext) {
     planner.ctx = context;
-    let plan = planner.normalize_nullable_tag_labels(plan).unwrap();
+    let plan = planner.normalize_nullable_tag_labels(plan, None).unwrap();
     (plan, planner.ctx.clone())
 }
 

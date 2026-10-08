@@ -274,6 +274,82 @@ DROP TABLE matching_groups_host_only_right;
 
 Affected Rows: 0
 
+-- Label removal must normalize its output before matching a stored NULL label.
+CREATE TABLE matching_groups_label_left (
+  host STRING NULL,
+  ts TIMESTAMP(3) TIME INDEX,
+  greptime_value DOUBLE,
+  PRIMARY KEY(host)
+);
+
+Affected Rows: 0
+
+CREATE TABLE matching_groups_label_right (
+  host STRING NULL,
+  ts TIMESTAMP(3) TIME INDEX,
+  greptime_value DOUBLE,
+  PRIMARY KEY(host)
+);
+
+Affected Rows: 0
+
+INSERT INTO matching_groups_label_left VALUES ('x', 0, 6);
+
+Affected Rows: 1
+
+INSERT INTO matching_groups_label_right VALUES (NULL, 0, 3);
+
+Affected Rows: 1
+
+TQL EVAL (0, 0, '1s') label_replace(matching_groups_label_left, "host", "", "host", ".*") / on(host) matching_groups_label_right;
+
++------+---------------------+----------------------------------------------------------------------------------------+
+| host | ts                  | matching_groups_label_left.greptime_value / matching_groups_label_right.greptime_value |
++------+---------------------+----------------------------------------------------------------------------------------+
+|      | 1970-01-01T00:00:00 | 2.0                                                                                    |
++------+---------------------+----------------------------------------------------------------------------------------+
+
+TQL EVAL (0, 0, '1s') label_replace(matching_groups_label_left, "host", "", "missing", ".*") / on(host) matching_groups_label_right;
+
++------+---------------------+----------------------------------------------------------------------------------------+
+| host | ts                  | matching_groups_label_left.greptime_value / matching_groups_label_right.greptime_value |
++------+---------------------+----------------------------------------------------------------------------------------+
+|      | 1970-01-01T00:00:00 | 2.0                                                                                    |
++------+---------------------+----------------------------------------------------------------------------------------+
+
+TQL EVAL (0, 0, '1s') label_join(matching_groups_label_left, "host", "", "missing") / on(host) matching_groups_label_right;
+
++------+---------------------+----------------------------------------------------------------------------------------+
+| host | ts                  | matching_groups_label_left.greptime_value / matching_groups_label_right.greptime_value |
++------+---------------------+----------------------------------------------------------------------------------------+
+|      | 1970-01-01T00:00:00 | 2.0                                                                                    |
++------+---------------------+----------------------------------------------------------------------------------------+
+
+TQL EVAL (0, 0, '1s') label_join(matching_groups_label_left, "host", "") / on(host) matching_groups_label_right;
+
++------+---------------------+----------------------------------------------------------------------------------------+
+| host | ts                  | matching_groups_label_left.greptime_value / matching_groups_label_right.greptime_value |
++------+---------------------+----------------------------------------------------------------------------------------+
+|      | 1970-01-01T00:00:00 | 2.0                                                                                    |
++------+---------------------+----------------------------------------------------------------------------------------+
+
+-- Removing x now collides with the existing normalized empty label.
+INSERT INTO matching_groups_label_left VALUES (NULL, 0, 9);
+
+Affected Rows: 1
+
+TQL EVAL (0, 0, '1s') label_replace(matching_groups_label_left, "host", "", "host", "x");
+
+Error: 3001(EngineExecuteQuery), Execution error: vector cannot contain metrics with the same labelset
+
+DROP TABLE matching_groups_label_left;
+
+Affected Rows: 0
+
+DROP TABLE matching_groups_label_right;
+
+Affected Rows: 0
+
 -- bottomk partitions by host when zone is excluded from grouping.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 0, '1s') bottomk without(zone)(1, matching_groups_left) / on(host,zone) matching_groups_right{host="x"};
