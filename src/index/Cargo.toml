@@ -23,7 +23,6 @@ fst.workspace = true
 futures.workspace = true
 greptime-proto.workspace = true
 itertools.workspace = true
-lazy_static.workspace = true
 mockall.workspace = true
 pin-project.workspace = true
 prost.workspace = true

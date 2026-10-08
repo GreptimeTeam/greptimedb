@@ -206,7 +206,7 @@ mod tests {
             ("连接timeout.5次", &["连接", "timeout", "5", "次"]),
             ("用户user-123登录", &["用户", "user", "123", "登录"]),
             ("中国农业银行", &["中国", "国农", "农业", "业银", "银行"]),
-            ("caféß日x", &["caf", "éß", "日", "x"]),
+            ("Größe日x", &["Gr", "öß", "e", "日", "x"]),
         ];
         for (text, expected) in cases {
             assert_eq!(tokenize(text), expected, "text: {text}");
@@ -219,7 +219,7 @@ mod tests {
             ("world", &["world"]),
             ("hello world", &["hello", "world"]),
             ("/start", &["start"]),
-            ("café", &["caf", "é"]),
+            ("naïve", &["na", "ï", "ve"]),
             // Han terms match as substrings: only bigrams and runs enclosed by
             // other characters of the term are safe.
             ("农业", &["农业"]),

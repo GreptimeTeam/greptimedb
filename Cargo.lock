@@ -6956,7 +6956,6 @@ dependencies = [
  "futures",
  "greptime-proto",
  "itertools 0.14.0",
- "lazy_static",
  "mockall",
  "pin-project",
  "prost 0.14.1",
