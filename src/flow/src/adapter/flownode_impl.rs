@@ -501,10 +501,11 @@ impl FlowDualEngine {
             self.streaming_engine.remove_flow(flow_id).await,
             self.batching_engine.remove_flow(flow_id).await,
         ] {
-            if let Err(err) = result {
-                if !matches!(&err, Error::FlowNotFound { .. }) && error.is_none() {
-                    error = Some(err);
-                }
+            if let Err(err) = result
+                && !matches!(&err, Error::FlowNotFound { .. })
+                && error.is_none()
+            {
+                error = Some(err);
             }
         }
         self.src_table2flow.write().await.remove_flow(flow_id);
@@ -1011,7 +1012,7 @@ impl FlowEngine for StreamingEngine {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1039,8 +1040,6 @@ mod tests {
 
     #[test]
     fn test_source_flow_mapping_clears_divergent_routes_on_replace() {
-        use common_meta::ddl::create_flow::FlowType;
-
         let mut mapping = SrcTableToFlow::default();
         mapping.add_flow(7, FlowType::Batching, vec![10, 11]);
         mapping.stream.entry(12).or_default().insert(7);
@@ -1055,6 +1054,7 @@ mod tests {
         mapping.add_flow(7, FlowType::Streaming, vec![14]);
         assert!(mapping.in_stream(13));
         assert!(mapping.in_stream(14));
+        assert_eq!(mapping.stream.get(&13), Some(&HashSet::from([8])));
         mapping.remove_flow(7);
         assert!(mapping.in_stream(13));
         assert!(!mapping.in_stream(14));
@@ -1112,28 +1112,54 @@ mod tests {
         ));
         assert!(!dual_engine.is_recover_done());
 
-        batching_engine
-            .create_flow(CreateFlowArgs {
-                flow_id: 9424,
-                sink_table_name: [
-                    "greptime".to_string(),
-                    "public".to_string(),
-                    "numbers_with_ts".to_string(),
-                ],
-                source_table_ids: vec![1],
-                create_if_not_exists: false,
-                or_replace: false,
-                expire_after: None,
-                eval_interval: Some(10),
-                comment: None,
-                sql: "SELECT number, ts FROM numbers_with_ts".to_string(),
-                flow_options: HashMap::new(),
-                query_ctx: Some(QueryContext::arc().as_ref().clone()),
-                eval_schedule: None,
-            })
-            .await
-            .unwrap();
+        let args = CreateFlowArgs {
+            flow_id: 9424,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ],
+            source_table_ids: vec![1],
+            create_if_not_exists: false,
+            or_replace: false,
+            expire_after: None,
+            eval_interval: Some(10),
+            comment: None,
+            sql: "SELECT number, ts FROM numbers_with_ts".to_string(),
+            flow_options: HashMap::new(),
+            query_ctx: Some(QueryContext::arc().as_ref().clone()),
+            eval_schedule: None,
+        };
+        batching_engine.create_flow(args.clone()).await.unwrap();
         assert!(batching_engine.flow_exist(9424).await.unwrap());
+        {
+            let mut routing = dual_engine.src_table2flow.write().await;
+            routing.add_flow(9424, FlowType::Batching, vec![1]);
+        }
+        let noop_args = CreateFlowArgs {
+            create_if_not_exists: true,
+            source_table_ids: vec![999],
+            ..args
+        };
+        assert!(
+            FlowEngine::create_flow(dual_engine.as_ref(), noop_args)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        {
+            let routing = dual_engine.src_table2flow.read().await;
+            assert_eq!(
+                routing.flow_infos.get(&9424),
+                Some(&(FlowType::Batching, vec![1]))
+            );
+            assert!(!routing.in_batch(999));
+        }
+        {
+            let mut routing = dual_engine.src_table2flow.write().await;
+            routing.remove_flow(9424);
+        }
+        // Restore the engine-to-router publication gap before exercising DROP recovery.
         assert!(
             !dual_engine
                 .src_table2flow
