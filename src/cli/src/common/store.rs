@@ -86,7 +86,13 @@ pub struct StoreConfig {
 
     /// Automatically create PostgreSQL schema if it doesn't exist (default: true).
     #[cfg(feature = "pg_kvbackend")]
-    #[clap(long, default_value_t = true, action = clap::ArgAction::Set)]
+    #[clap(
+        long,
+        default_value_t = true,
+        default_missing_value = "true",
+        num_args = 0..=1,
+        action = clap::ArgAction::Set
+    )]
     pub auto_create_schema: bool,
 
     /// TLS mode for backend store connections (etcd, PostgreSQL, MySQL)
