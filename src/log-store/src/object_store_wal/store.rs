@@ -381,6 +381,8 @@ impl ObjectStoreLogStore {
             #[cfg(any(test, feature = "testing"))]
             durability_waits: durability_waits_tx,
         };
+        #[cfg(test)]
+        LIVE_ACTORS.fetch_add(1, Ordering::SeqCst);
         common_runtime::spawn_global(actor.run());
         Ok(Arc::new(Self {
             prefix,
@@ -1026,8 +1028,7 @@ impl SealedBatch {
     }
 }
 
-/// The sequence of a create, when its batch was sealed, and its outcome.
-type CreateOutcome = (u64, Instant, Result<PutResult>);
+type CreateOutcome = (u64, Result<PutResult>);
 
 /// The actor that owns the open batch and the sealed batches until they are
 /// durable.
@@ -1157,8 +1158,8 @@ impl Actor {
                         self.flush_open_batch();
                     }
                 }
-                Some((object_seq, sealed_at, result)) = self.creates.next(), if !self.creates.is_empty() => {
-                    self.on_create_completed(object_seq, sealed_at, result);
+                Some((object_seq, result)) = self.creates.next(), if !self.creates.is_empty() => {
+                    self.on_create_completed(object_seq, result);
                 }
                 Some((object_seq, result)) = self.deletes.next(), if !self.deletes.is_empty() => {
                     self.on_delete_completed(object_seq, result);
@@ -1465,23 +1466,28 @@ impl Actor {
                 }
                 #[cfg(any(test, feature = "testing"))]
                 if creates_held.wait_for(|held| !*held).await.is_err() {
-                    return (
-                        object_seq,
-                        sealed_at,
-                        Err(ObjectStoreWalStoppedSnafu.build()),
-                    );
+                    return (object_seq, Err(ObjectStoreWalStoppedSnafu.build()));
                 }
                 #[cfg(any(test, feature = "testing"))]
                 if creates_fail.load(Ordering::Acquire) {
-                    return (
-                        object_seq,
-                        sealed_at,
-                        injected_create_failure(io.as_ref(), object_seq),
-                    );
+                    let result = injected_create_failure(io.as_ref(), object_seq);
+                    record_create(&result, Some(sealed_at));
+                    return (object_seq, result);
                 }
+                let created = io.put_if_absent(object_seq, bytes).await;
+                #[cfg(any(test, feature = "testing"))]
+                let created = match created {
+                    Ok(_) if next_create_fails_after_write.swap(false, Ordering::AcqRel) => {
+                        injected_create_failure(io.as_ref(), object_seq)
+                    }
+                    created => created,
+                };
+                // Counted as the object store answered, before the epoch of a
+                // conflicting object is read.
+                record_create(&created, Some(sealed_at));
                 // Any conflict poisons an `enqueued` store, so only the
                 // `durable` mode reads the epoch of the existing object.
-                let result = match io.put_if_absent(object_seq, bytes).await {
+                let result = match created {
                     Err(error @ Error::WalObjectConflict { .. })
                         if ack_mode == AckMode::Durable =>
                     {
@@ -1489,27 +1495,13 @@ impl Actor {
                     }
                     result => result,
                 };
-                #[cfg(any(test, feature = "testing"))]
-                if result.is_ok() && next_create_fails_after_write.swap(false, Ordering::AcqRel) {
-                    return (
-                        object_seq,
-                        sealed_at,
-                        injected_create_failure(io.as_ref(), object_seq),
-                    );
-                }
-                (object_seq, sealed_at, result)
+                (object_seq, result)
             }));
         }
     }
 
-    fn on_create_completed(
-        &mut self,
-        object_seq: u64,
-        sealed_at: Instant,
-        result: Result<PutResult>,
-    ) {
+    fn on_create_completed(&mut self, object_seq: u64, result: Result<PutResult>) {
         self.creating.remove(&object_seq);
-        record_create(sealed_at, &result);
         // A batch that already failed, or that the store gave up on when it
         // poisoned itself: the object may exist, but it is off the chain, and
         // collection may delete it now.
@@ -2030,8 +2022,15 @@ impl Drop for Actor {
     fn drop(&mut self) {
         self.deleting.abandon_all();
         self.take_stalled();
+        #[cfg(test)]
+        LIVE_ACTORS.fetch_sub(1, Ordering::SeqCst);
     }
 }
+
+/// Actors not dropped yet. An actor outlives the test that dropped its store
+/// and may still move the process-wide metrics.
+#[cfg(test)]
+static LIVE_ACTORS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn terminal(terminal_error: &TerminalError) -> Option<Arc<Error>> {
     terminal_error
@@ -2054,18 +2053,21 @@ fn set_terminal(terminal_error: &TerminalError, error: Error) -> Arc<Error> {
         .clone()
 }
 
-/// Counts the outcome of a create whether or not its batch is still there to
-/// be indexed: an object a poisoned store gave up on is as durable as any
-/// other.
-fn record_create(sealed_at: Instant, result: &Result<PutResult>) {
+/// Counts the outcome of a conditional create and, for the object of a batch
+/// sealed at `sealed_at`, times a success. The create of a batch is counted
+/// whether or not the batch is still there to be indexed: an object a
+/// poisoned store gave up on is as durable as any other.
+fn record_create(result: &Result<PutResult>, sealed_at: Option<Instant>) {
     match result {
         Ok(_) => {
-            METRIC_OBJECT_STORE_WAL_SEAL_TO_DURABLE_SECONDS
-                .observe(sealed_at.elapsed().as_secs_f64());
+            if let Some(sealed_at) = sealed_at {
+                METRIC_OBJECT_STORE_WAL_SEAL_TO_DURABLE_SECONDS
+                    .observe(sealed_at.elapsed().as_secs_f64());
+            }
             METRIC_OBJECT_STORE_WAL_CREATED_OBJECTS_TOTAL.inc();
         }
         Err(Error::WalObjectStore { .. }) => METRIC_OBJECT_STORE_WAL_CREATE_FAILURES_TOTAL.inc(),
-        Err(Error::WalObjectConflict { .. } | Error::StaleWalObject { .. }) => {
+        Err(Error::WalObjectConflict { .. }) => {
             METRIC_OBJECT_STORE_WAL_CREATE_CONFLICTS_TOTAL.inc()
         }
         Err(_) => {}
@@ -2408,10 +2410,11 @@ async fn start_epoch(
             prev: tip,
             reclaim_boundary,
         };
-        match io
+        let created = io
             .put_if_absent(object_seq, encode_object(header, &[])?.bytes)
-            .await
-        {
+            .await;
+        record_create(&created, None);
+        match created {
             Ok(PutResult::Created) => return Ok((ChainLink { object_seq, epoch }, moved_past)),
             Ok(PutResult::AlreadyPresent) => {
                 return UnconfirmedWalEpochStartSnafu {
@@ -7125,14 +7128,12 @@ mod tests {
 
         /// One failure of the object store access and the row it exercises.
         struct Case {
-            /// What the object store does.
             fault: &'static str,
             row: Row,
             run: fn() -> BoxFuture<'static, ()>,
         }
 
-        /// Declares [`Counters`] from one sampling expression per field, and
-        /// its difference since an earlier sample.
+        /// Declares [`Counters`] from one sampling expression per field.
         macro_rules! counters {
             ($($(#[$doc:meta])* $field:ident: $sample:expr,)*) => {
                 /// The metrics the cases assert on, sampled around a case.
@@ -7157,37 +7158,28 @@ mod tests {
 
         counters! {
             created_objects: METRIC_OBJECT_STORE_WAL_CREATED_OBJECTS_TOTAL.get(),
-            /// Samples of the seal-to-durable histogram, which every object
-            /// counted as created also feeds.
+            /// Samples of the seal-to-durable histogram.
             seal_to_durable: METRIC_OBJECT_STORE_WAL_SEAL_TO_DURABLE_SECONDS.get_sample_count(),
             create_failures: METRIC_OBJECT_STORE_WAL_CREATE_FAILURES_TOTAL.get(),
             create_conflicts: METRIC_OBJECT_STORE_WAL_CREATE_CONFLICTS_TOTAL.get(),
             poisoned: METRIC_OBJECT_STORE_WAL_POISONED_TOTAL.get(),
-            /// Samples of the object size and object entry histograms, which
-            /// every batch that seals feeds once each.
+            /// Samples of the object size and entry histograms, one per seal.
             sealed_objects: sealed_objects(),
-            /// What those two histograms recorded. The entry sum tells an
-            /// object apart from the entries in it, which the sample counts
-            /// cannot.
+            /// The sums of those two histograms.
             object_bytes: sum_of(&METRIC_OBJECT_STORE_WAL_OBJECT_BYTES),
             object_entries: sum_of(&METRIC_OBJECT_STORE_WAL_OBJECT_ENTRIES),
-            /// Samples of the acknowledgement histogram, which every append
-            /// the `durable` mode acknowledges feeds once.
+            /// Samples of the `durable` acknowledgement histogram.
             acknowledged_appends: METRIC_OBJECT_STORE_WAL_APPEND_ACK_SECONDS.get_sample_count(),
-            /// Objects recovery read footers from, and samples of the recovery
-            /// histogram, which every recovery that succeeds feeds once.
+            /// Objects recovery read footers from, and recoveries timed.
             recovered_objects: METRIC_OBJECT_STORE_WAL_RECOVERED_OBJECTS_TOTAL.get(),
             recoveries: METRIC_OBJECT_STORE_WAL_RECOVERY_SECONDS.get_sample_count(),
-            /// Samples of the read histogram, which every read stream that is
-            /// driven to its end feeds once.
+            /// Read streams driven to their end.
             reads: METRIC_OBJECT_STORE_WAL_READ_SECONDS.get_sample_count(),
             deleted_objects: METRIC_OBJECT_STORE_WAL_DELETED_OBJECTS_TOTAL.get(),
             failed_deletes: METRIC_OBJECT_STORE_WAL_FAILED_DELETES_TOTAL.get(),
-            /// A read of the matrix never meets a segment that does not
-            /// decode, so every case expects this to stand still.
+            /// No read of the matrix meets a corrupted segment.
             skipped_segments: METRIC_OBJECT_STORE_WAL_SKIPPED_SEGMENTS_TOTAL.get(),
             stalled_appends: METRIC_OBJECT_STORE_WAL_STALLED_APPENDS_TOTAL.get(),
-            /// Samples of the stalled-append histogram.
             stalled_waits: METRIC_OBJECT_STORE_WAL_STALLED_APPEND_SECONDS.get_sample_count(),
         }
 
@@ -7242,8 +7234,7 @@ mod tests {
             object_bytes_of(&[(region(1), "a1")])
         }
 
-        /// The sum and the count of a timing histogram, taken before a case
-        /// forces a wait on it.
+        /// The sum and the count of a timing histogram before a forced wait.
         fn timer_before(histogram: &Histogram) -> (f64, u64) {
             (histogram.get_sample_sum(), histogram.get_sample_count())
         }
@@ -7327,8 +7318,7 @@ mod tests {
             );
         }
 
-        /// Awaits every append and asserts each failed with the error
-        /// `recognise` accepts.
+        /// Asserts every append failed with an error `recognise` accepts.
         async fn assert_appends_failed(
             appends: Vec<tokio::task::JoinHandle<Result<AppendBatchResponse>>>,
             recognise: impl Fn(&Error) -> bool,
@@ -7349,18 +7339,14 @@ mod tests {
                 .await
                 .err()
                 .expect("a read of a poisoned store must fail");
+            let terminal = terminal(&store.terminal_error).expect("the store is not poisoned");
             assert!(
-                terminal(&store.terminal_error).is_some(),
-                "the store was expected to be poisoned"
-            );
-            assert!(
-                matches!(&error, Error::ObjectStoreWal { .. }),
+                matches!(&error, Error::ObjectStoreWal { source, .. } if Arc::ptr_eq(source, &terminal)),
                 "unexpected error: {error:?}"
             );
         }
 
-        /// Polls until `settled` holds, for what the actor records after it
-        /// answered every waiter.
+        /// Polls until `settled` holds.
         async fn wait_until(settled: impl Fn() -> bool) {
             let deadline = Instant::now() + WAIT;
             while !settled() {
@@ -7372,6 +7358,7 @@ mod tests {
         #[tokio::test]
         async fn test_store_fault_matrix() {
             let _serialized = SERIALIZED.lock().await;
+            wait_until(|| LIVE_ACTORS.load(Ordering::SeqCst) == 0).await;
             let cases = [
                 Case {
                     fault: "a create that succeeds",
@@ -7417,6 +7404,11 @@ mod tests {
                     fault: "a create that finds an object of the same or a later epoch",
                     row: Row::Conflict,
                     run: || Box::pin(create_finds_another_writer()),
+                },
+                Case {
+                    fault: "a create that finds an object whose header cannot be read",
+                    row: Row::Conflict,
+                    run: || Box::pin(create_finds_an_unreadable_object()),
                 },
                 Case {
                     fault: "a create that completes after a conflict poisoned the store",
@@ -7499,17 +7491,14 @@ mod tests {
                 release.send(true).unwrap();
                 timeout(WAIT, appended).await.unwrap().unwrap().unwrap();
                 let elapsed = started_at.elapsed();
-                seals.push(Timed::since(
+                let timed = |timer, before| Timed::since(timer, before, held, elapsed);
+                seals.push(timed(
                     &METRIC_OBJECT_STORE_WAL_SEAL_TO_DURABLE_SECONDS,
                     seal,
-                    held,
-                    elapsed,
                 ));
-                acknowledgements.push(Timed::since(
+                acknowledgements.push(timed(
                     &METRIC_OBJECT_STORE_WAL_APPEND_ACK_SECONDS,
                     acknowledgement,
-                    held,
-                    elapsed,
                 ));
                 hold = elapsed + Duration::from_millis(20);
             }
@@ -7634,8 +7623,7 @@ mod tests {
             }
         }
 
-        /// Object 2 is created, object 3 in flight, and object 1 fails: all
-        /// three batches fail, no sequence is reused and object 3 is an orphan.
+        /// Object 2 is created and object 3 in flight when object 1 fails.
         async fn create_fails_transiently_durable() {
             let (store, io, mut parked) = open_parking_creates(memory_store(), &eager()).await;
             let before = Counters::sample();
@@ -7696,8 +7684,6 @@ mod tests {
             store.stop().await.unwrap();
         }
 
-        /// The store repeats the create under the same sequence and the
-        /// acknowledged entry becomes durable.
         async fn create_fails_transiently_enqueued() {
             let (store, io, mut parked) =
                 open_parking_creates(memory_store(), &enqueued(eager())).await;
@@ -7756,8 +7742,6 @@ mod tests {
             store.stop().await.unwrap();
         }
 
-        /// The create is not repeated: the backlog is dropped, the store is
-        /// not poisoned and `stop` reports the loss.
         async fn create_fails_transiently_after_stop_began() {
             let (store, io, mut parked) =
                 open_parking_creates(memory_store(), &enqueued(manual())).await;
@@ -7794,8 +7778,6 @@ mod tests {
             );
         }
 
-        /// The batch fails as for a transient error, the sequence is consumed
-        /// and the store keeps serving.
         async fn create_finds_an_earlier_epoch() {
             let object_store = memory_store();
             let store = open(object_store.clone(), &eager()).await;
@@ -7844,8 +7826,6 @@ mod tests {
             store.stop().await.unwrap();
         }
 
-        /// The conflict poisons the store; the durability wait and `stop`
-        /// report it.
         async fn create_finds_an_earlier_epoch_enqueued() {
             let object_store = memory_store();
             let store = open(object_store.clone(), &enqueued(eager())).await;
@@ -7883,8 +7863,6 @@ mod tests {
             );
         }
 
-        /// Object 2 is created, object 1 meets another writer's object: both
-        /// waiters fail and the store poisons itself.
         async fn create_finds_another_writer() {
             for epoch in [1, 2] {
                 let object_store = memory_store();
@@ -7922,6 +7900,37 @@ mod tests {
                 );
                 store.stop().await.unwrap();
             }
+        }
+
+        /// The epoch of the object at the sequence cannot be read: the conflict
+        /// is counted once and the store poisons itself.
+        async fn create_finds_an_unreadable_object() {
+            let object_store = memory_store();
+            let (io, _) = RecordingIo::over(object_store.clone());
+            let store = open_over(io.clone(), &eager()).await;
+            put_foreign(&object_store, 1, 1).await;
+            let before = Counters::sample();
+            let region_id = region(1);
+            io.damage_next_range_read.store(true, Ordering::Relaxed);
+            let error = append(&store, region_id, "a1").await.unwrap_err();
+            assert!(
+                matches!(unwrap_shared(&error), Error::InvalidWalObject { .. }),
+                "unexpected error: {error:?}"
+            );
+            assert_read_is_terminal(&store, region_id).await;
+            assert_indexed(io.as_ref(), &[0]).await;
+            assert_eq!(
+                Counters {
+                    create_conflicts: 1,
+                    poisoned: 1,
+                    sealed_objects: 1,
+                    object_bytes: one_entry_object(),
+                    object_entries: 1,
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+            store.stop().await.unwrap();
         }
 
         /// The create of object 2 completes after the conflict at object 1
@@ -7974,8 +7983,6 @@ mod tests {
             store.stop().await.unwrap();
         }
 
-        /// The catalog already holds the sequence when the create returns:
-        /// both waiters fail and the store poisons itself.
         async fn catalog_rejects_the_created_object() {
             let (store, io, mut parked) = open_parking_creates(memory_store(), &eager()).await;
             let before = Counters::sample();
@@ -8025,8 +8032,6 @@ mod tests {
             store.stop().await.unwrap();
         }
 
-        /// The batch is acknowledged and the store poisons itself, since no
-        /// later batch can be allocated a sequence.
         async fn create_takes_the_last_object_sequence() {
             let object_store = memory_store();
             let last_object_seq = OBJECT_SEQ_LIMIT - 1;
@@ -8070,8 +8075,7 @@ mod tests {
             store.stop().await.unwrap();
         }
 
-        /// Object 0, the chain a start object of epoch 2 at sequence 1
-        /// extends, holding one entry of region 1.
+        /// Writes object 0 of epoch 1 with one entry of region 1.
         async fn put_chain_start(object_store: &ObjectStore) -> ObjectStoreIo {
             let fixtures = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
             let record = Record {
@@ -8095,8 +8099,6 @@ mod tests {
             ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string()).await
         }
 
-        /// The start object moves to the next sequence and epoch, and the
-        /// store opens over the recovered chain.
         async fn start_object_meets_an_earlier_epoch() {
             let object_store = memory_store();
             let fixtures = put_chain_start(&object_store).await;
@@ -8117,6 +8119,8 @@ mod tests {
             );
             assert_eq!(
                 Counters {
+                    created_objects: 1,
+                    create_conflicts: 1,
                     recovered_objects: 1,
                     recoveries: 1,
                     reads: 1,
@@ -8128,10 +8132,11 @@ mod tests {
         }
 
         /// Asserts a construction failure at the start object: no other
-        /// sequence was tried, and only the preceding recovery is reported.
+        /// sequence was tried, and only the recovery and `create` are counted.
         async fn assert_start_fails(
             fixtures: &ObjectStoreIo,
             before: Counters,
+            create: Counters,
             error: Error,
             recognise: impl Fn(&Error) -> bool,
             retry_hint: RetryHint,
@@ -8144,14 +8149,12 @@ mod tests {
                 Counters {
                     recovered_objects: 1,
                     recoveries: 1,
-                    ..Counters::default()
+                    ..create
                 },
                 Counters::since(before)
             );
         }
 
-        /// Another writer holds the start sequence: construction fails with a
-        /// conflict that is not retried.
         async fn start_object_meets_another_writer() {
             for epoch in [2, 3] {
                 let object_store = memory_store();
@@ -8165,6 +8168,10 @@ mod tests {
                 assert_start_fails(
                     &fixtures,
                     before,
+                    Counters {
+                        create_conflicts: 1,
+                        ..Counters::default()
+                    },
                     error,
                     |error| matches!(error, Error::WalObjectConflict { path: actual, .. } if *actual == path),
                     RetryHint::NonRetryable,
@@ -8173,8 +8180,6 @@ mod tests {
             }
         }
 
-        /// Another open wrote the very start object this open writes:
-        /// construction fails with a retryable error.
         async fn start_object_meets_an_identical_object() {
             let object_store = memory_store();
             let fixtures = put_chain_start(&object_store).await;
@@ -8186,6 +8191,10 @@ mod tests {
             assert_start_fails(
                 &fixtures,
                 before,
+                Counters {
+                    created_objects: 1,
+                    ..Counters::default()
+                },
                 error,
                 |error| matches!(error, Error::UnconfirmedWalEpochStart { epoch: 2, .. }),
                 RetryHint::Retryable,
@@ -8193,8 +8202,6 @@ mod tests {
             .await;
         }
 
-        /// The start object is stored but its create reports an error:
-        /// construction fails with a retryable error.
         async fn start_object_create_has_an_unknown_outcome() {
             let object_store = memory_store();
             let fixtures = put_chain_start(&object_store).await;
@@ -8209,6 +8216,10 @@ mod tests {
             assert_start_fails(
                 &fixtures,
                 before,
+                Counters {
+                    create_failures: 1,
+                    ..Counters::default()
+                },
                 error,
                 |error| matches!(error, Error::WalObjectStore { .. }),
                 RetryHint::Retryable,
