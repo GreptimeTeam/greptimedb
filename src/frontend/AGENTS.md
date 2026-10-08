@@ -60,7 +60,7 @@ remote datanodes via `operator`/`client`.
 
 - **OTLP trace lookup tables** (`instance/otlp/trace_ingest.rs`): `Instance` owns
   a shared cache of confirmed service/operation writes, which bypass batching.
-  `otlp.trace_aux_cache_capacity` sets its entry limit at startup; zero disables it.
+  `otlp.trace_aux_cache_size` sets its estimated byte budget at startup; zero disables it.
   Async main writes retain completion results; a frontend task writes auxiliary
   rows only for confirmed chunks before populating the cache.
   Cold async trace requests reserve a shared auxiliary slot before main writes,

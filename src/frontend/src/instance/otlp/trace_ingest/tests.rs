@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::value::ValueData;
@@ -37,9 +38,10 @@ use servers::otlp::trace::{SERVICE_NAME_COLUMN, TraceAuxData};
 use table::table_name::TableName;
 
 use super::{
-    ChunkFailureReaction, Instance, TraceAuxCache, TraceChunkRetry, TraceChunkSchemaState,
-    TraceFailureMessages, TraceRequestSchema, TraceRequestSchemaPlan, TraceSpanMetadata,
-    TraceTablePreAlter, chunk_owned, wrap_trace_alter_failure,
+    ChunkFailureReaction, Instance, TraceAuxCache, TraceAuxCacheKey, TraceAuxEntry,
+    TraceChunkRetry, TraceChunkSchemaState, TraceFailureMessages, TraceRequestSchema,
+    TraceRequestSchemaPlan, TraceSpanMetadata, TraceTablePreAlter, chunk_owned,
+    wrap_trace_alter_failure,
 };
 use crate::metrics::OTLP_TRACES_FAILURE_COUNT;
 
@@ -93,7 +95,7 @@ async fn test_trace_aux_waits_for_successful_chunk_completions() {
 
 #[test]
 fn test_trace_aux_cache_confirmed_writes() {
-    let cache = TraceAuxCache::new(100);
+    let cache = TraceAuxCache::new(1024);
     let table = TableName::new("greptime", "public", "traces");
     let mut data = trace_aux_data("svc", "span", "server");
     let pending = cache.filter(table.clone(), &mut data);
@@ -133,7 +135,7 @@ fn test_trace_aux_cache_confirmed_writes() {
     }
 
     // An operation hit must not suppress a missing service entry.
-    let cache = TraceAuxCache::new(100);
+    let cache = TraceAuxCache::new(1024);
     let table = TableName::new("greptime", "public", "traces");
     let mut data = trace_aux_data("svc", "span", "server");
     data.services.clear();
@@ -146,7 +148,7 @@ fn test_trace_aux_cache_confirmed_writes() {
 }
 
 #[test]
-fn test_trace_aux_cache_zero_capacity_disables_caching() {
+fn test_trace_aux_cache_zero_size_disables_caching() {
     let cache = TraceAuxCache::new(0);
     let table = TableName::new("greptime", "public", "traces");
     let mut data = trace_aux_data("svc", "span", "server");
@@ -158,9 +160,60 @@ fn test_trace_aux_cache_zero_capacity_disables_caching() {
     assert_eq!(repeated.operations.len(), 1);
 }
 
+#[test]
+fn test_trace_aux_cache_accounts_for_key_memory() {
+    let cache = TraceAuxCache::new(1024);
+    let table = TableName::new("greptime", "public", "traces");
+    let mut data = trace_aux_data("svc", "span", "server");
+    cache.record(cache.filter(table.clone(), &mut data));
+    cache.entries.run_pending_tasks();
+    assert_eq!(cache.entries.entry_count(), 2);
+    assert!(cache.entries.weighted_size() > 2);
+    assert!(cache.entries.weighted_size() <= 1024);
+
+    // Spare string capacity counts even when the string content is empty.
+    let large = || String::with_capacity(2048);
+    let service = || TraceAuxEntry::Service("svc".to_string());
+    for (table, entry) in [
+        (TableName::new(large(), "public", "traces"), service()),
+        (TableName::new("greptime", large(), "traces"), service()),
+        (TableName::new("greptime", "public", large()), service()),
+        (table.clone(), TraceAuxEntry::Service(large())),
+        (
+            table.clone(),
+            TraceAuxEntry::Operation(large(), String::new(), String::new()),
+        ),
+        (
+            table.clone(),
+            TraceAuxEntry::Operation(String::new(), large(), String::new()),
+        ),
+        (
+            table,
+            TraceAuxEntry::Operation(String::new(), String::new(), large()),
+        ),
+    ] {
+        let cache = TraceAuxCache::new(1024);
+        cache.record(vec![TraceAuxCacheKey {
+            table: Arc::new(table),
+            entry,
+        }]);
+        cache.entries.run_pending_tasks();
+        assert_eq!(cache.entries.entry_count(), 0);
+    }
+
+    // Empty strings still retain the key and table structs.
+    let cache = TraceAuxCache::new(1);
+    cache.record(vec![TraceAuxCacheKey {
+        table: Arc::new(TableName::new("", "", "")),
+        entry: TraceAuxEntry::Service(String::new()),
+    }]);
+    cache.entries.run_pending_tasks();
+    assert_eq!(cache.entries.entry_count(), 0);
+}
+
 #[tokio::test]
 async fn test_trace_aux_admission_rechecks_cache() {
-    let cache = TraceAuxCache::new(100);
+    let cache = TraceAuxCache::new(1024);
     let limiter = RequestLimiter::try_new(1).unwrap();
     let table = TableName::new("greptime", "public", "traces");
     let data = || trace_aux_data("svc", "span", "server");

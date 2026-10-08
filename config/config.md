@@ -95,7 +95,7 @@
 | `otlp` | -- | -- | OpenTelemetry protocol options. |
 | `otlp.enable` | Bool | `true` | Whether to enable OpenTelemetry protocol in HTTP API. |
 | `otlp.trace_ingest_chunk_size` | Integer | `512` | Maximum spans per trace ingest chunk. Set to 0 to disable splitting. |
-| `otlp.trace_aux_cache_capacity` | Integer | `100000` | Maximum cached trace service/operation entries per frontend, shared across<br/>all catalogs, schemas, and trace tables. Set to 0 to disable caching. |
+| `otlp.trace_aux_cache_size` | String | `32MiB` | Estimated memory budget for cached trace service/operation keys per frontend,<br/>shared across all catalogs, schemas, and trace tables. Set to 0 to disable caching.<br/>Excludes cache and allocator overhead; shared table names are charged per entry. |
 | `otlp.experimental_enable_resource_info` | Bool | `false` | Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric<br/>resource attributes, so metrics-only services reach the semantic graph. |
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
@@ -369,7 +369,7 @@
 | `otlp` | -- | -- | OpenTelemetry protocol options. |
 | `otlp.enable` | Bool | `true` | Whether to enable OpenTelemetry protocol in HTTP API. |
 | `otlp.trace_ingest_chunk_size` | Integer | `512` | Maximum spans per trace ingest chunk. Set to 0 to disable splitting. |
-| `otlp.trace_aux_cache_capacity` | Integer | `100000` | Maximum cached trace service/operation entries per frontend, shared across<br/>all catalogs, schemas, and trace tables. Set to 0 to disable caching. |
+| `otlp.trace_aux_cache_size` | String | `32MiB` | Estimated memory budget for cached trace service/operation keys per frontend,<br/>shared across all catalogs, schemas, and trace tables. Set to 0 to disable caching.<br/>Excludes cache and allocator overhead; shared table names are charged per entry. |
 | `otlp.experimental_enable_resource_info` | Bool | `false` | Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric<br/>resource attributes, so metrics-only services reach the semantic graph. |
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |

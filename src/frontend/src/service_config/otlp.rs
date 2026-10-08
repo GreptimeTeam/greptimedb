@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_base::readable_size::ReadableSize;
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_TRACE_INGEST_CHUNK_SIZE: usize = 512;
-const DEFAULT_TRACE_AUX_CACHE_CAPACITY: u64 = 100_000;
+const DEFAULT_TRACE_AUX_CACHE_SIZE: ReadableSize = ReadableSize::mb(32);
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -23,9 +24,10 @@ pub struct OtlpOptions {
     pub enable: bool,
     /// Maximum spans per trace ingest chunk. Set to 0 to disable splitting.
     pub trace_ingest_chunk_size: usize,
-    /// Maximum cached trace service/operation entries per frontend, shared across
-    /// all catalogs, schemas, and trace tables. Set to 0 to disable caching.
-    pub trace_aux_cache_capacity: u64,
+    /// Estimated memory budget for cached trace service/operation keys per frontend,
+    /// shared across all catalogs, schemas, and trace tables. Set to 0 to disable caching.
+    /// Excludes cache and allocator overhead; shared table names are charged per entry.
+    pub trace_aux_cache_size: ReadableSize,
     /// Whether to synthesize the `greptime_otel_resource_info` descriptor
     /// table from the resource attributes of OTLP metrics, so metrics-only
     /// services reach the semantic graph. Off by default: it creates and
@@ -38,7 +40,7 @@ impl Default for OtlpOptions {
         Self {
             enable: true,
             trace_ingest_chunk_size: DEFAULT_TRACE_INGEST_CHUNK_SIZE,
-            trace_aux_cache_capacity: DEFAULT_TRACE_AUX_CACHE_CAPACITY,
+            trace_aux_cache_size: DEFAULT_TRACE_AUX_CACHE_SIZE,
             experimental_enable_resource_info: false,
         }
     }
@@ -53,12 +55,12 @@ mod tests {
         let default = OtlpOptions::default();
         assert!(default.enable);
         assert_eq!(default.trace_ingest_chunk_size, 512);
-        assert_eq!(default.trace_aux_cache_capacity, 100_000);
+        assert_eq!(default.trace_aux_cache_size, ReadableSize::mb(32));
         assert!(!default.experimental_enable_resource_info);
 
         let options: OtlpOptions = toml::from_str("enable = false").unwrap();
         assert!(!options.enable);
-        assert_eq!(options.trace_aux_cache_capacity, 100_000);
+        assert_eq!(options.trace_aux_cache_size, ReadableSize::mb(32));
         assert_eq!(
             options.trace_ingest_chunk_size,
             DEFAULT_TRACE_INGEST_CHUNK_SIZE
@@ -71,10 +73,10 @@ mod tests {
         let serialized = toml::to_string(&options).unwrap();
         assert_eq!(toml::from_str::<OtlpOptions>(&serialized).unwrap(), options);
 
-        for capacity in [0, 37] {
+        for (value, size) in [("0", ReadableSize(0)), ("\"1MiB\"", ReadableSize::mb(1))] {
             let options: OtlpOptions =
-                toml::from_str(&format!("trace_aux_cache_capacity = {capacity}")).unwrap();
-            assert_eq!(options.trace_aux_cache_capacity, capacity);
+                toml::from_str(&format!("trace_aux_cache_size = {value}")).unwrap();
+            assert_eq!(options.trace_aux_cache_size, size);
             let serialized = toml::to_string(&options).unwrap();
             assert_eq!(toml::from_str::<OtlpOptions>(&serialized).unwrap(), options);
         }

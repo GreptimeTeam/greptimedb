@@ -732,12 +732,12 @@ fn test_example_configs_document_actual_defaults() {
 }
 
 #[test]
-fn test_load_trace_aux_cache_capacity() {
-    for capacity in [0, 37] {
+fn test_load_trace_aux_cache_size() {
+    for (value, size) in [("0", ReadableSize(0)), ("\"1MiB\"", ReadableSize::mb(1))] {
         let config = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(
             config.path(),
-            format!("[otlp]\ntrace_aux_cache_capacity = {capacity}\n"),
+            format!("[otlp]\ntrace_aux_cache_size = {value}\n"),
         )
         .unwrap();
 
@@ -748,7 +748,7 @@ fn test_load_trace_aux_cache_capacity() {
             GreptimeOptions::<StandaloneOptions>::load_layered_options(config.path().to_str(), "")
                 .unwrap();
         for options in [frontend.component, standalone.component.frontend_options()] {
-            assert_eq!(options.otlp.trace_aux_cache_capacity, capacity);
+            assert_eq!(options.otlp.trace_aux_cache_size, size);
         }
     }
 }

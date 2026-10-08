@@ -415,7 +415,7 @@ impl FrontendBuilder {
             slow_query_options: self.options.slow_query.clone(),
             influxdb_default_merge_mode: self.options.influxdb.default_merge_mode,
             trace_ingest_chunk_size: self.options.otlp.trace_ingest_chunk_size,
-            trace_aux_cache: TraceAuxCache::new(self.options.otlp.trace_aux_cache_capacity),
+            trace_aux_cache: TraceAuxCache::new(self.options.otlp.trace_aux_cache_size.as_bytes()),
             trace_aux_limiter,
             otlp_resource_info: self.options.otlp.experimental_enable_resource_info,
             suspend: Arc::new(AtomicBool::new(false)),

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::mem;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
@@ -68,7 +69,30 @@ pub(crate) struct TraceAuxCache {
     entries: Cache<TraceAuxCacheKey, ()>,
 }
 
-type TraceAuxCacheKey = (Arc<TableName>, TraceAuxEntry);
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct TraceAuxCacheKey {
+    table: Arc<TableName>,
+    entry: TraceAuxEntry,
+}
+
+impl TraceAuxCacheKey {
+    /// Estimated key memory, excluding cache and allocator overhead.
+    fn size(&self) -> usize {
+        let entry_size = match &self.entry {
+            TraceAuxEntry::Service(service) => service.capacity(),
+            TraceAuxEntry::Operation(service, span, kind) => {
+                service.capacity() + span.capacity() + kind.capacity()
+            }
+        };
+        // Charge the shared table name per entry to keep the estimate conservative.
+        mem::size_of::<Self>()
+            + mem::size_of::<TableName>()
+            + self.table.catalog_name.capacity()
+            + self.table.schema_name.capacity()
+            + self.table.table_name.capacity()
+            + entry_size
+    }
+}
 
 #[derive(Clone, Hash, PartialEq, Eq)]
 enum TraceAuxEntry {
@@ -77,10 +101,15 @@ enum TraceAuxEntry {
 }
 
 impl TraceAuxCache {
-    /// Creates a cache with the configured entry capacity; zero disables caching.
-    pub(crate) fn new(capacity: u64) -> Self {
+    /// Creates a cache with an estimated byte budget; zero disables caching.
+    pub(crate) fn new(max_size: u64) -> Self {
         Self {
-            entries: Cache::new(capacity),
+            entries: Cache::builder()
+                .max_capacity(max_size)
+                .weigher(|key: &TraceAuxCacheKey, _: &()| {
+                    u32::try_from(key.size()).unwrap_or(u32::MAX)
+                })
+                .build(),
         }
     }
 
@@ -89,7 +118,10 @@ impl TraceAuxCache {
         let table = Arc::new(table);
         let mut pending = Vec::new();
         let mut retain = |entry| {
-            let key = (table.clone(), entry);
+            let key = TraceAuxCacheKey {
+                table: table.clone(),
+                entry,
+            };
             if self.entries.get(&key).is_some() {
                 false
             } else {
