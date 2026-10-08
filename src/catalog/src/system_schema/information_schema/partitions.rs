@@ -648,11 +648,19 @@ mod tests {
         assert!(output.contains(SCHEMA_1), "{output}");
         assert!(!output.contains(SCHEMA_2), "{output}");
         assert!(
-            output.contains(&RegionId::new(TABLE_ID_1, REGION_NUMBER_1).as_u64().to_string()),
+            output.contains(
+                &RegionId::new(TABLE_ID_1, REGION_NUMBER_1)
+                    .as_u64()
+                    .to_string()
+            ),
             "{output}"
         );
         assert!(
-            output.contains(&RegionId::new(TABLE_ID_1, REGION_NUMBER_2).as_u64().to_string()),
+            output.contains(
+                &RegionId::new(TABLE_ID_1, REGION_NUMBER_2)
+                    .as_u64()
+                    .to_string()
+            ),
             "{output}"
         );
 
