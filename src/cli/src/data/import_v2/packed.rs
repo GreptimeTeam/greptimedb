@@ -16,8 +16,6 @@ use std::collections::HashSet;
 
 use common_datasource::packed_snapshot::{PACK_INDEX_FILE, PackIndex};
 use snafu::ResultExt;
-use sql::dialect::GreptimeDbDialect;
-use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
 
 use crate::data::export_v2::manifest::{ChunkStatus, Manifest};
@@ -51,49 +49,46 @@ pub(crate) async fn validate_snapshot(
             .read_text(&ddl_path_for_schema(schema))
             .await
             .context(SnapshotStorageSnafu)?;
-        let statements = ParserContext::create_with_dialect(
-            &ddl,
-            &GreptimeDbDialect {},
-            ParseOptions::default(),
-        )
-        .map_err(|e| {
-            InvalidPackedSnapshotSnafu {
-                reason: e.to_string(),
-            }
-            .build()
-        })?;
         let mut names = HashSet::new();
-        for statement in statements {
-            if let Statement::CreateTable(create) = statement {
-                if create.engine.eq_ignore_ascii_case("metric")
-                    && create.options.get("on_physical_table").is_none()
-                {
-                    continue;
+        for sql in super::command::iter_ddl_statements(&ddl) {
+            let statements = super::executor::parse_ddl(&sql).map_err(|_| {
+                InvalidPackedSnapshotSnafu {
+                    reason: "invalid or oversized snapshot DDL",
                 }
-                let parts: Vec<_> = create
-                    .name
-                    .0
-                    .iter()
-                    .map(|p| p.as_ident().map(|i| i.value.as_str()))
-                    .collect();
-                let allowed = match parts.as_slice() {
-                    [Some(_)] => true,
-                    [Some(s), Some(_)] => *s == schema,
-                    [Some(c), Some(s), Some(_)] => *c == manifest.catalog && *s == schema,
-                    _ => false,
-                };
-                if !allowed {
-                    return InvalidPackedSnapshotSnafu {
-                        reason: "snapshot table DDL escapes its catalog/schema",
+                .build()
+            })?;
+            for statement in statements {
+                if let Statement::CreateTable(create) = statement {
+                    if create.engine.eq_ignore_ascii_case("metric")
+                        && create.options.get("on_physical_table").is_none()
+                    {
+                        continue;
                     }
-                    .fail();
-                }
-                let name = parts.last().and_then(|p| *p).unwrap_or_default();
-                if !names.insert(name.to_string()) {
-                    return InvalidPackedSnapshotSnafu {
-                        reason: "duplicate snapshot table DDL",
+                    let parts: Vec<_> = create
+                        .name
+                        .0
+                        .iter()
+                        .map(|p| p.as_ident().map(|i| i.value.as_str()))
+                        .collect();
+                    let allowed = match parts.as_slice() {
+                        [Some(_)] => true,
+                        [Some(s), Some(_)] => *s == schema,
+                        [Some(c), Some(s), Some(_)] => *c == manifest.catalog && *s == schema,
+                        _ => false,
+                    };
+                    if !allowed {
+                        return InvalidPackedSnapshotSnafu {
+                            reason: "snapshot table DDL escapes its catalog/schema",
+                        }
+                        .fail();
                     }
-                    .fail();
+                    let name = parts.last().and_then(|p| *p).unwrap_or_default();
+                    if !names.insert(name.to_string()) {
+                        return InvalidPackedSnapshotSnafu {
+                            reason: "duplicate snapshot table DDL",
+                        }
+                        .fail();
+                    }
                 }
             }
         }
