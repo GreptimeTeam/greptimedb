@@ -830,6 +830,7 @@ pub(crate) fn to_alter_table_expr(
                 .map(|add_column| {
                     let column_def = sql_column_def_to_grpc_column_def(
                         &add_column.column_def,
+                        add_column.json2_options.as_ref(),
                         Some(&query_ctx.timezone()),
                     )
                     .map_err(BoxedError::new)
@@ -1223,6 +1224,32 @@ mod tests {
         let schema = Schema::new(vec![column_schema]);
 
         assert!(is_json2_extension_type(&schema.arrow_schema().fields()[0]));
+    }
+
+    #[test]
+    fn test_to_alter_add_json2_column_preserves_settings() {
+        let sql = "ALTER TABLE monitor ADD COLUMN payload JSON2(max_auto_expanded_paths = 0, service STRING, nested.value BIGINT)";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+        let Statement::AlterTable(alter_table) = stmt else {
+            unreachable!()
+        };
+        let expr = to_alter_table_expr(alter_table, &QueryContext::arc()).unwrap();
+        let AlterTableKind::AddColumns(AddColumns { add_columns, .. }) = expr.kind.unwrap() else {
+            unreachable!()
+        };
+        let column_schema =
+            try_as_column_schema(add_columns[0].column_def.as_ref().unwrap()).unwrap();
+        let metadata: datatypes::extension::json::JsonMetadata =
+            serde_json::from_str(&column_schema.metadata()["ARROW:extension:metadata"]).unwrap();
+        let settings = metadata.json_settings();
+        assert_eq!(Some(0), settings.max_auto_expanded_paths());
+        assert_eq!(2, settings.type_hints().len());
+        assert_eq!(vec!["service"], settings.type_hints()[0].path);
+        assert_eq!(vec!["nested", "value"], settings.type_hints()[1].path);
     }
 
     #[test]

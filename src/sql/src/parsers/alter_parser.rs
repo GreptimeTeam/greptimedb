@@ -26,7 +26,7 @@ use sqlparser::parser::IsOptional::Mandatory;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithSpan};
 
-use crate::ast::ObjectNamePartExt;
+use crate::ast::{ColumnDef, ColumnOptionDef, ObjectNamePartExt};
 use crate::error::{self, InvalidColumnOptionSnafu, Result, SetFulltextOptionSnafu};
 use crate::parser::ParserContext;
 use crate::parsers::create_parser::{INVERTED, parse_json2_type_and_options};
@@ -40,6 +40,7 @@ use crate::statements::alter::{
     DropDefaultsOperation, KeyValueOption, RepartitionOperation, SetDefaultsOperation,
     SetIndexOperation, UnsetIndexOperation,
 };
+use crate::statements::create::Json2Options;
 use crate::statements::statement::Statement;
 use crate::util::{OptionValue, parse_option_string};
 
@@ -708,7 +709,7 @@ fn parse_add_columns(parser: &mut Parser) -> std::result::Result<AddColumn, Pars
     parser.expect_keyword(Keyword::ADD)?;
     let _ = parser.parse_keyword(Keyword::COLUMN);
     let add_if_not_exists = parser.parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
-    let mut column_def = parser.parse_column_def()?;
+    let (mut column_def, json2_options) = parse_add_column_def(parser)?;
     column_def.name = ParserContext::canonicalize_identifier(column_def.name);
     let location = if parser.parse_keyword(Keyword::FIRST) {
         Some(AddColumnLocation::First)
@@ -727,9 +728,55 @@ fn parse_add_columns(parser: &mut Parser) -> std::result::Result<AddColumn, Pars
     };
     Ok(AddColumn {
         column_def,
+        json2_options,
         location,
         add_if_not_exists,
     })
+}
+
+/// Parses JSON2 options while preserving sqlparser's grammar for other column types.
+fn parse_add_column_def(
+    parser: &mut Parser,
+) -> std::result::Result<(ColumnDef, Option<Json2Options>), ParserError> {
+    let name = parser.parse_identifier()?;
+    let Some((data_type, json2_options)) = parse_json2_type_and_options(parser)
+        .map_err(|err| ParserError::ParserError(err.to_string()))?
+    else {
+        parser.prev_token();
+        return parser
+            .parse_column_def()
+            .map(|column_def| (column_def, None));
+    };
+
+    let mut options = Vec::new();
+    loop {
+        let constraint_name = if parser.parse_keyword(Keyword::CONSTRAINT) {
+            Some(parser.parse_identifier()?)
+        } else {
+            None
+        };
+        let Some(option) = parser.parse_optional_column_option()? else {
+            if constraint_name.is_some() {
+                return parser.expected(
+                    "constraint details after CONSTRAINT <name>",
+                    parser.peek_token(),
+                );
+            }
+            break;
+        };
+        options.push(ColumnOptionDef {
+            name: constraint_name,
+            option,
+        });
+    }
+    Ok((
+        ColumnDef {
+            name,
+            data_type,
+            options,
+        },
+        json2_options,
+    ))
 }
 
 /// Parses a comma separated list of string literals.
@@ -750,6 +797,64 @@ mod tests {
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParseOptions;
     use crate::statements::alter::AlterDatabaseOperation;
+
+    #[test]
+    fn test_parse_alter_add_json2_options() {
+        for sql in [
+            "ALTER TABLE t ADD COLUMN j JSON2(max_auto_expanded_paths = 100)",
+            "ALTER TABLE t ADD COLUMN IF NOT EXISTS j JSON2(service STRING) FIRST",
+            "ALTER TABLE t ADD COLUMN j JSON2(max_auto_expanded_paths = 0, service STRING, nested.value BIGINT) NULL AFTER ts, ADD COLUMN n INT",
+            "ALTER TABLE t ADD COLUMN j JSON2(service STRING) CONSTRAINT nullable NULL",
+        ] {
+            let parse = |sql| {
+                ParserContext::create_with_dialect(
+                    sql,
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap()
+                .pop()
+                .unwrap()
+            };
+            let statement = parse(sql);
+            let Statement::AlterTable(alter) = &statement else {
+                unreachable!()
+            };
+            let AlterTableOperation::AddColumns { add_columns } = alter.alter_operation() else {
+                unreachable!()
+            };
+            assert!(add_columns[0].json2_options.is_some());
+            let Statement::AlterTable(roundtrip) = parse(&statement.to_string()) else {
+                unreachable!()
+            };
+            let AlterTableOperation::AddColumns {
+                add_columns: roundtrip_columns,
+            } = roundtrip.alter_operation()
+            else {
+                unreachable!()
+            };
+            for (column, roundtrip_column) in add_columns.iter().zip(roundtrip_columns) {
+                assert_eq!(column.column_def, roundtrip_column.column_def);
+                assert_eq!(column.json2_options, roundtrip_column.json2_options);
+                assert_eq!(column.location, roundtrip_column.location);
+            }
+        }
+        for options in [
+            "max_auto_expanded_paths = -1",
+            "max_auto_expanded_paths = 1, max_auto_expanded_paths = 2",
+            "service TIMESTAMP",
+        ] {
+            let sql = format!("ALTER TABLE t ADD COLUMN j JSON2({options})");
+            assert!(
+                ParserContext::create_with_dialect(
+                    &sql,
+                    &GreptimeDbDialect {},
+                    ParseOptions::default()
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn test_parse_alter_database() {
@@ -967,6 +1072,7 @@ mod tests {
                                     data_type: DataType::Integer(None),
                                     options: vec![],
                                 },
+                                json2_options: None,
                                 location: None,
                                 add_if_not_exists: true,
                             },
@@ -976,6 +1082,7 @@ mod tests {
                                     data_type: DataType::String(None),
                                     options: vec![],
                                 },
+                                json2_options: None,
                                 location: None,
                                 add_if_not_exists: false,
                             },
@@ -985,6 +1092,7 @@ mod tests {
                                     data_type: DataType::Int(None),
                                     options: vec![],
                                 },
+                                json2_options: None,
                                 location: None,
                                 add_if_not_exists: true,
                             },

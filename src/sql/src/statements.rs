@@ -61,7 +61,7 @@ use crate::error::{
     SerializeColumnDefaultConstraintSnafu, SetFulltextOptionSnafu, SetSkippingIndexOptionSnafu,
     SqlCommonSnafu,
 };
-use crate::statements::create::Column;
+use crate::statements::create::{Column, Json2Options};
 pub use crate::statements::option_map::OptionMap;
 pub(crate) use crate::statements::transform::transform_statements;
 
@@ -176,6 +176,7 @@ fn set_json2_extension(column_schema: &mut ColumnSchema, column: &Column) -> Res
 /// Convert `ColumnDef` in sqlparser to `ColumnDef` in gRPC proto.
 pub fn sql_column_def_to_grpc_column_def(
     col: &ColumnDef,
+    json2_options: Option<&Json2Options>,
     timezone: Option<&Timezone>,
 ) -> Result<api::v1::ColumnDef> {
     let name = col.name.value.clone();
@@ -208,9 +209,11 @@ pub fn sql_column_def_to_grpc_column_def(
         SemanticType::Field
     };
 
-    // TODO(fys): Extend the ALTER TABLE ADD COLUMN parser to support JSON2
-    // type hints and pass the parsed JsonSettings through this conversion.
-    let options = json2_extension(&col.data_type, JsonSettings::new_v2()).map(|extension| {
+    let settings = json2_options
+        .map(Json2Options::build_json_settings)
+        .transpose()?
+        .unwrap_or_else(JsonSettings::new_v2);
+    let options = json2_extension(&col.data_type, settings).map(|extension| {
         let mut options = ColumnOptions::default();
         options.options.insert(
             EXTENSION_TYPE_NAME_KEY.to_string(),
@@ -497,7 +500,7 @@ mod tests {
             options: vec![],
         };
 
-        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def, None).unwrap();
+        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def, None, None).unwrap();
 
         assert_eq!("col", grpc_column_def.name);
         assert!(grpc_column_def.is_nullable); // nullable when options are empty
@@ -515,7 +518,7 @@ mod tests {
             }],
         };
 
-        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def, None).unwrap();
+        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def, None, None).unwrap();
         assert!(!grpc_column_def.is_nullable);
 
         // test primary key
@@ -535,7 +538,7 @@ mod tests {
             }],
         };
 
-        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def, None).unwrap();
+        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def, None, None).unwrap();
         assert_eq!(grpc_column_def.semantic_type, SemanticType::Tag as i32);
     }
 
@@ -556,6 +559,7 @@ mod tests {
         // with timezone "Asia/Shanghai"
         let grpc_column_def = sql_column_def_to_grpc_column_def(
             &column_def,
+            None,
             Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap()),
         )
         .unwrap();
@@ -575,7 +579,7 @@ mod tests {
         );
 
         // without timezone
-        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def, None).unwrap();
+        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def, None, None).unwrap();
         assert_eq!("col", grpc_column_def.name);
         assert!(grpc_column_def.is_nullable); // nullable when options are empty
         assert_eq!(
