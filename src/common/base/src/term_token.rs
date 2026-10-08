@@ -127,7 +127,7 @@ fn push_han_tokens<'a>(run: &'a str, tokens: &mut Vec<&'a str>) {
 /// Returns tokens that every text satisfying `matches_term(text, term)` contains,
 /// as produced by [`tokenize`].
 pub fn term_probes(term: &str) -> Vec<String> {
-    // Non-Han terms only match between word boundaries that `ScriptTokenizer` also
+    // Non-Han terms only match between word boundaries that `tokenize` also
     // splits at, so their edge runs are whole tokens. Han-containing terms match
     // as plain substrings and give no such guarantee at their edges.
     let bounded = !term.chars().any(|c| classify_char(c) == CharClass::Han);
@@ -137,7 +137,7 @@ pub fn term_probes(term: &str) -> Vec<String> {
 }
 
 /// Returns tokens that every text satisfying `text LIKE pattern` contains, as
-/// produced by [`ScriptTokenizer`]. `\` escapes the next character, following
+/// produced by [`tokenize`]. `\` escapes the next character, following
 /// arrow's `like` kernel; a trailing `\` is a literal backslash.
 pub fn like_probes(pattern: &str) -> Vec<String> {
     let mut probes = Vec::new();
