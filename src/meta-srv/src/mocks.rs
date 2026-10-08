@@ -96,7 +96,7 @@ pub async fn mock(
         datanode_clients,
         in_memory,
         None,
-        None,
+        Plugins::default(),
     )
     .await
 }
@@ -116,7 +116,7 @@ pub async fn mock_with_client_channel_config(
         datanode_clients,
         in_memory,
         Some(client_channel_config),
-        None,
+        Plugins::default(),
     )
     .await
 }
@@ -139,7 +139,7 @@ pub async fn mock_with_plugins(
         datanode_clients,
         in_memory,
         None,
-        Some(plugins),
+        plugins,
     )
     .await
 }
@@ -151,7 +151,7 @@ async fn mock_inner(
     datanode_clients: Option<Arc<NodeClients>>,
     in_memory: Option<ResettableKvBackendRef>,
     client_channel_config: Option<ChannelConfig>,
-    plugins: Option<Plugins>,
+    plugins: Plugins,
 ) -> MockInfo {
     let server_addr = opts.grpc.server_addr.clone();
     let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
@@ -179,10 +179,7 @@ async fn mock_inner(
         None => builder,
     };
 
-    let builder = match plugins {
-        Some(plugins) => builder.plugins(plugins),
-        None => builder,
-    };
+    let builder = builder.plugins(plugins);
 
     let metasrv = builder.build().await.unwrap();
     metasrv.try_start().await.unwrap();
