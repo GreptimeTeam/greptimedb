@@ -2041,12 +2041,15 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
         let (schema_addr, schema_server, schema_requests) =
             import_http(schema_target.fe_instance().clone(), false).await;
         schema_requests.fail_batch.store(false, Ordering::SeqCst);
+        let schema_state = destination.path().join("schema-only-state.json");
         let mut schema_import = vec![
             "import-v2",
             "--addr",
             &schema_addr,
             "--from",
             &schema_uri,
+            "--state-path",
+            schema_state.to_str().unwrap(),
             "--no-proxy",
             "--progress",
             "never",
@@ -2060,7 +2063,7 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
         let batches = schema_requests.batches.load(Ordering::SeqCst);
         run_data_cli(&schema_import).await.unwrap();
         assert!(schema_requests.batches.load(Ordering::SeqCst) > batches);
-        assert!(!state.exists());
+        assert!(!schema_state.exists());
         assert!(
             values(schema_target.fe_instance(), "SELECT * FROM dashboard")
                 .await
