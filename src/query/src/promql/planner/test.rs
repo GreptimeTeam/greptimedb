@@ -1682,8 +1682,8 @@ async fn single_sqrt() {
     // Negative input is mapped to NaN before DataFusion's `sqrt`, which rejects it.
     indie_query_plan_compare(
         r#"sqrt(some_metric{tag_0!="bar"})"#,
-        "Filter: sqrt(CASE WHEN field_0 < Float64(0) THEN Float64(NaN) ELSE field_0 END) IS NOT NULL [timestamp:Timestamp(ms), sqrt(CASE WHEN field_0 < Float64(0) THEN Float64(NaN) ELSE field_0 END):Float64;N, tag_0:Utf8]\
-            \n  Projection: some_metric.timestamp, sqrt(CASE WHEN some_metric.field_0 < Float64(0) THEN Float64(NaN) ELSE some_metric.field_0 END) AS sqrt(CASE WHEN field_0 < Float64(0) THEN Float64(NaN) ELSE field_0 END), some_metric.tag_0 [timestamp:Timestamp(ms), sqrt(CASE WHEN field_0 < Float64(0) THEN Float64(NaN) ELSE field_0 END):Float64;N, tag_0:Utf8]\
+        "Filter: sqrt(field_0) IS NOT NULL [timestamp:Timestamp(ms), sqrt(field_0):Float64;N, tag_0:Utf8]\
+            \n  Projection: some_metric.timestamp, prom_sqrt(some_metric.field_0) AS sqrt(field_0), some_metric.tag_0 [timestamp:Timestamp(ms), sqrt(field_0):Float64;N, tag_0:Utf8]\
             \n    PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n      PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n        Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
@@ -1822,6 +1822,12 @@ async fn single_rad() {
 //     },
 // },
 async fn do_aggregate_expr_plan(fn_name: &str, plan_name: &str) {
+    do_aggregate_expr_plan_with_display(fn_name, plan_name, plan_name).await;
+}
+
+/// `display_name` is the aggregate function as the plan shows it, `plan_name` the name of the
+/// output column; they differ for PromQL `min`/`max`.
+async fn do_aggregate_expr_plan_with_display(fn_name: &str, plan_name: &str, display_name: &str) {
     let prom_expr = parser::parse(&format!(
         "{fn_name} by (tag_1)(some_metric{{tag_0!=\"bar\"}})",
     ))
@@ -1848,13 +1854,15 @@ async fn do_aggregate_expr_plan(fn_name: &str, plan_name: &str) {
         .unwrap();
     let expected_no_without = String::from(
         "Sort: some_metric.tag_1 ASC NULLS LAST, some_metric.timestamp ASC NULLS LAST [tag_1:Utf8, timestamp:Timestamp(ms), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
-            \n  Aggregate: groupBy=[[some_metric.tag_1, some_metric.timestamp]], aggr=[[TEMPLATE(some_metric.field_0), TEMPLATE(some_metric.field_1)]] [tag_1:Utf8, timestamp:Timestamp(ms), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
+            \n  Aggregate: groupBy=[[some_metric.tag_1, some_metric.timestamp]], aggr=[[DISPLAY(some_metric.field_0), DISPLAY(some_metric.field_1)]] [tag_1:Utf8, timestamp:Timestamp(ms), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
             \n    PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
             \n      PromSeriesDivide: tags=[\"tag_0\", \"tag_1\"] [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
             \n        Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.tag_1 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
             \n          Filter: some_metric.tag_0 != Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
             \n            TableScan: some_metric [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]"
-    ).replace("TEMPLATE", plan_name);
+    )
+    .replace("TEMPLATE", plan_name)
+    .replace("DISPLAY", display_name);
     assert_eq!(
         plan.display_indent_schema().to_string(),
         expected_no_without
@@ -1877,13 +1885,14 @@ async fn do_aggregate_expr_plan(fn_name: &str, plan_name: &str) {
         .unwrap();
     let expected_without = String::from(
         "Sort: some_metric.tag_0 ASC NULLS LAST, some_metric.timestamp ASC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(ms), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
-            \n  Aggregate: groupBy=[[some_metric.tag_0, some_metric.timestamp]], aggr=[[TEMPLATE(some_metric.field_0), TEMPLATE(some_metric.field_1)]] [tag_0:Utf8, timestamp:Timestamp(ms), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
+            \n  Aggregate: groupBy=[[some_metric.tag_0, some_metric.timestamp]], aggr=[[DISPLAY(some_metric.field_0), DISPLAY(some_metric.field_1)]] [tag_0:Utf8, timestamp:Timestamp(ms), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
             \n    PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
             \n      PromSeriesDivide: tags=[\"tag_0\", \"tag_1\"] [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
             \n        Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.tag_1 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
             \n          Filter: some_metric.tag_0 != Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
             \n            TableScan: some_metric [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]"
-    ).replace("TEMPLATE", plan_name);
+    ).replace("TEMPLATE", plan_name)
+    .replace("DISPLAY", display_name);
     assert_eq!(plan.display_indent_schema().to_string(), expected_without);
 }
 
@@ -3415,11 +3424,11 @@ async fn nested_supported_inner_aggs_rewrite_apply_for_tsid_input() {
         ),
         (
             "count(min(some_metric) by (tag_0))",
-            "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(prom_min(some_metric.field_0))]]",
+            "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(min(some_metric.field_0))]]",
         ),
         (
             "count(max(some_metric) by (tag_0))",
-            "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(prom_max(some_metric.field_0))]]",
+            "Aggregate: groupBy=[[some_metric.timestamp]], aggr=[[count(Int64(1)) AS count(max(some_metric.field_0))]]",
         ),
         (
             "count(stddev(some_metric) by (tag_0))",
@@ -3909,12 +3918,12 @@ async fn aggregate_count() {
 
 #[tokio::test]
 async fn aggregate_min() {
-    do_aggregate_expr_plan("min", "prom_min").await;
+    do_aggregate_expr_plan_with_display("min", "min", "prom_min").await;
 }
 
 #[tokio::test]
 async fn aggregate_max() {
-    do_aggregate_expr_plan("max", "prom_max").await;
+    do_aggregate_expr_plan_with_display("max", "max", "prom_max").await;
 }
 
 #[tokio::test]
@@ -4092,7 +4101,7 @@ async fn binary_op_literal_literal() {
 async fn simple_bool_grammar() {
     let query = "some_metric != bool 1.2345";
     let expected = String::from(
-        "Projection: some_metric.tag_0, some_metric.timestamp, CAST(some_metric.field_0 != Float64(1.2345) OR isnan(some_metric.field_0) OR isnan(Float64(1.2345)) AS Float64) AS field_0 != Float64(1.2345) OR isnan(field_0) OR isnan(Float64(1.2345)) [tag_0:Utf8, timestamp:Timestamp(ms), field_0 != Float64(1.2345) OR isnan(field_0) OR isnan(Float64(1.2345)):Float64;N]\
+        "Projection: some_metric.tag_0, some_metric.timestamp, CAST(prom_ne(some_metric.field_0, Float64(1.2345)) AS Float64) AS field_0 != Float64(1.2345) [tag_0:Utf8, timestamp:Timestamp(ms), field_0 != Float64(1.2345):Float64;N]\
             \n  PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n    PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n      Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
@@ -4107,7 +4116,7 @@ async fn simple_bool_grammar() {
 async fn bool_with_additional_arithmetic() {
     let query = "some_metric + (1 == bool 2)";
     let expected = String::from(
-        "Projection: some_metric.tag_0, some_metric.timestamp, CAST(some_metric.field_0 AS Float64) + CAST(Float64(1) = Float64(2) AND NOT isnan(Float64(1)) OR isnan(Float64(2)) AS Float64) AS field_0 + Float64(1) = Float64(2) AND NOT isnan(Float64(1)) OR isnan(Float64(2)) [tag_0:Utf8, timestamp:Timestamp(ms), field_0 + Float64(1) = Float64(2) AND NOT isnan(Float64(1)) OR isnan(Float64(2)):Float64;N]\
+        "Projection: some_metric.tag_0, some_metric.timestamp, CAST(some_metric.field_0 AS Float64) + CAST(prom_eq(Float64(1), Float64(2)) AS Float64) AS field_0 + Float64(1) = Float64(2) [tag_0:Utf8, timestamp:Timestamp(ms), field_0 + Float64(1) = Float64(2):Float64;N]\
             \n  PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n    PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n      Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
@@ -5075,7 +5084,7 @@ async fn native_histogram_mixed_field_table_behaves() {
 async fn less_filter_on_value() {
     let query = "some_metric < 1.2345";
     let expected = String::from(
-        "Filter: some_metric.field_0 < Float64(1.2345) AND NOT isnan(some_metric.field_0) OR isnan(Float64(1.2345)) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+        "Filter: prom_lt(some_metric.field_0, Float64(1.2345)) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n  PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n    PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n      Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\

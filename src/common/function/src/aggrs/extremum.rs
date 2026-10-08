@@ -24,6 +24,8 @@ use std::sync::Arc;
 use datafusion::arrow::array::{ArrayRef, AsArray};
 use datafusion::arrow::datatypes::{DataType, Field, FieldRef, Float64Type};
 use datafusion::error::Result as DfResult;
+use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
+use datafusion::logical_expr::expr::AggregateFunctionParams;
 use datafusion::logical_expr::function::{AccumulatorArgs, StateFieldsArgs};
 use datafusion::logical_expr::{
     Accumulator, AggregateUDF, AggregateUDFImpl, GroupsAccumulator, Signature, Volatility,
@@ -93,6 +95,15 @@ impl AggregateUDFImpl for Extremum {
 
     fn return_type(&self, _arg_types: &[DataType]) -> DfResult<DataType> {
         Ok(DataType::Float64)
+    }
+
+    /// Names the output like the builtin `min`/`max`, so result columns do not change.
+    fn schema_name(&self, params: &AggregateFunctionParams) -> DfResult<String> {
+        if self.is_max {
+            max_udaf().schema_name(params)
+        } else {
+            min_udaf().schema_name(params)
+        }
     }
 
     fn accumulator(&self, _acc_args: AccumulatorArgs) -> DfResult<Box<dyn Accumulator>> {

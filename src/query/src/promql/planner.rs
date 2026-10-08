@@ -71,18 +71,18 @@ use promql::extension_plan::{
 };
 use promql::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
-    IDelta, Increase, LastOverTime, MatchGroupViolation, MaxOverTime, MinOverTime, MixedRange,
-    NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
-    NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime, NativeHistogramChanges,
-    NativeHistogramCount, NativeHistogramCountOverTime, NativeHistogramDelta,
-    NativeHistogramDivScalar, NativeHistogramDrop, NativeHistogramEq, NativeHistogramIDelta,
-    NativeHistogramIRate, NativeHistogramIncrease, NativeHistogramLastOverTime,
-    NativeHistogramMulScalar, NativeHistogramNeg, NativeHistogramNotEq,
-    NativeHistogramPresentOverTime, NativeHistogramRate, NativeHistogramResets,
-    NativeHistogramScalarMul, NativeHistogramStddev, NativeHistogramStdvar, NativeHistogramSub,
-    NativeHistogramSum, NativeHistogramSumOverTime, NativeHistogramToString, PredictLinear,
-    PresentOverTime, PromqlFloatToString, QuantileOverTime, Rate, Resets, Round, StddevOverTime,
-    StdvarOverTime, SumOverTime, UniqueMatchGroup, quantile_udaf,
+    IDelta, IeeeComparison, IeeeSqrt, Increase, LastOverTime, MatchGroupViolation, MaxOverTime,
+    MinOverTime, MixedRange, NativeHistogramAbsentOverTime, NativeHistogramAdd,
+    NativeHistogramAggAvg, NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime,
+    NativeHistogramChanges, NativeHistogramCount, NativeHistogramCountOverTime,
+    NativeHistogramDelta, NativeHistogramDivScalar, NativeHistogramDrop, NativeHistogramEq,
+    NativeHistogramIDelta, NativeHistogramIRate, NativeHistogramIncrease,
+    NativeHistogramLastOverTime, NativeHistogramMulScalar, NativeHistogramNeg,
+    NativeHistogramNotEq, NativeHistogramPresentOverTime, NativeHistogramRate,
+    NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev, NativeHistogramStdvar,
+    NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime, NativeHistogramToString,
+    PredictLinear, PresentOverTime, PromqlFloatToString, QuantileOverTime, Rate, Resets, Round,
+    StddevOverTime, StdvarOverTime, SumOverTime, UniqueMatchGroup, quantile_udaf,
 };
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
 use promql_parser::parser::token::TokenType;
@@ -3719,6 +3719,10 @@ impl PromPlanner {
                 }
                 ScalarFunc::DataFusionUdf(Arc::new(Round::scalar_udf()))
             }
+            // DataFusion's `sqrt` rejects negative input; PromQL returns NaN for it.
+            "sqrt" if !self.all_field_columns_are_native_histograms(input_schema) => {
+                ScalarFunc::DataFusionUdf(Arc::new(IeeeSqrt::scalar_udf()))
+            }
             "rad" | "deg" | "sgn" if self.all_field_columns_are_native_histograms(input_schema) => {
                 ScalarFunc::DataFusionUdf(native_histogram_drop_udf(func.name))
             }
@@ -3778,14 +3782,6 @@ impl PromPlanner {
 
         for value in &self.ctx.field_columns {
             let col_expr = DfExpr::Column(Column::from_name(value));
-            // DataFusion's `sqrt` rejects negative input; PromQL returns NaN for it.
-            let col_expr = if func.name == "sqrt" {
-                when(col_expr.clone().lt(lit(0.0_f64)), lit(f64::NAN))
-                    .otherwise(col_expr)
-                    .context(DataFusionPlanningSnafu)?
-            } else {
-                col_expr
-            };
             let value_is_histogram = Self::field_column_is_native_histogram(input_schema, value);
 
             match scalar_func.clone() {
@@ -5042,19 +5038,12 @@ impl PromPlanner {
         }
     }
 
-    /// Compares two float expressions with IEEE 754 semantics, as PromQL does.
-    ///
-    /// Arrow compares floats by total order, where NaN equals NaN and is greater than `+Inf`.
-    /// Under IEEE 754 every comparison involving NaN is false, except `!=`, which is true.
+    /// Compares two expressions with IEEE 754 semantics, as PromQL does; see [`IeeeComparison`].
     fn ieee_comparison(lhs: DfExpr, op: Operator, rhs: DfExpr) -> DfExpr {
-        let any_nan = datafusion_functions::math::expr_fn::isnan(lhs.clone())
-            .or(datafusion_functions::math::expr_fn::isnan(rhs.clone()));
-        let comparison = DfExpr::BinaryExpr(BinaryExpr::new(Box::new(lhs), op, Box::new(rhs)));
-        if op == Operator::NotEq {
-            comparison.or(any_nan)
-        } else {
-            comparison.and(!any_nan)
-        }
+        DfExpr::ScalarFunction(ScalarFunction {
+            func: Arc::new(IeeeComparison::scalar_udf(op)),
+            args: vec![lhs, rhs],
+        })
     }
 
     /// Check if the given op is a [comparison operator](https://prometheus.io/docs/prometheus/latest/querying/operators/#comparison-binary-operators).
