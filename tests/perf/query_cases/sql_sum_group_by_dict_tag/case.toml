@@ -1,0 +1,125 @@
+# Dictionary-tag SUM GROUP BY on immutable flat SSTs. Both benchmark arms receive
+# the same materialized data. The deterministic-wave generator is reproducible,
+# but does not reproduce any original counter-value distribution exactly.
+# Expected shape: 16 groups x 131072 rows for dc, 4096 groups x 512 rows for
+# instance, and 2097152 rows for the ungrouped control. Raw sample rows are
+# retained; audit complete normalized results, including sums with an
+# appropriate floating-point tolerance, rather than counts alone. Success only
+# checks requests and configured thresholds; it is not a speedup claim. The
+# workload targets reduced dictionary mapping work at this scale; actual Arc
+# reuse and dictionary D/R need runtime proof.
+
+[case]
+name = "sql_sum_group_by_dict_tag"
+description = "dictionary-tag SUM GROUP BY on immutable flat SSTs"
+
+[scenario]
+kind = "direct_readable_sst"
+seed = 25652
+
+[[scenario.tables]]
+database = "public"
+name = "sql_sum_group_by_dict_tag"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["dc", "device", "instance"]
+time_index = "ts"
+
+[[scenario.tables.columns]]
+name = "dc"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 16, prefix = "dc" }
+
+[[scenario.tables.columns]]
+name = "device"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 4, prefix = "device" }
+
+# instance in the primary key retains 4096 distinct series; dc/device alone
+# would represent only 16 actual keys.
+[[scenario.tables.columns]]
+name = "instance"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 4096, prefix = "instance" }
+
+[[scenario.tables.columns]]
+name = "val"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 100.0 }
+
+[[scenario.tables.columns]]
+name = "ts"
+type = "TIMESTAMP(3)"
+semantic = "timestamp"
+
+[scenario.layout]
+regions = 1
+sst_count = 2
+rows_per_sst = 1048576
+row_group_size = 8192
+series_count = 4096
+start_unix_nanos = 1704067200000000000
+step_nanos = 15000000000
+time_range_layout = "non_overlapping_per_sst"
+series_layout = "timestamp_major"
+
+[[scenario.queries]]
+name = "group_by_dc"
+kind = "sql"
+query = "SELECT dc, SUM(val) AS sum_val, COUNT(*) AS row_count FROM sql_sum_group_by_dict_tag GROUP BY dc ORDER BY dc"
+warmup = 3
+iterations = 20
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10
+
+# Intended Utf8 control; verify the actual optimized plan and Arrow arrays at
+# runtime rather than assuming the cast survives planning.
+[[scenario.queries]]
+name = "group_by_dc_utf8_control"
+kind = "sql"
+query = "SELECT CAST(dc AS VARCHAR) AS dc, SUM(val) AS sum_val, COUNT(*) AS row_count FROM sql_sum_group_by_dict_tag GROUP BY CAST(dc AS VARCHAR) ORDER BY dc"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10
+
+[[scenario.queries]]
+name = "ungrouped_control"
+kind = "sql"
+query = "SELECT SUM(val) AS sum_val, COUNT(*) AS row_count FROM sql_sum_group_by_dict_tag"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10
+
+[[scenario.queries]]
+name = "group_by_instance_high_cardinality"
+kind = "sql"
+query = "SELECT instance, SUM(val) AS sum_val, COUNT(*) AS row_count FROM sql_sum_group_by_dict_tag GROUP BY instance ORDER BY instance"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10
+
+[[scenario.queries]]
+name = "explain_group_by_dc"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT dc, SUM(val) AS sum_val, COUNT(*) AS row_count FROM sql_sum_group_by_dict_tag GROUP BY dc ORDER BY dc"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "explain_group_by_dc_utf8_control"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT CAST(dc AS VARCHAR) AS dc, SUM(val) AS sum_val, COUNT(*) AS row_count FROM sql_sum_group_by_dict_tag GROUP BY CAST(dc AS VARCHAR) ORDER BY dc"
+warmup = 0
+iterations = 1
