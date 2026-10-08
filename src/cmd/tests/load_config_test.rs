@@ -476,6 +476,261 @@ fn test_load_standalone_example_config() {
     similar_asserts::assert_eq!(options, expected);
 }
 
+/// Renders an example config with its `#+` options enabled, as `config.md`
+/// lists them. With `drop_none_default`, options annotated with
+/// `@toml2docs:none-default` are removed, because `config.md` does not present
+/// their example value as the default.
+fn render_example(example: &str, drop_none_default: bool) -> String {
+    let mut rendered = String::new();
+    let mut none_default = false;
+    for line in example.lines() {
+        let line = line.trim_start();
+        if line.starts_with("##") {
+            none_default |= line.contains("@toml2docs:none-default");
+            continue;
+        }
+        let line = line.strip_prefix("#+").map_or(line, str::trim_start);
+        let is_option = !line.starts_with('[') && line.contains('=');
+        if !(is_option && drop_none_default && none_default) {
+            rendered.push_str(line);
+            rendered.push('\n');
+        }
+        none_default = false;
+    }
+    rendered
+}
+
+/// Flattens leaf values into dotted paths. Arrays of tables such as
+/// `region_engine` are merged, since each element is keyed by its engine name.
+fn leaf_values(value: &toml::Value, prefix: &str, leaves: &mut Vec<(String, toml::Value)>) {
+    match value {
+        toml::Value::Table(table) => {
+            for (key, value) in table {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                leaf_values(value, &path, leaves);
+            }
+        }
+        toml::Value::Array(array)
+            if array.iter().all(toml::Value::is_table) && !array.is_empty() =>
+        {
+            for element in array {
+                leaf_values(element, prefix, leaves);
+            }
+        }
+        _ => leaves.push((prefix.to_string(), value.clone())),
+    }
+}
+
+/// Removes the option at a dotted path produced by [`leaf_values`].
+fn remove_leaf(value: &mut toml::Value, path: &str) -> bool {
+    match value {
+        toml::Value::Array(array) => array.iter_mut().any(|element| remove_leaf(element, path)),
+        toml::Value::Table(table) => match path.split_once('.') {
+            None => table.remove(path).is_some(),
+            Some((head, rest)) => table
+                .get_mut(head)
+                .is_some_and(|value| remove_leaf(value, rest)),
+        },
+        _ => false,
+    }
+}
+
+fn load_as_leaves<T>(
+    config: Option<&str>,
+) -> common_config::error::Result<std::collections::HashMap<String, toml::Value>>
+where
+    T: Configurable + serde::Serialize,
+{
+    let file = config.map(|config| {
+        let mut file = create_named_temp_file();
+        file.write_all(config.as_bytes()).unwrap();
+        file
+    });
+    let options = GreptimeOptions::<T>::load_layered_options(
+        file.as_ref().map(|file| file.path().to_str().unwrap()),
+        "",
+    )?;
+    let mut leaves = Vec::new();
+    leaf_values(&toml::Value::try_from(&options).unwrap(), "", &mut leaves);
+    Ok(leaves.into_iter().collect())
+}
+
+/// Returns the default of an option inside the example's other settings, so
+/// that options in sections absent by default still have one to compare with.
+/// Removes the closest enclosing table that still loads without the option.
+fn default_within_example<T>(full: &toml::Value, path: &str) -> Option<toml::Value>
+where
+    T: Configurable + serde::Serialize,
+{
+    let mut removed = path;
+    loop {
+        let mut without = full.clone();
+        assert!(remove_leaf(&mut without, removed));
+        if let Ok(defaults) = load_as_leaves::<T>(Some(&toml::to_string(&without).unwrap())) {
+            return defaults.get(path).cloned();
+        }
+        removed = removed
+            .rsplit_once('.')
+            .unwrap_or_else(|| panic!("the example does not load without `{path}`"))
+            .0;
+    }
+}
+
+/// Checks that every option in an example config exists, and that every value
+/// `config.md` presents as a default is the actual default.
+///
+/// `variants` lists tagged sections, e.g. `("wal", "provider", ["kafka"])`,
+/// whose options only deserialize under a specific tag value.
+fn check_example_defaults<T>(name: &str, variants: &[(&str, &str, &[&str])]) -> Vec<String>
+where
+    T: Configurable + serde::Serialize,
+{
+    let example = std::fs::read_to_string(common_test_util::find_workspace_path(&format!(
+        "config/{name}"
+    )))
+    .unwrap();
+    let full: toml::Value = toml::from_str(&render_example(&example, false)).unwrap();
+    let documented: toml::Value = toml::from_str(&render_example(&example, true)).unwrap();
+
+    // (options loaded from the example, options loaded without config) per variant
+    let mut loaded = vec![(
+        load_as_leaves::<T>(Some(&toml::to_string(&full).unwrap())).unwrap(),
+        load_as_leaves::<T>(None).unwrap(),
+    )];
+    for (section, tag, values) in variants {
+        for value in *values {
+            let mut variant = full.clone();
+            variant[section][tag] = toml::Value::String(value.to_string());
+            loaded.push((
+                load_as_leaves::<T>(Some(&toml::to_string(&variant).unwrap())).unwrap(),
+                load_as_leaves::<T>(Some(&format!("[{section}]\n{tag} = \"{value}\"\n"))).unwrap(),
+            ));
+        }
+    }
+
+    // Deserialize-only fields, invisible in the serialized options.
+    const SKIP_SERIALIZING: &[&str] = &[
+        "storage.access_key_id",
+        "storage.secret_access_key",
+        "storage.access_key_secret",
+        "storage.account_name",
+        "storage.account_key",
+        "storage.credential_path",
+        "storage.credential",
+        "region_engine.mito.inverted_index.intermediate_path",
+    ];
+
+    let mut errors = Vec::new();
+    let mut full_leaves = Vec::new();
+    leaf_values(&full, "", &mut full_leaves);
+    for (path, _) in full_leaves {
+        if SKIP_SERIALIZING.contains(&path.as_str())
+            || (path == "tracing.tokio_console_addr" && !cfg!(feature = "tokio-console"))
+        {
+            continue;
+        }
+        if !loaded
+            .iter()
+            .any(|(example, _)| example.contains_key(&path))
+        {
+            errors.push(format!("{name}: `{path}` is not a known option"));
+        }
+    }
+
+    // Options left unset by default and resolved where they are used.
+    let resolved_at_runtime: [(&str, toml::Value); 7] = [
+        (
+            "logging.dir",
+            format!("{DEFAULT_DATA_HOME}/{DEFAULT_LOGGING_DIR}").into(),
+        ),
+        ("logging.otlp_endpoint", DEFAULT_OTLP_HTTP_ENDPOINT.into()),
+        ("logging.otlp_export_protocol", "http".into()),
+        ("logging.tracing_sample_ratio.default_ratio", 1.0.into()),
+        ("wal.sync_period", "5s".into()),
+        (
+            "storage.copy_root",
+            format!("{DEFAULT_DATA_HOME}/copy").into(),
+        ),
+        ("flow.batching_mode.frontend_tls.enabled", false.into()),
+    ];
+
+    let mut documented_leaves = Vec::new();
+    leaf_values(&documented, "", &mut documented_leaves);
+    for (path, documented_value) in documented_leaves {
+        if SKIP_SERIALIZING.contains(&path.as_str()) {
+            continue;
+        }
+        if let Some((_, resolved)) = resolved_at_runtime.iter().find(|(p, _)| *p == path) {
+            if &documented_value != resolved {
+                errors.push(format!(
+                    "{name}: `{path}` is documented as default `{documented_value}`, but resolves to `{resolved}`"
+                ));
+            }
+            continue;
+        }
+        let mut pairs = loaded
+            .iter()
+            .filter_map(|(example, default)| Some((example.get(&path)?, default.get(&path)?)))
+            .map(|(example, default)| (example.clone(), default.clone()))
+            .collect::<Vec<_>>();
+        if pairs.is_empty() {
+            // The option sits in a section that is absent without config, or
+            // is itself optional.
+            match default_within_example::<T>(&full, &path) {
+                Some(default) => pairs.push((loaded[0].0[&path].clone(), default)),
+                None => {
+                    errors.push(format!(
+                        "{name}: `{path}` has no default to compare with; annotate it with \
+                         `@toml2docs:none-default` or list its runtime default in this test"
+                    ));
+                    continue;
+                }
+            }
+        }
+        if pairs.iter().all(|(example, default)| example != default) {
+            let (example, default) = &pairs[0];
+            errors.push(format!(
+                "{name}: `{path}` is documented as default `{example}`, but the default is `{default}`; \
+                 fix the value or annotate it with `@toml2docs:none-default`"
+            ));
+        }
+    }
+    errors
+}
+
+// The examples document HDFS storage options.
+#[cfg(feature = "hdfs-object-store")]
+#[test]
+fn test_example_configs_document_actual_defaults() {
+    const WAL: (&str, &str, &[&str]) = ("wal", "provider", &["kafka", "experimental_object_store"]);
+    const STORAGE: (&str, &str, &[&str]) =
+        ("storage", "type", &["S3", "Oss", "Azblob", "Gcs", "Hdfs"]);
+
+    let mut errors =
+        check_example_defaults::<StandaloneOptions>("standalone.example.toml", &[WAL, STORAGE]);
+    errors.extend(check_example_defaults::<FrontendOptions>(
+        "frontend.example.toml",
+        &[],
+    ));
+    errors.extend(check_example_defaults::<DatanodeOptions>(
+        "datanode.example.toml",
+        &[WAL, STORAGE],
+    ));
+    errors.extend(check_example_defaults::<MetasrvOptions>(
+        "metasrv.example.toml",
+        &[("wal", "provider", &["kafka"])],
+    ));
+    errors.extend(check_example_defaults::<FlownodeOptions>(
+        "flownode.example.toml",
+        &[],
+    ));
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+}
+
 #[test]
 fn test_load_removed_histogram_options() {
     for enabled in [false, true] {
