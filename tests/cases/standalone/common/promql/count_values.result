@@ -84,7 +84,7 @@ TQL EVAL (0, 15, '5s') abs(count_values("v", http_requests));
 TQL EVAL (0, 15, '5s') round(count_values("v", http_requests));
 
 +---------------------+-------------------------------------------------+-----+
-| ts                  | prom_round(count(http_requests.val),Float64(0)) | v   |
+| ts                  | prom_round(count(http_requests.val),Float64(1)) | v   |
 +---------------------+-------------------------------------------------+-----+
 | 1970-01-01T00:00:00 | 1.0                                             | 401 |
 | 1970-01-01T00:00:00 | 3.0                                             | 200 |
