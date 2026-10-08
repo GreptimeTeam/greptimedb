@@ -1074,13 +1074,16 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use async_trait::async_trait;
+    use common_error::ext::{BoxedError, PlainError};
     use common_query::OutputMeta;
+    use common_telemetry::tracing::instrument::WithSubscriber;
     use datafusion_expr::LogicalPlan;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{BinaryVector, UInt32Vector, VectorRef};
     use futures::stream;
     use query::query_engine::DescribeResult;
+    use snafu::IntoError;
 
     use super::*;
     use crate::query_handler::sql::SqlQueryHandler;
@@ -1093,6 +1096,12 @@ mod tests {
     impl SqlQueryHandler for TestSqlQueryHandler {
         async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
             std::mem::take(&mut *self.outputs.lock().unwrap())
+        }
+
+        async fn create_logical_tables(&self, _: &str, _: QueryContextRef) -> Result<Vec<Output>> {
+            std::mem::take(&mut *self.outputs.lock().unwrap())
+                .into_iter()
+                .collect()
         }
 
         async fn do_analyze_stream_query(&self, _: &str, _: QueryContextRef) -> Result<Output> {
@@ -1146,6 +1155,61 @@ mod tests {
             Form(SqlQuery::default()),
         )
         .await
+    }
+
+    #[tokio::test]
+    async fn test_logical_ddl_logs_diagnostics_without_exposing_sql_or_response_details() {
+        let sql = "CREATE TABLE logs (ts TIMESTAMP TIME INDEX) ENGINE=metric WITH (on_physical_table='request-only-value')";
+        for (status, level) in [
+            (StatusCode::InvalidArguments, "WARN"),
+            (StatusCode::Internal, "ERROR"),
+        ] {
+            let logs = tempfile::NamedTempFile::new().unwrap();
+            let writer = logs.reopen().unwrap();
+            let subscriber = common_telemetry::tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(move || writer.try_clone().unwrap())
+                .finish();
+            let error = crate::error::ExecuteQuerySnafu.into_error(BoxedError::new(
+                PlainError::new("sensitive-option-value".to_string(), status),
+            ));
+            let response = create_logical_tables(
+                State(ApiState {
+                    sql_handler: Arc::new(TestSqlQueryHandler {
+                        outputs: Mutex::new(vec![Err(error)]),
+                    }),
+                }),
+                Extension(QueryContext::with_db_name(None)),
+                Ok(Form(LogicalTableDdl {
+                    sql: Some(sql.to_string()),
+                    db: None,
+                })),
+            )
+            .with_subscriber(subscriber)
+            .await
+            .into_response();
+            let diagnostics = std::fs::read_to_string(logs.path()).unwrap();
+            assert!(diagnostics.contains(level), "{diagnostics}");
+            assert!(
+                diagnostics.contains("Failed to execute query"),
+                "{diagnostics}"
+            );
+            assert!(
+                diagnostics.contains("sensitive-option-value"),
+                "{diagnostics}"
+            );
+            assert!(!diagnostics.contains(sql), "{diagnostics}");
+            assert!(!diagnostics.contains("request-only-value"), "{diagnostics}");
+            assert!(!format!("{:?}", response.headers()).contains("sensitive-option-value"));
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["code"], status as u32);
+            assert_eq!(body["error"], "logical-table batch failed");
+            assert!(body.get("output").is_none());
+        }
     }
 
     fn number_batches() -> RecordBatches {
