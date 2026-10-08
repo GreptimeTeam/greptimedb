@@ -2032,13 +2032,42 @@ GROUP BY l.number, time_window
             .expect("task drop notifier should fire");
         assert!(!batching_engine.flow_exist_inner(9423).await);
 
-        tokio::time::timeout(
+        let (detached_orphan, detached_shutdown_tx) = new_test_task(9425).await;
+        let detached_drop_rx = install_abort_observed_handle(&detached_orphan).await;
+        batching_engine
+            .runtime
+            .write()
+            .await
+            .insert(9425, detached_orphan, detached_shutdown_tx);
+        batching_engine
+            .runtime
+            .write()
+            .await
+            .shutdown_txs
+            .remove(&9425);
+        let detach_error = tokio::time::timeout(
             TEST_TIMEOUT,
-            crate::engine::FlowEngine::remove_flow(dual_engine.as_ref(), 9422),
+            crate::engine::FlowEngine::remove_flow(dual_engine.as_ref(), 9425),
         )
         .await
-        .expect("repeated orphan removal should return")
-        .expect("repeated removal should be idempotent");
+        .expect("DROP after detach should return an error, not wait on its checker")
+        .expect_err("missing shutdown sender should be reported");
+        assert!(matches!(detach_error, Error::Unexpected { .. }));
+        tokio::time::timeout(TEST_TIMEOUT, detached_drop_rx)
+            .await
+            .expect("detached task should still be stopped")
+            .expect("task drop notifier should fire");
+        assert!(!batching_engine.flow_exist_inner(9425).await);
+
+        for flow_id in [9422, 9425] {
+            tokio::time::timeout(
+                TEST_TIMEOUT,
+                crate::engine::FlowEngine::remove_flow(dual_engine.as_ref(), flow_id),
+            )
+            .await
+            .expect("repeated orphan removal should return")
+            .expect("repeated removal should be idempotent");
+        }
         let flush = tokio::time::timeout(
             TEST_TIMEOUT,
             crate::engine::FlowEngine::flush_flow(dual_engine.as_ref(), 9422),
