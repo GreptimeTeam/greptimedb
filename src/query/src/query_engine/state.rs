@@ -186,7 +186,6 @@ impl QueryEngineState {
                 .extensions
                 .insert(DistPlannerOptions {
                     allow_query_fallback: true,
-                    ..Default::default()
                 });
         }
 
