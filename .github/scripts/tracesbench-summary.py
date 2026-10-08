@@ -126,6 +126,8 @@ def lifecycle(report, runs, root, targets=TARGETS):
         for run in selected:
             load = run.get('load', {})
             ingest = load.get('ingest', {})
+            if target == 'tempo' and 'ingest' not in load:
+                ingest = load.get('transport', {}).get('ingest', {})
             health = run.get('post_load_health', {})
             execution = run.get('execution', {})
             start, finish = run.get('started_unix_ns'), run.get('finished_unix_ns')
