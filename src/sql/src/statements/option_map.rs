@@ -143,7 +143,7 @@ impl OptionMap {
     }
 
     /// Streams the same pairs as `kv_pairs`, or all actual values for size validation.
-    pub(super) fn write_sql(
+    pub(crate) fn write_sql(
         &self,
         f: &mut dyn std::fmt::Write,
         separator: &str,

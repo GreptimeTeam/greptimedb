@@ -944,7 +944,7 @@ impl From<std::io::Error> for Error {
     }
 }
 
-fn log_error_if_necessary(error: &Error) {
+pub(crate) fn log_error_if_necessary(error: &Error) {
     if error.status_code().should_log_error() {
         error!(error; "Failed to handle HTTP request ");
     } else {

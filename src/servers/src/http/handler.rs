@@ -44,7 +44,10 @@ use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
 use tokio::sync::{Notify, watch};
 
-use crate::error::{CollectRecordbatchSnafu, FailedToParseQuerySnafu, InvalidQuerySnafu, Result};
+use crate::error::{
+    CollectRecordbatchSnafu, FailedToParseQuerySnafu, InvalidQuerySnafu, Result,
+    log_error_if_necessary,
+};
 use crate::http::header::collect_plan_metrics;
 use crate::http::result::arrow_result::ArrowResponse;
 use crate::http::result::csv_result::CsvResponse;
@@ -289,7 +292,10 @@ pub async fn create_logical_tables(
         }
         other => {
             let status = match other {
-                Err(error) => error.status_code(),
+                Err(error) => {
+                    log_error_if_necessary(&error);
+                    error.status_code()
+                }
                 Ok(_) => StatusCode::Internal,
             };
             return HttpResponse::Error(
