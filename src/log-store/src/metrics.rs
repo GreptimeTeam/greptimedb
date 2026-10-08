@@ -89,4 +89,12 @@ lazy_static! {
         &[LOGSTORE_LABEL, PARTITION_LABEL],
     )
     .unwrap();
+
+    /// Counter of segments a read of the object store logstore skipped because
+    /// they did not decode.
+    pub static ref METRIC_OBJECT_STORE_WAL_SKIPPED_SEGMENTS_TOTAL: IntCounter = register_int_counter!(
+        "greptime_logstore_object_store_wal_skipped_segments_total",
+        "object store logstore skipped corrupted segments total",
+    )
+    .unwrap();
 }
