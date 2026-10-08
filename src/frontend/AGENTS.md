@@ -57,7 +57,9 @@ remote datanodes via `operator`/`client`.
 
 - **Logical-table batching** (`instance/logical_batcher.rs`): `Services` initializes
   one shared batcher for opted-in HTTP Prom and nonlegacy OTLP metric-engine
-  writes. OTLP checks operator eligibility and falls back for incompatible tables.
+  writes. Downstream routers can initialize it when enabling replacement endpoints.
+  `Instance::handle_otlp_metric_row_inserts` shares OTLP eligibility and dispatch
+  between converters and falls back for incompatible tables.
   The schema adapter holds a weak instance reference to avoid an ownership cycle.
 
 - **Table batching** (`instance/builder.rs`): protocol entry points opt in through

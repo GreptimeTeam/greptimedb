@@ -225,7 +225,7 @@ pub fn is_api_listener_path(path: &str) -> bool {
 struct LogicalBatchingProtocols(Vec<BatchingProtocol>);
 
 /// Sets a local-only write selector after authentication creates the context.
-async fn set_http_write_batching(
+pub async fn set_http_write_batching(
     State(protocol): State<BatchingProtocol>,
     mut req: Request,
     next: Next,
