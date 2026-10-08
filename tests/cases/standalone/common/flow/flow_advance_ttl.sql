@@ -209,16 +209,16 @@ DROP TABLE out_distinct_auto_sink;
 CREATE TABLE distinct_auto_sink_pk (
     v INT,
     k INT,
-    other INT,
+    extra_value INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP TIME INDEX,
     PRIMARY KEY (v, k)
 ) WITH ('ttl' = 'instant');
 
 CREATE FLOW test_distinct_auto_sink_pk SINK TO out_distinct_auto_sink_pk AS
-SELECT DISTINCT v, other FROM distinct_auto_sink_pk;
+SELECT DISTINCT v, extra_value FROM distinct_auto_sink_pk;
 
-INSERT INTO distinct_auto_sink_pk (v, k, other)
-SELECT number % 10, number, number FROM numbers LIMIT 1000;
+INSERT INTO distinct_auto_sink_pk (v, k, extra_value)
+SELECT number % 10 AS v, number AS k, number AS extra_value FROM numbers LIMIT 1000;
 
 -- Mirror inserts reach the flownode asynchronously; wait before flushing.
 -- SQLNESS SLEEP 3s
@@ -227,10 +227,10 @@ ADMIN FLUSH_FLOW('test_distinct_auto_sink_pk');
 
 SELECT
     count(*) AS rows,
-    count(DISTINCT other) AS distinct_values,
-    min(other) AS min_value,
-    max(other) AS max_value,
-    sum(CASE WHEN v = other % 10 THEN 0 ELSE 1 END) AS mismatched_keys
+    count(DISTINCT extra_value) AS distinct_values,
+    min(extra_value) AS min_value,
+    max(extra_value) AS max_value,
+    sum(CASE WHEN v = extra_value % 10 THEN 0 ELSE 1 END) AS mismatched_keys
 FROM out_distinct_auto_sink_pk;
 
 DROP FLOW test_distinct_auto_sink_pk;
