@@ -3297,7 +3297,7 @@ async fn comparison_binary_join_uses_tsid_and_keeps_it_in_filtered_result() {
     .await;
     let mut planner = PromPlanner {
         table_provider,
-        ctx: PromPlannerContext::from_eval_stmt(&eval_stmt),
+        ctx: PromPlannerContext::from_eval_stmt(&eval_stmt).unwrap(),
         promql_annotations: None,
     };
     let plan = planner
@@ -5667,7 +5667,7 @@ async fn native_scan_bounds_preserve_zero_lookback_and_overflow() {
     .await;
     let mut planner = PromPlanner {
         table_provider,
-        ctx: PromPlannerContext::from_eval_stmt(&build_eval_stmt("some_metric")),
+        ctx: PromPlannerContext::from_eval_stmt(&build_eval_stmt("some_metric")).unwrap(),
         promql_annotations: None,
     };
     planner.ctx.time_index_column = Some("timestamp".to_string());
@@ -8272,4 +8272,27 @@ async fn test_count_values_groups_by_formatted_value_for_bigint_input() {
         count_values_rows(&batches, "v"),
         vec![("9007199254740992", 2.0)]
     );
+}
+
+#[tokio::test]
+async fn eval_times_before_epoch() {
+    let plan = |start: Duration, end: Duration| async move {
+        let mut eval_stmt = build_eval_stmt("some_metric");
+        eval_stmt.start = UNIX_EPOCH - start;
+        eval_stmt.end = UNIX_EPOCH - end;
+        let table_provider = build_test_table_provider(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await;
+        PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state()).await
+    };
+
+    plan(Duration::from_secs(30_000), Duration::from_secs(29_000))
+        .await
+        .unwrap();
+    // Beyond the i64 millisecond range, which must not wrap into the future.
+    let too_early = Duration::from_secs(10_000_000_000_000_000);
+    assert!(plan(too_early, too_early).await.is_err());
 }

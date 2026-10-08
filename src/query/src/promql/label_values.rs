@@ -33,13 +33,17 @@ use crate::promql::error::{
 /// a negative duration, and an RFC3339 query parameter can name one, so the sign
 /// is recovered here instead of unwrapping.
 fn millis_since_epoch(time: SystemTime) -> Result<Timestamp> {
+    Ok(Timestamp::new_millisecond(signed_millis_since_epoch(time)?))
+}
+
+/// Converts a [`SystemTime`] to signed milliseconds since the Unix epoch, rejecting instants
+/// outside the `i64` millisecond range.
+pub(crate) fn signed_millis_since_epoch(time: SystemTime) -> Result<i64> {
     let (millis, before_epoch) = match time.duration_since(UNIX_EPOCH) {
         Ok(duration) => (duration.as_millis(), false),
         Err(earlier) => (earlier.duration().as_millis(), true),
     };
-    let millis =
-        signed_millis(millis, before_epoch).with_context(|| SystemTimeOutOfRangeSnafu { time })?;
-    Ok(Timestamp::new_millisecond(millis))
+    signed_millis(millis, before_epoch).with_context(|| SystemTimeOutOfRangeSnafu { time })
 }
 
 /// Converts a millisecond magnitude and epoch direction without platform time limits.
