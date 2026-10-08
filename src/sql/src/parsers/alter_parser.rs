@@ -26,7 +26,7 @@ use sqlparser::parser::IsOptional::Mandatory;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithSpan};
 
-use crate::ast::{ColumnDef, ColumnOptionDef, ObjectNamePartExt};
+use crate::ast::{ColumnOption, ObjectNamePartExt};
 use crate::error::{self, InvalidColumnOptionSnafu, Result, SetFulltextOptionSnafu};
 use crate::parser::ParserContext;
 use crate::parsers::create_parser::{INVERTED, parse_json2_type_and_options};
@@ -40,7 +40,6 @@ use crate::statements::alter::{
     DropDefaultsOperation, KeyValueOption, RepartitionOperation, SetDefaultsOperation,
     SetIndexOperation, UnsetIndexOperation,
 };
-use crate::statements::create::{Column, ColumnExtensions};
 use crate::statements::statement::Statement;
 use crate::util::{OptionValue, parse_option_string};
 
@@ -380,12 +379,58 @@ impl ParserContext<'_> {
             Ok(AlterTableOperation::AddConstraint(constraint))
         } else {
             self.parser.prev_token();
-            let add_columns = self
-                .parser
-                .parse_comma_separated(parse_add_columns)
-                .context(error::SyntaxSnafu)?;
+            let mut add_columns = vec![self.parse_add_column()?];
+            while self.parser.consume_token(&Token::Comma) {
+                add_columns.push(self.parse_add_column()?);
+            }
             Ok(AlterTableOperation::AddColumns { add_columns })
         }
+    }
+
+    fn parse_add_column(&mut self) -> Result<AddColumn> {
+        self.parser
+            .expect_keyword(Keyword::ADD)
+            .context(error::SyntaxSnafu)?;
+        let _ = self.parser.parse_keyword(Keyword::COLUMN);
+        let add_if_not_exists =
+            self.parser
+                .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
+        let column = self.parse_column_def()?;
+
+        // These attributes need ALTER-specific execution support.
+        ensure!(
+            column.extensions.fulltext_index_options.is_none()
+                && column.extensions.skipping_index_options.is_none()
+                && column.extensions.inverted_index_options.is_none()
+                && !column
+                    .options()
+                    .iter()
+                    .any(|option| matches!(option.option, ColumnOption::DialectSpecific(_))),
+            InvalidColumnOptionSnafu {
+                name: column.name().to_string(),
+                msg: "ADD COLUMN does not support inline indexes or TIME INDEX",
+            }
+        );
+
+        let location = if self.parser.parse_keyword(Keyword::FIRST) {
+            Some(AddColumnLocation::First)
+        } else if matches!(self.parser.peek_token().token, Token::Word(word) if word.value.eq_ignore_ascii_case("AFTER"))
+        {
+            self.parser.next_token();
+            let name = Self::canonicalize_identifier(
+                self.parser.parse_identifier().context(error::SyntaxSnafu)?,
+            );
+            Some(AddColumnLocation::After {
+                column_name: name.value,
+            })
+        } else {
+            None
+        };
+        Ok(AddColumn {
+            column,
+            location,
+            add_if_not_exists,
+        })
     }
 
     fn parse_alter_table_drop_default(
@@ -705,81 +750,6 @@ fn parse_string_options(parser: &mut Parser) -> std::result::Result<(String, Str
     Ok((name, value))
 }
 
-fn parse_add_columns(parser: &mut Parser) -> std::result::Result<AddColumn, ParserError> {
-    parser.expect_keyword(Keyword::ADD)?;
-    let _ = parser.parse_keyword(Keyword::COLUMN);
-    let add_if_not_exists = parser.parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
-    let mut column = parse_add_column_def(parser)?;
-    column.column_def.name = ParserContext::canonicalize_identifier(column.column_def.name);
-    let location = if parser.parse_keyword(Keyword::FIRST) {
-        Some(AddColumnLocation::First)
-    } else if let Token::Word(word) = parser.peek_token().token {
-        if word.value.eq_ignore_ascii_case("AFTER") {
-            let _ = parser.next_token();
-            let name = ParserContext::canonicalize_identifier(parser.parse_identifier()?);
-            Some(AddColumnLocation::After {
-                column_name: name.value,
-            })
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    Ok(AddColumn {
-        column,
-        location,
-        add_if_not_exists,
-    })
-}
-
-/// Parses JSON2 options while preserving sqlparser's grammar for other column types.
-fn parse_add_column_def(parser: &mut Parser) -> std::result::Result<Column, ParserError> {
-    let name = parser.parse_identifier()?;
-    let Some((data_type, json2_options)) = parse_json2_type_and_options(parser)
-        .map_err(|err| ParserError::ParserError(err.to_string()))?
-    else {
-        parser.prev_token();
-        return parser.parse_column_def().map(|column_def| Column {
-            column_def,
-            extensions: ColumnExtensions::default(),
-        });
-    };
-
-    let mut options = Vec::new();
-    loop {
-        let constraint_name = if parser.parse_keyword(Keyword::CONSTRAINT) {
-            Some(parser.parse_identifier()?)
-        } else {
-            None
-        };
-        let Some(option) = parser.parse_optional_column_option()? else {
-            if constraint_name.is_some() {
-                return parser.expected(
-                    "constraint details after CONSTRAINT <name>",
-                    parser.peek_token(),
-                );
-            }
-            break;
-        };
-        options.push(ColumnOptionDef {
-            name: constraint_name,
-            option,
-        });
-    }
-    Ok(Column {
-        column_def: ColumnDef {
-            name,
-            data_type,
-            options,
-        },
-        extensions: ColumnExtensions {
-            json2_options,
-            ..Default::default()
-        },
-    })
-}
-
 /// Parses a comma separated list of string literals.
 fn parse_string_option_names(parser: &mut Parser) -> std::result::Result<String, ParserError> {
     parser.parse_literal_string()
@@ -798,6 +768,68 @@ mod tests {
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParseOptions;
     use crate::statements::alter::AlterDatabaseOperation;
+    use crate::statements::create::{Column, ColumnExtensions};
+
+    #[test]
+    fn test_add_column_matches_create_table() {
+        for definition in [
+            "payload JSON2(max_auto_expanded_paths = 100, service STRING) NOT NULL",
+            "embedding VECTOR(3) NOT NULL",
+            "reading INT DEFAULT 42 COMMENT 'value'",
+            "\"select\" STRING NULL",
+        ] {
+            let parse = |sql: &str| {
+                ParserContext::create_with_dialect(
+                    sql,
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap()
+                .pop()
+                .unwrap()
+            };
+            let Statement::CreateTable(create) = parse(&format!(
+                "CREATE TABLE t ({definition}, ts TIMESTAMP TIME INDEX)"
+            )) else {
+                unreachable!()
+            };
+            let Statement::AlterTable(alter) =
+                parse(&format!("ALTER TABLE t ADD COLUMN {definition} AFTER ts"))
+            else {
+                unreachable!()
+            };
+            let AlterTableOperation::AddColumns { add_columns } = alter.alter_operation() else {
+                unreachable!()
+            };
+            assert_eq!(create.columns[0], add_columns[0].column);
+            let Statement::AlterTable(roundtrip) = parse(&alter.to_string()) else {
+                unreachable!()
+            };
+            assert_eq!(alter, roundtrip);
+        }
+    }
+
+    #[test]
+    fn test_add_column_rejects_unsupported_attributes() {
+        for definition in [
+            "payload STRING FULLTEXT INDEX",
+            "payload STRING SKIPPING INDEX",
+            "payload STRING INVERTED INDEX",
+            "ts TIMESTAMP TIME INDEX",
+        ] {
+            let err = ParserContext::create_with_dialect(
+                &format!("ALTER TABLE t ADD COLUMN {definition}"),
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("ADD COLUMN does not support inline indexes or TIME INDEX"),
+                "{err}"
+            );
+        }
+    }
 
     #[test]
     fn test_parse_alter_add_json2_options() {

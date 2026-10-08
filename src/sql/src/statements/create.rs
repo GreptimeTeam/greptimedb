@@ -267,10 +267,11 @@ impl Column {
             && let Some(vector_options) = &self.extensions.vector_options
             && let Some(dim) = vector_options.get(VECTOR_OPT_DIM)
         {
-            return write!(f, "{} VECTOR({})", self.column_def.name, dim);
+            write!(f, "{} VECTOR({})", self.column_def.name, dim)?;
+        } else {
+            write!(f, "{} ", self.column_def.name)?;
+            write_data_type(f, &self.column_def.data_type)?;
         }
-        write!(f, "{} ", self.column_def.name)?;
-        write_data_type(f, &self.column_def.data_type)?;
         if let Some(options) = &self.extensions.json2_options {
             write!(f, "{options}")?;
         }
@@ -771,7 +772,7 @@ mod tests {
             name: None,
             option: sqlparser::ast::ColumnOption::Comment("private-value".repeat(8192)),
         });
-        assert!(!vector.to_string().contains("private-value"));
+        assert!(vector.to_string().contains("private-value"));
         assert!(!vector.consume_sql_size_budget(&mut 4096));
         vector.columns[1].column_def.options.clear();
         assert!(vector.consume_sql_size_budget(&mut 4096));
