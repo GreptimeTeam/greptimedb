@@ -1,0 +1,19 @@
+tests/perf/test_benchmark_version_comparison.py
+  s_03430c64913cae::t_aad40bea6bd0db 1-14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f6439b1d573f0a92458ac26c95d76474cf202773",
+  "prompts": {},
+  "sessions": {
+    "s_03430c64913cae": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0e5e7-152b-75d2-b3b7-29b2ce2b0171",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
