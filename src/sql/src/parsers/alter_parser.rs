@@ -384,7 +384,8 @@ impl ParserContext<'_> {
                 if matches!(
                     self.parser.peek_token().token,
                     Token::SemiColon | Token::EOF
-                ) {
+                ) || self.matches_keyword(Keyword::WITH)
+                {
                     break;
                 }
                 add_columns.push(self.parse_add_column()?);
@@ -401,7 +402,7 @@ impl ParserContext<'_> {
         let add_if_not_exists =
             self.parser
                 .parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
-        let column = self.parse_column_def()?;
+        let column = self.parse_column_def(true)?;
 
         // These attributes need ALTER-specific execution support.
         ensure!(
