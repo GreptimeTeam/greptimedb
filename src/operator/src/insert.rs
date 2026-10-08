@@ -2025,8 +2025,9 @@ struct CreateAlterTableResult {
 ///
 /// Rows retained by in-flight mirror RPCs count against this bound. If ordinary
 /// persisted source-table mirroring exceeds it, that mirror batch is best-effort
-/// dropped while its datanode write continues; instant-TTL requests instead
-/// fail retryably because dropping their only delivery would lose the write.
+/// dropped while its datanode write continues. Instant-TTL batches fail retryably
+/// on temporary saturation; oversized batches fail non-retryably so the client
+/// can reduce the batch size.
 const MAX_MIRROR_PENDING_ROWS: usize = 1_000_000;
 
 /// How often at most each mirror event is reported.
@@ -2172,6 +2173,15 @@ impl FlowMirrorTask {
         let num_rows = self.pending_rows();
         if num_rows == 0 {
             return Ok(());
+        }
+        if has_instant_rows && num_rows > MAX_MIRROR_PENDING_ROWS as u64 {
+            return InvalidInsertRequestSnafu {
+                reason: format!(
+                    "flow mirror batch has {num_rows} peer-fan-out rows, exceeding the limit of {}; reduce the batch size",
+                    MAX_MIRROR_PENDING_ROWS
+                ),
+            }
+            .fail();
         }
 
         let pending = reserve_mirror_pending_rows(&mirror_pending_rows, num_rows);
@@ -3761,6 +3771,44 @@ mod tests {
             crate::metrics::DIST_MIRROR_DROPPED_ROW_COUNT.get(),
             dropped_before
         );
+
+        for pending_before in [0, MAX_MIRROR_PENDING_ROWS as u64] {
+            if pending_before == 0 {
+                pending.store(0, Ordering::Relaxed);
+                crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.sub(MAX_MIRROR_PENDING_ROWS as i64);
+            }
+            let gauge_before_rejection = crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get();
+            for (normal, instant) in [
+                (0, MAX_MIRROR_PENDING_ROWS + 1),
+                (MAX_MIRROR_PENDING_ROWS / 2, MAX_MIRROR_PENDING_ROWS / 2 + 1),
+            ] {
+                let error = inserter
+                    .do_request(make_request(normal, instant), &table_infos, &ctx)
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+                assert_eq!(error.retry_hint(), RetryHint::NonRetryable);
+                let message = error.to_string();
+                assert!(message.contains("1000001"), "{message}");
+                assert!(message.contains("1000000"), "{message}");
+                assert!(message.contains("reduce the batch size"), "{message}");
+                assert!(datanode_rx.try_recv().is_err());
+                assert!(flownode_rx.try_recv().is_err());
+                assert_eq!(pending.load(Ordering::Relaxed), pending_before);
+                assert_eq!(
+                    crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get(),
+                    gauge_before_rejection
+                );
+                assert_eq!(
+                    crate::metrics::DIST_MIRROR_DROPPED_ROW_COUNT.get(),
+                    dropped_before
+                );
+            }
+            if pending_before == 0 {
+                crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.add(MAX_MIRROR_PENDING_ROWS as i64);
+                pending.store(MAX_MIRROR_PENDING_ROWS as u64, Ordering::Relaxed);
+            }
+        }
 
         let result = inserter
             .do_request(make_request(1, 0), &table_infos, &ctx)
