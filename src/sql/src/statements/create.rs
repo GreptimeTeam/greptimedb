@@ -456,7 +456,7 @@ impl CreateTable {
         if self.if_not_exists {
             write!(f, "IF NOT EXISTS ")?;
         }
-        writeln!(f, "{} (", &self.name)?;
+        writeln!(f, "{} (", self.name)?;
         for (index, column) in self.columns.iter().enumerate() {
             if index > 0 {
                 f.write_str(LINE_SEP)?;
@@ -471,7 +471,7 @@ impl CreateTable {
         if let Some(partitions) = &self.partitions {
             writeln!(f, "{partitions}")?;
         }
-        writeln!(f, "ENGINE={}", &self.engine)?;
+        writeln!(f, "ENGINE={}", self.engine)?;
         if !self.options.is_empty() {
             f.write_str("WITH(\n")?;
             self.options.write_sql(f, LINE_SEP, "  ", complete)?;
@@ -506,7 +506,7 @@ impl Display for CreateDatabase {
         if self.if_not_exists {
             write!(f, "IF NOT EXISTS ")?;
         }
-        write!(f, "{}", &self.name)?;
+        write!(f, "{}", self.name)?;
         if !self.options.is_empty() {
             let options = self.options.kv_pairs();
             write!(f, "\nWITH(\n{}\n)", format_list_indent!(options))?;
@@ -533,11 +533,11 @@ impl Display for CreateExternalTable {
         if self.if_not_exists {
             write!(f, "IF NOT EXISTS ")?;
         }
-        writeln!(f, "{} (", &self.name)?;
+        writeln!(f, "{} (", self.name)?;
         writeln!(f, "{},", format_list_indent!(self.columns))?;
         writeln!(f, "{}", format_table_constraint(&self.constraints))?;
         writeln!(f, ")")?;
-        writeln!(f, "ENGINE={}", &self.engine)?;
+        writeln!(f, "ENGINE={}", self.engine)?;
         if !self.options.is_empty() {
             let options = self.options.kv_pairs();
             write!(f, "WITH(\n{}\n)", format_list_indent!(options))?;
@@ -635,8 +635,8 @@ impl Display for CreateFlow {
         if self.if_not_exists {
             write!(f, "IF NOT EXISTS ")?;
         }
-        writeln!(f, "{}", &self.flow_name)?;
-        writeln!(f, "SINK TO {}", &self.sink_table_name)?;
+        writeln!(f, "{}", self.flow_name)?;
+        writeln!(f, "SINK TO {}", self.sink_table_name)?;
         if let Some(expire_after) = &self.expire_after {
             writeln!(f, "EXPIRE AFTER '{} s'", expire_after)?;
         }
@@ -657,7 +657,7 @@ impl Display for CreateFlow {
             let options = self.flow_options.kv_pairs();
             writeln!(f, "WITH ({})", format_list_comma!(options))?;
         }
-        write!(f, "AS {}", &self.query)
+        write!(f, "AS {}", self.query)
     }
 }
 
@@ -687,11 +687,11 @@ impl Display for CreateView {
         if self.if_not_exists {
             write!(f, "IF NOT EXISTS ")?;
         }
-        write!(f, "{} ", &self.name)?;
+        write!(f, "{} ", self.name)?;
         if !self.columns.is_empty() {
             write!(f, "({}) ", format_list_comma!(self.columns))?;
         }
-        write!(f, "AS {}", &self.query)
+        write!(f, "AS {}", self.query)
     }
 }
 

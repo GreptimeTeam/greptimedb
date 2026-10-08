@@ -505,13 +505,10 @@ fn extract_from_in_list_expr(
     for expr in list {
         if let Expr::Literal(scalar, _) = expr {
             return_none_if_utf8!(scalar);
-            if let Some(timestamp) = scalar_value_to_timestamp(scalar, None) {
-                init_range = init_range.or(&TimestampRange::single(timestamp))
-            } else {
-                // TODO(hl): maybe we should raise an error here since cannot parse
-                // timestamp value from in list expr
-                return None;
-            }
+            // TODO(hl): maybe we should raise an error here since cannot parse
+            // timestamp value from in list expr
+            let timestamp = scalar_value_to_timestamp(scalar, None)?;
+            init_range = init_range.or(&TimestampRange::single(timestamp));
         }
     }
     Some(init_range)

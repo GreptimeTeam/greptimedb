@@ -258,10 +258,10 @@ impl Visit for OptionMap {
 
 impl VisitMut for OptionMap {
     fn visit<V: VisitorMut>(&mut self, visitor: &mut V) -> ControlFlow<V::Break> {
-        for (_, v) in self.options.iter_mut() {
+        for v in self.options.values_mut() {
             v.visit(visitor)?;
         }
-        for (_, v) in self.secrets.iter_mut() {
+        for v in self.secrets.values_mut() {
             v.expose_secret_mut().visit(visitor)?;
         }
         ControlFlow::Continue(())
