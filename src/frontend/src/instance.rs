@@ -3419,12 +3419,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_event_recorder_is_exposed() -> TestResult<()> {
+    async fn test_instance_shared_state() -> TestResult<()> {
         let instance =
             test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
                 .await?;
 
         let _event_recorder = instance.event_recorder();
+        assert!(Arc::ptr_eq(
+            &instance.otlp_metrics_table_legacy_cache,
+            &instance.clone().otlp_metrics_table_legacy_cache,
+        ));
 
         Ok(())
     }
@@ -3874,25 +3878,6 @@ mod tests {
         assert_eq!(StatusCode::PermissionDenied, err.status_code());
 
         Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_instance_clone_shares_otlp_legacy_cache() {
-        let instance = test_instance_with_tables(
-            test_table(1024, "source").unwrap(),
-            test_table(1025, "target").unwrap(),
-        )
-        .await
-        .unwrap();
-        let ctx = test_query_ctx(1);
-        instance
-            .cache_otlp_legacy(&["metric1".to_string()], &ctx, true)
-            .unwrap();
-
-        let cloned = instance.clone();
-        let names = ["metric2".to_string()];
-        cloned.cache_otlp_legacy(&names, &ctx, true).unwrap();
-        assert!(instance.check_otlp_legacy(&names, &ctx).await.unwrap());
     }
 
     #[test]

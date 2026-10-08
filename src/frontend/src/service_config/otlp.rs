@@ -70,5 +70,13 @@ mod tests {
 
         let serialized = toml::to_string(&options).unwrap();
         assert_eq!(toml::from_str::<OtlpOptions>(&serialized).unwrap(), options);
+
+        for capacity in [0, 37] {
+            let options: OtlpOptions =
+                toml::from_str(&format!("trace_aux_cache_capacity = {capacity}")).unwrap();
+            assert_eq!(options.trace_aux_cache_capacity, capacity);
+            let serialized = toml::to_string(&options).unwrap();
+            assert_eq!(toml::from_str::<OtlpOptions>(&serialized).unwrap(), options);
+        }
     }
 }

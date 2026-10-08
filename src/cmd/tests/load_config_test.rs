@@ -749,9 +749,6 @@ fn test_load_trace_aux_cache_capacity() {
                 .unwrap();
         for options in [frontend.component, standalone.component.frontend_options()] {
             assert_eq!(options.otlp.trace_aux_cache_capacity, capacity);
-            let serialized = toml::to_string(&options).unwrap();
-            let restored: FrontendOptions = toml::from_str(&serialized).unwrap();
-            assert_eq!(restored.otlp.trace_aux_cache_capacity, capacity);
         }
     }
 }

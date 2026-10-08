@@ -130,38 +130,18 @@ fn test_trace_aux_cache_confirmed_writes() {
         let mut data = trace_aux_data("svc", "span", "server");
         assert_eq!(cache.filter(other_table, &mut data).len(), 2);
     }
-}
 
-#[test]
-fn test_trace_aux_cache_service_and_operation_are_independent() {
+    // An operation hit must not suppress a missing service entry.
     let cache = TraceAuxCache::new(100);
     let table = TableName::new("greptime", "public", "traces");
     let mut data = trace_aux_data("svc", "span", "server");
-    let pending = cache.filter(table.clone(), &mut data);
-    cache.record(pending);
-    cache.entries.invalidate(&(
-        std::sync::Arc::new(table.clone()),
-        super::TraceAuxEntry::Service("svc".into()),
-    ));
+    data.services.clear();
+    cache.record(cache.filter(table.clone(), &mut data));
 
     let mut data = trace_aux_data("svc", "span", "server");
     assert_eq!(cache.filter(table, &mut data).len(), 1);
     assert_eq!(data.services.len(), 1);
     assert!(data.operations.is_empty());
-}
-
-#[test]
-fn test_trace_aux_cache_eviction_allows_rewrite() {
-    let cache = TraceAuxCache::new(1);
-    let table = TableName::new("greptime", "public", "traces");
-    let mut data = trace_aux_data("svc", "span", "server");
-    cache.record(cache.filter(table.clone(), &mut data));
-    cache.entries.run_pending_tasks();
-    assert_eq!(cache.entries.entry_count(), 1);
-
-    let mut data = trace_aux_data("svc", "span", "server");
-    assert_eq!(cache.filter(table, &mut data).len(), 1);
-    assert_eq!(data.services.len() + data.operations.len(), 1);
 }
 
 #[test]

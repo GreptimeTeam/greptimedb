@@ -1241,6 +1241,22 @@ impl Instance {
         Ok((requests, keys))
     }
 
+    /// Checks deferred cache population without confusing visible rows with completion.
+    #[cfg(feature = "testing")]
+    pub fn trace_aux_data_cached_for_test(
+        &self,
+        table_name: &str,
+        mut aux_data: TraceAuxData,
+        ctx: &QueryContextRef,
+    ) -> bool {
+        self.trace_aux_cache
+            .filter(
+                TableName::new(ctx.current_catalog(), ctx.current_schema(), table_name),
+                &mut aux_data,
+            )
+            .is_empty()
+    }
+
     async fn insert_trace_aux_requests(
         &self,
         requests: RowInsertRequests,
