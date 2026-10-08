@@ -28,6 +28,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::region::{QueryRequest, RegionRequestHeader};
+use common_meta::cache::TableRouteCacheRef;
+use common_meta::cache_invalidator::{CacheInvalidator, Context};
+use common_meta::instruction::CacheIdent;
 use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches, SendableRecordBatchStream};
 use common_telemetry::info;
@@ -42,7 +45,7 @@ use query::query_engine::DefaultSerializer;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
 use store_api::region_request::{RegionCloseRequest, RegionRequest};
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, TableId};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 
 use crate::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
@@ -54,6 +57,7 @@ const PROBE_TABLE: &str = "nested_cap_probe";
 const BUILD_TABLE: &str = "nested_cap_build";
 /// Missing inner table used to verify plan-resolution failure.
 const MISSING_INNER_TABLE: &str = "nested_cap_missing_build";
+const UNRELATED_TABLE_ID: TableId = 10_000_000;
 
 /// `(a_id, probe_key, probe_v)` fixture rows; `a_id` is the partition key.
 const PROBE_ROWS: &[(i32, i32, i32)] = &[
@@ -738,6 +742,59 @@ async fn test_experimental_dist_join_setting_activates_rewrite() {
     );
 }
 
+/// Explicit route eviction and unrelated invalidation finish before execution; nested reads refill
+/// the route and return complete rows. This does not exercise a concurrent invalidation race.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_nested_merge_scan_capability_cold_load_with_unrelated_invalidation() {
+    common_telemetry::init_default_ut_logging();
+
+    let cluster =
+        build_cluster("test_nested_merge_scan_capability_cold_load_with_unrelated_invalidation")
+            .await;
+    let frontend = cluster.fe_instance().clone();
+    prepare_tables(&frontend).await;
+
+    let probe_leaders = region_leaders(&frontend, PROBE_TABLE).await;
+    let build_leaders = region_leaders(&frontend, BUILD_TABLE).await;
+    assert_eq!(2, datanodes(&probe_leaders).len());
+    assert_eq!(2, datanodes(&build_leaders).len());
+    let build_table_id = table_id(&build_leaders);
+
+    let reference = query_pretty(&frontend, &join_sql(), query_ctx()).await;
+    let expected = expected_join_rows();
+    assert_eq!(expected.clone(), multiset(table_cells(&reference)));
+
+    let query_ctx = query_ctx();
+    let plan = encode(&nested_plan(&frontend, &query_ctx).await);
+    invalidate_table_ids(&cluster, &[build_table_id]).await;
+    assert_route_cold(&cluster, build_table_id);
+    invalidate_table_ids(&cluster, &[UNRELATED_TABLE_ID]).await;
+    assert_route_cold(&cluster, build_table_id);
+
+    let remote_datanodes = datanodes(&build_leaders);
+    let baseline_requests = remote_datanodes
+        .iter()
+        .map(|datanode| (*datanode, rpc_requests(&cluster, *datanode)))
+        .collect::<BTreeMap<_, _>>();
+    let rows = run_nested_queries(&cluster, &probe_leaders, &plan, &query_ctx).await;
+    let actual = multiset(rows);
+    assert_eq!(
+        expected, actual,
+        "unexpected nested join rows after cold load"
+    );
+    assert_eq!(multiset(table_cells(&reference)), actual);
+    assert_cross_datanode_region_query(&cluster, &remote_datanodes, &baseline_requests);
+
+    for datanode in datanodes(&probe_leaders) {
+        assert!(
+            table_route_cache(&cluster, datanode).contains_key(&build_table_id),
+            "datanode {datanode} must refill the route of build table {build_table_id}"
+        );
+    }
+}
+
+/// A failing inner region makes the whole query fail: the datanode must not return the rows of the
+/// inner regions that succeed.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_nested_merge_scan_capability_inner_failure_fails_query() {
     common_telemetry::init_default_ut_logging();
@@ -880,6 +937,64 @@ fn region_server(cluster: &GreptimeDbCluster, datanode_id: u64) -> RegionServer 
         .get(&datanode_id)
         .unwrap_or_else(|| panic!("expected a datanode {datanode_id}"))
         .region_server()
+}
+
+/// The id of the single table that the regions of `leaders` belong to.
+fn table_id(leaders: &BTreeMap<u64, (u64, String)>) -> TableId {
+    let table_ids = leaders
+        .keys()
+        .map(|region_id| RegionId::from_u64(*region_id).table_id())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        1,
+        table_ids.len(),
+        "expected the regions to belong to a single table, actual region leaders: {leaders:?}"
+    );
+
+    *table_ids.first().expect("there is at least one region")
+}
+
+/// Returns the table route cache of the datanode `datanode_id`: the cache that
+/// `DatanodeRegionQueryHandler::select_target` reads to resolve the leader of a region.
+fn table_route_cache(cluster: &GreptimeDbCluster, datanode_id: u64) -> TableRouteCacheRef {
+    cluster
+        .datanode_cache_registries
+        .get(&datanode_id)
+        .unwrap_or_else(|| panic!("expected the cache registry of the datanode {datanode_id}"))
+        .get::<TableRouteCacheRef>()
+        .unwrap_or_else(|| panic!("expected the table route cache of the datanode {datanode_id}"))
+}
+
+/// Invalidates `table_ids` on every datanode, the way a datanode handles the invalidation
+/// instruction of metasrv (see [`GreptimeDbCluster::datanode_cache_registries`]).
+async fn invalidate_table_ids(cluster: &GreptimeDbCluster, table_ids: &[TableId]) {
+    let idents = table_ids
+        .iter()
+        .copied()
+        .map(CacheIdent::TableId)
+        .collect::<Vec<_>>();
+    for (datanode_id, registry) in &cluster.datanode_cache_registries {
+        registry
+            .invalidate(&Context::default(), &idents)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("the datanode {datanode_id} must invalidate {idents:?}: {e}")
+            });
+    }
+}
+
+/// Asserts that no datanode holds the route of `table_id`, i.e. the route is cold.
+fn assert_route_cold(cluster: &GreptimeDbCluster, table_id: TableId) {
+    let cached = cluster
+        .datanode_cache_registries
+        .keys()
+        .filter(|datanode_id| table_route_cache(cluster, **datanode_id).contains_key(&table_id))
+        .collect::<Vec<_>>();
+    assert!(
+        cached.is_empty(),
+        "the datanodes {cached:?} must drop the route of the table {table_id} after the \
+         invalidation"
+    );
 }
 
 async fn run_nested_queries(
