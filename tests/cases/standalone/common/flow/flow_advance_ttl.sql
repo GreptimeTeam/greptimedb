@@ -181,3 +181,58 @@ SELECT number FROM distinct_basic;
 DROP FLOW test_distinct_basic;
 DROP TABLE distinct_basic;
 DROP TABLE out_distinct_basic;
+
+-- Streaming DISTINCT auto-sink retains all 1000 output tuples.
+CREATE TABLE distinct_auto_sink (
+    v INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP TIME INDEX
+) WITH ('ttl' = 'instant');
+
+CREATE FLOW test_distinct_auto_sink SINK TO out_distinct_auto_sink AS
+SELECT DISTINCT v FROM distinct_auto_sink;
+
+INSERT INTO distinct_auto_sink (v)
+SELECT number FROM numbers LIMIT 1000;
+
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('test_distinct_auto_sink');
+
+SELECT count(*) AS rows, count(DISTINCT v) AS distinct_values, min(v) AS min_v, max(v) AS max_v
+FROM out_distinct_auto_sink;
+
+DROP FLOW test_distinct_auto_sink;
+DROP TABLE distinct_auto_sink;
+DROP TABLE out_distinct_auto_sink;
+
+CREATE TABLE distinct_auto_sink_pk (
+    v INT,
+    k INT,
+    other INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP TIME INDEX,
+    PRIMARY KEY (v, k)
+) WITH ('ttl' = 'instant');
+
+CREATE FLOW test_distinct_auto_sink_pk SINK TO out_distinct_auto_sink_pk AS
+SELECT DISTINCT v, other FROM distinct_auto_sink_pk;
+
+INSERT INTO distinct_auto_sink_pk (v, k, other)
+SELECT number % 10, number, number FROM numbers LIMIT 1000;
+
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('test_distinct_auto_sink_pk');
+
+SELECT
+    count(*) AS rows,
+    count(DISTINCT other) AS distinct_values,
+    min(other) AS min_value,
+    max(other) AS max_value,
+    sum(CASE WHEN v = other % 10 THEN 0 ELSE 1 END) AS mismatched_keys
+FROM out_distinct_auto_sink_pk;
+
+DROP FLOW test_distinct_auto_sink_pk;
+DROP TABLE distinct_auto_sink_pk;
+DROP TABLE out_distinct_auto_sink_pk;

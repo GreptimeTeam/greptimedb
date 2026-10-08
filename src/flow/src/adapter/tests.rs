@@ -199,48 +199,126 @@ fn stateless_distinct_preserves_direct_column_lineage() {
 }
 
 #[test]
-fn stateless_distinct_without_source_pk_uses_distinct_output_as_key() {
-    let source = Arc::new(Schema::new(vec![ColumnSchema::new(
-        "v",
-        ConcreteDataType::int32_datatype(),
-        true,
-    )]));
-    let provider = MemTable::try_new(
-        Arc::new(datafusion::arrow::datatypes::Schema::new(vec![Field::new(
-            "v",
-            ArrowDataType::Int32,
-            true,
-        )])),
-        vec![vec![]],
-    )
-    .unwrap();
-    let plan = LogicalPlanBuilder::scan(
-        TableReference::bare("source"),
-        provider_as_source(Arc::new(provider)),
-        None,
-    )
-    .unwrap()
-    .project(vec![datafusion_expr::col("v")])
-    .unwrap()
-    .distinct()
-    .unwrap()
-    .build()
-    .unwrap();
-
-    let (output, lineage) = super::output_column_schemas(&plan, &source).unwrap();
-    let relation = super::relation_desc_from_output(&output, &lineage, &[], &plan);
-    assert_eq!(relation.typ.keys.len(), 1);
-    assert_eq!(relation.typ.keys[0].column_indices, vec![0]);
-
-    // Non-DISTINCT plans keep the empty-key behavior.
-    let project_plan = match &plan {
-        LogicalPlan::Distinct(datafusion_expr::logical_plan::Distinct::All(input)) => {
-            input.as_ref().clone()
+fn stateless_distinct_output_is_always_the_sink_key() {
+    let source = Arc::new(Schema::new(vec![
+        ColumnSchema::new("v", ConcreteDataType::int32_datatype(), true),
+        ColumnSchema::new("k", ConcreteDataType::int32_datatype(), true),
+        ColumnSchema::new("other", ConcreteDataType::int32_datatype(), true),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+    ]));
+    // All cases share one provider so the key assertions exercise only plan/output metadata.
+    let provider = Arc::new(
+        MemTable::try_new(
+            Arc::new(datafusion::arrow::datatypes::Schema::new(vec![
+                Field::new("v", ArrowDataType::Int32, true),
+                Field::new("k", ArrowDataType::Int32, true),
+                Field::new("other", ArrowDataType::Int32, true),
+                Field::new(
+                    "ts",
+                    ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                    false,
+                ),
+            ])),
+            vec![vec![]],
+        )
+        .unwrap(),
+    );
+    let make_plan = |expressions: Vec<datafusion_expr::Expr>, distinct: bool| {
+        let builder = LogicalPlanBuilder::scan(
+            TableReference::bare("source"),
+            provider_as_source(provider.clone()),
+            None,
+        )
+        .unwrap()
+        .project(expressions)
+        .unwrap();
+        if distinct {
+            builder.distinct().unwrap().build().unwrap()
+        } else {
+            builder.build().unwrap()
         }
-        _ => panic!("expected distinct plan"),
     };
-    let relation = super::relation_desc_from_output(&output, &lineage, &[], &project_plan);
-    assert!(relation.typ.keys.is_empty());
+    let assert_key = |plan: &LogicalPlan, source_keys: &[usize], expected: &[usize]| {
+        let (output, lineage) = super::output_column_schemas(plan, &source).unwrap();
+        let relation = super::relation_desc_from_output(&output, &lineage, source_keys, plan);
+        assert_eq!(
+            relation
+                .typ
+                .keys
+                .iter()
+                .map(|key| key.column_indices.clone())
+                .collect::<Vec<_>>(),
+            if expected.is_empty() {
+                vec![]
+            } else {
+                vec![expected.to_vec()]
+            }
+        );
+        relation
+    };
+
+    // No source PK: all distinct output fields form the key.
+    assert_key(&make_plan(vec![datafusion_expr::col("v")], true), &[], &[0]);
+    // A surviving subset of a composite source PK cannot identify projected DISTINCT tuples.
+    assert_key(
+        &make_plan(
+            vec![datafusion_expr::col("v"), datafusion_expr::col("other")],
+            true,
+        ),
+        &[0, 1],
+        &[0, 1],
+    );
+    // Even a retained source PK needs the additional selected fields in the DISTINCT key.
+    assert_key(
+        &make_plan(
+            vec![datafusion_expr::col("v"), datafusion_expr::col("other")],
+            true,
+        ),
+        &[0],
+        &[0, 1],
+    );
+    // Aliases and computed output expressions are included by output position.
+    let alias_plan = make_plan(
+        vec![
+            datafusion_expr::col("v").alias("renamed"),
+            (datafusion_expr::col("v") + datafusion_expr::col("other")).alias("computed"),
+        ],
+        true,
+    );
+    let (output, lineage) = super::output_column_schemas(&alias_plan, &source).unwrap();
+    let relation = super::relation_desc_from_output(&output, &lineage, &[0], &alias_plan);
+    assert_eq!(
+        output
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect_vec(),
+        ["renamed", "computed"]
+    );
+    assert_eq!(relation.typ.keys[0].column_indices, vec![0, 1]);
+
+    // A selected time index remains the relation time index, not part of the tag key.
+    let relation = assert_key(
+        &make_plan(
+            vec![datafusion_expr::col("v"), datafusion_expr::col("ts")],
+            true,
+        ),
+        &[0],
+        &[0],
+    );
+    assert_eq!(relation.typ.time_index, Some(1));
+
+    // Non-DISTINCT plans retain only inherited source-key lineage (or no key if none survives).
+    let ordinary = make_plan(
+        vec![datafusion_expr::col("v"), datafusion_expr::col("other")],
+        false,
+    );
+    assert_key(&ordinary, &[0, 1], &[0]);
+    assert_key(&ordinary, &[], &[]);
 }
 
 #[test]

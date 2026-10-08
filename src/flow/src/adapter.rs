@@ -151,10 +151,9 @@ fn relation_desc_from_output(
                 .position(|index| index == &Some(*source_index))
         })
         .collect_vec();
-    // A `DISTINCT` establishes the output key by itself: every non-time-index output
-    // column is part of the distinct key. When no source primary key is inherited,
-    // fall back to the DISTINCT output key so the sink relation keeps row identity.
-    if keys.is_empty() && matches!(plan, LogicalPlan::Distinct(Distinct::All(_))) {
+    // DISTINCT defines identity from every output tuple; the source timestamp participates
+    // separately as the relation time index, so it is excluded from the tag key.
+    if matches!(plan, LogicalPlan::Distinct(Distinct::All(_))) {
         keys = columns
             .iter()
             .positions(|column| !column.is_time_index())

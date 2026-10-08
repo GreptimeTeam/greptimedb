@@ -18,6 +18,8 @@ use std::sync::Arc;
 
 use api::v1::flow::CreateRequest;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_procedure::{Procedure, Status};
 use common_procedure_test::execute_procedure_until_done;
 use table::table_name::TableName;
@@ -324,6 +326,26 @@ fn test_validate_flow_options_allows_incremental_read_option() {
     );
 
     validate_flow_options(&task).unwrap();
+}
+
+#[test]
+fn test_validate_flow_options_unknown_option_matches_invalid_sql_error() {
+    let mut task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    task.flow_options
+        .insert("foo".to_string(), "sensitive-value".to_string());
+
+    let err = validate_flow_options(&task).unwrap_err();
+    assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    assert_eq!(
+        "Invalid SQL, error: unknown flow option 'foo', supported options: defer_on_missing_source, experimental_enable_incremental_read",
+        err.output_msg()
+    );
+    assert!(!err.output_msg().contains("sensitive-value"));
 }
 
 #[test]

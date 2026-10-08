@@ -42,7 +42,7 @@ use crate::cache_invalidator::Context;
 use crate::ddl::DdlContext;
 use crate::ddl::event::flow::{CREATE_FLOW_EVENT_TYPE, CreateFlowEventIntent, FlowDdlEvent};
 use crate::ddl::utils::{add_peer_context_if_needed, map_to_procedure_error};
-use crate::error::{self, Result, UnexpectedSnafu};
+use crate::error::{self, InvalidFlowOptionSnafu, Result, UnexpectedSnafu};
 use crate::instruction::{CacheIdent, CreateFlow, DropFlow};
 use crate::key::flow::flow_info::{FlowInfoValue, FlowScheduleConfig, FlowStatus};
 use crate::key::flow::flow_route::FlowRouteValue;
@@ -558,9 +558,9 @@ pub fn validate_flow_options(flow_task: &CreateFlowTask) -> Result<()> {
             | FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY
             | FlowType::FLOW_TYPE_KEY => {}
             unknown => {
-                return UnexpectedSnafu {
+                return InvalidFlowOptionSnafu {
                     err_msg: format!(
-                        "Unknown flow option '{unknown}', supported user options: {DEFER_ON_MISSING_SOURCE_KEY}, {FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY}"
+                        "unknown flow option '{unknown}', supported options: {DEFER_ON_MISSING_SOURCE_KEY}, {FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY}"
                     ),
                 }
                 .fail();
