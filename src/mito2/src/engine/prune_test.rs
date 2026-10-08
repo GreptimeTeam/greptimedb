@@ -288,7 +288,7 @@ async fn test_prune_memtable_complex_expr_with_format(flat_format: bool) {
     )
     .await;
 
-    // ts filter will be ignored when pruning time series in memtable.
+    // Both the compound time range and the tag predicate are evaluated during the scan.
     let filters = vec![time_range_expr(4, 7), col("tag_0").lt(lit("6"))];
 
     let stream = engine
@@ -306,10 +306,6 @@ async fn test_prune_memtable_complex_expr_with_format(flat_format: bool) {
 +-------+---------+---------------------+
 | tag_0 | field_0 | ts                  |
 +-------+---------+---------------------+
-| 0     | 0.0     | 1970-01-01T00:00:00 |
-| 1     | 1.0     | 1970-01-01T00:00:01 |
-| 2     | 2.0     | 1970-01-01T00:00:02 |
-| 3     | 3.0     | 1970-01-01T00:00:03 |
 | 4     | 4.0     | 1970-01-01T00:00:04 |
 | 5     | 5.0     | 1970-01-01T00:00:05 |
 +-------+---------+---------------------+";
