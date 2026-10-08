@@ -54,7 +54,6 @@ use crate::error::Result;
 use crate::http::jaeger::QueryTraceParams;
 use crate::influxdb::InfluxdbRequest;
 use crate::opentsdb::codec::DataPoint;
-use crate::prom_store::Metrics;
 pub type OpentsdbProtocolHandlerRef = Arc<dyn OpentsdbProtocolHandler + Send + Sync>;
 pub type InfluxdbLineProtocolHandlerRef = Arc<dyn InfluxdbLineProtocolHandler + Send + Sync>;
 pub type PromStoreProtocolHandlerRef = Arc<dyn PromStoreProtocolHandler + Send + Sync>;
@@ -71,10 +70,17 @@ pub struct TraceIngestOutcome {
     pub error_message: Option<String>,
 }
 
+/// Result of ingesting one OTLP metrics request or Arrow batch.
+#[derive(Debug, Default, Clone)]
+pub struct MetricsIngestOutcome {
+    pub write_cost: usize,
+    pub accepted_data_points: i64,
+    pub rejected_data_points: i64,
+    pub error_message: Option<String>,
+}
+
 #[async_trait]
 pub trait InfluxdbLineProtocolHandler {
-    /// A successful request will not return a response.
-    /// Only on error will the socket return a line of data.
     async fn exec(&self, request: InfluxdbRequest, ctx: QueryContextRef) -> Result<Output>;
 }
 
@@ -83,9 +89,14 @@ pub trait OpentsdbProtocolHandler {
     /// Checks all points in one external request before per-point debug execution.
     async fn preflight(&self, data_points: &[DataPoint], ctx: QueryContextRef) -> Result<()>;
 
-    /// A successful request will not return a response.
-    /// Only on error will the socket return a line of data.
     async fn exec(&self, data_points: Vec<DataPoint>, ctx: QueryContextRef) -> Result<usize>;
+
+    /// Executes an ordinary HTTP put with optional batching. Debug callers
+    /// retain [`Self::exec`]; the frontend clears HTTP batching selection
+    /// there so diagnostic requests preserve direct, per-point error attribution.
+    async fn exec_batch(&self, data_points: Vec<DataPoint>, ctx: QueryContextRef) -> Result<usize> {
+        self.exec(data_points, ctx).await
+    }
 }
 
 pub struct PromStoreResponse {
@@ -125,8 +136,6 @@ pub trait PromStoreProtocolHandler {
 
     /// Handling prometheus remote read requests
     async fn read(&self, request: ReadRequest, ctx: QueryContextRef) -> Result<PromStoreResponse>;
-    /// Handling push gateway requests
-    async fn ingest_metrics(&self, metrics: Metrics) -> Result<()>;
 }
 
 #[async_trait]
@@ -136,7 +145,7 @@ pub trait OpenTelemetryProtocolHandler: PipelineHandler {
         &self,
         request: ExportMetricsServiceRequest,
         ctx: QueryContextRef,
-    ) -> Result<Output>;
+    ) -> Result<MetricsIngestOutcome>;
 
     /// Handling opentelemetry traces request
     async fn traces(

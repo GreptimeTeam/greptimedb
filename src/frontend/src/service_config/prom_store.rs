@@ -15,8 +15,10 @@
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
+use common_batcher::flush_policy::timing::TimingFlushPolicy;
 use serde::{Deserialize, Serialize};
 use servers::prom_remote_write::validation::PromValidationMode;
+use tokio::sync::Semaphore;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PromStoreOptions {
@@ -25,9 +27,6 @@ pub struct PromStoreOptions {
     /// Validation mode while decoding Prometheus remote write requests.
     #[serde(default)]
     pub prom_validation_mode: PromValidationMode,
-    /// Enables experimental Prometheus remote write v2 native histogram ingestion.
-    #[serde(default)]
-    pub experimental_enable_prometheus_native_histogram: bool,
     #[serde(default, with = "humantime_serde")]
     pub pending_rows_flush_interval: Duration,
     #[serde(default = "default_max_batch_rows")]
@@ -52,7 +51,7 @@ fn default_max_concurrent_flushes() -> usize {
 }
 
 fn default_worker_channel_capacity() -> usize {
-    65526
+    65_536
 }
 
 fn default_max_inflight_requests() -> usize {
@@ -64,18 +63,20 @@ fn default_flow_notification_queue_capacity() -> NonZeroUsize {
 }
 
 impl PromStoreOptions {
-    /// Returns whether the pending rows batcher can be enabled with these
-    /// options. Mirrors the enablement conditions of
-    /// `PendingRowsBatcher::try_new` in the servers crate, which returns
-    /// `None` when any of these knobs is zero.
+    /// Returns whether batching is enabled and its controls pass construction validation.
     pub fn pending_rows_batching_enabled(&self) -> bool {
         self.enable
             && self.with_metric_engine
-            && !self.pending_rows_flush_interval.is_zero()
+            && TimingFlushPolicy::validate(self.pending_rows_flush_interval)
             && self.max_batch_rows > 0
-            && self.max_concurrent_flushes > 0
-            && self.worker_channel_capacity > 0
-            && self.max_inflight_requests > 0
+            && [
+                self.max_concurrent_flushes,
+                self.worker_channel_capacity,
+                self.max_inflight_requests,
+                self.flow_notification_queue_capacity.get(),
+            ]
+            .into_iter()
+            .all(|capacity| (1..=Semaphore::MAX_PERMITS).contains(&capacity))
     }
 }
 
@@ -85,7 +86,6 @@ impl Default for PromStoreOptions {
             enable: true,
             with_metric_engine: true,
             prom_validation_mode: PromValidationMode::Strict,
-            experimental_enable_prometheus_native_histogram: false,
             pending_rows_flush_interval: Duration::ZERO,
             max_batch_rows: default_max_batch_rows(),
             max_concurrent_flushes: default_max_concurrent_flushes(),
@@ -104,8 +104,43 @@ mod tests {
     use crate::service_config::prom_store::{
         default_flow_notification_queue_capacity, default_max_batch_rows,
         default_max_concurrent_flushes, default_max_inflight_requests,
-        default_worker_channel_capacity,
     };
+
+    #[test]
+    fn test_batching_capacity_boundaries() {
+        let max = tokio::sync::Semaphore::MAX_PERMITS;
+        let options = PromStoreOptions {
+            pending_rows_flush_interval: Duration::from_secs(5),
+            max_batch_rows: usize::MAX,
+            max_concurrent_flushes: max,
+            worker_channel_capacity: max,
+            max_inflight_requests: max,
+            flow_notification_queue_capacity: std::num::NonZeroUsize::new(max).unwrap(),
+            ..Default::default()
+        };
+        assert!(options.pending_rows_batching_enabled());
+        let cases = [
+            PromStoreOptions {
+                max_concurrent_flushes: max + 1,
+                ..options.clone()
+            },
+            PromStoreOptions {
+                worker_channel_capacity: max + 1,
+                ..options.clone()
+            },
+            PromStoreOptions {
+                max_inflight_requests: max + 1,
+                ..options.clone()
+            },
+            PromStoreOptions {
+                flow_notification_queue_capacity: std::num::NonZeroUsize::new(max + 1).unwrap(),
+                ..options
+            },
+        ];
+        for options in cases {
+            assert!(!options.pending_rows_batching_enabled());
+        }
+    }
 
     #[test]
     fn test_prom_store_options() {
@@ -113,17 +148,13 @@ mod tests {
         assert!(default.enable);
         assert!(default.with_metric_engine);
         assert_eq!(default.prom_validation_mode, PromValidationMode::Strict);
-        assert!(!default.experimental_enable_prometheus_native_histogram);
         assert_eq!(default.pending_rows_flush_interval, Duration::ZERO);
         assert_eq!(default.max_batch_rows, default_max_batch_rows());
         assert_eq!(
             default.max_concurrent_flushes,
             default_max_concurrent_flushes()
         );
-        assert_eq!(
-            default.worker_channel_capacity,
-            default_worker_channel_capacity()
-        );
+        assert_eq!(default.worker_channel_capacity, 65_536);
         assert_eq!(
             default.max_inflight_requests,
             default_max_inflight_requests()

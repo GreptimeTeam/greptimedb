@@ -585,6 +585,8 @@ impl MetadataRegion {
         };
 
         RegionPutRequest {
+            // Metadata must remain recoverable regardless of the user write policy.
+            skip_wal: false,
             rows,
             hint: None,
             partition_expr_version: None,
@@ -818,6 +820,37 @@ mod test {
     use super::*;
     use crate::test_util::TestEnv;
     use crate::utils::to_metadata_region_id;
+
+    #[test]
+    fn test_metadata_put_always_writes_wal() {
+        // Both metadata put paths use this constructor rather than forwarding
+        // a user insert request, so its WAL policy must always be independent.
+        for entries in [
+            vec![],
+            vec![("region", "")],
+            vec![("region", ""), ("column", "metadata")],
+        ] {
+            let request = MetadataRegion::build_put_request_from_iter(
+                entries
+                    .iter()
+                    .map(|(key, value)| (key.to_string(), value.to_string())),
+            );
+            assert!(!request.skip_wal);
+            assert!(request.hint.is_none());
+            assert!(request.partition_expr_version.is_none());
+            let expected_rows = entries
+                .into_iter()
+                .map(|(key, value)| {
+                    row(vec![
+                        ValueData::TimestampMillisecondValue(0),
+                        ValueData::StringValue(key.to_string()),
+                        ValueData::StringValue(value.to_string()),
+                    ])
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(request.rows.rows, expected_rows);
+        }
+    }
 
     #[test]
     fn test_concat_table_key() {

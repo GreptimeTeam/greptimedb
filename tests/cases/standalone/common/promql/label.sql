@@ -17,6 +17,7 @@ INSERT INTO TABLE test VALUES
     (15000, 'host2', 'idc4',8);
 
 -- Missing source labels --
+-- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "new_host", "-");
 
 -- dst_label is equal to source label --
@@ -27,9 +28,14 @@ TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "host", "-", "host");
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "host", "-", "idc", "host");
 
--- test the empty source label --
--- SQLNESS SORT_RESULT 3 1
+-- Absent labels join as empty strings and keep their separators --
+TQL EVAL (0, 15, '5s') label_join(label_join(vector(1), "a", "", "missing"), "b", "-", "a", "a");
+
+-- An empty source label name is invalid --
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "host", "-", "");
+
+-- Both hosts are joined to the same `host` at 0s, leaving two series with the same label set --
+TQL EVAL (0, 15, '5s') label_join(test, "host", "-", "idc");
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "new_host", "-", "idc", "host");
@@ -50,8 +56,13 @@ TQL EVAL (0, 15, '5s') label_replace(test{host="host2"}, "new_idc", "$2", "idc",
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_replace(test{host="host2"}, "idc", "$2", "idc", "(.*):(.*)");
 
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') label_replace(test{host="host1"}, "idc", "$2", "idc", "(.*):(.*)");
+
+-- Both hosts are rewritten to the same `host`, leaving two series with the same label set --
+TQL EVAL (0, 15, '5s') label_replace(test, "host", "x", "host", ".*");
+
 -- test the empty source label --
--- TODO(dennis): we can't remove the label currently --
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_replace(test{host="host2"}, "idc2", "", "", "");
 
@@ -77,6 +88,10 @@ TQL EVAL(0, 15, '5s') label_replace(test{host="host1"}, "host2", "host2", "insta
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL(0, 15, '5s') label_replace(test{host="host1"}, "host2", "", "instance", "");
 
+-- An empty replacement removes an existing label --
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') label_replace(test{idc="idc1"}, "idc", "", "instance", "");
+
 -- Empty regex and different label value
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL(0, 15, '5s') {__name__="test",host="host1"} * label_replace(vector(1), "host", "host2", "host", "");
@@ -95,6 +110,10 @@ TQL EVAL (0, 15, '5s') label_replace(test{host="host1"}, "new_idc", "idc99", "id
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "new_host", "-", "idc", "host") == 3;
+
+-- Issue 8969 --
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') sum by (foo) (label_replace(test, "foo", "$1", "host", "(.*)")) * 0.8;
 
 DROP TABLE test;
 

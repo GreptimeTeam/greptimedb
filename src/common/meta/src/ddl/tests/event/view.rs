@@ -17,9 +17,8 @@ use std::sync::Arc;
 use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, Row, Value};
 use common_event_recorder::event_table::{
-    CATALOG_NAME_COLUMN, EVENT_CONTEXT_COLUMN, PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN,
-    PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN, SCHEMA_NAME_COLUMN, VIEW_ID_COLUMN,
-    VIEW_NAME_COLUMN, jsonb_value,
+    ACTOR_COLUMN, CATALOG_NAME_COLUMN, EVENT_CONTEXT_COLUMN, SCHEMA_NAME_COLUMN, VIEW_ID_COLUMN,
+    VIEW_NAME_COLUMN, jsonb_value, procedure_event_column_schemas,
 };
 use common_event_recorder::testing::assert_event_contract;
 use common_event_recorder::{Event, EventTypeFilter};
@@ -334,13 +333,9 @@ fn assert_procedure_event_contract(
     trigger: &str,
     locator: ViewEventLocator<'_>,
 ) {
-    let mut schema = vec![
-        PROCEDURE_ID_COLUMN.column_schema(),
-        PROCEDURE_STATE_COLUMN.column_schema(),
-        PROCEDURE_ERROR_COLUMN.column_schema(),
-        PROCEDURE_TRIGGER_COLUMN.column_schema(),
-    ];
+    let mut schema = procedure_event_column_schemas();
     schema.extend(view_schema());
+    schema.push(ACTOR_COLUMN.column_schema());
     schema.push(EVENT_CONTEXT_COLUMN.column_schema());
 
     let mut values = vec![
@@ -350,6 +345,7 @@ fn assert_procedure_event_contract(
         jsonb_value(&serde_json::json!({"type": trigger})),
     ];
     values.extend(locator.values());
+    values.push(Value { value_data: None });
     values.push(Value { value_data: None });
 
     assert_event_contract(event, event_type, &schema, &[Row { values }]);

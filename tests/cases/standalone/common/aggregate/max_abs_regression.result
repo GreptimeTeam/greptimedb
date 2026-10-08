@@ -1,0 +1,131 @@
+-- Regression coverage for aggregate expressions with multiple MAX aggregates.
+CREATE DATABASE max_abs_regression;
+
+Affected Rows: 1
+
+USE max_abs_regression;
+
+Affected Rows: 0
+
+CREATE TABLE t (
+    ts TIMESTAMP TIME INDEX,
+    v INT,
+    PRIMARY KEY (v),
+) ENGINE = mito;
+
+Affected Rows: 0
+
+INSERT INTO t VALUES
+    ('2024-01-01 00:00:00', -11),
+    ('2024-01-01 00:01:00', 3),
+    ('2024-01-01 00:02:00', -7),
+    ('2024-01-01 00:03:00', 5);
+
+Affected Rows: 4
+
+-- Expression aggregate regression.
+SELECT MAX(ABS(v)), MAX(ts) FROM t;
+
++---------------+---------------------+
+| max(abs(t.v)) | max(t.ts)           |
++---------------+---------------------+
+| 11            | 2024-01-01T00:03:00 |
++---------------+---------------------+
+
+SELECT MAX(ts), MAX(ABS(v)) FROM t;
+
++---------------------+---------------+
+| max(t.ts)           | max(abs(t.v)) |
++---------------------+---------------+
+| 2024-01-01T00:03:00 | 11            |
++---------------------+---------------+
+
+-- Column-only multiple-MAX positive control.
+SELECT MAX(v), MAX(ts) FROM t;
+
++----------+---------------------+
+| max(t.v) | max(t.ts)           |
++----------+---------------------+
+| 5        | 2024-01-01T00:03:00 |
++----------+---------------------+
+
+-- A mixed expression/column MAX must not send an incomplete dynamic filter to DN SeqScans.
+-- SQLNESS REPLACE ("metrics_per_partition":\s*.*metrics=) "metrics_per_partition": REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE ,\s"dyn_filters":\s\["DynamicFilter\s\[[^"]*\]"\] , "dyn_filters": ["DynamicFilter [ REDACTED ]"]
+-- SQLNESS REPLACE metrics=REDACTED\s*\| metrics=REDACTED_|
+EXPLAIN ANALYZE VERBOSE SELECT MAX(ABS(v)), MAX(ts) FROM t;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[max(abs(t.v)), max(t.ts)] metrics=REDACTED_|
+|_|_|_CoalescePartitionsExec metrics=REDACTED_|
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[max(abs(t.v)), max(t.ts)] metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["ts", "v"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+-- A column-only multiple-MAX query remains a dynamic-filter positive control.
+-- SQLNESS REPLACE ("metrics_per_partition":\s*.*metrics=) "metrics_per_partition": REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (=Hash.*) =REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE ,\s"dyn_filters":\s\["DynamicFilter\s\[[^"]*\]"\] , "dyn_filters": ["DynamicFilter [ REDACTED ]"]
+-- SQLNESS REPLACE metrics=REDACTED\s*\| metrics=REDACTED_|
+EXPLAIN ANALYZE VERBOSE SELECT MAX(v), MAX(ts) FROM t;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[max(t.v), max(t.ts)] metrics=REDACTED_|
+|_|_|_CoalescePartitionsExec metrics=REDACTED_|
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[max(t.v), max(t.ts)] metrics=REDACTED_|
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["ts", "v"], "dyn_filters": ["DynamicFilter [ REDACTED ]"], "flat_format":REDACTED, "metrics_per_partition": REDACTED metrics=REDACTED_|
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+DROP TABLE t;
+
+Affected Rows: 0
+
+USE public;
+
+Affected Rows: 0
+
+DROP DATABASE max_abs_regression;
+
+Affected Rows: 0
+

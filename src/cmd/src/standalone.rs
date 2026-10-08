@@ -44,20 +44,22 @@ use common_meta::procedure_executor::{LocalProcedureExecutor, ProcedureExecutorR
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::{Sequence, SequenceBuilder};
-use common_meta::wal_provider::{WalProviderRef, build_wal_provider};
+use common_meta::wal_provider::{WalProvider, WalProviderRef, build_wal_provider};
 use common_options::plugin_options::StandaloneFlag;
 use common_procedure::ProcedureManagerRef;
 use common_query::prelude::set_default_prefix;
-use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
+use common_telemetry::{info, warn};
 use common_time::timezone::set_default_timezone;
 use common_version::{short_version, verbose_version};
+use common_wal::config::DatanodeWalConfig;
+use common_wal::config::object_store::STANDALONE_GENERATION;
 use datanode::config::{DatanodeOptions, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::region_server::RegionServer;
 use flow::{
     FlowDualEngineRef, FlownodeBuilder, FlownodeInstance, FlownodeOptions, FrontendClient,
-    FrontendInvoker, GrpcQueryHandlerWithBoxedError,
+    GrpcQueryHandlerWithBoxedError,
 };
 use frontend::frontend::Frontend;
 use frontend::instance::builder::FrontendBuilder;
@@ -82,6 +84,34 @@ use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, error, log_versions, maybe_activate_heap_profile};
 
 pub const APP_NAME: &str = "greptime-standalone";
+
+/// Builds the WAL provider that allocates region WAL options in standalone mode.
+///
+/// The object store WAL allocates the node prefix of `node_id`, the datanode id
+/// of the standalone instance; an absent id is treated as 0, the id
+/// `StandaloneOptions::datanode_options` assigns.
+pub async fn build_standalone_wal_provider(
+    wal: &DatanodeWalConfig,
+    node_id: Option<DatanodeId>,
+    kv_backend: KvBackendRef,
+) -> Result<WalProvider> {
+    match wal {
+        DatanodeWalConfig::ObjectStore(config) => Ok(WalProvider::ObjectStore {
+            prefix: config.node_prefix(node_id.unwrap_or(0), STANDALONE_GENERATION),
+        }),
+        DatanodeWalConfig::RaftEngine(_)
+        | DatanodeWalConfig::Kafka(_)
+        | DatanodeWalConfig::Noop => {
+            let metasrv_wal_config = wal
+                .clone()
+                .try_into()
+                .context(error::InvalidWalProviderSnafu)?;
+            build_wal_provider(&metasrv_wal_config, kv_backend)
+                .await
+                .context(error::BuildWalProviderSnafu)
+        }
+    }
+}
 
 fn standalone_local_file_access(
     storage: &StorageConfig,
@@ -152,6 +182,11 @@ impl Command {
     ) -> Result<GreptimeOptions<StandaloneOptions>> {
         self.subcmd.load_options(global_options)
     }
+
+    /// Whether the `standalone start` command requested daemonization.
+    pub fn is_daemon(&self) -> bool {
+        self.subcmd.is_daemon()
+    }
 }
 
 #[derive(Parser)]
@@ -172,6 +207,12 @@ impl SubCommand {
     ) -> Result<GreptimeOptions<StandaloneOptions>> {
         match self {
             SubCommand::Start(cmd) => cmd.load_options(global_options),
+        }
+    }
+
+    fn is_daemon(&self) -> bool {
+        match self {
+            SubCommand::Start(cmd) => cmd.is_daemon(),
         }
     }
 }
@@ -233,32 +274,53 @@ impl App for Instance {
         Ok(())
     }
 
+    /// Stops every component in order. A failed step does not skip the later
+    /// ones; the first error is returned and the rest are logged.
     async fn stop(&mut self) -> Result<()> {
-        self.frontend
-            .shutdown()
-            .await
-            .context(error::ShutdownFrontendSnafu)?;
+        let mut first_error = None;
+        let mut record = |result: Result<()>| {
+            if let Err(err) = result {
+                if first_error.is_none() {
+                    first_error = Some(err);
+                } else {
+                    warn!(err; "Ignored a later shutdown error");
+                }
+            }
+        };
 
-        self.leader_services_controller
-            .stop(
-                self.procedure_manager.clone(),
-                self.datanode.region_server(),
-            )
-            .await?;
+        record(
+            self.frontend
+                .shutdown()
+                .await
+                .context(error::ShutdownFrontendSnafu),
+        );
 
-        self.datanode
-            .shutdown()
-            .await
-            .context(error::ShutdownDatanodeSnafu)?;
+        record(
+            self.leader_services_controller
+                .stop(
+                    self.procedure_manager.clone(),
+                    self.datanode.region_server(),
+                )
+                .await,
+        );
 
-        self.flownode
-            .shutdown()
-            .await
-            .context(error::ShutdownFlownodeSnafu)?;
+        record(
+            self.datanode
+                .shutdown()
+                .await
+                .context(error::ShutdownDatanodeSnafu),
+        );
+
+        record(
+            self.flownode
+                .shutdown()
+                .await
+                .context(error::ShutdownFlownodeSnafu),
+        );
 
         info!("Datanode instance stopped.");
 
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 }
 
@@ -291,9 +353,24 @@ pub struct StartCommand {
     /// The working home directory of this standalone instance.
     #[clap(long)]
     data_home: Option<String>,
+    /// Run in the background as a daemon.
+    #[cfg(unix)]
+    #[clap(short, long)]
+    daemon: bool,
 }
 
 impl StartCommand {
+    /// Whether the `standalone start` command requested daemonization.
+    #[cfg(unix)]
+    pub(crate) fn is_daemon(&self) -> bool {
+        self.daemon
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn is_daemon(&self) -> bool {
+        false
+    }
+
     /// Load the GreptimeDB options from various sources (command line, config file or env).
     pub fn load_options(
         &self,
@@ -395,8 +472,6 @@ impl StartCommand {
     #[allow(clippy::diverging_sub_expression)]
     /// Build GreptimeDB instance with the loaded options.
     pub async fn build(&self, opts: GreptimeOptions<StandaloneOptions>) -> Result<Instance> {
-        common_runtime::init_global_runtimes(&opts.runtime);
-
         let guard = common_telemetry::init_global_logging(
             APP_NAME,
             &opts.component.logging,
@@ -404,6 +479,8 @@ impl StartCommand {
             None,
             Some(&opts.component.slow_query),
         );
+
+        common_runtime::init_standalone_runtimes(&opts.runtime);
 
         crate::options::flush_dropped_plugin_warnings();
         log_versions(verbose_version(), short_version(), APP_NAME);
@@ -584,15 +661,8 @@ impl StartCommand {
                 .step(10)
                 .build(),
         );
-        let kafka_options = opts
-            .wal
-            .clone()
-            .try_into()
-            .context(error::InvalidWalProviderSnafu)?;
-        let wal_provider = build_wal_provider(&kafka_options, kv_backend.clone())
-            .await
-            .context(error::BuildWalProviderSnafu)?;
-        let wal_provider = Arc::new(wal_provider);
+        let wal_provider =
+            Arc::new(build_standalone_wal_provider(&opts.wal, node_id, kv_backend.clone()).await?);
         let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
             table_id_allocator.clone(),
             wal_provider.clone(),
@@ -676,22 +746,6 @@ impl StartCommand {
         frontend_instance_handler
             .set_handler(weak_grpc_handler)
             .await;
-
-        // set the frontend invoker for flownode
-        let flow_streaming_engine = flow_engine.streaming_engine();
-        // flow server need to be able to use frontend to write insert requests back
-        let invoker = FrontendInvoker::build_from(
-            flow_streaming_engine.clone(),
-            catalog_manager.clone(),
-            kv_backend.clone(),
-            layered_cache_registry.clone(),
-            procedure_executor,
-            node_manager.clone(),
-            fe_instance.frontend_peer_addr().to_string(),
-        )
-        .await
-        .context(StartFlownodeSnafu)?;
-        flow_streaming_engine.set_frontend_invoker(invoker).await;
 
         let servers = Services::new(opts, fe_instance.clone(), plugins.clone())
             .build()
@@ -1025,15 +1079,135 @@ mod tests {
     use clap::{CommandFactory, Parser};
     use common_base::readable_size::ReadableSize;
     use common_config::ENV_VAR_SEP;
+    use common_meta::ddl::allocator::wal_options::WalOptionsAllocator;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_options::plugin_options::StandaloneFlag;
     use common_test_util::temp_dir::{create_named_temp_file, create_temp_dir};
-    use common_wal::config::DatanodeWalConfig;
+    use common_wal::config::object_store::ObjectStoreWalConfig;
+    use common_wal::options::{ObjectStoreWalOptions, WalOptions};
     use frontend::frontend::FrontendOptions;
     use object_store::config::{FileConfig, GcsConfig};
     use servers::grpc::GrpcOptions;
+    use servers::server::ServerHandlers;
+    use store_api::logstore::LogStore;
 
     use super::*;
     use crate::options::GlobalOptions;
+
+    struct FailingLeaderServices;
+
+    #[async_trait]
+    impl StandaloneLeaderServicesController for FailingLeaderServices {
+        async fn start(&self, _context: LeaderServicesContext) -> Result<()> {
+            Ok(())
+        }
+
+        async fn stop(
+            &self,
+            _procedure_manager: ProcedureManagerRef,
+            _region_server: RegionServer,
+        ) -> Result<()> {
+            error::IllegalConfigSnafu {
+                msg: "leader services failed to stop",
+            }
+            .fail()
+        }
+    }
+
+    struct FailingServer;
+
+    #[async_trait]
+    impl servers::server::Server for FailingServer {
+        async fn shutdown(&self) -> servers::error::Result<()> {
+            servers::error::InternalSnafu {
+                err_msg: "server failed to stop",
+            }
+            .fail()
+        }
+
+        async fn start(&mut self, _listening: SocketAddr) -> servers::error::Result<()> {
+            Ok(())
+        }
+
+        fn name(&self) -> &str {
+            "failing"
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stop_runs_every_step_and_returns_the_first_error() {
+        common_telemetry::init_default_ut_logging();
+        let data_home = create_temp_dir("standalone-stop");
+        let mut opts = StandaloneOptions {
+            wal: DatanodeWalConfig::ObjectStore(ObjectStoreWalConfig::default()),
+            ..Default::default()
+        };
+        opts.storage.data_home = data_home.path().to_str().unwrap().to_string();
+        let creator = InstanceCreator::default()
+            .with_leader_services_controller(Box::new(FailingLeaderServices));
+        let (mut instance, _) = StartCommand::build_with(opts, vec![], creator)
+            .await
+            .unwrap();
+        let log_store = instance.datanode.object_store_log_store().unwrap();
+        // The datanode fails to stop its servers after the leader services failed.
+        let mut services = ServerHandlers::default();
+        services.insert((Box::new(FailingServer), "127.0.0.1:0".parse().unwrap()));
+        services.start_all().await.unwrap();
+        instance.datanode.setup_services(services);
+
+        let err = instance.stop().await.unwrap_err();
+
+        assert!(
+            matches!(&err, error::Error::IllegalConfig { msg, .. } if msg == "leader services failed to stop"),
+            "unexpected error: {err:?}"
+        );
+        assert!(matches!(
+            log_store.append_batch(vec![]).await,
+            Err(log_store::error::Error::ObjectStoreWalStopped { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_build_standalone_wal_provider() {
+        let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
+
+        let config = ObjectStoreWalConfig {
+            prefix: "cluster-a/wal".to_string(),
+            ..Default::default()
+        };
+        // The regions persist the node prefix the datanode runs its store under.
+        let node_prefix = config.node_prefix(0, STANDALONE_GENERATION);
+        assert_eq!(node_prefix, "cluster-a/wal/datanodes/0/epochs/0");
+        let provider = build_standalone_wal_provider(
+            &DatanodeWalConfig::ObjectStore(config),
+            Some(0),
+            kv_backend.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            &provider,
+            WalProvider::ObjectStore { prefix } if *prefix == node_prefix
+        ));
+        let regions = vec![0, 1];
+        let wal_options = provider.allocate(&regions, false).await.unwrap();
+        for region in regions {
+            assert_eq!(
+                wal_options[&region],
+                WalOptions::ObjectStore(ObjectStoreWalOptions::new(node_prefix.clone()))
+            );
+        }
+
+        let provider =
+            build_standalone_wal_provider(&DatanodeWalConfig::default(), Some(0), kv_backend)
+                .await
+                .unwrap();
+        assert!(matches!(provider, WalProvider::RaftEngine));
+    }
 
     #[test]
     fn test_standalone_local_file_access_config() {
@@ -1129,7 +1303,8 @@ mod tests {
     fn test_toml() {
         let opts = StandaloneOptions::default();
         let toml_string = toml::to_string(&opts).unwrap();
-        let _parsed: StandaloneOptions = toml::from_str(&toml_string).unwrap();
+        let parsed: StandaloneOptions = toml::from_str(&toml_string).unwrap();
+        assert_eq!(parsed.otlp, opts.otlp);
     }
 
     #[test]
@@ -1352,6 +1527,19 @@ mod tests {
         let command =
             StartCommand::try_parse_from(["standalone", "--rpc-addr", "127.0.0.1:34001"]).unwrap();
         assert_eq!(command.grpc_bind_addr.as_deref(), Some("127.0.0.1:34001"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_parse_daemon_flag() {
+        let command = StartCommand::try_parse_from(["standalone", "--daemon"]).unwrap();
+        assert!(command.is_daemon());
+
+        let command = StartCommand::try_parse_from(["standalone", "-d"]).unwrap();
+        assert!(command.is_daemon());
+
+        let command = StartCommand::try_parse_from(["standalone"]).unwrap();
+        assert!(!command.is_daemon());
     }
 
     #[test]

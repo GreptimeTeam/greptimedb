@@ -30,6 +30,14 @@
 //! [`crate::requests::validate_table_option`], so they are accepted both on the
 //! ingestion auto-create path and on explicit `CREATE TABLE ... WITH (...)` DDL.
 
+use common_catalog::consts::{
+    RESOURCE_ATTRIBUTES_COLUMN, SCOPE_ATTRIBUTES_COLUMN, SPAN_ATTRIBUTES_COLUMN,
+};
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::{ColumnSchema, Schema};
+
+use crate::requests::TABLE_DATA_MODEL_TRACE_V2;
+
 /// Reserved prefix for every public semantic table-option key.
 pub const SEMANTIC_PREFIX: &str = "greptime.semantic.";
 
@@ -66,8 +74,8 @@ pub const SEMANTIC_METRIC_TYPE: &str = "greptime.semantic.metric.type";
 /// UCUM unit, e.g. `s`, `By`, `{request}`. Discarded by the row encoders, so it
 /// is unrecoverable once ingested.
 pub const SEMANTIC_METRIC_UNIT: &str = "greptime.semantic.metric.unit";
-/// `cumulative` / `delta` (OTel only). Invisible in the metric name, so it is
-/// unrecoverable from the table alone.
+/// Catalog-level `cumulative` / `delta` / `mixed` description for OTLP metrics.
+/// Per-series query behavior is determined from stored row identity instead.
 pub const SEMANTIC_METRIC_TEMPORALITY: &str = "greptime.semantic.metric.temporality";
 /// [`METADATA_QUALITY_DECLARED`] when the protocol stated the type, or
 /// [`METADATA_QUALITY_INFERRED`] when guessed from a name suffix.
@@ -90,10 +98,16 @@ pub const SEMANTIC_ENTITY_PREFIX: &str = "greptime.semantic.entity.";
 /// is the `service_name` tag column, declaring the logical `service` entity.
 pub const SEMANTIC_ENTITY_SERVICE_ID: &str = "greptime.semantic.entity.service.id";
 
-/// The role a set of columns plays for an entity: `id` (identifying attributes,
-/// must be tag columns — enforced at DDL time), `descriptive`, or `scope`.
+/// The role a set of columns plays for an entity: `id` (identifying
+/// attributes), `descriptive`, or `scope`. Columns may be tags or fields; DDL
+/// validation only requires that they exist and render as stable strings
+/// ([`has_stable_string_form`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntityRole {
+    /// Identifying columns. Their **order is part of the identity**: the
+    /// entity id is their values joined in the declared order, so two tables
+    /// naming the same entity must list them the same way (broad to narrow)
+    /// or they name two entities.
     Id,
     Descriptive,
     Scope,
@@ -126,6 +140,9 @@ pub const SOURCE_ELASTICSEARCH: &str = "elasticsearch";
 
 pub const METADATA_QUALITY_DECLARED: &str = "declared";
 pub const METADATA_QUALITY_INFERRED: &str = "inferred";
+
+pub const METRIC_TEMPORALITY_CUMULATIVE: &str = "cumulative";
+pub const METRIC_TEMPORALITY_DELTA: &str = "delta";
 
 /// Sentinel for a key that cannot be determined at stamp time.
 pub const SEMANTIC_VALUE_UNKNOWN: &str = "unknown";
@@ -182,14 +199,61 @@ pub fn is_entity_option_key(key: &str) -> bool {
     parse_entity_option_key(key).is_some()
 }
 
+/// Resolves a Trace V2 entity reference to a JSON2 root and a literal attribute key.
+/// Everything after the first dot belongs to the key, matching Trace V1's
+/// flattened column names. Existing physical columns take precedence.
+pub fn trace_v2_attribute<'a>(
+    schema: &Schema,
+    data_model: Option<&str>,
+    column: &'a str,
+) -> Option<(&'a str, &'a str)> {
+    if data_model != Some(TABLE_DATA_MODEL_TRACE_V2)
+        || schema.column_schema_by_name(column).is_some()
+    {
+        return None;
+    }
+    let (root, key) = column.split_once('.')?;
+    (!key.is_empty()
+        && schema
+            .column_schema_by_name(root)
+            .is_some_and(is_v2_attribute_column))
+    .then_some((root, key))
+}
+
+fn is_v2_attribute_column(schema: &ColumnSchema) -> bool {
+    matches!(
+        schema.name.as_str(),
+        RESOURCE_ATTRIBUTES_COLUMN | SCOPE_ATTRIBUTES_COLUMN | SPAN_ATTRIBUTES_COLUMN
+    ) && schema.data_type.is_json2()
+}
+
+/// Returns true if a column of `data_type` renders as a stable string — the
+/// requirement for entity id/descriptive/scope columns. The read-time
+/// derivation casts them to strings, so a type without a stable string form
+/// would fail only when the graph is scanned; DDL validation rejects it up
+/// front instead.
+pub fn has_stable_string_form(data_type: &ConcreteDataType) -> bool {
+    !matches!(
+        data_type,
+        ConcreteDataType::Binary(_)
+            | ConcreteDataType::Json(_)
+            | ConcreteDataType::Vector(_)
+            | ConcreteDataType::List(_)
+            | ConcreteDataType::Struct(_)
+            | ConcreteDataType::Dictionary(_)
+            | ConcreteDataType::Null(_)
+    )
+}
+
 /// Tokenizes an entity option's comma-separated column list (trimmed, empty
 /// tokens dropped). [`validate_semantic_option`] rejects empty tokens at DDL
 /// time, so readers only ever drop what validation already refused.
 pub fn parse_entity_columns(value: &str) -> Vec<String> {
     value
         .split(',')
-        .map(|c| c.trim().to_string())
-        .filter(|c| !c.is_empty())
+        .map(str::trim)
+        .filter(|column| !column.is_empty())
+        .map(String::from)
         .collect()
 }
 
@@ -209,13 +273,13 @@ pub fn is_semantic_option_key(key: &str) -> bool {
 /// non-empty string. Closed-domain keys accept a fixed set, plus the `unknown`
 /// sentinel, plus `mixed` for the keys where one long-lived table can
 /// legitimately see multiple values. Entity keys ([`is_entity_option_key`]) take a
-/// comma-separated column-name list (each token non-empty); the "id columns must
-/// be tag columns" invariant is enforced later against the table schema at DDL
-/// time, not here. Keys that are neither whitelisted nor a well-formed entity key
+/// comma-separated column-name list (each token non-empty); column existence and
+/// the stable-string-form rule for entity columns are enforced later against
+/// the table schema at DDL time, not here. Keys that are neither whitelisted nor a well-formed entity key
 /// are rejected.
 pub fn validate_semantic_option(key: &str, value: &str) -> bool {
     if is_entity_option_key(key) {
-        return !value.is_empty() && value.split(',').all(|col| !col.trim().is_empty());
+        return !value.is_empty() && value.split(',').all(|column| !column.trim().is_empty());
     }
     match key {
         SEMANTIC_PIPELINE
@@ -251,7 +315,10 @@ pub fn validate_semantic_option(key: &str, value: &str) -> bool {
                 | "unknown"
         ),
         SEMANTIC_METRIC_TEMPORALITY => {
-            matches!(value, "cumulative" | "delta" | "mixed" | "unknown")
+            matches!(
+                value,
+                METRIC_TEMPORALITY_CUMULATIVE | METRIC_TEMPORALITY_DELTA | "mixed" | "unknown"
+            )
         }
         SEMANTIC_METRIC_METADATA_QUALITY => matches!(value, "declared" | "inferred" | "unknown"),
 
@@ -261,7 +328,54 @@ pub fn validate_semantic_option(key: &str, value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use datatypes::types::JsonType;
+
     use super::*;
+
+    #[test]
+    fn test_trace_v2_attribute_references() {
+        let schema = Schema::new(vec![
+            ColumnSchema::new(
+                RESOURCE_ATTRIBUTES_COLUMN,
+                ConcreteDataType::Json(JsonType::null()),
+                true,
+            ),
+            ColumnSchema::new(
+                SCOPE_ATTRIBUTES_COLUMN,
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                "resource_attributes.physical",
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+        ]);
+        let model = Some(TABLE_DATA_MODEL_TRACE_V2);
+        for key in ["host.name", "host..name", "host[0]", "host.*", r#"a"b\c.d"#] {
+            let column = format!("resource_attributes.{key}");
+            assert_eq!(
+                trace_v2_attribute(&schema, model, &column),
+                Some((RESOURCE_ATTRIBUTES_COLUMN, key))
+            );
+        }
+        for column in [
+            "resource_attributes",
+            "resource_attributes.",
+            "scope_attributes.name",
+            "span_attributes.name",
+            "resource_attributes.physical",
+            "missing.key",
+        ] {
+            assert_eq!(trace_v2_attribute(&schema, model, column), None, "{column}");
+        }
+        for model in [None, Some(crate::requests::TABLE_DATA_MODEL_TRACE_V1)] {
+            assert_eq!(
+                trace_v2_attribute(&schema, model, "resource_attributes.host.name"),
+                None
+            );
+        }
+    }
 
     #[test]
     fn test_is_semantic_option_key() {

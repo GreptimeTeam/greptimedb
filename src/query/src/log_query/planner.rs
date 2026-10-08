@@ -17,12 +17,11 @@ use catalog::table_source::DfTableSourceProvider;
 use common_function::utils::escape_like_pattern;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::SessionState;
-use datafusion_common::{DFSchema, ScalarValue};
+use datafusion_common::{DFSchema, ScalarValue, TableReference};
 use datafusion_expr::utils::{conjunction, disjunction};
 use datafusion_expr::{
     BinaryExpr, Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder, Operator, col, lit, not,
 };
-use datafusion_sql::TableReference;
 use datatypes::schema::Schema;
 use log_query::{AggFunc, BinaryOperator, EqualValue, LogExpr, LogQuery, TimeFilter};
 use snafu::{OptionExt, ResultExt};
@@ -56,11 +55,9 @@ impl LogQueryPlanner {
             .await
             .context(CatalogSnafu)?;
         let schema = table_source
-            .as_any()
             .downcast_ref::<DefaultTableSource>()
             .context(UnknownTableSnafu)?
             .table_provider
-            .as_any()
             .downcast_ref::<DfTableProviderAdapter>()
             .context(UnknownTableSnafu)?
             .table()
@@ -145,7 +142,7 @@ impl LogQueryPlanner {
                 let exprs = filters
                     .iter()
                     .filter_map(|filter| self.build_filters(filter, schema).transpose())
-                    .try_collect::<Vec<_>>()?;
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
                 if exprs.is_empty() {
                     Ok(None)
                 } else {
@@ -156,7 +153,7 @@ impl LogQueryPlanner {
                 let exprs = filters
                     .iter()
                     .filter_map(|filter| self.build_filters(filter, schema).transpose())
-                    .try_collect::<Vec<_>>()?;
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
                 if exprs.is_empty() {
                     Ok(None)
                 } else {
@@ -194,7 +191,7 @@ impl LogQueryPlanner {
                 self.build_content_filter_with_expr(col_expr.clone(), filter, &df_schema)
                     .transpose()
             })
-            .try_collect::<Vec<_>>()?;
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         if filter_exprs.is_empty() {
             return Ok(Some(col_expr.is_true()));
@@ -288,7 +285,7 @@ impl LogQueryPlanner {
                         self.build_content_filter_with_expr(col_expr.clone(), filter, schema)
                             .transpose()
                     })
-                    .try_collect::<Vec<_>>()?;
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
 
                 if exprs.is_empty() {
                     return Ok(None);
@@ -329,19 +326,19 @@ impl LogQueryPlanner {
                 let args = args
                     .iter()
                     .map(|expr| self.log_expr_to_df_expr(expr, schema))
-                    .try_collect::<Vec<_>>()?;
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
                 if let Some(alias) = alias {
                     Ok(aggr_fn.call(args).alias(alias))
                 } else {
                     Ok(aggr_fn.call(args))
                 }
             })
-            .try_collect::<Vec<_>>()?;
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         let group_exprs = by
             .iter()
             .map(|expr| self.log_expr_to_df_expr(expr, schema))
-            .try_collect::<Vec<_>>()?;
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok((aggr_expr, group_exprs))
     }
@@ -383,7 +380,7 @@ impl LogQueryPlanner {
         let args = args
             .iter()
             .map(|expr| self.log_expr_to_df_expr(expr, schema))
-            .try_collect::<Vec<_>>()?;
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         let func = self.session_state.scalar_functions().get(name).context(
             UnknownScalarFunctionSnafu {
                 name: name.to_string(),

@@ -67,6 +67,20 @@ pub enum Error {
         error: object_store::Error,
     },
 
+    #[snafu(display(
+        "Manifest delta {} disappeared after it was listed, path: {}",
+        version,
+        path
+    ))]
+    ManifestDeltaNotFound {
+        version: ManifestVersion,
+        path: String,
+        #[snafu(source)]
+        error: object_store::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Fail to compress object by {}, path: {}", compress_type, path))]
     CompressObject {
         compress_type: CompressionType,
@@ -272,6 +286,36 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "SEQUENCE_RANGE_UNSUPPORTED: exact sequence-range read unsupported, region: {}, min_seq: {}, max_seq: {}, reason: {}, retry_hint: FALLBACK_MEMTABLE_ONLY_OR_FULL_RECOMPUTE",
+        region_id,
+        min_seq,
+        max_seq,
+        reason
+    ))]
+    SequenceRangeUnsupported {
+        region_id: RegionId,
+        min_seq: u64,
+        max_seq: u64,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "region {} is unusable for sequence reads: file {} declares region {}",
+        region_id,
+        file_id,
+        file_region_id
+    ))]
+    RegionSequenceDomainBroken {
+        region_id: RegionId,
+        file_region_id: RegionId,
+        file_id: FileId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Old manifest missing for region {}", region_id))]
     MissingOldManifest {
         region_id: RegionId,
@@ -403,6 +447,14 @@ pub enum Error {
 
     #[snafu(display("Failed to delete WAL, region_id: {}", region_id))]
     DeleteWal {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
+    #[snafu(display("Failed to wait for the WAL to be durable, region_id: {}", region_id))]
+    WaitWalDurable {
         region_id: RegionId,
         #[snafu(implicit)]
         location: Location,
@@ -725,14 +777,6 @@ pub enum Error {
     #[snafu(display("Failed to apply bloom filter index"))]
     ApplyBloomFilterIndex {
         source: index::bloom_filter::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[cfg(feature = "vector_index")]
-    #[snafu(display("Failed to apply vector index: {}", reason))]
-    ApplyVectorIndex {
-        reason: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1094,6 +1138,21 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid SST primary key range: {reason}"))]
+    InvalidPrimaryKeyRange {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to decode SST primary key range {endpoint} endpoint"))]
+    DecodePrimaryKeyRange {
+        endpoint: &'static str,
+        source: mito_codec::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Region {} is busy", region_id))]
     RegionBusy {
         region_id: RegionId,
@@ -1134,22 +1193,6 @@ pub enum Error {
     #[snafu(display("Failed to finish bloom filter"))]
     BloomFilterFinish {
         source: index::bloom_filter::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[cfg(feature = "vector_index")]
-    #[snafu(display("Failed to build vector index: {}", reason))]
-    VectorIndexBuild {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[cfg(feature = "vector_index")]
-    #[snafu(display("Failed to finish vector index: {}", reason))]
-    VectorIndexFinish {
-        reason: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1359,6 +1402,7 @@ impl Error {
     pub(crate) fn is_object_not_found(&self) -> bool {
         match self {
             Error::OpenDal { error, .. } => error.kind() == ErrorKind::NotFound,
+            Error::ManifestDeltaNotFound { .. } => true,
             _ => false,
         }
     }
@@ -1400,10 +1444,13 @@ impl ErrorExt for Error {
 
         match self {
             DataTypeMismatch { source, .. } => source.status_code(),
-            OpenDal { .. } | ReadParquet { .. } => StatusCode::StorageUnavailable,
-            WriteWal { source, .. } | ReadWal { source, .. } | DeleteWal { source, .. } => {
-                source.status_code()
+            OpenDal { .. } | ManifestDeltaNotFound { .. } | ReadParquet { .. } => {
+                StatusCode::StorageUnavailable
             }
+            WriteWal { source, .. }
+            | ReadWal { source, .. }
+            | DeleteWal { source, .. }
+            | WaitWalDurable { source, .. } => source.status_code(),
             CompressObject { .. }
             | DecompressObject { .. }
             | SerdeJson { .. }
@@ -1449,7 +1496,10 @@ impl ErrorExt for Error {
 
             IncrementalQueryStale { .. } | SnapshotFenceStale { .. } => StatusCode::RequestOutdated,
 
-            RegionMetadataNotFound { .. }
+            SequenceRangeUnsupported { .. } => StatusCode::Unsupported,
+
+            RegionSequenceDomainBroken { .. }
+            | RegionMetadataNotFound { .. }
             | Join { .. }
             | WorkerStopped { .. }
             | Recv { .. }
@@ -1506,8 +1556,6 @@ impl ErrorExt for Error {
             | PushIndexValue { source, .. }
             | ApplyInvertedIndex { source, .. }
             | IndexFinish { source, .. } => source.status_code(),
-            #[cfg(feature = "vector_index")]
-            ApplyVectorIndex { .. } => StatusCode::Internal,
             PuffinReadBlob { source, .. }
             | PuffinAddBlob { source, .. }
             | PuffinInitStager { source, .. }
@@ -1536,7 +1584,10 @@ impl ErrorExt for Error {
             FulltextPushText { source, .. }
             | FulltextFinish { source, .. }
             | ApplyFulltextIndex { source, .. } => source.status_code(),
-            DecodeStats { .. } | StatsNotPresent { .. } => StatusCode::Internal,
+            DecodeStats { .. }
+            | StatsNotPresent { .. }
+            | InvalidPrimaryKeyRange { .. }
+            | DecodePrimaryKeyRange { .. } => StatusCode::Internal,
             RegionBusy { .. } => StatusCode::RegionBusy,
             GetSchemaMetadata { source, .. } => source.status_code(),
             Timeout { .. } => StatusCode::Cancelled,
@@ -1546,9 +1597,6 @@ impl ErrorExt for Error {
             PushBloomFilterValue { source, .. } | BloomFilterFinish { source, .. } => {
                 source.status_code()
             }
-
-            #[cfg(feature = "vector_index")]
-            VectorIndexBuild { .. } | VectorIndexFinish { .. } => StatusCode::Internal,
 
             ManualCompactionOverride {} | CompactionCancelled {} | FlushCancelled {} => {
                 StatusCode::Cancelled
@@ -1601,7 +1649,8 @@ impl ErrorExt for Error {
             | RegionStopped { .. }
             | RegionBusy { .. }
             | ManualCompactionAlreadyRunning { .. }
-            | FlushableRegionState { .. } => RetryHint::Retryable,
+            | FlushableRegionState { .. }
+            | ManifestDeltaNotFound { .. } => RetryHint::Retryable,
 
             OpenDal { error, .. }
             | DeleteSsts { error, .. }
@@ -1611,6 +1660,7 @@ impl ErrorExt for Error {
             WriteWal { source, .. }
             | ReadWal { source, .. }
             | DeleteWal { source, .. }
+            | WaitWalDurable { source, .. }
             | FetchManifests { source, .. }
             | External { source, .. } => source.retry_hint(),
 

@@ -67,6 +67,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Procedure submission requires query context"))]
+    MissingQueryContext {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to send heartbeat: {}", err_msg))]
     SendHeartbeat {
         err_msg: String,
@@ -78,6 +84,15 @@ pub enum Error {
     CreateHeartbeatStream {
         #[snafu(implicit)]
         location: Location,
+    },
+
+    #[snafu(display("Heartbeat handshake timeout after {timeout:?}"))]
+    HeartbeatHandshakeTimeout {
+        timeout: std::time::Duration,
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: tokio::time::error::Elapsed,
     },
 
     #[snafu(display("Invalid response header"))]
@@ -141,8 +156,10 @@ impl ErrorExt for Error {
             | Error::NoLeader { .. }
             | Error::AskLeaderTimeout { .. }
             | Error::NotStarted { .. }
+            | Error::MissingQueryContext { .. }
             | Error::SendHeartbeat { .. }
             | Error::CreateHeartbeatStream { .. }
+            | Error::HeartbeatHandshakeTimeout { .. }
             | Error::CreateChannel { .. }
             | Error::RetryTimesExceeded { .. }
             | Error::ConvertMetaConfig { .. } => StatusCode::Internal,
@@ -161,6 +178,7 @@ impl ErrorExt for Error {
     fn retry_hint(&self) -> RetryHint {
         match self {
             Error::MetaServer { retry_hint, .. } => *retry_hint,
+            Error::HeartbeatHandshakeTimeout { .. } => RetryHint::Retryable,
             Error::InvalidResponseHeader { source, .. }
             | Error::ConvertMetaRequest { source, .. }
             | Error::ConvertMetaResponse { source, .. }

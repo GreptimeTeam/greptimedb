@@ -40,6 +40,7 @@ impl ParserContext<'_> {
         if self.consume_token("TRIGGERS") {
             return self.parse_show_triggers();
         }
+        self.consume_variables_scope();
         if self.consume_token("DATABASES") || self.consume_token("SCHEMAS") {
             self.parse_show_databases(false)
         } else if self.matches_keyword(Keyword::TABLES) {
@@ -144,6 +145,21 @@ impl ParserContext<'_> {
                     actual: self.peek_token_as_string(),
                 })?;
             Ok(Statement::ShowVariables(ShowVariables { variable }))
+        }
+    }
+
+    /// Consumes the `GLOBAL`/`SESSION`/`LOCAL` scope MySQL accepts in front of `VARIABLES` and
+    /// `STATUS`. GreptimeDB keeps no global/session split, so the scope is accepted and ignored.
+    fn consume_variables_scope(&mut self) {
+        let scoped = matches!(
+            self.parser.peek_token().token,
+            Token::Word(w) if matches!(w.keyword, Keyword::GLOBAL | Keyword::SESSION | Keyword::LOCAL)
+        ) && matches!(
+            self.parser.peek_nth_token(1).token,
+            Token::Word(w) if matches!(w.keyword, Keyword::VARIABLES | Keyword::STATUS)
+        );
+        if scoped {
+            let _ = self.parser.next_token();
         }
     }
 
@@ -1139,6 +1155,34 @@ mod tests {
             result.unwrap()[0],
             Statement::ShowCharset(ShowKind::Like(_))
         ));
+    }
+
+    #[test]
+    fn test_show_variables_scope() {
+        for sql in [
+            "SHOW STATUS",
+            "SHOW GLOBAL STATUS",
+            "SHOW SESSION STATUS",
+            "SHOW LOCAL STATUS",
+        ] {
+            let result = ParserContext::create_with_dialect(
+                sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            );
+            assert!(
+                matches!(result.unwrap()[0], Statement::ShowStatus(_)),
+                "{sql}"
+            );
+        }
+
+        // The scope is only swallowed in front of VARIABLES/STATUS.
+        let result = ParserContext::create_with_dialect(
+            "SHOW GLOBAL TABLES",
+            &GreptimeDbDialect {},
+            ParseOptions::default(),
+        );
+        assert!(result.is_err());
     }
 
     fn parse_show_table_status(sql: &str) -> ShowTableStatus {

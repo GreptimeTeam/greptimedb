@@ -55,3 +55,8 @@ pub const SSTS_INDEX_META: &str = "ssts_index_meta";
 pub const TABLE_SEMANTICS: &str = "table_semantics";
 pub const STATISTICS: &str = "statistics";
 pub const RECYCLE_BIN: &str = "recycle_bin";
+pub const PLUGINS: &str = "plugins";
+pub const USER_PRIVILEGES: &str = "user_privileges";
+/// MySQL's session list. GreptimeDB reports its own sessions through [`PROCESS_LIST`];
+/// this table only exists so MySQL tooling finds the name and column shape it expects.
+pub const PROCESSLIST: &str = "processlist";

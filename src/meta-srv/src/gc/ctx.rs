@@ -27,12 +27,12 @@ use common_meta::ddl_manager::DdlManagerRef;
 #[cfg(feature = "enterprise")]
 use common_meta::key::DroppedTableName;
 use common_meta::key::TableMetadataManagerRef;
+use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
 use common_meta::key::table_repart::TableRepartValue;
 use common_meta::key::table_route::PhysicalTableRouteValue;
-use common_meta::rpc::ddl::PersistentEventContext;
 #[cfg(feature = "enterprise")]
 use common_meta::rpc::ddl::PurgeDroppedTableTask;
-use common_procedure::{ProcedureManagerRef, ProcedureWithId, watcher};
+use common_procedure::{ProcedureContext, ProcedureManagerRef, ProcedureWithId, watcher};
 use common_telemetry::debug;
 use snafu::{OptionExt as _, ResultExt as _};
 use store_api::storage::{GcReport, RegionId};
@@ -68,7 +68,7 @@ pub(crate) trait SchedulerCtx: Send + Sync {
         full_file_listing: bool,
         timeout: Duration,
         region_routes_override: Region2Peers,
-        event_context: PersistentEventContext,
+        procedure_context: ProcedureContext,
     ) -> Result<GcReport>;
 
     #[cfg(feature = "enterprise")]
@@ -156,6 +156,8 @@ pub(crate) struct DefaultGcSchedulerCtx {
     pub(crate) table_metadata_manager: TableMetadataManagerRef,
     /// Procedure manager.
     pub(crate) procedure_manager: ProcedureManagerRef,
+    /// Runtime switch manager used by recovered and newly submitted GC procedures.
+    pub(crate) runtime_switch_manager: RuntimeSwitchManagerRef,
     /// DDL manager used to submit the existing purge procedure.
     #[cfg(feature = "enterprise")]
     pub(crate) ddl_manager: DdlManagerRef,
@@ -177,6 +179,7 @@ impl DefaultGcSchedulerCtx {
     pub fn try_new(
         table_metadata_manager: TableMetadataManagerRef,
         procedure_manager: ProcedureManagerRef,
+        runtime_switch_manager: RuntimeSwitchManagerRef,
         #[cfg(feature = "enterprise")] ddl_manager: DdlManagerRef,
         meta_peer_client: MetaPeerClientRef,
         mailbox: MailboxRef,
@@ -185,6 +188,7 @@ impl DefaultGcSchedulerCtx {
         Ok(Self {
             table_metadata_manager,
             procedure_manager,
+            runtime_switch_manager,
             #[cfg(feature = "enterprise")]
             ddl_manager,
             #[cfg(feature = "enterprise")]
@@ -256,14 +260,14 @@ impl SchedulerCtx for DefaultGcSchedulerCtx {
         full_file_listing: bool,
         timeout: Duration,
         region_routes_override: Region2Peers,
-        event_context: PersistentEventContext,
+        procedure_context: ProcedureContext,
     ) -> Result<GcReport> {
         self.gc_regions_inner(
             region_ids,
             full_file_listing,
             timeout,
             region_routes_override,
-            event_context,
+            procedure_context,
         )
         .await
     }
@@ -310,7 +314,7 @@ impl DefaultGcSchedulerCtx {
         full_file_listing: bool,
         timeout: Duration,
         region_routes_override: Region2Peers,
-        event_context: PersistentEventContext,
+        procedure_context: ProcedureContext,
     ) -> Result<GcReport> {
         debug!(
             "Sending GC instruction for {} regions (full_file_listing: {})",
@@ -321,6 +325,7 @@ impl DefaultGcSchedulerCtx {
         let procedure = BatchGcProcedure::new(
             self.mailbox.clone(),
             self.table_metadata_manager.clone(),
+            self.runtime_switch_manager.clone(),
             self.server_addr.clone(),
             region_ids.to_vec(),
             full_file_listing,
@@ -328,7 +333,7 @@ impl DefaultGcSchedulerCtx {
             region_routes_override,
         );
         let procedure_with_id =
-            ProcedureWithId::with_random_id(Box::new(procedure)).with_event_context(event_context);
+            ProcedureWithId::with_random_id(Box::new(procedure)).with_context(procedure_context);
 
         let id = procedure_with_id.id;
 

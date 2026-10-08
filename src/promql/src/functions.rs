@@ -27,6 +27,7 @@ mod resets;
 mod round;
 #[cfg(test)]
 mod test_util;
+mod vector_matching;
 
 pub use aggr_over_time::{
     AbsentOverTime, AvgOverTime, CountOverTime, LastOverTime, MaxOverTime, MinOverTime,
@@ -54,13 +55,14 @@ pub use native_histogram::{
     NativeHistogramNotEq, NativeHistogramPresentOverTime, NativeHistogramQuantile,
     NativeHistogramRate, NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev,
     NativeHistogramStdvar, NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime,
-    NativeHistogramToString,
+    NativeHistogramToString, PromqlFloatToString,
 };
 pub use predict_linear::PredictLinear;
 pub use quantile::QuantileOverTime;
 pub use quantile_aggr::{QUANTILE_NAME, quantile_udaf};
 pub use resets::Resets;
 pub use round::Round;
+pub use vector_matching::{MatchGroupViolation, UniqueMatchGroup};
 
 use crate::range_array::RangeArray;
 

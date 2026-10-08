@@ -280,7 +280,7 @@ fn collect_region_watermarks(plan: Arc<dyn ExecutionPlan>) -> Vec<RegionWatermar
     let mut stack = vec![plan];
 
     while let Some(plan) = stack.pop() {
-        if let Some(merge_scan) = plan.as_any().downcast_ref::<MergeScanExec>()
+        if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>()
             && !merge_scan.is_flow_sink_scan()
         {
             merge_merge_scan_region_watermarks(

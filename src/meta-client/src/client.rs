@@ -49,7 +49,10 @@ use common_meta::peer::PeerDiscovery;
 use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutor};
 use common_meta::range_stream::PaginationStream;
 use common_meta::rpc::KeyValue;
-use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+use common_meta::rpc::ddl::{
+    CREATE_DATABASE_CREATOR_EXTENSION_KEY, CreateDatabaseTask, DdlTask, SubmitDdlTaskRequest,
+    SubmitDdlTaskResponse,
+};
 use common_meta::rpc::procedure::{
     AddRegionFollowerRequest, AddTableFollowerRequest, GcRegionsRequest, GcResponse,
     GcTableRequest, ManageRegionFollowerRequest, MigrateRegionRequest, MigrateRegionResponse,
@@ -66,7 +69,7 @@ use common_time::util::DefaultSystemTimer;
 use config::Client as ConfigClient;
 use futures::TryStreamExt;
 use heartbeat::{Client as HeartbeatClient, HeartbeatConfig};
-use procedure::Client as ProcedureClient;
+use procedure::{Client as ProcedureClient, procedure_actor, procedure_event_context};
 use serde::de::DeserializeOwned;
 use snafu::{OptionExt, ResultExt};
 use store::Client as StoreClient;
@@ -75,7 +78,7 @@ pub use self::heartbeat::{HeartbeatSender, HeartbeatStream};
 use crate::client::ask_leader::{LeaderProviderFactoryImpl, LeaderProviderFactoryRef};
 use crate::error::{
     ConvertMetaConfigSnafu, ConvertMetaRequestSnafu, ConvertMetaResponseSnafu, Error,
-    GetFlowStatSnafu, NotStartedSnafu, Result,
+    GetFlowStatSnafu, MissingQueryContextSnafu, NotStartedSnafu, Result,
 };
 
 pub type Id = u64;
@@ -334,10 +337,10 @@ pub trait RegionFollowerClient: Sync + Send + Debug {
 impl ProcedureExecutor for MetaClient {
     async fn submit_ddl_task(
         &self,
-        _ctx: &ExecutorContext,
+        ctx: ExecutorContext,
         request: SubmitDdlTaskRequest,
     ) -> MetaResult<SubmitDdlTaskResponse> {
-        self.submit_ddl_task(request)
+        MetaClient::submit_ddl_task(self, ctx, request)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
@@ -345,10 +348,10 @@ impl ProcedureExecutor for MetaClient {
 
     async fn migrate_region(
         &self,
-        _ctx: &ExecutorContext,
+        ctx: &ExecutorContext,
         request: MigrateRegionRequest,
     ) -> MetaResult<MigrateRegionResponse> {
-        self.migrate_region(request)
+        self.migrate_region(ctx, request)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
@@ -418,10 +421,10 @@ impl ProcedureExecutor for MetaClient {
 
     async fn gc_regions(
         &self,
-        _ctx: &ExecutorContext,
+        ctx: &ExecutorContext,
         request: GcRegionsRequest,
     ) -> MetaResult<GcResponse> {
-        self.gc_regions(request)
+        self.gc_regions(ctx, request)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
@@ -429,10 +432,10 @@ impl ProcedureExecutor for MetaClient {
 
     async fn gc_table(
         &self,
-        _ctx: &ExecutorContext,
+        ctx: &ExecutorContext,
         request: GcTableRequest,
     ) -> MetaResult<GcResponse> {
-        self.gc_table(request)
+        self.gc_table(ctx, request)
             .await
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
@@ -807,10 +810,12 @@ impl MetaClient {
     /// Submit a region migration task.
     pub async fn migrate_region(
         &self,
+        context: &ExecutorContext,
         request: MigrateRegionRequest,
     ) -> Result<MigrateRegionResponse> {
         self.procedure_client()?
             .migrate_region(
+                context,
                 request.region_id,
                 request.from_peer,
                 request.to_peer,
@@ -825,28 +830,57 @@ impl MetaClient {
     }
 
     /// Manually trigger GC for specific regions.
-    pub async fn gc_regions(&self, request: GcRegionsRequest) -> Result<GcResponse> {
-        self.procedure_client()?.gc_regions(request).await
+    pub async fn gc_regions(
+        &self,
+        context: &ExecutorContext,
+        request: GcRegionsRequest,
+    ) -> Result<GcResponse> {
+        self.procedure_client()?.gc_regions(context, request).await
     }
 
     /// Manually trigger GC for a table (all its regions).
-    pub async fn gc_table(&self, request: GcTableRequest) -> Result<GcResponse> {
-        self.procedure_client()?.gc_table(request).await
+    pub async fn gc_table(
+        &self,
+        context: &ExecutorContext,
+        request: GcTableRequest,
+    ) -> Result<GcResponse> {
+        self.procedure_client()?.gc_table(context, request).await
     }
 
-    /// Submit a DDL task
+    /// Submit a DDL task.
     pub async fn submit_ddl_task(
         &self,
-        req: SubmitDdlTaskRequest,
+        context: ExecutorContext,
+        request: SubmitDdlTaskRequest,
     ) -> Result<SubmitDdlTaskResponse> {
-        let res = self
-            .procedure_client()?
-            .submit_ddl_task(req.try_into().context(ConvertMetaRequestSnafu)?)
+        let event_context = procedure_event_context(&context);
+        let actor = procedure_actor(&context);
+        let mut query_context = context.query_context.context(MissingQueryContextSnafu)?;
+        query_context
+            .extensions
+            .remove(CREATE_DATABASE_CREATOR_EXTENSION_KEY);
+        if let DdlTask::CreateDatabase(CreateDatabaseTask {
+            creator: Some(creator),
+            ..
+        }) = &request.task
+        {
+            query_context.extensions.insert(
+                CREATE_DATABASE_CREATOR_EXTENSION_KEY.to_string(),
+                serde_json::to_string(creator).context(ConvertMetaConfigSnafu)?,
+            );
+        }
+
+        let mut request: api::v1::meta::DdlTaskRequest =
+            request.try_into().context(ConvertMetaRequestSnafu)?;
+        request.query_context = Some(api::v1::QueryContext::from(query_context));
+        request.event_context = event_context;
+        request.actor = actor;
+
+        self.procedure_client()?
+            .submit_ddl_task(request)
             .await?
             .try_into()
-            .context(ConvertMetaResponseSnafu)?;
-
-        Ok(res)
+            .context(ConvertMetaResponseSnafu)
     }
 
     pub fn heartbeat_client(&self) -> Result<HeartbeatClient> {

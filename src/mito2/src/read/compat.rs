@@ -25,11 +25,9 @@ use datatypes::arrow::compute::{TakeOptions, take};
 use datatypes::arrow::datatypes::{FieldRef, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::extension::json::is_json2_extension_type;
 use datatypes::prelude::DataType;
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
-use datatypes::vectors::json::array::JsonArray;
 use mito_codec::row_converter::{
     CompositeValues, PrimaryKeyCodec, SortField, build_primary_key_codec,
     build_primary_key_codec_with_fields,
@@ -40,8 +38,8 @@ use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
 use crate::error::{
-    CompatReaderSnafu, ComputeArrowSnafu, ConvertValueSnafu, CreateDefaultSnafu, DecodeSnafu,
-    EncodeSnafu, NewRecordBatchSnafu, Result, UnexpectedSnafu, UnsupportedOperationSnafu,
+    CompatReaderSnafu, ComputeArrowSnafu, CreateDefaultSnafu, DecodeSnafu, EncodeSnafu,
+    NewRecordBatchSnafu, Result, UnexpectedSnafu, UnsupportedOperationSnafu,
 };
 use crate::read::flat_projection::{FlatProjectionMapper, flat_projected_columns};
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
@@ -97,24 +95,11 @@ impl FlatCompatBatch {
         compaction: bool,
     ) -> Result<Option<Self>> {
         let actual = read_format.metadata();
-        let format_projection = read_format.format_projection();
-        let mut actual_schema = flat_projected_columns(actual, format_projection);
-        if read_format
-            .arrow_schema()
-            .fields()
-            .iter()
-            .any(is_json2_extension_type)
-        {
-            for field in read_format.arrow_schema().fields() {
-                if is_json2_extension_type(field)
-                    && let Some(column_id) =
-                        actual.column_by_name(field.name()).map(|x| x.column_id)
-                    && let Some(i) = actual_schema.iter().position(|x| x.0 == column_id)
-                {
-                    actual_schema[i].1 = ConcreteDataType::from_arrow_type(field.data_type());
-                }
-            }
-        }
+        let actual_schema = flat_projected_columns(
+            actual,
+            read_format.format_projection(),
+            read_format.json_target_types(),
+        );
 
         let expect_schema = mapper.batch_schema();
         if expect_schema == actual_schema
@@ -186,7 +171,19 @@ impl FlatCompatBatch {
 
                 // Same column different type.
                 if expect_data_type != *actual_data_type {
-                    cast_type = Some(expect_data_type.clone())
+                    ensure!(
+                        !expect_data_type.is_json2() && !actual_data_type.is_json2(),
+                        CompatReaderSnafu {
+                            region_id: expect_metadata.region_id,
+                            reason: format!(
+                                "JSON2 column '{}' must be aligned before FlatCompatBatch, actual: {}, expected: {}",
+                                expect_column.column_schema.name,
+                                actual_data_type,
+                                expect_data_type,
+                            ),
+                        }
+                    );
+                    cast_type = Some(expect_data_type.clone());
                 }
                 // Source has this column.
                 index_or_defaults.push(IndexOrDefault::Index {
@@ -270,16 +267,9 @@ impl FlatCompatBatch {
                     let old_column = batch.column(*pos);
 
                     if let Some(ty) = cast_type {
-                        let casted = if let Some(json_type) = ty.as_json()
-                            && json_type.is_json2()
-                        {
-                            JsonArray::from(old_column)
-                                .project_to(&json_type.as_arrow_type())
-                                .context(ConvertValueSnafu)?
-                        } else {
+                        let casted =
                             datatypes::arrow::compute::cast(old_column, &ty.as_arrow_type())
-                                .context(ComputeArrowSnafu)?
-                        };
+                                .context(ComputeArrowSnafu)?;
                         Ok(casted)
                     } else {
                         Ok(old_column.clone())
@@ -651,17 +641,19 @@ impl FlatCompatPrimaryKey {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use api::v1::{OpType, SemanticType};
     use datatypes::arrow::array::{
         ArrayRef, BinaryArray, BinaryDictionaryBuilder, Int64Array, StringDictionaryBuilder,
-        TimestampMillisecondArray, UInt8Array, UInt64Array,
+        TimestampMicrosecondArray, TimestampMillisecondArray, UInt8Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::UInt32Type;
     use datatypes::arrow::record_batch::RecordBatch;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
+    use datatypes::types::json_type::JsonNativeType;
     use datatypes::value::ValueRef;
     use mito_codec::row_converter::{
         DensePrimaryKeyCodec, PrimaryKeyCodecExt, SparsePrimaryKeyCodec,
@@ -777,7 +769,7 @@ mod tests {
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
         let read_format = FlatReadFormat::new(
             actual_metadata.clone(),
-            ReadColumns::from_deduped_column_ids([0, 1, 2, 3]),
+            ReadColumns::new([0, 1, 2, 3]),
             None,
             "test",
             false,
@@ -832,6 +824,57 @@ mod tests {
     }
 
     #[test]
+    fn test_flat_compat_batch_uses_projected_json2_type() -> Result<()> {
+        let json2 = ConcreteDataType::json2(JsonNativeType::object());
+        let actual_metadata = Arc::new(new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Field, json2.clone()),
+            ],
+            &[],
+        ));
+        let expected_metadata = Arc::new(new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Field, json2),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[],
+        ));
+        let read_columns = ReadColumns::new([0, 1, 2])
+            .with_json_target_types(BTreeMap::from([(1, JsonNativeType::Variant)]));
+        let mapper = FlatProjectionMapper::new_with_read_columns(
+            &expected_metadata,
+            vec![0, 1, 2],
+            read_columns.clone(),
+        )?;
+        let read_format = FlatReadFormat::new(actual_metadata, read_columns, None, "test", false)?;
+
+        let compat = FlatCompatBatch::try_new(&mapper, &read_format, false)?.unwrap();
+        let json_index = mapper
+            .batch_schema()
+            .iter()
+            .position(|(id, _)| *id == 1)
+            .unwrap();
+        assert!(matches!(
+            &compat.index_or_defaults[json_index],
+            IndexOrDefault::Index {
+                cast_type: None,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn test_flat_compat_batch_with_read_projection_superset() {
         let actual_metadata = Arc::new(new_metadata(
             &[
@@ -864,13 +907,12 @@ mod tests {
         let mapper = FlatProjectionMapper::new_with_read_columns(
             &expected_metadata,
             vec![1, 2],
-            ReadColumns::from_deduped_column_ids([1, 2, 3]),
-            None,
+            ReadColumns::new([1, 2, 3]),
         )
         .unwrap();
         let read_format = FlatReadFormat::new(
             actual_metadata.clone(),
-            ReadColumns::from_deduped_column_ids([1, 2, 3]),
+            ReadColumns::new([1, 2, 3]),
             None,
             "test",
             false,
@@ -959,7 +1001,7 @@ mod tests {
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
         let read_format = FlatReadFormat::new(
             actual_metadata.clone(),
-            ReadColumns::from_deduped_column_ids([0, 1, 2, 3]),
+            ReadColumns::new([0, 1, 2, 3]),
             None,
             "test",
             false,
@@ -1041,7 +1083,7 @@ mod tests {
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
         let read_format = FlatReadFormat::new(
             actual_metadata,
-            ReadColumns::from_deduped_column_ids([0, 1, 2]),
+            ReadColumns::new([0, 1, 2]),
             None,
             "test",
             false,
@@ -1073,6 +1115,282 @@ mod tests {
         let result = result.as_any().downcast_ref::<BinaryArray>().unwrap();
         assert_eq!(result.value(0), sparse_key);
         assert_eq!(result.value(1), sparse_key);
+    }
+
+    /// A widened time index unit must be cast on compat (values rescaled to
+    /// the expected unit), and identical units must skip compat entirely.
+    #[test]
+    fn test_flat_compat_batch_with_time_index_unit_change() {
+        let actual_metadata = Arc::new(new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[1],
+        ));
+
+        let mut expected_metadata = (*actual_metadata).clone();
+        for column in expected_metadata.column_metadatas.iter_mut() {
+            if column.semantic_type == SemanticType::Timestamp {
+                column.column_schema.data_type = ConcreteDataType::timestamp_microsecond_datatype();
+            }
+        }
+        // Keep the schema consistent with the column metadata.
+        let expected_metadata = Arc::new(
+            RegionMetadataBuilder::from_existing(expected_metadata)
+                .build()
+                .unwrap(),
+        );
+
+        // Same units: nothing to compat.
+        let same_unit_metadata = Arc::new((*actual_metadata).clone());
+        let mapper = FlatProjectionMapper::all(&same_unit_metadata).unwrap();
+        let read_format = FlatReadFormat::new(
+            actual_metadata.clone(),
+            ReadColumns::new([0, 1, 2]),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+        assert!(
+            FlatCompatBatch::try_new(&mapper, &read_format, false)
+                .unwrap()
+                .is_none()
+        );
+
+        // Widened unit: the time index column is rescaled, others pass through.
+        let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
+        let read_format = FlatReadFormat::new(
+            actual_metadata.clone(),
+            ReadColumns::new([0, 1, 2]),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+        let compat_batch = FlatCompatBatch::try_new(&mapper, &read_format, false)
+            .unwrap()
+            .unwrap();
+
+        let mut tag_builder = StringDictionaryBuilder::<UInt32Type>::new();
+        tag_builder.append_value("tag1");
+        tag_builder.append_value("tag1");
+        let tag_dict_array = Arc::new(tag_builder.finish());
+
+        let k1 = encode_key(&[Some("tag1")]);
+        let input_columns: Vec<ArrayRef> = vec![
+            tag_dict_array.clone(),
+            Arc::new(Int64Array::from(vec![100, 200])),
+            Arc::new(TimestampMillisecondArray::from_iter_values([1000, 2000])),
+            build_flat_test_pk_array(&[&k1, &k1]),
+            Arc::new(UInt64Array::from_iter_values([1, 2])),
+            Arc::new(UInt8Array::from_iter_values([
+                OpType::Put as u8,
+                OpType::Put as u8,
+            ])),
+        ];
+        let input_schema =
+            to_flat_sst_arrow_schema(&actual_metadata, &FlatSchemaOptions::default());
+        let input_batch = RecordBatch::try_new(input_schema, input_columns).unwrap();
+
+        let result = compat_batch.compat(input_batch).unwrap();
+
+        let expected_columns: Vec<ArrayRef> = vec![
+            tag_dict_array.clone(),
+            Arc::new(Int64Array::from(vec![100, 200])),
+            // Rescaled, not reinterpreted: 1000ms -> 1_000_000us.
+            Arc::new(TimestampMicrosecondArray::from_iter_values([
+                1_000_000, 2_000_000,
+            ])),
+            build_flat_test_pk_array(&[&k1, &k1]),
+            Arc::new(UInt64Array::from_iter_values([1, 2])),
+            Arc::new(UInt8Array::from_iter_values([
+                OpType::Put as u8,
+                OpType::Put as u8,
+            ])),
+        ];
+        let expected_schema =
+            to_flat_sst_arrow_schema(&expected_metadata, &FlatSchemaOptions::default());
+        let expected_batch = RecordBatch::try_new(expected_schema, expected_columns).unwrap();
+
+        assert_eq!(expected_batch, result);
+    }
+
+    /// A widened time index unit combined with an added column (the realistic
+    /// multi-alter sequence) must rescale and default-fill in one pass.
+    #[test]
+    fn test_flat_compat_batch_time_index_unit_change_with_added_column() {
+        let actual_metadata = Arc::new(new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[1],
+        ));
+
+        let mut expected_metadata = new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_microsecond_datatype(),
+                ),
+                (1, SemanticType::Tag, ConcreteDataType::string_datatype()),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+                (3, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[1],
+        );
+        expected_metadata.primary_key_encoding = PrimaryKeyEncoding::Dense;
+        let expected_metadata = Arc::new(expected_metadata);
+
+        let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
+        let read_format = FlatReadFormat::new(
+            actual_metadata.clone(),
+            ReadColumns::new([0, 1, 2, 3]),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+
+        let compat_batch = FlatCompatBatch::try_new(&mapper, &read_format, false)
+            .unwrap()
+            .unwrap();
+
+        let mut tag_builder = StringDictionaryBuilder::<UInt32Type>::new();
+        tag_builder.append_value("tag1");
+        tag_builder.append_value("tag1");
+        let tag_dict_array = Arc::new(tag_builder.finish());
+
+        let k1 = encode_key(&[Some("tag1")]);
+        let input_columns: Vec<ArrayRef> = vec![
+            tag_dict_array.clone(),
+            Arc::new(Int64Array::from(vec![100, 200])),
+            Arc::new(TimestampMillisecondArray::from_iter_values([1000, 2000])),
+            build_flat_test_pk_array(&[&k1, &k1]),
+            Arc::new(UInt64Array::from_iter_values([1, 2])),
+            Arc::new(UInt8Array::from_iter_values([
+                OpType::Put as u8,
+                OpType::Put as u8,
+            ])),
+        ];
+        let input_schema =
+            to_flat_sst_arrow_schema(&actual_metadata, &FlatSchemaOptions::default());
+        let input_batch = RecordBatch::try_new(input_schema, input_columns).unwrap();
+
+        let result = compat_batch.compat(input_batch).unwrap();
+
+        let expected_columns: Vec<ArrayRef> = vec![
+            tag_dict_array.clone(),
+            Arc::new(Int64Array::from(vec![100, 200])),
+            Arc::new(Int64Array::from(vec![None::<i64>, None::<i64>])),
+            Arc::new(TimestampMicrosecondArray::from_iter_values([
+                1_000_000, 2_000_000,
+            ])),
+            build_flat_test_pk_array(&[&k1, &k1]),
+            Arc::new(UInt64Array::from_iter_values([1, 2])),
+            Arc::new(UInt8Array::from_iter_values([
+                OpType::Put as u8,
+                OpType::Put as u8,
+            ])),
+        ];
+        let expected_schema =
+            to_flat_sst_arrow_schema(&expected_metadata, &FlatSchemaOptions::default());
+        let expected_batch = RecordBatch::try_new(expected_schema, expected_columns).unwrap();
+
+        assert_eq!(expected_batch, result);
+    }
+
+    /// The sparse compaction compat path must also rescale a widened time
+    /// index unit (metric-engine regions compact with sparse encoding).
+    #[test]
+    fn test_flat_compat_batch_compact_sparse_time_index_unit_change() {
+        let mut actual_metadata = new_metadata(
+            &[
+                (
+                    0,
+                    SemanticType::Timestamp,
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                ),
+                (2, SemanticType::Field, ConcreteDataType::int64_datatype()),
+            ],
+            &[],
+        );
+        actual_metadata.primary_key_encoding = PrimaryKeyEncoding::Sparse;
+        let actual_metadata = Arc::new(actual_metadata);
+
+        let mut expected_metadata = (*actual_metadata).clone();
+        for column in expected_metadata.column_metadatas.iter_mut() {
+            if column.semantic_type == SemanticType::Timestamp {
+                column.column_schema.data_type = ConcreteDataType::timestamp_microsecond_datatype();
+            }
+        }
+        let expected_metadata = Arc::new(
+            RegionMetadataBuilder::from_existing(expected_metadata)
+                .build()
+                .unwrap(),
+        );
+
+        let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
+        let read_format = FlatReadFormat::new(
+            actual_metadata.clone(),
+            ReadColumns::new([0, 2]),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+
+        let compat_batch = FlatCompatBatch::try_new(&mapper, &read_format, true)
+            .unwrap()
+            .unwrap();
+
+        let sparse_k1 = encode_sparse_key(&[]);
+        let input_columns: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![100, 200])),
+            Arc::new(TimestampMillisecondArray::from_iter_values([1000, 2000])),
+            build_flat_test_pk_array(&[&sparse_k1, &sparse_k1]),
+            Arc::new(UInt64Array::from_iter_values([1, 2])),
+            Arc::new(UInt8Array::from_iter_values([
+                OpType::Put as u8,
+                OpType::Put as u8,
+            ])),
+        ];
+        let input_schema =
+            to_flat_sst_arrow_schema(&actual_metadata, &FlatSchemaOptions::default());
+        let input_batch = RecordBatch::try_new(input_schema, input_columns).unwrap();
+
+        let result = compat_batch.compat(input_batch).unwrap();
+
+        let expected_columns: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![100, 200])),
+            Arc::new(TimestampMicrosecondArray::from_iter_values([
+                1_000_000, 2_000_000,
+            ])),
+            build_flat_test_pk_array(&[&sparse_k1, &sparse_k1]),
+            Arc::new(UInt64Array::from_iter_values([1, 2])),
+            Arc::new(UInt8Array::from_iter_values([
+                OpType::Put as u8,
+                OpType::Put as u8,
+            ])),
+        ];
+        let output_schema =
+            to_flat_sst_arrow_schema(&expected_metadata, &FlatSchemaOptions::default());
+        let expected_batch = RecordBatch::try_new(output_schema, expected_columns).unwrap();
+
+        assert_eq!(expected_batch, result);
     }
 
     #[test]
@@ -1109,7 +1427,7 @@ mod tests {
         let mapper = FlatProjectionMapper::all(&expected_metadata).unwrap();
         let read_format = FlatReadFormat::new(
             actual_metadata.clone(),
-            ReadColumns::from_deduped_column_ids([0, 2, 3]),
+            ReadColumns::new([0, 2, 3]),
             None,
             "test",
             true,

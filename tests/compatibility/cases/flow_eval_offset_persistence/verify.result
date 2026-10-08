@@ -1,0 +1,11 @@
+SHOW CREATE FLOW compat_eval_offset_flow;
+
++-------------------------+-----------------------------------------------------------------------------------------------------------------------------------------+
+| Flow                    | Create Flow                                                                                                                             |
++-------------------------+-----------------------------------------------------------------------------------------------------------------------------------------+
+| compat_eval_offset_flow | CREATE FLOW IF NOT EXISTS compat_eval_offset_flow                                                                                       |
+|                         | SINK TO flow_eval_offset_persistence.compat_eval_offset_sink                                                                            |
+|                         | EVAL INTERVAL '10 s'                                                                                                                    |
+|                         | EVAL OFFSET '3 s'                                                                                                                       |
+|                         | AS SELECT date_trunc('second', now()) AS ts, count(v) AS value_count FROM compat_eval_offset_input GROUP BY date_trunc('second', now()) |
++-------------------------+-----------------------------------------------------------------------------------------------------------------------------------------+

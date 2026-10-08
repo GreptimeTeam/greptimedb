@@ -22,6 +22,7 @@ use common_options::datanode::DatanodeClientOptions;
 use common_options::memory::MemoryOptions;
 use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions};
 use meta_client::MetaClientOptions;
+use pipeline::PipelineOptions;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
@@ -34,8 +35,8 @@ use crate::error::Result;
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::Instance;
 use crate::service_config::{
-    InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, OtlpOptions, PostgresOptions,
-    PromStoreOptions,
+    InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, OtlpOptions,
+    PendingRowsBatcherOptions, PostgresOptions, PromStoreOptions,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -49,6 +50,8 @@ pub struct FrontendOptions {
     /// even if a request sets the `auto_create_table` hint to `true`. When `true`
     /// (default), the per-request hint still applies. Default: `true`.
     pub auto_create_table: bool,
+    /// Enables experimental Parquet database exports using shared Metric scans.
+    pub experimental_metric_export: bool,
     /// Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
     /// Set to 0 to disable the limit. Default: "0" (unlimited)
     pub max_in_flight_write_bytes: ReadableSize,
@@ -58,12 +61,15 @@ pub struct FrontendOptions {
     pub http: HttpOptions,
     pub grpc: GrpcOptions,
     /// The internal gRPC options for the frontend service.
-    /// it provide the same service as the public gRPC service, just only for internal use.
+    /// It serves the same services as the public one plus the internal handler.
+    /// CORS is always off on it.
     pub internal_grpc: Option<GrpcOptions>,
     pub mysql: MysqlOptions,
     pub postgres: PostgresOptions,
     pub opentsdb: OpentsdbOptions,
     pub influxdb: InfluxdbOptions,
+    /// Ordinary-table batching with independent logical-table controls.
+    pub pending_rows_batcher: PendingRowsBatcherOptions,
     pub prom_store: PromStoreOptions,
     pub jaeger: JaegerOptions,
     pub otlp: OtlpOptions,
@@ -75,6 +81,8 @@ pub struct FrontendOptions {
     pub query: QueryOptions,
     pub slow_query: SlowQueryOptions,
     pub memory: MemoryOptions,
+    /// The pipeline options.
+    pub pipeline: PipelineOptions,
     /// The event recorder options.
     pub event_recorder: EventRecorderOptions,
     /// Environment variable keys to read and report in heartbeat messages.
@@ -88,6 +96,7 @@ impl Default for FrontendOptions {
             default_timezone: None,
             default_column_prefix: None,
             auto_create_table: true,
+            experimental_metric_export: false,
             max_in_flight_write_bytes: ReadableSize(0),
             write_bytes_exhausted_policy: OnExhaustedPolicy::default(),
             http: HttpOptions::default(),
@@ -97,6 +106,7 @@ impl Default for FrontendOptions {
             postgres: PostgresOptions::default(),
             opentsdb: OpentsdbOptions::default(),
             influxdb: InfluxdbOptions::default(),
+            pending_rows_batcher: PendingRowsBatcherOptions::default(),
             jaeger: JaegerOptions::default(),
             prom_store: PromStoreOptions::default(),
             otlp: OtlpOptions::default(),
@@ -108,6 +118,7 @@ impl Default for FrontendOptions {
             query: QueryOptions::default(),
             slow_query: SlowQueryOptions::default(),
             memory: MemoryOptions::default(),
+            pipeline: PipelineOptions::default(),
             event_recorder: EventRecorderOptions::default(),
             heartbeat_env_vars: vec![],
         }
@@ -120,6 +131,8 @@ impl Configurable for FrontendOptions {
             "heartbeat_env_vars",
             "meta_client.metasrv_addrs",
             "event_recorder.event_types",
+            "pending_rows_batcher.protocols",
+            "pending_rows_batcher.logical_table.protocols",
         ])
     }
 }
@@ -194,6 +207,7 @@ mod tests {
     use futures::Stream;
     use meta_client::MetaClientRef;
     use meta_client::client::MetaClientBuilder;
+    use servers::batcher::BatchingProtocol;
     use servers::grpc::{FlightCompression, GRPC_SERVER};
     use servers::http::HTTP_SERVER;
     use servers::http::result::greptime_result_v1::GreptimedbV1Response;
@@ -204,7 +218,7 @@ mod tests {
     use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
     use tonic::{Request, Response, Status, Streaming};
 
-    use super::*;
+    use crate::frontend::*;
     use crate::heartbeat::{
         FrontendHeartbeatExtension, FrontendHeartbeatExtensionResult, FrontendHeartbeatExtensions,
     };
@@ -215,10 +229,96 @@ mod tests {
         Pin<Box<dyn Stream<Item = std::result::Result<T, Status>> + Send + Sync + 'static>>;
 
     #[test]
+    fn test_logical_batcher_protocols_from_env() {
+        temp_env::with_vars(
+            [
+                (
+                    "FRONTEND_LOGICAL_TEST__PENDING_ROWS_BATCHER__PROTOCOLS",
+                    Some("otlp,influxdb"),
+                ),
+                (
+                    "FRONTEND_LOGICAL_TEST__PENDING_ROWS_BATCHER__LOGICAL_TABLE__PROTOCOLS",
+                    Some("prom,otlp"),
+                ),
+            ],
+            || {
+                let options =
+                    FrontendOptions::load_layered_options(None, "FRONTEND_LOGICAL_TEST").unwrap();
+                assert_eq!(options.pending_rows_batcher.table.protocols.len(), 2);
+                assert_eq!(
+                    options
+                        .pending_rows_batcher
+                        .logical_table
+                        .unwrap()
+                        .protocols,
+                    vec![BatchingProtocol::Prom, BatchingProtocol::Otlp]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_batcher_protocols_from_env() {
+        temp_env::with_vars(
+            [(
+                "FRONTEND_BATCHER_TEST__PENDING_ROWS_BATCHER__PROTOCOLS",
+                Some("influxdb,http_sql"),
+            )],
+            || {
+                let options =
+                    FrontendOptions::load_layered_options(None, "FRONTEND_BATCHER_TEST").unwrap();
+                assert_eq!(
+                    options.pending_rows_batcher.table.protocols,
+                    vec![BatchingProtocol::Influxdb, BatchingProtocol::HttpSql]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_protocol_pending_rows_batcher_config() {
+        let defaults: FrontendOptions = toml::from_str("").unwrap();
+        assert!(
+            !defaults
+                .pending_rows_batcher
+                .table
+                .pending_rows_batching_enabled()
+        );
+        let options: FrontendOptions = toml::from_str(
+            r#"
+[pending_rows_batcher]
+protocols = ["influxdb", "http_sql"]
+pending_rows_flush_interval = "5ms"
+max_batch_rows = 25
+"#,
+        )
+        .unwrap();
+        assert_eq!(options.pending_rows_batcher.table.max_batch_rows, 25);
+        assert_eq!(options.pending_rows_batcher.table.protocols.len(), 2);
+        assert!(
+            options
+                .pending_rows_batcher
+                .table
+                .pending_rows_batching_enabled()
+        );
+        let serialized = toml::to_string(&options).unwrap();
+        let parsed: FrontendOptions = toml::from_str(&serialized).unwrap();
+        assert_eq!(options.influxdb, parsed.influxdb);
+        assert_eq!(options.opentsdb, parsed.opentsdb);
+        assert_eq!(options.pending_rows_batcher, parsed.pending_rows_batcher);
+    }
+
+    #[test]
     fn test_toml() {
         let opts = FrontendOptions::default();
+        assert!(!opts.experimental_metric_export);
+        let enabled: FrontendOptions = toml::from_str("experimental_metric_export = true").unwrap();
+        assert!(enabled.experimental_metric_export);
         let toml_string = toml::to_string(&opts).unwrap();
-        let _parsed: FrontendOptions = toml::from_str(&toml_string).unwrap();
+        let parsed: FrontendOptions = toml::from_str(&toml_string).unwrap();
+        assert_eq!(parsed.otlp, opts.otlp);
+        assert_eq!(parsed.influxdb, opts.influxdb);
+        assert_eq!(parsed.opentsdb, opts.opentsdb);
     }
 
     #[test]
@@ -544,7 +644,11 @@ mod tests {
         expected: std::result::Result<&str, (StatusCode, &str)>,
     ) {
         let addr = frontend.server_handlers().addr(GRPC_SERVER).unwrap();
-        let client = Client::with_urls([addr.to_string()]);
+        let client = Client::with_query_and_control_managers(
+            ChannelManager::new(),
+            ChannelManager::new(),
+            [addr.to_string()],
+        );
         let client = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
         let response = client.sql("SELECT 1").await;
 

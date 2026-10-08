@@ -391,7 +391,7 @@ mod tests {
     fn procedure_store_for_test(dir: &TempDir) -> ProcedureStore {
         let store_dir = dir.path().to_str().unwrap();
         let builder = Builder::default().root(store_dir);
-        let object_store = ObjectStore::new(builder).unwrap().finish();
+        let object_store = ObjectStore::new(builder).unwrap();
 
         ProcedureStore::from_object_store(object_store)
     }
@@ -512,6 +512,14 @@ mod tests {
         assert_eq!(
             json,
             r#"{"type_name":"TestMessage","data":"no parent id","parent_id":"9f805a1f-05f7-490c-9f91-bd56e3cc54c1","step":4,"context":{"event_context":{"reason":"auto_rebalance"}}}"#
+        );
+
+        message.context.actor = Some("alice".to_string());
+        let json = serde_json::to_string(&message).unwrap();
+        assert!(json.contains(r#""actor":"alice""#));
+        assert_eq!(
+            serde_json::from_str::<ProcedureMessage>(&json).unwrap(),
+            message
         );
 
         let legacy: ProcedureMessage = serde_json::from_str(

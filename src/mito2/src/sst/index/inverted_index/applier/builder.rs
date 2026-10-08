@@ -300,7 +300,7 @@ mod tests {
     }
 
     pub(crate) fn test_object_store() -> ObjectStore {
-        ObjectStore::new(Memory::default()).unwrap().finish()
+        ObjectStore::new(Memory::default()).unwrap()
     }
 
     pub(crate) fn tag_column() -> Expr {

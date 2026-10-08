@@ -132,13 +132,12 @@ EXPLAIN SELECT ts, host, min(val) RANGE '5s' FROM host ALIGN '5s';
 | plan_type_| plan_|
 +-+-+
 | logical_plan_| RangeSelect: range_exprs=[min(host.val) RANGE 5s], align=5000ms, align_to=0ms, align_by=[host.host], time_index=ts |
-|_|_Projection: host.ts, host.host, host.val_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| Projection: host.ts, host.host, host.val_|
 |_|_TableScan: host_|
 |_| ]]_|
 | physical_plan | RangeSelectExec: range_expr=[min(host.val) RANGE 5s], align=5000ms, align_to=0ms, align_by=[host@1], time_index=ts |
-|_|_CoalescePartitionsExec_|
+|_|_CooperativeExec_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -154,7 +153,7 @@ EXPLAIN ANALYZE SELECT ts, host, min(val) RANGE '5s' FROM host ALIGN '5s';
 | stage | node | plan_|
 +-+-+-+
 | 0_| 0_|_RangeSelectExec: range_expr=[min(host.val) RANGE 5s], align=5000ms, align_to=0ms, align_by=[host@1], time_index=ts REDACTED
-|_|_|_CoalescePartitionsExec REDACTED
+|_|_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_CooperativeExec REDACTED

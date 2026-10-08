@@ -269,6 +269,20 @@ pub enum Error {
         error: prost::DecodeError,
     },
 
+    #[snafu(display("Failed to decode packed file references"))]
+    DecodePackedFileRefs {
+        #[snafu(implicit)]
+        location: Location,
+        #[snafu(source)]
+        error: base64::DecodeError,
+    },
+
+    #[snafu(display("Invalid packed file references framing"))]
+    InvalidPackedFileRefs {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to encode object into json"))]
     EncodeJson {
         #[snafu(implicit)]
@@ -325,9 +339,18 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Corrupted table route data, err: {}", err_msg))]
-    RouteInfoCorrupted {
-        err_msg: String,
+    #[snafu(display(
+        "Conflicting schema options: {}={} and {}={}",
+        first_key,
+        first_value,
+        second_key,
+        second_value
+    ))]
+    ConflictingSchemaOptions {
+        first_key: String,
+        first_value: String,
+        second_key: String,
+        second_value: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1183,7 +1206,6 @@ impl ErrorExt for Error {
 
             SerdeJson { .. }
             | ParseOption { .. }
-            | RouteInfoCorrupted { .. }
             | InvalidProtoMsg { .. }
             | InvalidMetadata { .. }
             | Unexpected { .. }
@@ -1196,6 +1218,8 @@ impl ErrorExt for Error {
             | PayloadNotExist { .. }
             | ConvertRawKey { .. }
             | DecodeProto { .. }
+            | DecodePackedFileRefs { .. }
+            | InvalidPackedFileRefs { .. }
             | BuildTableMeta { .. }
             | TableRouteNotFound { .. }
             | TableRepartNotFound { .. }
@@ -1235,7 +1259,8 @@ impl ErrorExt for Error {
             | InvalidFileExtension { .. }
             | InvalidFileName { .. }
             | InvalidFlowRequestBody { .. }
-            | InvalidFilePath { .. } => StatusCode::InvalidArguments,
+            | InvalidFilePath { .. }
+            | ConflictingSchemaOptions { .. } => StatusCode::InvalidArguments,
 
             #[cfg(feature = "enterprise")]
             MissingInterval { .. } | NegativeDuration { .. } | TooLargeDuration { .. } => {

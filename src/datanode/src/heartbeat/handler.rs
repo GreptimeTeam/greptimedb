@@ -41,9 +41,9 @@ use crate::heartbeat::handler::apply_staging_manifest::ApplyStagingManifestsHand
 use crate::heartbeat::handler::close_region::CloseRegionsHandler;
 use crate::heartbeat::handler::downgrade_region::DowngradeRegionsHandler;
 use crate::heartbeat::handler::enter_staging::EnterStagingRegionsHandler;
-use crate::heartbeat::handler::file_ref::GetFileRefsHandler;
+use crate::heartbeat::handler::file_ref::{GetFileRefsHandler, GetPackedFileRefsHandler};
 use crate::heartbeat::handler::flush_region::FlushRegionsHandler;
-use crate::heartbeat::handler::gc_worker::GcRegionsHandler;
+use crate::heartbeat::handler::gc_worker::{GcRegionsHandler, PackedGcRegionsHandler};
 use crate::heartbeat::handler::open_region::OpenRegionsHandler;
 use crate::heartbeat::handler::remap_manifest::RemapManifestHandler;
 use crate::heartbeat::handler::sync_region::SyncRegionHandler;
@@ -135,7 +135,11 @@ impl RegionHeartbeatResponseHandler {
                 .into(),
             ))),
             Instruction::GetFileRefs(_) => Ok(Some(Box::new(GetFileRefsHandler.into()))),
+            Instruction::GetPackedFileRefs(_) => {
+                Ok(Some(Box::new(GetPackedFileRefsHandler.into())))
+            }
             Instruction::GcRegions(_) => Ok(Some(Box::new(GcRegionsHandler.into()))),
+            Instruction::PackedGcRegions(_) => Ok(Some(Box::new(PackedGcRegionsHandler.into()))),
             Instruction::InvalidateCaches(_) => InvalidHeartbeatResponseSnafu.fail(),
             Instruction::Suspend => Ok(None),
             Instruction::EnterStagingRegions(_) => {
@@ -159,7 +163,9 @@ pub enum InstructionHandlers {
     DowngradeRegions(DowngradeRegionsHandler),
     UpgradeRegions(UpgradeRegionsHandler),
     GetFileRefs(GetFileRefsHandler),
+    GetPackedFileRefs(GetPackedFileRefsHandler),
     GcRegions(GcRegionsHandler),
+    PackedGcRegions(PackedGcRegionsHandler),
     EnterStagingRegions(EnterStagingRegionsHandler),
     SyncRegions(SyncRegionHandler),
     RemapManifest(RemapManifestHandler),
@@ -192,7 +198,9 @@ impl_from_handler!(
     DowngradeRegionsHandler => DowngradeRegions,
     UpgradeRegionsHandler => UpgradeRegions,
     GetFileRefsHandler => GetFileRefs,
+    GetPackedFileRefsHandler => GetPackedFileRefs,
     GcRegionsHandler => GcRegions,
+    PackedGcRegionsHandler => PackedGcRegions,
     EnterStagingRegionsHandler => EnterStagingRegions,
     SyncRegionHandler => SyncRegions,
     RemapManifestHandler => RemapManifest,
@@ -240,7 +248,9 @@ dispatch_instr!(
     DowngradeRegions => DowngradeRegions,
     UpgradeRegions => UpgradeRegions,
     GetFileRefs => GetFileRefs,
+    GetPackedFileRefs => GetPackedFileRefs,
     GcRegions => GcRegions,
+    PackedGcRegions => PackedGcRegions,
     EnterStagingRegions => EnterStagingRegions,
     SyncRegions => SyncRegions,
     RemapManifest => RemapManifest,

@@ -35,6 +35,8 @@ use client::Client;
 use client::client_manager::NodeClients;
 use cmd::frontend::create_heartbeat_task;
 use common_base::Plugins;
+use common_datasource::object_store::LocalFileAccess;
+use common_event_recorder::EventRecorderOptions;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::DatanodeId;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
@@ -169,9 +171,12 @@ pub struct GreptimeDbClusterBuilder {
     metasrv_wal_config: MetasrvWalConfig,
     datanode_gc_config: GcConfig,
     metasrv_gc_config: GcSchedulerOptions,
+    frontend_auto_create_table: bool,
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
     plugins: Plugins,
+    local_file_access: LocalFileAccess,
+    event_recorder_options: EventRecorderOptions,
 }
 
 impl GreptimeDbClusterBuilder {
@@ -203,9 +208,12 @@ impl GreptimeDbClusterBuilder {
             metasrv_wal_config: MetasrvWalConfig::default(),
             datanode_gc_config: GcConfig::default(),
             metasrv_gc_config: GcSchedulerOptions::default(),
+            frontend_auto_create_table: true,
             shared_home_dir: None,
             meta_selector: None,
             plugins: Plugins::default(),
+            local_file_access: LocalFileAccess::default(),
+            event_recorder_options: EventRecorderOptions::default(),
         }
     }
 
@@ -251,6 +259,22 @@ impl GreptimeDbClusterBuilder {
     }
 
     #[must_use]
+    pub fn with_event_recorder_options(
+        mut self,
+        event_recorder_options: EventRecorderOptions,
+    ) -> Self {
+        self.event_recorder_options = event_recorder_options;
+        self
+    }
+
+    /// Sets whether the test frontend automatically creates tables on write.
+    #[must_use]
+    pub fn with_frontend_auto_create_table(mut self, auto_create_table: bool) -> Self {
+        self.frontend_auto_create_table = auto_create_table;
+        self
+    }
+
+    #[must_use]
     pub fn with_shared_home_dir(mut self, shared_home_dir: Arc<TempDir>) -> Self {
         self.shared_home_dir = Some(shared_home_dir);
         self
@@ -266,6 +290,12 @@ impl GreptimeDbClusterBuilder {
     #[must_use]
     pub fn with_plugins(mut self, plugins: Plugins) -> Self {
         self.plugins = plugins;
+        self
+    }
+
+    /// Configure the frontend COPY sandbox for filesystem integration tests.
+    pub fn with_local_file_access(mut self, access: LocalFileAccess) -> Self {
+        self.local_file_access = access;
         self
     }
 
@@ -295,6 +325,7 @@ impl GreptimeDbClusterBuilder {
                 ..Default::default()
             },
             gc: self.metasrv_gc_config.clone(),
+            event_recorder: self.event_recorder_options.clone(),
             ..Default::default()
         };
 
@@ -514,6 +545,7 @@ impl GreptimeDbClusterBuilder {
             meta_client.clone(),
             Arc::new(ProcessManager::new(fe_opts.grpc.server_addr.clone(), None)),
         )
+        .with_local_file_access(self.local_file_access.clone())
         .with_local_cache_invalidator(cache_registry)
         .try_build()
         .await
@@ -540,7 +572,11 @@ impl GreptimeDbClusterBuilder {
     }
 
     fn build_frontend_options(&self) -> FrontendOptions {
-        let mut fe_opts = FrontendOptions::default();
+        let mut fe_opts = FrontendOptions {
+            auto_create_table: self.frontend_auto_create_table,
+            event_recorder: self.event_recorder_options.clone(),
+            ..Default::default()
+        };
 
         // Choose a random unused port between [14000, 24000] for local test to avoid conflicts.
         let port_range = 14000..=24000;
@@ -657,11 +693,15 @@ async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
 
     (
         addr.to_string(),
-        Client::with_manager_and_urls(channel_manager, [addr]),
+        // The mock connector pool lives on this single manager, so both lanes
+        // intentionally share it (same semantics as the legacy constructor).
+        Client::with_query_and_control_managers(channel_manager.clone(), channel_manager, [addr]),
     )
 }
 
+// Mock connectors are registered on a shared channel manager.
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 

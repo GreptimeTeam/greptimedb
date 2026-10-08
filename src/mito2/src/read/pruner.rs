@@ -87,6 +87,12 @@ impl PartitionPruner {
         }
     }
 
+    /// Excludes files replaced by another candidate source from prefetching.
+    pub(crate) fn excluding_files(mut self, excluded: &HashSet<usize>) -> Self {
+        self.file_indices.retain(|index| !excluded.contains(index));
+        self
+    }
+
     /// Gets or creates the FileRangeBuilder for a file.
     ///
     /// This method also triggers pre-fetching of upcoming files in the background
@@ -344,12 +350,14 @@ impl Pruner {
             enable_predicate_prefilter,
         });
 
-        // Spawn worker tasks with their receivers
+        // Keep pruning and prefetching on the runtime of the originating workload.
         for (worker_id, rx) in receivers.into_iter().enumerate() {
-            let inner_clone = inner.clone();
-            common_runtime::spawn_query(async move {
-                Self::worker_loop(worker_id, rx, inner_clone).await;
-            });
+            let worker = Self::worker_loop(worker_id, rx, inner.clone());
+            if inner.stream_ctx.input.compaction {
+                common_runtime::spawn_compact(worker);
+            } else {
+                common_runtime::spawn_query(worker);
+            }
         }
 
         Self {
@@ -737,7 +745,7 @@ impl Pruner {
 #[cfg(test)]
 impl Pruner {
     /// Returns the remaining range count for a file (test-only).
-    fn test_remaining_ranges(&self, file_index: usize) -> usize {
+    pub(crate) fn test_remaining_ranges(&self, file_index: usize) -> usize {
         self.inner.file_entries[file_index]
             .lock()
             .unwrap()
@@ -841,9 +849,10 @@ mod tests {
             })
             .collect();
 
-        let input = ScanInput::new(env.access_layer.clone(), mapper)
+        let input = ScanInput::builder(env.access_layer.clone(), mapper)
             .with_files(files)
-            .with_append_mode(true);
+            .with_append_mode(true)
+            .build();
         let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input));
         let pruner = Arc::new(Pruner::new_with_options(
             stream_ctx,
@@ -898,10 +907,11 @@ mod tests {
             })
             .collect();
 
-        let input = ScanInput::new(env.access_layer.clone(), mapper)
+        let input = ScanInput::builder(env.access_layer.clone(), mapper)
             .with_files(files)
             .with_predicate(predicate)
-            .with_append_mode(true);
+            .with_append_mode(true)
+            .build();
         let stream_ctx = Arc::new(StreamContext::unordered_scan_ctx(input));
         let pruner = Arc::new(Pruner::new(stream_ctx, 1));
         (env, pruner)

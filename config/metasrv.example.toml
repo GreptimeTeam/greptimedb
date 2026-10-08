@@ -35,6 +35,8 @@ meta_table_name = "greptime_metakv"
 ## When PostgreSQL public schema is not writable (e.g., PostgreSQL 15+ with restricted public),
 ## set this to a writable schema. GreptimeDB will use `meta_schema_name`.`meta_table_name`.
 ## **Only used when backend is `postgres_store`.**
+## Unset by default; this example sets it to `greptime_schema`.
+## @toml2docs:none-default
 meta_schema_name = "greptime_schema"
 
 ## Automatically create PostgreSQL schema if it doesn't exist.
@@ -88,11 +90,16 @@ node_max_idle_time = "24hours"
 ## The runtime options.
 #+ [runtime]
 ## The number of threads to execute the runtime for global read operations.
+## Defaults to max(num_cpus, 2).
+## @toml2docs:none-default="Auto"
 #+ global_rt_size = 8
 ## The number of threads to execute compact operations.
+## Defaults to max(num_cpus / 2, 2).
+## @toml2docs:none-default="Auto"
 #+ compact_rt_size = 4
 ## The maximum number of blocking threads for compact operations.
-## Defaults to max(num_cpus / 2, 1).
+## Defaults to max(num_cpus / 2, 2).
+## @toml2docs:none-default="Auto"
 #+ compact_rt_max_blocking_threads = 4
 
 ## TLS configuration for kv store backend (applicable for etcd, PostgreSQL, and MySQL backends)
@@ -140,6 +147,7 @@ bind_addr = "127.0.0.1:3002"
 ## The communication server address for the frontend and datanode to connect to metasrv.
 ## If left empty or unset, the server will automatically use the IP address of the first network interface
 ## on the host, with the same port number as the one specified in `grpc.bind_addr`.
+## @toml2docs:none-default
 server_addr = "127.0.0.1:3002"
 ## The number of server worker threads.
 runtime_size = 8
@@ -206,7 +214,8 @@ acceptable_heartbeat_pause = "10000ms"
 ## Operation timeout.
 timeout = "10s"
 
-## Connect server timeout.
+## Connect server timeout. Defaults to `1s`; this example sets it to `10s`.
+## @toml2docs:none-default="1s"
 connect_timeout = "10s"
 
 ## `TCP_NODELAY` option for accepted connections.
@@ -228,6 +237,14 @@ provider = "raft_engine"
 ##
 ## **It's only used when the provider is `kafka`**.
 broker_endpoints = ["127.0.0.1:9092"]
+
+## The connect timeout for kafka client.
+## **It's only used when the provider is `kafka`**.
+#+ connect_timeout = "3s"
+
+## The total request timeout for kafka client.
+## **It's only used when the provider is `kafka`**.
+#+ timeout = "5s"
 
 ## Automatically create topics for WAL.
 ## Set to `true` to automatically create topics for WAL.
@@ -320,9 +337,11 @@ ttl = "90d"
 ## `drop_flow`, `create_table`, `create_logical_tables`, `alter_table`,
 ## `alter_logical_tables`, `drop_table`, `undrop_table`, `purge_dropped_table`,
 ## `truncate_table`, `create_view`, `drop_view`, `repartition`,
-## `repartition_group`, `wal_prune`, `batch_gc`.
+## `repartition_group`, `wal_prune`, `batch_gc`, `reconcile_catalog`,
+## `reconcile_database`, `reconcile_table`, `reconcile_logical_tables`.
 ## When omitted, all current and future event types are recorded.
 ## Set to an empty array to disable event recording.
+## @toml2docs:none-default="All"
 #+ event_types = ["region_migration"]
 
 ## Configuration options for the stats persistence.
@@ -370,6 +389,10 @@ log_format = "text"
 
 ## The maximum amount of log files.
 max_log_files = 720
+
+## The maximum total size of managed log files in `dir`.
+## Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.
+max_log_dir_size = "0B"
 
 ## The OTLP tracing export protocol. Can be `grpc`/`http`.
 otlp_export_protocol = "http"

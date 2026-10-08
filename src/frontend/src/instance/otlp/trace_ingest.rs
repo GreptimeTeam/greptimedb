@@ -25,23 +25,23 @@ use client::Output;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_meta::rpc::ddl::TriggerReason;
-use common_telemetry::warn;
+use common_telemetry::{debug, warn};
 use datatypes::prelude::ConcreteDataType;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use pipeline::{GreptimePipelineParams, PipelineWay};
+use pipeline::PipelineWay;
 use servers::error::{self, Result as ServerResult};
 use servers::otlp;
-use servers::otlp::coerce::{coerce_value_data, trace_value_datatype};
+use servers::otlp::coerce::{coerce_value_data, is_supported_trace_coercion, trace_value_datatype};
 use servers::otlp::trace::span::{TraceSpan, TraceSpanGroup};
 use servers::otlp::trace::v1::{TraceBatchSchema, TraceBinaryType, TraceRetryColumns};
 use servers::otlp::trace::{SERVICE_NAME_COLUMN, TraceAuxData};
-use servers::query_handler::{PipelineHandlerRef, TraceIngestOutcome};
+use servers::query_handler::TraceIngestOutcome;
 use session::context::QueryContextRef;
 use snafu::{IntoError, ResultExt};
 use table::requests::{
     SEMANTIC_ENTITY_SERVICE_ID, SEMANTIC_PIPELINE, SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE,
     SEMANTIC_TRACE_CONVENTIONS, SEMANTIC_VALUE_MIXED, SEMANTIC_VALUE_UNKNOWN, SIGNAL_TYPE_TRACE,
-    SOURCE_OPENTELEMETRY, TABLE_DATA_MODEL_TRACE_V1,
+    SOURCE_OPENTELEMETRY, TABLE_DATA_MODEL_TRACE_V1, TABLE_DATA_MODEL_TRACE_V2,
 };
 
 use crate::instance::Instance;
@@ -50,10 +50,30 @@ use crate::instance::otlp::trace_types::{
     PendingTraceColumnRewrite, PreparedTraceColumnRewrites, TraceColumnRewriteError,
     choose_trace_reconcile_decision, enrich_trace_reconcile_error,
     is_trace_reconcile_candidate_type, prepare_trace_column_rewrites, push_observed_trace_type,
+    truncate_for_diagnostics,
 };
 use crate::metrics::{OTLP_TRACES_FAILURE_COUNT, OTLP_TRACES_ROWS};
 
+/// Merge converted V2 rows only when their fixed schemas agree.
+fn merge_trace_v2_rows(rows: &mut Rows, batch: Rows) -> ServerResult<()> {
+    if rows.schema.is_empty() {
+        rows.schema = batch.schema;
+    } else {
+        snafu::ensure!(
+            rows.schema == batch.schema,
+            error::InternalSnafu {
+                err_msg: "Trace V2 schema mismatch while merging spans",
+            }
+        );
+    }
+    rows.rows.extend(batch.rows);
+    Ok(())
+}
+
 const TRACE_FAILURE_MESSAGE_LIMIT: usize = 4;
+
+/// Maximum characters of a failure cause echoed to the client and the log.
+const TRACE_FAILURE_CAUSE_LIMIT: usize = 256;
 
 /// Determines how trace ingestion responds to a failure before a write is dispatched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,18 +95,42 @@ impl ChunkFailureReaction {
 
 /// Shared dependencies and request metadata used while ingesting trace chunks.
 struct TraceChunkIngestContext<'a> {
-    pipeline_handler: PipelineHandlerRef,
     pipeline: &'a PipelineWay,
-    pipeline_params: &'a GreptimePipelineParams,
     table_name: &'a str,
-    is_trace_v1_model: bool,
 }
 
 /// Accumulates trace outcomes, auxiliary rows, and bounded failure details.
 struct TraceIngestState {
     aux_data: TraceAuxData,
     outcome: TraceIngestOutcome,
-    failure_messages: Vec<String>,
+    failure_messages: TraceFailureMessages,
+}
+
+/// Bounded, deduplicated failure details for one trace request.
+///
+/// Occurrences past [`TRACE_FAILURE_MESSAGE_LIMIT`] distinct failures are
+/// counted but their keys are dropped: retaining them would let this state grow
+/// with the number of distinct bad values in a request.
+#[derive(Debug, Default)]
+struct TraceFailureMessages {
+    entries: Vec<TraceFailureEntry>,
+    suppressed_occurrences: usize,
+}
+
+#[derive(Debug)]
+struct TraceFailureEntry {
+    label: &'static str,
+    /// Untruncated: two causes can agree on a truncated prefix and differ
+    /// exactly where the actionable detail is.
+    key: String,
+    message: String,
+    occurrences: usize,
+}
+
+impl TraceFailureMessages {
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 /// How a v1 chunk should be reconciled when it is written.
@@ -824,18 +868,20 @@ impl TraceColumnRequestSchema {
 impl Instance {
     /// Ingest OTLP trace spans with chunk-level writes and span-level fallback on
     /// deterministic chunk failures.
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn ingest_trace_spans(
         &self,
-        pipeline_handler: PipelineHandlerRef,
         pipeline: &PipelineWay,
-        pipeline_params: &GreptimePipelineParams,
         table_name: String,
         groups: Vec<TraceSpanGroup>,
         conventions: &str,
         ctx: QueryContextRef,
     ) -> ServerResult<TraceIngestOutcome> {
         let is_trace_v1_model = matches!(pipeline, PipelineWay::OtlpTraceDirectV1);
+        let data_model = match pipeline {
+            PipelineWay::OtlpTraceDirectV1 => Some(TABLE_DATA_MODEL_TRACE_V1),
+            PipelineWay::OtlpTraceDirectV2 => Some(TABLE_DATA_MODEL_TRACE_V2),
+            _ => None,
+        };
 
         // Only the main span table gets the identity; the derived `_services` /
         // `_operations` lookup tables keep the unstamped `ctx`.
@@ -846,24 +892,35 @@ impl Instance {
             // `service_name` is a tag column in both trace models, so the main span
             // table declares the logical `service` entity (Layer 1 auto-stamp).
             c.set_extension(SEMANTIC_ENTITY_SERVICE_ID, SERVICE_NAME_COLUMN);
-            if is_trace_v1_model {
-                c.set_extension(SEMANTIC_PIPELINE, TABLE_DATA_MODEL_TRACE_V1);
+            if let Some(data_model) = data_model {
+                c.set_extension(SEMANTIC_PIPELINE, data_model);
                 c.set_extension(SEMANTIC_TRACE_CONVENTIONS, conventions);
             }
             Arc::new(c)
         };
 
+        if data_model.is_some()
+            && let Some(table) = self
+                .catalog_manager
+                .table(
+                    ctx.current_catalog(),
+                    &ctx.current_schema(),
+                    &table_name,
+                    None,
+                )
+                .await?
+        {
+            operator::insert::validate_trace_table_model(&table.table_info(), &main_ctx)?;
+        }
+
         let ingest_ctx = TraceChunkIngestContext {
-            pipeline_handler,
             pipeline,
-            pipeline_params,
             table_name: &table_name,
-            is_trace_v1_model,
         };
         let mut ingest_state = TraceIngestState {
             aux_data: TraceAuxData::default(),
             outcome: TraceIngestOutcome::default(),
-            failure_messages: Vec::new(),
+            failure_messages: TraceFailureMessages::default(),
         };
 
         let main_result: ServerResult<()> = async {
@@ -944,7 +1001,7 @@ impl Instance {
             match aux_requests {
                 Ok((aux_requests, _)) if !aux_requests.inserts.is_empty() => {
                     match self
-                        .insert_trace_requests(aux_requests, ingest_ctx.is_trace_v1_model, ctx)
+                        .insert_trace_requests(aux_requests, ingest_ctx.pipeline, ctx)
                         .await
                     {
                         Ok(output) => {
@@ -954,6 +1011,7 @@ impl Instance {
                             Self::push_trace_failure_message(
                                 &mut ingest_state.failure_messages,
                                 "aux_table_update_failed",
+                                err.status_code().as_ref(),
                                 format!(
                                     "Auxiliary trace tables were not fully updated ({})",
                                     err.status_code().as_ref()
@@ -968,6 +1026,7 @@ impl Instance {
                 Err(err) => Self::push_trace_failure_message(
                     &mut ingest_state.failure_messages,
                     "aux_table_update_failed",
+                    err.status_code().as_ref(),
                     format!(
                         "Auxiliary trace tables were not fully updated ({})",
                         err.status_code().as_ref()
@@ -985,6 +1044,35 @@ impl Instance {
             ingest_state.failure_messages,
         );
 
+        if let Some(error_message) = &ingest_state.outcome.error_message {
+            let accepted_spans = ingest_state.outcome.accepted_spans;
+            let rejected_spans = ingest_state.outcome.rejected_spans;
+            // A partial success repeats every export interval while the sender
+            // keeps emitting the bad value, so only a fully rejected request is
+            // worth a warning. Either way the detail reaches the sender: as an
+            // OTLP partial success, or as the status message of a 400.
+            //
+            // The detail embeds attribute keys verbatim, so it goes out as a
+            // Debug field; interpolating it would let a newline in an attribute
+            // key forge log lines.
+            if accepted_spans == 0 && rejected_spans > 0 {
+                warn!(
+                    table_name = ingest_ctx.table_name,
+                    rejected_spans,
+                    error_message = ?error_message,
+                    "OTLP trace ingest rejected every span"
+                );
+            } else {
+                debug!(
+                    table_name = ingest_ctx.table_name,
+                    accepted_spans,
+                    rejected_spans,
+                    error_message = ?error_message,
+                    "OTLP trace ingest reported failures"
+                );
+            }
+        }
+
         Ok(ingest_state.outcome)
     }
 
@@ -993,23 +1081,71 @@ impl Instance {
     async fn ingest_trace_chunk(
         &self,
         ingest_ctx: &TraceChunkIngestContext<'_>,
-        chunk: Vec<TraceSpan>,
+        mut chunk: Vec<TraceSpan>,
         ctx: QueryContextRef,
         ingest_state: &mut TraceIngestState,
     ) -> ServerResult<()> {
         // Try the fast path first so healthy batches keep their original
         // throughput and write amplification stays low.
-        let (requests, chunk_rows) = otlp::trace::to_grpc_insert_requests_from_spans(
-            &chunk,
-            ingest_ctx.pipeline,
-            ingest_ctx.pipeline_params,
-            ingest_ctx.table_name,
-            &ctx,
-            ingest_ctx.pipeline_handler.clone(),
-        )?;
+        let convert = |spans: &[TraceSpan]| {
+            otlp::trace::to_grpc_insert_requests_from_spans(
+                spans,
+                ingest_ctx.pipeline,
+                ingest_ctx.table_name,
+            )
+        };
+        let (requests, chunk_rows) = match convert(&chunk) {
+            Ok(x) => x,
+            Err(_) if matches!(ingest_ctx.pipeline, PipelineWay::OtlpTraceDirectV2) => {
+                let mut rows = Rows {
+                    rows: Vec::with_capacity(chunk.len()),
+                    ..Default::default()
+                };
+
+                for span in std::mem::take(&mut chunk) {
+                    let result = convert(std::slice::from_ref(&span));
+                    match result {
+                        Ok((requests, _)) => {
+                            // V2 must always emit the same table and fixed column order.
+                            for batch in requests.inserts.into_iter().filter_map(|r| r.rows) {
+                                merge_trace_v2_rows(&mut rows, batch)?;
+                            }
+                            chunk.push(span);
+                        }
+                        Err(err) => {
+                            ingest_state.outcome.rejected_spans += 1;
+
+                            let (cause, shown_cause) = Self::trace_failure_cause(&err);
+                            Self::push_trace_failure_message(
+                                &mut ingest_state.failure_messages,
+                                "span_rejected",
+                                &cause,
+                                format!(
+                                    "Rejected span {}:{}: {}",
+                                    span.trace_id, span.span_id, shown_cause
+                                ),
+                            );
+                        }
+                    }
+                }
+
+                if rows.rows.is_empty() {
+                    return Ok(());
+                }
+                let chunk_rows = rows.rows.len();
+                let requests = RowInsertRequests {
+                    inserts: vec![RowInsertRequest {
+                        table_name: ingest_ctx.table_name.to_string(),
+                        rows: Some(rows),
+                    }],
+                };
+                (requests, chunk_rows)
+            }
+            Err(e) => return Err(e),
+        };
 
         let output = match self
-            .insert_trace_requests(requests, ingest_ctx.is_trace_v1_model, ctx)
+            .insert_trace_requests(requests, ingest_ctx.pipeline, ctx)
             .await
         {
             Ok(output) => output,
@@ -1019,6 +1155,7 @@ impl Instance {
                 Self::push_trace_failure_message(
                     &mut ingest_state.failure_messages,
                     ChunkFailureReaction::Propagate.as_metric_label(),
+                    err.status_code().as_ref(),
                     format!(
                         "Propagating chunk write failure ({})",
                         err.status_code().as_ref()
@@ -1069,13 +1206,18 @@ impl Instance {
             // recover valid data.
             let span_count = chunks.iter().map(|chunk| chunk.rows.len()).sum::<usize>();
             ingest_state.outcome.rejected_spans += span_count;
+            let (cause, shown_cause) = Self::trace_failure_cause(&err);
             Self::push_trace_failure_message(
                 &mut ingest_state.failure_messages,
                 ChunkFailureReaction::DiscardChunk.as_metric_label(),
+                // Merging discards of different sizes would make the reported
+                // count times its occurrences wrong.
+                &format!("{span_count}:{cause}"),
                 format!(
-                    "Discarded {} spans after pre-write request failure ({})",
+                    "Discarded {} spans after pre-write request failure ({}): {}",
                     span_count,
-                    err.status_code().as_ref()
+                    err.status_code().as_ref(),
+                    shown_cause
                 ),
             );
             return Ok(());
@@ -1110,6 +1252,7 @@ impl Instance {
             Self::push_trace_failure_message(
                 &mut ingest_state.failure_messages,
                 ChunkFailureReaction::RetryPerSpan.as_metric_label(),
+                "incompatible_binary_and_json",
                 "Chunk fallback triggered by incompatible binary and JSON values".to_string(),
             );
             return self
@@ -1136,6 +1279,7 @@ impl Instance {
                     Self::push_trace_failure_message(
                         &mut ingest_state.failure_messages,
                         ChunkFailureReaction::RetryPerSpan.as_metric_label(),
+                        err.status_code().as_ref(),
                         format!("Chunk fallback triggered by {}", err.status_code().as_ref()),
                     );
                     return self
@@ -1144,13 +1288,19 @@ impl Instance {
                 }
                 ChunkFailureReaction::DiscardChunk => {
                     ingest_state.outcome.rejected_spans += span_count;
+                    let (cause, shown_cause) = Self::trace_failure_cause(&err);
                     Self::push_trace_failure_message(
                         &mut ingest_state.failure_messages,
                         ChunkFailureReaction::DiscardChunk.as_metric_label(),
+                        // Chunks discarded for one cause differ in size; merging
+                        // them would make the reported count times its
+                        // occurrences wrong.
+                        &format!("{span_count}:{cause}"),
                         format!(
-                            "Discarded {} spans after pre-write chunk failure ({})",
+                            "Discarded {} spans after pre-write chunk failure ({}): {}",
                             span_count,
-                            err.status_code().as_ref()
+                            err.status_code().as_ref(),
+                            shown_cause
                         ),
                     );
                     return Ok(());
@@ -1159,6 +1309,7 @@ impl Instance {
                     Self::push_trace_failure_message(
                         &mut ingest_state.failure_messages,
                         ChunkFailureReaction::Propagate.as_metric_label(),
+                        err.status_code().as_ref(),
                         format!(
                             "Propagating pre-write chunk failure ({})",
                             err.status_code().as_ref()
@@ -1182,6 +1333,7 @@ impl Instance {
                 Self::push_trace_failure_message(
                     &mut ingest_state.failure_messages,
                     ChunkFailureReaction::Propagate.as_metric_label(),
+                    err.status_code().as_ref(),
                     format!(
                         "Propagating chunk write failure ({})",
                         err.status_code().as_ref()
@@ -1221,6 +1373,7 @@ impl Instance {
                     Self::push_trace_failure_message(
                         &mut ingest_state.failure_messages,
                         ChunkFailureReaction::Propagate.as_metric_label(),
+                        err.status_code().as_ref(),
                         format!(
                             "Propagating pre-write span failure for {}:{} ({})",
                             span.trace_id,
@@ -1232,14 +1385,19 @@ impl Instance {
                 }
 
                 ingest_state.outcome.rejected_spans += 1;
+                // Dedup on the cause, not the span id: one bad column rejects
+                // every span and would otherwise fill the entry list.
+                let (cause, shown_cause) = Self::trace_failure_cause(&err);
                 Self::push_trace_failure_message(
                     &mut ingest_state.failure_messages,
                     "span_rejected",
+                    &cause,
                     format!(
-                        "Rejected span {}:{} ({})",
+                        "Rejected span {}:{} ({}): {}",
                         span.trace_id,
                         span.span_id,
-                        err.status_code().as_ref()
+                        err.status_code().as_ref(),
+                        shown_cause
                     ),
                 );
                 continue;
@@ -1256,6 +1414,7 @@ impl Instance {
                     Self::push_trace_failure_message(
                         &mut ingest_state.failure_messages,
                         ChunkFailureReaction::Propagate.as_metric_label(),
+                        err.status_code().as_ref(),
                         format!(
                             "Propagating span write failure for {}:{} ({})",
                             span.trace_id,
@@ -1279,12 +1438,17 @@ impl Instance {
     async fn insert_trace_requests(
         &self,
         mut requests: RowInsertRequests,
-        is_trace_v1_model: bool,
+        pipeline: &PipelineWay,
         ctx: QueryContextRef,
     ) -> ServerResult<Output> {
-        if is_trace_v1_model {
+        if matches!(pipeline, PipelineWay::OtlpTraceDirectV1) {
             self.reconcile_trace_column_types(&mut requests, &ctx)
                 .await?;
+        }
+        if matches!(
+            pipeline,
+            PipelineWay::OtlpTraceDirectV1 | PipelineWay::OtlpTraceDirectV2
+        ) {
             self.handle_trace_inserts(requests, ctx)
                 .await
                 .map_err(BoxedError::new)
@@ -1309,6 +1473,9 @@ impl Instance {
             .catalog_manager
             .table(catalog, &schema, table_name, None)
             .await?;
+        if let Some(table) = &table {
+            operator::insert::validate_trace_table_model(&table.table_info(), ctx)?;
+        }
         let table_schema = table.as_ref().map(|table| table.schema());
         let exclusions = request_schema.incompatible_schema_observations(table_schema.as_deref());
         if !exclusions.is_empty() {
@@ -1619,24 +1786,52 @@ impl Instance {
         outcome.write_cost += cost;
     }
 
-    fn push_trace_failure_message(messages: &mut Vec<String>, label: &str, message: String) {
+    /// Returns the full cause of a pre-write failure and its display form.
+    ///
+    /// `output_msg` masks internal errors and unwraps the root cause. Dedup must
+    /// key on the full text: two causes can agree on a truncated prefix and
+    /// differ exactly where the actionable detail is.
+    fn trace_failure_cause(err: &error::Error) -> (String, String) {
+        let cause = err.output_msg();
+        let display = truncate_for_diagnostics(&cause, TRACE_FAILURE_CAUSE_LIMIT);
+        (cause, display)
+    }
+
+    /// Records one failure, merging repeats of `(label, key)` into a count.
+    fn push_trace_failure_message(
+        messages: &mut TraceFailureMessages,
+        label: &'static str,
+        key: &str,
+        message: String,
+    ) {
         OTLP_TRACES_FAILURE_COUNT.with_label_values(&[label]).inc();
 
-        if messages.len() < TRACE_FAILURE_MESSAGE_LIMIT {
-            messages.push(message);
-        } else if messages.len() == TRACE_FAILURE_MESSAGE_LIMIT {
-            tracing::debug!(
-                label,
-                limit = TRACE_FAILURE_MESSAGE_LIMIT,
-                "Trace ingest failure message limit reached; suppressing additional failure details"
-            );
+        if let Some(entry) = messages
+            .entries
+            .iter_mut()
+            .find(|entry| entry.label == label && entry.key == key)
+        {
+            entry.occurrences += 1;
+            return;
         }
+
+        if messages.entries.len() >= TRACE_FAILURE_MESSAGE_LIMIT {
+            messages.suppressed_occurrences += 1;
+            return;
+        }
+
+        messages.entries.push(TraceFailureEntry {
+            label,
+            key: key.to_string(),
+            message,
+            occurrences: 1,
+        });
     }
 
     fn finish_trace_failure_message(
         accepted_spans: usize,
         rejected_spans: usize,
-        messages: Vec<String>,
+        messages: TraceFailureMessages,
     ) -> Option<String> {
         if rejected_spans == 0 && messages.is_empty() {
             return None;
@@ -1648,8 +1843,27 @@ impl Instance {
         );
 
         if !messages.is_empty() {
+            let details = messages
+                .entries
+                .into_iter()
+                .map(|entry| {
+                    if entry.occurrences > 1 {
+                        format!("{} (x{})", entry.message, entry.occurrences)
+                    } else {
+                        entry.message
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
             summary.push_str(": ");
-            summary.push_str(&messages.join("; "));
+            summary.push_str(&details);
+        }
+
+        if messages.suppressed_occurrences > 0 {
+            summary.push_str(&format!(
+                "; {} additional failures suppressed",
+                messages.suppressed_occurrences
+            ));
         }
 
         Some(summary)
@@ -1893,10 +2107,23 @@ fn trace_logical_types_incompatible(
     right_datatype: ColumnDataType,
     right_concrete_type: &ConcreteDataType,
 ) -> bool {
-    left_concrete_type != right_concrete_type
-        && (left_datatype == right_datatype
-            || !is_trace_reconcile_candidate_type(left_datatype)
-            || !is_trace_reconcile_candidate_type(right_datatype))
+    if left_concrete_type == right_concrete_type {
+        return false;
+    }
+    // A supported coercion in either direction means the two types can be
+    // reconciled, so they are not logically incompatible. This lets a signed
+    // request reach the coercion path instead of being excluded up front when
+    // the existing column is unsigned (e.g. trace `duration_nano` written as
+    // Int64 into an existing UInt64 column during the unsigned -> signed
+    // transition).
+    if is_supported_trace_coercion(left_datatype, right_datatype)
+        || is_supported_trace_coercion(right_datatype, left_datatype)
+    {
+        return false;
+    }
+    left_datatype == right_datatype
+        || !is_trace_reconcile_candidate_type(left_datatype)
+        || !is_trace_reconcile_candidate_type(right_datatype)
 }
 
 fn chunk_owned<T>(items: Vec<T>, chunk_size: usize) -> Vec<Vec<T>> {

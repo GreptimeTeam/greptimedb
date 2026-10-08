@@ -306,13 +306,25 @@ fn run_bench_command(command: Vec<String>, mut run: Value) -> Result<Value> {
 }
 
 fn parse_average_duration(stdout: &str) -> Option<f64> {
-    Regex::new(r"(?i)Average duration[^0-9]*([0-9.]+)\s*ms")
-        .ok()?
-        .captures(stdout)?
-        .get(1)?
-        .as_str()
-        .parse()
-        .ok()
+    let captures = Regex::new(
+        r"(?i)Average:\s+(?:\x1b\[[0-9;]*m)*\d+(?:\x1b\[[0-9;]*m)*\s+rows(?:,\s+(?:\x1b\[[0-9;]*m)*\d+(?:\x1b\[[0-9;]*m)*\s+record batches)?\s+in\s+([0-9]+(?:\.[0-9]+)?)\s*(ns|µs|us|ms|s)\s+over\s+\d+\s+iterations|Average duration[^0-9]*([0-9]+(?:\.[0-9]+)?)\s*ms",
+    )
+    .ok()?
+    .captures(stdout)?;
+    let (value, unit) = match (captures.get(1), captures.get(2), captures.get(3)) {
+        (Some(value), Some(unit), _) => (value.as_str(), unit.as_str()),
+        (_, _, Some(value)) => (value.as_str(), "ms"),
+        _ => return None,
+    };
+    let value = value.parse::<f64>().ok()?;
+    let milliseconds = match unit.to_ascii_lowercase().as_str() {
+        "ns" => value / 1_000_000.0,
+        "µs" | "us" => value / 1_000.0,
+        "ms" => value,
+        "s" => value * 1_000.0,
+        _ => return None,
+    };
+    milliseconds.is_finite().then_some(milliseconds)
 }
 
 fn bench_median(runs: &[Value]) -> Option<f64> {
@@ -328,12 +340,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_average_duration_and_groups_scan_paths() {
-        assert_eq!(
-            parse_average_duration("work\nAverage duration: 12.5 ms\n"),
-            Some(12.5)
-        );
-        assert_eq!(parse_average_duration("completed"), None);
+    fn parses_average_durations() {
+        let cases = [
+            (
+                "parquetbench nanoseconds",
+                "ℹ Average: 42 rows, 2 record batches in 500ns over 4 iterations",
+                Some(0.0005),
+            ),
+            (
+                "scanbench colored microseconds",
+                "\x1b[1;32mSummary\x1b[0m Average: \x1b[36m12\x1b[0m rows in 250µs over 2 iterations",
+                Some(0.25),
+            ),
+            (
+                "scanbench seconds",
+                "Summary Average: 12 rows in 2.5s over 2 iterations",
+                Some(2500.0),
+            ),
+            (
+                "legacy milliseconds",
+                "Average duration: 12.5 ms",
+                Some(12.5),
+            ),
+            ("absent", "Benchmark completed!", None),
+            (
+                "malformed",
+                "Summary Average: 12 rows in unknown over 2 iterations",
+                None,
+            ),
+        ];
+
+        for (name, stdout, expected) in cases {
+            let actual = parse_average_duration(stdout);
+            match (actual, expected) {
+                (Some(actual), Some(expected)) => assert!(
+                    (actual - expected).abs() < f64::EPSILON,
+                    "{name}: expected {expected}, got {actual}"
+                ),
+                (None, None) => {}
+                (actual, expected) => panic!("{name}: expected {expected:?}, got {actual:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn groups_scan_paths() {
         let targets = vec![
             BenchTarget {
                 relative_path: "data/a.parquet".to_string(),

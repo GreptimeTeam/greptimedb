@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 #[cfg(test)]
 use std::cell::Cell;
 use std::sync::{Arc, Mutex};
@@ -20,11 +19,12 @@ use std::time::Duration;
 
 use ahash::{HashMap, HashSet};
 use arrow_schema::{
-    ArrowError, DataType, DataType as ArrowDataType, Field, Schema as ArrowSchema,
+    ArrowError, DataType as ArrowDataType, Field, Schema as ArrowSchema,
     SchemaRef as ArrowSchemaRef, SortOptions,
 };
 use async_stream::stream;
 use common_catalog::parse_catalog_and_schema_from_db_string;
+use common_error::ext::BoxedError;
 use common_plugins::GREPTIME_EXEC_READ_COST;
 use common_query::request::QueryRequest;
 use common_recordbatch::adapter::{RecordBatchMetrics, region_scan_output_bytes};
@@ -40,16 +40,15 @@ use datafusion::physical_plan::metrics::{
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
-    SendableRecordBatchStream,
+    SendableRecordBatchStream, StatisticsArgs, apply_expression_roots,
 };
-use datafusion_common::{Column as ColumnExpr, DataFusionError, Result};
-use datafusion_expr::{Expr, Extension, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion_common::stats::Precision;
+use datafusion_common::tree_node::TreeNodeRecursion;
+use datafusion_common::{Column as ColumnExpr, DFSchemaRef, DataFusionError, Result, Statistics};
+use datafusion_expr::{Expr, Extension, FetchType, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::{Distribution, EquivalenceProperties, PhysicalSortExpr};
-use datatypes::extension::json::{
-    Json2ExtensionType, is_any_json_extension_type, is_json2_extension_type,
-    is_legacy_json2_extension_type,
-};
+use datatypes::extension::json::is_any_json_extension_type;
 use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
 use meter_core::data::ReadItem;
@@ -82,6 +81,51 @@ use crate::region_query::RegionQueryHandlerRef;
 
 fn query_engine_state_from_task_context(context: &TaskContext) -> Option<Arc<QueryEngineState>> {
     context.session_config().get_extension()
+}
+
+/// Returns a deterministic upper bound on rows emitted by the remote plan for
+/// one region.
+///
+/// Only explicit caps and row-non-increasing wrappers are followed. Nodes that
+/// may multiply rows fail open, so the result remains a sound upper bound.
+fn remote_plan_row_bound(plan: &LogicalPlan) -> Option<usize> {
+    match plan {
+        LogicalPlan::Limit(limit) => {
+            let input_bound = remote_plan_row_bound(&limit.input);
+            match limit.get_fetch_type() {
+                Ok(FetchType::Literal(Some(fetch))) => {
+                    Some(input_bound.map_or(fetch, |bound| bound.min(fetch)))
+                }
+                _ => input_bound,
+            }
+        }
+        LogicalPlan::Sort(sort) => {
+            let input_bound = remote_plan_row_bound(&sort.input);
+            sort.fetch
+                .map(|fetch| input_bound.map_or(fetch, |bound| bound.min(fetch)))
+                .or(input_bound)
+        }
+        LogicalPlan::Projection(projection) => remote_plan_row_bound(&projection.input),
+        LogicalPlan::Filter(filter) => remote_plan_row_bound(&filter.input),
+        LogicalPlan::SubqueryAlias(alias) => remote_plan_row_bound(&alias.input),
+        LogicalPlan::Window(window) => remote_plan_row_bound(&window.input),
+        LogicalPlan::Repartition(repartition) => remote_plan_row_bound(&repartition.input),
+        LogicalPlan::Distinct(distinct) => remote_plan_row_bound(distinct.input()),
+        LogicalPlan::Aggregate(aggregate) => {
+            if aggregate
+                .group_expr
+                .iter()
+                .any(|expr| matches!(expr, Expr::GroupingSet(_)))
+            {
+                None
+            } else if aggregate.group_expr.is_empty() {
+                Some(1)
+            } else {
+                remote_plan_row_bound(&aggregate.input)
+            }
+        }
+        _ => None,
+    }
 }
 
 fn remote_dyn_filter_enabled(query_ctx: &QueryContextRef) -> Result<bool> {
@@ -287,15 +331,53 @@ impl Drop for SubscriberRollbackGuard<'_> {
     }
 }
 
-#[derive(Debug, Hash, PartialOrd, PartialEq, Eq, Clone)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
 pub struct MergeScanLogicalPlan {
     /// In logical plan phase it only contains one input
     input: LogicalPlan,
+    /// Schema exposed to the local stage.
+    output_schema: DFSchemaRef,
     /// If this plan is a placeholder
     is_placeholder: bool,
     partition_cols: AliasMapping,
     /// Assigned after dist-plan rewriting so rewriters only deal with plan shape.
     remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
+}
+
+impl PartialOrd for MergeScanLogicalPlan {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        let Self {
+            input,
+            output_schema,
+            is_placeholder,
+            partition_cols,
+            remote_dyn_filter_producer_id,
+        } = self;
+        let Self {
+            input: other_input,
+            output_schema: other_output_schema,
+            is_placeholder: other_is_placeholder,
+            partition_cols: other_partition_cols,
+            remote_dyn_filter_producer_id: other_remote_dyn_filter_producer_id,
+        } = other;
+
+        let ordering = (
+            input,
+            is_placeholder,
+            partition_cols,
+            remote_dyn_filter_producer_id,
+        )
+            .partial_cmp(&(
+                other_input,
+                other_is_placeholder,
+                other_partition_cols,
+                other_remote_dyn_filter_producer_id,
+            ));
+        match ordering {
+            Some(std::cmp::Ordering::Equal) if output_schema != other_output_schema => None,
+            ordering => ordering,
+        }
+    }
 }
 
 impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
@@ -310,7 +392,7 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
     }
 
     fn schema(&self) -> &datafusion_common::DFSchemaRef {
-        self.input.schema()
+        &self.output_schema
     }
 
     // Prevent further optimization
@@ -336,13 +418,21 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
 }
 
 impl MergeScanLogicalPlan {
+    /// Creates a merge scan with the input plan's schema.
     pub fn new(input: LogicalPlan, is_placeholder: bool, partition_cols: AliasMapping) -> Self {
         Self {
+            output_schema: input.schema().clone(),
             input,
             is_placeholder,
             partition_cols,
             remote_dyn_filter_producer_id: None,
         }
+    }
+
+    /// Replaces the schema exposed to the local stage.
+    pub(crate) fn with_output_schema(mut self, output_schema: DFSchemaRef) -> Self {
+        self.output_schema = output_schema;
+        self
     }
 
     pub(crate) fn with_remote_dyn_filter_producer_id(
@@ -428,7 +518,8 @@ impl MergeScanExec {
         remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
         enable_per_region_metrics: bool,
     ) -> Result<Self> {
-        let arrow_schema = maybe_amend_json2_field(arrow_schema);
+        let arrow_schema = Arc::new(arrow_schema.clone());
+        let output_partition_count = Self::output_partition_count(regions.len(), target_partition);
 
         // States the output ordering of the plan.
         //
@@ -438,7 +529,7 @@ impl MergeScanExec {
         //
         // Otherwise, we need to use the default ordering.
         let eq_properties = if let LogicalPlan::Sort(sort) = &plan
-            && target_partition >= regions.len()
+            && output_partition_count >= regions.len()
         {
             let lex_ordering = sort
                 .expr
@@ -477,7 +568,7 @@ impl MergeScanExec {
                 }
             })
             .collect();
-        let partitioning = Partitioning::Hash(partition_exprs, target_partition);
+        let partitioning = Partitioning::Hash(partition_exprs, output_partition_count);
 
         let properties = Arc::new(PlanProperties::new(
             eq_properties,
@@ -504,6 +595,28 @@ impl MergeScanExec {
         })
     }
 
+    /// Conservative row-count upper bound for all selected regions.
+    ///
+    /// This is not an expected cardinality: DataFusion receives it as an
+    /// inexact estimate only because `Statistics` has no upper-bound precision.
+    fn estimated_num_rows(&self) -> Precision<usize> {
+        if self.regions.is_empty() {
+            return Precision::Inexact(0);
+        }
+
+        let Some(rows_per_region) = remote_plan_row_bound(&self.plan) else {
+            return Precision::Absent;
+        };
+        rows_per_region
+            .checked_mul(self.regions.len())
+            .map_or(Precision::Absent, Precision::Inexact)
+    }
+
+    /// Number of partitions populated by the region striping in [`Self::to_stream`].
+    fn output_partition_count(num_regions: usize, target_partition: usize) -> usize {
+        num_regions.max(1).min(target_partition.max(1))
+    }
+
     pub fn to_stream(
         &self,
         context: Arc<TaskContext>,
@@ -518,7 +631,8 @@ impl MergeScanExec {
         let sub_stage_metrics_moved = self.sub_stage_metrics.clone();
         let partition_metrics_moved = self.partition_metrics.clone();
         let plan = self.plan.clone();
-        let target_partition = self.target_partition;
+        let target_partition =
+            Self::output_partition_count(self.regions.len(), self.target_partition);
         let remote_dyn_filter_enabled = remote_dyn_filter_enabled(&self.query_ctx)?;
         let captured_remote_dyn_filters = if remote_dyn_filter_enabled {
             self.captured_remote_dyn_filters()
@@ -633,7 +747,7 @@ impl MergeScanExec {
                 }
                 let mut stream = do_get_result.map_err(|e| {
                     MERGE_SCAN_ERRORS_TOTAL.inc();
-                    DataFusionError::External(Box::new(e))
+                    DataFusionError::External(Box::new(BoxedError::new(e)))
                 })?;
 
                 if let Some(subscriber_rollback) = subscriber_rollback.as_mut() {
@@ -684,12 +798,26 @@ impl MergeScanExec {
                         stream.next().instrument(region_span.clone()).await
                     };
                     let Some(batch) = batch else {
+                        // The remote Flight stream publishes its terminal metrics
+                        // immediately after EOF. Capture them before leaving the
+                        // loop so the final verbose snapshot is not lost.
+                        if let Some(metrics) = stream.metrics() {
+                            let load = region_scan_load(&metrics);
+                            let (c, s) = parse_catalog_and_schema_from_db_string(&dbname);
+                            let value = read_meter!(c, s, load, current_channel as u8);
+                            metric.record_greptime_exec_cost(value as usize);
+                            sub_stage_metrics_moved
+                                .lock()
+                                .unwrap()
+                                .insert(region_id, metrics);
+                        }
                         break;
                     };
                     let poll_elapsed = poll_timer.elapsed();
                     poll_duration += poll_elapsed;
 
-                    let batch = batch.map_err(|e| DataFusionError::External(Box::new(e)))?;
+                    let batch = batch
+                        .map_err(|e| DataFusionError::External(Box::new(BoxedError::new(e))))?;
                     let df_batch = batch.into_df_record_batch();
                     if !Arc::ptr_eq(&advertised_schema, df_batch.schema_ref()) {
                         validate_remote_schema(
@@ -753,18 +881,6 @@ impl MergeScanExec {
                     );
                 }
 
-                // process metrics after all data is drained.
-                if let Some(metrics) = stream.metrics() {
-                    let load = region_scan_load(&metrics);
-                    let (c, s) = parse_catalog_and_schema_from_db_string(&dbname);
-                    let value = read_meter!(c, s, load, current_channel as u8);
-                    metric.record_greptime_exec_cost(value as usize);
-
-                    // record metrics from sub sgates
-                    let mut sub_stage_metrics = sub_stage_metrics_moved.lock().unwrap();
-                    sub_stage_metrics.insert(region_id, metrics);
-                }
-
                 MERGE_SCAN_POLL_ELAPSED.observe(poll_duration.as_secs_f64());
             }
 
@@ -797,7 +913,7 @@ impl MergeScanExec {
     }
 
     pub fn try_with_new_distribution(&self, distribution: Distribution) -> Option<Self> {
-        let Distribution::HashPartitioned(hash_exprs) = distribution else {
+        let Distribution::KeyPartitioned(hash_exprs) = distribution else {
             // not applicable
             return None;
         };
@@ -812,8 +928,7 @@ impl MergeScanExec {
         let hash_expr_col_names: HashSet<_> = hash_exprs
             .iter()
             .filter_map(|expr| {
-                expr.as_any()
-                    .downcast_ref::<Column>()
+                expr.downcast_ref::<Column>()
                     .map(|col_expr| col_expr.name())
             })
             .collect();
@@ -835,8 +950,7 @@ impl MergeScanExec {
         let overlaps: Vec<_> = hash_exprs
             .iter()
             .filter(|expr| {
-                expr.as_any()
-                    .downcast_ref::<Column>()
+                expr.downcast_ref::<Column>()
                     .is_some_and(|col_expr| all_partition_col_aliases.contains(col_expr.name()))
             })
             .cloned()
@@ -855,7 +969,7 @@ impl MergeScanExec {
             metric: self.metric.clone(),
             properties: Arc::new(PlanProperties::new(
                 self.properties.eq_properties.clone(),
-                Partitioning::Hash(overlaps, self.target_partition),
+                Partitioning::Hash(overlaps, self.partition_count()),
                 self.properties.emission_type,
                 self.properties.boundedness,
             )),
@@ -906,7 +1020,7 @@ impl MergeScanExec {
     }
 
     pub fn partition_count(&self) -> usize {
-        self.target_partition
+        Self::output_partition_count(self.regions.len(), self.target_partition)
     }
 
     pub fn region_count(&self) -> usize {
@@ -921,44 +1035,6 @@ impl MergeScanExec {
             .cloned()
             .collect()
     }
-}
-
-// If the schema has JSON2 field, AND the field is of empty Struct datatype, amend it with Binary
-// datatype.
-// This is a very hacky way to make it possible to query the whole JSON2 column. Because when
-// querying a whole JSON2 column, like in the SQL `select * from ...`, we can't concretize the JSON2
-// datatype from the query. Hence, the JSON2 datatype remains what in the column schema, i.e., empty
-// Struct. An empty Struct is not alignable like any other concretized JSON2 datatypes, so to make
-// the query work, we amend(rewrite) it to Binary datatype.
-// Why the Binary datatype? Because underlying the scan and projection stage, the JSON2 data are
-// variant shape, will be all converted to bytes.
-// Anyway, this is not clean nor elegant. TODO(LFC) Maybe make it into some plan analyzer rule?
-fn maybe_amend_json2_field(schema: &ArrowSchema) -> ArrowSchemaRef {
-    let schema = schema.clone();
-    let mut new_fields = Vec::with_capacity(schema.fields().len());
-    for field in schema.fields().iter() {
-        let new_field = if is_json2_extension_type(field)
-            && matches!(field.data_type(), DataType::Struct(fields) if fields.is_empty())
-        {
-            let is_legacy_json2 = is_legacy_json2_extension_type(field);
-            let mut new_field = field.as_ref().clone();
-            new_field.set_data_type(DataType::Binary);
-            if is_legacy_json2 {
-                // Pre-type-hint JSON2 is identified partly by its Struct data type. Promote the
-                // ephemeral field before rewriting it to Binary so later checks retain its JSON2
-                // identity.
-                new_field = new_field.with_extension_type(Json2ExtensionType::default());
-            }
-            Arc::new(new_field)
-        } else {
-            field.clone()
-        };
-        new_fields.push(new_field);
-    }
-    Arc::new(ArrowSchema::new_with_metadata(
-        new_fields,
-        schema.metadata().clone(),
-    ))
 }
 
 #[cfg(test)]
@@ -1077,10 +1153,6 @@ impl Drop for PartitionMetrics {
 }
 
 impl ExecutionPlan for MergeScanExec {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> ArrowSchemaRef {
         self.arrow_schema.clone()
     }
@@ -1091,6 +1163,24 @@ impl ExecutionPlan for MergeScanExec {
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
+    }
+
+    fn apply_expressions(
+        &self,
+        f: &mut dyn FnMut(
+            &Arc<dyn datafusion_physical_expr::PhysicalExpr>,
+        ) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        let captured_remote_dyn_filters = self.captured_remote_dyn_filters();
+        apply_expression_roots(
+            captured_remote_dyn_filters
+                .into_iter()
+                .map(|captured_dyn_filter| {
+                    captured_dyn_filter.alive_dyn_filter
+                        as Arc<dyn datafusion_physical_expr::PhysicalExpr>
+                }),
+            f,
+        )
     }
 
     // DataFusion will swap children unconditionally.
@@ -1172,6 +1262,20 @@ impl ExecutionPlan for MergeScanExec {
 
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.metric.clone_inner())
+    }
+
+    fn statistics_from_inputs(
+        &self,
+        _input_stats: &[Arc<Statistics>],
+        args: &StatisticsArgs,
+    ) -> Result<Arc<Statistics>> {
+        if args.partition().is_some() {
+            return Ok(Arc::new(Statistics::new_unknown(&self.arrow_schema)));
+        }
+
+        let mut statistics = Statistics::new_unknown(&self.arrow_schema);
+        statistics.num_rows = self.estimated_num_rows();
+        Ok(Arc::new(statistics))
     }
 
     fn name(&self) -> &str {
@@ -1322,12 +1426,11 @@ mod tests {
     use std::task::{Context, Poll};
 
     use arrow::array::{Int64Array, TimestampMillisecondArray};
-    use arrow_schema::extension::{
-        EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
-    };
-    use arrow_schema::{DataType as TestArrowDataType, Field, Fields, TimeUnit};
+    use arrow_schema::{DataType as TestArrowDataType, Field, TimeUnit};
     use async_trait::async_trait;
     use common_base::Plugins;
+    use common_error::ext::{ErrorExt, PlainError};
+    use common_error::status_code::StatusCode;
     use common_meta::peer::Peer;
     use common_query::request::{
         INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, InitialDynFilterRegs,
@@ -1339,13 +1442,14 @@ mod tests {
     use datafusion::config::ConfigOptions;
     use datafusion::execution::SessionStateBuilder;
     use datafusion::physical_plan::filter_pushdown::ChildFilterPushdownResult;
+    use datafusion::physical_plan::repartition::RepartitionExec;
+    use datafusion::physical_plan::{StatisticsArgs, StatisticsContext};
     use datafusion_common::TableReference;
     use datafusion_expr::{LogicalPlanBuilder, col, lit};
-    use datafusion_physical_expr::Distribution;
     use datafusion_physical_expr::expressions::{
         Column, DynamicFilterPhysicalExpr, lit as physical_lit,
     };
-    use datatypes::extension::json::JsonExtensionType;
+    use datafusion_physical_expr::{Distribution, PhysicalExpr};
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{Int64Vector, StringVector, TimestampMillisecondVector};
@@ -1353,6 +1457,7 @@ mod tests {
     use session::ReadPreference;
     use session::context::QueryContext;
     use session::query_id::QueryId;
+    use snafu::IntoError;
     use table::table::scan::REGION_SCAN_EXEC_NAME;
     use table::table_name::TableName;
     use tokio::sync::{Notify, oneshot};
@@ -1375,36 +1480,10 @@ mod tests {
         QueryId::from(Uuid::from_u128(value))
     }
 
-    #[test]
-    fn test_amend_legacy_json2_field_preserves_json2_identity() {
-        let field = Field::new("j", DataType::Struct(Fields::empty()), true).with_metadata(
-            StdHashMap::from([
-                (
-                    EXTENSION_TYPE_NAME_KEY.to_string(),
-                    JsonExtensionType::NAME.to_string(),
-                ),
-                (
-                    EXTENSION_TYPE_METADATA_KEY.to_string(),
-                    serde_json::json!({
-                        "json_structure_settings": { "Structured": null }
-                    })
-                    .to_string(),
-                ),
-            ]),
-        );
-
-        let schema = maybe_amend_json2_field(&ArrowSchema::new(vec![field]));
-        let field = schema.field(0);
-        assert_eq!(&DataType::Binary, field.data_type());
-        assert_eq!(Some(Json2ExtensionType::NAME), field.extension_type_name());
-        assert!(is_json2_extension_type(field));
-    }
-
     fn merge_scan_exec_with_sorted_input(
         region_count: u64,
         target_partition: usize,
     ) -> MergeScanExec {
-        let session_state = SessionStateBuilder::new().build();
         let plan = LogicalPlanBuilder::empty(true)
             .project(vec![lit(1i64).alias("ts")])
             .unwrap()
@@ -1412,10 +1491,20 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let schema = plan.schema().as_arrow().clone();
         let regions = (0..region_count)
             .map(|region_number| RegionId::new(1024, region_number as u32))
             .collect();
+
+        merge_scan_exec_with_plan(regions, plan, target_partition)
+    }
+
+    fn merge_scan_exec_with_plan(
+        regions: Vec<RegionId>,
+        plan: LogicalPlan,
+        target_partition: usize,
+    ) -> MergeScanExec {
+        let session_state = SessionStateBuilder::new().build();
+        let schema = plan.schema().as_arrow().clone();
 
         MergeScanExec::new(
             &session_state,
@@ -1433,6 +1522,12 @@ mod tests {
             false,
         )
         .unwrap()
+    }
+
+    fn merge_scan_statistics(exec: &MergeScanExec) -> Arc<Statistics> {
+        StatisticsContext::new()
+            .compute(exec, &StatisticsArgs::new())
+            .unwrap()
     }
 
     fn task_context_with_engine_state(
@@ -1556,6 +1651,116 @@ mod tests {
     }
 
     #[test]
+    fn merge_scan_reports_populated_partition_count() {
+        let cases = [(0, 10, 1), (1, 10, 1), (3, 2, 2), (5, 10, 5), (3, 0, 1)];
+
+        for (region_count, target, expected) in cases {
+            let exec = merge_scan_exec_with_sorted_input(region_count, target);
+            assert_eq!(exec.partition_count(), expected);
+            assert_eq!(
+                exec.properties().output_partitioning().partition_count(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn merge_scan_reports_only_deterministic_plan_bounds() {
+        use datafusion::functions_aggregate::expr_fn::count;
+        use datafusion_expr::GroupingSet;
+
+        let regions = vec![RegionId::new(1024, 1), RegionId::new(1024, 2)];
+        let limited = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(50))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            merge_scan_statistics(&merge_scan_exec_with_plan(regions.clone(), limited, 10))
+                .num_rows,
+            Precision::Inexact(100)
+        );
+
+        let large_bound = i32::MAX as usize + 1;
+        let large_limit = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(large_bound))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            merge_scan_statistics(&merge_scan_exec_with_plan(
+                vec![RegionId::new(1024, 1)],
+                large_limit,
+                10,
+            ))
+            .num_rows,
+            Precision::Inexact(large_bound)
+        );
+
+        let uncapped = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            merge_scan_statistics(&merge_scan_exec_with_plan(
+                regions.clone(),
+                uncapped.clone(),
+                10,
+            ))
+            .num_rows,
+            Precision::Absent
+        );
+        assert_eq!(
+            merge_scan_statistics(&merge_scan_exec_with_plan(Vec::new(), uncapped, 10)).num_rows,
+            Precision::Inexact(0)
+        );
+
+        let global_aggregate = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(0))
+            .unwrap()
+            .aggregate(Vec::<Expr>::new(), vec![count(lit(1))])
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            merge_scan_statistics(&merge_scan_exec_with_plan(
+                regions.clone(),
+                global_aggregate,
+                10,
+            ))
+            .num_rows,
+            Precision::Inexact(2)
+        );
+
+        let grouping_sets = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(50))
+            .unwrap()
+            .aggregate(
+                vec![Expr::GroupingSet(GroupingSet::GroupingSets(vec![
+                    vec![],
+                    vec![col("col")],
+                ]))],
+                Vec::<Expr>::new(),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            merge_scan_statistics(&merge_scan_exec_with_plan(regions, grouping_sets, 10)).num_rows,
+            Precision::Absent
+        );
+    }
+
+    #[test]
     fn sub_stage_metrics_are_sorted_by_region_id() {
         let exec = merge_scan_exec_with_sorted_input(0, 1);
         let higher_region = RegionId::new(1024, 2);
@@ -1635,7 +1840,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_do_get_rolls_back_new_subscriber_without_starting_fanout() {
+    async fn failed_do_get_preserves_status_code_and_rolls_back_subscriber() {
         let handler = Arc::new(FailingRegionQueryHandler::default());
         let query_ctx = QueryContext::arc();
         let state = Arc::new(QueryEngineState::new(
@@ -1691,8 +1896,12 @@ mod tests {
         )
         .unwrap();
 
-        let mut stream = exec.to_stream(task_ctx, 0).unwrap();
-        assert!(stream.next().await.unwrap().is_err());
+        let mut stream = common_recordbatch::adapter::RecordBatchStreamAdapter::try_new(
+            exec.to_stream(task_ctx, 0).unwrap(),
+        )
+        .unwrap();
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(error.status_code(), StatusCode::RequestOutdated);
         assert_eq!(handler.do_get_calls.load(Ordering::SeqCst), 1);
         assert!(handler.saw_subscriber.load(Ordering::SeqCst));
 
@@ -1700,6 +1909,46 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert!(entries[0].subscribers().is_empty());
         assert!(!entries[0].fanout_started_for_test());
+    }
+
+    #[tokio::test]
+    async fn repartitioned_merge_scan_later_stream_error_preserves_status_code() {
+        let region_id = RegionId::new(1024, 1);
+        let handler = Arc::new(TestRegionQueryHandler::with_responses(vec![(
+            region_id,
+            int64_schema(&["a", "b"]),
+            vec![Err(common_recordbatch::error::ExternalSnafu.into_error(
+                BoxedError::new(PlainError::new(
+                    "neutral stream error".to_string(),
+                    StatusCode::RequestOutdated,
+                )),
+            ))],
+        )]));
+        let merge_scan = Arc::new(merge_scan_exec_with_handler(
+            vec![region_id],
+            expected_int64_schema(),
+            handler,
+            1,
+        ));
+        let repartition =
+            RepartitionExec::try_new(merge_scan, Partitioning::RoundRobinBatch(2)).unwrap();
+        assert_eq!(
+            repartition
+                .properties()
+                .output_partitioning()
+                .partition_count(),
+            2
+        );
+
+        let mut stream = common_recordbatch::adapter::RecordBatchStreamAdapter::try_new(
+            repartition
+                .execute(0, Arc::new(TaskContext::default()))
+                .unwrap(),
+        )
+        .unwrap();
+
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(error.status_code(), StatusCode::RequestOutdated);
     }
 
     #[tokio::test]
@@ -1902,10 +2151,9 @@ mod tests {
         assert_eq!(registry_manager.registry_count(), 0);
     }
 
-    #[derive(Clone)]
     struct TestRegionResponse {
         advertised_schema: Arc<Schema>,
-        batches: Vec<RecordBatch>,
+        batches: Vec<common_recordbatch::error::Result<RecordBatch>>,
     }
 
     #[derive(Default)]
@@ -1922,7 +2170,7 @@ mod tests {
                         region_id,
                         TestRegionResponse {
                             advertised_schema: batch.schema.clone(),
-                            batches: vec![batch],
+                            batches: vec![Ok(batch)],
                         },
                     )
                 })
@@ -1931,7 +2179,13 @@ mod tests {
         }
 
         fn with_responses(
-            responses: impl IntoIterator<Item = (RegionId, Arc<Schema>, Vec<RecordBatch>)>,
+            responses: impl IntoIterator<
+                Item = (
+                    RegionId,
+                    Arc<Schema>,
+                    Vec<common_recordbatch::error::Result<RecordBatch>>,
+                ),
+            >,
         ) -> Self {
             let responses = responses
                 .into_iter()
@@ -1951,19 +2205,17 @@ mod tests {
 
     struct TestRecordBatchStream {
         schema: Arc<Schema>,
-        batches: Vec<RecordBatch>,
-        index: usize,
+        batches: Vec<common_recordbatch::error::Result<RecordBatch>>,
     }
 
     impl Stream for TestRecordBatchStream {
         type Item = common_recordbatch::error::Result<RecordBatch>;
 
         fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            if let Some(batch) = self.batches.get(self.index).cloned() {
-                self.index += 1;
-                Poll::Ready(Some(Ok(batch)))
-            } else {
+            if self.batches.is_empty() {
                 Poll::Ready(None)
+            } else {
+                Poll::Ready(Some(self.batches.remove(0)))
             }
         }
     }
@@ -2024,10 +2276,13 @@ mod tests {
                     }),
                 Ordering::SeqCst,
             );
-            crate::error::UnimplementedSnafu {
-                operation: "test do_get failure",
-            }
-            .fail()
+            Err(crate::error::Error::QueryExecution {
+                source: BoxedError::new(PlainError::new(
+                    "neutral do_get error".to_string(),
+                    StatusCode::RequestOutdated,
+                )),
+                location: snafu::Location::default(),
+            })
         }
 
         async fn handle_remote_dyn_filter_update(
@@ -2345,8 +2600,19 @@ mod tests {
                 .expect("test handler needs a response for every requested region");
             Ok(Box::pin(TestRecordBatchStream {
                 schema: response.advertised_schema.clone(),
-                batches: response.batches.clone(),
-                index: 0,
+                batches: response
+                    .batches
+                    .iter()
+                    .map(|batch| match batch {
+                        Ok(batch) => Ok(batch.clone()),
+                        Err(error) => Err(common_recordbatch::error::ExternalSnafu.into_error(
+                            BoxedError::new(PlainError::new(
+                                error.to_string(),
+                                error.status_code(),
+                            )),
+                        )),
+                    })
+                    .collect(),
             }))
         }
 
@@ -2907,7 +3173,7 @@ mod tests {
             Arc::new(TestRegionQueryHandler::with_responses(vec![(
                 RegionId::new(1024, 1),
                 remote_schema,
-                vec![batch],
+                vec![Ok(batch)],
             )])),
             1,
         ))
@@ -2944,7 +3210,7 @@ mod tests {
             Arc::new(TestRegionQueryHandler::with_responses(vec![(
                 region_id,
                 advertised_schema,
-                vec![batch],
+                vec![Ok(batch)],
             )])),
             1,
         );
@@ -2977,7 +3243,7 @@ mod tests {
             Arc::new(TestRegionQueryHandler::with_responses(vec![(
                 region_id,
                 advertised_schema,
-                vec![batch],
+                vec![Ok(batch)],
             )])),
             1,
         );
@@ -3012,7 +3278,7 @@ mod tests {
             Arc::new(TestRegionQueryHandler::with_responses(vec![(
                 region_id,
                 advertised_schema,
-                vec![batch],
+                vec![Ok(batch)],
             )])),
             1,
         ))
@@ -3073,7 +3339,7 @@ mod tests {
         // A distribution that differs from the current partitioning but shares a
         // column name present in partition_cols, so try_with_new_distribution
         // produces a clone instead of returning None.
-        let new_dist = Distribution::HashPartitioned(vec![
+        let new_dist = Distribution::KeyPartitioned(vec![
             Arc::new(Column::new("col1", 0)),
             Arc::new(Column::new("col2", 1)),
         ]);
@@ -3087,6 +3353,24 @@ mod tests {
             Some(remote_dyn_filter_producer_id),
             "try_with_new_distribution must preserve remote dynamic filter producer id"
         );
+    }
+
+    #[test]
+    fn merge_scan_apply_expressions_exposes_remote_dyn_filter_id() {
+        let query_ctx = QueryContext::arc();
+        let exec =
+            remote_dyn_filter_test_exec(Arc::new(TestRegionQueryHandler::default()), query_ctx);
+        let dyn_filter = install_remote_dyn_filter(&exec);
+        let expected_expression_id = dyn_filter.expression_id();
+        let mut expression_ids = Vec::new();
+
+        exec.apply_expressions(&mut |expr| {
+            expression_ids.push(expr.expression_id());
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+
+        assert_eq!(expression_ids, vec![expected_expression_id]);
     }
 
     #[test]

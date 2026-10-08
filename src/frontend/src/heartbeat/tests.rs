@@ -14,8 +14,9 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::future::pending;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
@@ -492,6 +493,170 @@ impl FrontendHeartbeatExtension for TestExtension {
         self.shutdown_calls.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
+}
+
+struct PanickingNameExtension;
+
+#[async_trait]
+impl FrontendHeartbeatExtension for PanickingNameExtension {
+    fn name(&self) -> &str {
+        panic!("extension name panic")
+    }
+}
+
+#[test]
+fn test_panicking_extension_name_does_not_corrupt_registry() {
+    let extensions = FrontendHeartbeatExtensions::default();
+
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        extensions.register(Arc::new(PanickingNameExtension));
+    }));
+    assert!(result.is_err());
+
+    let valid = TestExtension::new("valid");
+    assert!(extensions.register(valid.clone()));
+    let registered = extensions.extensions();
+    assert_eq!(registered.len(), 1);
+    assert!(Arc::ptr_eq(
+        &(valid as Arc<dyn FrontendHeartbeatExtension>),
+        &registered[0]
+    ));
+    assert_eq!(extensions.len(), 1);
+}
+
+#[test]
+fn test_registry_recovers_from_poisoned_lock() {
+    let extensions = FrontendHeartbeatExtensions::default();
+    let poisoned = extensions.clone();
+
+    let result = catch_unwind(AssertUnwindSafe(move || {
+        let _guard = poisoned.lock();
+        panic!("poison registry lock")
+    }));
+    assert!(result.is_err());
+
+    let valid = TestExtension::new("valid");
+    assert!(extensions.register(valid.clone()));
+    let registered = extensions.extensions();
+    assert_eq!(registered.len(), 1);
+    assert!(Arc::ptr_eq(
+        &(valid as Arc<dyn FrontendHeartbeatExtension>),
+        &registered[0]
+    ));
+    assert_eq!(extensions.len(), 1);
+}
+
+#[test]
+fn test_registry_freeze_rejects_late_registration_without_changing_membership() {
+    let extensions = FrontendHeartbeatExtensions::default();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler: HeartbeatResponseHandlerRef = Arc::new(ShortCircuitHandler {
+        result: ShortCircuitResult::Done,
+        calls,
+    });
+    let registered = TestExtension::with_handler("registered", handler.clone());
+
+    assert!(extensions.register(registered.clone()));
+    assert!(!extensions.register(TestExtension::new("registered")));
+    extensions.freeze();
+
+    assert!(!extensions.register(TestExtension::new("late")));
+    let frozen_extensions = extensions.extensions();
+    assert_eq!(frozen_extensions.len(), 1);
+    assert!(Arc::ptr_eq(
+        &(registered as Arc<dyn FrontendHeartbeatExtension>),
+        &frozen_extensions[0]
+    ));
+    let frozen_handlers = extensions.response_handlers();
+    assert_eq!(frozen_handlers.len(), 1);
+    assert!(Arc::ptr_eq(&handler, &frozen_handlers[0]));
+    assert_eq!(extensions.len(), 1);
+}
+
+#[test]
+fn test_try_register_distinguishes_duplicate_and_frozen() {
+    let extensions = FrontendHeartbeatExtensions::default();
+
+    assert_eq!(
+        extensions.try_register(TestExtension::new("registered")),
+        Ok(())
+    );
+    assert_eq!(
+        extensions.try_register(TestExtension::new("registered")),
+        Err(RegistrationError::Duplicate)
+    );
+
+    extensions.freeze();
+    assert_eq!(
+        extensions.try_register(TestExtension::new("late")),
+        Err(RegistrationError::Frozen)
+    );
+}
+
+#[test]
+fn test_frozen_registration_does_not_call_extension_name() {
+    let extensions = FrontendHeartbeatExtensions::default();
+    extensions.freeze();
+
+    let compatible_result = catch_unwind(AssertUnwindSafe(|| {
+        extensions.register(Arc::new(PanickingNameExtension))
+    }));
+    assert!(!compatible_result.unwrap());
+
+    let typed_result = catch_unwind(AssertUnwindSafe(|| {
+        extensions.try_register(Arc::new(PanickingNameExtension))
+    }));
+
+    assert_eq!(typed_result.unwrap(), Err(RegistrationError::Frozen));
+    assert!(extensions.is_empty());
+}
+
+struct BlockingNameExtension {
+    entered_name: Arc<Barrier>,
+    release_name: Arc<Barrier>,
+}
+
+#[async_trait]
+impl FrontendHeartbeatExtension for BlockingNameExtension {
+    fn name(&self) -> &str {
+        self.entered_name.wait();
+        self.release_name.wait();
+        "blocking"
+    }
+}
+
+#[test]
+fn test_freeze_wins_while_registration_name_is_running() {
+    let extensions = FrontendHeartbeatExtensions::default();
+    let entered_name = Arc::new(Barrier::new(2));
+    let release_name = Arc::new(Barrier::new(2));
+    let registering = extensions.clone();
+    let extension = Arc::new(BlockingNameExtension {
+        entered_name: entered_name.clone(),
+        release_name: release_name.clone(),
+    });
+
+    let registration = std::thread::spawn(move || registering.try_register(extension));
+    entered_name.wait();
+    let freezing = extensions.clone();
+    let (freeze_done_tx, freeze_done_rx) = std::sync::mpsc::sync_channel(1);
+    let freeze = std::thread::spawn(move || {
+        freezing.freeze();
+        let _ = freeze_done_tx.send(());
+    });
+    if let Err(error) = freeze_done_rx.recv_timeout(Duration::from_secs(2)) {
+        release_name.wait();
+        let registration = registration.join();
+        let freeze = freeze.join();
+        panic!(
+            "freeze did not complete while extension name was blocked: {error:?}; registration: {registration:?}; freeze: {freeze:?}"
+        );
+    }
+    release_name.wait();
+
+    freeze.join().unwrap();
+    assert_eq!(registration.join().unwrap(), Err(RegistrationError::Frozen));
+    assert!(extensions.is_empty());
 }
 
 fn test_task(

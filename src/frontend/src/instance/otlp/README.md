@@ -24,10 +24,12 @@ flowchart TD
 
     F -->|greptime_trace_v0| G["v0 conversion<br/>fixed columns and JSON attributes"]
     F -->|greptime_trace_v1| H["v1 conversion<br/>flattened dynamic attributes"]
+    F -->|greptime_trace_v2| T["v2 conversion<br/>fixed columns and JSON2 attributes"]
     H --> I["Collect request-wide schema observations"]
     I --> J["Resolve types, prevalidate rewrites,<br/>apply DDL, and recheck table schema"]
 
     G --> K["Write main-table chunks"]
+    T --> K
     J --> K
     K --> L{"Chunk result"}
     L -->|success| M["Accept spans and collect<br/>service/operation data"]
@@ -54,8 +56,8 @@ The route is registered as `POST /v1/otlp/v1/traces` in
 3. resolves the requested pipeline; and
 4. calls `OpenTelemetryProtocolHandler::traces`.
 
-The trace converter currently accepts the internal `greptime_trace_v0` and
-`greptime_trace_v1` pipelines. Their `PipelineWay` variants are defined in
+The trace converter accepts the internal `greptime_trace_v0`,
+`greptime_trace_v1`, and `greptime_trace_v2` pipelines. Their `PipelineWay` variants are defined in
 [`pipeline/src/manager.rs`](../../../../pipeline/src/manager.rs).
 
 ### 2. Parse and chunk
@@ -65,6 +67,10 @@ interceptor, derives the semantic-convention version, and parses the request.
 The parser in
 [`servers/src/otlp/trace/span.rs`](../../../../servers/src/otlp/trace/span.rs)
 produces one `TraceSpanGroup` per resource/scope pair.
+
+After permission checks, admission counts all spans in the request once per
+database. Chunks, schema retries, and derived lookup-table writes retain that
+admission; their actual writes still contribute WCU accounting.
 
 `ingest_trace_spans` in [`trace_ingest.rs`](trace_ingest.rs) splits the spans in
 each group into owned chunks. `trace_ingest_chunk_size` defaults to 512; setting
@@ -77,6 +83,17 @@ it to 0 disables splitting. The option is defined in
 | --- | --- | --- |
 | v0 | [`trace/v0.rs`](../../../../servers/src/otlp/trace/v0.rs) writes a fixed span schema and keeps span, scope, and resource attributes in JSON columns. | Converts and writes one chunk at a time through the legacy log insertion path. |
 | v1 | [`trace/v1.rs`](../../../../servers/src/otlp/trace/v1.rs) flattens OTLP attributes into dynamic columns and records the value types seen in each chunk. | Scans chunks one at a time to build a request-wide schema plan, then materializes and writes one chunk at a time. |
+| v2 | [`trace/v2.rs`](../../../../servers/src/otlp/trace/v2.rs) writes one row per span with fixed columns and preserves resource, scope, and span attributes in JSON2 columns. | Converts and writes fixed-schema chunks without dynamic-column reconciliation. |
+
+The v2 pipeline currently discards events and links. Their storage is deferred
+until `ARRAY(JSON2)` is supported (TODO(LFC)).
+
+V2 always creates the nullable `service_name` tag and reads it only from the
+`service.name` resource attribute. It rejects out-of-range start/end timestamps
+before writing. A conversion failure isolates invalid spans and writes the
+remaining chunk; a storage failure propagates without retry because it may have
+partially committed. V1 and v2 requests cannot write to a table stamped with the
+other model, including through automatic schema alteration.
 
 Consequently, v1 chunks from one request can have different schemas: attribute
 keys are data-dependent. The request-wide plan reconciles compatible column
@@ -157,6 +174,18 @@ Accounting follows the main-table write:
 - an auxiliary-table failure adds failure detail but does not change the
   accepted or rejected span counts; and
 - failure details are bounded before they are folded into `TraceIngestOutcome`.
+
+A rejection detail carries the failing cause, not just a status code, so an
+unusable attribute value names its column, source value, and target type. Repeats
+of the same `(site, cause)` collapse into one entry with an occurrence count, and
+only a fixed number of distinct entries is retained; failures past that limit are
+counted but their causes are dropped, which keeps the state bounded regardless of
+how many distinct bad values a request carries.
+
+A request that rejects every span is logged at warn level. A partial success is
+logged at debug level only: it repeats every export interval while the sender
+keeps emitting the value, and its detail already reaches the sender through the
+OTLP partial-success message.
 
 Finally, the HTTP handler returns:
 

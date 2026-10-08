@@ -14,7 +14,10 @@
 
 mod buckets;
 pub mod compactor;
+mod json2;
+mod last_non_null;
 pub mod memory_manager;
+mod overlap;
 pub mod picker;
 mod reader;
 pub mod run;
@@ -31,12 +34,16 @@ use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{debug, error};
 use common_time::TimeToLive;
 use common_time::range::TimestampRange;
+pub(crate) use json2::{
+    Json2RewritePlans, collect_json2_rewrite_plans, rewrite_json2_batch, rewrite_json2_schema,
+};
 pub use scheduler::CompactionRequest;
 pub(crate) use scheduler::{
     CompactionExecution, CompactionPickFinished, CompactionScheduler, CompactionTransition,
 };
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
+use store_api::mito_engine_options::{TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_TRIGGER_FILE_NUM};
 use store_api::storage::RegionId;
 
 use crate::error::{GetSchemaMetadataSnafu, Result, TimeoutSnafu};
@@ -81,7 +88,7 @@ async fn find_dynamic_options(
 
     let compaction = if !region_options.compaction_override {
         if let Some(schema_opts) = db_options {
-            let map: HashMap<String, String> = schema_opts
+            let mut map: HashMap<String, String> = schema_opts
                 .extra_options
                 .iter()
                 .filter_map(|(k, v)| {
@@ -92,6 +99,10 @@ async fn find_dynamic_options(
                     }
                 })
                 .collect();
+            // Historical metadata may contain both aliases; prefer the canonical key.
+            if map.contains_key(TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM) {
+                map.remove(TWCS_TRIGGER_FILE_NUM);
+            }
             if map.is_empty() {
                 region_options.compaction.clone()
             } else {

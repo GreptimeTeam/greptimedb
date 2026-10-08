@@ -14,10 +14,43 @@
 
 use arrow_flight::FlightData;
 use common_grpc::flight::{FlightDecoder, FlightMessage};
-use snafu::ResultExt;
+use futures_util::{Stream, StreamExt};
+use snafu::{OptionExt, ResultExt};
 
 use crate::Result;
-use crate::error::{ConvertFlightDataSnafu, Error};
+use crate::error::{ConvertFlightDataSnafu, Error, IllegalFlightMessagesSnafu};
+
+pub(crate) struct FlightMessageReader<S: Stream + Unpin> {
+    /// Remote Flight peer associated with this response stream.
+    remote_addr: String,
+    messages: S,
+}
+
+impl<S> FlightMessageReader<S>
+where
+    S: Stream<Item = Result<FlightMessage>> + Unpin,
+{
+    pub(crate) fn new(remote_addr: impl Into<String>, messages: S) -> Self {
+        Self {
+            remote_addr: remote_addr.into(),
+            messages,
+        }
+    }
+
+    pub(crate) fn remote_addr(&self) -> &str {
+        &self.remote_addr
+    }
+
+    pub(crate) async fn read_first(&mut self) -> Result<FlightMessage> {
+        self.read_next().await?.context(IllegalFlightMessagesSnafu {
+            reason: "Expect the response not to be empty",
+        })
+    }
+
+    pub(crate) async fn read_next(&mut self) -> Result<Option<FlightMessage>> {
+        self.messages.next().await.transpose()
+    }
+}
 
 pub(crate) fn decode_flight_data(
     decoder: &mut FlightDecoder,

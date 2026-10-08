@@ -1,0 +1,83 @@
+# Default all-group default-versus-BSS storage and warmed-query comparison.
+
+[case]
+name = "sst_float_bss"
+description = "Compare default and byte-stream-split floating-point SST bytes and warmed value-scanning query latency with bounded 95/5 per-series DOUBLE values"
+
+[scenario]
+kind = "prom_remote_write_then_query"
+
+[scenario.remote_write]
+database = "public"
+metric = "sst_float_bss"
+physical_table = "sst_float_bss_physical"
+series_count = 1000
+samples_per_series = 4320
+sample_chunk_size = 1440
+flush_every_sample_chunks = 1
+start_unix_millis = 1_704_067_200_000 # 2024-01-01T00:00:00Z
+step_millis = 60000
+chunk_series_count = 128
+timeout_seconds = 600
+visibility_timeout_seconds = 300
+
+# Omit the default encoding from base setup because older binaries do not recognize it.
+# The high shared TWCS trigger avoids compaction changing the three-flush layout.
+base_setup_sql = [
+  "CREATE TABLE sst_float_bss_physical (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='', 'compaction.twcs.trigger_file_num'='100')",
+]
+candidate_setup_sql = [
+  "CREATE TABLE sst_float_bss_physical (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='', 'experimental_sst_float_field_encoding'='byte_stream_split', 'compaction.twcs.trigger_file_num'='100')",
+]
+
+[scenario.remote_write.value]
+# Synthetic, not empirical: 95% integral and 5% nonintegral series vary
+# smoothly within deterministic per-series ranges; series are not a global monotonic counter.
+pattern = "bounded_mixed"
+base = 0
+step = 1
+cardinality = 1000
+seed = 42
+mixed_every = 20
+run_length = 60
+
+[scenario.remote_write.prom_store]
+pending_rows_flush_interval = "1s"
+max_batch_rows = 100000
+
+[scenario.remote_write.storage]
+root_suffix = "data/greptime/public"
+column = "greptime_value"
+min_files = 1
+min_files_with_column = 1
+max_candidate_total_file_size_regression_pct = -5.0
+
+[scenario.remote_write.read_bench]
+enabled = true
+parquetbench = true
+scanbench = true
+iterations = 7
+projection = ["greptime_value"]
+parquet_reader = "direct"
+scan_scanner = "seq"
+parallelism = 1
+
+[[scenario.queries]]
+name = "sum_all_values"
+kind = "sql"
+query = "SELECT sum(greptime_value) FROM sst_float_bss"
+warmup = 3
+iterations = 15
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 25
+
+[[scenario.queries]]
+name = "hourly_sum_values"
+kind = "sql"
+query = "SELECT date_bin(INTERVAL '1 hour', greptime_timestamp) AS time_window, sum(greptime_value) FROM sst_float_bss WHERE greptime_timestamp >= TIMESTAMP '2024-01-01 00:00:00' AND greptime_timestamp < TIMESTAMP '2024-01-04 00:00:00' GROUP BY time_window ORDER BY time_window"
+warmup = 3
+iterations = 15
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 25

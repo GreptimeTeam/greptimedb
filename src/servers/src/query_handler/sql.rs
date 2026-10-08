@@ -26,19 +26,41 @@ use crate::error::Result;
 
 pub type ServerSqlQueryHandlerRef = Arc<dyn SqlQueryHandler + Send + Sync>;
 
+/// Maximum decoded SQL size accepted by the logical-table batch operation.
+pub const MAX_LOGICAL_TABLE_DDL_BYTES: usize = 1024 * 1024;
+/// Maximum number of CREATE statements in one logical-table batch.
+pub const MAX_LOGICAL_TABLE_DDL_STATEMENTS: usize = 128;
+
 #[async_trait]
 pub trait SqlQueryHandler {
+    /// Whether this handler implements the bounded logical-table DDL operation.
+    fn supports_metric_batch_ddl(&self) -> bool {
+        false
+    }
+
+    /// Validates and authorizes the whole batch before submitting one procedure.
+    async fn create_logical_tables(
+        &self,
+        _query: &str,
+        _query_ctx: QueryContextRef,
+    ) -> Result<Vec<Output>> {
+        crate::error::UnsupportedOperationSnafu {
+            operation: "metric batch DDL",
+        }
+        .fail()
+    }
+
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>>;
 
-    /// Executes the experimental HTTP analyze-stream query path.
+    /// Executes an HTTP analyze-stream query.
     ///
-    /// Implementations must validate that `query` is exactly one explicit
-    /// `EXPLAIN ANALYZE VERBOSE` statement and must return a streaming output.
-    /// `OutputMeta.plan` is used by the HTTP layer to emit metrics snapshots;
-    /// when it is absent, partial metrics may not be available. The returned
-    /// stream should support cancel-on-drop semantics (as the production
-    /// frontend implementation does) so client disconnect can best-effort cancel
-    /// the underlying query.
+    /// Implementations must validate that `query` is exactly one supported
+    /// SQL `EXPLAIN ANALYZE VERBOSE` or TQL `TQL ANALYZE VERBOSE` statement and
+    /// must return a streaming output. `OutputMeta.plan` is used by the HTTP
+    /// layer to emit metrics snapshots; when it is absent, partial metrics may
+    /// not be available. The returned stream should support cancel-on-drop
+    /// semantics (as the production frontend implementation does) so client
+    /// disconnect can best-effort cancel the underlying query.
     async fn do_analyze_stream_query(
         &self,
         query: &str,

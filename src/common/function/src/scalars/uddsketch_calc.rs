@@ -22,10 +22,10 @@ use datafusion_common::DataFusionError;
 use datafusion_common::arrow::array::{Array, AsArray, Float64Builder};
 use datafusion_common::arrow::datatypes::{DataType, Float64Type};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
-use uddsketch::UDDSketch;
 
 use crate::function::{Function, extract_args};
 use crate::function_registry::FunctionRegistry;
+use crate::uddsketch_compat;
 
 const NAME: &str = "uddsketch_calc";
 
@@ -114,26 +114,19 @@ impl Function for UddSketchCalcFunction {
             let sketch_bytes = sketch_opt.unwrap();
             let perc = perc_opt.unwrap();
 
-            // Deserialize the UDDSketch from its bincode representation
-            let sketch: UDDSketch = match bincode::deserialize(sketch_bytes) {
-                Ok(s) => s,
+            let value = match uddsketch_compat::quantile(sketch_bytes, perc) {
+                Ok(value) => value,
                 Err(e) => {
-                    common_telemetry::trace!("Failed to deserialize UDDSketch: {}", e);
+                    common_telemetry::trace!("Failed to parse UDDSketch: {}", e);
                     builder.append_null();
                     continue;
                 }
             };
 
-            // Check if the sketch is empty, if so, return null
-            // This is important to avoid panics when calling estimate_quantile on an empty sketch
-            // In practice, this will happen if input is all null
-            if sketch.bucket_iter().count() == 0 {
-                builder.append_null();
-                continue;
+            match value {
+                Some(value) => builder.append_value(value),
+                None => builder.append_null(),
             }
-            // Compute the estimated quantile from the sketch
-            let result = sketch.estimate_quantile(perc);
-            builder.append_value(result);
         }
 
         Ok(ColumnarValue::Array(Arc::new(builder.finish())))
@@ -146,6 +139,7 @@ mod tests {
 
     use arrow_schema::Field;
     use datafusion_common::arrow::array::{BinaryArray, Float64Array};
+    use uddsketch::UddSketch;
 
     use super::*;
 
@@ -159,24 +153,17 @@ mod tests {
         );
 
         // Create a test sketch
-        let mut sketch = UDDSketch::new(128, 0.01);
-        sketch.add_value(10.0);
-        sketch.add_value(20.0);
-        sketch.add_value(30.0);
-        sketch.add_value(40.0);
-        sketch.add_value(50.0);
-        sketch.add_value(60.0);
-        sketch.add_value(70.0);
-        sketch.add_value(80.0);
-        sketch.add_value(90.0);
-        sketch.add_value(100.0);
+        let mut sketch = UddSketch::new(128, 0.01).unwrap();
+        sketch
+            .add_batch(&[10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0])
+            .unwrap();
 
         // Get expected values directly from the sketch
-        let expected_p50 = sketch.estimate_quantile(0.5);
-        let expected_p90 = sketch.estimate_quantile(0.9);
-        let expected_p95 = sketch.estimate_quantile(0.95);
+        let expected_p50 = sketch.quantile(0.5).unwrap().unwrap();
+        let expected_p90 = sketch.quantile(0.9).unwrap().unwrap();
+        let expected_p95 = sketch.quantile(0.95).unwrap().unwrap();
 
-        let serialized = bincode::serialize(&sketch).unwrap();
+        let serialized = sketch.encode().unwrap();
         let percentiles = vec![0.5, 0.9, 0.95];
 
         let args = vec![
@@ -205,6 +192,34 @@ mod tests {
         assert!((result.value(1) - expected_p90).abs() < 1e-10);
         // Test p95
         assert!((result.value(2) - expected_p95).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_uddsketch_calc_function_reads_legacy_state() {
+        let function = UddSketchCalcFunction::default();
+        let args = vec![
+            ColumnarValue::Array(Arc::new(Float64Array::from(vec![0.5]))),
+            ColumnarValue::Array(Arc::new(BinaryArray::from_iter_values(vec![
+                uddsketch_compat::LEGACY_STATE,
+            ]))),
+        ];
+
+        let result = function
+            .invoke_with_args(ScalarFunctionArgs {
+                args,
+                arg_fields: vec![],
+                number_rows: 1,
+                return_field: Arc::new(Field::new("x", DataType::Float64, false)),
+                config_options: Arc::new(Default::default()),
+            })
+            .unwrap();
+        let ColumnarValue::Array(result) = result else {
+            unreachable!()
+        };
+        let result = result.as_primitive::<Float64Type>();
+        assert_eq!(result.len(), 1);
+        assert!(!result.is_null(0));
+        assert_eq!(result.value(0), 0.9900000000000001);
     }
 
     #[test]
@@ -249,5 +264,31 @@ mod tests {
         let result = result.as_primitive::<Float64Type>();
         assert_eq!(result.len(), 1);
         assert!(result.is_null(0));
+
+        let empty = UddSketch::new(128, 0.01).unwrap().encode().unwrap();
+        let mut populated = UddSketch::new(128, 0.01).unwrap();
+        populated.add(1.0).unwrap();
+        let populated = populated.encode().unwrap();
+        let args = vec![
+            ColumnarValue::Array(Arc::new(Float64Array::from(vec![0.5, -0.1, f64::NAN]))),
+            ColumnarValue::Array(Arc::new(BinaryArray::from_iter_values(vec![
+                empty,
+                populated.clone(),
+                populated,
+            ]))),
+        ];
+        let result = function
+            .invoke_with_args(ScalarFunctionArgs {
+                args,
+                arg_fields: vec![],
+                number_rows: 3,
+                return_field: Arc::new(Field::new("x", DataType::Float64, false)),
+                config_options: Arc::new(Default::default()),
+            })
+            .unwrap();
+        let ColumnarValue::Array(result) = result else {
+            unreachable!()
+        };
+        assert_eq!(result.as_primitive::<Float64Type>().null_count(), 3);
     }
 }

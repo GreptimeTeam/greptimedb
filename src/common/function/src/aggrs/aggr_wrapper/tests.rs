@@ -12,22 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use arrow::array::{
-    ArrayRef, BooleanArray, Float64Array, Int64Array, TimestampMillisecondArray, UInt64Array,
+    ArrayRef, BinaryArray, BooleanArray, Float64Array, Int64Array, StringArray,
+    TimestampMillisecondArray, UInt64Array,
 };
 use arrow::record_batch::RecordBatch;
 use arrow_schema::SchemaRef;
 use common_telemetry::init_default_ut_logging;
 use datafusion::catalog::{Session, TableProvider};
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
+use datafusion::functions_aggregate::approx_percentile_cont::approx_percentile_cont_udaf;
+use datafusion::functions_aggregate::array_agg::array_agg_udaf;
 use datafusion::functions_aggregate::average::avg_udaf;
 use datafusion::functions_aggregate::count::count_udaf;
+use datafusion::functions_aggregate::nth_value::nth_value_udaf;
 use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion::optimizer::AnalyzerRule;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
@@ -38,25 +42,28 @@ use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 use datafusion::prelude::SessionContext;
 use datafusion_common::arrow::array::AsArray;
 use datafusion_common::arrow::datatypes::{Float64Type, UInt64Type};
-use datafusion_common::{Column, TableReference};
+use datafusion_common::{Column, Result, TableReference};
 use datafusion_expr::expr::{AggregateFunction, NullTreatment};
 use datafusion_expr::function::AccumulatorArgs;
 use datafusion_expr::{
     Aggregate, AggregateUDFImpl, ColumnarValue, Expr, LogicalPlan, ScalarFunctionArgs, SortExpr,
-    TableScan, lit,
+    TableScanBuilder, TypeSignature, lit,
 };
 use datafusion_physical_expr::aggregate::AggregateExprBuilder;
-use datafusion_physical_expr::expressions::col;
-use datafusion_physical_expr::{EquivalenceProperties, Partitioning};
-use datatypes::arrow_array::StringArray;
+use datafusion_physical_expr::expressions::{Column as PhysicalColumn, col, lit as physical_lit};
+use datafusion_physical_expr::{EquivalenceProperties, Partitioning, PhysicalExpr};
 use futures::{Stream, StreamExt as _};
+use hyperloglogplus::HyperLogLog;
 use pretty_assertions::assert_eq;
+use uddsketch::UddSketchRef;
 
 use super::*;
-use crate::aggrs::approximate::hll::HllState;
+use crate::aggrs::approximate::hll::{HllState, HllStateType};
 use crate::aggrs::approximate::uddsketch::UddSketchState;
+use crate::aggrs::approximate::welford::{WelfordAccumulator, WelfordState};
 use crate::aggrs::count_hash::CountHash;
 use crate::function::Function as _;
+use crate::function_registry::FUNCTION_REGISTRY;
 use crate::scalars::hll_count::HllCalcFunction;
 use crate::scalars::uddsketch_calc::UddSketchCalcFunction;
 
@@ -93,16 +100,19 @@ impl ExecutionPlan for MockInputExec {
         "MockInputExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn with_new_children(
@@ -199,10 +209,6 @@ impl Default for DummyTableProvider {
 
 #[async_trait::async_trait]
 impl TableProvider for DummyTableProvider {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
     fn schema(&self) -> Arc<arrow_schema::Schema> {
         self.schema.clone()
     }
@@ -233,14 +239,12 @@ fn dummy_table_scan() -> LogicalPlan {
     let table_provider = Arc::new(DummyTableProvider::default());
     let table_source = DefaultTableSource::new(table_provider);
     LogicalPlan::TableScan(
-        TableScan::try_new(
-            TableReference::bare("Number"),
-            Arc::new(table_source),
-            None,
-            vec![],
-            None,
-        )
-        .unwrap(),
+        TableScanBuilder::new(TableReference::bare("Number"), Arc::new(table_source))
+            .with_projection(None)
+            .with_filters(vec![])
+            .with_fetch(None)
+            .build()
+            .unwrap(),
     )
 }
 
@@ -248,14 +252,12 @@ fn dummy_table_scan_with_ts() -> LogicalPlan {
     let table_provider = Arc::new(DummyTableProvider::with_ts(None));
     let table_source = DefaultTableSource::new(table_provider);
     LogicalPlan::TableScan(
-        TableScan::try_new(
-            TableReference::bare("Number"),
-            Arc::new(table_source),
-            None,
-            vec![],
-            None,
-        )
-        .unwrap(),
+        TableScanBuilder::new(TableReference::bare("Number"), Arc::new(table_source))
+            .with_projection(None)
+            .with_filters(vec![])
+            .with_fetch(None)
+            .build()
+            .unwrap(),
     )
 }
 
@@ -377,10 +379,7 @@ async fn test_sum_udaf() {
         .create_physical_plan(&res.lower_state, &ctx.state())
         .await
         .unwrap();
-    let aggr_exec = phy_aggr_state_plan
-        .as_any()
-        .downcast_ref::<AggregateExec>()
-        .unwrap();
+    let aggr_exec = phy_aggr_state_plan.downcast_ref::<AggregateExec>().unwrap();
     let aggr_func_expr = &aggr_exec.aggr_expr()[0];
     let mut state_accum = aggr_func_expr.create_accumulator().unwrap();
 
@@ -410,10 +409,7 @@ async fn test_sum_udaf() {
         .create_physical_plan(&res.upper_merge, &ctx.state())
         .await
         .unwrap();
-    let aggr_exec = phy_aggr_merge_plan
-        .as_any()
-        .downcast_ref::<AggregateExec>()
-        .unwrap();
+    let aggr_exec = phy_aggr_merge_plan.downcast_ref::<AggregateExec>().unwrap();
     let aggr_func_expr = &aggr_exec.aggr_expr()[0];
     let mut merge_accum = aggr_func_expr.create_accumulator().unwrap();
 
@@ -539,10 +535,7 @@ async fn test_avg_udaf() {
         .create_physical_plan(&coerced_aggr_state_plan, &ctx.state())
         .await
         .unwrap();
-    let aggr_exec = phy_aggr_state_plan
-        .as_any()
-        .downcast_ref::<AggregateExec>()
-        .unwrap();
+    let aggr_exec = phy_aggr_state_plan.downcast_ref::<AggregateExec>().unwrap();
     let aggr_func_expr = &aggr_exec.aggr_expr()[0];
     let mut state_accum = aggr_func_expr.create_accumulator().unwrap();
 
@@ -578,10 +571,7 @@ async fn test_avg_udaf() {
         .create_physical_plan(&res.upper_merge, &ctx.state())
         .await
         .unwrap();
-    let aggr_exec = phy_aggr_merge_plan
-        .as_any()
-        .downcast_ref::<AggregateExec>()
-        .unwrap();
+    let aggr_exec = phy_aggr_merge_plan.downcast_ref::<AggregateExec>().unwrap();
     let aggr_func_expr = &aggr_exec.aggr_expr()[0];
 
     let mut merge_accum = aggr_func_expr.create_accumulator().unwrap();
@@ -699,10 +689,7 @@ async fn test_last_value_order_by_udaf() {
         .create_physical_plan(&fixed_aggr_state_plan, &ctx.state())
         .await
         .unwrap();
-    let aggr_exec = phy_aggr_state_plan
-        .as_any()
-        .downcast_ref::<AggregateExec>()
-        .unwrap();
+    let aggr_exec = phy_aggr_state_plan.downcast_ref::<AggregateExec>().unwrap();
     let aggr_func_expr = &aggr_exec.aggr_expr()[0];
 
     let merge_input_fields = vec![Arc::new(Field::new(
@@ -792,10 +779,7 @@ async fn test_last_value_order_by_udaf() {
         .create_physical_plan(&res.upper_merge, &ctx.state())
         .await
         .unwrap();
-    let aggr_exec = phy_aggr_merge_plan
-        .as_any()
-        .downcast_ref::<AggregateExec>()
-        .unwrap();
+    let aggr_exec = phy_aggr_merge_plan.downcast_ref::<AggregateExec>().unwrap();
     let aggr_func_expr = &aggr_exec.aggr_expr()[0];
 
     let mut merge_accum = aggr_func_expr.create_accumulator().unwrap();
@@ -896,7 +880,7 @@ fn test_avg_state_groups_accumulator_state_merge_evaluate() {
         .update_batch(&merged_values, &merged_group_indices, None, 3)
         .unwrap();
     merged_accum
-        .merge_batch(&source_state, &[1, 2, 0], None, 3)
+        .merge_batch(&source_state, &[1, 2, 0], 3)
         .unwrap();
 
     let result = merged_accum.evaluate(EmitTo::All).unwrap();
@@ -920,9 +904,204 @@ fn test_avg_state_groups_accumulator_state_merge_evaluate() {
     );
 }
 
-/// For testing whether the UDAF state fields are correctly implemented.
-/// esp. for our own custom UDAF's state fields.
-/// By compare eval results before and after split to state/merge functions.
+#[test]
+fn test_registered_hll_delta_merge_semantics() {
+    let hll = FUNCTION_REGISTRY
+        .get_aggr_func(&aggr_delta_merge_func_name("hll"))
+        .expect("global approximate functions register hll delta merge");
+    assert_eq!(hll.name(), "__hll_delta_merge");
+    assert_eq!(
+        hll.signature().type_signature,
+        TypeSignature::Exact(vec![DataType::Binary, DataType::Binary])
+    );
+
+    let schema = Arc::new(arrow_schema::Schema::new(vec![
+        Field::new("delta", DataType::Binary, true),
+        Field::new("persisted", DataType::Binary, true),
+    ]));
+    let expr = AggregateExprBuilder::new(
+        Arc::new(hll),
+        vec![
+            Arc::new(PhysicalColumn::new("delta", 0)),
+            Arc::new(PhysicalColumn::new("persisted", 1)),
+        ],
+    )
+    .schema(schema)
+    .alias("hll_delta_merge")
+    .build()
+    .unwrap();
+    let mut accum = expr.create_accumulator().unwrap();
+
+    let mut delta = HllState::new();
+    delta
+        .update_batch(&[Arc::new(StringArray::from(vec![Some("delta")]))])
+        .unwrap();
+    let mut persisted = HllState::new();
+    persisted
+        .update_batch(&[Arc::new(StringArray::from(vec![Some("persisted")]))])
+        .unwrap();
+    let ScalarValue::Binary(Some(delta)) = delta.evaluate().unwrap() else {
+        panic!("HLL state must be binary");
+    };
+    let ScalarValue::Binary(Some(persisted)) = persisted.evaluate().unwrap() else {
+        panic!("HLL state must be binary");
+    };
+
+    accum
+        .update_batch(&[
+            Arc::new(BinaryArray::from(vec![Some(delta.as_slice())])),
+            Arc::new(BinaryArray::from(vec![Some(persisted.as_slice())])),
+        ])
+        .unwrap();
+    let ScalarValue::Binary(Some(merged)) = accum.evaluate().unwrap() else {
+        panic!("HLL delta merge state must be binary");
+    };
+    let mut merged: HllStateType = bincode::deserialize(&merged).unwrap();
+    assert_eq!(merged.count().trunc() as u32, 2);
+}
+
+#[test]
+fn test_registered_welford_delta_merge_semantics() {
+    let welford = FUNCTION_REGISTRY
+        .get_aggr_func(&aggr_delta_merge_func_name("stddev_pop_state"))
+        .expect("global approximate functions register Welford delta merge");
+    assert_eq!(welford.name(), "__stddev_pop_state_delta_merge");
+    assert_eq!(
+        welford.signature().type_signature,
+        TypeSignature::Exact(vec![DataType::Binary, DataType::Binary])
+    );
+
+    let schema = Arc::new(arrow_schema::Schema::new(vec![
+        Field::new("delta", DataType::Binary, true),
+        Field::new("persisted", DataType::Binary, true),
+    ]));
+    let expr = AggregateExprBuilder::new(
+        Arc::new(welford),
+        vec![
+            Arc::new(PhysicalColumn::new("delta", 0)),
+            Arc::new(PhysicalColumn::new("persisted", 1)),
+        ],
+    )
+    .schema(schema)
+    .alias("stddev_pop_state_delta_merge")
+    .build()
+    .unwrap();
+
+    fn state(values: &[f64]) -> Vec<u8> {
+        let mut accumulator = WelfordAccumulator::default();
+        accumulator
+            .update_batch(&[Arc::new(Float64Array::from(
+                values.iter().copied().map(Some).collect::<Vec<_>>(),
+            )) as ArrayRef])
+            .unwrap();
+        let ScalarValue::Binary(Some(state)) = accumulator.evaluate().unwrap() else {
+            panic!("Welford state must be binary");
+        };
+        state
+    }
+
+    let delta = state(&[1.0, 2.0]);
+    let persisted = state(&[3.0, 4.0]);
+    let expected = state(&[1.0, 2.0, 3.0, 4.0]);
+
+    for (delta, persisted, expected) in [
+        (Some(delta.as_slice()), None, state(&[1.0, 2.0])),
+        (None, Some(persisted.as_slice()), state(&[3.0, 4.0])),
+        (None, None, state(&[])),
+        (Some(delta.as_slice()), Some(persisted.as_slice()), expected),
+    ] {
+        let mut accum = expr.create_accumulator().unwrap();
+        accum
+            .update_batch(&[
+                Arc::new(BinaryArray::from(vec![delta])),
+                Arc::new(BinaryArray::from(vec![persisted])),
+            ])
+            .unwrap();
+        let ScalarValue::Binary(Some(merged)) = accum.evaluate().unwrap() else {
+            panic!("Welford delta merge state must be binary");
+        };
+        assert_eq!(
+            WelfordState::decode(&merged).unwrap(),
+            WelfordState::decode(&expected).unwrap()
+        );
+    }
+}
+
+#[test]
+fn test_registered_uddsketch_delta_merge_semantics() {
+    let uddsketch = FUNCTION_REGISTRY
+        .get_aggr_func(&aggr_delta_merge_func_name("uddsketch_state"))
+        .expect("global approximate functions register uddsketch delta merge");
+    assert_eq!(uddsketch.name(), "__uddsketch_state_delta_merge");
+    assert_eq!(
+        uddsketch.signature().type_signature,
+        TypeSignature::Exact(vec![
+            DataType::Int64,
+            DataType::Float64,
+            DataType::Binary,
+            DataType::Binary,
+        ])
+    );
+
+    let schema = Arc::new(arrow_schema::Schema::new(vec![
+        Field::new("delta", DataType::Binary, true),
+        Field::new("persisted", DataType::Binary, true),
+    ]));
+    let expr = AggregateExprBuilder::new(
+        Arc::new(uddsketch),
+        vec![
+            physical_lit(10_i64),
+            physical_lit(0.01_f64),
+            Arc::new(PhysicalColumn::new("delta", 0)),
+            Arc::new(PhysicalColumn::new("persisted", 1)),
+        ],
+    )
+    .schema(schema)
+    .alias("uddsketch_delta_merge")
+    .build()
+    .unwrap();
+    let mut accum = expr.create_accumulator().unwrap();
+
+    let mut delta = UddSketchState::new(10, 0.01).unwrap();
+    delta
+        .update_batch(&[
+            Arc::new(Int64Array::from(vec![10])) as ArrayRef,
+            Arc::new(Float64Array::from(vec![0.01])) as ArrayRef,
+            Arc::new(Float64Array::from(vec![2.0])) as ArrayRef,
+        ])
+        .unwrap();
+    let mut persisted = UddSketchState::new(10, 0.01).unwrap();
+    persisted
+        .update_batch(&[
+            Arc::new(Int64Array::from(vec![10])) as ArrayRef,
+            Arc::new(Float64Array::from(vec![0.01])) as ArrayRef,
+            Arc::new(Float64Array::from(vec![1.0])) as ArrayRef,
+        ])
+        .unwrap();
+    let ScalarValue::Binary(Some(delta)) = delta.evaluate().unwrap() else {
+        panic!("UDDSketch state must be binary");
+    };
+    let ScalarValue::Binary(Some(persisted)) = persisted.evaluate().unwrap() else {
+        panic!("UDDSketch state must be binary");
+    };
+
+    accum
+        .update_batch(&[
+            Arc::new(Int64Array::from(vec![10])) as ArrayRef,
+            Arc::new(Float64Array::from(vec![0.01])) as ArrayRef,
+            Arc::new(BinaryArray::from(vec![Some(delta.as_slice())])),
+            Arc::new(BinaryArray::from(vec![Some(persisted.as_slice())])),
+        ])
+        .unwrap();
+    let ScalarValue::Binary(Some(merged)) = accum.evaluate().unwrap() else {
+        panic!("UDDSketch delta merge state must be binary");
+    };
+    let merged = UddSketchRef::parse(&merged).unwrap();
+    assert_eq!(merged.count(), 2);
+    let median = merged.quantile(0.5).unwrap().unwrap();
+    assert!((1.0..=2.0).contains(&median));
+}
+
 #[tokio::test]
 async fn test_udaf_correct_eval_result() {
     struct TestCase {
@@ -1113,6 +1292,40 @@ async fn test_udaf_correct_eval_result() {
             order_by: vec![],
             null_treatment: None,
         },
+        // The ordering state of `array_agg` nests the ORDER BY fields in `List(Struct(..))`.
+        TestCase {
+            func: array_agg_udaf(),
+            input_schema: Arc::new(arrow_schema::Schema::new(vec![
+                Field::new("number", DataType::Float64, true),
+                Field::new(
+                    "ts",
+                    DataType::Timestamp(arrow_schema::TimeUnit::Millisecond, None),
+                    false,
+                ),
+            ])),
+            args: vec![Expr::Column(Column::new_unqualified("number"))],
+            input: vec![
+                Arc::new(Float64Array::from(vec![Some(3.), Some(1.), Some(2.)])),
+                Arc::new(TimestampMillisecondArray::from(vec![3000, 1000, 2000])),
+            ],
+            expected_output: Some(ScalarValue::List(ScalarValue::new_list_nullable(
+                &[
+                    ScalarValue::Float64(Some(1.)),
+                    ScalarValue::Float64(Some(2.)),
+                    ScalarValue::Float64(Some(3.)),
+                ],
+                &DataType::Float64,
+            ))),
+            expected_fn: None,
+            distinct: false,
+            filter: None,
+            order_by: vec![SortExpr::new(
+                Expr::Column(Column::new_unqualified("ts")),
+                true,
+                true,
+            )],
+            null_treatment: None,
+        },
         // TODO(discord9): udd_merge/hll_merge/geo_path/quantile_aggr tests
     ];
     let test_table_ref = TableReference::bare("TestTable");
@@ -1125,14 +1338,12 @@ async fn test_udaf_correct_eval_result() {
         );
         let table_source = DefaultTableSource::new(Arc::new(table_provider));
         let logical_plan = LogicalPlan::TableScan(
-            TableScan::try_new(
-                test_table_ref.clone(),
-                Arc::new(table_source),
-                None,
-                vec![],
-                None,
-            )
-            .unwrap(),
+            TableScanBuilder::new(test_table_ref.clone(), Arc::new(table_source))
+                .with_projection(None)
+                .with_filters(vec![])
+                .with_fetch(None)
+                .build()
+                .unwrap(),
         );
 
         let args = case.args;
@@ -1221,4 +1432,90 @@ async fn execute_phy_plan(
         batches.push(batch?);
     }
     Ok(batches)
+}
+
+#[test]
+fn test_state_struct_array_rejects_mismatched_state() {
+    let fields = Fields::from(vec![Field::new("sum", DataType::Int64, true)]);
+    let arrays: Vec<ArrayRef> = vec![Arc::new(Float64Array::from(vec![1.0]))];
+    let err = state_struct_array(&fields, arrays).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("State field `sum` expects type Int64, but the accumulator produced Float64"),
+        "{err}"
+    );
+}
+
+#[test]
+fn test_state_struct_array_keeps_child_order() {
+    let int_field = |name: &str| Field::new(name, DataType::Int64, true);
+    // Same child types, names crossed: children must stay in place, not be matched by name.
+    let produced = StructArray::from(vec![
+        (
+            Arc::new(int_field("a")),
+            Arc::new(Int64Array::from(vec![10])) as ArrayRef,
+        ),
+        (
+            Arc::new(int_field("b")),
+            Arc::new(Int64Array::from(vec![20])) as ArrayRef,
+        ),
+    ]);
+    let declared = Fields::from(vec![Field::new(
+        "state",
+        DataType::Struct(Fields::from(vec![int_field("b"), int_field("a")])),
+        true,
+    )]);
+
+    let state = state_struct_array(&declared, vec![Arc::new(produced)]).unwrap();
+    let state = state.column(0).as_struct();
+    assert_eq!(
+        state
+            .column_by_name("b")
+            .unwrap()
+            .as_primitive::<arrow::datatypes::Int64Type>()
+            .value(0),
+        10
+    );
+    assert_eq!(
+        state
+            .column_by_name("a")
+            .unwrap()
+            .as_primitive::<arrow::datatypes::Int64Type>()
+            .value(0),
+        20
+    );
+}
+
+#[test]
+fn test_hard_ordered_aggr_not_steppable() {
+    let order_by = vec![SortExpr::new(
+        Expr::Column(Column::new_unqualified("ts")),
+        true,
+        true,
+    )];
+    let aggr = |func: Arc<AggregateUDF>, args: Vec<Expr>| {
+        Expr::AggregateFunction(AggregateFunction::new_udf(
+            func,
+            args,
+            false,
+            None,
+            order_by.clone(),
+            None,
+        ))
+    };
+    let number = Expr::Column(Column::new_unqualified("number"));
+
+    assert!(!is_all_aggr_exprs_steppable(&[aggr(
+        nth_value_udaf(),
+        vec![number.clone(), lit(2i64)],
+    )]));
+    assert!(is_all_aggr_exprs_steppable(&[aggr(
+        array_agg_udaf(),
+        vec![number.clone()]
+    )]));
+    // WITHIN GROUP (ORDER BY number)
+    assert!(is_all_aggr_exprs_steppable(&[aggr(
+        approx_percentile_cont_udaf(),
+        vec![number, lit(0.5f64)]
+    )]));
 }

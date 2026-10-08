@@ -11,11 +11,17 @@ snafu.workspace = true
 tokio.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-pprof = { version = "0.14", features = [
+pprof = { version = "0.15", features = [
     "flamegraph",
     "prost-codec",
     "protobuf",
 ] }
+
+# framehop-unwinder is only available on x86_64/aarch64 Linux/macOS.
+# Enabling it on other targets (e.g. riscv64) would disable the
+# backtrace-rs fallback without providing a TraceImpl, breaking the build.
+[target.'cfg(all(unix, any(target_arch = "x86_64", target_arch = "aarch64"), any(target_os = "linux", target_os = "macos")))'.dependencies]
+pprof = { version = "0.15", features = ["framehop-unwinder"] }
 
 [lints]
 workspace = true

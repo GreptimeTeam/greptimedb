@@ -60,6 +60,8 @@ pub(crate) struct MutableInner {
     timezone: Timezone,
     query_timeout: Option<Duration>,
     read_preference: ReadPreference,
+    /// Request-level WAL policy for ordinary inserts.
+    skip_wal: bool,
     #[debug(skip)]
     pub(crate) cursors: HashMap<String, Arc<RecordBatchStreamCursor>>,
     /// Warning messages for MySQL SHOW WARNINGS support
@@ -74,6 +76,7 @@ impl Default for MutableInner {
             timezone: get_timezone(None).clone(),
             query_timeout: None,
             read_preference: ReadPreference::Leader,
+            skip_wal: false,
             cursors: HashMap::with_capacity(0),
             warnings: VecDeque::new(),
         }
@@ -109,6 +112,12 @@ impl Session {
             .conn_info(self.conn_info.clone())
             .build()
             .into()
+    }
+
+    /// Cursors are shared across query contexts created from this session.
+    pub fn get_cursor(&self, name: &str) -> Option<Arc<RecordBatchStreamCursor>> {
+        let guard = self.mutable_inner.read().unwrap();
+        guard.cursors.get(name).cloned()
     }
 
     pub fn conn_info(&self) -> &ConnInfo {

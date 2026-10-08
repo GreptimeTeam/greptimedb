@@ -29,9 +29,10 @@ use datatypes::timestamp::timestamp_array_to_primitive;
 use futures::Stream;
 use prometheus::IntGauge;
 use smallvec::SmallVec;
-use store_api::storage::RegionId;
+use snafu::ResultExt;
+use store_api::storage::{RegionId, SequenceRange, TimeSeriesRowSelector};
 
-use crate::error::Result;
+use crate::error::{ComputeArrowSnafu, Result};
 use crate::memtable::MemScanMetrics;
 use crate::metrics::{
     IN_PROGRESS_SCAN, PRECISE_FILTER_ROWS_TOTAL, READ_BATCHES_RETURN, READ_ROW_GROUPS_TOTAL,
@@ -48,7 +49,7 @@ use crate::sst::index::bloom_filter::applier::BloomFilterIndexApplyMetrics;
 use crate::sst::index::fulltext_index::applier::FulltextIndexApplyMetrics;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplyMetrics;
 use crate::sst::parquet::file_range::{FileRange, PreFilterMode};
-use crate::sst::parquet::flat_format::time_index_column_index;
+use crate::sst::parquet::flat_format::{sequence_column_index, time_index_column_index};
 use crate::sst::parquet::reader::{MetadataCacheMetrics, ReaderFilterMetrics, ReaderMetrics};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE};
@@ -157,8 +158,6 @@ pub(crate) struct ScanMetricsSet {
     rg_minmax_filtered: usize,
     /// Number of row groups filtered by bloom filter index.
     rg_bloom_filtered: usize,
-    /// Number of row groups filtered by vector index.
-    rg_vector_filtered: usize,
     /// Number of rows in row group before filtering.
     rows_before_filter: usize,
     /// Number of rows in row group filtered by fulltext index.
@@ -167,10 +166,6 @@ pub(crate) struct ScanMetricsSet {
     rows_inverted_filtered: usize,
     /// Number of rows in row group filtered by bloom filter index.
     rows_bloom_filtered: usize,
-    /// Number of rows filtered by vector index.
-    rows_vector_filtered: usize,
-    /// Number of rows selected by vector index.
-    rows_vector_selected: usize,
     /// Number of rows filtered by precise filter.
     rows_precise_filtered: usize,
     /// Number of index result cache hits for fulltext index.
@@ -309,13 +304,10 @@ impl fmt::Debug for ScanMetricsSet {
             rg_inverted_filtered,
             rg_minmax_filtered,
             rg_bloom_filtered,
-            rg_vector_filtered,
             rows_before_filter,
             rows_fulltext_filtered,
             rows_inverted_filtered,
             rows_bloom_filtered,
-            rows_vector_filtered,
-            rows_vector_selected,
             rows_precise_filtered,
             fulltext_index_cache_hit,
             fulltext_index_cache_miss,
@@ -408,9 +400,6 @@ impl fmt::Debug for ScanMetricsSet {
         if *rg_bloom_filtered > 0 {
             write!(f, ", \"rg_bloom_filtered\":{rg_bloom_filtered}")?;
         }
-        if *rg_vector_filtered > 0 {
-            write!(f, ", \"rg_vector_filtered\":{rg_vector_filtered}")?;
-        }
         if *rows_fulltext_filtered > 0 {
             write!(f, ", \"rows_fulltext_filtered\":{rows_fulltext_filtered}")?;
         }
@@ -419,12 +408,6 @@ impl fmt::Debug for ScanMetricsSet {
         }
         if *rows_bloom_filtered > 0 {
             write!(f, ", \"rows_bloom_filtered\":{rows_bloom_filtered}")?;
-        }
-        if *rows_vector_filtered > 0 {
-            write!(f, ", \"rows_vector_filtered\":{rows_vector_filtered}")?;
-        }
-        if *rows_vector_selected > 0 {
-            write!(f, ", \"rows_vector_selected\":{rows_vector_selected}")?;
         }
         if *rows_precise_filtered > 0 {
             write!(f, ", \"rows_precise_filtered\":{rows_precise_filtered}")?;
@@ -676,13 +659,10 @@ impl ScanMetricsSet {
                     rg_inverted_filtered,
                     rg_minmax_filtered,
                     rg_bloom_filtered,
-                    rg_vector_filtered,
                     rows_total,
                     rows_fulltext_filtered,
                     rows_inverted_filtered,
                     rows_bloom_filtered,
-                    rows_vector_filtered,
-                    rows_vector_selected,
                     rows_precise_filtered,
                     fulltext_index_cache_hit,
                     fulltext_index_cache_miss,
@@ -720,14 +700,11 @@ impl ScanMetricsSet {
         self.rg_inverted_filtered += *rg_inverted_filtered;
         self.rg_minmax_filtered += *rg_minmax_filtered;
         self.rg_bloom_filtered += *rg_bloom_filtered;
-        self.rg_vector_filtered += *rg_vector_filtered;
 
         self.rows_before_filter += *rows_total;
         self.rows_fulltext_filtered += *rows_fulltext_filtered;
         self.rows_inverted_filtered += *rows_inverted_filtered;
         self.rows_bloom_filtered += *rows_bloom_filtered;
-        self.rows_vector_filtered += *rows_vector_filtered;
-        self.rows_vector_selected += *rows_vector_selected;
         self.rows_precise_filtered += *rows_precise_filtered;
 
         self.fulltext_index_cache_hit += *fulltext_index_cache_hit;
@@ -860,10 +837,6 @@ impl ScanMetricsSet {
         READ_ROW_GROUPS_TOTAL
             .with_label_values(&["bloom_filter_index_filtered"])
             .inc_by(self.rg_bloom_filtered as u64);
-        #[cfg(feature = "vector_index")]
-        READ_ROW_GROUPS_TOTAL
-            .with_label_values(&["vector_index_filtered"])
-            .inc_by(self.rg_vector_filtered as u64);
 
         PRECISE_FILTER_ROWS_TOTAL
             .with_label_values(&["parquet"])
@@ -880,10 +853,6 @@ impl ScanMetricsSet {
         READ_ROWS_IN_ROW_GROUP_TOTAL
             .with_label_values(&["bloom_filter_index_filtered"])
             .inc_by(self.rows_bloom_filtered as u64);
-        #[cfg(feature = "vector_index")]
-        READ_ROWS_IN_ROW_GROUP_TOTAL
-            .with_label_values(&["vector_index_filtered"])
-            .inc_by(self.rows_vector_filtered as u64);
     }
 }
 
@@ -1143,21 +1112,18 @@ impl PartitionMetrics {
     }
 
     /// Increments the total bytes added to the range cache.
-    #[allow(dead_code)]
     pub(crate) fn inc_range_cache_size(&self, size: usize) {
         let mut metrics = self.0.metrics.lock().unwrap();
         metrics.range_cache_size += size;
     }
 
     /// Increments the range cache hit counter.
-    #[allow(dead_code)]
     pub(crate) fn inc_range_cache_hit(&self) {
         let mut metrics = self.0.metrics.lock().unwrap();
         metrics.range_cache_hit += 1;
     }
 
     /// Increments the range cache miss counter.
-    #[allow(dead_code)]
     pub(crate) fn inc_range_cache_miss(&self) {
         let mut metrics = self.0.metrics.lock().unwrap();
         metrics.range_cache_miss += 1;
@@ -1378,13 +1344,13 @@ mod split_tests {
         let env = SchedulerEnv::new().await;
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
         let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
-        let input = ScanInput::new(env.access_layer.clone(), mapper).with_files(files);
+        let input = ScanInput::builder(env.access_layer.clone(), mapper)
+            .with_files(files)
+            .build();
 
         StreamContext {
             input,
             ranges: vec![],
-            scan_fingerprint: None,
-            scan_implied_time_range: None,
             query_start: std::time::Instant::now(),
         }
     }
@@ -1501,6 +1467,49 @@ pub(crate) async fn scan_flat_file_ranges(
     ))
 }
 
+/// Filters a flat-format record batch by the exact sequence range.
+///
+/// Returns `None` when the entire batch is filtered out. The sequence column is
+/// the second-to-last internal column of the flat format
+/// (`__primary_key`, `__sequence`, `__op_type`), so it must be applied before any
+/// projection/compat conversion that drops internal columns.
+///
+/// `file_sequence_trusted` is the per-file trust decision. Foreign reader
+/// batches have already been virtualized to the target-local file barrier, so
+/// they are filtered using the effective batch sequence. Local untrusted files
+/// pass through because exact capability excludes them before row filtering.
+pub(crate) fn filter_flat_batch_by_sequence(
+    record_batch: RecordBatch,
+    sequence_range: Option<SequenceRange>,
+    file_sequence_trusted: bool,
+) -> Result<Option<RecordBatch>> {
+    let Some(sequence) = sequence_range else {
+        return Ok(Some(record_batch));
+    };
+    if !file_sequence_trusted {
+        return Ok(Some(record_batch));
+    }
+
+    let num_rows = record_batch.num_rows();
+    if num_rows == 0 {
+        return Ok(Some(record_batch));
+    }
+    let sequence_column = record_batch.column(sequence_column_index(record_batch.num_columns()));
+    let predicate = sequence
+        .filter(sequence_column)
+        .context(ComputeArrowSnafu)?;
+    let select_count = predicate.true_count();
+    if select_count == 0 {
+        return Ok(None);
+    }
+    if select_count == num_rows {
+        return Ok(Some(record_batch));
+    }
+    let filtered_batch = datatypes::arrow::compute::filter_record_batch(&record_batch, &predicate)
+        .context(ComputeArrowSnafu)?;
+    Ok(Some(filtered_batch))
+}
+
 /// Build the stream of scanning the input [`FileRange`]s using flat reader that returns RecordBatch.
 #[tracing::instrument(
     skip_all,
@@ -1527,7 +1536,14 @@ pub fn build_flat_file_range_scan_stream(
             let build_reader_start = Instant::now();
             let Some(mut reader) = range
                 .flat_reader(
-                    stream_ctx.input.series_row_selector,
+                    match stream_ctx.input.series_row_selector {
+                        Some(TimeSeriesRowSelector::LastRow { after_merge: false })
+                            if stream_ctx.input.sequence_range.is_none() =>
+                        {
+                            stream_ctx.input.series_row_selector
+                        }
+                        _ => None,
+                    },
                     fetch_metrics.as_deref(),
                 )
                 .await?
@@ -1538,6 +1554,9 @@ pub fn build_flat_file_range_scan_stream(
             part_metrics.inc_build_reader_cost(build_cost);
 
             let may_compat = range.compat_batch();
+            let file_sequence_trusted = range
+                .file_handle()
+                .is_effective_target_sequence_trusted(stream_ctx.input.region_metadata().region_id);
 
             let mapper = range.compaction_projection_mapper();
             while let Some(record_batch) = reader.next_batch().await? {
@@ -1546,6 +1565,14 @@ pub fn build_flat_file_range_scan_stream(
                     batch
                 } else {
                     record_batch
+                };
+
+                let Some(record_batch) = filter_flat_batch_by_sequence(
+                    record_batch,
+                    stream_ctx.input.sequence_range,
+                    file_sequence_trusted,
+                )? else {
+                    continue;
                 };
 
                 if let Some(flat_compat) = may_compat {
@@ -1756,16 +1783,15 @@ mod tests {
         let env = SchedulerEnv::new().await;
         let metadata = metadata_for_test();
         let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
-        let input = ScanInput::new(env.access_layer.clone(), mapper)
+        let input = ScanInput::builder(env.access_layer.clone(), mapper)
             .with_cache(CacheStrategy::Disabled)
             .with_memtables(memtables)
-            .with_files(files);
+            .with_files(files)
+            .build();
 
         Arc::new(StreamContext {
             input,
             ranges: Vec::new(),
-            scan_fingerprint: None,
-            scan_implied_time_range: None,
             query_start: Instant::now(),
         })
     }
@@ -2031,5 +2057,119 @@ mod tests {
         assert!(batches.is_empty());
 
         assert_eq!(split_ts(&[42]), vec![vec![42]]);
+    }
+}
+
+#[cfg(test)]
+mod sequence_filter_tests {
+    use std::sync::Arc;
+
+    use datatypes::arrow::array::{Int64Array, StringArray, UInt8Array, UInt64Array};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema};
+    use datatypes::arrow::record_batch::RecordBatch;
+    use store_api::storage::SequenceRange;
+
+    use super::filter_flat_batch_by_sequence;
+
+    /// Builds a flat-format record batch: `(tag, field, ts, __primary_key, __sequence, __op_type)`.
+    fn batch(sequences: &[u64]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("tag_0", DataType::Utf8, false),
+            Field::new("field_0", DataType::Int64, false),
+            Field::new(
+                "ts",
+                DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("__primary_key", DataType::UInt8, false),
+            Field::new("__sequence", DataType::UInt64, false),
+            Field::new("__op_type", DataType::UInt8, false),
+        ]));
+        let tags = StringArray::from_iter_values((0..sequences.len()).map(|i| i.to_string()));
+        let fields = Int64Array::from_iter_values(0..sequences.len() as i64);
+        let ts = datatypes::arrow::array::TimestampMillisecondArray::from_iter_values(
+            (0..sequences.len()).map(|i| i as i64 * 1000),
+        );
+        let pk = UInt8Array::from(vec![0u8; sequences.len()]);
+        let seq = UInt64Array::from_iter_values(sequences.iter().copied());
+        let op = UInt8Array::from(vec![0u8; sequences.len()]);
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(tags),
+                Arc::new(fields),
+                Arc::new(ts),
+                Arc::new(pk),
+                Arc::new(seq),
+                Arc::new(op),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn remaining_tags(batch: &RecordBatch) -> Vec<String> {
+        batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .iter()
+            .map(|v| v.unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn test_filter_flat_batch_by_sequence_no_range_or_legacy_file() {
+        let b = batch(&[1, 2, 3, 4]);
+
+        let out = filter_flat_batch_by_sequence(b.clone(), None, true).unwrap();
+        assert_eq!(remaining_tags(&out.unwrap()), vec!["0", "1", "2", "3"]);
+
+        let out = filter_flat_batch_by_sequence(
+            b.clone(),
+            Some(SequenceRange::GtLtEq { min: 2, max: 3 }),
+            false,
+        )
+        .unwrap();
+        assert_eq!(remaining_tags(&out.unwrap()), vec!["0", "1", "2", "3"]);
+    }
+
+    #[test]
+    fn test_filter_flat_batch_by_sequence_exact_range() {
+        let b = batch(&[1, 2, 3, 4]);
+        let out = filter_flat_batch_by_sequence(
+            b.clone(),
+            Some(SequenceRange::GtLtEq { min: 2, max: 3 }),
+            true,
+        )
+        .unwrap();
+        assert_eq!(remaining_tags(&out.unwrap()), vec!["2"]);
+
+        let out = filter_flat_batch_by_sequence(
+            b.clone(),
+            Some(SequenceRange::GtLtEq { min: 10, max: 20 }),
+            true,
+        )
+        .unwrap();
+        assert!(out.is_none());
+
+        let empty = batch(&[]);
+        let out = filter_flat_batch_by_sequence(
+            empty,
+            Some(SequenceRange::GtLtEq { min: 0, max: 10 }),
+            true,
+        )
+        .unwrap();
+        assert_eq!(out.unwrap().num_rows(), 0);
+
+        // Foreign batches are already virtualized by the reader. Their source
+        // marker is irrelevant, and filtering uses the effective batch values.
+        let out = filter_flat_batch_by_sequence(
+            batch(&[1, 5, 9]),
+            Some(SequenceRange::GtLtEq { min: 2, max: 8 }),
+            true,
+        )
+        .unwrap();
+        assert_eq!(remaining_tags(&out.unwrap()), vec!["1"]);
     }
 }

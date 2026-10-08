@@ -65,6 +65,8 @@ pub struct ManifestSstEntry {
     pub file_path: String,
     /// File size in bytes.
     pub file_size: u64,
+    /// Maximum uncompressed row group size in bytes. Zero means unknown.
+    pub max_row_group_uncompressed_size: u64,
     /// Full path of the index file in object store.
     pub index_file_path: Option<String>,
     /// File size of the index file in object store.
@@ -81,6 +83,8 @@ pub struct ManifestSstEntry {
     pub max_ts: Timestamp,
     /// The sequence number associated with this file.
     pub sequence: Option<u64>,
+    /// Human-readable partition expression associated with this file.
+    pub partition_expr: Option<String>,
     /// The region id of region that creates the file.
     pub origin_region_id: RegionId,
     /// The node id fetched from the manifest.
@@ -122,6 +126,12 @@ impl ManifestSstEntry {
             ColumnSchema::new("visible", Ty::boolean_datatype(), false),
             ColumnSchema::new("primary_key_min", Ty::binary_datatype(), true),
             ColumnSchema::new("primary_key_max", Ty::binary_datatype(), true),
+            ColumnSchema::new(
+                "max_row_group_uncompressed_size",
+                Ty::uint64_datatype(),
+                false,
+            ),
+            ColumnSchema::new("partition_expr", Ty::string_datatype(), true),
         ]))
     }
 
@@ -139,6 +149,8 @@ impl ManifestSstEntry {
         let levels = entries.iter().map(|e| e.level);
         let file_paths = entries.iter().map(|e| e.file_path.as_str());
         let file_sizes = entries.iter().map(|e| e.file_size);
+        let max_row_group_uncompressed_sizes =
+            entries.iter().map(|e| e.max_row_group_uncompressed_size);
         let index_file_paths = entries.iter().map(|e| e.index_file_path.as_ref());
         let index_file_sizes = entries.iter().map(|e| e.index_file_size);
         let num_rows = entries.iter().map(|e| e.num_rows);
@@ -155,6 +167,7 @@ impl ManifestSstEntry {
                 .map(|ts| ts.value())
         });
         let sequences = entries.iter().map(|e| e.sequence);
+        let partition_exprs = entries.iter().map(|e| e.partition_expr.as_ref());
         let origin_region_ids = entries.iter().map(|e| e.origin_region_id.as_u64());
         let node_ids = entries.iter().map(|e| e.node_id);
         let visible_flags = entries.iter().map(|e| Some(e.visible));
@@ -186,6 +199,10 @@ impl ManifestSstEntry {
             Arc::new(BooleanArray::from_iter(visible_flags)),
             Arc::new(BinaryArray::from_iter(primary_key_min)),
             Arc::new(BinaryArray::from_iter(primary_key_max)),
+            Arc::new(UInt64Array::from_iter_values(
+                max_row_group_uncompressed_sizes,
+            )),
+            Arc::new(StringArray::from_iter(partition_exprs)),
         ];
 
         DfRecordBatch::try_new(schema.arrow_schema().clone(), columns)
@@ -458,6 +475,7 @@ mod tests {
                 level: 1,
                 file_path: "/p1".to_string(),
                 file_size: 100,
+                max_row_group_uncompressed_size: 80,
                 index_file_path: None,
                 index_file_size: None,
                 num_rows: 10,
@@ -466,6 +484,7 @@ mod tests {
                 min_ts: Timestamp::new_millisecond(1000), // 1s -> 1_000_000_000ns
                 max_ts: Timestamp::new_second(2),         // 2s -> 2_000_000_000ns
                 sequence: None,
+                partition_expr: Some("a < 10".to_string()),
                 origin_region_id: region_id1,
                 node_id: Some(1),
                 visible: false,
@@ -484,6 +503,7 @@ mod tests {
                 level: 3,
                 file_path: "/p2".to_string(),
                 file_size: 200,
+                max_row_group_uncompressed_size: 160,
                 index_file_path: Some("idx".to_string()),
                 index_file_size: Some(11),
                 num_rows: 20,
@@ -492,6 +512,7 @@ mod tests {
                 min_ts: Timestamp::new_nanosecond(5),     // 5ns
                 max_ts: Timestamp::new_microsecond(2000), // 2ms -> 2_000_000ns
                 sequence: Some(9),
+                partition_expr: None,
                 origin_region_id: region_id2,
                 node_id: None,
                 visible: true,
@@ -506,6 +527,44 @@ mod tests {
         // Schema checks
         assert_eq!(schema.arrow_schema().fields().len(), batch.num_columns());
         assert_eq!(2, batch.num_rows());
+        let expected_columns = [
+            "table_dir",
+            "region_id",
+            "table_id",
+            "region_number",
+            "region_group",
+            "region_sequence",
+            "file_id",
+            "index_version",
+            "level",
+            "file_path",
+            "file_size",
+            "index_file_path",
+            "index_file_size",
+            "num_rows",
+            "num_row_groups",
+            "num_series",
+            "min_ts",
+            "max_ts",
+            "sequence",
+            "origin_region_id",
+            "node_id",
+            "visible",
+            "primary_key_min",
+            "primary_key_max",
+            "max_row_group_uncompressed_size",
+            "partition_expr",
+        ];
+        assert_eq!(
+            expected_columns,
+            schema
+                .arrow_schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
         for (i, f) in schema.arrow_schema().fields().iter().enumerate() {
             assert_eq!(f.name(), batch.schema().field(i).name());
             assert_eq!(f.is_nullable(), batch.schema().field(i).is_nullable());
@@ -704,6 +763,22 @@ mod tests {
             .unwrap();
         assert_eq!(b"zzz", primary_key_max.value(0));
         assert!(primary_key_max.is_null(1));
+
+        let max_row_group_uncompressed_sizes = batch
+            .column(24)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        assert_eq!(80, max_row_group_uncompressed_sizes.value(0));
+        assert_eq!(160, max_row_group_uncompressed_sizes.value(1));
+
+        let partition_exprs = batch
+            .column(25)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!("a < 10", partition_exprs.value(0));
+        assert!(partition_exprs.is_null(1));
     }
 
     #[test]

@@ -180,6 +180,310 @@ DROP TABLE alter_hint_table;
 
 Affected Rows: 0
 
+CREATE TABLE partition_num_hint_table (
+  host STRING PRIMARY KEY,
+  ts TIMESTAMP TIME INDEX
+)
+PARTITION ON COLUMNS (host) (
+  host < 'm',
+  host >= 'm'
+)
+WITH ('repartition.partition.num.hint' = ' 8 ');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE partition_num_hint_table;
+
++--------------------------+---------------------------------------------------------+
+| Table                    | Create Table                                            |
++--------------------------+---------------------------------------------------------+
+| partition_num_hint_table | CREATE TABLE IF NOT EXISTS "partition_num_hint_table" ( |
+|                          |   "host" STRING NULL,                                   |
+|                          |   "ts" TIMESTAMP(3) NOT NULL,                           |
+|                          |   TIME INDEX ("ts"),                                    |
+|                          |   PRIMARY KEY ("host")                                  |
+|                          | )                                                       |
+|                          | PARTITION ON COLUMNS ("host") (                         |
+|                          |   host < 'm',                                           |
+|                          |   host >= 'm'                                           |
+|                          | )                                                       |
+|                          | ENGINE=mito                                             |
+|                          | WITH(                                                   |
+|                          |   'repartition.partition.num.hint' = '8'                |
+|                          | )                                                       |
++--------------------------+---------------------------------------------------------+
+
+ALTER TABLE partition_num_hint_table SET 'repartition.partition.num.hint' = 16;
+
+Affected Rows: 0
+
+SHOW CREATE TABLE partition_num_hint_table;
+
++--------------------------+---------------------------------------------------------+
+| Table                    | Create Table                                            |
++--------------------------+---------------------------------------------------------+
+| partition_num_hint_table | CREATE TABLE IF NOT EXISTS "partition_num_hint_table" ( |
+|                          |   "host" STRING NULL,                                   |
+|                          |   "ts" TIMESTAMP(3) NOT NULL,                           |
+|                          |   TIME INDEX ("ts"),                                    |
+|                          |   PRIMARY KEY ("host")                                  |
+|                          | )                                                       |
+|                          | PARTITION ON COLUMNS ("host") (                         |
+|                          |   host < 'm',                                           |
+|                          |   host >= 'm'                                           |
+|                          | )                                                       |
+|                          | ENGINE=mito                                             |
+|                          | WITH(                                                   |
+|                          |   'repartition.partition.num.hint' = '16'               |
+|                          | )                                                       |
++--------------------------+---------------------------------------------------------+
+
+ALTER TABLE partition_num_hint_table SET 'repartition.partition.num.hint' = '0';
+
+Error: 1004(InvalidArguments), Invalid alter table(partition_num_hint_table) request: repartition.partition.num.hint expects a positive integer within u32 range, got `0`
+
+ALTER TABLE partition_num_hint_table UNSET 'repartition.partition.num.hint';
+
+Affected Rows: 0
+
+ALTER TABLE partition_num_hint_table UNSET 'repartition.partition.num.hint';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE partition_num_hint_table;
+
++--------------------------+---------------------------------------------------------+
+| Table                    | Create Table                                            |
++--------------------------+---------------------------------------------------------+
+| partition_num_hint_table | CREATE TABLE IF NOT EXISTS "partition_num_hint_table" ( |
+|                          |   "host" STRING NULL,                                   |
+|                          |   "ts" TIMESTAMP(3) NOT NULL,                           |
+|                          |   TIME INDEX ("ts"),                                    |
+|                          |   PRIMARY KEY ("host")                                  |
+|                          | )                                                       |
+|                          | PARTITION ON COLUMNS ("host") (                         |
+|                          |   host < 'm',                                           |
+|                          |   host >= 'm'                                           |
+|                          | )                                                       |
+|                          | ENGINE=mito                                             |
+|                          |                                                         |
++--------------------------+---------------------------------------------------------+
+
+DROP TABLE partition_num_hint_table;
+
+Affected Rows: 0
+
+CREATE TABLE partition_num_hint_table (
+  host STRING PRIMARY KEY,
+  ts TIMESTAMP TIME INDEX
+)
+WITH ('repartition.partition.num.hint' = '10');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE partition_num_hint_table;
+
++--------------------------+---------------------------------------------------------+
+| Table                    | Create Table                                            |
++--------------------------+---------------------------------------------------------+
+| partition_num_hint_table | CREATE TABLE IF NOT EXISTS "partition_num_hint_table" ( |
+|                          |   "host" STRING NULL,                                   |
+|                          |   "ts" TIMESTAMP(3) NOT NULL,                           |
+|                          |   TIME INDEX ("ts"),                                    |
+|                          |   PRIMARY KEY ("host")                                  |
+|                          | )                                                       |
+|                          |                                                         |
+|                          | ENGINE=mito                                             |
+|                          | WITH(                                                   |
+|                          |   'repartition.partition.num.hint' = '10'               |
+|                          | )                                                       |
++--------------------------+---------------------------------------------------------+
+
+DROP TABLE partition_num_hint_table;
+
+Affected Rows: 0
+
+CREATE TABLE partition_num_hint_table (
+  host STRING PRIMARY KEY,
+  ts TIMESTAMP TIME INDEX
+)
+WITH ('repartition.partition.num.hint' = 10);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE partition_num_hint_table;
+
++--------------------------+---------------------------------------------------------+
+| Table                    | Create Table                                            |
++--------------------------+---------------------------------------------------------+
+| partition_num_hint_table | CREATE TABLE IF NOT EXISTS "partition_num_hint_table" ( |
+|                          |   "host" STRING NULL,                                   |
+|                          |   "ts" TIMESTAMP(3) NOT NULL,                           |
+|                          |   TIME INDEX ("ts"),                                    |
+|                          |   PRIMARY KEY ("host")                                  |
+|                          | )                                                       |
+|                          |                                                         |
+|                          | ENGINE=mito                                             |
+|                          | WITH(                                                   |
+|                          |   'repartition.partition.num.hint' = '10'               |
+|                          | )                                                       |
++--------------------------+---------------------------------------------------------+
+
+DROP TABLE partition_num_hint_table;
+
+Affected Rows: 0
+
+CREATE TABLE combined_hint_table (
+  host STRING PRIMARY KEY,
+  `service` STRING,
+  ts TIMESTAMP TIME INDEX
+);
+
+Affected Rows: 0
+
+ALTER TABLE combined_hint_table SET
+  'repartition.column.hint' = 'host',
+  'repartition.partition.num.hint' = 10;
+
+Affected Rows: 0
+
+SHOW CREATE TABLE combined_hint_table;
+
++---------------------+----------------------------------------------------+
+| Table               | Create Table                                       |
++---------------------+----------------------------------------------------+
+| combined_hint_table | CREATE TABLE IF NOT EXISTS "combined_hint_table" ( |
+|                     |   "host" STRING NULL,                              |
+|                     |   "service" STRING NULL,                           |
+|                     |   "ts" TIMESTAMP(3) NOT NULL,                      |
+|                     |   TIME INDEX ("ts"),                               |
+|                     |   PRIMARY KEY ("host")                             |
+|                     | )                                                  |
+|                     |                                                    |
+|                     | ENGINE=mito                                        |
+|                     | WITH(                                              |
+|                     |   'repartition.column.hint' = 'host',              |
+|                     |   'repartition.partition.num.hint' = '10'          |
+|                     | )                                                  |
++---------------------+----------------------------------------------------+
+
+ALTER TABLE combined_hint_table SET
+  'repartition.column.hint' = 'service',
+  'repartition.partition.num.hint' = 0;
+
+Error: 1004(InvalidArguments), Invalid alter table(combined_hint_table) request: repartition.partition.num.hint expects a positive integer within u32 range, got `0`
+
+SHOW CREATE TABLE combined_hint_table;
+
++---------------------+----------------------------------------------------+
+| Table               | Create Table                                       |
++---------------------+----------------------------------------------------+
+| combined_hint_table | CREATE TABLE IF NOT EXISTS "combined_hint_table" ( |
+|                     |   "host" STRING NULL,                              |
+|                     |   "service" STRING NULL,                           |
+|                     |   "ts" TIMESTAMP(3) NOT NULL,                      |
+|                     |   TIME INDEX ("ts"),                               |
+|                     |   PRIMARY KEY ("host")                             |
+|                     | )                                                  |
+|                     |                                                    |
+|                     | ENGINE=mito                                        |
+|                     | WITH(                                              |
+|                     |   'repartition.column.hint' = 'host',              |
+|                     |   'repartition.partition.num.hint' = '10'          |
+|                     | )                                                  |
++---------------------+----------------------------------------------------+
+
+ALTER TABLE combined_hint_table SET
+  'repartition.partition.num.hint' = 20,
+  'repartition.column.hint' = 'missing';
+
+Error: 4002(TableColumnNotFound), Column missing not exists in table combined_hint_table
+
+SHOW CREATE TABLE combined_hint_table;
+
++---------------------+----------------------------------------------------+
+| Table               | Create Table                                       |
++---------------------+----------------------------------------------------+
+| combined_hint_table | CREATE TABLE IF NOT EXISTS "combined_hint_table" ( |
+|                     |   "host" STRING NULL,                              |
+|                     |   "service" STRING NULL,                           |
+|                     |   "ts" TIMESTAMP(3) NOT NULL,                      |
+|                     |   TIME INDEX ("ts"),                               |
+|                     |   PRIMARY KEY ("host")                             |
+|                     | )                                                  |
+|                     |                                                    |
+|                     | ENGINE=mito                                        |
+|                     | WITH(                                              |
+|                     |   'repartition.column.hint' = 'host',              |
+|                     |   'repartition.partition.num.hint' = '10'          |
+|                     | )                                                  |
++---------------------+----------------------------------------------------+
+
+ALTER TABLE combined_hint_table SET
+  'repartition.partition.num.hint' = 20,
+  'repartition.column.hint' = 'service';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE combined_hint_table;
+
++---------------------+----------------------------------------------------+
+| Table               | Create Table                                       |
++---------------------+----------------------------------------------------+
+| combined_hint_table | CREATE TABLE IF NOT EXISTS "combined_hint_table" ( |
+|                     |   "host" STRING NULL,                              |
+|                     |   "service" STRING NULL,                           |
+|                     |   "ts" TIMESTAMP(3) NOT NULL,                      |
+|                     |   TIME INDEX ("ts"),                               |
+|                     |   PRIMARY KEY ("host")                             |
+|                     | )                                                  |
+|                     |                                                    |
+|                     | ENGINE=mito                                        |
+|                     | WITH(                                              |
+|                     |   'repartition.column.hint' = 'service',           |
+|                     |   'repartition.partition.num.hint' = '20'          |
+|                     | )                                                  |
++---------------------+----------------------------------------------------+
+
+ALTER TABLE combined_hint_table SET
+  'repartition.partition.num.hint' = 30,
+  'repartition.partition.num.hint' = 40;
+
+Error: 1004(InvalidArguments), Invalid table option request: duplicate repartition hint keys
+
+ALTER TABLE combined_hint_table SET
+  'repartition.partition.num.hint' = 30,
+  'ttl' = '7d';
+
+Error: 1004(InvalidArguments), Invalid table option request: repartition hints must be altered separately from other table options
+
+ALTER TABLE combined_hint_table UNSET
+  'repartition.column.hint',
+  'repartition.partition.num.hint';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE combined_hint_table;
+
++---------------------+----------------------------------------------------+
+| Table               | Create Table                                       |
++---------------------+----------------------------------------------------+
+| combined_hint_table | CREATE TABLE IF NOT EXISTS "combined_hint_table" ( |
+|                     |   "host" STRING NULL,                              |
+|                     |   "service" STRING NULL,                           |
+|                     |   "ts" TIMESTAMP(3) NOT NULL,                      |
+|                     |   TIME INDEX ("ts"),                               |
+|                     |   PRIMARY KEY ("host")                             |
+|                     | )                                                  |
+|                     |                                                    |
+|                     | ENGINE=mito                                        |
+|                     |                                                    |
++---------------------+----------------------------------------------------+
+
+DROP TABLE combined_hint_table;
+
+Affected Rows: 0
+
 CREATE TABLE not_supported_table_storage_option (
   `id` INT UNSIGNED,
   host STRING,

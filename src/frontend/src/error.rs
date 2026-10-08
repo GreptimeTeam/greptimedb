@@ -174,6 +174,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Unexpected type {data_type} for column '{column}' of table '{table_name}'"))]
+    UnexpectedColumnType {
+        table_name: String,
+        column: String,
+        data_type: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to collect recordbatch"))]
     CollectRecordbatch {
         #[snafu(implicit)]
@@ -414,7 +423,9 @@ impl ErrorExt for Error {
 
             Error::RequestQuery { source, .. } => source.status_code(),
 
-            Error::CacheRequired { .. } => StatusCode::Internal,
+            Error::CacheRequired { .. } | Error::UnexpectedColumnType { .. } => {
+                StatusCode::Internal
+            }
 
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
 

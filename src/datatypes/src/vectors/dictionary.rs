@@ -17,8 +17,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, ArrayBuilder, ArrayRef, DictionaryArray, PrimitiveArray, PrimitiveBuilder,
-    StringDictionaryBuilder,
+    Array, ArrayBuilder, ArrayRef, DictionaryArray, PrimitiveArray, StringDictionaryBuilder,
 };
 use arrow::datatypes::{ArrowDictionaryKeyType, ArrowNativeType, UInt32Type};
 use serde_json::Value as JsonValue;
@@ -320,36 +319,6 @@ impl<'a, K: ArrowDictionaryKeyType> Iterator for DictionaryIter<'a, K> {
 }
 
 impl<K: ArrowDictionaryKeyType> VectorOp for DictionaryVector<K> {
-    fn replicate(&self, offsets: &[usize]) -> VectorRef {
-        let keys = self.array.keys();
-        let mut replicated_keys = PrimitiveBuilder::new();
-
-        let mut previous_offset = 0;
-        let mut key_iter = keys.iter().chain(std::iter::repeat(None));
-        for &offset in offsets {
-            let key = key_iter.next().unwrap();
-
-            // repeat this key (offset - previous_offset) times
-            let repeat_count = offset - previous_offset;
-            for _ in 0..repeat_count {
-                replicated_keys.append_option(key);
-            }
-
-            previous_offset = offset;
-        }
-
-        let new_keys = replicated_keys.finish();
-        let new_array = DictionaryArray::try_new(new_keys, self.values().clone())
-            .expect("Failed to create replicated dictionary array");
-
-        Arc::new(Self {
-            array: new_array,
-            key_type: self.key_type.clone(),
-            item_type: self.item_type.clone(),
-            item_vector: self.item_vector.clone(),
-        })
-    }
-
     fn filter(&self, filter: &vectors::BooleanVector) -> Result<VectorRef> {
         let key_array: ArrayRef = Arc::new(self.array.keys().clone());
         let key_vector = Helper::try_into_vector(&key_array)?;
@@ -483,21 +452,6 @@ mod tests {
         assert_eq!(sliced.get(0), Value::String("b".to_string().into()));
         assert_eq!(sliced.get(1), Value::String("c".to_string().into()));
         assert_eq!(sliced.get(2), Value::Null);
-    }
-
-    #[test]
-    fn test_replicate() {
-        let dict_vec = create_test_dictionary();
-
-        // Replicate with offsets [0, 2, 5] - should get values at these indices
-        let offsets = vec![0, 2, 5];
-        let replicated = dict_vec.replicate(&offsets);
-        assert_eq!(replicated.len(), 5);
-        assert_eq!(replicated.get(0), Value::String("b".to_string().into()));
-        assert_eq!(replicated.get(1), Value::String("b".to_string().into()));
-        assert_eq!(replicated.get(2), Value::String("c".to_string().into()));
-        assert_eq!(replicated.get(3), Value::String("c".to_string().into()));
-        assert_eq!(replicated.get(4), Value::String("c".to_string().into()));
     }
 
     #[test]

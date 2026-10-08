@@ -18,27 +18,35 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
 use api::v1::RowInsertRequests;
 use arrow::array::{
-    Array, AsArray, DictionaryArray, LargeStringArray, StringArray, StringViewArray,
+    Array, ArrayRef, AsArray, DictionaryArray, LargeStringArray, StringArray, StringViewArray,
 };
-use arrow::datatypes::{Float64Type, TimestampMillisecondType, UInt32Type};
+use arrow::compute::kernels::cast as casts;
+use arrow::datatypes::{
+    DataType, Float64Type, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
+    TimestampNanosecondType, UInt32Type,
+};
 use common_grpc::precision::Precision;
+use common_memory_manager::MemoryGuard;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_telemetry::{tracing, warn};
 use datafusion::dataframe::DataFrame;
-use datafusion::prelude::{Expr, col, lit, regexp_match};
+use datafusion::prelude::{Expr, ident, lit, regexp_match};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
-use openmetrics_parser::{MetricsExposition, PrometheusType, PrometheusValue};
 use snafu::{OptionExt, ResultExt, ensure};
 use snap::raw::{Decoder, Encoder};
 
 use crate::error::{self, Result};
+use crate::prom_remote_write::REMOTE_WRITE_V1_VERSION;
+use crate::request_memory_limiter::ServerMemoryLimiter;
+use crate::request_memory_metrics::RequestMemoryMetrics;
 use crate::row_writer::{self, MultiTableData};
 
 pub const METRIC_NAME_LABEL: &str = "__name__";
@@ -94,11 +102,6 @@ pub fn is_physical_table_selection_label(label: &str) -> bool {
     label == PHYSICAL_TABLE_LABEL || label == PHYSICAL_TABLE_LABEL_ALT
 }
 
-/// Metrics for push gateway protocol
-pub struct Metrics {
-    pub exposition: MetricsExposition<PrometheusType, PrometheusValue>,
-}
-
 /// Get table name from remote query
 pub fn table_name(q: &Query) -> Result<String> {
     let mut matchers = q
@@ -150,8 +153,9 @@ pub fn query_to_plan(
     let mut conditions = Vec::with_capacity(label_matches.len() + 1);
 
     conditions
-        .push(col(timestamp_column_name).gt_eq(lit_timestamp_millisecond(start_timestamp_ms)));
-    conditions.push(col(timestamp_column_name).lt_eq(lit_timestamp_millisecond(end_timestamp_ms)));
+        .push(ident(timestamp_column_name).gt_eq(lit_timestamp_millisecond(start_timestamp_ms)));
+    conditions
+        .push(ident(timestamp_column_name).lt_eq(lit_timestamp_millisecond(end_timestamp_ms)));
 
     for m in label_matches {
         let name = &m.name;
@@ -170,18 +174,18 @@ pub fn query_to_plan(
 
         match m_type {
             MatcherType::Eq => {
-                conditions.push(col(name).eq(lit(value)));
+                conditions.push(ident(name).eq(lit(value)));
             }
             MatcherType::Neq => {
-                conditions.push(col(name).not_eq(lit(value)));
+                conditions.push(ident(name).not_eq(lit(value)));
             }
             // Case sensitive regexp match
             MatcherType::Re => {
-                conditions.push(regexp_match(col(name), lit(value), None).is_not_null());
+                conditions.push(regexp_match(ident(name), lit(value), None).is_not_null());
             }
             // Case sensitive regexp not match
             MatcherType::Nre => {
-                conditions.push(regexp_match(col(name), lit(value), None).is_null());
+                conditions.push(regexp_match(ident(name), lit(value), None).is_null());
             }
         }
     }
@@ -367,27 +371,86 @@ pub fn recordbatches_to_timeseries(
     value_column_name: &str,
     recordbatches: RecordBatches,
 ) -> Result<Vec<TimeSeries>> {
-    Ok(recordbatches
-        .take()
-        .into_iter()
-        .map(|x| recordbatch_to_timeseries(table_name, timestamp_column_name, value_column_name, x))
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect())
+    let mut timeseries: Vec<TimeSeries> = Vec::new();
+    let mut timeseries_by_hash: HashMap<u64, Vec<usize>> = HashMap::new();
+
+    for recordbatch in recordbatches.take() {
+        append_recordbatch_to_timeseries(
+            table_name,
+            timestamp_column_name,
+            value_column_name,
+            recordbatch,
+            &mut timeseries,
+            &mut timeseries_by_hash,
+        )?;
+    }
+
+    for ts in &mut timeseries {
+        ts.samples.sort_unstable_by_key(|s| s.timestamp);
+    }
+
+    timeseries
+        .sort_unstable_by(|left, right| compare_timeseries_labels(&left.labels, &right.labels));
+    Ok(timeseries)
 }
 
-fn recordbatch_to_timeseries(
+fn append_recordbatch_to_timeseries(
     table: &str,
     timestamp_column_name: &str,
     value_column_name: &str,
     recordbatch: RecordBatch,
-) -> Result<Vec<TimeSeries>> {
+    timeseries: &mut Vec<TimeSeries>,
+    timeseries_by_hash: &mut HashMap<u64, Vec<usize>>,
+) -> Result<()> {
     let ts_column = recordbatch
         .column_by_name(timestamp_column_name)
         .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {
             msg: format!("missing timestamp column '{timestamp_column_name}' in query result"),
         })?;
+    // The Prometheus remote read wire format carries millisecond timestamps,
+    // while the table's time index can use any time unit (e.g. a metric
+    // physical table created with TIMESTAMP(6)). Narrowing floors towards
+    // negative infinity, consistent with `Timestamp::convert_to` on the
+    // ingestion path; arrow's cast would truncate towards zero, so a
+    // pre-epoch sample (e.g. -1001us) would round to -1ms instead of -2ms
+    // and disagree with what ingesting the same instant into a millisecond
+    // table would have stored.
+    let ts_column: ArrayRef = match ts_column.data_type() {
+        DataType::Timestamp(TimeUnit::Millisecond, _) => ts_column.clone(),
+        // Second -> millisecond is a widening (exact) conversion.
+        DataType::Timestamp(TimeUnit::Second, _) => casts::cast(
+            ts_column,
+            &DataType::Timestamp(TimeUnit::Millisecond, None),
+        )
+        .map_err(|e| {
+            error::InvalidPromRemoteReadQueryResultSnafu {
+                msg: format!(
+                    "failed to cast timestamp column '{timestamp_column_name}' of datatype {:?} to millisecond: {e}",
+                    ts_column.data_type()
+                ),
+            }
+            .build()
+        })?,
+        DataType::Timestamp(TimeUnit::Microsecond, _) => Arc::new(
+            ts_column
+                .as_primitive::<TimestampMicrosecondType>()
+                .unary::<_, TimestampMillisecondType>(|v| v.div_euclid(1_000)),
+        ),
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => Arc::new(
+            ts_column
+                .as_primitive::<TimestampNanosecondType>()
+                .unary::<_, TimestampMillisecondType>(|v| v.div_euclid(1_000_000)),
+        ),
+        _ => {
+            return error::InvalidPromRemoteReadQueryResultSnafu {
+                msg: format!(
+                    "Expect timestamp column of datatype Timestamp(Millisecond), actual {:?}",
+                    ts_column.data_type()
+                ),
+            }
+            .fail();
+        }
+    };
     let ts_column = ts_column
         .as_primitive_opt::<TimestampMillisecondType>()
         .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {
@@ -414,8 +477,6 @@ fn recordbatch_to_timeseries(
         })?;
 
     let columns = label_columns(&recordbatch, timestamp_column_name, value_column_name)?;
-    let mut timeseries: Vec<TimeSeries> = Vec::new();
-    let mut timeseries_by_hash: HashMap<u64, Vec<usize>> = HashMap::new();
     let mut previous_timeseries: Option<usize> = None;
 
     for row in 0..recordbatch.num_rows() {
@@ -452,13 +513,13 @@ fn recordbatch_to_timeseries(
         timeseries[timeseries_index].samples.push(sample);
     }
 
-    timeseries
-        .sort_unstable_by(|left, right| compare_timeseries_labels(&left.labels, &right.labels));
-    Ok(timeseries)
+    Ok(())
 }
 
 pub fn to_grpc_row_insert_requests(request: &WriteRequest) -> Result<(RowInsertRequests, usize)> {
-    let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_CONVERT_ELAPSED.start_timer();
+    let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_CODEC_ELAPSED
+        .with_label_values(&["convert", REMOTE_WRITE_V1_VERSION])
+        .start_timer();
 
     let mut multi_table_data = MultiTableData::new();
 
@@ -545,8 +606,147 @@ pub fn to_grpc_row_insert_requests(request: &WriteRequest) -> Result<(RowInsertR
     Ok(multi_table_data.into_row_insert_requests())
 }
 
+/// Hard cap on the decompressed size of a handler-decompressed request body
+/// (Prometheus remote read/write, Loki push).
+///
+/// The HTTP body limit only bounds the *encoded* bytes on the wire. Without
+/// this cap a tiny compressed payload (e.g. a five-byte raw-Snappy varint or a
+/// few KiB of zstd RLE blocks) could declare/expand to multiple GiB of heap
+/// before any protobuf validation runs, so the decompressed size must be
+/// bounded on its own.
+pub const MAX_DECOMPRESSED_REQUEST_SIZE: usize = 512 * 1024 * 1024;
+
+/// Size of the chunks a zstd body is decompressed and charged in.
+const ZSTD_DECOMPRESS_CHUNK: usize = 256 * 1024;
+
+/// Decompressed bytes together with the memory permits charged for them.
+/// The permits are released when the buffer is dropped, so the aggregate
+/// memory accounting covers the whole lifetime of the decompressed data.
+pub(crate) struct ChargedBuffer {
+    pub data: Vec<u8>,
+    guards: Vec<MemoryGuard<RequestMemoryMetrics>>,
+}
+
+impl std::ops::Deref for ChargedBuffer {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl std::fmt::Debug for ChargedBuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChargedBuffer")
+            .field("data_len", &self.data.len())
+            .field("guards", &self.guards.len())
+            .finish()
+    }
+}
+
+impl ChargedBuffer {
+    /// Creates a buffer with the permits charged for it.
+    pub(crate) fn new(data: Vec<u8>, guards: Vec<MemoryGuard<RequestMemoryMetrics>>) -> Self {
+        Self { data, guards }
+    }
+
+    /// Splits the buffer into the raw bytes and the memory permits charged for
+    /// them. Hold the permits as long as the bytes are kept.
+    pub(crate) fn into_parts(self) -> (Vec<u8>, Vec<MemoryGuard<RequestMemoryMetrics>>) {
+        (self.data, self.guards)
+    }
+}
+
+/// Decompresses a raw Snappy body after enforcing a hard cap on the decoded
+/// size and charging the aggregate request-memory limiter.
+///
+/// The raw Snappy format prefixes the stream with a varint of the decoded
+/// length, so the output size is known (and validated) before the output
+/// buffer is allocated by `decompress_vec`.
+pub(crate) async fn snappy_decompress_limited(
+    buf: &[u8],
+    max_decompressed: usize,
+    limiter: &ServerMemoryLimiter,
+) -> Result<ChargedBuffer> {
+    let decoded_len =
+        snap::raw::decompress_len(buf).context(error::DecompressSnappyPromRemoteRequestSnafu)?;
+    ensure!(
+        decoded_len <= max_decompressed,
+        error::DecompressedBodyTooLargeSnafu {
+            size: decoded_len as u64,
+            limit: max_decompressed as u64,
+        }
+    );
+    // Reserve the declared size before the allocation happens so concurrent
+    // decompressions cannot exceed the aggregate quota.
+    let guard = limiter.acquire(decoded_len as u64).await?;
+    let mut decoder = Decoder::new();
+    let data = decoder
+        .decompress_vec(buf)
+        .context(error::DecompressSnappyPromRemoteRequestSnafu)?;
+    Ok(ChargedBuffer {
+        data,
+        guards: vec![guard],
+    })
+}
+
+/// Decompresses a zstd body with a hard cap on the decoded size, charging the
+/// aggregate request-memory limiter incrementally while the output is
+/// materialized (zstd streams don't declare their decoded size up front).
+pub(crate) async fn zstd_decompress_limited(
+    buf: &[u8],
+    max_decompressed: usize,
+    limiter: &ServerMemoryLimiter,
+) -> Result<ChargedBuffer> {
+    use std::io::Read;
+
+    let decoder = zstd::stream::read::Decoder::new(buf)
+        .context(error::DecompressZstdPromRemoteRequestSnafu)?;
+    // Allow reading one byte past the limit so oversized streams are detected
+    // instead of being silently truncated.
+    let mut limited = decoder.take(max_decompressed as u64 + 1);
+    let mut data = Vec::new();
+    let mut guards = Vec::new();
+    let mut chunk = vec![0u8; ZSTD_DECOMPRESS_CHUNK];
+    loop {
+        let n = limited
+            .read(&mut chunk)
+            .context(error::DecompressZstdPromRemoteRequestSnafu)?;
+        if n == 0 {
+            break;
+        }
+        ensure!(
+            data.len() + n <= max_decompressed,
+            error::DecompressedBodyTooLargeSnafu {
+                size: (data.len() + n) as u64,
+                limit: max_decompressed as u64,
+            }
+        );
+        // Charge each chunk before it is appended so the aggregate quota
+        // bounds the memory while it is being materialized.
+        guards.push(limiter.acquire(n as u64).await?);
+        data.extend_from_slice(&chunk[..n]);
+    }
+    Ok(ChargedBuffer { data, guards })
+}
+
+/// Decompresses a raw Snappy body with the hard decoded-size cap enforced,
+/// without charging the aggregate request-memory limiter.
+///
+/// Used for response bodies (remote read replies) and tests; request bodies
+/// must use [`snappy_decompress_limited`] instead so their decoded size is
+/// also charged to the aggregate quota.
 #[inline]
 pub fn snappy_decompress(buf: &[u8]) -> Result<Vec<u8>> {
+    let decoded_len =
+        snap::raw::decompress_len(buf).context(error::DecompressSnappyPromRemoteRequestSnafu)?;
+    ensure!(
+        decoded_len <= MAX_DECOMPRESSED_REQUEST_SIZE,
+        error::DecompressedBodyTooLargeSnafu {
+            size: decoded_len as u64,
+            limit: MAX_DECOMPRESSED_REQUEST_SIZE as u64,
+        }
+    );
     let mut decoder = Decoder::new();
     decoder
         .decompress_vec(buf)
@@ -559,11 +759,6 @@ pub fn snappy_compress(buf: &[u8]) -> Result<Vec<u8>> {
     encoder
         .compress_vec(buf)
         .context(error::CompressPromRemoteRequestSnafu)
-}
-
-#[inline]
-pub fn zstd_decompress(buf: &[u8]) -> Result<Vec<u8>> {
-    zstd::stream::decode_all(buf).context(error::DecompressZstdPromRemoteRequestSnafu)
 }
 
 /// Mock timeseries for test, it is both used in servers and frontend crate
@@ -705,6 +900,7 @@ mod tests {
         DictionaryArray, Float64Array, StringArray, TimestampMillisecondArray, UInt32Array,
     };
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema, UInt32Type};
+    use common_memory_manager::OnExhaustedPolicy;
     use common_recordbatch::DfRecordBatch;
     use datafusion::prelude::SessionContext;
     use datatypes::data_type::ConcreteDataType;
@@ -833,6 +1029,8 @@ mod tests {
             ColumnSchema::new(greptime_value(), ConcreteDataType::float64_datatype(), true),
             ColumnSchema::new("instance", ConcreteDataType::string_datatype(), true),
             ColumnSchema::new("job", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("service.name", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("Region", ConcreteDataType::string_datatype(), true),
         ]));
         let recordbatch = RecordBatch::new(
             schema,
@@ -841,6 +1039,8 @@ mod tests {
                 Arc::new(Float64Vector::from_vec(vec![3.0])) as _,
                 Arc::new(StringVector::from(vec!["host1"])) as _,
                 Arc::new(StringVector::from(vec!["job"])) as _,
+                Arc::new(StringVector::from(vec!["api"])) as _,
+                Arc::new(StringVector::from(vec!["us"])) as _,
             ],
         )
         .unwrap();
@@ -879,6 +1079,16 @@ mod tests {
                     value: "localhost".to_string(),
                     r#type: NEQ_TYPE,
                 },
+                LabelMatcher {
+                    name: "service.name".to_string(),
+                    value: "api".to_string(),
+                    r#type: EQ_TYPE,
+                },
+                LabelMatcher {
+                    name: "Region".to_string(),
+                    value: "us".to_string(),
+                    r#type: EQ_TYPE,
+                },
             ],
             ..Default::default()
         };
@@ -889,7 +1099,7 @@ mod tests {
 
         let ts_col = greptime_timestamp();
         let expected = format!(
-            "Filter: ?table?.{} >= TimestampMillisecond(1000, None) AND ?table?.{} <= TimestampMillisecond(2000, None) AND regexp_match(?table?.job, Utf8(\"*prom*\")) IS NOT NULL AND ?table?.instance != Utf8(\"localhost\")\n  TableScan: ?table?",
+            "Filter: ?table?.{} >= TimestampMillisecond(1000, None) AND ?table?.{} <= TimestampMillisecond(2000, None) AND regexp_match(?table?.job, Utf8(\"*prom*\")) IS NOT NULL AND ?table?.instance != Utf8(\"localhost\") AND ?table?.service.name = Utf8(\"api\") AND ?table?.Region = Utf8(\"us\")\n  TableScan: ?table?",
             ts_col, ts_col
         );
         assert_eq!(expected, display_string);
@@ -1126,6 +1336,121 @@ mod tests {
     }
 
     #[test]
+    fn test_recordbatches_to_timeseries_merges_across_batches() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                greptime_timestamp(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                true,
+            ),
+            ColumnSchema::new(greptime_value(), ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new("instance", ConcreteDataType::string_datatype(), true),
+        ]));
+
+        let recordbatches = RecordBatches::try_new(
+            schema.clone(),
+            vec![
+                RecordBatch::new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(TimestampMillisecondVector::from_vec(vec![3000, 1500])) as _,
+                        Arc::new(Float64Vector::from_vec(vec![30.0, 15.0])) as _,
+                        Arc::new(StringVector::from(vec!["host1", "host2"])) as _,
+                    ],
+                )
+                .unwrap(),
+                RecordBatch::new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(TimestampMillisecondVector::from_vec(vec![1000])) as _,
+                        Arc::new(Float64Vector::from_vec(vec![10.0])) as _,
+                        Arc::new(StringVector::from(vec!["host1"])) as _,
+                    ],
+                )
+                .unwrap(),
+                RecordBatch::new(
+                    schema,
+                    vec![
+                        Arc::new(TimestampMillisecondVector::from_vec(vec![2000, 2500])) as _,
+                        Arc::new(Float64Vector::from_vec(vec![20.0, 25.0])) as _,
+                        Arc::new(StringVector::from(vec!["host1", "host2"])) as _,
+                    ],
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let timeseries = recordbatches_to_timeseries(
+            "cpu_usage",
+            greptime_timestamp(),
+            greptime_value(),
+            recordbatches,
+        )
+        .unwrap();
+
+        assert_eq!(2, timeseries.len());
+
+        assert_eq!(
+            vec![
+                Label {
+                    name: METRIC_NAME_LABEL.to_string(),
+                    value: "cpu_usage".to_string(),
+                },
+                Label {
+                    name: "instance".to_string(),
+                    value: "host1".to_string(),
+                },
+            ],
+            timeseries[0].labels
+        );
+        assert_eq!(
+            vec![
+                Sample {
+                    value: 10.0,
+                    timestamp: 1000,
+                },
+                Sample {
+                    value: 20.0,
+                    timestamp: 2000,
+                },
+                Sample {
+                    value: 30.0,
+                    timestamp: 3000,
+                },
+            ],
+            timeseries[0].samples
+        );
+
+        assert_eq!(
+            vec![
+                Label {
+                    name: METRIC_NAME_LABEL.to_string(),
+                    value: "cpu_usage".to_string(),
+                },
+                Label {
+                    name: "instance".to_string(),
+                    value: "host2".to_string(),
+                },
+            ],
+            timeseries[1].labels
+        );
+        assert_eq!(
+            vec![
+                Sample {
+                    value: 15.0,
+                    timestamp: 1500,
+                },
+                Sample {
+                    value: 25.0,
+                    timestamp: 2500,
+                },
+            ],
+            timeseries[1].samples
+        );
+    }
+
+    #[test]
     fn test_recordbatches_to_timeseries_borrows_and_groups_dictionary_labels() {
         let arrow_schema = Arc::new(ArrowSchema::new(vec![
             Field::new(
@@ -1215,7 +1540,7 @@ mod tests {
     }
 
     #[test]
-    fn test_recordbatch_to_timeseries_groups_non_contiguous_series() {
+    fn test_recordbatches_to_timeseries_groups_non_contiguous_series() {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
                 greptime_timestamp(),
@@ -1226,7 +1551,7 @@ mod tests {
             ColumnSchema::new("instance", ConcreteDataType::string_datatype(), true),
         ]));
         let recordbatch = RecordBatch::new(
-            schema,
+            schema.clone(),
             vec![
                 Arc::new(TimestampMillisecondVector::from_vec(vec![1000, 2000, 3000])) as _,
                 Arc::new(Float64Vector::from_vec(vec![1.0, 2.0, 3.0])) as _,
@@ -1235,11 +1560,12 @@ mod tests {
         )
         .unwrap();
 
-        let timeseries = recordbatch_to_timeseries(
+        let recordbatches = RecordBatches::try_new(schema, vec![recordbatch]).unwrap();
+        let timeseries = recordbatches_to_timeseries(
             "metric1",
             greptime_timestamp(),
             greptime_value(),
-            recordbatch,
+            recordbatches,
         )
         .unwrap();
 
@@ -1262,7 +1588,7 @@ mod tests {
     }
 
     #[test]
-    fn test_recordbatch_to_timeseries_arrow_label_types_and_nulls() {
+    fn test_recordbatches_to_timeseries_arrow_label_types_and_nulls() {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
                 greptime_timestamp(),
@@ -1275,7 +1601,7 @@ mod tests {
             ColumnSchema::new("shard", ConcreteDataType::int32_datatype(), true),
         ]));
         let recordbatch = RecordBatch::new(
-            schema,
+            schema.clone(),
             vec![
                 Arc::new(TimestampMillisecondVector::from_vec(vec![1000, 2000, 3000])) as _,
                 Arc::new(Float64Vector::from_vec(vec![1.0, 2.0, 3.0])) as _,
@@ -1292,11 +1618,12 @@ mod tests {
         )
         .unwrap();
 
-        let timeseries = recordbatch_to_timeseries(
+        let recordbatches = RecordBatches::try_new(schema, vec![recordbatch]).unwrap();
+        let timeseries = recordbatches_to_timeseries(
             "metric1",
             greptime_timestamp(),
             greptime_value(),
-            recordbatch,
+            recordbatches,
         )
         .unwrap();
 
@@ -1331,5 +1658,127 @@ mod tests {
             ],
             timeseries[1].samples
         );
+    }
+
+    #[tokio::test]
+    async fn test_snappy_varint_bomb_is_rejected_before_allocation() {
+        // A five-byte raw Snappy header declaring a ~4 GiB decoded length.
+        // Regression test for the compression-bomb finding: the declared size
+        // must be rejected by the cap check before any buffer is allocated.
+        let bomb = [0xffu8, 0xff, 0xff, 0xff, 0x0f];
+        let limiter = ServerMemoryLimiter::default();
+
+        let err = snappy_decompress_limited(&bomb, MAX_DECOMPRESSED_REQUEST_SIZE, &limiter)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::Error::DecompressedBodyTooLarge { .. }
+        ));
+        assert_eq!(0, limiter.used_bytes());
+    }
+
+    #[tokio::test]
+    async fn test_snappy_decompress_limited_roundtrip() {
+        let raw = vec![b'a'; 1024 * 1024];
+        let mut encoder = snap::raw::Encoder::new();
+        let compressed = encoder.compress_vec(&raw).unwrap();
+        let limiter = ServerMemoryLimiter::default();
+
+        let decoded =
+            snappy_decompress_limited(&compressed, MAX_DECOMPRESSED_REQUEST_SIZE, &limiter)
+                .await
+                .unwrap();
+        assert_eq!(&decoded[..], &raw[..]);
+    }
+
+    #[tokio::test]
+    async fn test_snappy_charges_and_releases_quota() {
+        let raw = vec![b'a'; 64 * 1024];
+        let mut encoder = snap::raw::Encoder::new();
+        let compressed = encoder.compress_vec(&raw).unwrap();
+        let limiter = ServerMemoryLimiter::new(128 * 1024, OnExhaustedPolicy::Fail);
+
+        let decoded =
+            snappy_decompress_limited(&compressed, MAX_DECOMPRESSED_REQUEST_SIZE, &limiter)
+                .await
+                .unwrap();
+        // Rounding to the 1 KiB permit granularity.
+        assert!(limiter.used_bytes() >= 64 * 1024);
+        assert!(limiter.used_bytes() <= 65 * 1024);
+        drop(decoded);
+        assert_eq!(0, limiter.used_bytes());
+    }
+
+    #[tokio::test]
+    async fn test_snappy_rejects_when_quota_exhausted() {
+        let raw = vec![b'a'; 64 * 1024];
+        let mut encoder = snap::raw::Encoder::new();
+        let compressed = encoder.compress_vec(&raw).unwrap();
+        // Quota smaller than the decoded size.
+        let limiter = ServerMemoryLimiter::new(1024, OnExhaustedPolicy::Fail);
+
+        let err = snappy_decompress_limited(&compressed, MAX_DECOMPRESSED_REQUEST_SIZE, &limiter)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::Error::MemoryLimitExceeded { .. }
+        ));
+        assert_eq!(0, limiter.used_bytes(), "failed charge must be released");
+    }
+
+    #[tokio::test]
+    async fn test_zstd_at_and_over_the_cap() {
+        let limiter = ServerMemoryLimiter::default();
+        let small_cap = 8 * 1024;
+
+        // Exactly at the cap: accepted.
+        let raw = vec![0u8; small_cap];
+        let compressed = zstd::stream::encode_all(&raw[..], 3).unwrap();
+        let decoded = zstd_decompress_limited(&compressed, small_cap, &limiter)
+            .await
+            .unwrap();
+        assert_eq!(decoded.len(), small_cap);
+
+        // One byte past the cap: rejected.
+        let raw = vec![0u8; small_cap + 1];
+        let compressed = zstd::stream::encode_all(&raw[..], 3).unwrap();
+        let err = zstd_decompress_limited(&compressed, small_cap, &limiter)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::Error::DecompressedBodyTooLarge { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_zstd_charges_incrementally() {
+        // 64 KiB wire that expands to 2 MiB must be charged chunk by chunk
+        // against a quota that only fits the expanded size.
+        let raw = vec![0u8; 2 * 1024 * 1024];
+        let compressed = zstd::stream::encode_all(&raw[..], 19).unwrap();
+        assert!(compressed.len() < 16 * 1024);
+        let limiter = ServerMemoryLimiter::new(4 * 1024 * 1024, OnExhaustedPolicy::Fail);
+
+        let decoded = zstd_decompress_limited(&compressed, MAX_DECOMPRESSED_REQUEST_SIZE, &limiter)
+            .await
+            .unwrap();
+        assert_eq!(decoded.len(), raw.len());
+        assert!(limiter.used_bytes() >= raw.len() as u64);
+        drop(decoded);
+        assert_eq!(0, limiter.used_bytes());
+    }
+
+    #[test]
+    fn test_snappy_response_decompress_is_capped() {
+        // The response-side (uncharged) helper must enforce the cap too.
+        let bomb = [0xffu8, 0xff, 0xff, 0xff, 0x0f];
+        let err = snappy_decompress(&bomb).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::Error::DecompressedBodyTooLarge { .. }
+        ));
     }
 }

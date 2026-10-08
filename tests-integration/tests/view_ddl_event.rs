@@ -16,17 +16,21 @@ use std::sync::Arc;
 
 use common_test_util::temp_dir::create_temp_dir;
 use common_wal::config::DatanodeWalConfig;
-use servers::query_handler::sql::SqlQueryHandler;
-use session::context::QueryContext;
 use tests_integration::cluster::GreptimeDbClusterBuilder;
-use tests_integration::standalone::GreptimeDbStandaloneBuilder;
-use tests_integration::test_util::{StorageType, get_test_store_config};
+use tests_integration::test_util::{
+    StorageType, get_test_store_config, setup_authenticated_grpc_database,
+    test_event_recorder_options,
+};
 use uuid::Uuid;
 
-use crate::event_recorder_test_util::{assert_single_event, find_eventually_string};
+use crate::event_recorder_test_util::{
+    assert_procedure_actor, assert_single_event, find_eventually_string,
+};
 
 const CREATE_VIEW_EVENT_TYPE: &str = "create_view";
 const DROP_VIEW_EVENT_TYPE: &str = "drop_view";
+const PROCEDURE_ACTOR: &str = "procedure_actor";
+const PROCEDURE_ACTOR_PASSWORD: &str = "procedure_actor_pwd";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_view_ddl_events() {
@@ -40,6 +44,7 @@ async fn test_view_ddl_events() {
     let home_dir = create_temp_dir("test_view_ddl_events_data_home");
     let cluster = GreptimeDbClusterBuilder::new("test_view_ddl_events")
         .await
+        .with_event_recorder_options(test_event_recorder_options())
         .with_datanodes(1)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Noop)
@@ -54,55 +59,40 @@ async fn test_view_ddl_events() {
     execute_view_ddl(instance, &source_table, &view).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_standalone_view_ddl_events() {
-    common_telemetry::init_default_ut_logging();
-    let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_view_ddl_events")
-        .build()
-        .await;
-    let suffix = Uuid::new_v4().simple();
-    let source_table = format!("view_ddl_event_source_{suffix}");
-    let view = format!("view_ddl_event_{suffix}");
-
-    execute_view_ddl(standalone.fe_instance(), &source_table, &view).await;
-}
-
 async fn execute_view_ddl(
     instance: &Arc<frontend::instance::Instance>,
     source_table: &str,
     view: &str,
 ) {
-    instance
-        .do_query(
-            &format!(
-                "CREATE TABLE {source_table} (host STRING PRIMARY KEY, amount DOUBLE, ts TIMESTAMP TIME INDEX)"
-            ),
-            QueryContext::arc(),
-        )
+    let (database, _grpc_server) = setup_authenticated_grpc_database(
+        instance.clone(),
+        PROCEDURE_ACTOR,
+        PROCEDURE_ACTOR_PASSWORD,
+    )
+    .await;
+
+    database
+        .sql(format!(
+            "CREATE TABLE {source_table} (host STRING PRIMARY KEY, amount DOUBLE, ts TIMESTAMP TIME INDEX)"
+        ))
         .await
-        .remove(0)
         .unwrap();
 
-    instance
-        .do_query(
-            &format!("CREATE VIEW {view} AS SELECT amount FROM {source_table}"),
-            QueryContext::arc(),
-        )
+    database
+        .sql(format!(
+            "CREATE VIEW {view} AS SELECT amount FROM {source_table}"
+        ))
         .await
-        .remove(0)
         .unwrap();
     assert_create_events(instance, view).await;
 
-    instance
-        .do_query(&format!("DROP VIEW {view}"), QueryContext::arc())
-        .await
-        .remove(0)
-        .unwrap();
+    database.sql(format!("DROP VIEW {view}")).await.unwrap();
     assert_drop_events(instance, view).await;
 }
 
 async fn assert_create_events(instance: &Arc<frontend::instance::Instance>, view: &str) {
     let procedure_id = find_submitted_procedure_id(instance, CREATE_VIEW_EVENT_TYPE, view).await;
+    assert_procedure_actor(instance, &procedure_id, Some(PROCEDURE_ACTOR)).await;
     assert_single_event(
         instance,
         &format!(
@@ -157,11 +147,12 @@ async fn assert_event_context(
         "event_context",
     )
     .await;
-    assert_eq!(r#"{"reason":"manual"}"#, actual);
+    assert_eq!(r#"{"protocol":"grpc","reason":"manual"}"#, actual);
 }
 
 async fn assert_drop_events(instance: &Arc<frontend::instance::Instance>, view: &str) {
     let procedure_id = find_submitted_procedure_id(instance, DROP_VIEW_EVENT_TYPE, view).await;
+    assert_procedure_actor(instance, &procedure_id, Some(PROCEDURE_ACTOR)).await;
     assert_single_event(
         instance,
         &format!(

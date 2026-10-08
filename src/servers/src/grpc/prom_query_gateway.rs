@@ -47,6 +47,11 @@ pub struct PrometheusGatewayService {
 impl PrometheusGateway for PrometheusGatewayService {
     async fn handle(&self, req: Request<PromqlRequest>) -> TonicResult<Response<PromqlResponse>> {
         let mut is_range_query = false;
+        let channel = req
+            .extensions()
+            .get::<Channel>()
+            .copied()
+            .unwrap_or(Channel::Promql);
         let inner = req.into_inner();
         let prom_query = match inner.promql.context(InvalidQuerySnafu {
             reason: "Expecting non-empty PromqlRequest.",
@@ -80,12 +85,8 @@ impl PrometheusGateway for PrometheusGatewayService {
         };
 
         let header = inner.header.as_ref();
-        let query_ctx = create_query_context(
-            Channel::Promql,
-            header,
-            Default::default(),
-            Default::default(),
-        )?;
+        let query_ctx =
+            create_query_context(channel, header, Default::default(), Default::default())?;
 
         let user_info = auth(self.user_provider.clone(), header, &query_ctx).await?;
         query_ctx.set_current_user(user_info);
@@ -135,11 +136,15 @@ impl PrometheusGatewayService {
         };
         let (metric_name, mut result_type) = retrieve_metric_name_and_result_type(query.expr());
         let query_id = ctx.remote_query_id().map(str::to_string);
-        let result = self.handler.do_query_parsed(query, ctx).await;
-        // range query only returns matrix
-        if is_range_query {
+        // A range query only returns a matrix, and matrix serialization sorts
+        // samples and series, so execution order never reaches the response.
+        let query = if is_range_query {
             result_type = ValueType::Matrix;
+            query.with_unordered_output()
+        } else {
+            query
         };
+        let result = self.handler.do_query_parsed(query, ctx).await;
 
         PrometheusJsonResponse::from_query_result(
             result,

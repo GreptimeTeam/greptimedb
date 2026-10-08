@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use datafusion::config::ConfigOptions;
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
-use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::repartition::RepartitionExec;
+use datafusion::physical_plan::{ChildrenPropertiesMode, ExecutionPlan, ReplaceChildrenOptions};
 use datafusion_common::Result as DfResult;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 
@@ -35,29 +35,18 @@ impl PhysicalOptimizerRule for RemoveDuplicate {
         plan: Arc<dyn ExecutionPlan>,
         _config: &ConfigOptions,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
-        Self::do_optimize(plan)
-    }
-
-    fn name(&self) -> &str {
-        "RemoveDuplicateRule"
-    }
-
-    fn schema_check(&self) -> bool {
-        false
-    }
-}
-
-impl RemoveDuplicate {
-    fn do_optimize(plan: Arc<dyn ExecutionPlan>) -> DfResult<Arc<dyn ExecutionPlan>> {
         let result = plan
             .transform_down(|plan| {
-                if plan.as_any().is::<RepartitionExec>() {
+                if plan.is::<RepartitionExec>() {
                     // check child
                     let child = plan.children()[0].clone();
-                    if child.as_any().type_id() == plan.as_any().type_id() {
+                    if child.is::<RepartitionExec>() {
                         // remove child
                         let grand_child = child.children()[0].clone();
-                        let new_plan = plan.with_new_children(vec![grand_child])?;
+                        let new_plan = plan.replace_children(
+                            vec![grand_child],
+                            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+                        )?;
                         return Ok(Transformed::yes(new_plan));
                     }
                 }
@@ -65,7 +54,14 @@ impl RemoveDuplicate {
                 Ok(Transformed::no(plan))
             })?
             .data;
-
         Ok(result)
+    }
+
+    fn name(&self) -> &str {
+        "RemoveDuplicateRule"
+    }
+
+    fn schema_check(&self) -> bool {
+        true
     }
 }

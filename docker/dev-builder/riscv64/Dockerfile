@@ -11,6 +11,7 @@ RUN apt-get update && \
 # Install dependencies, including the riscv64 cross toolchain.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     libssl-dev \
+    libatomic1 \
     tzdata \
     curl \
     unzip \
@@ -39,6 +40,20 @@ RUN mv -f protoc3/bin/* /usr/local/bin/
 # Use cp -r instead of mv so that it also works when the base image already
 # contains protobuf headers under /usr/local/include.
 RUN cp -r protoc3/include/* /usr/local/include/
+
+# Install mold and make it the default linker (the equivalent of
+# rui314/setup-mold with its default options on GitHub-hosted runners) for
+# lower peak memory usage during linking. The host `ld` symlink covers
+# host-side linking (build scripts, proc macros); the riscv64 symlink covers
+# the cross target -- the cross gcc driver passes -m elf64lriscv explicitly,
+# so mold picks the right emulation.
+ARG MOLD_VERSION=2.42.1
+RUN arch="$(uname -m)" && \
+    curl -fsSL -o /tmp/mold.tar.gz https://github.com/rui314/mold/releases/download/v${MOLD_VERSION}/mold-${MOLD_VERSION}-${arch}-linux.tar.gz && \
+    tar -C /usr/local --strip-components=1 -xzf /tmp/mold.tar.gz && \
+    rm /tmp/mold.tar.gz && \
+    ln -sf /usr/local/bin/mold "$(readlink -f /usr/bin/ld)" && \
+    ln -sf /usr/local/bin/mold "$(readlink -f "$(command -v riscv64-linux-gnu-ld)")"
 
 # Silence all `safe.directory` warnings, to avoid the "detect dubious repository"
 # error when building with the repository mounted from a different user.

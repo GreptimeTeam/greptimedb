@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use api::helper::{ColumnDataTypeWrapper, to_grpc_value};
 use api::v1::bulk_wal_entry::Body;
-use api::v1::{ArrowIpc, BulkWalEntry, Mutation, OpType};
+use api::v1::{ArrowIpc, BulkWalEntry, Mutation, OpType, SemanticType};
 use bytes::Bytes;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_recordbatch::DfRecordBatch as RecordBatch;
@@ -30,14 +30,16 @@ use datafusion_common::pruning::PruningStatistics;
 use datafusion_expr::utils::expr_to_columns;
 use datatypes::arrow;
 use datatypes::arrow::array::{
-    Array, ArrayRef, BinaryArray, BooleanArray, StringDictionaryBuilder, UInt8Array, UInt64Array,
+    Array, ArrayRef, BinaryArray, BooleanArray, DictionaryArray, StringDictionaryBuilder,
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray, UInt8Array, UInt32Array, UInt64Array,
 };
 use datatypes::arrow::compute::{SortColumn, SortOptions, concat_batches};
 use datatypes::arrow::datatypes::{
-    DataType as ArrowDataType, Field, Schema, SchemaRef, UInt32Type,
+    DataType as ArrowDataType, Field, Schema, SchemaRef, TimeUnit, UInt32Type,
 };
 use datatypes::data_type::DataType;
-use datatypes::extension::json::is_json2_extension_type;
+use datatypes::extension::json::align_schema_with_json_array;
 use datatypes::prelude::{MutableVector, Vector};
 use datatypes::value::ValueRef;
 use datatypes::vectors::Helper;
@@ -51,16 +53,17 @@ use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
+use store_api::mito_engine_options::FloatFieldEncoding;
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{ColumnId, FileId, SequenceNumber, SequenceRange};
 
+use crate::compaction::{collect_json2_rewrite_plans, rewrite_json2_batch, rewrite_json2_schema};
 use crate::error::{
     self, ColumnNotFoundSnafu, ComputeArrowSnafu, CreateDefaultSnafu, DataTypeMismatchSnafu,
     EncodeMemtableSnafu, EncodeSnafu, InvalidMetadataSnafu, InvalidRequestSnafu,
     NewRecordBatchSnafu, Result,
 };
 use crate::memtable::bulk::context::{BulkIterContext, BulkIterContextRef};
-use crate::memtable::bulk::json_align::Json2Aligner;
 use crate::memtable::bulk::part_reader::EncodedBulkPartIter;
 use crate::memtable::time_series::{ValueBuilder, Values};
 use crate::memtable::{BoxedRecordBatchIterator, MemScanMetrics, MemtableStats};
@@ -68,7 +71,9 @@ use crate::sst::SeriesEstimator;
 use crate::sst::index::IndexOutput;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder};
-use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo};
+use crate::sst::parquet::{
+    COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo, apply_float_field_encoding,
+};
 
 const INIT_DICT_VALUE_CAPACITY: usize = 8;
 
@@ -78,7 +83,12 @@ pub struct BulkPart {
     pub batch: RecordBatch,
     pub max_timestamp: i64,
     pub min_timestamp: i64,
+    /// Uniform sequence for external bulk writes, or the maximum row sequence
+    /// for parts produced by [`BulkPartConverter`]. Rows need not share it.
     pub sequence: u64,
+    /// Lower bound of row sequences. Slices may inherit a lower bound from
+    /// their parent part rather than recomputing an exact minimum.
+    pub min_sequence: SequenceNumber,
     pub timestamp_index: usize,
     pub raw_data: Option<ArrowIpc>,
 }
@@ -99,6 +109,9 @@ impl TryFrom<BulkWalEntry> for BulkPart {
                     max_timestamp: value.max_ts,
                     min_timestamp: value.min_ts,
                     sequence: value.sequence,
+                    // Bulk WAL entries represent uniform-sequence external writes.
+                    // Row mutations reconstruct their bounds through BulkPartConverter.
+                    min_sequence: value.sequence,
                     timestamp_index: value.timestamp_index as usize,
                     raw_data: Some(ipc),
                 })
@@ -181,6 +194,7 @@ impl BulkPart {
             num_rows: self.num_rows(),
             num_ranges: 1,
             max_sequence: self.sequence,
+            min_sequence: self.min_sequence,
             series_count: self.estimated_series_count(),
         }
     }
@@ -206,6 +220,12 @@ impl BulkPart {
         // Finds columns that need to be filled
         let mut columns_to_fill = Vec::new();
         for column_meta in &region_metadata.column_metadatas {
+            // Sparse bulk batches already carry tags in the encoded primary key.
+            if region_metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse
+                && column_meta.semantic_type == SemanticType::Tag
+            {
+                continue;
+            }
             // TODO(yingwen): Returns error if it is impure default after we support filling
             // bulk insert request in the frontend
             if !batch_columns.contains(column_meta.column_schema.name.as_str()) {
@@ -351,6 +371,8 @@ pub struct UnorderedPart {
     max_timestamp: i64,
     /// Maximum sequence number across all parts.
     max_sequence: u64,
+    /// Minimum sequence lower bound across all parts.
+    min_sequence: SequenceNumber,
     /// Row count threshold for accepting parts (default: 1024).
     threshold: usize,
     /// Row count threshold for compacting (default: 4096).
@@ -373,6 +395,7 @@ impl UnorderedPart {
             min_timestamp: i64::MAX,
             max_timestamp: i64::MIN,
             max_sequence: 0,
+            min_sequence: SequenceNumber::MAX,
             threshold: 1024,
             compact_threshold: 4096,
         }
@@ -420,6 +443,7 @@ impl UnorderedPart {
         self.min_timestamp = self.min_timestamp.min(part.min_timestamp);
         self.max_timestamp = self.max_timestamp.max(part.max_timestamp);
         self.max_sequence = self.max_sequence.max(part.sequence);
+        self.min_sequence = self.min_sequence.min(part.min_sequence);
         self.parts.push(part);
     }
 
@@ -440,7 +464,7 @@ impl UnorderedPart {
 
     /// Concatenates and sorts all parts into a single RecordBatch.
     /// Returns None if the collection is empty.
-    pub fn concat_and_sort(&self) -> Result<Option<RecordBatch>> {
+    pub fn concat_and_sort(&self, metadata: &RegionMetadataRef) -> Result<Option<RecordBatch>> {
         if self.parts.is_empty() {
             return Ok(None);
         }
@@ -450,17 +474,28 @@ impl UnorderedPart {
             return Ok(Some(self.parts[0].batch.clone()));
         }
 
-        // Get the schema from the first part
-        let schema = self.parts[0].batch.schema();
-        let concatenated = if schema.fields().iter().any(is_json2_extension_type) {
-            let aligner = Json2Aligner::try_new(self.parts.iter().map(|part| part.batch.schema()))?;
-            let aligned_batches =
-                aligner.align_batches(self.parts.iter().map(|part| part.batch.clone()))?;
-            concat_batches(aligner.schema(), &aligned_batches).context(ComputeArrowSnafu)?
-        } else {
-            concat_batches(&schema, self.parts.iter().map(|x| &x.batch))
-                .context(ComputeArrowSnafu)?
-        };
+        let schemas = self
+            .parts
+            .iter()
+            .map(|x| (x.batch.schema(), x.num_rows() as u64))
+            .collect::<Vec<_>>();
+        let plans = collect_json2_rewrite_plans(metadata, &schemas)?;
+
+        debug_assert!(self.parts.windows(2).all(|w| rewrite_json2_schema(
+            &w[0].batch.schema(),
+            &plans
+        ) == rewrite_json2_schema(
+            &w[1].batch.schema(),
+            &plans
+        )));
+        let schema = rewrite_json2_schema(&self.parts[0].batch.schema(), &plans);
+
+        let batches = self
+            .parts
+            .iter()
+            .map(|x| rewrite_json2_batch(x.batch.clone(), &plans))
+            .collect::<Result<Vec<_>>>()?;
+        let concatenated = concat_batches(&schema, &batches).context(ComputeArrowSnafu)?;
 
         // Sort the concatenated batch
         let sorted_batch = sort_primary_key_record_batch(&concatenated)?;
@@ -470,8 +505,8 @@ impl UnorderedPart {
 
     /// Converts all parts into a single sorted BulkPart.
     /// Returns None if the collection is empty.
-    pub fn to_bulk_part(&self) -> Result<Option<BulkPart>> {
-        let Some(sorted_batch) = self.concat_and_sort()? else {
+    pub fn to_bulk_part(&self, metadata: &RegionMetadataRef) -> Result<Option<BulkPart>> {
+        let Some(sorted_batch) = self.concat_and_sort(metadata)? else {
             return Ok(None);
         };
 
@@ -482,6 +517,7 @@ impl UnorderedPart {
             max_timestamp: self.max_timestamp,
             min_timestamp: self.min_timestamp,
             sequence: self.max_sequence,
+            min_sequence: self.min_sequence,
             timestamp_index,
             raw_data: None,
         }))
@@ -495,6 +531,7 @@ impl UnorderedPart {
         self.min_timestamp = i64::MAX;
         self.max_timestamp = i64::MIN;
         self.max_sequence = 0;
+        self.min_sequence = SequenceNumber::MAX;
     }
 }
 
@@ -566,6 +603,8 @@ pub struct BulkPartConverter {
     min_ts: i64,
     /// Max sequence number.
     max_sequence: SequenceNumber,
+    /// Min sequence number.
+    min_sequence: SequenceNumber,
 }
 
 impl BulkPartConverter {
@@ -603,6 +642,7 @@ impl BulkPartConverter {
             min_ts: i64::MAX,
             max_ts: i64::MIN,
             max_sequence: SequenceNumber::MIN,
+            min_sequence: SequenceNumber::MAX,
         }
     }
 
@@ -681,6 +721,7 @@ impl BulkPartConverter {
         self.min_ts = self.min_ts.min(ts);
         self.max_ts = self.max_ts.max(ts);
         self.max_sequence = self.max_sequence.max(kv.sequence());
+        self.min_sequence = self.min_sequence.min(kv.sequence());
 
         Ok(())
     }
@@ -721,30 +762,11 @@ impl BulkPartConverter {
             max_timestamp: self.max_ts,
             min_timestamp: self.min_ts,
             sequence: self.max_sequence,
+            min_sequence: self.min_sequence,
             timestamp_index,
             raw_data: None,
         })
     }
-}
-
-fn align_schema_with_json_array(schema: SchemaRef, columns: &[ArrayRef]) -> SchemaRef {
-    if schema.fields().iter().all(|f| !is_json2_extension_type(f)) {
-        return schema;
-    }
-
-    let mut fields = Vec::with_capacity(schema.fields().len());
-    for (field, array) in schema.fields().iter().zip(columns) {
-        if !is_json2_extension_type(field) {
-            fields.push(field.clone());
-            continue;
-        }
-
-        let mut field = field.as_ref().clone();
-        field.set_data_type(array.data_type().clone());
-        fields.push(Arc::new(field));
-    }
-
-    Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
 }
 
 fn new_primary_key_column_builders(
@@ -771,6 +793,147 @@ fn new_primary_key_column_builders(
 
 /// Sorts the record batch with primary key format.
 pub fn sort_primary_key_record_batch(batch: &RecordBatch) -> Result<RecordBatch> {
+    let indices = if let Some(indices) = try_sort_primary_key_indices(batch)? {
+        indices
+    } else {
+        lexsort_primary_key_indices(batch)?
+    };
+
+    datatypes::arrow::compute::take_record_batch(batch, &indices).context(ComputeArrowSnafu)
+}
+
+/// Sorts the known, non-null primary-key layout without comparing encoded keys for every row.
+///
+/// Returns `None` if the batch does not have the exact layout supported by this fast path.
+fn try_sort_primary_key_indices(batch: &RecordBatch) -> Result<Option<UInt32Array>> {
+    let total_columns = batch.num_columns();
+    let timestamp = batch.column(total_columns - 4);
+    let primary_key = batch.column(total_columns - 3);
+    let sequence = batch.column(total_columns - 2);
+
+    let Some(primary_key) = primary_key
+        .as_any()
+        .downcast_ref::<DictionaryArray<UInt32Type>>()
+    else {
+        return Ok(None);
+    };
+    let Some(sequence) = sequence.as_any().downcast_ref::<UInt64Array>() else {
+        return Ok(None);
+    };
+
+    if batch.num_rows() > u32::MAX as usize
+        || primary_key.null_count() != 0
+        || primary_key.values().data_type() != &ArrowDataType::Binary
+        || primary_key.values().null_count() != 0
+        || primary_key.values().len() > batch.num_rows()
+        || timestamp.null_count() != 0
+        || sequence.null_count() != 0
+    {
+        return Ok(None);
+    }
+
+    let indices = match timestamp.data_type() {
+        ArrowDataType::Timestamp(TimeUnit::Second, _) => timestamp
+            .as_any()
+            .downcast_ref::<TimestampSecondArray>()
+            .map(|timestamp| sort_primary_key_indices(primary_key, timestamp.values(), sequence)),
+        ArrowDataType::Timestamp(TimeUnit::Millisecond, _) => timestamp
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .map(|timestamp| sort_primary_key_indices(primary_key, timestamp.values(), sequence)),
+        ArrowDataType::Timestamp(TimeUnit::Microsecond, _) => timestamp
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .map(|timestamp| sort_primary_key_indices(primary_key, timestamp.values(), sequence)),
+        ArrowDataType::Timestamp(TimeUnit::Nanosecond, _) => timestamp
+            .as_any()
+            .downcast_ref::<TimestampNanosecondArray>()
+            .map(|timestamp| sort_primary_key_indices(primary_key, timestamp.values(), sequence)),
+        _ => None,
+    };
+
+    indices.transpose()
+}
+
+/// Computes sorted row indices by ranking dictionary values, scattering rows into primary-key
+/// buckets, and sorting only buckets that are not already ordered by time and sequence.
+fn sort_primary_key_indices(
+    primary_key: &PrimaryKeyArray,
+    timestamps: &[i64],
+    sequences: &UInt64Array,
+) -> Result<UInt32Array> {
+    debug_assert_eq!(primary_key.len(), timestamps.len());
+    debug_assert_eq!(primary_key.len(), sequences.len());
+    debug_assert_eq!(primary_key.null_count(), 0);
+    debug_assert_eq!(primary_key.values().null_count(), 0);
+    debug_assert_eq!(sequences.null_count(), 0);
+
+    // Ranks compare in the same order as the dictionary values. Equal dictionary values receive
+    // the same rank, which is required because Arrow dictionary concatenation only deduplicates
+    // values on a best-effort basis.
+    let value_ranks = datatypes::arrow::compute::rank(
+        primary_key.values().as_ref(),
+        Some(SortOptions {
+            descending: false,
+            nulls_first: true,
+        }),
+    )
+    .context(ComputeArrowSnafu)?;
+
+    // A rank is at most the number of dictionary values. It is not necessarily dense when the
+    // dictionary contains duplicate values, so keep one extra slot and allow empty buckets.
+    let mut counts = vec![0usize; value_ranks.len() + 1];
+    for &key in primary_key.keys().values() {
+        counts[value_ranks[key as usize] as usize] += 1;
+    }
+
+    let mut bucket_offsets = vec![0usize; counts.len()];
+    let mut offset = 0;
+    for (bucket_offset, &count) in bucket_offsets.iter_mut().zip(&counts) {
+        *bucket_offset = offset;
+        offset += count;
+    }
+
+    // Scatter in input order. This preserves already sorted runs within each primary key.
+    let mut next_offsets = bucket_offsets.clone();
+    let mut indices = vec![0u32; primary_key.len()];
+    for (row, &key) in primary_key.keys().values().iter().enumerate() {
+        let rank = value_ranks[key as usize] as usize;
+        indices[next_offsets[rank]] = row as u32;
+        next_offsets[rank] += 1;
+    }
+
+    let sequences = sequences.values();
+    for (&start, count) in bucket_offsets.iter().zip(counts) {
+        let end = start + count;
+        let bucket = &mut indices[start..end];
+        if !bucket.is_sorted_by(|left, right| {
+            compare_time_sequence(timestamps, sequences, *left, *right).is_le()
+        }) {
+            bucket.sort_unstable_by(|left, right| {
+                compare_time_sequence(timestamps, sequences, *left, *right)
+            });
+        }
+    }
+
+    Ok(UInt32Array::from(indices))
+}
+
+#[inline]
+fn compare_time_sequence(
+    timestamps: &[i64],
+    sequences: &[u64],
+    left: u32,
+    right: u32,
+) -> std::cmp::Ordering {
+    let left = left as usize;
+    let right = right as usize;
+    timestamps[left]
+        .cmp(&timestamps[right])
+        .then_with(|| sequences[right].cmp(&sequences[left]))
+}
+
+fn lexsort_primary_key_indices(batch: &RecordBatch) -> Result<UInt32Array> {
     let total_columns = batch.num_columns();
     let sort_columns = vec![
         // Primary key column (ascending)
@@ -799,10 +962,7 @@ pub fn sort_primary_key_record_batch(batch: &RecordBatch) -> Result<RecordBatch>
         },
     ];
 
-    let indices = datatypes::arrow::compute::lexsort_to_indices(&sort_columns, None)
-        .context(ComputeArrowSnafu)?;
-
-    datatypes::arrow::compute::take_record_batch(batch, &indices).context(ComputeArrowSnafu)
+    datatypes::arrow::compute::lexsort_to_indices(&sort_columns, None).context(ComputeArrowSnafu)
 }
 
 /// Converts a `BulkPart` that is unordered and without encoded primary keys into a `BulkPart`
@@ -990,6 +1150,7 @@ pub fn convert_bulk_part(
         max_timestamp: part.max_timestamp,
         min_timestamp: part.min_timestamp,
         sequence: part.sequence,
+        min_sequence: part.sequence,
         timestamp_index: new_timestamp_index,
         raw_data: None,
     }))
@@ -1043,6 +1204,7 @@ impl EncodedBulkPart {
             num_rows: meta.num_rows,
             num_ranges: 1,
             max_sequence: meta.max_sequence,
+            min_sequence: 0,
             series_count: meta.num_series as usize,
         }
     }
@@ -1155,22 +1317,29 @@ pub struct BulkPartEncoder {
 
 impl BulkPartEncoder {
     pub fn new(metadata: RegionMetadataRef, row_group_size: usize) -> Result<BulkPartEncoder> {
+        Self::new_with_float_field_encoding(metadata, row_group_size, FloatFieldEncoding::default())
+    }
+
+    pub(super) fn new_with_float_field_encoding(
+        metadata: RegionMetadataRef,
+        row_group_size: usize,
+        float_field_encoding: FloatFieldEncoding,
+    ) -> Result<BulkPartEncoder> {
         // TODO(yingwen): Skip arrow schema if needed.
         let json = metadata.to_json().context(InvalidMetadataSnafu)?;
         let key_value_meta =
             parquet::file::metadata::KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
 
         // TODO(yingwen): Do we need compression?
-        let writer_props = Some(
-            WriterProperties::builder()
-                .set_key_value_metadata(Some(vec![key_value_meta]))
-                .set_write_batch_size(row_group_size)
-                .set_max_row_group_row_count(Some(row_group_size))
-                .set_compression(Compression::ZSTD(ZstdLevel::default()))
-                .set_column_index_truncate_length(None)
-                .set_statistics_truncate_length(None)
-                .build(),
-        );
+        let mut props = WriterProperties::builder()
+            .set_key_value_metadata(Some(vec![key_value_meta]))
+            .set_write_batch_size(row_group_size)
+            .set_max_row_group_row_count(Some(row_group_size))
+            .set_compression(Compression::ZSTD(ZstdLevel::default()))
+            .set_column_index_truncate_length(COLUMN_INDEX_TRUNCATE_LENGTH)
+            .set_statistics_truncate_length(None);
+        props = apply_float_field_encoding(props, &metadata, float_field_encoding);
+        let writer_props = Some(props.build());
 
         Ok(Self {
             metadata,
@@ -1407,7 +1576,7 @@ impl PruningStatistics for BatchPruningStats<'_> {
         None
     }
 
-    fn row_counts(&self, _column: &Column) -> Option<ArrayRef> {
+    fn row_counts(&self) -> Option<ArrayRef> {
         None
     }
 
@@ -1658,6 +1827,7 @@ impl MultiBulkPart {
             num_rows: self.num_rows(),
             num_ranges: 1,
             max_sequence: self.max_sequence,
+            min_sequence: 0,
             series_count: self.series_count,
         }
     }
@@ -1674,6 +1844,8 @@ mod tests {
     use datatypes::prelude::{ConcreteDataType, Value};
     use datatypes::schema::ColumnSchema;
     use mito_codec::row_converter::build_primary_key_codec;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
     use store_api::storage::consts::ReservedColumnId;
@@ -1693,6 +1865,137 @@ mod tests {
     }
 
     #[test]
+    fn test_sort_primary_key_record_batch_with_duplicate_dictionary_values() {
+        // Dictionary keys 1 and 2 both represent "series_a". This can happen after Arrow
+        // concatenates dictionaries because dictionary deduplication is best-effort.
+        let primary_key = DictionaryArray::try_new(
+            UInt32Array::from(vec![0, 1, 0, 2, 2]),
+            Arc::new(BinaryArray::from_vec(vec![
+                b"series_b".as_slice(),
+                b"series_a".as_slice(),
+                b"series_a".as_slice(),
+            ])),
+        )
+        .unwrap();
+        let timestamps = TimestampMillisecondArray::from(vec![20, 30, 10, 30, 10]);
+        let sequences = UInt64Array::from(vec![5, 6, 4, 8, 9]);
+        let row_ids = UInt32Array::from_iter_values(0..5);
+        let op_types = UInt8Array::from_value(OpType::Put as u8, 5);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("row_id", ArrowDataType::UInt32, false),
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(
+                PRIMARY_KEY_COLUMN_NAME,
+                ArrowDataType::Dictionary(
+                    Box::new(ArrowDataType::UInt32),
+                    Box::new(ArrowDataType::Binary),
+                ),
+                false,
+            ),
+            Field::new("__sequence", ArrowDataType::UInt64, false),
+            Field::new("__op_type", ArrowDataType::UInt8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(row_ids),
+                Arc::new(timestamps),
+                Arc::new(primary_key),
+                Arc::new(sequences),
+                Arc::new(op_types),
+            ],
+        )
+        .unwrap();
+
+        let expected_indices = lexsort_primary_key_indices(&batch).unwrap();
+        let expected =
+            datatypes::arrow::compute::take_record_batch(&batch, &expected_indices).unwrap();
+        let actual = sort_primary_key_record_batch(&batch).unwrap();
+
+        let expected_row_ids = expected
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        let actual_row_ids = actual
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap();
+        assert_eq!(expected_row_ids, actual_row_ids);
+        assert_eq!(actual_row_ids.values(), &[4, 3, 1, 2, 0]);
+    }
+
+    #[test]
+    fn test_sort_primary_key_record_batch_against_lexsort() {
+        let mut rng = StdRng::seed_from_u64(0x5eed);
+        for _ in 0..100 {
+            let num_rows = rng.random_range(0..128);
+            let keys = UInt32Array::from_iter_values((0..num_rows).map(|_| rng.random_range(0..8)));
+            let primary_key = DictionaryArray::try_new(
+                keys,
+                Arc::new(BinaryArray::from_vec(vec![
+                    b"d".as_slice(),
+                    b"a".as_slice(),
+                    b"c".as_slice(),
+                    b"b".as_slice(),
+                    b"a".as_slice(),
+                    b"d".as_slice(),
+                    b"b".as_slice(),
+                    b"c".as_slice(),
+                ])),
+            )
+            .unwrap();
+            let timestamps = TimestampMillisecondArray::from_iter_values(
+                (0..num_rows).map(|_| rng.random_range(-1000..1000)),
+            );
+            // Unique sequences ensure that the oracle and fast path have no fully equal sort keys.
+            let sequences = UInt64Array::from_iter_values(0..num_rows as u64);
+            let row_ids = UInt32Array::from_iter_values(0..num_rows as u32);
+            let op_types = UInt8Array::from_value(OpType::Put as u8, num_rows);
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("row_id", ArrowDataType::UInt32, false),
+                Field::new(
+                    "ts",
+                    ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                ),
+                Field::new(
+                    PRIMARY_KEY_COLUMN_NAME,
+                    ArrowDataType::Dictionary(
+                        Box::new(ArrowDataType::UInt32),
+                        Box::new(ArrowDataType::Binary),
+                    ),
+                    false,
+                ),
+                Field::new("__sequence", ArrowDataType::UInt64, false),
+                Field::new("__op_type", ArrowDataType::UInt8, false),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(row_ids),
+                    Arc::new(timestamps),
+                    Arc::new(primary_key),
+                    Arc::new(sequences),
+                    Arc::new(op_types),
+                ],
+            )
+            .unwrap();
+
+            let expected_indices = lexsort_primary_key_indices(&batch).unwrap();
+            let expected =
+                datatypes::arrow::compute::take_record_batch(&batch, &expected_indices).unwrap();
+            let actual = sort_primary_key_record_batch(&batch).unwrap();
+            assert_eq!(expected.column(0), actual.column(0));
+        }
+    }
+
+    #[test]
     fn test_unordered_part_tracks_estimated_bytes() {
         let mut part = UnorderedPart::new();
         let bulk_part = BulkPart {
@@ -1700,6 +2003,7 @@ mod tests {
             max_timestamp: 0,
             min_timestamp: 0,
             sequence: 0,
+            min_sequence: 0,
             timestamp_index: 0,
             raw_data: None,
         };
@@ -2408,6 +2712,7 @@ mod tests {
             max_timestamp: 0,
             min_timestamp: 0,
             sequence: 0,
+            min_sequence: 0,
             timestamp_index: 0,
             raw_data: None,
         };
@@ -2453,6 +2758,7 @@ mod tests {
             max_timestamp: 2000,
             min_timestamp: 1000,
             sequence: 5,
+            min_sequence: 5,
             timestamp_index: 4,
             raw_data: None,
         };
@@ -2477,6 +2783,7 @@ mod tests {
         assert_eq!(converted.max_timestamp, 2000);
         assert_eq!(converted.min_timestamp, 1000);
         assert_eq!(converted.sequence, 5);
+        assert_eq!(converted.min_sequence, 5);
 
         let schema = converted.batch.schema();
         let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -2545,6 +2852,7 @@ mod tests {
             max_timestamp: 2000,
             min_timestamp: 1000,
             sequence: 3,
+            min_sequence: 3,
             timestamp_index: 4,
             raw_data: None,
         };
@@ -2658,6 +2966,7 @@ mod tests {
             max_timestamp: 2000,
             min_timestamp: 1000,
             sequence: 7,
+            min_sequence: 7,
             timestamp_index: 3,
             raw_data: None,
         };
@@ -2738,6 +3047,7 @@ mod tests {
             max_timestamp: 4000,
             min_timestamp: 1000,
             sequence: 10,
+            min_sequence: 10,
             timestamp_index: 4,
             raw_data: None,
         };
@@ -2791,6 +3101,44 @@ mod tests {
             converter.append_key_values(&kv).unwrap();
         }
         converter.convert().unwrap()
+    }
+
+    #[test]
+    fn test_min_sequence_survives_slicing_and_unordered_part_reuse() {
+        let metadata = metadata_for_test();
+        let make_part = |sequence| {
+            build_converted_bulk_part(&[MutationInput {
+                k0: "a",
+                k1: 0,
+                timestamps: &[2000, 1000],
+                v1: &[Some(1.0), Some(2.0)],
+                sequence,
+            }])
+        };
+        let original = make_part(100);
+        let sliced = crate::memtable::time_partition::filter_record_batch(&original, 1000, 1001)
+            .unwrap()
+            .unwrap();
+        // The remaining row has sequence 101. Inheriting 100 is conservative
+        // and avoids rescanning the sequence column after each partition split.
+        assert_eq!(1, sliced.num_rows());
+        assert_eq!(100, sliced.min_sequence);
+        assert_eq!(101, sliced.sequence);
+
+        let mut unordered = UnorderedPart::new();
+        unordered.push(sliced.clone());
+        unordered.push(make_part(10));
+        let merged = unordered.to_bulk_part(&metadata).unwrap().unwrap();
+        assert_eq!(3, merged.num_rows());
+        assert_eq!(10, merged.min_sequence);
+        assert_eq!(101, merged.sequence);
+        assert_eq!(10, merged.to_memtable_stats(&metadata).min_sequence);
+
+        unordered.clear();
+        unordered.push(sliced);
+        let reused = unordered.to_bulk_part(&metadata).unwrap().unwrap();
+        assert_eq!(1, reused.num_rows());
+        assert_eq!(100, reused.min_sequence);
     }
 
     /// Helper to create a MultiBulkPart where each group becomes a separate batch.
@@ -2939,6 +3287,7 @@ mod tests {
             max_timestamp: 2000,
             min_timestamp: 1000,
             sequence: 5,
+            min_sequence: 5,
             timestamp_index: 3,
             raw_data: Some(ArrowIpc {
                 schema: schema_bytes,
@@ -2957,6 +3306,7 @@ mod tests {
         // The WAL entry round trip keeps the filled column.
         let entry = BulkWalEntry::try_from(&part).unwrap();
         let replayed = BulkPart::try_from(entry).unwrap();
+        assert_eq!(part.sequence, replayed.min_sequence);
         assert_eq!(2, replayed.num_rows());
         assert!(replayed.batch.column_by_name("v1").is_some());
     }

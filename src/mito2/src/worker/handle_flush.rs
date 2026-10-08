@@ -243,6 +243,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             flush_semaphore: self.flush_semaphore.clone(),
             is_staging: region.is_staging(),
             partition_expr: region.maybe_staging_partition_expr_str(),
+            durability_barrier: self
+                .wal
+                .durability_barrier(region.region_id, &region.provider),
         }
     }
 }

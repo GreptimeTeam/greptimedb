@@ -42,6 +42,7 @@ use session::context::{QueryContext, QueryContextRef};
 
 use crate::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
+pub(crate) use crate::test_util::MockInstanceImpl;
 use crate::test_util::StorageType;
 use crate::tests::{MockDistributedInstance, create_distributed_instance};
 
@@ -85,33 +86,9 @@ pub(crate) enum MockInstanceBuilder {
     Distributed(GreptimeDbClusterBuilder),
 }
 
-pub(crate) enum MockInstanceImpl {
-    Standalone(GreptimeDbStandalone),
-    Distributed(GreptimeDbCluster),
-}
-
-impl MockInstanceImpl {
-    pub(crate) fn metasrv(&self) -> &Arc<Metasrv> {
-        match self {
-            MockInstanceImpl::Standalone(_) => unreachable!(),
-            MockInstanceImpl::Distributed(instance) => &instance.metasrv,
-        }
-    }
-
-    pub(crate) fn datanodes(&self) -> &HashMap<DatanodeId, Datanode> {
-        match self {
-            MockInstanceImpl::Standalone(_) => unreachable!(),
-            MockInstanceImpl::Distributed(instance) => &instance.datanode_instances,
-        }
-    }
-}
-
 impl MockInstance for MockInstanceImpl {
     fn frontend(&self) -> Arc<Instance> {
-        match self {
-            MockInstanceImpl::Standalone(instance) => instance.frontend(),
-            MockInstanceImpl::Distributed(instance) => instance.fe_instance().clone(),
-        }
+        MockInstanceImpl::frontend(self)
     }
 
     fn is_distributed_mode(&self) -> bool {
@@ -286,15 +263,8 @@ pub(crate) async fn standalone_with_kafka_wal() -> Option<Box<dyn RebuildableMoc
         .map(|s| s.trim().to_string())
         .collect::<Vec<_>>();
     let test_name = uuid::Uuid::new_v4().to_string();
-    let builder = GreptimeDbStandaloneBuilder::new(&test_name)
-        .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
-            connection: KafkaConnectionConfig {
-                broker_endpoints: endpoints.clone(),
-                ..Default::default()
-            },
-            ..Default::default()
-        }))
-        .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
+    let builder = GreptimeDbStandaloneBuilder::new(&test_name).with_datanode_wal_config(
+        DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
             connection: KafkaConnectionConfig {
                 broker_endpoints: endpoints,
                 ..Default::default()
@@ -305,7 +275,8 @@ pub(crate) async fn standalone_with_kafka_wal() -> Option<Box<dyn RebuildableMoc
                 ..Default::default()
             },
             ..Default::default()
-        }));
+        }),
+    );
     let instance = TestContext::new(MockInstanceBuilder::Standalone(builder)).await;
     Some(Box::new(instance))
 }

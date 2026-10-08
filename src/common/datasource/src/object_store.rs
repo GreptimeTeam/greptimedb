@@ -50,6 +50,31 @@ pub const AZBLOB_SCHEMA: &str = "AZBLOB";
 pub struct BuiltBackend {
     pub object_store: ObjectStore,
     pub object_path: Option<String>,
+    local_root: Option<SecureFsRoot>,
+}
+
+impl BuiltBackend {
+    /// Checks an explicit input using the same file-type filter as directory listing.
+    pub async fn is_file(&self, path: &str) -> object_store::Result<bool> {
+        let meta = self.object_store.stat(path).await?;
+        self.is_file_with_mode(path, meta.mode()).await
+    }
+
+    /// Applies local file-type protections to a previously fetched object stat.
+    pub async fn is_file_with_mode(
+        &self,
+        path: &str,
+        mode: object_store::EntryMode,
+    ) -> object_store::Result<bool> {
+        if mode != object_store::EntryMode::FILE {
+            return Ok(false);
+        }
+        if let Some(root) = &self.local_root {
+            root.is_file(path).await
+        } else {
+            Ok(true)
+        }
+    }
 }
 
 /// Controls whether SQL paths may access the local filesystem.
@@ -379,6 +404,7 @@ async fn build_backend_inner(
         return Ok(BuiltBackend {
             object_store: build_fs_backend(&root)?,
             object_path,
+            local_root: Some(root),
         });
     }
 
@@ -418,6 +444,7 @@ async fn build_backend_inner(
     Ok(BuiltBackend {
         object_store,
         object_path,
+        local_root: None,
     })
 }
 

@@ -1,0 +1,72 @@
+SELECT ts, j FROM unknown_json2 ORDER BY ts;
+
++---------------------+---+
+| ts                  | j |
++---------------------+---+
+| 1970-01-01T00:00:00 |   |
++---------------------+---+
+
+-- Decode the previous version's unknown type and evolve it on a new write.
+INSERT INTO unknown_json2 VALUES
+  (1, '{"items":[1,"two",null],"ok":true}'),
+  (2, NULL);
+
+Affected Rows: 2
+
+-- Exercise schema creation with this version's encoding as well.
+CREATE TABLE new_unknown_json2 (ts TIMESTAMP TIME INDEX, j JSON2)
+WITH ('append_mode' = 'true', 'memtable.type' = 'bulk');
+
+Affected Rows: 0
+
+INSERT INTO new_unknown_json2 VALUES (0, NULL);
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('unknown_json2');
+
++------------------------------------+
+| ADMIN FLUSH_TABLE('unknown_json2') |
++------------------------------------+
+| 0                                  |
++------------------------------------+
+
+ADMIN FLUSH_TABLE('new_unknown_json2');
+
++----------------------------------------+
+| ADMIN FLUSH_TABLE('new_unknown_json2') |
++----------------------------------------+
+| 0                                      |
++----------------------------------------+
+
+-- SQLNESS ARG restart=true
+SELECT ts, j FROM new_unknown_json2 ORDER BY ts;
+
++---------------------+---+
+| ts                  | j |
++---------------------+---+
+| 1970-01-01T00:00:00 |   |
++---------------------+---+
+
+INSERT INTO new_unknown_json2 VALUES (1, '{"items":[1,"two",null],"ok":true}');
+
+Affected Rows: 1
+
+SELECT ts, j FROM unknown_json2 ORDER BY ts;
+
++-------------------------+------------------------------------+
+| ts                      | j                                  |
++-------------------------+------------------------------------+
+| 1970-01-01T00:00:00     |                                    |
+| 1970-01-01T00:00:00.001 | {"items":[1,"two",null],"ok":true} |
+| 1970-01-01T00:00:00.002 |                                    |
++-------------------------+------------------------------------+
+
+SELECT ts, j FROM new_unknown_json2 ORDER BY ts;
+
++-------------------------+------------------------------------+
+| ts                      | j                                  |
++-------------------------+------------------------------------+
+| 1970-01-01T00:00:00     |                                    |
+| 1970-01-01T00:00:00.001 | {"items":[1,"two",null],"ok":true} |
++-------------------------+------------------------------------+

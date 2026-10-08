@@ -19,8 +19,9 @@ use api::v1::{ColumnSchema, Row};
 use common_event_recorder::Event;
 use common_event_recorder::error::{Result, SerializeEventSnafu};
 use common_event_recorder::event_table::{
-    EVENT_CONTEXT_COLUMN, PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN,
-    PROCEDURE_TRIGGER_COLUMN, jsonb_value, nullable_json, procedure_event_column_schemas,
+    ACTOR_COLUMN, EVENT_CONTEXT_COLUMN, PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN,
+    PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN, jsonb_value, nullable_json, nullable_string,
+    procedure_event_column_schemas,
 };
 use common_time::timestamp::{TimeUnit, Timestamp};
 use snafu::ResultExt;
@@ -100,6 +101,7 @@ impl Event for ProcedureEvent {
         let mut schema = procedure_event_column_schemas();
         let mut internal_schema = self.internal_event.extra_schema();
         schema.append(&mut internal_schema);
+        schema.push(ACTOR_COLUMN.column_schema());
         schema.push(EVENT_CONTEXT_COLUMN.column_schema());
         schema
     }
@@ -124,9 +126,10 @@ impl Event for ProcedureEvent {
             .map(serde_json::to_value)
             .transpose()
             .context(SerializeEventSnafu)?;
+        let actor = self.context.actor.as_deref();
 
         for internal_event_extra_row in internal_event_extra_rows.iter_mut() {
-            let mut values = Vec::with_capacity(5 + internal_event_extra_row.values.len());
+            let mut values = Vec::with_capacity(6 + internal_event_extra_row.values.len());
             values.extend([
                 ValueData::StringValue(procedure_id.clone()).into(),
                 ValueData::StringValue(state.clone()).into(),
@@ -134,6 +137,7 @@ impl Event for ProcedureEvent {
                 jsonb_value(&trigger),
             ]);
             values.append(&mut internal_event_extra_row.values);
+            values.push(nullable_string(actor));
             values.push(nullable_json(event_context.as_ref()));
             rows.push(Row { values });
         }
@@ -155,7 +159,7 @@ mod tests {
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
     use common_event_recorder::event_table::{
-        EVENT_CONTEXT_COLUMN, PROCEDURE_TRIGGER_COLUMN, jsonb_value,
+        ACTOR_COLUMN, EVENT_CONTEXT_COLUMN, PROCEDURE_TRIGGER_COLUMN, jsonb_value,
     };
     use common_event_recorder::{Event, PersistentEventContext, TriggerReason};
     use serde_json::json;
@@ -223,6 +227,7 @@ mod tests {
                         jsonb_value(&json!({"type": "Submitted"})),
                         ValueData::StringValue("test_event1".to_string()).into(),
                         Value { value_data: None },
+                        Value { value_data: None },
                     ],
                 },
                 Row {
@@ -233,6 +238,7 @@ mod tests {
                         jsonb_value(&json!({"type": "Submitted"})),
                         ValueData::StringValue("test_event2".to_string()).into(),
                         Value { value_data: None },
+                        Value { value_data: None },
                     ],
                 },
                 Row {
@@ -241,6 +247,7 @@ mod tests {
                         ValueData::StringValue("Running".to_string()).into(),
                         ValueData::StringValue(String::new()).into(),
                         jsonb_value(&json!({"type": "Submitted"})),
+                        Value { value_data: None },
                         Value { value_data: None },
                         Value { value_data: None },
                     ],
@@ -313,16 +320,18 @@ mod tests {
                     semantic_type: SemanticType::Field.into(),
                     ..Default::default()
                 },
+                ACTOR_COLUMN.column_schema(),
                 EVENT_CONTEXT_COLUMN.column_schema(),
             ]
         );
     }
 
     #[test]
-    fn procedure_event_only_records_context_on_submission() {
-        let context = ProcedureContext::from_event_context(PersistentEventContext::new(
+    fn procedure_event_records_actor_for_all_lifecycle_triggers() {
+        let mut context = ProcedureContext::from_event_context(PersistentEventContext::new(
             TriggerReason::AutoRepartition,
         ));
+        context.actor = Some("alice".to_string());
         let submitted = ProcedureEvent::new_with_context(
             ProcedureId::random(),
             Box::new(TestEvent {}),
@@ -330,22 +339,46 @@ mod tests {
             EventTrigger::Submitted,
             context.clone(),
         );
-        let succeeded = ProcedureEvent::new_with_context(
-            ProcedureId::random(),
-            Box::new(TestEvent {}),
-            ProcedureState::Done { output: None },
-            EventTrigger::Succeeded,
-            context,
-        );
 
         assert_eq!(
             submitted.extra_rows().unwrap()[0].values[5],
-            jsonb_value(&json!({"reason": "auto_repartition"}))
+            ValueData::StringValue("alice".to_string()).into()
         );
         assert_eq!(
-            succeeded.extra_rows().unwrap()[0].values[5],
-            Value { value_data: None }
+            submitted.extra_rows().unwrap()[0].values[6],
+            jsonb_value(&json!({"reason": "auto_repartition"}))
         );
+
+        let child_id = ProcedureId::random();
+        for trigger in [
+            EventTrigger::Recovered,
+            EventTrigger::ChildSubmitted {
+                procedure_id: child_id,
+                outcome: ChildSubmissionOutcome::Accepted,
+            },
+            EventTrigger::Retrying {
+                phase: RetryPhase::Execute,
+                attempt: 1,
+            },
+            EventTrigger::RollingBack,
+            EventTrigger::Succeeded,
+            EventTrigger::Failed,
+            EventTrigger::Poisoned,
+        ] {
+            let event = ProcedureEvent::new_with_context(
+                ProcedureId::random(),
+                Box::new(TestEvent {}),
+                ProcedureState::Running,
+                trigger,
+                context.clone(),
+            );
+            let values = &event.extra_rows().unwrap()[0].values;
+            assert_eq!(
+                values[5],
+                ValueData::StringValue("alice".to_string()).into()
+            );
+            assert_eq!(values[6], Value { value_data: None });
+        }
     }
 
     #[test]

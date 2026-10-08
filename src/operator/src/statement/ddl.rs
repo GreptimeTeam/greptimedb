@@ -42,12 +42,12 @@ use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::cache_invalidator::Context;
 use common_meta::ddl::create_flow::{
     DEFER_ON_MISSING_SOURCE_KEY, FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType,
+    INTERNAL_EVAL_OFFSET_KEY, INTERNAL_EVAL_SCHEDULE_KEY,
 };
 use common_meta::instruction::CacheIdent;
 #[cfg(feature = "enterprise")]
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::schema_name::{SchemaName, SchemaNameKey};
-use common_meta::procedure_executor::ExecutorContext;
 #[cfg(feature = "enterprise")]
 use common_meta::procedure_executor::ProcedureExecutorRef;
 #[cfg(feature = "enterprise")]
@@ -65,6 +65,7 @@ use common_telemetry::{debug, info, tracing, warn};
 use common_time::{Timestamp, Timezone};
 use datafusion_common::tree_node::TreeNodeVisitor;
 use datafusion_expr::LogicalPlan;
+use datafusion_expr::logical_plan::Distinct;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::value::Value;
@@ -92,15 +93,17 @@ use sql::statements::create::{
 };
 use sql::statements::statement::Statement;
 use sqlparser::ast::{Expr, Ident, UnaryOperator, Value as ParserValue};
-use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
+use store_api::metric_engine_consts::{
+    LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
+};
 use store_api::mito_engine_options::APPEND_MODE_KEY;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::TableRef;
 use table::dist_table::DistTable;
 use table::metadata::{self, TableId, TableInfo, TableMeta, TableType};
 use table::requests::{
-    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, EntityRole,
-    REPARTITION_COLUMN_HINT_KEY, TableOptions, parse_entity_columns, parse_entity_option_key,
+    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, INGEST_ROWS_RATE_LIMIT_KEY,
+    TableOptions, validate_and_normalize_annotation_options,
 };
 use table::table_name::TableName;
 use table::table_reference::TableReference;
@@ -109,20 +112,17 @@ use crate::error::{
     self, AlterExprToRequestSnafu, BuildDfLogicalPlanSnafu, CatalogSnafu, ColumnDataTypeSnafu,
     ColumnNotFoundSnafu, ConvertSchemaSnafu, CreateLogicalTablesSnafu,
     DeserializePartitionExprSnafu, EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu,
-    FlowNotFoundSnafu, InvalidEntitySemanticOptionSnafu, InvalidPartitionRuleSnafu,
-    InvalidPartitionSnafu, InvalidSqlSnafu, InvalidTableNameSnafu, InvalidViewNameSnafu,
-    InvalidViewStmtSnafu, NotSupportedSnafu, PartitionExprToPbSnafu, Result, SchemaInUseSnafu,
-    SchemaNotFoundSnafu, SchemaReadOnlySnafu, SerializePartitionExprSnafu, SubstraitCodecSnafu,
-    TableAlreadyExistsSnafu, TableDdlReservedSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
-    TableReadOnlySnafu, UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
+    FlowNotFoundSnafu, InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu,
+    InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, NotSupportedSnafu,
+    PartitionExprToPbSnafu, Result, SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu,
+    SerializePartitionExprSnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
+    TableDdlReservedSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu, TableReadOnlySnafu,
+    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper::{self, RepartitionRequest, RepartitionSource};
 use crate::statement::StatementExecutor;
 use crate::statement::show::create_partitions_stmt;
-use crate::utils::{
-    to_meta_query_context_with_origin_frontend_and_trigger_reason,
-    to_meta_query_context_with_trigger_reason,
-};
+use crate::utils::{to_executor_context, to_executor_context_with_origin_frontend};
 
 #[derive(Debug, Clone, Copy)]
 struct DdlSubmitOptions {
@@ -130,6 +130,7 @@ struct DdlSubmitOptions {
     timeout: Duration,
 }
 
+#[cfg(not(feature = "enterprise"))]
 const ALLOWED_FLOW_OPTIONS: [&str; 2] = [
     DEFER_ON_MISSING_SOURCE_KEY,
     FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY,
@@ -174,6 +175,7 @@ fn parse_ddl_options(options: &OptionMap) -> Result<DdlSubmitOptions> {
     Ok(DdlSubmitOptions { wait, timeout })
 }
 
+#[cfg(not(feature = "enterprise"))]
 fn supported_flow_options() -> String {
     ALLOWED_FLOW_OPTIONS.join(", ")
 }
@@ -209,7 +211,10 @@ fn validate_and_normalize_flow_options(
     options
         .into_iter()
         .map(|(key, value)| {
-            if key == FlowType::FLOW_TYPE_KEY {
+            if matches!(
+                key.as_str(),
+                FlowType::FLOW_TYPE_KEY | INTERNAL_EVAL_OFFSET_KEY | INTERNAL_EVAL_SCHEDULE_KEY
+            ) {
                 return InvalidSqlSnafu {
                     err_msg: format!("flow option '{key}' is reserved for internal use"),
                 }
@@ -220,6 +225,9 @@ fn validate_and_normalize_flow_options(
                 DEFER_ON_MISSING_SOURCE_KEY | FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY => {
                     normalize_flow_bool_option(&key, &value)?
                 }
+                #[cfg(feature = "enterprise")]
+                _ => value,
+                #[cfg(not(feature = "enterprise"))]
                 _ => {
                     return InvalidSqlSnafu {
                         err_msg: format!(
@@ -236,12 +244,51 @@ fn validate_and_normalize_flow_options(
         .collect()
 }
 
+/// Validates `EVAL OFFSET` semantics at the operator boundary: an offset is
+/// only legal together with `EVAL INTERVAL` and must lie in
+/// `[0, eval_interval)`. Never modulo-normalized.
+fn validate_eval_offset(
+    eval_offset_secs: Option<i64>,
+    eval_interval_secs: Option<i64>,
+) -> Result<()> {
+    if let Some(offset_secs) = eval_offset_secs {
+        let Some(eval_interval_secs) = eval_interval_secs else {
+            return InvalidSqlSnafu {
+                err_msg: "EVAL OFFSET requires EVAL INTERVAL to be specified".to_string(),
+            }
+            .fail();
+        };
+        if !(0..eval_interval_secs).contains(&offset_secs) {
+            return InvalidSqlSnafu {
+                err_msg: format!(
+                    "EVAL OFFSET must be in range [0, EVAL INTERVAL), got {offset_secs} seconds with EVAL INTERVAL {eval_interval_secs} seconds"
+                ),
+            }
+            .fail();
+        }
+    }
+    Ok(())
+}
+
 fn determine_flow_type_for_source_state(
     flow_name: &str,
     flow_options: &HashMap<String, String>,
     has_missing_source_table: bool,
     has_instant_ttl_source_table: bool,
+    force_batching: bool,
 ) -> Result<Option<FlowType>> {
+    if has_instant_ttl_source_table && force_batching {
+        // The batching scheduler cannot read instant-TTL source tables, so
+        // reject this combination even when another source table is missing.
+        return InvalidSqlSnafu {
+            err_msg: format!(
+                "flow '{}' with EVAL INTERVAL requires the batching scheduler, but source tables with ttl=instant are not supported under batching mode; use a TTL longer than the flush interval",
+                flow_name
+            ),
+        }
+        .fail();
+    }
+
     if has_missing_source_table {
         let defer_on_missing_source = flow_options
             .get(DEFER_ON_MISSING_SOURCE_KEY)
@@ -262,12 +309,32 @@ fn determine_flow_type_for_source_state(
         return Ok(Some(FlowType::Batching));
     }
 
-    if has_instant_ttl_source_table {
-        return Ok(Some(FlowType::Streaming));
-    }
-
     Ok(None)
 }
+
+/// The stateless streaming runtime accepts only a single source scan wrapped by
+/// projections and filters. Keep this check local to the operator: the flow
+/// validator is intentionally private to the flow crate.
+fn is_stateless_flow_plan(plan: &LogicalPlan) -> bool {
+    let mut scans = 0;
+    let mut supported_nodes = true;
+    let result = plan.apply_with_subqueries(|node| {
+        match node {
+            LogicalPlan::TableScan(_) => scans += 1,
+            LogicalPlan::Projection(_) | LogicalPlan::Filter(_) => {}
+            LogicalPlan::Distinct(Distinct::All(_)) => {}
+            _ => supported_nodes = false,
+        }
+        Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
+    });
+
+    result.is_ok() && supported_nodes && scans == 1
+}
+
+const INSTANT_TTL_FLOW_QUERY_ERROR: &str = "instant-TTL flow sources support only stateless projection/filter queries over one source; non-stateless queries require a persisted source";
+
+const STATELESS_FLOW_QUERY_ERROR: &str =
+    "flow streaming supports only stateless projection/filter queries over one source";
 
 impl StatementExecutor {
     pub fn catalog_manager(&self) -> CatalogManagerRef {
@@ -276,7 +343,22 @@ impl StatementExecutor {
 
     #[tracing::instrument(skip_all)]
     pub async fn create_table(&self, stmt: CreateTable, ctx: QueryContextRef) -> Result<TableRef> {
-        let (catalog, schema, _table) = table_idents_to_full_name(&stmt.name, &ctx)
+        let mut create_expr = self.prepare_create_table(&stmt, &ctx).await?;
+        self.create_table_inner(
+            &mut create_expr,
+            stmt.partitions,
+            ctx,
+            TriggerReason::Manual,
+        )
+        .await
+    }
+
+    async fn prepare_create_table(
+        &self,
+        stmt: &CreateTable,
+        ctx: &QueryContextRef,
+    ) -> Result<CreateTableExpr> {
+        let (catalog, schema, _table) = table_idents_to_full_name(&stmt.name, ctx)
             .map_err(BoxedError::new)
             .context(error::ExternalSnafu)?;
 
@@ -291,12 +373,11 @@ impl StatementExecutor {
             .context(TableMetadataManagerSnafu)?
             .map(|v| v.into_inner());
 
-        let create_expr = &mut expr_helper::create_to_expr(&stmt, &ctx)?;
-        // Don't inherit schema-level TTL/compaction options into table options:
-        // TTL is applied during compaction, and `compaction.*` is handled separately.
+        let mut create_expr = expr_helper::create_to_expr(stmt, ctx)?;
+        // TTL and compaction options are handled separately; ingestion quota is database-only.
         if let Some(schema_options) = schema_options {
             for (key, value) in schema_options.extra_options.iter() {
-                if key.starts_with("compaction.") {
+                if key == INGEST_ROWS_RATE_LIMIT_KEY || key.starts_with("compaction.") {
                     continue;
                 }
                 create_expr
@@ -306,8 +387,72 @@ impl StatementExecutor {
             }
         }
 
-        self.create_table_inner(create_expr, stmt.partitions, ctx, TriggerReason::Manual)
-            .await
+        Ok(create_expr)
+    }
+
+    /// Prepares every explicit logical CREATE before submitting one batch procedure.
+    pub async fn batch_create_logical_tables(
+        &self,
+        statements: Vec<CreateTable>,
+        ctx: QueryContextRef,
+    ) -> Result<()> {
+        let mut expressions = Vec::with_capacity(statements.len());
+        let mut targets = std::collections::HashSet::new();
+        let mut group = None;
+        for statement in statements {
+            ensure!(
+                statement.engine == METRIC_ENGINE_NAME
+                    && statement.options.get(LOGICAL_TABLE_METADATA_KEY).is_some()
+                    && statement
+                        .options
+                        .value(PHYSICAL_TABLE_METADATA_KEY)
+                        .is_none(),
+                InvalidSqlSnafu {
+                    err_msg: "batch requires explicit Metric logical CREATE TABLE statements"
+                }
+            );
+            let expr = self.prepare_create_table(&statement, &ctx).await?;
+            let key = (
+                expr.catalog_name.clone(),
+                expr.schema_name.clone(),
+                expr.table_options.get(LOGICAL_TABLE_METADATA_KEY).cloned(),
+            );
+            ensure!(
+                group.as_ref().is_none_or(|group| group == &key),
+                InvalidSqlSnafu {
+                    err_msg: "batch must share catalog, schema and literal on_physical_table"
+                }
+            );
+            group = Some(key);
+            ensure!(
+                targets.insert(expr.table_name.clone()),
+                InvalidSqlSnafu {
+                    err_msg: "duplicate target in logical-table batch"
+                }
+            );
+            self.validate_logical_create(&expr, statement.partitions.as_ref(), &ctx)
+                .await?;
+            expressions.push(expr);
+        }
+        self.create_logical_tables(&expressions, ctx, TriggerReason::Manual)
+            .await?;
+        Ok(())
+    }
+
+    async fn validate_logical_create(
+        &self,
+        expr: &CreateTableExpr,
+        partitions: Option<&Partitions>,
+        ctx: &QueryContextRef,
+    ) -> Result<()> {
+        ensure_table_definition_writable(&expr.schema_name, &expr.table_name)?;
+        if let Some(partitions) = partitions
+            && !partitions.exprs.is_empty()
+        {
+            self.validate_logical_table_partition_rule(expr, partitions, ctx)
+                .await?;
+        }
+        Ok(())
     }
 
     #[tracing::instrument(skip_all)]
@@ -408,12 +553,8 @@ impl StatementExecutor {
                 .table_options
                 .contains_key(LOGICAL_TABLE_METADATA_KEY)
         {
-            if let Some(partitions) = partitions.as_ref()
-                && !partitions.exprs.is_empty()
-            {
-                self.validate_logical_table_partition_rule(create_table, partitions, &query_ctx)
-                    .await?;
-            }
+            self.validate_logical_create(create_table, partitions.as_ref(), &query_ctx)
+                .await?;
             // Create logical tables
             self.create_logical_tables(
                 std::slice::from_ref(create_table),
@@ -729,13 +870,11 @@ impl StatementExecutor {
         })
         .context(error::InvalidExprSnafu)?;
 
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
-            DdlTask::new_create_trigger(task),
-        );
+        let executor_context = to_executor_context(query_context, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_create_trigger(task));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -747,23 +886,31 @@ impl StatementExecutor {
         query_context: QueryContextRef,
     ) -> Result<Output> {
         // TODO(ruihang): do some verification
+        let eval_offset_secs = stmt.eval_offset;
         let expr = expr_helper::to_create_flow_task_expr(stmt, &query_context)?;
 
-        self.create_flow_inner(expr, query_context).await
+        // The typed `EVAL OFFSET` comes straight from the parsed SQL AST; it is
+        // the only trusted source of the offset at this boundary.
+        self.create_flow_procedure(expr, eval_offset_secs, query_context)
+            .await?;
+        Ok(Output::new_with_affected_rows(0))
     }
 
+    /// Direct gRPC entry point for `CREATE FLOW`.
     pub async fn create_flow_inner(
         &self,
         expr: CreateFlowExpr,
         query_context: QueryContextRef,
     ) -> Result<Output> {
-        self.create_flow_procedure(expr, query_context).await?;
+        self.create_flow_procedure(expr, None, query_context)
+            .await?;
         Ok(Output::new_with_affected_rows(0))
     }
 
     async fn create_flow_procedure(
         &self,
         mut expr: CreateFlowExpr,
+        eval_offset_secs: Option<i64>,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let eval_interval_secs = expr.eval_interval.as_ref().map(|e| e.seconds);
@@ -778,6 +925,14 @@ impl StatementExecutor {
             .fail();
         }
 
+        // Validate EVAL OFFSET semantics at the operator boundary (defense in
+        // depth; the parser already enforces them deterministically). The
+        // offset arrives as a typed parameter, never from `flow_options`.
+        validate_eval_offset(eval_offset_secs, eval_interval_secs)?;
+
+        // Validate user options. `validate_and_normalize_flow_options` also
+        // rejects the internal transport keys, so a spoofed key smuggled into
+        // the expr can never be honored here.
         expr.flow_options =
             validate_and_normalize_flow_options(expr.flow_options, eval_interval_secs)?;
 
@@ -789,29 +944,32 @@ impl StatementExecutor {
         expr.flow_options
             .insert(FlowType::FLOW_TYPE_KEY.to_string(), flow_type.to_string());
 
-        let task = CreateFlowTask::try_from(PbCreateFlowTask {
+        let mut task = CreateFlowTask::try_from(PbCreateFlowTask {
             create_flow: Some(expr),
         })
         .context(error::InvalidExprSnafu)?;
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
-            DdlTask::new_create_flow(task),
-        );
+        task.eval_offset_secs = eval_offset_secs;
+        let executor_context = to_executor_context(query_context, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_create_flow(task));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
 
-    /// Determine the flow type based on the SQL query
+    /// Determines the flow type from source-table state, schedule requirements,
+    /// and SQL shape.
     ///
-    /// If it contains aggregation or distinct, then it is a batch flow, otherwise it is a streaming flow
+    /// Aggregates and persisted-source DISTINCT use batching. Plain DISTINCT is request-local only
+    /// for instant-TTL sources, where it retains the legacy streaming compatibility behavior.
     async fn determine_flow_type(
         &self,
         expr: &CreateFlowExpr,
         query_ctx: QueryContextRef,
     ) -> Result<FlowType> {
+        let has_eval_interval = expr.eval_interval.is_some();
+
         let mut has_missing_source_table = false;
         let mut has_instant_ttl_source_table = false;
 
@@ -835,13 +993,18 @@ impl StatementExecutor {
 
             if table.table_info().meta.options.ttl == Some(common_time::TimeToLive::Instant) {
                 warn!(
-                    "Source table `{}` for flow `{}`'s ttl=instant, fallback to streaming mode",
+                    "Source table `{}` for flow `{}`'s ttl=instant, {}",
                     format_full_table_name(
                         &src_table_name.catalog_name,
                         &src_table_name.schema_name,
                         &src_table_name.table_name
                     ),
-                    expr.flow_name
+                    expr.flow_name,
+                    if has_eval_interval {
+                        "rejecting flow because EVAL INTERVAL requires the batching scheduler which does not support instant TTL"
+                    } else {
+                        "fallback to streaming mode"
+                    }
                 );
                 has_instant_ttl_source_table = true;
             }
@@ -852,8 +1015,18 @@ impl StatementExecutor {
             &expr.flow_options,
             has_missing_source_table,
             has_instant_ttl_source_table,
+            has_eval_interval,
         )? {
             return Ok(flow_type);
+        }
+
+        // A flow with `EVAL INTERVAL` (and therefore possibly `EVAL OFFSET`)
+        // always uses the batching scheduler: the fixed epoch-phase schedule is
+        // only honored by the batching scheduler, regardless of the SQL shape.
+        // Non-aggregate SQL is supported as an explicit full-query flow (the
+        // batching engine requires a time-window expression or EVAL INTERVAL).
+        if has_eval_interval {
+            return Ok(FlowType::Batching);
         }
 
         let engine = &self.query_engine;
@@ -873,17 +1046,31 @@ impl StatementExecutor {
         );
         let stmt = &stmts[0];
 
-        if is_tql(query_ctx.sql_dialect(), &expr.sql)
+        let is_tql_query = is_tql(query_ctx.sql_dialect(), &expr.sql)
             .map_err(BoxedError::new)
-            .context(ExternalSnafu)?
-        {
+            .context(ExternalSnafu)?;
+        if is_tql_query {
+            if has_instant_ttl_source_table {
+                return InvalidSqlSnafu {
+                    err_msg: INSTANT_TTL_FLOW_QUERY_ERROR.to_string(),
+                }
+                .fail();
+            }
             return Ok(FlowType::Batching);
         }
 
-        // support tql parse too
+        // Plan before selecting a mode. In particular, instant-TTL sources
+        // must not bypass validation of the stateless streaming subset.
         let plan = match stmt {
-            // prom ql is only supported in batching mode
-            Statement::Tql(_) => return Ok(FlowType::Batching),
+            Statement::Tql(_) => {
+                if has_instant_ttl_source_table {
+                    return InvalidSqlSnafu {
+                        err_msg: INSTANT_TTL_FLOW_QUERY_ERROR.to_string(),
+                    }
+                    .fail();
+                }
+                return Ok(FlowType::Batching);
+            }
             _ => engine
                 .planner()
                 .plan(&QueryStatement::Sql(stmt.clone()), query_ctx)
@@ -892,12 +1079,15 @@ impl StatementExecutor {
                 .context(ExternalSnafu)?,
         };
 
-        /// Visitor to find aggregation or distinct
-        struct FindAggr {
+        /// Visitor to classify aggregation and DISTINCT separately. Plain DISTINCT is request
+        /// local only for instant-TTL sources; persisted-source DISTINCT keeps batching semantics.
+        struct FindQueryShape {
             is_aggr: bool,
+            is_distinct: bool,
+            has_distinct_on: bool,
         }
 
-        impl TreeNodeVisitor<'_> for FindAggr {
+        impl TreeNodeVisitor<'_> for FindQueryShape {
             type Node = LogicalPlan;
             fn f_down(
                 &mut self,
@@ -905,25 +1095,58 @@ impl StatementExecutor {
             ) -> datafusion_common::Result<datafusion_common::tree_node::TreeNodeRecursion>
             {
                 match node {
-                    LogicalPlan::Aggregate(_) | LogicalPlan::Distinct(_) => {
-                        self.is_aggr = true;
-                        return Ok(datafusion_common::tree_node::TreeNodeRecursion::Stop);
-                    }
+                    LogicalPlan::Aggregate(_) => self.is_aggr = true,
+                    LogicalPlan::Distinct(Distinct::All(_)) => self.is_distinct = true,
+                    LogicalPlan::Distinct(Distinct::On(_)) => self.has_distinct_on = true,
                     _ => (),
                 }
                 Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
             }
         }
 
-        let mut find_aggr = FindAggr { is_aggr: false };
+        let mut query_shape = FindQueryShape {
+            is_aggr: false,
+            is_distinct: false,
+            has_distinct_on: false,
+        };
 
-        plan.visit_with_subqueries(&mut find_aggr)
+        plan.visit_with_subqueries(&mut query_shape)
             .context(BuildDfLogicalPlanSnafu)?;
-        if find_aggr.is_aggr {
-            Ok(FlowType::Batching)
-        } else {
-            Ok(FlowType::Streaming)
+        if query_shape.has_distinct_on {
+            return InvalidSqlSnafu {
+                err_msg: if has_instant_ttl_source_table {
+                    INSTANT_TTL_FLOW_QUERY_ERROR.to_string()
+                } else {
+                    STATELESS_FLOW_QUERY_ERROR.to_string()
+                },
+            }
+            .fail();
         }
+        if query_shape.is_aggr {
+            return if has_instant_ttl_source_table {
+                InvalidSqlSnafu {
+                    err_msg: INSTANT_TTL_FLOW_QUERY_ERROR.to_string(),
+                }
+                .fail()
+            } else {
+                Ok(FlowType::Batching)
+            };
+        }
+        if query_shape.is_distinct && !has_instant_ttl_source_table {
+            return Ok(FlowType::Batching);
+        }
+
+        ensure!(
+            is_stateless_flow_plan(&plan),
+            InvalidSqlSnafu {
+                err_msg: if has_instant_ttl_source_table {
+                    INSTANT_TTL_FLOW_QUERY_ERROR.to_string()
+                } else {
+                    STATELESS_FLOW_QUERY_ERROR.to_string()
+                },
+            }
+        );
+        Ok(FlowType::Streaming)
     }
 
     #[tracing::instrument(skip_all)]
@@ -1109,14 +1332,12 @@ impl StatementExecutor {
             table_type: TableType::View,
         };
 
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_trigger_reason(ctx, TriggerReason::Manual),
-            DdlTask::new_create_view(expr, view_info.clone()),
-        );
+        let executor_context = to_executor_context(ctx, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_create_view(expr, view_info.clone()));
 
         let resp = self
             .procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)?;
 
@@ -1195,13 +1416,11 @@ impl StatementExecutor {
         expr: DropFlowTask,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
-            DdlTask::new_drop_flow(expr),
-        );
+        let executor_context = to_executor_context(query_context, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_drop_flow(expr));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -1230,13 +1449,11 @@ impl StatementExecutor {
         expr: DropTriggerTask,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
-            DdlTask::new_drop_trigger(expr),
-        );
+        let executor_context = to_executor_context(query_context, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_drop_trigger(expr));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -1311,13 +1528,11 @@ impl StatementExecutor {
         expr: DropViewTask,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
-            DdlTask::new_drop_view(expr),
-        );
+        let executor_context = to_executor_context(query_context, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_drop_view(expr));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -1780,17 +1995,13 @@ impl StatementExecutor {
             source: Some(source),
             ..Default::default()
         };
-        let meta_query_context =
-            to_meta_query_context_with_trigger_reason(query_context.clone(), TriggerReason::Manual);
-        let mut req = SubmitDdlTaskRequest::new(
-            meta_query_context,
-            DdlTask::new_alter_table(AlterTableExpr {
-                catalog_name: request.catalog_name.clone(),
-                schema_name: request.schema_name.clone(),
-                table_name: request.table_name.clone(),
-                kind: Some(Kind::Repartition(repartition)),
-            }),
-        );
+        let executor_context = to_executor_context(query_context.clone(), TriggerReason::Manual);
+        let mut req = SubmitDdlTaskRequest::new(DdlTask::new_alter_table(AlterTableExpr {
+            catalog_name: request.catalog_name.clone(),
+            schema_name: request.schema_name.clone(),
+            table_name: request.table_name.clone(),
+            kind: Some(Kind::Repartition(repartition)),
+        }));
         req.wait = ddl_options.wait;
         req.timeout = ddl_options.timeout;
 
@@ -1806,7 +2017,7 @@ impl StatementExecutor {
 
         let response = self
             .procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), req)
+            .submit_ddl_task(executor_context, req)
             .await
             .context(error::ExecuteDdlSnafu)?;
 
@@ -1888,12 +2099,11 @@ impl StatementExecutor {
             .await
             .context(TableMetadataManagerSnafu)?;
 
-        let meta_query_context =
-            to_meta_query_context_with_trigger_reason(query_context, trigger_reason);
+        let executor_context = to_executor_context(query_context, trigger_reason);
 
         let (req, invalidate_keys) = if physical_table_id == table_id {
             // This is physical table
-            let req = SubmitDdlTaskRequest::new(meta_query_context, DdlTask::new_alter_table(expr));
+            let req = SubmitDdlTaskRequest::new(DdlTask::new_alter_table(expr));
 
             let invalidate_keys = vec![
                 CacheIdent::TableId(table_id),
@@ -1902,11 +2112,20 @@ impl StatementExecutor {
 
             (req, invalidate_keys)
         } else {
-            // This is logical table
-            let req = SubmitDdlTaskRequest::new(
-                meta_query_context,
-                DdlTask::new_alter_logical_tables(vec![expr]),
-            );
+            // This is logical table. Annotation alters only rewrite its own
+            // metadata; `AlterLogicalTablesProcedure` only handles column adds.
+            let annotation_alter = match expr.kind.as_ref() {
+                Some(kind) => common_grpc_expr::annotation_alter_family(kind)
+                    .context(AlterExprToRequestSnafu)?
+                    .is_some_and(|family| family.allows_logical_tables()),
+                None => false,
+            };
+            let task = if annotation_alter {
+                DdlTask::new_alter_table(expr)
+            } else {
+                DdlTask::new_alter_logical_tables(vec![expr])
+            };
+            let req = SubmitDdlTaskRequest::new(task);
 
             let mut invalidate_keys = vec![
                 CacheIdent::TableId(physical_table_id),
@@ -1934,7 +2153,7 @@ impl StatementExecutor {
         };
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), req)
+            .submit_ddl_task(executor_context, req)
             .await
             .context(error::ExecuteDdlSnafu)?;
 
@@ -2025,17 +2244,19 @@ impl StatementExecutor {
             .map(|expr| expr.as_pb_partition().context(PartitionExprToPbSnafu))
             .collect::<Result<Vec<_>>>()?;
 
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_origin_frontend_and_trigger_reason(
-                query_context,
-                &self.origin_frontend_addr,
-                trigger_reason,
-            ),
-            DdlTask::new_create_table(create_table, partitions, table_info),
+        let executor_context = to_executor_context_with_origin_frontend(
+            query_context,
+            &self.origin_frontend_addr,
+            trigger_reason,
         );
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_create_table(
+            create_table,
+            partitions,
+            table_info,
+        ));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2046,17 +2267,15 @@ impl StatementExecutor {
         query_context: QueryContextRef,
         trigger_reason: TriggerReason,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_origin_frontend_and_trigger_reason(
-                query_context,
-                &self.origin_frontend_addr,
-                trigger_reason,
-            ),
-            DdlTask::new_create_logical_tables(tables_data),
+        let executor_context = to_executor_context_with_origin_frontend(
+            query_context,
+            &self.origin_frontend_addr,
+            trigger_reason,
         );
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_create_logical_tables(tables_data));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2067,15 +2286,11 @@ impl StatementExecutor {
         query_context: QueryContextRef,
         trigger_reason: TriggerReason,
     ) -> Result<SubmitDdlTaskResponse> {
-        let meta_query_context =
-            to_meta_query_context_with_trigger_reason(query_context, trigger_reason);
-        let request = SubmitDdlTaskRequest::new(
-            meta_query_context,
-            DdlTask::new_alter_logical_tables(tables_data),
-        );
+        let executor_context = to_executor_context(query_context, trigger_reason);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_alter_logical_tables(tables_data));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2087,19 +2302,17 @@ impl StatementExecutor {
         drop_if_exists: bool,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
-            DdlTask::new_drop_table(
-                table_name.catalog_name.clone(),
-                table_name.schema_name.clone(),
-                table_name.table_name.clone(),
-                table_id,
-                drop_if_exists,
-            ),
-        );
+        let executor_context = to_executor_context(query_context, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_drop_table(
+            table_name.catalog_name.clone(),
+            table_name.schema_name.clone(),
+            table_name.table_name.clone(),
+            table_id,
+            drop_if_exists,
+        ));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2111,13 +2324,12 @@ impl StatementExecutor {
         drop_if_exists: bool,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
-            DdlTask::new_drop_database(catalog, schema, drop_if_exists),
-        );
+        let executor_context = to_executor_context(query_context, TriggerReason::Manual);
+        let request =
+            SubmitDdlTaskRequest::new(DdlTask::new_drop_database(catalog, schema, drop_if_exists));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2127,13 +2339,11 @@ impl StatementExecutor {
         alter_expr: AlterDatabaseExpr,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
-            DdlTask::new_alter_database(alter_expr),
-        );
+        let executor_context = to_executor_context(query_context, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_alter_database(alter_expr));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2145,21 +2355,17 @@ impl StatementExecutor {
         time_ranges: Vec<(Timestamp, Timestamp)>,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
-        let meta_query_context =
-            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual);
-        let request = SubmitDdlTaskRequest::new(
-            meta_query_context,
-            DdlTask::new_truncate_table(
-                table_name.catalog_name.clone(),
-                table_name.schema_name.clone(),
-                table_name.table_name.clone(),
-                table_id,
-                time_ranges,
-            ),
-        );
+        let executor_context = to_executor_context(query_context, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_truncate_table(
+            table_name.catalog_name.clone(),
+            table_name.schema_name.clone(),
+            table_name.table_name.clone(),
+            table_id,
+            time_ranges,
+        ));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2239,13 +2445,17 @@ impl StatementExecutor {
         query_context: QueryContextRef,
         creator: Option<CreatorGrantIntent>,
     ) -> Result<SubmitDdlTaskResponse> {
-        let request = SubmitDdlTaskRequest::new(
-            to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual),
-            DdlTask::new_create_database(catalog, database, create_if_not_exists, options, creator),
-        );
+        let executor_context = to_executor_context(query_context, TriggerReason::Manual);
+        let request = SubmitDdlTaskRequest::new(DdlTask::new_create_database(
+            catalog,
+            database,
+            create_if_not_exists,
+            options,
+            creator,
+        ));
 
         self.procedure_executor
-            .submit_ddl_task(&ExecutorContext::default(), request)
+            .submit_ddl_task(executor_context, request)
             .await
             .context(error::ExecuteDdlSnafu)
     }
@@ -2422,18 +2632,7 @@ pub fn create_table_info(
 
     validate_json2_columns_append_mode(&schema, &table_options)?;
 
-    validate_repartition_column_hint(
-        &mut table_options,
-        &column_name_to_index_map,
-        &partition_key_indices,
-        &create_table.time_index,
-    )?;
-
-    validate_entity_semantic_options(
-        &table_options,
-        &column_name_to_index_map,
-        &primary_key_indices,
-    )?;
+    validate_and_normalize_annotations(&mut table_options, &schema, &partition_key_indices)?;
 
     let meta = TableMeta {
         schema,
@@ -2493,61 +2692,6 @@ fn validate_json2_columns_append_mode(schema: &Schema, table_options: &TableOpti
     Ok(())
 }
 
-fn validate_repartition_column_hint(
-    table_options: &mut TableOptions,
-    column_name_to_index_map: &HashMap<String, usize>,
-    partition_key_indices: &[usize],
-    time_index: &str,
-) -> Result<()> {
-    let Some(column_name) = table_options
-        .extra_options
-        .get(REPARTITION_COLUMN_HINT_KEY)
-        .map(|value| value.trim().to_string())
-    else {
-        return Ok(());
-    };
-
-    ensure!(
-        !column_name.is_empty(),
-        InvalidPartitionRuleSnafu {
-            reason: format!("{REPARTITION_COLUMN_HINT_KEY} expects exactly one column name"),
-        }
-    );
-
-    ensure!(
-        !column_name.contains(','),
-        InvalidPartitionRuleSnafu {
-            reason: format!("{REPARTITION_COLUMN_HINT_KEY} expects exactly one column name"),
-        }
-    );
-
-    ensure!(
-        partition_key_indices.is_empty(),
-        InvalidPartitionRuleSnafu {
-            reason: format!(
-                "cannot set {REPARTITION_COLUMN_HINT_KEY} on a table with partition metadata"
-            ),
-        }
-    );
-
-    column_name_to_index_map
-        .get(&column_name)
-        .context(ColumnNotFoundSnafu { msg: &column_name })?;
-
-    ensure!(
-        column_name != time_index,
-        InvalidPartitionRuleSnafu {
-            reason: format!("cannot set {REPARTITION_COLUMN_HINT_KEY} to the time index column"),
-        }
-    );
-
-    table_options
-        .extra_options
-        .insert(REPARTITION_COLUMN_HINT_KEY.to_string(), column_name);
-
-    Ok(())
-}
-
 /// Rejects DDL against read-only schemas and computed entity-graph tables.
 fn ensure_table_writable(schema: &str, table: &str) -> Result<()> {
     ensure!(
@@ -2581,35 +2725,33 @@ fn ensure_table_definition_writable(schema: &str, table: &str) -> Result<()> {
     Ok(())
 }
 
-/// Validates `greptime.semantic.entity.<type>.{id|descriptive|scope}` options
-/// against the table schema: every named column must exist, and `id` columns must
-/// additionally be tag (primary-key) columns so entity identity stays indexable
-/// and joinable. See `docs/rfcs/2026-06-25-entity-relationships-and-graph-query.md`.
-fn validate_entity_semantic_options(
-    table_options: &TableOptions,
-    column_name_to_index_map: &HashMap<String, usize>,
-    primary_key_indices: &[usize],
+/// CREATE-side annotation validation: one rule source in the table crate,
+/// mapped onto this crate's existing error variants so client-visible codes
+/// and messages stay put.
+fn validate_and_normalize_annotations(
+    options: &mut TableOptions,
+    schema: &Schema,
+    partition_key_indices: &[usize],
 ) -> Result<()> {
-    for (key, value) in &table_options.extra_options {
-        let Some((_, role)) = parse_entity_option_key(key) else {
-            continue;
-        };
-        let is_id_role = role == EntityRole::Id;
-        for col in &parse_entity_columns(value) {
-            let idx = column_name_to_index_map
-                .get(col)
-                .context(ColumnNotFoundSnafu { msg: col })?;
-            ensure!(
-                !is_id_role || primary_key_indices.contains(idx),
-                InvalidEntitySemanticOptionSnafu {
-                    reason: format!(
-                        "entity id column `{col}` (option `{key}`) must be a tag/primary-key column"
-                    ),
-                }
-            );
+    use table::requests::AnnotationValidationError as CheckError;
+    let handle_error = |e: CheckError| match e {
+        CheckError::ColumnNotFound { column } => ColumnNotFoundSnafu { msg: column }.build(),
+        e @ (CheckError::UnknownKey { .. }
+        | CheckError::InvalidValue { .. }
+        | CheckError::InvalidPartitionNumHint { .. }
+        | CheckError::ColumnNotStringForm { .. }) => InvalidSqlSnafu {
+            err_msg: e.to_string(),
         }
-    }
-    Ok(())
+        .build(),
+        e @ (CheckError::NotSingleColumn
+        | CheckError::PartitionMetadataConflict
+        | CheckError::TimeIndexConflict) => InvalidPartitionRuleSnafu {
+            reason: e.to_string(),
+        }
+        .build(),
+    };
+    validate_and_normalize_annotation_options(options, schema, partition_key_indices)
+        .map_err(handle_error)
 }
 
 fn find_partition_columns(partitions: &Option<Partitions>) -> Result<Vec<String>> {
@@ -2845,14 +2987,10 @@ async fn execute_undrop_table(
             table_name: table_name.to_string(),
         })?;
 
-    let meta_query_context =
-        to_meta_query_context_with_trigger_reason(query_context, TriggerReason::Manual);
-    let request = SubmitDdlTaskRequest::new(
-        meta_query_context,
-        DdlTask::new_undrop_table(dropped.table_id),
-    );
+    let executor_context = to_executor_context(query_context, TriggerReason::Manual);
+    let request = SubmitDdlTaskRequest::new(DdlTask::new_undrop_table(dropped.table_id));
     procedure_executor
-        .submit_ddl_task(&ExecutorContext::default(), request)
+        .submit_ddl_task(executor_context, request)
         .await
         .context(error::ExecuteDdlSnafu)?;
 
@@ -2883,6 +3021,7 @@ mod test {
 
     #[cfg(feature = "enterprise")]
     use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
+    use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField};
     #[cfg(feature = "enterprise")]
     use common_meta::cache_invalidator::{CacheInvalidator, CacheInvalidatorRef};
     #[cfg(feature = "enterprise")]
@@ -2900,18 +3039,20 @@ mod test {
         ExecutorContext, ProcedureExecutor, ProcedureExecutorRef,
     };
     #[cfg(feature = "enterprise")]
-    use common_meta::rpc::ddl::{
-        DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse, TRIGGER_REASON_EXTENSION_KEY,
-    };
+    use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
     #[cfg(feature = "enterprise")]
     use common_meta::rpc::procedure::{
         MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
     };
-    use session::context::{QueryContext, QueryContextBuilder};
+    use datafusion::functions_aggregate::expr_fn::count;
+    use datafusion::logical_expr::builder::LogicalTableSource;
+    use datafusion::logical_expr::{LogicalPlanBuilder, col};
+    use session::context::QueryContext;
     use sql::dialect::GreptimeDbDialect;
     use sql::parser::{ParseOptions, ParserContext};
     use sql::statements::statement::Statement;
     use sqlparser::parser::Parser;
+    use table::requests::REPARTITION_COLUMN_HINT_KEY;
 
     use super::*;
     use crate::expr_helper;
@@ -2920,6 +3061,7 @@ mod test {
     #[derive(Default)]
     struct RecordingProcedureExecutor {
         requests: Mutex<Vec<SubmitDdlTaskRequest>>,
+        contexts: Mutex<Vec<ExecutorContext>>,
         fail: bool,
     }
 
@@ -2928,9 +3070,10 @@ mod test {
     impl ProcedureExecutor for RecordingProcedureExecutor {
         async fn submit_ddl_task(
             &self,
-            _ctx: &ExecutorContext,
+            ctx: ExecutorContext,
             request: SubmitDdlTaskRequest,
         ) -> common_meta::error::Result<SubmitDdlTaskResponse> {
+            self.contexts.lock().unwrap().push(ctx);
             self.requests.lock().unwrap().push(request);
             if self.fail {
                 return common_meta::error::UnsupportedSnafu {
@@ -3047,12 +3190,10 @@ mod test {
 
         let requests = procedure.requests.lock().unwrap();
         assert!(matches!(&requests[0].task, DdlTask::UndropTable(task) if task.table_id == 42));
+        let contexts = procedure.contexts.lock().unwrap();
         assert_eq!(
-            requests[0]
-                .query_context
-                .extensions
-                .get(TRIGGER_REASON_EXTENSION_KEY),
-            Some(&TriggerReason::Manual.as_ref().to_string())
+            contexts[0].event_input.as_ref().map(|input| input.reason),
+            Some(TriggerReason::Manual)
         );
         assert_eq!(
             cache.invalidations.lock().unwrap()[0],
@@ -3141,14 +3282,13 @@ mod test {
     }
 
     #[test]
-    fn test_validate_entity_semantic_options() {
-        let col_map = HashMap::from([
-            ("service_name".to_string(), 0usize),
-            ("host_id".to_string(), 1usize),
-            ("value".to_string(), 2usize),
+    fn test_validate_and_normalize_annotations() {
+        let schema = Schema::new(vec![
+            ColumnSchema::new("service_name", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("host_id", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new("payload", ConcreteDataType::binary_datatype(), true),
         ]);
-        // service_name (0) and host_id (1) are tags; value (2) is a field.
-        let pk = vec![0usize, 1usize];
         let opts = |pairs: &[(&str, &str)]| TableOptions {
             extra_options: pairs
                 .iter()
@@ -3156,40 +3296,40 @@ mod test {
                 .collect(),
             ..Default::default()
         };
+        let check = |pairs: &[(&str, &str)]| {
+            let mut options = opts(pairs);
+            validate_and_normalize_annotations(&mut options, &schema, &[]).map(|()| options)
+        };
 
-        // id on a tag column, composite id on tags, and descriptive on a field
-        // column are all accepted.
+        // Any existing column with a string form may be an id, tag or field.
         for pairs in [
-            &[("greptime.semantic.entity.service.id", "service_name")][..],
             &[(
                 "greptime.semantic.entity.process.id",
                 "service_name,host_id",
             )][..],
-            &[("greptime.semantic.entity.service.descriptive", "value")][..],
+            &[("greptime.semantic.entity.service.id", "value")][..],
         ] {
-            assert!(validate_entity_semantic_options(&opts(pairs), &col_map, &pk).is_ok());
+            assert!(check(pairs).is_ok());
         }
 
-        // id pointing at a field column is rejected.
-        let err = validate_entity_semantic_options(
-            &opts(&[("greptime.semantic.entity.service.id", "value")]),
-            &col_map,
-            &pk,
-        )
-        .unwrap_err();
-        assert!(matches!(
-            err,
-            error::Error::InvalidEntitySemanticOption { .. }
-        ));
+        // Missing columns keep this crate's error variant and status code.
+        let missing = check(&[("greptime.semantic.entity.service.id", "nope")]).unwrap_err();
+        assert!(matches!(missing, error::Error::ColumnNotFound { .. }));
+        assert_eq!(
+            common_error::status_code::StatusCode::InvalidArguments,
+            common_error::ext::ErrorExt::status_code(&missing)
+        );
 
-        // id pointing at a missing column is rejected.
-        let err = validate_entity_semantic_options(
-            &opts(&[("greptime.semantic.entity.service.id", "nope")]),
-            &col_map,
-            &pk,
-        )
-        .unwrap_err();
-        assert!(matches!(err, error::Error::ColumnNotFound { .. }));
+        let binary_id = check(&[("greptime.semantic.entity.service.id", "payload")]).unwrap_err();
+        assert!(matches!(binary_id, error::Error::InvalidSql { .. }));
+
+        // The SQL parser checks keys and value domains, but gRPC expressions
+        // bypass it.
+        let bad_value = check(&[("greptime.semantic.signal_type", "garbage")]).unwrap_err();
+        assert!(matches!(bad_value, error::Error::InvalidSql { .. }));
+
+        let unknown_key = check(&[("greptime.semantic.nonsense", "x")]).unwrap_err();
+        assert!(matches!(unknown_key, error::Error::InvalidSql { .. }));
     }
 
     #[test]
@@ -3223,6 +3363,7 @@ mod test {
         );
     }
 
+    #[cfg(not(feature = "enterprise"))]
     #[test]
     fn test_validate_and_normalize_flow_options_unknown_option() {
         let err = validate_and_normalize_flow_options(
@@ -3272,7 +3413,7 @@ mod test {
     }
 
     #[test]
-    fn test_validate_and_normalize_flow_options_rejects_redacted_invalid_input() {
+    fn test_parser_flow_option_access_key_id() {
         let sql = r"
 CREATE FLOW task_6
 SINK TO schema_1.table_1
@@ -3290,12 +3431,91 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         };
         let expr =
             expr_helper::to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
-        let err = validate_and_normalize_flow_options(expr.flow_options, None).unwrap_err();
 
-        assert!(
-            err.to_string()
-                .contains("unknown flow option 'access_key_id'")
+        #[cfg(not(feature = "enterprise"))]
+        {
+            let err = validate_and_normalize_flow_options(expr.flow_options, None).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("unknown flow option 'access_key_id'")
+            );
+        }
+        #[cfg(feature = "enterprise")]
+        assert_eq!(
+            validate_and_normalize_flow_options(expr.flow_options, None).unwrap(),
+            HashMap::from([("access_key_id".to_string(), "['true']".to_string())])
         );
+    }
+
+    fn stateless_test_scan(name: &str) -> LogicalPlan {
+        let schema = arrow::datatypes::Schema::new(vec![ArrowField::new(
+            "value",
+            ArrowDataType::Int32,
+            true,
+        )]);
+        LogicalPlanBuilder::scan(
+            name,
+            Arc::new(LogicalTableSource::new(Arc::new(schema))),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+    }
+
+    #[test]
+    fn test_is_stateless_flow_plan_accepts_scan_projection_and_filter() {
+        let scan = stateless_test_scan("source");
+        assert!(is_stateless_flow_plan(&scan));
+
+        let projection = LogicalPlanBuilder::from(scan.clone())
+            .project(vec![col("value")])
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(is_stateless_flow_plan(&projection));
+
+        let filter = LogicalPlanBuilder::from(projection)
+            .filter(col("value").gt(datafusion_expr::lit(0)))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(is_stateless_flow_plan(&filter));
+    }
+
+    #[test]
+    fn test_is_stateless_flow_plan_rejects_aggregate_and_multiple_scans() {
+        let scan = stateless_test_scan("source");
+        let aggregate = LogicalPlanBuilder::from(scan.clone())
+            .aggregate(
+                Vec::<datafusion_expr::Expr>::new(),
+                vec![count(col("value"))],
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(!is_stateless_flow_plan(&aggregate));
+
+        let distinct = LogicalPlanBuilder::from(scan.clone())
+            .distinct()
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(is_stateless_flow_plan(&distinct));
+
+        let distinct_on_aggregate = LogicalPlanBuilder::from(aggregate)
+            .distinct()
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(!is_stateless_flow_plan(&distinct_on_aggregate));
+
+        let multiple_scans = LogicalPlanBuilder::from(stateless_test_scan("left"))
+            .cross_join(stateless_test_scan("right"))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(!is_stateless_flow_plan(&multiple_scans));
     }
 
     // --- Schedule option tests ---
@@ -3316,24 +3536,77 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
     }
 
     #[test]
-    fn test_schedule_and_internal_keys_rejected_as_unknown_options() {
+    fn test_internal_schedule_key_rejected() {
+        let err = validate_and_normalize_flow_options(
+            HashMap::from([(INTERNAL_EVAL_SCHEDULE_KEY.to_string(), "value".to_string())]),
+            Some(300),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("reserved for internal use"));
+    }
+
+    #[cfg(not(feature = "enterprise"))]
+    #[test]
+    fn test_schedule_keys_rejected_as_unknown_options() {
         for key in [
             "eval_interval_anchor",
             "eval_interval_start",
             "eval_interval_missed_tick_policy",
             "eval_interval_catchup_max_runs",
             "eval_interval_catchup_max_lag",
-            "__greptime_internal_eval_schedule",
         ] {
             let err = validate_and_normalize_flow_options(
                 HashMap::from([(key.to_string(), "value".to_string())]),
                 Some(300),
             )
             .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("unknown flow option '{key}'"))
+            );
+        }
+    }
+
+    #[cfg(feature = "enterprise")]
+    #[test]
+    fn test_schedule_keys_preserved() {
+        let options = HashMap::from([
+            ("eval_interval_anchor".to_string(), "anchor".to_string()),
+            ("eval_interval_start".to_string(), "start".to_string()),
+            (
+                "eval_interval_missed_tick_policy".to_string(),
+                "missed".to_string(),
+            ),
+            (
+                "eval_interval_catchup_max_runs".to_string(),
+                "runs".to_string(),
+            ),
+            (
+                "eval_interval_catchup_max_lag".to_string(),
+                "lag".to_string(),
+            ),
+        ]);
+        assert_eq!(
+            validate_and_normalize_flow_options(options.clone(), Some(300)).unwrap(),
+            options
+        );
+    }
+
+    #[test]
+    fn test_internal_transport_keys_rejected_as_reserved() {
+        for key in [
+            "__greptime_internal_eval_schedule",
+            "__greptime_internal_eval_offset_secs",
+        ] {
+            let err = validate_and_normalize_flow_options(
+                HashMap::from([(key.to_string(), "120".to_string())]),
+                Some(300),
+            )
+            .unwrap_err();
 
             assert!(
                 err.to_string()
-                    .contains(&format!("unknown flow option '{key}'")),
+                    .contains(&format!("flow option '{key}' is reserved for internal use")),
                 "unexpected error for {key}: {err}"
             );
         }
@@ -3341,8 +3614,9 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
 
     #[test]
     fn test_determine_flow_type_for_source_state_missing_sources_require_opt_in() {
-        let err = determine_flow_type_for_source_state("my_flow", &HashMap::new(), true, false)
-            .unwrap_err();
+        let err =
+            determine_flow_type_for_source_state("my_flow", &HashMap::new(), true, false, false)
+                .unwrap_err();
 
         assert!(err.to_string().contains(
             "missing source tables for flow 'my_flow'; use WITH (defer_on_missing_source = true) to create a pending flow"
@@ -3355,16 +3629,40 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
             HashMap::from([(DEFER_ON_MISSING_SOURCE_KEY.to_string(), "true".to_string())]);
 
         assert_eq!(
-            determine_flow_type_for_source_state("my_flow", &flow_options, true, true).unwrap(),
+            determine_flow_type_for_source_state("my_flow", &flow_options, true, true, false)
+                .unwrap(),
             Some(FlowType::Batching)
+        );
+        let err = determine_flow_type_for_source_state("my_flow", &flow_options, true, true, true)
+            .unwrap_err();
+        assert!(err.to_string().contains(
+            "flow 'my_flow' with EVAL INTERVAL requires the batching scheduler, but source tables with ttl=instant are not supported under batching mode"
+        ));
+    }
+
+    #[test]
+    fn test_determine_flow_type_for_source_state_existing_sources_require_plan() {
+        assert_eq!(
+            determine_flow_type_for_source_state("my_flow", &HashMap::new(), false, true, false)
+                .unwrap(),
+            None
         );
     }
 
     #[test]
-    fn test_determine_flow_type_for_source_state_instant_ttl_without_missing_sources() {
-        assert_eq!(
-            determine_flow_type_for_source_state("my_flow", &HashMap::new(), false, true).unwrap(),
-            Some(FlowType::Streaming)
+    fn test_determine_flow_type_for_source_state_instant_ttl_with_eval_interval_is_rejected() {
+        // A flow with `EVAL INTERVAL` is forced onto the batching scheduler,
+        // which cannot read instant-TTL source tables: reject instead of
+        // silently falling back to streaming (where the schedule/offset would
+        // be ignored).
+        let err =
+            determine_flow_type_for_source_state("my_flow", &HashMap::new(), false, true, true)
+                .unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "flow 'my_flow' with EVAL INTERVAL requires the batching scheduler, but source tables with ttl=instant are not supported under batching mode"
+            ),
+            "unexpected error: {err}"
         );
     }
 
@@ -3500,6 +3798,36 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
     }
 
     #[test]
+    fn test_create_table_with_repartition_partition_num_hint() {
+        let key = table::requests::REPARTITION_PARTITION_NUM_HINT_KEY;
+        for (value, expected) in [
+            (" 8 ", Some("8")),
+            ("0", None),
+            ("-1", None),
+            ("4294967296", None),
+        ] {
+            let expr = create_expr_from_sql(&format!(
+                "CREATE TABLE metrics (host STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host)) WITH ('{key}' = '{value}')"
+            ));
+            let result = create_table_info(&expr, vec![]);
+            if let Some(expected) = expected {
+                let info = result.unwrap();
+                assert_eq!(
+                    info.meta.options.extra_options.get(key).map(String::as_str),
+                    Some(expected)
+                );
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("expects a positive integer")
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_create_table_with_repartition_column_hint() {
         let expr = create_expr_from_sql(
             r"
@@ -3553,6 +3881,44 @@ WITH ('repartition.column.hint' = ' host ')",
             common_error::ext::ErrorExt::status_code(&err),
             common_error::status_code::StatusCode::InvalidArguments
         );
+    }
+
+    #[test]
+    fn test_verify_alter_guards_entity_column_types() {
+        let expr = create_expr_from_sql(
+            "CREATE TABLE t (svc STRING, ts TIMESTAMP TIME INDEX) \
+             WITH ('greptime.semantic.entity.service.id'='svc');",
+        );
+        let table_info = Arc::new(create_table_info(&expr, vec![]).unwrap());
+        let alter = |kind| AlterTableExpr {
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
+            table_name: "t".to_string(),
+            kind: Some(kind),
+        };
+
+        let modify = alter(Kind::ModifyColumnTypes(api::v1::ModifyColumnTypes {
+            modify_column_types: vec![api::v1::ModifyColumnType {
+                column_name: "svc".to_string(),
+                target_type: api::v1::ColumnDataType::Binary as i32,
+                target_type_extension: None,
+            }],
+        }));
+        let err = verify_alter(1, table_info.clone(), modify).unwrap_err();
+        let msg = common_error::ext::ErrorExt::output_msg(&err);
+        assert!(
+            msg.contains("must keep a type that renders as a string"),
+            "{msg}"
+        );
+
+        // Dropping a declared column stays allowed: the derivation skips the
+        // stale declaration.
+        let drop = alter(Kind::DropColumns(api::v1::DropColumns {
+            drop_columns: vec![api::v1::DropColumn {
+                name: "svc".to_string(),
+            }],
+        }));
+        assert!(verify_alter(1, table_info, drop).unwrap());
     }
 
     #[test]
@@ -3677,55 +4043,5 @@ WITH ('repartition.column.hint' = 'host')",
             err.to_string()
                 .contains("cannot set repartition.column.hint on a table with partition metadata")
         );
-    }
-
-    #[tokio::test]
-    #[ignore = "TODO(ruihang): WIP new partition rule"]
-    async fn test_parse_partitions() {
-        common_telemetry::init_default_ut_logging();
-        let cases = [
-            (
-                r"
-CREATE TABLE rcx ( a INT, b STRING, c TIMESTAMP, TIME INDEX (c) )
-PARTITION ON COLUMNS (b) (
-  b < 'hz',
-  b >= 'hz' AND b < 'sh',
-  b >= 'sh'
-)
-ENGINE=mito",
-                r#"[{"column_list":["b"],"value_list":["{\"Value\":{\"String\":\"hz\"}}"]},{"column_list":["b"],"value_list":["{\"Value\":{\"String\":\"sh\"}}"]},{"column_list":["b"],"value_list":["\"MaxValue\""]}]"#,
-            ),
-            (
-                r"
-CREATE TABLE rcx ( a INT, b STRING, c TIMESTAMP, TIME INDEX (c) )
-PARTITION BY RANGE COLUMNS (b, a) (
-  PARTITION r0 VALUES LESS THAN ('hz', 10),
-  b < 'hz' AND a < 10,
-  b >= 'hz' AND b < 'sh' AND a >= 10 AND a < 20,
-  b >= 'sh' AND a >= 20
-)
-ENGINE=mito",
-                r#"[{"column_list":["b","a"],"value_list":["{\"Value\":{\"String\":\"hz\"}}","{\"Value\":{\"Int32\":10}}"]},{"column_list":["b","a"],"value_list":["{\"Value\":{\"String\":\"sh\"}}","{\"Value\":{\"Int32\":20}}"]},{"column_list":["b","a"],"value_list":["\"MaxValue\"","\"MaxValue\""]}]"#,
-            ),
-        ];
-        let ctx = QueryContextBuilder::default().build().into();
-        for (sql, expected) in cases {
-            let result = ParserContext::create_with_dialect(
-                sql,
-                &GreptimeDbDialect {},
-                ParseOptions::default(),
-            )
-            .unwrap();
-            match &result[0] {
-                Statement::CreateTable(c) => {
-                    let expr = expr_helper::create_to_expr(c, &QueryContext::arc()).unwrap();
-                    let (partitions, _) =
-                        parse_partitions(&expr, c.partitions.clone(), &ctx).unwrap();
-                    let json = serde_json::to_string(&partitions).unwrap();
-                    assert_eq!(json, expected);
-                }
-                _ => unreachable!(),
-            }
-        }
     }
 }

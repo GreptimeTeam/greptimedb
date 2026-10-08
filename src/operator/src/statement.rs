@@ -19,9 +19,13 @@ mod copy_query_to;
 mod copy_table_from;
 mod copy_table_to;
 mod cursor;
+mod database_copy;
 pub mod ddl;
 mod describe;
 mod dml;
+pub mod export_database;
+pub mod export_logical_tables;
+pub mod import_packed;
 mod kill;
 pub mod semantic_graph;
 mod set;
@@ -63,7 +67,7 @@ use query::QueryEngineRef;
 use query::parser::QueryStatement;
 use session::context::{Channel, QueryContextBuilder, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
-use set::{set_query_timeout, set_read_preference};
+use set::{set_query_timeout, set_read_preference, set_skip_wal};
 use snafu::{OptionExt, ResultExt, ensure};
 use sql::ast::ObjectNamePartExt;
 use sql::statements::OptionMap;
@@ -84,7 +88,7 @@ use table::table_reference::TableReference;
 pub use self::admin::{
     AdminEventRecorderHandle, AdminFunctionLayer, AdminFunctionLayerRef,
     AdminFunctionRecordingLayer, AdminFunctionRequest, AdminFunctionResponse, AdminFunctionService,
-    AdminFunctionServiceRef,
+    AdminFunctionServiceRef, admin_output_schema,
 };
 use self::set::{
     set_bytea_output, set_datestyle, set_intervalstyle, set_timezone, validate_client_encoding,
@@ -534,6 +538,7 @@ impl StatementExecutor {
 
         match var_name.as_str() {
             "READ_PREFERENCE" => set_read_preference(set_var.value, query_ctx)?,
+            "SKIP_WAL" => set_skip_wal(set_var.value, query_ctx)?,
 
             "@@TIME_ZONE" | "@@SESSION.TIME_ZONE" | "TIMEZONE" | "TIME_ZONE" => {
                 set_timezone(set_var.value, query_ctx)?
@@ -866,7 +871,7 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
 
 /// Converts [CopyDatabaseArgument] to [CopyDatabaseRequest].
 /// This function extracts the necessary info including catalog/database name, time range, etc.
-fn to_copy_database_request(
+pub fn to_copy_database_request(
     arg: CopyDatabaseArgument,
     query_ctx: &QueryContextRef,
 ) -> Result<CopyDatabaseRequest> {

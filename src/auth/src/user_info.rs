@@ -224,26 +224,6 @@ mod tests {
     }
 
     #[test]
-    fn test_default_user_info_with_name() {
-        let user_info = DefaultUserInfo::with_name("test_user");
-        assert_eq!(user_info.username(), "test_user");
-    }
-
-    #[test]
-    fn test_default_user_info_with_name_and_permission() {
-        let user_info =
-            DefaultUserInfo::with_name_and_permission("test_user", PermissionMode::ReadOnly);
-        assert_eq!(user_info.username(), "test_user");
-
-        // Cast to DefaultUserInfo to access permission_mode
-        let default_user = user_info
-            .as_any()
-            .downcast_ref::<DefaultUserInfo>()
-            .unwrap();
-        assert_eq!(default_user.permission_mode, PermissionMode::ReadOnly);
-    }
-
-    #[test]
     fn test_user_info_as_any() {
         let user_info = DefaultUserInfo::with_name("test_user");
         let any_ref = user_info.as_any();

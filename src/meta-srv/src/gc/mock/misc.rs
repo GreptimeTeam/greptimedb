@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use common_meta::peer::Peer;
-use common_meta::rpc::ddl::PersistentEventContext;
+use common_procedure::ProcedureContext;
 use common_telemetry::init_default_ut_logging;
 use store_api::storage::{FileRefsManifest, GcReport, RegionId};
 
@@ -76,7 +76,7 @@ async fn test_empty_file_refs_manifest() {
             datanode_to_candidates,
             HashMap::new(),
             HashMap::new(),
-            PersistentEventContext::default(),
+            ProcedureContext::default(),
         )
         .await;
 
@@ -169,7 +169,7 @@ async fn test_multiple_regions_per_table() {
             datanode_to_candidates,
             HashMap::new(),
             HashMap::new(),
-            PersistentEventContext::default(),
+            ProcedureContext::default(),
         )
         .await;
 

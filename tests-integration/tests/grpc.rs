@@ -12,43 +12,74 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Retain coverage of the legacy constructors, including TLS configuration.
+#![allow(deprecated)]
+
+use std::sync::Arc;
+
 use api::v1::alter_table_expr::Kind;
+use api::v1::greptime_database_client::GreptimeDatabaseClient;
+use api::v1::greptime_request::Request as RequestBody;
+use api::v1::greptime_response::Response as ResponseBody;
 use api::v1::promql_request::Promql;
+use api::v1::query_request::Query;
 use api::v1::value::ValueData;
 use api::v1::{
-    AddColumn, AddColumns, AlterTableExpr, Basic, Column, ColumnDataType, ColumnDef,
-    CreateTableExpr, InsertRequest, InsertRequests, PromInstantQuery, PromRangeQuery,
-    PromqlRequest, RequestHeader, Row, RowInsertRequest, RowInsertRequests, SemanticType, Value,
-    column,
+    AddColumn, AddColumns, AlterTableExpr, Basic, Column, ColumnDataType, ColumnDef, ColumnSchema,
+    CreateTableExpr, GreptimeRequest, InsertRequest, InsertRequests, PromInstantQuery,
+    PromRangeQuery, PromqlRequest, QueryRequest, RequestHeader, Row, RowInsertRequest,
+    RowInsertRequests, Rows, SemanticType, Value, column,
 };
 use auth::user_provider_from_option;
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use client::{Client, DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, Database, OutputData};
-use common_catalog::consts::MITO_ENGINE;
+use common_catalog::consts::{DEFAULT_PRIVATE_SCHEMA_NAME, MITO_ENGINE};
+use common_event_recorder::DEFAULT_EVENTS_TABLE_NAME;
+use common_frontend::slow_query_event::SLOW_QUERY_TABLE_NAME;
 use common_grpc::channel_manager::ClientTlsOption;
 use common_memory_manager::OnExhaustedPolicy;
+use common_meta::datanode::REGION_STATS_HISTORY_TABLE_NAME;
 use common_query::Output;
 use common_recordbatch::RecordBatches;
 use common_runtime::Runtime;
 use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
 use common_test_util::find_workspace_path;
-use otel_arrow_rust::proto::opentelemetry::arrow::v1::BatchArrowRecords;
+use datatypes::arrow::array::{
+    Array, ArrayRef, Float64Array, Float64Builder, Int32Array, ListBuilder, StringArray,
+    StructArray, TimestampNanosecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    UInt64Builder,
+};
+use datatypes::arrow::datatypes::{DataType, Field};
+use datatypes::arrow::ipc::writer::StreamWriter;
+use datatypes::arrow::record_batch::RecordBatch as ArrowRecordBatch;
+use otel_arrow_rust::otlp::metrics::MetricType as ArrowMetricType;
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_client::ArrowMetricsServiceClient;
+use otel_arrow_rust::proto::opentelemetry::arrow::v1::{
+    ArrowPayload, ArrowPayloadType, BatchArrowRecords, StatusCode as ArrowStatusCode,
+};
+use otel_arrow_rust::proto::opentelemetry::metrics::v1::AggregationTemporality;
+use otel_arrow_rust::schema::consts as arrow_consts;
+use rstest_reuse::apply;
 use servers::grpc::GrpcServerConfig;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::http::prometheus::{
-    PromData, PromQueryResult, PromSeriesMatrix, PromSeriesVector, PrometheusJsonResponse,
-    PrometheusResponse,
+    PromData, PromQueryResult, PromSampleValue, PromSeriesMatrix, PromSeriesVector,
+    PrometheusJsonResponse, PrometheusResponse,
 };
 use servers::request_memory_limiter::ServerMemoryLimiter;
 use servers::server::Server;
 use servers::tls::{TlsMode, TlsOption};
+use session::hints::{HINTS_KEY, INSERT_SKIP_WAL_HINT};
 use tests_integration::test_util::{
-    StorageType, setup_grpc_server, setup_grpc_server_with,
+    MockInstanceImpl, StorageType, assert_wal_delta, setup_grpc_server,
+    setup_grpc_server_for_frontend_instance, setup_grpc_server_with,
     setup_grpc_server_with_auto_create_table_disabled, setup_grpc_server_with_user_provider,
 };
 use tonic::Request;
+use tonic::codec::CompressionEncoding;
 use tonic::metadata::MetadataValue;
+
+use crate::both_deployment_cases;
 
 #[macro_export]
 macro_rules! grpc_test {
@@ -63,9 +94,13 @@ macro_rules! grpc_test {
                     async fn [< $test >]() {
                         let store_type = tests_integration::test_util::StorageType::$service;
                         if store_type.test_on() {
-                            let _ = $crate::grpc::$test(store_type).await;
+                            // Support both unit tests and fallible tests without discarding errors.
+                            let result = $crate::grpc::$test(store_type).await;
+                            assert_eq!(
+                                std::process::Termination::report(result),
+                                std::process::ExitCode::SUCCESS,
+                            );
                         }
-
                     }
                 )*
             }
@@ -84,7 +119,11 @@ macro_rules! grpc_tests {
                 test_auto_create_table,
                 test_auto_create_table_with_hints,
                 test_auto_create_table_disabled_by_config,
+                test_private_system_tables_auto_create_table_with_global_disabled,
+                test_private_system_tables_bypass_auto_create_hint,
                 test_otel_arrow_auth,
+                test_otel_arrow_delta_histogram,
+                test_otel_arrow_exponential_histogram,
                 test_insert_and_select,
                 test_dbname,
                 test_grpc_message_size_ok,
@@ -97,6 +136,7 @@ macro_rules! grpc_tests {
                 test_grpc_timezone,
                 test_grpc_tls_config,
                 test_grpc_memory_limit,
+                test_grpc_compressed_memory_reservation,
             );
         )*
     };
@@ -168,29 +208,128 @@ pub async fn test_grpc_message_size_ok(store_type: StorageType) {
     let _ = fe_grpc_server.shutdown().await;
 }
 
+/// Both the server (`servers::grpc::builder`) and the standard client
+/// (`configure_tonic_client!`) enable zstd, so a plain round trip never shows
+/// whether negotiation actually happened. This drives raw tonic clients instead
+/// and asserts on the `grpc-encoding` the server answers with.
 pub async fn test_grpc_zstd_compression(store_type: StorageType) {
-    // server and client both support gzip
-    let config = GrpcServerConfig {
-        max_recv_message_size: 1024,
-        max_send_message_size: 1024,
-        ..Default::default()
-    };
-    let (_db, fe_grpc_server) = setup_grpc_server_with(
-        store_type,
-        "test_grpc_zstd_compression",
-        None,
-        Some(config),
-        None,
-    )
-    .await;
+    let (_db, fe_grpc_server) = setup_grpc_server(store_type, "test_grpc_zstd_compression").await;
     let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
-    let grpc_client = Client::with_urls(vec![addr]);
+    let ddl = |sql: &str| GreptimeRequest {
+        header: Some(RequestHeader {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            ..Default::default()
+        }),
+        request: Some(RequestBody::Query(QueryRequest {
+            query: Some(Query::Sql(sql.to_string())),
+        })),
+    };
+
+    // Sends zstd and accepts zstd: the server has to decode a compressed request
+    // body and compress its response.
+    let mut zstd_client = GreptimeDatabaseClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap()
+        .send_compressed(CompressionEncoding::Zstd)
+        .accept_compressed(CompressionEncoding::Zstd);
+    let response = zstd_client
+        .handle(Request::new(ddl(
+            "CREATE TABLE zstd_compression (ts TIMESTAMP TIME INDEX, payload STRING)",
+        )))
+        .await
+        .unwrap();
+    assert_eq!(
+        response
+            .metadata()
+            .get("grpc-encoding")
+            .map(|v| v.to_str().unwrap()),
+        Some("zstd")
+    );
+
+    // A payload far above the zstd frame overhead, so the request body really is
+    // compressed rather than passed through.
+    let payload = "compressible-".repeat(4096);
+    let insert = |ts: i64| GreptimeRequest {
+        header: Some(RequestHeader {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            ..Default::default()
+        }),
+        request: Some(RequestBody::RowInserts(RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: "zstd_compression".to_string(),
+                rows: Some(Rows {
+                    schema: vec![
+                        ColumnSchema {
+                            column_name: "ts".to_string(),
+                            semantic_type: SemanticType::Timestamp as i32,
+                            datatype: ColumnDataType::TimestampMillisecond as i32,
+                            ..Default::default()
+                        },
+                        ColumnSchema {
+                            column_name: "payload".to_string(),
+                            semantic_type: SemanticType::Field as i32,
+                            datatype: ColumnDataType::String as i32,
+                            ..Default::default()
+                        },
+                    ],
+                    rows: vec![Row {
+                        values: vec![
+                            Value {
+                                value_data: Some(ValueData::TimestampMillisecondValue(ts)),
+                            },
+                            Value {
+                                value_data: Some(ValueData::StringValue(payload.clone())),
+                            },
+                        ],
+                    }],
+                }),
+            }],
+        })),
+    };
+
+    let response = zstd_client
+        .handle(Request::new(insert(1000)))
+        .await
+        .unwrap();
+    let ResponseBody::AffectedRows(rows) = response.into_inner().response.unwrap();
+    assert_eq!(rows.value, 1);
+
+    // A client that does not advertise zstd gets an uncompressed response.
+    let mut plain_client = GreptimeDatabaseClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    let response = plain_client
+        .handle(Request::new(insert(2000)))
+        .await
+        .unwrap();
+    assert!(response.metadata().get("grpc-encoding").is_none());
+
+    // Both payloads survived their respective paths intact.
     let db = Database::new_with_dbname(
         format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
-        grpc_client,
+        Client::with_urls(vec![addr]),
     );
-    db.sql("show tables;").await.unwrap();
+    let sql = format!(
+        "SELECT count(*) AS c FROM zstd_compression WHERE length(payload) = {}",
+        payload.len()
+    );
+    let OutputData::Stream(stream) = db.sql(&sql).await.unwrap().data else {
+        panic!("expected a stream");
+    };
+    let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        recordbatches.pretty_print().unwrap(),
+        "\
++---+
+| c |
++---+
+| 2 |
++---+"
+    );
+
     let _ = fe_grpc_server.shutdown().await;
 }
 
@@ -217,6 +356,104 @@ pub async fn test_grpc_message_size_limit_send(store_type: StorageType) {
     );
     let err_msg = db.sql("show tables;").await.unwrap_err().to_string();
     assert!(err_msg.contains("message length too large"), "{}", err_msg);
+    let _ = fe_grpc_server.shutdown().await;
+}
+
+/// Transport-compressed gRPC requests reserve the worst-case decoded message
+/// size (`max_recv_message_size`) against the aggregate quota *before* tonic
+/// decompresses them. With a quota smaller than that bound, compressed
+/// requests must fail fast with `RESOURCE_EXHAUSTED` (before decoding), while
+/// uncompressed requests are still admitted through the exact post-decode
+/// charge. With the default unlimited limiter, compression keeps working.
+pub async fn test_grpc_compressed_memory_reservation(store_type: StorageType) {
+    use api::v1::query_request::Query;
+    use api::v1::{GreptimeRequest, QueryRequest};
+    use tonic::codec::CompressionEncoding;
+
+    let config = GrpcServerConfig {
+        max_recv_message_size: 1024 * 1024,
+        ..Default::default()
+    };
+    // Quota smaller than the decoding bound: compressed requests cannot be
+    // pre-admitted.
+    let memory_limiter = ServerMemoryLimiter::new(512 * 1024, OnExhaustedPolicy::Fail);
+    let (_db, fe_grpc_server) = setup_grpc_server_with(
+        store_type,
+        "test_grpc_compressed_memory_reservation",
+        None,
+        Some(config),
+        Some(memory_limiter),
+    )
+    .await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
+
+    let db = Database::new_with_dbname(
+        format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+        Client::with_urls(vec![addr.clone()]),
+    );
+    db.sql("CREATE TABLE grpc_quota(ts TIMESTAMP TIME INDEX, v DOUBLE)")
+        .await
+        .unwrap();
+
+    let insert_request = || {
+        tonic::Request::new(GreptimeRequest {
+            header: Some(RequestHeader {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                ..Default::default()
+            }),
+            request: Some(RequestBody::Query(QueryRequest {
+                query: Some(Query::Sql(
+                    "INSERT INTO grpc_quota VALUES (1000, 1.0)".to_string(),
+                )),
+            })),
+        })
+    };
+
+    // Compressed request: the pre-decode reservation (1 MiB) exceeds the
+    // 512 KiB quota and must be rejected before any decoding happens.
+    let mut compressed = GreptimeDatabaseClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap()
+        .send_compressed(CompressionEncoding::Zstd);
+    let status = compressed.handle(insert_request()).await.unwrap_err();
+    assert_eq!(
+        status.code(),
+        tonic::Code::ResourceExhausted,
+        "compressed request must be pre-admitted against the quota, got: {status}"
+    );
+
+    // Uncompressed request on the same server: still admitted (its exact
+    // serialized size fits the quota).
+    let mut plain = GreptimeDatabaseClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    plain.handle(insert_request()).await.unwrap();
+
+    let _ = fe_grpc_server.shutdown().await;
+
+    // Default (unlimited) limiter: compressed requests keep working.
+    let (_db, fe_grpc_server) = setup_grpc_server_with(
+        store_type,
+        "test_grpc_compressed_memory_reservation_unlimited",
+        None,
+        Some(GrpcServerConfig::default()),
+        None,
+    )
+    .await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
+    let db = Database::new_with_dbname(
+        format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+        Client::with_urls(vec![addr.clone()]),
+    );
+    db.sql("CREATE TABLE grpc_quota(ts TIMESTAMP TIME INDEX, v DOUBLE)")
+        .await
+        .unwrap();
+    let mut compressed = GreptimeDatabaseClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap()
+        .send_compressed(CompressionEncoding::Zstd);
+    compressed.handle(insert_request()).await.unwrap();
     let _ = fe_grpc_server.shutdown().await;
 }
 
@@ -378,6 +615,488 @@ pub async fn test_otel_arrow_auth(store_type: StorageType) {
     let _ = fe_grpc_server.shutdown().await;
 }
 
+// The pinned otel-arrow Producer cannot hash List-typed bucket schemas yet, so
+// serialize these test-only record batches directly into the same Arrow stream format.
+fn serialize_arrow_record_batch(record_batch: &ArrowRecordBatch) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut writer = StreamWriter::try_new(&mut bytes, record_batch.schema_ref()).unwrap();
+    writer.write(record_batch).unwrap();
+    writer.finish().unwrap();
+    drop(writer);
+    bytes
+}
+
+fn exponential_histogram_arrow_batch(batch_id: i64, scales: &[i32]) -> BatchArrowRecords {
+    let resource = StructArray::from(vec![(
+        Arc::new(Field::new(arrow_consts::ID, DataType::UInt16, true)),
+        Arc::new(UInt16Array::from(vec![0_u16])) as ArrayRef,
+    )]);
+    let scope = StructArray::from(vec![(
+        Arc::new(Field::new(arrow_consts::ID, DataType::UInt16, true)),
+        Arc::new(UInt16Array::from(vec![0_u16])) as ArrayRef,
+    )]);
+    let metrics = ArrowRecordBatch::try_from_iter(vec![
+        (
+            arrow_consts::ID,
+            Arc::new(UInt16Array::from(vec![0_u16])) as ArrayRef,
+        ),
+        (arrow_consts::RESOURCE, Arc::new(resource) as ArrayRef),
+        (arrow_consts::SCOPE, Arc::new(scope) as ArrayRef),
+        (
+            arrow_consts::METRIC_TYPE,
+            Arc::new(UInt8Array::from(vec![
+                ArrowMetricType::ExponentialHistogram as u8,
+            ])) as ArrayRef,
+        ),
+        (
+            arrow_consts::NAME,
+            Arc::new(StringArray::from(vec!["otel.arrow.exponential.latency"])) as ArrayRef,
+        ),
+        (
+            arrow_consts::AGGREGATION_TEMPORALITY,
+            Arc::new(Int32Array::from(vec![
+                AggregationTemporality::Cumulative as i32,
+            ])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+
+    let point_count = scales.len();
+    let mut positive_counts = ListBuilder::new(UInt64Builder::new());
+    let mut negative_counts = ListBuilder::new(UInt64Builder::new());
+    for _ in scales {
+        positive_counts.values().append_slice(&[1, 2]);
+        positive_counts.append(true);
+        negative_counts.append(true);
+    }
+    let positive_counts = positive_counts.finish();
+    let negative_counts = negative_counts.finish();
+    let positive = StructArray::from(vec![
+        (
+            Arc::new(Field::new(
+                arrow_consts::EXP_HISTOGRAM_OFFSET,
+                DataType::Int32,
+                true,
+            )),
+            Arc::new(Int32Array::from(vec![-1; point_count])) as ArrayRef,
+        ),
+        (
+            Arc::new(Field::new(
+                arrow_consts::EXP_HISTOGRAM_BUCKET_COUNTS,
+                positive_counts.data_type().clone(),
+                true,
+            )),
+            Arc::new(positive_counts) as ArrayRef,
+        ),
+    ]);
+    let negative = StructArray::from(vec![
+        (
+            Arc::new(Field::new(
+                arrow_consts::EXP_HISTOGRAM_OFFSET,
+                DataType::Int32,
+                true,
+            )),
+            Arc::new(Int32Array::from(vec![0; point_count])) as ArrayRef,
+        ),
+        (
+            Arc::new(Field::new(
+                arrow_consts::EXP_HISTOGRAM_BUCKET_COUNTS,
+                negative_counts.data_type().clone(),
+                true,
+            )),
+            Arc::new(negative_counts) as ArrayRef,
+        ),
+    ]);
+    let data_points = ArrowRecordBatch::try_from_iter(vec![
+        (
+            arrow_consts::ID,
+            Arc::new(UInt32Array::from_iter_values(
+                (0..point_count).map(|id| u32::try_from(id).unwrap()),
+            )) as ArrayRef,
+        ),
+        (
+            arrow_consts::PARENT_ID,
+            Arc::new(UInt16Array::from(vec![0_u16; point_count])) as ArrayRef,
+        ),
+        (
+            arrow_consts::START_TIME_UNIX_NANO,
+            Arc::new(TimestampNanosecondArray::from(vec![
+                1_000_000_000;
+                point_count
+            ])) as ArrayRef,
+        ),
+        (
+            arrow_consts::TIME_UNIX_NANO,
+            Arc::new(TimestampNanosecondArray::from(vec![
+                3_000_000_000;
+                point_count
+            ])) as ArrayRef,
+        ),
+        (
+            arrow_consts::HISTOGRAM_COUNT,
+            Arc::new(UInt64Array::from(vec![4_u64; point_count])) as ArrayRef,
+        ),
+        (
+            arrow_consts::HISTOGRAM_SUM,
+            Arc::new(Float64Array::from(vec![8.0; point_count])) as ArrayRef,
+        ),
+        (
+            arrow_consts::EXP_HISTOGRAM_SCALE,
+            Arc::new(Int32Array::from(scales.to_vec())) as ArrayRef,
+        ),
+        (
+            arrow_consts::EXP_HISTOGRAM_ZERO_COUNT,
+            Arc::new(UInt64Array::from(vec![1_u64; point_count])) as ArrayRef,
+        ),
+        (
+            arrow_consts::EXP_HISTOGRAM_POSITIVE,
+            Arc::new(positive) as ArrayRef,
+        ),
+        (
+            arrow_consts::EXP_HISTOGRAM_NEGATIVE,
+            Arc::new(negative) as ArrayRef,
+        ),
+        (
+            arrow_consts::FLAGS,
+            Arc::new(UInt32Array::from(vec![0_u32; point_count])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    BatchArrowRecords {
+        batch_id,
+        arrow_payloads: vec![
+            ArrowPayload {
+                schema_id: format!("metrics-{batch_id}"),
+                r#type: ArrowPayloadType::UnivariateMetrics as i32,
+                record: serialize_arrow_record_batch(&metrics),
+            },
+            ArrowPayload {
+                schema_id: format!("exp-histogram-{batch_id}"),
+                r#type: ArrowPayloadType::ExpHistogramDataPoints as i32,
+                record: serialize_arrow_record_batch(&data_points),
+            },
+        ],
+        headers: vec![],
+    }
+}
+
+fn delta_histogram_arrow_batch(
+    batch_id: i64,
+    points: &[(u64, &[u64], &[f64])],
+) -> BatchArrowRecords {
+    let resource = StructArray::from(vec![(
+        Arc::new(Field::new(arrow_consts::ID, DataType::UInt16, true)),
+        Arc::new(UInt16Array::from(vec![0_u16])) as ArrayRef,
+    )]);
+    let scope = StructArray::from(vec![(
+        Arc::new(Field::new(arrow_consts::ID, DataType::UInt16, true)),
+        Arc::new(UInt16Array::from(vec![0_u16])) as ArrayRef,
+    )]);
+    let metrics = ArrowRecordBatch::try_from_iter(vec![
+        (
+            arrow_consts::ID,
+            Arc::new(UInt16Array::from(vec![0_u16])) as ArrayRef,
+        ),
+        (arrow_consts::RESOURCE, Arc::new(resource) as ArrayRef),
+        (arrow_consts::SCOPE, Arc::new(scope) as ArrayRef),
+        (
+            arrow_consts::METRIC_TYPE,
+            Arc::new(UInt8Array::from(vec![ArrowMetricType::Histogram as u8])) as ArrayRef,
+        ),
+        (
+            arrow_consts::NAME,
+            Arc::new(StringArray::from(vec!["otel.arrow.delta.histogram"])) as ArrayRef,
+        ),
+        (
+            arrow_consts::AGGREGATION_TEMPORALITY,
+            Arc::new(Int32Array::from(vec![AggregationTemporality::Delta as i32])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+
+    let mut bucket_counts = ListBuilder::new(UInt64Builder::new());
+    let mut explicit_bounds = ListBuilder::new(Float64Builder::new());
+    for (_, counts, bounds) in points {
+        bucket_counts.values().append_slice(counts);
+        bucket_counts.append(true);
+        explicit_bounds.values().append_slice(bounds);
+        explicit_bounds.append(true);
+    }
+    let bucket_counts = bucket_counts.finish();
+    let explicit_bounds = explicit_bounds.finish();
+    let data_points = ArrowRecordBatch::try_from_iter(vec![
+        (
+            arrow_consts::ID,
+            Arc::new(UInt32Array::from_iter_values(
+                (0..points.len()).map(|id| u32::try_from(id).unwrap()),
+            )) as ArrayRef,
+        ),
+        (
+            arrow_consts::PARENT_ID,
+            Arc::new(UInt16Array::from(vec![0_u16; points.len()])) as ArrayRef,
+        ),
+        (
+            arrow_consts::START_TIME_UNIX_NANO,
+            Arc::new(TimestampNanosecondArray::from(vec![
+                1_000_000_000;
+                points.len()
+            ])) as ArrayRef,
+        ),
+        (
+            arrow_consts::TIME_UNIX_NANO,
+            Arc::new(TimestampNanosecondArray::from_iter_values(
+                (1..=points.len()).map(|second| i64::try_from(second).unwrap() * 1_000_000_000),
+            )) as ArrayRef,
+        ),
+        (
+            arrow_consts::HISTOGRAM_COUNT,
+            Arc::new(UInt64Array::from(
+                points
+                    .iter()
+                    .map(|(count, _, _)| *count)
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef,
+        ),
+        (
+            arrow_consts::HISTOGRAM_SUM,
+            Arc::new(Float64Array::from(vec![1.0; points.len()])) as ArrayRef,
+        ),
+        (
+            arrow_consts::HISTOGRAM_BUCKET_COUNTS,
+            Arc::new(bucket_counts) as ArrayRef,
+        ),
+        (
+            arrow_consts::HISTOGRAM_EXPLICIT_BOUNDS,
+            Arc::new(explicit_bounds) as ArrayRef,
+        ),
+        (
+            arrow_consts::FLAGS,
+            Arc::new(UInt32Array::from(vec![0_u32; points.len()])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    BatchArrowRecords {
+        batch_id,
+        arrow_payloads: vec![
+            ArrowPayload {
+                schema_id: format!("metrics-{batch_id}"),
+                r#type: ArrowPayloadType::UnivariateMetrics as i32,
+                record: serialize_arrow_record_batch(&metrics),
+            },
+            ArrowPayload {
+                schema_id: format!("histogram-{batch_id}"),
+                r#type: ArrowPayloadType::HistogramDataPoints as i32,
+                record: serialize_arrow_record_batch(&data_points),
+            },
+        ],
+        headers: vec![],
+    }
+}
+
+fn gauge_arrow_batch(batch_id: i64, reserved_attr: bool) -> BatchArrowRecords {
+    let resource = StructArray::from(vec![(
+        Arc::new(Field::new(arrow_consts::ID, DataType::UInt16, true)),
+        Arc::new(UInt16Array::from(vec![0_u16])) as ArrayRef,
+    )]);
+    let scope = StructArray::from(vec![(
+        Arc::new(Field::new(arrow_consts::ID, DataType::UInt16, true)),
+        Arc::new(UInt16Array::from(vec![0_u16])) as ArrayRef,
+    )]);
+    let metrics = ArrowRecordBatch::try_from_iter(vec![
+        (
+            arrow_consts::ID,
+            Arc::new(UInt16Array::from(vec![0_u16])) as ArrayRef,
+        ),
+        (arrow_consts::RESOURCE, Arc::new(resource) as ArrayRef),
+        (arrow_consts::SCOPE, Arc::new(scope) as ArrayRef),
+        (
+            arrow_consts::METRIC_TYPE,
+            Arc::new(UInt8Array::from(vec![ArrowMetricType::Gauge as u8])) as ArrayRef,
+        ),
+        (
+            arrow_consts::NAME,
+            Arc::new(StringArray::from(vec!["otel.arrow.gauge"])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    let data_points = ArrowRecordBatch::try_from_iter(vec![
+        (
+            arrow_consts::ID,
+            Arc::new(UInt32Array::from(vec![0_u32])) as ArrayRef,
+        ),
+        (
+            arrow_consts::PARENT_ID,
+            Arc::new(UInt16Array::from(vec![0_u16])) as ArrayRef,
+        ),
+        (
+            arrow_consts::START_TIME_UNIX_NANO,
+            Arc::new(TimestampNanosecondArray::from(vec![1_000_000_000])) as ArrayRef,
+        ),
+        (
+            arrow_consts::TIME_UNIX_NANO,
+            Arc::new(TimestampNanosecondArray::from(vec![2_000_000_000])) as ArrayRef,
+        ),
+        (
+            arrow_consts::DOUBLE_VALUE,
+            Arc::new(Float64Array::from(vec![1.0])) as ArrayRef,
+        ),
+        (
+            arrow_consts::FLAGS,
+            Arc::new(UInt32Array::from(vec![0_u32])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    let mut arrow_payloads = vec![
+        ArrowPayload {
+            schema_id: format!("metrics-{batch_id}"),
+            r#type: ArrowPayloadType::UnivariateMetrics as i32,
+            record: serialize_arrow_record_batch(&metrics),
+        },
+        ArrowPayload {
+            schema_id: format!("number-{batch_id}"),
+            r#type: ArrowPayloadType::NumberDataPoints as i32,
+            record: serialize_arrow_record_batch(&data_points),
+        },
+    ];
+    if reserved_attr {
+        let attributes = ArrowRecordBatch::try_from_iter(vec![
+            (
+                arrow_consts::PARENT_ID,
+                Arc::new(UInt32Array::from(vec![0_u32])) as ArrayRef,
+            ),
+            (
+                arrow_consts::ATTRIBUTE_KEY,
+                Arc::new(StringArray::from(vec!["otlp_aggregation_temporality"])) as ArrayRef,
+            ),
+            (
+                arrow_consts::ATTRIBUTE_TYPE,
+                Arc::new(UInt8Array::from(vec![1_u8])) as ArrayRef,
+            ),
+            (
+                arrow_consts::ATTRIBUTE_STR,
+                Arc::new(StringArray::from(vec!["user"])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+        arrow_payloads.push(ArrowPayload {
+            schema_id: format!("number-attrs-{batch_id}"),
+            r#type: ArrowPayloadType::NumberDpAttrs as i32,
+            record: serialize_arrow_record_batch(&attributes),
+        });
+    }
+    BatchArrowRecords {
+        batch_id,
+        arrow_payloads,
+        headers: vec![],
+    }
+}
+
+#[apply(both_deployment_cases)]
+async fn test_skip_wal_otel_arrow_metrics(distributed: bool) {
+    // OTEL Arrow metrics decode into ordinary metric inserts, unlike Flight DoPut bulk inserts.
+    let mut env = MockInstanceImpl::new("skip_wal_otel_arrow", distributed).await;
+    let server = setup_grpc_server_for_frontend_instance(env.frontend(), None).await;
+    let mut client =
+        ArrowMetricsServiceClient::connect(format!("http://{}", server.bind_addr().unwrap()))
+            .await
+            .unwrap();
+    // Warm up auto-created logical/physical tables and metadata before comparing data-region WAL.
+    for (batch_id, hint) in [None, Some("true"), Some("false"), None]
+        .into_iter()
+        .enumerate()
+    {
+        let before = env.flush_and_snapshot_wal().await;
+        let batch = gauge_arrow_batch(batch_id as i64, false);
+        let request = with_skip_wal_hint(futures::stream::iter([batch]), hint);
+        let mut response = client.arrow_metrics(request).await.unwrap().into_inner();
+        let status = response.message().await.unwrap().unwrap();
+        assert_eq!(
+            status.status_code,
+            ArrowStatusCode::Ok as i32,
+            "{}",
+            status.status_message
+        );
+        assert!(response.message().await.unwrap().is_none());
+        if batch_id != 0 {
+            assert_wal_delta(
+                &before,
+                &env.flush_and_snapshot_wal().await,
+                hint == Some("true"),
+            );
+        }
+    }
+    server.shutdown().await.unwrap();
+    env.shutdown().await;
+}
+
+pub async fn test_otel_arrow_delta_histogram(store_type: StorageType) {
+    let (_instance, server) =
+        setup_grpc_server(store_type, "test_otel_arrow_delta_histogram").await;
+    let addr = server.bind_addr().unwrap().to_string();
+    let mut client = ArrowMetricsServiceClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    let valid = (3, &[1, 2][..], &[1.0][..]);
+    let malformed = (1, &[1][..], &[1.0][..]);
+    let request = Request::new(futures::stream::iter([
+        delta_histogram_arrow_batch(10, &[valid, malformed]),
+        delta_histogram_arrow_batch(11, &[malformed]),
+        delta_histogram_arrow_batch(12, &[valid]),
+        gauge_arrow_batch(13, true),
+        gauge_arrow_batch(14, false),
+    ]));
+    let mut response = client.arrow_metrics(request).await.unwrap().into_inner();
+
+    let mixed = response.message().await.unwrap().unwrap();
+    assert_eq!(10, mixed.batch_id);
+    assert_eq!(ArrowStatusCode::Ok as i32, mixed.status_code);
+    assert!(mixed.status_message.contains("bucket_counts length"));
+
+    let rejected = response.message().await.unwrap().unwrap();
+    assert_eq!(11, rejected.batch_id);
+    assert_eq!(
+        ArrowStatusCode::InvalidArgument as i32,
+        rejected.status_code
+    );
+    assert!(rejected.status_message.contains("bucket_counts length"));
+
+    let later_valid = response.message().await.unwrap().unwrap();
+    assert_eq!(12, later_valid.batch_id);
+    assert_eq!(ArrowStatusCode::Ok as i32, later_valid.status_code);
+    assert!(later_valid.status_message.is_empty());
+
+    let collision = response.message().await.unwrap().unwrap();
+    assert_eq!(13, collision.batch_id);
+    assert_eq!(
+        ArrowStatusCode::InvalidArgument as i32,
+        collision.status_code
+    );
+    assert!(collision.status_message.contains("reserved label"));
+
+    let after_collision = response.message().await.unwrap().unwrap();
+    assert_eq!(14, after_collision.batch_id);
+    assert_eq!(ArrowStatusCode::Ok as i32, after_collision.status_code);
+    assert!(after_collision.status_message.is_empty());
+    let _ = server.shutdown().await;
+}
+
+pub async fn test_otel_arrow_exponential_histogram(store_type: StorageType) {
+    let (_instance, server) =
+        setup_grpc_server(store_type, "test_otel_arrow_exponential_histogram").await;
+    let addr = server.bind_addr().unwrap().to_string();
+    let mut client = ArrowMetricsServiceClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    let batch = exponential_histogram_arrow_batch(0, &[0]);
+    let request = Request::new(futures::stream::once(async { batch }));
+    let mut response = client.arrow_metrics(request).await.unwrap().into_inner();
+    let status = response.message().await.unwrap().unwrap();
+    assert_eq!(0, status.batch_id);
+    assert_eq!(ArrowStatusCode::InvalidArgument as i32, status.status_code);
+    assert!(status.status_message.contains("omits zero_threshold"));
+    let _ = server.shutdown().await;
+}
+
 fn basic_auth(username: &str, password: &str) -> String {
     format!("Basic {}", basic_auth_credentials(username, password))
 }
@@ -482,6 +1201,154 @@ pub async fn test_auto_create_table_disabled_by_config(store_type: StorageType) 
     let _ = fe_grpc_server.shutdown().await;
 }
 
+pub async fn test_private_system_tables_auto_create_table_with_global_disabled(
+    store_type: StorageType,
+) {
+    let (_db, fe_grpc_server) = setup_grpc_server_with_auto_create_table_disabled(
+        store_type,
+        "test_private_system_tables_auto_create_table_with_global_disabled",
+    )
+    .await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let db = Database::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_PRIVATE_SCHEMA_NAME,
+        grpc_client,
+    );
+    let (host, cpu, mem, ts) = expect_data();
+
+    for table_name in [
+        DEFAULT_EVENTS_TABLE_NAME,
+        SLOW_QUERY_TABLE_NAME,
+        REGION_STATS_HISTORY_TABLE_NAME,
+    ] {
+        let result = db
+            .insert(InsertRequests {
+                inserts: vec![InsertRequest {
+                    table_name: table_name.to_string(),
+                    columns: vec![host.clone(), cpu.clone(), mem.clone(), ts.clone()],
+                    row_count: 4,
+                }],
+            })
+            .await;
+        assert_eq!(result.unwrap(), 4);
+    }
+
+    let load = Column {
+        column_name: "load".to_string(),
+        values: Some(column::Values {
+            f64_values: vec![0.4, 0.5, 0.6, 0.7],
+            ..Default::default()
+        }),
+        semantic_type: SemanticType::Field as i32,
+        datatype: ColumnDataType::Float64 as i32,
+        ..Default::default()
+    };
+    let result = db
+        .insert(InsertRequests {
+            inserts: vec![InsertRequest {
+                table_name: DEFAULT_EVENTS_TABLE_NAME.to_string(),
+                columns: vec![host, cpu, mem, ts, load],
+                row_count: 4,
+            }],
+        })
+        .await;
+    assert_eq!(result.unwrap(), 4);
+
+    let output = db
+        .sql(format!("SHOW CREATE TABLE {DEFAULT_EVENTS_TABLE_NAME}"))
+        .await
+        .unwrap();
+    let record_batches = match output.data {
+        OutputData::RecordBatches(record_batches) => record_batches,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
+    };
+    assert!(record_batches.pretty_print().unwrap().contains("\"load\""));
+
+    let _ = fe_grpc_server.shutdown().await;
+}
+
+pub async fn test_private_system_tables_bypass_auto_create_hint(store_type: StorageType) {
+    let (_db, fe_grpc_server) = setup_grpc_server(
+        store_type,
+        "test_private_system_tables_bypass_auto_create_hint",
+    )
+    .await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
+
+    let grpc_client = Client::with_urls(vec![addr]);
+    let db = Database::new(
+        DEFAULT_CATALOG_NAME,
+        DEFAULT_PRIVATE_SCHEMA_NAME,
+        grpc_client,
+    );
+    let (host, cpu, mem, ts) = expect_data();
+
+    for table_name in [
+        DEFAULT_EVENTS_TABLE_NAME,
+        SLOW_QUERY_TABLE_NAME,
+        REGION_STATS_HISTORY_TABLE_NAME,
+    ] {
+        let result = db
+            .insert_with_hints(
+                InsertRequests {
+                    inserts: vec![InsertRequest {
+                        table_name: table_name.to_string(),
+                        columns: vec![host.clone(), cpu.clone(), mem.clone(), ts.clone()],
+                        row_count: 4,
+                    }],
+                },
+                &[("auto_create_table", "false")],
+            )
+            .await;
+        assert_eq!(result.unwrap(), 4);
+    }
+
+    let ordinary_table = "ordinary_private_table";
+    let result = db
+        .insert_with_hints(
+            InsertRequests {
+                inserts: vec![
+                    InsertRequest {
+                        table_name: DEFAULT_EVENTS_TABLE_NAME.to_string(),
+                        columns: vec![host.clone(), cpu.clone(), mem.clone(), ts.clone()],
+                        row_count: 4,
+                    },
+                    InsertRequest {
+                        table_name: ordinary_table.to_string(),
+                        columns: vec![host, cpu, mem, ts],
+                        row_count: 4,
+                    },
+                ],
+            },
+            &[("auto_create_table", "false")],
+        )
+        .await;
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains(ordinary_table) && err.contains("auto_create_table"),
+        "unexpected error: {err}"
+    );
+
+    let output = db.sql("SHOW TABLES").await.unwrap();
+    let record_batches = match output.data {
+        OutputData::RecordBatches(record_batches) => record_batches,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
+    };
+    assert!(
+        !record_batches
+            .pretty_print()
+            .unwrap()
+            .contains(ordinary_table)
+    );
+
+    let _ = fe_grpc_server.shutdown().await;
+}
+
 fn expect_data() -> (Column, Column, Column, Column) {
     // testing data:
     let expected_host_col = Column {
@@ -536,6 +1403,258 @@ fn expect_data() -> (Column, Column, Column, Column) {
         expected_mem_col,
         expected_ts_col,
     )
+}
+
+fn with_skip_wal_hint<T>(body: T, hint: Option<&str>) -> Request<T> {
+    let mut request = Request::new(body);
+    if let Some(hint) = hint {
+        request.metadata_mut().insert(
+            HINTS_KEY,
+            format!("{INSERT_SKIP_WAL_HINT}={hint}").parse().unwrap(),
+        );
+    }
+    request
+}
+
+fn skip_wal_insert_body(columnar: bool) -> RequestBody {
+    if columnar {
+        RequestBody::Inserts(InsertRequests {
+            inserts: vec![InsertRequest {
+                table_name: "skip_wal_grpc".to_string(),
+                row_count: 1,
+                columns: vec![Column {
+                    column_name: "ts".to_string(),
+                    semantic_type: SemanticType::Timestamp as i32,
+                    datatype: ColumnDataType::TimestampMillisecond as i32,
+                    values: Some(column::Values {
+                        timestamp_millisecond_values: vec![1000],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+            }],
+        })
+    } else {
+        RequestBody::RowInserts(RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: "skip_wal_grpc".to_string(),
+                rows: Some(Rows {
+                    schema: vec![ColumnSchema {
+                        column_name: "ts".to_string(),
+                        semantic_type: SemanticType::Timestamp as i32,
+                        datatype: ColumnDataType::TimestampMillisecond as i32,
+                        ..Default::default()
+                    }],
+                    rows: vec![Row {
+                        values: vec![Value {
+                            value_data: Some(ValueData::TimestampMillisecondValue(1000)),
+                        }],
+                    }],
+                }),
+            }],
+        })
+    }
+}
+
+#[apply(both_deployment_cases)]
+async fn test_skip_wal_grpc_unary_stream_and_flight_sql(distributed: bool) {
+    let mut env = MockInstanceImpl::new("skip_wal_grpc_protocols", distributed).await;
+    let server = setup_grpc_server_for_frontend_instance(env.frontend(), None).await;
+    let addr = server.bind_addr().unwrap().to_string();
+    let mut grpc = GreptimeDatabaseClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    let database = Database::new_with_dbname("greptime-public", Client::with_urls(vec![addr]));
+    database
+        .sql("CREATE TABLE skip_wal_grpc (ts TIMESTAMP TIME INDEX)")
+        .await
+        .unwrap();
+
+    for streaming in [false, true] {
+        for columnar in [false, true] {
+            for hint in [Some("true"), Some("false"), None] {
+                let before = env.flush_and_snapshot_wal().await;
+                let request = GreptimeRequest {
+                    header: Some(RequestHeader {
+                        catalog: "greptime".to_string(),
+                        schema: "public".to_string(),
+                        ..Default::default()
+                    }),
+                    request: Some(skip_wal_insert_body(columnar)),
+                };
+                let response = if streaming {
+                    grpc.handle_requests(with_skip_wal_hint(
+                        futures::stream::iter([request.clone(), request]),
+                        hint,
+                    ))
+                    .await
+                    .unwrap()
+                } else {
+                    grpc.handle(with_skip_wal_hint(request, hint))
+                        .await
+                        .unwrap()
+                }
+                .into_inner();
+                let expected_rows = if streaming { 2 } else { 1 };
+                assert!(
+                    matches!(response.response, Some(ResponseBody::AffectedRows(rows)) if rows.value == expected_rows)
+                );
+                assert_wal_delta(
+                    &before,
+                    &env.flush_and_snapshot_wal().await,
+                    hint == Some("true"),
+                );
+            }
+        }
+    }
+    for hint in [Some("true"), Some("false"), None] {
+        let before = env.flush_and_snapshot_wal().await;
+        let hints = hint
+            .map(|value| vec![(INSERT_SKIP_WAL_HINT, value)])
+            .unwrap_or_default();
+        database
+            .sql_with_hint("INSERT INTO skip_wal_grpc VALUES (1000)", &hints)
+            .await
+            .unwrap();
+        assert_wal_delta(
+            &before,
+            &env.flush_and_snapshot_wal().await,
+            hint == Some("true"),
+        );
+    }
+    // Strict validation must reject the request before any data write.
+    let before = env.flush_and_snapshot_wal().await;
+    assert!(
+        database
+            .sql_with_hint(
+                "INSERT INTO skip_wal_grpc VALUES (1000)",
+                &[(INSERT_SKIP_WAL_HINT, "yes")]
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(before, env.flush_and_snapshot_wal().await);
+    server.shutdown().await.unwrap();
+    env.shutdown().await;
+}
+
+#[apply(both_deployment_cases)]
+async fn test_grpc_json2_row_inserts(distributed: bool) {
+    let mut env = MockInstanceImpl::new("grpc_json2_row_inserts", distributed).await;
+    let server = setup_grpc_server_for_frontend_instance(env.frontend(), None).await;
+    let addr = server.bind_addr().unwrap().to_string();
+    let database = Database::new_with_dbname("greptime-public", Client::with_urls(vec![addr]));
+    database
+        .sql(
+            "CREATE TABLE grpc_json2 (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, j JSON2) \
+             WITH (append_mode='true', 'memtable.type'='bulk')",
+        )
+        .await
+        .unwrap();
+
+    let (datatype, extension) =
+        api::helper::ColumnDataTypeWrapper::try_from(datatypes::prelude::ConcreteDataType::json2(
+            datatypes::types::json_type::JsonNativeType::Null,
+        ))
+        .unwrap()
+        .into_parts();
+
+    // Send the all-NULL JSON2 batch separately to check its type marker.
+    for (index, (host, payload)) in [
+        (
+            "host-a",
+            Some(serde_json::json!({
+                "active": true,
+                "nested": {"items": [1, "two", null, {"ok": false}], "ratio": 1.5},
+                "tags": ["api", "prod"]
+            })),
+        ),
+        (
+            "host-b",
+            Some(serde_json::json!({
+                "active": false,
+                "nested": {"items": [-2, "three", null, {"ok": true}], "ratio": -0.25},
+                "tags": ["worker"]
+            })),
+        ),
+        ("host-a", None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let output = database
+            .row_inserts(RowInsertRequests {
+                inserts: vec![RowInsertRequest {
+                    table_name: "grpc_json2".into(),
+                    rows: Some(Rows {
+                        schema: vec![
+                            ColumnSchema {
+                                column_name: "ts".into(),
+                                datatype: ColumnDataType::TimestampMillisecond as i32,
+                                semantic_type: SemanticType::Timestamp as i32,
+                                ..Default::default()
+                            },
+                            ColumnSchema {
+                                column_name: "host".into(),
+                                datatype: ColumnDataType::String as i32,
+                                semantic_type: SemanticType::Tag as i32,
+                                ..Default::default()
+                            },
+                            ColumnSchema {
+                                column_name: "j".into(),
+                                datatype: datatype as i32,
+                                datatype_extension: extension.clone(),
+                                semantic_type: SemanticType::Field as i32,
+                                ..Default::default()
+                            },
+                        ],
+                        rows: vec![Row {
+                            values: vec![
+                                Value {
+                                    value_data: Some(ValueData::TimestampMillisecondValue(
+                                        index as i64,
+                                    )),
+                                },
+                                Value {
+                                    value_data: Some(ValueData::StringValue(host.into())),
+                                },
+                                Value {
+                                    value_data: payload.map(|x| {
+                                        ValueData::JsonValue(api::helper::encode_json_value(
+                                            x.into(),
+                                        ))
+                                    }),
+                                },
+                            ],
+                        }],
+                    }),
+                }],
+            })
+            .await
+            .unwrap();
+        assert_eq!(output, 1);
+    }
+
+    let output = database
+        .sql("SELECT host, j FROM grpc_json2 ORDER BY ts")
+        .await
+        .unwrap();
+    let batches = match output.data {
+        OutputData::RecordBatches(batches) => batches,
+        OutputData::Stream(stream) => RecordBatches::try_collect(stream).await.unwrap(),
+        OutputData::AffectedRows(_) => unreachable!(),
+    };
+    let pretty = batches.pretty_print().unwrap();
+    let expected = r#"+--------+---------------------------------------------------------------------------------------------------+
+| host   | j                                                                                                 |
++--------+---------------------------------------------------------------------------------------------------+
+| host-a | {"active":true,"nested":{"items":[1,"two",null,{"ok":false}],"ratio":1.5},"tags":["api","prod"]}  |
+| host-b | {"active":false,"nested":{"items":[-2,"three",null,{"ok":true}],"ratio":-0.25},"tags":["worker"]} |
+| host-a |                                                                                                   |
++--------+---------------------------------------------------------------------------------------------------+"#;
+    assert_eq!(pretty, expected);
+    server.shutdown().await.unwrap();
+    env.shutdown().await;
 }
 
 pub async fn test_insert_and_select(store_type: StorageType) {
@@ -874,7 +1993,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 ]
                 .into_iter()
                 .collect(),
-                value: Some((5.0, "1".to_string())),
+                value: Some((5.0, "1.0".to_string())),
                 ..Default::default()
             },
             PromSeriesVector {
@@ -884,7 +2003,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 ]
                 .into_iter()
                 .collect(),
-                value: Some((5.0, "2".to_string())),
+                value: Some((5.0, "2.0".to_string())),
                 ..Default::default()
             },
         ]
@@ -924,7 +2043,7 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
         panic!("unexpected result type")
     };
 
-    mat.sort_unstable_by_key(|v| v.values[0].1.clone());
+    mat.sort_unstable_by_key(|v| serde_json::to_string(&v.values[0].1).unwrap());
 
     assert_eq!(
         mat,
@@ -936,7 +2055,10 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 ]
                 .into_iter()
                 .collect(),
-                values: vec![(5.0, "1".to_string()), (10.0, "1".to_string())],
+                values: vec![
+                    (5.0, PromSampleValue::Text("1.0".to_string())),
+                    (10.0, PromSampleValue::Text("1.0".to_string())),
+                ],
                 ..Default::default()
             },
             PromSeriesMatrix {
@@ -946,7 +2068,10 @@ pub async fn test_prom_gateway_query(store_type: StorageType) {
                 ]
                 .into_iter()
                 .collect(),
-                values: vec![(5.0, "2".to_string()), (10.0, "2".to_string())],
+                values: vec![
+                    (5.0, PromSampleValue::Text("2.0".to_string())),
+                    (10.0, PromSampleValue::Text("2.0".to_string())),
+                ],
                 ..Default::default()
             },
         ]

@@ -16,7 +16,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use datatypes::arrow::array::{Array, BinaryArray};
 use datatypes::arrow::compute::concat_batches;
 use datatypes::arrow::record_batch::RecordBatch;
@@ -29,97 +28,13 @@ use crate::cache::{
     selector_result_cache_hit, selector_result_cache_miss,
 };
 use crate::error::{ComputeArrowSnafu, Result};
-use crate::read::{
-    Batch, BatchReader, BoxedBatchReader, BoxedRecordBatchStream, timestamp_array_to_i64_slice,
-};
+use crate::read::read_columns::JsonTargetTypes;
+use crate::read::{BoxedRecordBatchStream, timestamp_array_to_i64_slice};
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::flat_format::{primary_key_column_index, time_index_column_index};
 use crate::sst::parquet::format::{PrimaryKeyArray, primary_key_offsets};
 use crate::sst::parquet::read_columns::ParquetReadColumns;
 use crate::sst::parquet::reader::FlatRowGroupReader;
-
-/// Reader to keep the last row for each time series.
-/// It assumes that batches from the input reader are
-/// - sorted
-/// - all deleted rows has been filtered.
-/// - not empty
-///
-/// This reader is different from the [MergeMode](crate::region::options::MergeMode) as
-/// it focus on time series (the same key).
-#[allow(dead_code)]
-pub(crate) struct LastRowReader {
-    /// Inner reader.
-    reader: BoxedBatchReader,
-    /// The last batch pending to return.
-    selector: LastRowSelector,
-}
-
-#[allow(dead_code)]
-impl LastRowReader {
-    /// Creates a new `LastRowReader`.
-    pub(crate) fn new(reader: BoxedBatchReader) -> Self {
-        Self {
-            reader,
-            selector: LastRowSelector::default(),
-        }
-    }
-
-    /// Returns the last row of the next key.
-    pub(crate) async fn next_last_row(&mut self) -> Result<Option<Batch>> {
-        while let Some(batch) = self.reader.next_batch().await? {
-            if let Some(yielded) = self.selector.on_next(batch) {
-                return Ok(Some(yielded));
-            }
-        }
-        Ok(self.selector.finish())
-    }
-}
-
-#[async_trait]
-impl BatchReader for LastRowReader {
-    async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        self.next_last_row().await
-    }
-}
-
-/// Common struct that selects only the last row of each time series.
-#[derive(Default)]
-pub struct LastRowSelector {
-    last_batch: Option<Batch>,
-}
-
-impl LastRowSelector {
-    /// Handles next batch. Return the yielding batch if present.
-    pub fn on_next(&mut self, batch: Batch) -> Option<Batch> {
-        if let Some(last) = &self.last_batch {
-            if last.primary_key() == batch.primary_key() {
-                // Same key, update last batch.
-                self.last_batch = Some(batch);
-                None
-            } else {
-                // Different key, return the last row in `last` and update `last_batch` by
-                // current batch.
-                debug_assert!(!last.is_empty());
-                let last_row = last.slice(last.num_rows() - 1, 1);
-                self.last_batch = Some(batch);
-                Some(last_row)
-            }
-        } else {
-            self.last_batch = Some(batch);
-            None
-        }
-    }
-
-    /// Finishes the selector and returns the pending batch if any.
-    pub fn finish(&mut self) -> Option<Batch> {
-        if let Some(last) = self.last_batch.take() {
-            // This is the last key.
-            let last_row = last.slice(last.num_rows() - 1, 1);
-            return Some(last_row);
-        }
-        None
-    }
-}
 
 /// Cached last row reader for flat format row group.
 /// If the last rows are already cached (as flat `RecordBatch`), returns cached values.
@@ -137,24 +52,26 @@ impl FlatRowGroupLastRowCachedReader {
         row_group_idx: usize,
         cache_strategy: CacheStrategy,
         read_cols: &ParquetReadColumns,
+        json_target_types: JsonTargetTypes,
         reader: FlatRowGroupReader,
     ) -> Self {
         let key = SelectorResultKey {
             file_id,
             row_group_idx,
-            selector: TimeSeriesRowSelector::LastRow,
+            selector: TimeSeriesRowSelector::LastRow { after_merge: false },
         };
 
         if let Some(value) = cache_strategy.get_selector_result(&key) {
             let is_flat = matches!(&value.result, SelectorResult::Flat(_));
             let schema_matches = value.read_cols == *read_cols;
-            if is_flat && schema_matches {
+            let json_target_types_matches = value.json_target_types == json_target_types;
+            if is_flat && schema_matches && json_target_types_matches {
                 Self::new_hit(value)
             } else {
-                Self::new_miss(key, read_cols, reader, cache_strategy)
+                Self::new_miss(key, read_cols, json_target_types, reader, cache_strategy)
             }
         } else {
-            Self::new_miss(key, read_cols, reader, cache_strategy)
+            Self::new_miss(key, read_cols, json_target_types, reader, cache_strategy)
         }
     }
 
@@ -174,6 +91,7 @@ impl FlatRowGroupLastRowCachedReader {
     fn new_miss(
         key: SelectorResultKey,
         read_cols: &ParquetReadColumns,
+        json_target_types: JsonTargetTypes,
         reader: FlatRowGroupReader,
         cache_strategy: CacheStrategy,
     ) -> Self {
@@ -181,6 +99,7 @@ impl FlatRowGroupLastRowCachedReader {
         Self::Miss(FlatRowGroupLastRowReader::new(
             key,
             read_cols.clone(),
+            json_target_types,
             reader,
             cache_strategy,
         ))
@@ -260,6 +179,7 @@ pub(crate) struct FlatRowGroupLastRowReader {
     yielded_batches: Vec<RecordBatch>,
     cache_strategy: CacheStrategy,
     read_cols: ParquetReadColumns,
+    json_target_types: JsonTargetTypes,
     /// Accumulates small selector-output batches before concatenating.
     pending: BatchBuffer,
 }
@@ -268,6 +188,7 @@ impl FlatRowGroupLastRowReader {
     fn new(
         key: SelectorResultKey,
         read_cols: ParquetReadColumns,
+        json_target_types: JsonTargetTypes,
         reader: FlatRowGroupReader,
         cache_strategy: CacheStrategy,
     ) -> Self {
@@ -278,6 +199,7 @@ impl FlatRowGroupLastRowReader {
             yielded_batches: vec![],
             cache_strategy,
             read_cols,
+            json_target_types,
             pending: BatchBuffer::new(),
         }
     }
@@ -326,6 +248,7 @@ impl FlatRowGroupLastRowReader {
         let value = Arc::new(SelectorResultValue::new_flat(
             batches,
             self.read_cols.clone(),
+            self.json_target_types.clone(),
         ));
         self.cache_strategy.put_selector_result(self.key, value);
     }
@@ -505,7 +428,6 @@ fn last_timestamp_start(ts_values: &[i64], range_start: usize, range_end: usize)
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::OpType;
     use datatypes::arrow::array::{
         ArrayRef, BinaryDictionaryBuilder, Int64Array, TimestampMillisecondArray, UInt8Array,
         UInt64Array,
@@ -514,72 +436,6 @@ mod tests {
     use datatypes::arrow::record_batch::RecordBatch;
 
     use super::*;
-    use crate::test_util::{VecBatchReader, check_reader_result, new_batch};
-
-    #[tokio::test]
-    async fn test_last_row_one_batch() {
-        let input = [new_batch(
-            b"k1",
-            &[1, 2],
-            &[11, 11],
-            &[OpType::Put, OpType::Put],
-            &[21, 22],
-        )];
-        let reader = VecBatchReader::new(&input);
-        let mut reader = LastRowReader::new(Box::new(reader));
-        check_reader_result(
-            &mut reader,
-            &[new_batch(b"k1", &[2], &[11], &[OpType::Put], &[22])],
-        )
-        .await;
-
-        // Only one row.
-        let input = [new_batch(b"k1", &[1], &[11], &[OpType::Put], &[21])];
-        let reader = VecBatchReader::new(&input);
-        let mut reader = LastRowReader::new(Box::new(reader));
-        check_reader_result(
-            &mut reader,
-            &[new_batch(b"k1", &[1], &[11], &[OpType::Put], &[21])],
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn test_last_row_multi_batch() {
-        let input = [
-            new_batch(
-                b"k1",
-                &[1, 2],
-                &[11, 11],
-                &[OpType::Put, OpType::Put],
-                &[21, 22],
-            ),
-            new_batch(
-                b"k1",
-                &[3, 4],
-                &[11, 11],
-                &[OpType::Put, OpType::Put],
-                &[23, 24],
-            ),
-            new_batch(
-                b"k2",
-                &[1, 2],
-                &[11, 11],
-                &[OpType::Put, OpType::Put],
-                &[31, 32],
-            ),
-        ];
-        let reader = VecBatchReader::new(&input);
-        let mut reader = LastRowReader::new(Box::new(reader));
-        check_reader_result(
-            &mut reader,
-            &[
-                new_batch(b"k1", &[4], &[11], &[OpType::Put], &[24]),
-                new_batch(b"k2", &[2], &[11], &[OpType::Put], &[32]),
-            ],
-        )
-        .await;
-    }
 
     /// Helper to build a flat format RecordBatch for testing.
     fn new_flat_batch(primary_keys: &[&[u8]], timestamps: &[i64], fields: &[i64]) -> RecordBatch {

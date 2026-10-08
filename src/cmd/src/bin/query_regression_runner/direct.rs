@@ -166,7 +166,28 @@ fn create_table_sql(table: &Table) -> Result<String> {
     let columns = table
         .columns
         .iter()
-        .map(|column| format!("{} {}", sql_ident(&column.name), column.data_type))
+        .map(|column| {
+            // The direct-SST fixture generator (`query_perf_fixture::direct_sst::
+            // build_region_metadata`) bakes index metadata into the region
+            // manifest's column schemas: tag columns get an inverted index and
+            // a skipping index with granularity 1, field columns get a skipping
+            // index with granularity 1. The CREATE TABLE must declare the same
+            // column options, otherwise the table schema (frontend) and the
+            // region schema (datanode, from the manifest) disagree and the
+            // MergeScan remote schema validation fails with "advertised remote
+            // stream schema field mismatch".
+            let mut sql = format!("{} {}", sql_ident(&column.name), column.data_type);
+            match column.semantic.as_deref() {
+                Some("tag") => {
+                    sql.push_str(" SKIPPING INDEX WITH (granularity='1') INVERTED INDEX");
+                }
+                Some("field") => {
+                    sql.push_str(" SKIPPING INDEX WITH (granularity='1')");
+                }
+                _ => {}
+            }
+            sql
+        })
         .collect::<Vec<_>>()
         .join(",\n  ");
     let primary_key = table
@@ -455,10 +476,12 @@ mod tests {
                 Column {
                     name: "host".to_string(),
                     data_type: "STRING".to_string(),
+                    semantic: Some("tag".to_string()),
                 },
                 Column {
                     name: "ts".to_string(),
                     data_type: "TIMESTAMP(9)".to_string(),
+                    semantic: Some("timestamp".to_string()),
                 },
             ],
             primary_key: vec!["host".to_string()],
@@ -469,7 +492,86 @@ mod tests {
         };
         assert_eq!(
             create_table_sql(&table).unwrap(),
-            "CREATE TABLE \"metric\"\"name\" (\n  \"host\" STRING,\n  \"ts\" TIMESTAMP(9),\n  TIME INDEX (\"ts\"),\n  PRIMARY KEY (\"host\")\n) ENGINE=mito\nWITH ('append_mode'='true', 'sst_format'='flat');"
+            "CREATE TABLE \"metric\"\"name\" (\n  \"host\" STRING SKIPPING INDEX WITH (granularity='1') INVERTED INDEX,\n  \"ts\" TIMESTAMP(9),\n  TIME INDEX (\"ts\"),\n  PRIMARY KEY (\"host\")\n) ENGINE=mito\nWITH ('append_mode'='true', 'sst_format'='flat');"
+        );
+    }
+
+    #[test]
+    fn create_table_sql_declares_indexes_matching_fixture_metadata() {
+        // Mirrors the index metadata baked by
+        // query_perf_fixture::direct_sst::build_region_metadata: tag columns
+        // get SKIPPING INDEX WITH (granularity='1') + INVERTED INDEX, field
+        // columns get SKIPPING INDEX WITH (granularity='1'), timestamp columns
+        // get no column options. Without these options the frontend table
+        // schema and the datanode region schema (from the fixture manifest)
+        // disagree and the MergeScan remote schema validation fails.
+        let table = Table {
+            database: "public".to_string(),
+            name: "metric".to_string(),
+            engine: "mito".to_string(),
+            columns: vec![
+                Column {
+                    name: "host".to_string(),
+                    data_type: "STRING".to_string(),
+                    semantic: Some("tag".to_string()),
+                },
+                Column {
+                    name: "instance".to_string(),
+                    data_type: "STRING".to_string(),
+                    semantic: Some("tag".to_string()),
+                },
+                Column {
+                    name: "value".to_string(),
+                    data_type: "DOUBLE".to_string(),
+                    semantic: Some("field".to_string()),
+                },
+                Column {
+                    name: "ts".to_string(),
+                    data_type: "TIMESTAMP(9)".to_string(),
+                    semantic: Some("timestamp".to_string()),
+                },
+            ],
+            primary_key: vec!["host".to_string(), "instance".to_string()],
+            time_index: Some("ts".to_string()),
+            append_mode: Some(true),
+            sst_format: Some("flat".to_string()),
+            validate_show_create_engine: true,
+        };
+        assert_eq!(
+            create_table_sql(&table).unwrap(),
+            "CREATE TABLE \"metric\" (\n  \"host\" STRING SKIPPING INDEX WITH (granularity='1') INVERTED INDEX,\n  \"instance\" STRING SKIPPING INDEX WITH (granularity='1') INVERTED INDEX,\n  \"value\" DOUBLE SKIPPING INDEX WITH (granularity='1'),\n  \"ts\" TIMESTAMP(9),\n  TIME INDEX (\"ts\"),\n  PRIMARY KEY (\"host\", \"instance\")\n) ENGINE=mito\nWITH ('append_mode'='true', 'sst_format'='flat');"
+        );
+    }
+
+    #[test]
+    fn create_table_sql_without_semantic_keeps_bare_columns() {
+        // Columns without a semantic type must keep the historical bare form so
+        // tables that predate the index-metadata fix are unaffected.
+        let table = Table {
+            database: "public".to_string(),
+            name: "metric".to_string(),
+            engine: "mito".to_string(),
+            columns: vec![
+                Column {
+                    name: "host".to_string(),
+                    data_type: "STRING".to_string(),
+                    semantic: None,
+                },
+                Column {
+                    name: "ts".to_string(),
+                    data_type: "TIMESTAMP(9)".to_string(),
+                    semantic: None,
+                },
+            ],
+            primary_key: vec!["host".to_string()],
+            time_index: Some("ts".to_string()),
+            append_mode: None,
+            sst_format: None,
+            validate_show_create_engine: true,
+        };
+        assert_eq!(
+            create_table_sql(&table).unwrap(),
+            "CREATE TABLE \"metric\" (\n  \"host\" STRING,\n  \"ts\" TIMESTAMP(9),\n  TIME INDEX (\"ts\"),\n  PRIMARY KEY (\"host\")\n) ENGINE=mito;"
         );
     }
 

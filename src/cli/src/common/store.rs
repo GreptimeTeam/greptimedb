@@ -86,7 +86,13 @@ pub struct StoreConfig {
 
     /// Automatically create PostgreSQL schema if it doesn't exist (default: true).
     #[cfg(feature = "pg_kvbackend")]
-    #[clap(long, default_value_t = true)]
+    #[clap(
+        long,
+        default_value_t = true,
+        default_missing_value = "true",
+        num_args = 0..=1,
+        action = clap::ArgAction::Set
+    )]
     pub auto_create_schema: bool,
 
     /// TLS mode for backend store connections (etcd, PostgreSQL, MySQL)
@@ -125,6 +131,14 @@ impl StoreConfig {
         }
     }
 
+    /// Sanitize store addrs for logging (redacts passwords in connection strings).
+    fn sanitize_store_addrs(&self) -> Vec<String> {
+        self.store_addrs
+            .iter()
+            .map(|addr| common_meta::kv_backend::util::sanitize_connection_string(addr))
+            .collect()
+    }
+
     /// Builds a [`KvBackendRef`] from the store configuration.
     pub async fn build(&self) -> Result<KvBackendRef, BoxedError> {
         let max_txn_ops = self.max_txn_ops;
@@ -134,7 +148,7 @@ impl StoreConfig {
         } else {
             common_telemetry::info!(
                 "Building kvbackend with store addrs: {:?}, backend: {:?}",
-                store_addrs,
+                &self.sanitize_store_addrs(),
                 self.backend
             );
             let kvbackend = match self.backend {
@@ -213,5 +227,29 @@ impl StoreConfig {
                 Ok(Arc::new(chroot_kvbackend))
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "pg_kvbackend"))]
+mod tests {
+    use clap::Parser;
+
+    use super::StoreConfig;
+
+    #[test]
+    fn test_auto_create_schema_accepts_explicit_value() {
+        let config =
+            StoreConfig::try_parse_from(["store", "--auto-create-schema", "false"]).unwrap();
+        assert!(!config.auto_create_schema);
+
+        let config =
+            StoreConfig::try_parse_from(["store", "--auto-create-schema", "true"]).unwrap();
+        assert!(config.auto_create_schema);
+    }
+
+    #[test]
+    fn test_auto_create_schema_defaults_to_true() {
+        let config = StoreConfig::try_parse_from(["store"]).unwrap();
+        assert!(config.auto_create_schema);
     }
 }

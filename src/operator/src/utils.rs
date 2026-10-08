@@ -14,9 +14,9 @@
 
 use std::sync::{Arc, RwLock};
 
-use common_meta::rpc::ddl::{
-    ORIGIN_FRONTEND_ADDR_EXTENSION_KEY, TRIGGER_REASON_EXTENSION_KEY, TriggerReason,
-};
+use common_event_recorder::ProcedureEventInput;
+use common_meta::procedure_executor::ExecutorContext;
+use common_meta::rpc::ddl::{ORIGIN_FRONTEND_ADDR_EXTENSION_KEY, TriggerReason};
 use common_time::Timezone;
 use session::context::{QueryContextBuilder, QueryContextRef};
 use snafu::ResultExt;
@@ -37,31 +37,34 @@ pub fn to_meta_query_context(
     }
 }
 
-/// Converts a session query context and records the DDL trigger reason.
-pub fn to_meta_query_context_with_trigger_reason(
+/// Builds the execution envelope for a frontend-originated procedure.
+pub(crate) fn to_executor_context(
     query_context: QueryContextRef,
     trigger_reason: TriggerReason,
-) -> common_meta::rpc::ddl::QueryContext {
-    let mut meta_query_context = to_meta_query_context(query_context);
-    meta_query_context.extensions.insert(
-        TRIGGER_REASON_EXTENSION_KEY.to_string(),
-        trigger_reason.as_ref().to_string(),
-    );
-    meta_query_context
+) -> ExecutorContext {
+    let actor = query_context.current_user().username().to_string();
+    ExecutorContext {
+        query_context: Some(to_meta_query_context(query_context)),
+        actor: Some(actor),
+        event_input: Some(ProcedureEventInput::new(trigger_reason)),
+        ..Default::default()
+    }
 }
 
-pub fn to_meta_query_context_with_origin_frontend_and_trigger_reason(
+/// Builds a frontend-originated procedure envelope with the trusted frontend origin.
+pub(crate) fn to_executor_context_with_origin_frontend(
     query_context: QueryContextRef,
     origin_frontend_addr: &str,
     trigger_reason: TriggerReason,
-) -> common_meta::rpc::ddl::QueryContext {
-    let mut meta_query_context =
-        to_meta_query_context_with_trigger_reason(query_context, trigger_reason);
-    meta_query_context.extensions.insert(
-        ORIGIN_FRONTEND_ADDR_EXTENSION_KEY.to_string(),
-        origin_frontend_addr.to_string(),
-    );
-    meta_query_context
+) -> ExecutorContext {
+    let mut executor_context = to_executor_context(query_context, trigger_reason);
+    if let Some(query_context) = &mut executor_context.query_context {
+        query_context.extensions.insert(
+            ORIGIN_FRONTEND_ADDR_EXTENSION_KEY.to_string(),
+            origin_frontend_addr.to_string(),
+        );
+    }
+    executor_context
 }
 
 pub fn try_to_session_query_context(
@@ -87,14 +90,12 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, RwLock};
 
-    use common_meta::rpc::ddl::{
-        ORIGIN_FRONTEND_ADDR_EXTENSION_KEY, TRIGGER_REASON_EXTENSION_KEY, TriggerReason,
-    };
+    use common_meta::rpc::ddl::{ORIGIN_FRONTEND_ADDR_EXTENSION_KEY, TriggerReason};
     use common_time::Timezone;
     use session::context::QueryContextBuilder;
 
     use super::{
-        to_meta_query_context, to_meta_query_context_with_origin_frontend_and_trigger_reason,
+        to_executor_context_with_origin_frontend, to_meta_query_context,
         try_to_session_query_context,
     };
 
@@ -122,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn test_meta_query_context_with_origin_frontend_overrides_reserved_key() {
+    fn test_executor_context_with_origin_frontend_overrides_reserved_key() {
         let session_ctx = Arc::new(
             QueryContextBuilder::default()
                 .set_extension(
@@ -132,11 +133,12 @@ mod tests {
                 .build(),
         );
 
-        let meta_ctx = to_meta_query_context_with_origin_frontend_and_trigger_reason(
+        let executor_context = to_executor_context_with_origin_frontend(
             session_ctx,
             "127.0.0.1:4000",
             TriggerReason::Manual,
         );
+        let meta_ctx = executor_context.query_context.as_ref().unwrap();
 
         assert_eq!(
             meta_ctx
@@ -146,11 +148,8 @@ mod tests {
             Some("127.0.0.1:4000")
         );
         assert_eq!(
-            meta_ctx
-                .extensions
-                .get(TRIGGER_REASON_EXTENSION_KEY)
-                .map(String::as_str),
-            Some("manual")
+            executor_context.event_input.unwrap().reason,
+            TriggerReason::Manual
         );
     }
 }

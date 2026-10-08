@@ -122,6 +122,12 @@ pub const INFORMATION_SCHEMA_STATISTICS_TABLE_ID: u32 = 43;
 pub const INFORMATION_SCHEMA_RECYCLE_BIN_TABLE_ID: u32 = 44;
 /// id for information_schema.flow_statistics
 pub const INFORMATION_SCHEMA_FLOW_STATISTICS_TABLE_ID: u32 = 45;
+/// id for information_schema.PLUGINS
+pub const INFORMATION_SCHEMA_PLUGINS_TABLE_ID: u32 = 47;
+/// id for information_schema.USER_PRIVILEGES
+pub const INFORMATION_SCHEMA_USER_PRIVILEGES_TABLE_ID: u32 = 48;
+/// id for information_schema.PROCESSLIST (for mysql)
+pub const INFORMATION_SCHEMA_PROCESSLIST_TABLE_ID: u32 = 49;
 
 // ----- End of information_schema tables -----
 
@@ -151,6 +157,23 @@ pub const SEMANTIC_TYPE_PRIMARY_KEY: &str = "TAG";
 pub const SEMANTIC_TYPE_FIELD: &str = "FIELD";
 pub const SEMANTIC_TYPE_TIME_INDEX: &str = "TIMESTAMP";
 
+const SYSTEM_SCHEMA_NAMES: [&str; 3] = [
+    INFORMATION_SCHEMA_NAME,
+    PG_CATALOG_NAME,
+    DEFAULT_PRIVATE_SCHEMA_NAME,
+];
+
+/// Returns the canonical name of the system schema `schema` refers to, ignoring ASCII
+/// case, or `None` if it is not one.
+///
+/// Only system schemas are matched case-insensitively, as MySQL does; user schema names
+/// keep the case they were created with.
+pub fn system_schema_name(schema: &str) -> Option<&'static str> {
+    SYSTEM_SCHEMA_NAMES
+        .into_iter()
+        .find(|name| schema.eq_ignore_ascii_case(name))
+}
+
 pub fn is_readonly_schema(schema: &str) -> bool {
     matches!(schema, INFORMATION_SCHEMA_NAME)
 }
@@ -179,6 +202,12 @@ pub fn is_ddl_reserved_table(schema: &str, table: &str) -> bool {
 pub const TRACE_ID_COLUMN: &str = "trace_id";
 pub const SPAN_ID_COLUMN: &str = "span_id";
 pub const SPAN_NAME_COLUMN: &str = "span_name";
+/// Column containing span attributes as JSON/JSON2.
+pub const SPAN_ATTRIBUTES_COLUMN: &str = "span_attributes";
+/// Column containing instrumentation scope attributes as JSON2.
+pub const SCOPE_ATTRIBUTES_COLUMN: &str = "scope_attributes";
+/// Column containing resource attributes as JSON2.
+pub const RESOURCE_ATTRIBUTES_COLUMN: &str = "resource_attributes";
 pub const SERVICE_NAME_COLUMN: &str = "service_name";
 pub const PARENT_SPAN_ID_COLUMN: &str = "parent_span_id";
 // More fixed columns/values of the `greptime_trace_v1` data model, shared by
@@ -219,4 +248,40 @@ pub const SEMANTIC_RELATIONSHIPS_TABLE_NAME: &str = "semantic_relationships";
 /// Physical table of hand-declared edges, unioned into the computed
 /// `semantic_relationships`; see [`is_ddl_reserved_table`] for its lifecycle.
 pub const SEMANTIC_RELATIONSHIPS_DECLARED_TABLE_NAME: &str = "semantic_relationships_declared";
+
+/// Width of the window the graph derivation bins observations into. Sources
+/// synthesizing observations must land a row in every window they describe,
+/// so this is shared rather than restated per crate.
+pub const SEMANTIC_GRAPH_WINDOW_NANOS: i64 = 60 * 1_000_000_000;
+
+// Column names of the graph tables: `catalog` exposes these schemas and the
+// read-time plans in `operator` must project exactly them.
+pub const OBSERVED_AT_COLUMN: &str = "observed_at";
+pub const WINDOW_START_COLUMN: &str = "window_start";
+pub const WINDOW_END_COLUMN: &str = "window_end";
+pub const FRESH_UNTIL_COLUMN: &str = "fresh_until";
+pub const ENTITY_TYPE_COLUMN: &str = "entity_type";
+pub const ENTITY_ID_COLUMN: &str = "entity_id";
+pub const ENTITY_ID_ATTRS_COLUMN: &str = "entity_id_attrs";
+pub const ENTITY_SCOPE_COLUMN: &str = "scope";
+pub const ENTITY_DESCRIPTIVE_COLUMN: &str = "descriptive";
+pub const SOURCE_TABLES_COLUMN: &str = "source_tables";
+pub const SRC_TYPE_COLUMN: &str = "src_type";
+pub const SRC_ID_COLUMN: &str = "src_id";
+pub const DST_TYPE_COLUMN: &str = "dst_type";
+pub const DST_ID_COLUMN: &str = "dst_id";
+pub const REL_TYPE_COLUMN: &str = "rel_type";
+pub const PROVENANCE_COLUMN: &str = "provenance";
+pub const CONFIDENCE_COLUMN: &str = "confidence";
+pub const REQUEST_COUNT_COLUMN: &str = "request_count";
+pub const UNMATCHED_COUNT_COLUMN: &str = "unmatched_count";
+pub const ERROR_COUNT_COLUMN: &str = "error_count";
+pub const DURATION_SUM_COLUMN: &str = "duration_sum";
+pub const DURATION_COUNT_COLUMN: &str = "duration_count";
+pub const DURATION_MAX_COLUMN: &str = "duration_max";
+pub const EDGE_ATTRIBUTES_COLUMN: &str = "attributes";
+// Declared-edge table only.
+pub const VALID_FROM_COLUMN: &str = "valid_from";
+pub const VALID_UNTIL_COLUMN: &str = "valid_until";
+pub const GENERATION_ID_COLUMN: &str = "generation_id";
 // ---- End of entity relationship graph tables ----

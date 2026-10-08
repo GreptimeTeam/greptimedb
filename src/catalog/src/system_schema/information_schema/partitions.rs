@@ -29,8 +29,8 @@ use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::timestamp::TimestampSecond;
 use datatypes::value::Value;
 use datatypes::vectors::{
-    ConstantVector, Int64Vector, Int64VectorBuilder, MutableVector, StringVector,
-    StringVectorBuilder, TimestampSecondVector, TimestampSecondVectorBuilder, UInt64VectorBuilder,
+    Int64Vector, Int64VectorBuilder, MutableVector, StringVector, StringVectorBuilder,
+    TimestampSecondVector, TimestampSecondVectorBuilder, UInt64VectorBuilder,
 };
 use futures::{StreamExt, TryStreamExt};
 use partition::manager::PartitionInfo;
@@ -361,22 +361,11 @@ impl InformationSchemaPartitionsBuilder {
     fn finish(&mut self) -> Result<RecordBatch> {
         let rows_num = self.catalog_names.len();
 
-        let null_string_vector = Arc::new(ConstantVector::new(
-            Arc::new(StringVector::from(vec![None as Option<&str>])),
-            rows_num,
-        ));
-        let null_i64_vector = Arc::new(ConstantVector::new(
-            Arc::new(Int64Vector::from(vec![None])),
-            rows_num,
-        ));
-        let null_timestamp_second_vector = Arc::new(ConstantVector::new(
-            Arc::new(TimestampSecondVector::from(vec![None])),
-            rows_num,
-        ));
-        let partition_methods = Arc::new(ConstantVector::new(
-            Arc::new(StringVector::from(vec![Some("RANGE")])),
-            rows_num,
-        ));
+        let null_string_vector = Arc::new(StringVector::from(vec![None as Option<&str>; rows_num]));
+        let null_i64_vector = Arc::new(Int64Vector::from(vec![None; rows_num]));
+        let null_timestamp_second_vector =
+            Arc::new(TimestampSecondVector::from(vec![None; rows_num]));
+        let partition_methods = Arc::new(StringVector::from(vec![Some("RANGE"); rows_num]));
 
         let columns: Vec<VectorRef> = vec![
             Arc::new(self.catalog_names.finish()),

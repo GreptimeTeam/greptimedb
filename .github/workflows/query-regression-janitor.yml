@@ -1,0 +1,36 @@
+name: Query Regression ECS Janitor
+
+# Safety net for the aliyun-ecs query-regression path: deletes managed ECS
+# instances (and their runner registrations) that outlived their workflow run,
+# so a failed teardown never leaks pay-as-you-go spend.
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout teardown script
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Sweep expired ECS runners
+        env:
+          ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_ID }}
+          ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_SECRET }}
+          GH_PERSONAL_ACCESS_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          ALIYUN_ECS_REGION_ID: ${{ vars.ALIYUN_ECS_REGION_ID }}
+        run: >-
+          uv run .github/scripts/aliyun-ecs-runner-teardown.py
+          --sweep --sweep-ttl-hours 4

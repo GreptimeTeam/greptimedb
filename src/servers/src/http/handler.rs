@@ -13,7 +13,10 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::future;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::extract::rejection::FormRejection;
@@ -26,11 +29,11 @@ use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_plugins::GREPTIME_EXEC_WRITE_COST;
 use common_query::{Output, OutputData};
-use common_recordbatch::{RecordBatch, SendableRecordBatchStream, util};
+use common_recordbatch::error::Result as RecordBatchResult;
+use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper, RecordBatches, util};
 use common_telemetry::tracing;
 use datafusion::physical_plan::ExecutionPlan;
-use datatypes::schema::SchemaRef;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use query::parser::{DEFAULT_LOOKBACK_STRING, PromQuery};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -39,8 +42,12 @@ use snafu::ResultExt;
 use sql::dialect::GreptimeDbDialect;
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
+use tokio::sync::{Notify, watch};
 
-use crate::error::{FailedToParseQuerySnafu, InvalidQuerySnafu, Result};
+use crate::error::{
+    CollectRecordbatchSnafu, FailedToParseQuerySnafu, InvalidQuerySnafu, Result,
+    log_error_if_necessary,
+};
 use crate::http::header::collect_plan_metrics;
 use crate::http::result::arrow_result::ArrowResponse;
 use crate::http::result::csv_result::CsvResponse;
@@ -100,15 +107,32 @@ struct AnalyzeStreamPayload {
     code: Option<u32>,
 }
 
-struct AnalyzeStreamState {
-    stream: SendableRecordBatchStream,
-    schema: SchemaRef,
-    plan: Option<Arc<dyn ExecutionPlan>>,
-    batches: Vec<RecordBatch>,
-    seq: u64,
-    start: Instant,
-    requested_interval_ms: u64,
-    current_interval_ms: u64,
+#[derive(Clone, Debug)]
+#[doc(hidden)]
+pub struct AnalyzeStreamMessage {
+    pub event_name: &'static str,
+    pub payload: String,
+}
+
+struct AnalyzeStreamWorkerGuard {
+    cancel: watch::Sender<bool>,
+    handle: common_runtime::JoinHandle<()>,
+}
+
+impl Drop for AnalyzeStreamWorkerGuard {
+    fn drop(&mut self) {
+        let _ = self.cancel.send(true);
+        self.handle.abort();
+    }
+}
+
+struct AnalyzeStreamBodyState {
+    latest_metrics: watch::Receiver<Option<String>>,
+    terminal: watch::Receiver<Option<AnalyzeStreamMessage>>,
+    notify: Arc<Notify>,
+    // Keeping the guard in the body state makes dropping the response cancel and
+    // abort the worker instead of leaving an owned query stream detached.
+    _worker: AnalyzeStreamWorkerGuard,
     done: bool,
 }
 
@@ -173,7 +197,25 @@ pub async fn sql(
         Ok(outputs) => outputs,
     };
 
-    let mut resp = match format {
+    let outputs = match query_params.limit {
+        Some(limit)
+            if matches!(
+                format,
+                ResponseFormat::Csv(..)
+                    | ResponseFormat::Table
+                    | ResponseFormat::GreptimedbV1
+                    | ResponseFormat::Json
+            ) =>
+        {
+            outputs
+                .into_iter()
+                .map(|output| output.and_then(|output| limit_output_rows(output, limit)))
+                .collect()
+        }
+        _ => outputs,
+    };
+
+    let resp = match format {
         ResponseFormat::Arrow => {
             ArrowResponse::from_output(outputs, query_params.compression).await
         }
@@ -187,15 +229,137 @@ pub async fn sql(
         ResponseFormat::Null => NullResponse::from_output(outputs).await,
     };
 
-    if let Some(limit) = query_params.limit {
-        resp = resp.with_limit(limit);
-    }
     resp.with_execution_time(start.elapsed().as_millis() as u64)
+}
+
+/// Form parameters for the bounded logical-table DDL operation.
+#[derive(Deserialize)]
+pub struct LogicalTableDdl {
+    sql: Option<String>,
+    db: Option<String>,
+}
+
+/// Creates one batch of Metric logical tables using the normal v1 response.
+pub async fn create_logical_tables(
+    State(state): State<ApiState>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+    form: std::result::Result<Form<LogicalTableDdl>, FormRejection>,
+) -> HttpResponse {
+    let start = Instant::now();
+    let form = match form {
+        Ok(Form(form)) => form,
+        Err(_) => {
+            return HttpResponse::Error(ErrorResponse::from_error_message(
+                StatusCode::InvalidArguments,
+                "invalid or oversized form body".to_string(),
+            ));
+        }
+    };
+    let Some(sql) = form.sql else {
+        return HttpResponse::Error(ErrorResponse::from_error_message(
+            StatusCode::InvalidArguments,
+            "sql parameter is required.".to_string(),
+        ));
+    };
+    if sql.len() > crate::query_handler::sql::MAX_LOGICAL_TABLE_DDL_BYTES {
+        return HttpResponse::Error(ErrorResponse::from_error_message(
+            StatusCode::InvalidArguments,
+            "logical-table DDL exceeds 1 MiB".to_string(),
+        ));
+    }
+    if let Some(db) = form.db {
+        let (catalog, schema) = parse_catalog_and_schema_from_db_string(&db);
+        query_ctx.set_current_catalog(&catalog);
+        query_ctx.set_current_schema(&schema);
+    }
+    query_ctx.set_channel(Channel::HttpSql);
+    let query_ctx = Arc::new(query_ctx);
+    if let Some((status, msg)) = validate_schema(state.sql_handler.clone(), query_ctx.clone()).await
+    {
+        return HttpResponse::Error(ErrorResponse::from_error_message(status, msg));
+    }
+    let outputs = match state
+        .sql_handler
+        .create_logical_tables(&sql, query_ctx)
+        .await
+    {
+        Ok(outputs)
+            if outputs
+                .iter()
+                .all(|output| matches!(output.data, OutputData::AffectedRows(0))) =>
+        {
+            outputs.into_iter().map(Ok).collect()
+        }
+        other => {
+            let status = match other {
+                Err(error) => {
+                    log_error_if_necessary(&error);
+                    error.status_code()
+                }
+                Ok(_) => StatusCode::Internal,
+            };
+            return HttpResponse::Error(
+                ErrorResponse::from_error_message(status, "logical-table batch failed".to_string())
+                    .with_execution_time(start.elapsed().as_millis() as u64),
+            );
+        }
+    };
+    GreptimedbV1Response::from_output(outputs)
+        .await
+        .with_execution_time(start.elapsed().as_millis() as u64)
+}
+
+/// Limits each statement's response before collecting batches and converting rows.
+fn limit_output_rows(output: Output, limit: usize) -> Result<Output> {
+    let mut remaining = limit;
+    let data = match output.data {
+        OutputData::AffectedRows(rows) => OutputData::AffectedRows(rows),
+        OutputData::RecordBatches(batches) => {
+            let schema = batches.schema();
+            let batches = batches
+                .into_iter()
+                .filter_map(|batch| take_response_rows(batch, &mut remaining).transpose())
+                .collect::<RecordBatchResult<Vec<_>>>()
+                .context(CollectRecordbatchSnafu)?;
+            OutputData::RecordBatches(
+                RecordBatches::try_new(schema, batches).context(CollectRecordbatchSnafu)?,
+            )
+        }
+        OutputData::Stream(stream) => {
+            let schema = stream.schema();
+            // This is a response limit. Drain the input even after reaching it so
+            // execution errors and terminal query metrics are still observed.
+            let stream = stream.filter_map(move |batch| {
+                future::ready(
+                    batch
+                        .and_then(|batch| take_response_rows(batch, &mut remaining))
+                        .transpose(),
+                )
+            });
+            OutputData::Stream(Box::pin(RecordBatchStreamWrapper::new(schema, stream)))
+        }
+    };
+    Ok(Output::new(data, output.meta))
+}
+
+fn take_response_rows(
+    batch: RecordBatch,
+    remaining: &mut usize,
+) -> RecordBatchResult<Option<RecordBatch>> {
+    let num_rows = batch.num_rows().min(*remaining);
+    *remaining -= num_rows;
+    if num_rows == 0 {
+        Ok(None)
+    } else if num_rows == batch.num_rows() {
+        Ok(Some(batch))
+    } else {
+        batch.slice(0, num_rows).map(Some)
+    }
 }
 
 /// Handler to stream partial `EXPLAIN ANALYZE VERBOSE` metrics as SSE.
 ///
-/// This experimental endpoint is POST-only SSE, so browser `EventSource` does
+/// This endpoint is POST-only SSE, so browser `EventSource` does
 /// not apply. Each `metrics` event carries a complete snapshot (not a delta);
 /// large snapshots are throttled but never truncated. `final`, `canceled`, and
 /// `error` are terminal events. If the client disconnects it won't receive a
@@ -284,88 +448,182 @@ pub async fn sql_analyze_stream(
     };
     let schema = stream.schema();
 
-    let sse_stream = futures::stream::unfold(
-        AnalyzeStreamState {
-            stream,
-            schema,
-            plan,
-            batches: Vec::new(),
-            seq: 0,
-            start,
-            requested_interval_ms: interval_ms,
-            current_interval_ms: interval_ms,
+    let (metrics_tx, metrics_rx) = watch::channel::<Option<String>>(None);
+    let (terminal_tx, terminal_rx) = watch::channel::<Option<AnalyzeStreamMessage>>(None);
+    let notify = Arc::new(Notify::new());
+    let (cancel_tx, mut cancel_rx) = watch::channel(false);
+    let worker_notify = notify.clone();
+    let panic_notify = notify.clone();
+    let sequence = Arc::new(AtomicU64::new(0));
+    let worker_sequence = sequence.clone();
+    let worker_terminal_tx = terminal_tx.clone();
+    let worker = common_runtime::spawn_global(async move {
+        let worker_result = AssertUnwindSafe(async move {
+            let mut stream = stream;
+            let mut batches = Vec::new();
+            let mut current_interval_ms = interval_ms;
+            let tick = tokio::time::sleep(Duration::from_millis(current_interval_ms));
+            tokio::pin!(tick);
+
+            loop {
+                tokio::select! {
+                    _ = cancel_rx.changed() => return,
+                    item = stream.next() => {
+                        match item {
+                            Some(Ok(next_batch)) => batches.push(next_batch),
+                            Some(Err(err)) => {
+                                let status = err.status_code();
+                                let event_name = if status == StatusCode::Cancelled { "canceled" } else { "error" };
+                                let (payload, _) = make_analyze_payload(AnalyzePayloadArgs {
+                                    seq: worker_sequence.load(Ordering::Relaxed),
+                                    state: event_name,
+                                    partial: false,
+                                    start,
+                                    plan: plan.as_ref(),
+                                    output: None,
+                                    reason: Some(err.output_msg()),
+                                    code: Some(status as u32),
+                                });
+                                send_analyze_terminal(&terminal_tx, &worker_notify, event_name, payload);
+                                return;
+                            }
+                            None => {
+                                let output = HttpRecordsOutput::try_new(schema.clone(), batches)
+                                    .map(GreptimeQueryOutput::Records);
+                                let (event_name, payload) = make_final_analyze_event(
+                                    output.map_err(|err| (err.output_msg(), err.status_code() as u32)),
+                                    worker_sequence.load(Ordering::Relaxed),
+                                    start,
+                                    plan.as_ref(),
+                                );
+                                send_analyze_terminal(&terminal_tx, &worker_notify, event_name, payload);
+                                return;
+                            }
+                        }
+                    }
+                    _ = &mut tick, if plan.is_some() => {
+                        let (payload, payload_bytes) = make_analyze_payload(AnalyzePayloadArgs {
+                            seq: worker_sequence.load(Ordering::Relaxed),
+                            state: "metrics",
+                            partial: true,
+                            start,
+                            plan: plan.as_ref(),
+                            output: None,
+                            reason: None,
+                            code: None,
+                        });
+                        current_interval_ms = adaptive_interval_ms(payload_bytes, interval_ms);
+                        worker_sequence.fetch_add(1, Ordering::Relaxed);
+                        if metrics_tx.send(Some(payload)).is_err() {
+                            return;
+                        }
+                        worker_notify.notify_one();
+                        tick.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(current_interval_ms));
+                    }
+                }
+            }
+        })
+        .catch_unwind()
+        .await;
+
+        if worker_result.is_err() {
+            tracing::debug!("analyze stream worker panicked");
+            let (payload, _) = make_analyze_payload(AnalyzePayloadArgs {
+                seq: sequence.load(Ordering::Relaxed),
+                state: "error",
+                partial: false,
+                start,
+                plan: None,
+                output: None,
+                reason: Some("analyze stream worker panicked".to_string()),
+                code: Some(StatusCode::Internal as u32),
+            });
+            send_analyze_terminal(&worker_terminal_tx, &panic_notify, "error", payload);
+        }
+    });
+
+    let sse_stream = analyze_stream_body(metrics_rx, terminal_rx, notify, cancel_tx, worker);
+
+    Sse::new(sse_stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response()
+}
+
+#[doc(hidden)]
+pub fn analyze_stream_body(
+    metrics: watch::Receiver<Option<String>>,
+    terminal: watch::Receiver<Option<AnalyzeStreamMessage>>,
+    notify: Arc<Notify>,
+    cancel: watch::Sender<bool>,
+    worker: common_runtime::JoinHandle<()>,
+) -> impl futures::Stream<Item = std::result::Result<Event, std::convert::Infallible>> {
+    futures::stream::unfold(
+        AnalyzeStreamBodyState {
+            latest_metrics: metrics,
+            terminal,
+            notify,
+            _worker: AnalyzeStreamWorkerGuard {
+                cancel,
+                handle: worker,
+            },
             done: false,
         },
         |mut state| async move {
             if state.done {
                 return None;
             }
-            let tick = tokio::time::sleep(Duration::from_millis(state.current_interval_ms));
-            tokio::pin!(tick);
             loop {
-                tokio::select! {
-                    item = state.stream.next() => {
-                        match item {
-                            Some(Ok(batch)) => state.batches.push(batch),
-                            Some(Err(err)) => {
-                                let status = err.status_code();
-                                let event_name = if status == StatusCode::Cancelled { "canceled" } else { "error" };
-                                let (payload, _) = make_analyze_payload(AnalyzePayloadArgs {
-                                    seq: state.seq,
-                                    state: event_name,
-                                    partial: false,
-                                    start: state.start,
-                                    plan: state.plan.as_ref(),
-                                    output: None,
-                                    reason: Some(err.output_msg()),
-                                    code: Some(status as u32),
-                                });
-                                state.seq += 1;
-                                state.done = true;
-                                return Some((Ok::<Event, std::convert::Infallible>(Event::default().event(event_name).data(payload)), state));
-                            }
-                            None => {
-                                let batches = std::mem::take(&mut state.batches);
-                                let output = HttpRecordsOutput::try_new(state.schema.clone(), batches)
-                                    .map(GreptimeQueryOutput::Records);
-                                let (event_name, payload) = make_final_analyze_event(
-                                    output.map_err(|err| (err.output_msg(), err.status_code() as u32)),
-                                    state.seq,
-                                    state.start,
-                                    state.plan.as_ref(),
-                                );
-                                state.seq += 1;
-                                state.done = true;
-                                return Some((Ok::<Event, std::convert::Infallible>(Event::default().event(event_name).data(payload)), state));
-                            }
-                        }
-                    }
-                    _ = &mut tick => {
-                        if state.plan.is_some() {
-                            let (payload, payload_bytes) = make_analyze_payload(AnalyzePayloadArgs {
-                                seq: state.seq,
-                                state: "metrics",
-                                partial: true,
-                                start: state.start,
-                                plan: state.plan.as_ref(),
-                                output: None,
-                                reason: None,
-                                code: None,
-                            });
-                            state.current_interval_ms = adaptive_interval_ms(payload_bytes, state.requested_interval_ms);
-                            state.seq += 1;
-                            return Some((Ok::<Event, std::convert::Infallible>(Event::default().event("metrics").data(payload)), state));
-                        }
-                        tick.as_mut().reset(tokio::time::Instant::now() + Duration::from_millis(state.current_interval_ms));
+                let notify = Arc::clone(&state.notify);
+                let notified = notify.notified();
+                tokio::pin!(notified);
+                // Register before checking the slots to avoid a lost wakeup.
+                notified.as_mut().enable();
+                let latest = {
+                    let latest = state.latest_metrics.borrow_and_update();
+                    latest.has_changed().then(|| latest.clone())
+                };
+                if let Some(Some(payload)) = latest {
+                    return Some((Ok(Event::default().event("metrics").data(payload)), state));
+                }
+                // Inspect the terminal slot directly because a closed watch channel
+                // can otherwise hide a value published while a worker was unwinding.
+                if state.terminal.borrow().is_some() {
+                    let terminal = { state.terminal.borrow_and_update().clone() };
+                    if let Some(AnalyzeStreamMessage {
+                        event_name,
+                        payload,
+                    }) = terminal
+                    {
+                        state.done = true;
+                        return Some((Ok(Event::default().event(event_name).data(payload)), state));
                     }
                 }
+                notified.await;
             }
         },
-    );
+    )
+}
 
-    Sse::new(sse_stream)
-        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
-        .into_response()
+#[doc(hidden)]
+pub fn send_analyze_terminal(
+    terminal_tx: &watch::Sender<Option<AnalyzeStreamMessage>>,
+    notify: &Notify,
+    event_name: &'static str,
+    payload: String,
+) {
+    if terminal_tx.send_if_modified(|terminal| {
+        if terminal.is_none() {
+            *terminal = Some(AnalyzeStreamMessage {
+                event_name,
+                payload,
+            });
+            true
+        } else {
+            false
+        }
+    }) {
+        notify.notify_one();
+    }
 }
 
 fn adaptive_interval_ms(payload_bytes: usize, requested_ms: u64) -> u64 {
@@ -438,7 +696,9 @@ fn make_analyze_payload(args: AnalyzePayloadArgs<'_>) -> (String, usize) {
         reason,
         code,
     } = args;
-    let metrics = plan.and_then(|plan| query::analyze_plan_metrics_to_json_value(plan, true).ok());
+    // Periodic snapshots are compact; terminal snapshots retain verbose plan details.
+    let metrics =
+        plan.and_then(|plan| query::analyze_plan_metrics_to_json_value(plan, !partial).ok());
     let payload = AnalyzeStreamPayload {
         seq,
         state,
@@ -810,7 +1070,325 @@ pub async fn index() -> axum::response::Html<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
+
+    use async_trait::async_trait;
+    use common_error::ext::{BoxedError, PlainError};
+    use common_query::OutputMeta;
+    use common_telemetry::tracing::instrument::WithSubscriber;
+    use datafusion_expr::LogicalPlan;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::vectors::{BinaryVector, UInt32Vector, VectorRef};
+    use futures::stream;
+    use query::query_engine::DescribeResult;
+    use snafu::IntoError;
+
     use super::*;
+    use crate::query_handler::sql::SqlQueryHandler;
+
+    struct TestSqlQueryHandler {
+        outputs: Mutex<Vec<Result<Output>>>,
+    }
+
+    #[async_trait]
+    impl SqlQueryHandler for TestSqlQueryHandler {
+        async fn do_query(&self, _: &str, _: QueryContextRef) -> Vec<Result<Output>> {
+            std::mem::take(&mut *self.outputs.lock().unwrap())
+        }
+
+        async fn create_logical_tables(&self, _: &str, _: QueryContextRef) -> Result<Vec<Output>> {
+            std::mem::take(&mut *self.outputs.lock().unwrap())
+                .into_iter()
+                .collect()
+        }
+
+        async fn do_analyze_stream_query(&self, _: &str, _: QueryContextRef) -> Result<Output> {
+            unimplemented!()
+        }
+
+        async fn do_exec_plan(
+            &self,
+            _: LogicalPlan,
+            _: Option<Statement>,
+            _: QueryContextRef,
+        ) -> Result<Output> {
+            unimplemented!()
+        }
+
+        async fn do_promql_query(&self, _: &PromQuery, _: QueryContextRef) -> Vec<Result<Output>> {
+            unimplemented!()
+        }
+
+        async fn do_describe(
+            &self,
+            _: Statement,
+            _: QueryContextRef,
+        ) -> Result<Option<DescribeResult>> {
+            unimplemented!()
+        }
+
+        async fn is_valid_schema(&self, _: &str, _: &str) -> Result<bool> {
+            Ok(true)
+        }
+    }
+
+    async fn sql_response(
+        outputs: Vec<Result<Output>>,
+        format: &str,
+        limit: Option<usize>,
+    ) -> HttpResponse {
+        sql(
+            State(ApiState {
+                sql_handler: Arc::new(TestSqlQueryHandler {
+                    outputs: Mutex::new(outputs),
+                }),
+            }),
+            Query(SqlQuery {
+                sql: Some("select number from numbers".to_string()),
+                format: Some(format.to_string()),
+                limit,
+                ..Default::default()
+            }),
+            Extension(QueryContext::with_db_name(None)),
+            Form(SqlQuery::default()),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn test_logical_ddl_logs_diagnostics_without_exposing_sql_or_response_details() {
+        let sql = "CREATE TABLE logs (ts TIMESTAMP TIME INDEX) ENGINE=metric WITH (on_physical_table='request-only-value')";
+        for (status, level) in [
+            (StatusCode::InvalidArguments, "WARN"),
+            (StatusCode::Internal, "ERROR"),
+        ] {
+            let logs = tempfile::NamedTempFile::new().unwrap();
+            let writer = logs.reopen().unwrap();
+            let subscriber = common_telemetry::tracing_subscriber::fmt()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(move || writer.try_clone().unwrap())
+                .finish();
+            let error = crate::error::ExecuteQuerySnafu.into_error(BoxedError::new(
+                PlainError::new("sensitive-option-value".to_string(), status),
+            ));
+            let response = create_logical_tables(
+                State(ApiState {
+                    sql_handler: Arc::new(TestSqlQueryHandler {
+                        outputs: Mutex::new(vec![Err(error)]),
+                    }),
+                }),
+                Extension(QueryContext::with_db_name(None)),
+                Ok(Form(LogicalTableDdl {
+                    sql: Some(sql.to_string()),
+                    db: None,
+                })),
+            )
+            .with_subscriber(subscriber)
+            .await
+            .into_response();
+            let diagnostics = std::fs::read_to_string(logs.path()).unwrap();
+            assert!(diagnostics.contains(level), "{diagnostics}");
+            assert!(
+                diagnostics.contains("Failed to execute query"),
+                "{diagnostics}"
+            );
+            assert!(
+                diagnostics.contains("sensitive-option-value"),
+                "{diagnostics}"
+            );
+            assert!(!diagnostics.contains(sql), "{diagnostics}");
+            assert!(!diagnostics.contains("request-only-value"), "{diagnostics}");
+            assert!(!format!("{:?}", response.headers()).contains("sensitive-option-value"));
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["code"], status as u32);
+            assert_eq!(body["error"], "logical-table batch failed");
+            assert!(body.get("output").is_none());
+        }
+    }
+
+    fn number_batches() -> RecordBatches {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "number",
+            ConcreteDataType::uint32_datatype(),
+            false,
+        )]));
+        let batches = [vec![], vec![0, 1], vec![], vec![2, 3, 4], vec![]]
+            .into_iter()
+            .map(|values| {
+                let columns: Vec<VectorRef> = vec![Arc::new(UInt32Vector::from_slice(values))];
+                RecordBatch::new(schema.clone(), columns).unwrap()
+            })
+            .collect();
+        RecordBatches::try_new(schema, batches).unwrap()
+    }
+
+    fn number_output(streaming: bool) -> Output {
+        let batches = number_batches();
+        if streaming {
+            Output::new_with_stream(batches.as_stream())
+        } else {
+            Output::new_with_record_batches(batches)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sql_response_limit_across_batches_and_formats() {
+        for format in [
+            "greptimedb_v1",
+            "json",
+            "csv",
+            "csvWithNames",
+            "csvWithNamesAndTypes",
+            "table",
+        ] {
+            for streaming in [false, true] {
+                for limit in [
+                    None,
+                    Some(0),
+                    Some(1),
+                    Some(2),
+                    Some(3),
+                    Some(5),
+                    Some(10),
+                    Some(usize::MAX),
+                ] {
+                    let response =
+                        sql_response(vec![Ok(number_output(streaming))], format, limit).await;
+                    let output = match &response {
+                        HttpResponse::GreptimedbV1(response) => response.output(),
+                        HttpResponse::Json(response) => response.output(),
+                        HttpResponse::Csv(response) => response.output(),
+                        HttpResponse::Table(response) => response.output(),
+                        _ => panic!("unexpected response: {response:?}"),
+                    };
+                    let GreptimeQueryOutput::Records(records) = &output[0] else {
+                        panic!("expected records");
+                    };
+                    let expected_rows: Vec<_> = (0..limit.unwrap_or(5).min(5))
+                        .map(|number| vec![Value::from(number)])
+                        .collect();
+                    assert_eq!(records.rows(), &expected_rows);
+                    assert_eq!(records.total_rows, expected_rows.len());
+                    assert_eq!(records.schema.column_schemas[0].name, "number");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sql_response_limit_is_per_statement_and_preserves_write_cost() {
+        let affected = Output::new(
+            OutputData::AffectedRows(7),
+            OutputMeta {
+                cost: 42,
+                ..Default::default()
+            },
+        );
+        let response = sql_response(
+            vec![
+                Ok(number_output(true)),
+                Ok(affected),
+                Ok(number_output(false)),
+            ],
+            "greptimedb_v1",
+            Some(1),
+        )
+        .await;
+        let HttpResponse::GreptimedbV1(response) = response else {
+            panic!("expected greptimedb response");
+        };
+        assert_eq!(response.output().len(), 3);
+        for index in [0, 2] {
+            let GreptimeQueryOutput::Records(records) = &response.output()[index] else {
+                panic!("expected records");
+            };
+            assert_eq!(records.rows(), &vec![vec![Value::from(0)]]);
+        }
+        assert!(matches!(
+            response.output()[1],
+            GreptimeQueryOutput::AffectedRows(7)
+        ));
+        assert_eq!(
+            response.resp_metrics[GREPTIME_EXEC_WRITE_COST],
+            Value::from(42)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sql_response_limit_does_not_affect_other_formats() {
+        for format in ["arrow", "influxdb_v1", "null"] {
+            let unlimited = sql_response(vec![Ok(number_output(true))], format, None).await;
+            let limited = sql_response(vec![Ok(number_output(true))], format, Some(0)).await;
+            assert_eq!(
+                serde_json::to_value(unlimited.with_execution_time(0)).unwrap(),
+                serde_json::to_value(limited.with_execution_time(0)).unwrap(),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sql_response_limit_drains_input_and_propagates_late_errors() {
+        for limit in [0, 1, 3] {
+            for late_error in [false, true] {
+                let batches = number_batches();
+                let schema = batches.schema();
+                let mut input: Vec<_> = batches.into_iter().map(Ok).collect();
+                if late_error {
+                    input.push(
+                        common_recordbatch::error::CreateRecordBatchesSnafu {
+                            reason: "late stream error",
+                        }
+                        .fail(),
+                    );
+                }
+                let expected_batches = input.len();
+                let observed = Arc::new(AtomicUsize::new(0));
+                let counter = observed.clone();
+                let stream = stream::iter(input).inspect(move |_| {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                });
+                let output = Output::new_with_stream(Box::pin(RecordBatchStreamWrapper::new(
+                    schema, stream,
+                )));
+                let response = sql_response(vec![Ok(output)], "greptimedb_v1", Some(limit)).await;
+                assert_eq!(observed.load(Ordering::Relaxed), expected_batches);
+                assert_eq!(matches!(response, HttpResponse::Error(_)), late_error);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_sql_response_limit_skips_conversion_of_discarded_rows() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "payload",
+            ConcreteDataType::json_datatype(),
+            false,
+        )]));
+        let columns: Vec<VectorRef> = vec![Arc::new(BinaryVector::from(vec![
+            datatypes::types::parse_string_to_jsonb(r#"{"ok":1}"#).unwrap(),
+            b"invalid jsonb".to_vec(),
+        ]))];
+        let batch = RecordBatch::new(schema.clone(), columns).unwrap();
+        for streaming in [false, true] {
+            for limit in [0, 1, 2] {
+                let batches = RecordBatches::try_new(schema.clone(), vec![batch.clone()]).unwrap();
+                let output = if streaming {
+                    Output::new_with_stream(batches.as_stream())
+                } else {
+                    Output::new_with_record_batches(batches)
+                };
+                let response = sql_response(vec![Ok(output)], "greptimedb_v1", Some(limit)).await;
+                // Only retained rows should be decoded into HTTP response values.
+                assert_eq!(matches!(response, HttpResponse::Error(_)), limit == 2);
+            }
+        }
+    }
 
     #[test]
     fn test_final_analyze_event_uses_error_event_for_conversion_error() {

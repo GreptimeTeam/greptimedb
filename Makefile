@@ -4,11 +4,13 @@ FEATURES ?=
 TARGET_DIR ?=
 TARGET ?=
 BUILD_BIN ?= greptime
+BUILD_PACKAGE ?= $(if $(filter greptime,$(strip $(BUILD_BIN))),cmd)
+BUILD_PACKAGE_OPT = $(if $(strip $(BUILD_PACKAGE)),-p ${BUILD_PACKAGE})
 CARGO_BUILD_OPTS := --locked
 IMAGE_REGISTRY ?= docker.io
 IMAGE_NAMESPACE ?= greptime
 IMAGE_TAG ?= latest
-DEV_BUILDER_IMAGE_TAG ?= 2026-03-21-7fa6f5f9-20260810091725
+DEV_BUILDER_IMAGE_TAG ?= 1.96.1-822042c7-20260924091315
 DEV_BUILDER_RISCV64_IMAGE_TAG ?= $(DEV_BUILDER_IMAGE_TAG)
 DEV_BUILDER_RISCV64_BASE_IMAGE ?= ubuntu:22.04
 RISCV64_TARGET ?= riscv64gc-unknown-linux-gnu
@@ -84,7 +86,7 @@ endif
 
 .PHONY: build
 build: ## Build debug version greptime.
-	cargo ${CARGO_EXTENSION} build ${CARGO_BUILD_OPTS}
+	cargo ${CARGO_EXTENSION} build ${BUILD_PACKAGE_OPT} ${CARGO_BUILD_OPTS}
 
 .PHONY: build-by-dev-builder
 build-by-dev-builder: ## Build greptime by dev-builder.
@@ -93,6 +95,8 @@ build-by-dev-builder: ## Build greptime by dev-builder.
 	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry -v ${CARGO_GIT_CACHE}:/root/.cargo/git \
 	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:${DEV_BUILDER_IMAGE_TAG} \
 	make build \
+	BUILD_PACKAGE="${BUILD_PACKAGE}" \
+	BUILD_BIN="${BUILD_BIN}" \
 	CARGO_EXTENSION="${CARGO_EXTENSION}" \
 	CARGO_PROFILE=${CARGO_PROFILE} \
 	FEATURES=${FEATURES} \
@@ -108,6 +112,8 @@ build-riscv64-bin: ## Build greptime binary for riscv64 (linux-gnu) by the riscv
 	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry -v ${CARGO_GIT_CACHE}:/root/.cargo/git \
 	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-riscv64:${DEV_BUILDER_RISCV64_IMAGE_TAG} \
 	make build \
+	BUILD_PACKAGE="${BUILD_PACKAGE}" \
+	BUILD_BIN="${BUILD_BIN}" \
 	CARGO_EXTENSION="${CARGO_EXTENSION}" \
 	CARGO_PROFILE=${CARGO_PROFILE} \
 	FEATURES=${FEATURES} \
@@ -122,6 +128,8 @@ build-android-bin: ## Build greptime binary for android.
 	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry -v ${CARGO_GIT_CACHE}:/root/.cargo/git \
 	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-android:${DEV_BUILDER_IMAGE_TAG} \
 	make build \
+	BUILD_PACKAGE="${BUILD_PACKAGE}" \
+	BUILD_BIN="${BUILD_BIN}" \
 	CARGO_EXTENSION="ndk --platform 23 -t aarch64-linux-android" \
 	CARGO_PROFILE=release \
 	FEATURES="${FEATURES}" \
@@ -204,12 +212,12 @@ sqlness-test: ## Run sqlness test.
 RUNS ?= 1
 FUZZ_TARGET ?= fuzz_alter_table
 .PHONY: fuzz
-fuzz: ## Run fuzz test ${FUZZ_TARGET}.
-	cargo fuzz run ${FUZZ_TARGET} --fuzz-dir tests-fuzz -D -s none -- -runs=${RUNS}
+fuzz: ## Run fuzz test ${FUZZ_TARGET} (requires a nightly toolchain).
+	cargo +nightly fuzz run ${FUZZ_TARGET} --fuzz-dir tests-fuzz -D -s none -- -runs=${RUNS}
 
 .PHONY: fuzz-ls
-fuzz-ls: ## List all fuzz targets.
-	cargo fuzz list --fuzz-dir tests-fuzz
+fuzz-ls: ## List all fuzz targets (requires a nightly toolchain).
+	cargo +nightly fuzz list --fuzz-dir tests-fuzz
 
 .PHONY: check
 check: ## Cargo check all the targets.
@@ -225,14 +233,11 @@ fix-clippy: ## Fix clippy violations.
 
 .PHONY: check-udeps
 check-udeps: ## Check unused dependencies.
-	cargo udeps --workspace --all-targets
+	cargo shear
 
 .PHONY: fix-udeps
 fix-udeps: ## Remove unused dependencies automatically.
-	@echo "Running cargo-udeps to find unused dependencies..."
-	@cargo udeps --workspace --all-targets --output json > udeps-report.json || true
-	@echo "Removing unused dependencies..."
-	@python3 scripts/fix-udeps.py udeps-report.json
+	cargo shear --fix
 
 .PHONY: fmt-check
 fmt-check: ## Check code format.
@@ -256,6 +261,7 @@ stop-etcd: ## Stop single node etcd for testing purpose.
 run-it-in-container: start-etcd ## Run integration tests in dev-builder.
 	docker run --network=host \
 	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry -v ${CARGO_GIT_CACHE}:/root/.cargo/git -v /tmp:/tmp \
+	-e GT_S3_BUCKET -e GT_S3_ACCESS_KEY_ID -e GT_S3_ACCESS_KEY -e GT_S3_REGION \
 	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:${DEV_BUILDER_IMAGE_TAG} \
 	make test sqlness-test BUILD_JOBS=${BUILD_JOBS}
 
@@ -278,6 +284,7 @@ dashboards: ## Generate the Grafana dashboards for standalone mode and intermedi
 	@./grafana/scripts/gen-dashboards.sh
 
 ##@ Docs
+.PHONY: config-docs
 config-docs: ## Generate configuration documentation from toml files.
 	docker run --rm \
     -v ${PWD}:/greptimedb \

@@ -92,7 +92,7 @@ use crate::utils::database::DatabaseOperator;
 use crate::utils::insert_forwarder::InsertForwarder;
 
 /// The time window for twcs compaction of the region stats table.
-const REGION_STATS_TABLE_TWCS_COMPACTION_TIME_WINDOW: Duration = Duration::from_days(1);
+const REGION_STATS_TABLE_TWCS_COMPACTION_TIME_WINDOW: Duration = Duration::from_secs(86400);
 
 // TODO(fys): try use derive_builder macro
 pub struct MetasrvBuilder {
@@ -250,6 +250,7 @@ impl MetasrvBuilder {
         let event_recorder = Arc::new(EventRecorderImpl::with_event_type_filter(
             Box::new(EventHandlerImpl::new(event_inserter)),
             options.event_recorder.event_types.clone(),
+            options.event_recorder.flush_interval,
         ));
 
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector));
@@ -530,6 +531,7 @@ impl MetasrvBuilder {
             let gc_scheduler_ctx = DefaultGcSchedulerCtx::try_new(
                 table_metadata_manager.clone(),
                 procedure_manager.clone(),
+                runtime_switch_manager.clone(),
                 #[cfg(feature = "enterprise")]
                 ddl_manager.clone(),
                 meta_peer_client.clone(),

@@ -1,0 +1,78 @@
+CREATE TABLE json2_alter_type_hints_compaction_conversion (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2
+) WITH (
+    'append_mode' = 'true',
+    'sst_format' = 'flat'
+);
+
+Affected Rows: 0
+
+INSERT INTO json2_alter_type_hints_compaction_conversion VALUES
+    (1, '{"to_string":123,"to_int":"456"}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_alter_type_hints_compaction_conversion');
+
++-------------------------------------------------------------------+
+| ADMIN FLUSH_TABLE('json2_alter_type_hints_compaction_conversion') |
++-------------------------------------------------------------------+
+| 0                                                                 |
++-------------------------------------------------------------------+
+
+ALTER TABLE json2_alter_type_hints_compaction_conversion
+    MODIFY COLUMN attrs JSON2 (
+        to_string STRING,
+        to_int BIGINT
+    );
+
+Affected Rows: 0
+
+INSERT INTO json2_alter_type_hints_compaction_conversion VALUES
+    (2, '{"to_string":"after","to_int":789}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_alter_type_hints_compaction_conversion');
+
++-------------------------------------------------------------------+
+| ADMIN FLUSH_TABLE('json2_alter_type_hints_compaction_conversion') |
++-------------------------------------------------------------------+
+| 0                                                                 |
++-------------------------------------------------------------------+
+
+SELECT ts, attrs.to_string, attrs.to_int
+FROM json2_alter_type_hints_compaction_conversion
+ORDER BY ts;
+
++-------------------------+-------------------------------------------------------------------------------------------------+-------------------------------------------------------------------------------------------+
+| ts                      | json_get(json2_alter_type_hints_compaction_conversion.attrs,Utf8("$.to_string"),Utf8View(NULL)) | json_get(json2_alter_type_hints_compaction_conversion.attrs,Utf8("$.to_int"),Int64(NULL)) |
++-------------------------+-------------------------------------------------------------------------------------------------+-------------------------------------------------------------------------------------------+
+| 1970-01-01T00:00:00.001 | 123                                                                                             | 456                                                                                       |
+| 1970-01-01T00:00:00.002 | after                                                                                           | 789                                                                                       |
++-------------------------+-------------------------------------------------------------------------------------------------+-------------------------------------------------------------------------------------------+
+
+ADMIN COMPACT_TABLE('json2_alter_type_hints_compaction_conversion', 'swcs', '86400');
+
++--------------------------------------------------------------------------------------+
+| ADMIN COMPACT_TABLE('json2_alter_type_hints_compaction_conversion', 'swcs', '86400') |
++--------------------------------------------------------------------------------------+
+| 0                                                                                    |
++--------------------------------------------------------------------------------------+
+
+SELECT ts, attrs.to_string, attrs.to_int
+FROM json2_alter_type_hints_compaction_conversion
+ORDER BY ts;
+
++-------------------------+-------------------------------------------------------------------------------------------------+-------------------------------------------------------------------------------------------+
+| ts                      | json_get(json2_alter_type_hints_compaction_conversion.attrs,Utf8("$.to_string"),Utf8View(NULL)) | json_get(json2_alter_type_hints_compaction_conversion.attrs,Utf8("$.to_int"),Int64(NULL)) |
++-------------------------+-------------------------------------------------------------------------------------------------+-------------------------------------------------------------------------------------------+
+| 1970-01-01T00:00:00.001 | 123                                                                                             | 456                                                                                       |
+| 1970-01-01T00:00:00.002 | after                                                                                           | 789                                                                                       |
++-------------------------+-------------------------------------------------------------------------------------------------+-------------------------------------------------------------------------------------------+
+
+DROP TABLE json2_alter_type_hints_compaction_conversion;
+
+Affected Rows: 0
+

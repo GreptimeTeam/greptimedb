@@ -54,6 +54,9 @@ pub struct OtlpMetricCtx {
     pub promote_scope_attrs: bool,
     pub with_metric_engine: bool,
     pub is_legacy: bool,
+    /// Set from the server's `otlp.experimental_enable_resource_info`; off
+    /// means the resource descriptor is not synthesized at all.
+    pub resource_info: bool,
     pub metric_type: MetricType,
     pub metric_translation_strategy: OtlpMetricTranslationStrategy,
 }

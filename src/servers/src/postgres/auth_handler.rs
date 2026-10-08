@@ -13,11 +13,10 @@
 // limitations under the License.
 
 use std::fmt::Debug;
-use std::sync::Exclusive;
 
 use ::auth::{
-    Identity, Password, PgAuthInfo, PgScramSha256Verifier, UserInfoRef, UserProviderRef,
-    userinfo_by_name,
+    BEARER_TOKEN_USER, Identity, Password, PgAuthInfo, PgScramSha256Verifier, UserInfoRef,
+    UserProviderRef, userinfo_by_name,
 };
 use async_trait::async_trait;
 use base64::Engine;
@@ -123,15 +122,21 @@ impl PgLoginVerifier {
             None => return Ok(None),
         };
 
-        match user_provider
-            .auth(
-                Identity::UserId(user_name, None),
-                Password::PlainText(password.to_string().into()),
-                catalog,
-                schema,
-            )
-            .await
-        {
+        let result = if user_name == BEARER_TOKEN_USER {
+            user_provider
+                .auth_bearer_token(password, catalog, schema)
+                .await
+        } else {
+            user_provider
+                .auth(
+                    Identity::UserId(user_name, None),
+                    Password::PlainText(password.to_string().into()),
+                    catalog,
+                    schema,
+                )
+                .await
+        };
+        match result {
             Err(e) => {
                 METRIC_AUTH_FAILURE
                     .with_label_values(&[e.status_code().as_ref()])
@@ -152,9 +157,16 @@ impl PgLoginVerifier {
             Some(name) => name,
             None => return Ok(PgAuthInfo::Cleartext),
         };
+        if user_name == BEARER_TOKEN_USER {
+            return Ok(PgAuthInfo::Cleartext);
+        }
+        let catalog = match &login.catalog {
+            Some(name) => name,
+            None => return Ok(PgAuthInfo::Cleartext),
+        };
 
         match user_provider
-            .postgres_auth_info(Identity::UserId(user_name, None))
+            .postgres_auth_info(Identity::UserId(user_name, None), catalog)
             .await
         {
             Err(e) => {
@@ -239,7 +251,7 @@ impl StartupHandler for PostgresServerHandlerInner {
                 auth::save_startup_parameters_to_metadata(client, startup);
 
                 // check if db is valid
-                match resolve_db_info(Exclusive::new(client), self.query_handler.clone()).await? {
+                match resolve_db_info(client, self.query_handler.clone()).await? {
                     DbResolution::Resolved(catalog, schema) => {
                         let metadata = client.metadata_mut();
                         let _ = metadata.insert(super::METADATA_CATALOG.to_owned(), catalog);
@@ -277,7 +289,6 @@ impl StartupHandler for PostgresServerHandlerInner {
                             return send_password_authentication_failed(client).await;
                         }
                     };
-
                     client.set_state(PgWireConnectionState::AuthenticationInProgress);
                     match auth_info {
                         PgAuthInfo::ScramSha256 { .. } => {
@@ -583,13 +594,13 @@ enum DbResolution {
 
 /// A function extracted to resolve lifetime and readability issues:
 async fn resolve_db_info<C>(
-    client: Exclusive<&mut C>,
+    client: &mut C,
     query_handler: ServerSqlQueryHandlerRef,
 ) -> PgWireResult<DbResolution>
 where
     C: ClientInfo + Unpin + Send,
 {
-    let db_ref = client.into_inner().metadata().get(super::METADATA_DATABASE);
+    let db_ref = client.metadata().get(super::METADATA_DATABASE);
     if let Some(db) = db_ref {
         let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
         if query_handler

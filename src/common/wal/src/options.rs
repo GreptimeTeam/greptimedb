@@ -13,11 +13,13 @@
 // limitations under the License.
 
 pub mod kafka;
+pub mod object_store;
 
 use serde::{Deserialize, Serialize};
 use serde_with::with_prefix;
 
 pub use crate::options::kafka::KafkaWalOptions;
+pub use crate::options::object_store::ObjectStoreWalOptions;
 
 /// An encoded wal options will be wrapped into a (WAL_OPTIONS_KEY, encoded wal options) key-value pair
 /// and inserted into the options of a `RegionCreateRequest`.
@@ -34,9 +36,12 @@ pub enum WalOptions {
     #[serde(with = "kafka_prefix")]
     Kafka(KafkaWalOptions),
     Noop,
+    #[serde(with = "object_store_prefix")]
+    ObjectStore(ObjectStoreWalOptions),
 }
 
 with_prefix!(kafka_prefix "wal.kafka.");
+with_prefix!(object_store_prefix "wal.object_store.");
 
 #[cfg(test)]
 mod tests {
@@ -89,5 +94,36 @@ mod tests {
 
         let decoded: WalOptions = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, wal_options);
+
+        let wal_options = WalOptions::ObjectStore(ObjectStoreWalOptions::new("wal".to_string()));
+        let encoded = serde_json::to_string(&wal_options).unwrap();
+        let expected = r#"{"wal.provider":"object_store","wal.object_store.prefix":"wal"}"#;
+        assert_eq!(&encoded, expected);
+
+        let decoded: WalOptions = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, wal_options);
+    }
+
+    #[test]
+    fn test_decode_persisted_wal_options() {
+        let cases = [
+            (r#"{"wal.provider":"raft_engine"}"#, WalOptions::RaftEngine),
+            (
+                r#"{"wal.provider":"kafka","wal.kafka.topic":"test_topic"}"#,
+                WalOptions::Kafka(KafkaWalOptions::new("test_topic".to_string())),
+            ),
+            (r#"{"wal.provider":"noop"}"#, WalOptions::Noop),
+            (
+                r#"{"wal.provider":"object_store","wal.object_store.prefix":"wal"}"#,
+                WalOptions::ObjectStore(ObjectStoreWalOptions::new("wal".to_string())),
+            ),
+        ];
+        for (encoded, expected) in cases {
+            let decoded: WalOptions = serde_json::from_str(encoded).unwrap();
+            assert_eq!(decoded, expected);
+        }
+
+        assert!(serde_json::from_str::<WalOptions>(r#"{"wal.provider":"unknown"}"#).is_err());
+        assert!(serde_json::from_str::<WalOptions>(r#"{"wal.provider":"object_store"}"#).is_err());
     }
 }

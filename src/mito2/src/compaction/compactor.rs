@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::num::NonZero;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,7 +30,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::access_layer::{
     AccessLayer, AccessLayerRef, Metrics, OperationType, SstWriteRequest, WriteType,
@@ -47,12 +47,12 @@ use crate::error::{
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
-use crate::region::options::RegionOptions;
+use crate::region::options::{MergeMode, RegionOptions};
 use crate::region::version::VersionRef;
 use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
 use crate::schedule::scheduler::LocalScheduler;
 use crate::sst::FormatType;
-use crate::sst::file::{FileMeta, UncommittedSsts};
+use crate::sst::file::{FileHandle, FileMeta, UncommittedSsts};
 use crate::sst::file_purger::LocalFilePurger;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
@@ -73,6 +73,10 @@ pub struct CompactionVersion {
     pub(crate) options: RegionOptions,
     /// SSTs of the region.
     pub(crate) ssts: SstVersionRef,
+    /// Lower bound of pending memtable sequences from the same Version as `ssts`.
+    /// None means no barrier; Some(0) conservatively represents an unknown bound.
+    /// Keep only the value so background compaction cannot pin flushed memtables.
+    pub(crate) memtable_min_sequence: Option<SequenceNumber>,
     /// Inferred compaction time window.
     pub(crate) compaction_time_window: Option<Duration>,
 }
@@ -83,6 +87,11 @@ impl From<VersionRef> for CompactionVersion {
             metadata: value.metadata.clone(),
             options: value.options.clone(),
             ssts: value.ssts.clone(),
+            memtable_min_sequence: if value.options.merge_mode() == MergeMode::LastNonNull {
+                value.memtables.min_sequence()
+            } else {
+                None
+            },
             compaction_time_window: value.compaction_time_window,
         }
     }
@@ -199,12 +208,15 @@ pub async fn open_compaction_region(
     };
 
     let current_version = {
-        let mut ssts = SstVersion::new();
+        let mut ssts = SstVersion::new(region_metadata.clone());
         ssts.add_files(file_purger.clone(), manifest.files.values().cloned());
         CompactionVersion {
             metadata: region_metadata.clone(),
             options: req.region_options.clone(),
             ssts: Arc::new(ssts),
+            // Remote execution uses an already picked output. A manifest-only
+            // opener cannot prove that a new LastNonNull pick is memtable-safe.
+            memtable_min_sequence: Some(0),
             compaction_time_window: manifest.compaction_time_window,
         }
     };
@@ -404,6 +416,42 @@ pub trait SstMerger: Send + Sync + 'static {
 #[derive(Clone)]
 pub struct DefaultSstMerger;
 
+/// File-level sequence metadata is independent of physical row encoding.
+struct OutputSequenceMetadata {
+    file_sequence: Option<NonZeroU64>,
+    exact_sequence_trusted: bool,
+}
+
+/// Compaction does not admit new data, so it inherits the input sequence bounds
+/// without allocating a new admission marker. Retaining physical row sequences
+/// does not by itself restore exact-read capability for untrusted inputs.
+fn output_sequence_metadata(
+    region: &CompactionRegion,
+    inputs: &[FileHandle],
+) -> OutputSequenceMetadata {
+    let exact_sequence_trusted = region.region_options.preserve_row_sequence
+        && inputs
+            .iter()
+            .all(|f| f.is_effective_target_sequence_trusted(region.region_id));
+    OutputSequenceMetadata {
+        file_sequence: known_max_input_sequence(inputs),
+        exact_sequence_trusted,
+    }
+}
+
+/// Computes the maximum target-domain sequence bound of the output of merging
+/// `inputs`. A bound can be a row maximum or an admission marker; compaction
+/// must preserve both for sequence-based pruning. Unknown bounds must remain
+/// unknown rather than being replaced with a partial maximum.
+fn known_max_input_sequence(inputs: &[FileHandle]) -> Option<NonZeroU64> {
+    let mut max: Option<NonZeroU64> = None;
+    for input in inputs {
+        let sequence = input.meta_ref().sequence?;
+        max = Some(max.map_or(sequence, |current| current.max(sequence)));
+    }
+    max
+}
+
 #[async_trait::async_trait]
 impl SstMerger for DefaultSstMerger {
     async fn merge_single_output(
@@ -413,7 +461,6 @@ impl SstMerger for DefaultSstMerger {
         write_opts: WriteOptions,
     ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
         let region_id = compaction_region.region_id;
-        let storage = compaction_region.region_options.storage.clone();
         let index_options = compaction_region
             .current_version
             .options
@@ -431,20 +478,13 @@ impl SstMerger for DefaultSstMerger {
         let inverted_index_config = compaction_region.engine_config.inverted_index.clone();
         let fulltext_index_config = compaction_region.engine_config.fulltext_index.clone();
         let bloom_filter_index_config = compaction_region.engine_config.bloom_filter_index.clone();
-        #[cfg(feature = "vector_index")]
-        let vector_index_config = compaction_region.engine_config.vector_index.clone();
 
         let input_file_names = output
             .inputs
             .iter()
             .map(|f| f.file_id().to_string())
             .join(",");
-        let max_sequence = output
-            .inputs
-            .iter()
-            .map(|f| f.meta_ref().sequence)
-            .max()
-            .flatten();
+        let sequence_metadata = output_sequence_metadata(&compaction_region, &output.inputs);
         let builder = CompactionSstReaderBuilder {
             metadata: compaction_region.region_metadata.clone(),
             sst_layer: compaction_region.access_layer.clone(),
@@ -467,20 +507,21 @@ impl SstMerger for DefaultSstMerger {
                     metadata: region_metadata.clone(),
                     source,
                     cache_manager: compaction_region.cache_manager.clone(),
-                    storage,
-                    max_sequence: max_sequence.map(NonZero::get),
+                    // Readers resolve file overrides before merge/dedup. Replacing
+                    // their effective sequences here could promote old rows above
+                    // versions in SSTs that were not part of this merge.
+                    max_sequence: None,
                     sst_write_format: if flat_format {
                         FormatType::Flat
                     } else {
                         FormatType::PrimaryKey
                     },
+                    preserve_row_sequence: sequence_metadata.exact_sequence_trusted,
                     index_options,
                     index_config,
                     inverted_index_config,
                     fulltext_index_config,
                     bloom_filter_index_config,
-                    #[cfg(feature = "vector_index")]
-                    vector_index_config,
                 },
                 &write_opts,
                 &mut metrics,
@@ -522,11 +563,12 @@ impl SstMerger for DefaultSstMerger {
                     index_version: 0,
                     num_rows: sst_info.num_rows as u64,
                     num_row_groups: sst_info.num_row_groups,
-                    sequence: max_sequence,
+                    sequence: sequence_metadata.file_sequence,
                     partition_expr: partition_expr.clone(),
                     num_series: sst_info.num_series,
                     primary_key_min,
                     primary_key_max,
+                    preserve_row_sequence: sequence_metadata.exact_sequence_trusted,
                 }
             })
             .collect::<Vec<_>>();
@@ -612,6 +654,7 @@ where
                 write_buffer_size: compaction_region.engine_config.sst_write_buffer_size,
                 max_file_size: picker_output.max_file_size,
                 row_group_size: compaction_region.region_options.row_group_size(),
+                float_field_encoding: compaction_region.region_options.float_field_encoding,
             };
             let merger = self.merger.clone();
             let compaction_region = compaction_region.clone();
@@ -791,6 +834,321 @@ mod tests {
         FileHandle::new(meta, Arc::new(NoopFilePurger))
     }
 
+    #[test]
+    fn test_effective_target_trust_and_max_sequence() {
+        let target = RegionId::new(1, 1);
+        let local_trusted = new_file_handle(FileMeta {
+            region_id: target,
+            sequence: NonZeroU64::new(3),
+            preserve_row_sequence: true,
+            ..dummy_file_meta()
+        });
+        let foreign_untrusted_marker = new_file_handle(FileMeta {
+            region_id: RegionId::new(1, 2),
+            sequence: NonZeroU64::new(9),
+            preserve_row_sequence: false,
+            ..dummy_file_meta()
+        });
+        let local_untrusted = new_file_handle(FileMeta {
+            region_id: target,
+            sequence: NonZeroU64::new(11),
+            preserve_row_sequence: false,
+            ..dummy_file_meta()
+        });
+        assert!(local_trusted.is_effective_target_sequence_trusted(target));
+        assert!(foreign_untrusted_marker.is_effective_target_sequence_trusted(target));
+        assert!(!local_untrusted.is_effective_target_sequence_trusted(target));
+        assert_eq!(
+            NonZeroU64::new(9),
+            known_max_input_sequence(&[local_trusted, foreign_untrusted_marker])
+        );
+    }
+
+    #[test]
+    fn test_known_max_input_sequence() {
+        let meta_with = |sequence| FileMeta {
+            sequence,
+            ..dummy_file_meta()
+        };
+
+        let inputs = vec![
+            new_file_handle(meta_with(NonZeroU64::new(3))),
+            new_file_handle(meta_with(NonZeroU64::new(9))),
+            new_file_handle(meta_with(NonZeroU64::new(5))),
+        ];
+        assert_eq!(NonZeroU64::new(9), known_max_input_sequence(&inputs));
+
+        let inputs = vec![
+            new_file_handle(meta_with(NonZeroU64::new(9))),
+            new_file_handle(meta_with(None)),
+        ];
+        assert_eq!(None, known_max_input_sequence(&inputs));
+
+        assert_eq!(None, known_max_input_sequence(&[]));
+    }
+
+    #[tokio::test]
+    async fn test_output_sequence_metadata_preserves_trust_and_unknown_bounds() {
+        let mut region = new_test_compaction_region().await;
+        let local = region.region_id;
+        let foreign = RegionId::new(1, 2);
+        let file = |region_id, sequence: Option<u64>, preserve_row_sequence| {
+            new_file_handle(FileMeta {
+                region_id,
+                sequence: sequence.and_then(NonZeroU64::new),
+                preserve_row_sequence,
+                ..dummy_file_meta()
+            })
+        };
+        // Bounds are independent of row trust: known, mixed trust, unknown in
+        // either sequence domain, empty inputs, and the largest possible bound.
+        let cases = [
+            (
+                vec![file(local, Some(3), true), file(foreign, Some(9), false)],
+                Some(9),
+                true,
+            ),
+            (
+                vec![file(local, Some(3), true), file(local, Some(6), false)],
+                Some(6),
+                false,
+            ),
+            (
+                vec![file(foreign, Some(9), false), file(foreign, Some(11), true)],
+                Some(11),
+                true,
+            ),
+            (
+                vec![file(local, Some(3), true), file(local, None, true)],
+                None,
+                true,
+            ),
+            (
+                vec![file(local, None, false), file(local, Some(6), true)],
+                None,
+                false,
+            ),
+            (
+                vec![file(local, Some(3), true), file(foreign, None, true)],
+                None,
+                false,
+            ),
+            (vec![], None, true),
+            (
+                vec![file(local, Some(u64::MAX), false)],
+                Some(u64::MAX),
+                false,
+            ),
+        ];
+        for committed_sequence in [100, 101] {
+            region
+                .manifest_ctx
+                .manifest_manager
+                .write()
+                .await
+                .update(
+                    RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+                        committed_sequence: Some(committed_sequence),
+                        files_to_add: vec![],
+                        files_to_remove: vec![],
+                        timestamp_ms: None,
+                        compaction_time_window: None,
+                        flushed_entry_id: None,
+                        flushed_sequence: None,
+                    })),
+                    false,
+                )
+                .await
+                .unwrap();
+            for preserve in [false, true] {
+                region.region_options.preserve_row_sequence = preserve;
+                for (inputs, known_bound, inputs_trusted) in &cases {
+                    let metadata = output_sequence_metadata(&region, inputs);
+                    let trusted = preserve && *inputs_trusted;
+                    assert_eq!(trusted, metadata.exact_sequence_trusted);
+                    assert_eq!(
+                        known_bound.and_then(NonZeroU64::new),
+                        metadata.file_sequence
+                    );
+                }
+            }
+        }
+    }
+
+    /// Independent outputs must be safe in either visibility order, including when
+    /// only one output succeeds. Merely committing both outputs together is not a
+    /// substitute for preserving version order across their separate merge streams.
+    #[rstest::rstest]
+    #[case(true)]
+    #[case(false)]
+    #[tokio::test]
+    async fn test_independent_outputs_preserve_delete_in_every_visibility_state(
+        #[case] flat_format: bool,
+        #[values(false, true)] unknown_put_bound: bool,
+    ) {
+        use datatypes::arrow::array::AsArray;
+        use datatypes::arrow::datatypes::TimestampMillisecondType;
+        use store_api::region_engine::RegionEngine;
+        use store_api::region_request::RegionRequest;
+
+        use crate::compaction::CompactionOutput;
+        use crate::compaction::compactor::{CompactionRegion, Compactor, DefaultCompactor};
+        use crate::compaction::picker::PickerOutput;
+        use crate::compaction::reader::CompactionSstReaderBuilder;
+        use crate::engine::compaction_test::{delete_and_flush, put_and_flush};
+        use crate::region::options::MergeMode;
+        use crate::sst::file::FileHandle;
+        use crate::sst::file_purger::NoopFilePurger;
+        use crate::test_util::{CreateRequestBuilder, TestEnv, rows_schema};
+
+        let mut env = TestEnv::new().await;
+        let region_id = RegionId::new(1, 1);
+        let config = MitoConfig {
+            default_flat_format: flat_format,
+            min_compaction_interval: Duration::from_secs(3600),
+            ..Default::default()
+        };
+        let engine = env.create_engine(config).await;
+        let request = CreateRequestBuilder::new().build();
+        let columns = rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        put_and_flush(&engine, region_id, &columns, 0..1).await;
+        delete_and_flush(&engine, region_id, &columns, 0..1).await;
+        put_and_flush(&engine, region_id, &columns, 10..11).await;
+        let region = engine.get_region(region_id).unwrap();
+        let version = region.version();
+        let mut files: Vec<_> = version
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files())
+            .cloned()
+            .collect();
+        assert_eq!(3, files.len());
+        files.sort_unstable_by_key(|file| file.meta_ref().sequence);
+        if unknown_put_bound {
+            // Model a legacy SST whose physical rows are readable but whose
+            // file-level boundary is unknown. Merging cannot invent that bound.
+            let mut meta = files[0].meta_ref().clone();
+            meta.sequence = None;
+            files[0] = FileHandle::new(meta, Arc::new(NoopFilePurger));
+        }
+        let compaction_region = CompactionRegion {
+            region_id,
+            region_options: version.options.clone(),
+            engine_config: Arc::new(MitoConfig {
+                default_flat_format: flat_format,
+                ..Default::default()
+            }),
+            region_metadata: version.metadata.clone(),
+            cache_manager: engine.cache_manager(),
+            access_layer: region.access_layer.clone(),
+            manifest_ctx: region.manifest_ctx.clone(),
+            current_version: version.into(),
+            file_purger: None,
+            ttl: None,
+            max_parallelism: 2,
+            plugins: common_base::Plugins::new(),
+        };
+        let puts = vec![files[0].clone(), files[2].clone()];
+        let deletes = vec![files[1].clone()];
+        let picker_output = PickerOutput {
+            outputs: [puts.clone(), deletes.clone()]
+                .into_iter()
+                .map(|inputs| CompactionOutput {
+                    output_level: 1,
+                    inputs,
+                    filter_deleted: false,
+                    output_time_range: None,
+                })
+                .collect(),
+            expired_ssts: vec![],
+            time_window_size: 3600,
+            max_file_size: None,
+        };
+        let merged = DefaultCompactor::with_merger(DefaultSstMerger)
+            .merge_ssts(&compaction_region, picker_output)
+            .await
+            .unwrap();
+        assert_eq!(2, merged.files_to_add.len());
+        let outputs: Vec<_> = merged
+            .files_to_add
+            .into_iter()
+            .map(|meta| FileHandle::new(meta, Arc::new(NoopFilePurger)))
+            .collect();
+        let put_output = outputs
+            .iter()
+            .find(|file| file.meta_ref().num_rows == 2)
+            .unwrap();
+        let delete_output = outputs
+            .iter()
+            .find(|file| file.meta_ref().num_rows == 1)
+            .unwrap();
+        assert_eq!(
+            if unknown_put_bound {
+                None
+            } else {
+                NonZeroU64::new(3)
+            },
+            put_output.meta_ref().sequence,
+        );
+        assert_eq!(NonZeroU64::new(2), delete_output.meta_ref().sequence);
+        assert!(
+            outputs
+                .iter()
+                .all(|file| !file.meta_ref().preserve_row_sequence)
+        );
+
+        // Cover the original snapshot, each partial success/cancellation state,
+        // and both completed outputs using real persisted SSTs and merge readers.
+        for (put_done, delete_done) in [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let mut visible = if put_done {
+                vec![put_output.clone()]
+            } else {
+                puts.clone()
+            };
+            visible.extend(if delete_done {
+                vec![delete_output.clone()]
+            } else {
+                deletes.clone()
+            });
+            let mut reader = CompactionSstReaderBuilder {
+                metadata: compaction_region.region_metadata.clone(),
+                sst_layer: region.access_layer.clone(),
+                cache: engine.cache_manager(),
+                inputs: &visible,
+                append_mode: false,
+                filter_deleted: true,
+                time_range: None,
+                merge_mode: MergeMode::LastRow,
+            }
+            .build_flat_sst_reader()
+            .await
+            .unwrap();
+            let mut timestamps = Vec::new();
+            while let Some(batch) = reader.next_batch().await.unwrap() {
+                timestamps.extend(
+                    batch
+                        .column_by_name("ts")
+                        .unwrap()
+                        .as_primitive::<TimestampMillisecondType>()
+                        .values()
+                        .iter()
+                        .copied(),
+                );
+            }
+            assert_eq!(
+                vec![10_000],
+                timestamps,
+                "put_done={put_done}, delete_done={delete_done}"
+            );
+        }
+    }
+
     /// Build a minimal [`CompactionRegion`] suitable for tests where the
     /// [`SstMerger`] is mocked and never touches the access layer.
     async fn new_test_compaction_region() -> CompactionRegion {
@@ -806,9 +1164,10 @@ mod tests {
             access_layer: env.access_layer.clone(),
             manifest_ctx,
             current_version: CompactionVersion {
-                metadata,
+                metadata: metadata.clone(),
                 options: RegionOptions::default(),
-                ssts: Arc::new(SstVersion::new()),
+                ssts: Arc::new(SstVersion::new(metadata)),
+                memtable_min_sequence: None,
                 compaction_time_window: None,
             },
             file_purger: None,

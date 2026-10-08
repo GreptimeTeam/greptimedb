@@ -11,6 +11,10 @@ SHOW CREATE TABLE t_legacy_json2_non_append_table;
 INSERT INTO t_legacy_json2_non_append_table (ts, j) VALUES
   ('2026-07-08 00:02:00+0000', '{"a": 3, "nested": {"s": "current-3"}}');
 
+ADMIN FLUSH_TABLE('t_legacy_json2_non_append_table');
+
+ADMIN compact_table('t_legacy_json2_non_append_table');
+
 SELECT ts, j.a AS a, j.nested.s AS nested_s
 FROM t_legacy_json2_non_append_table
 ORDER BY ts;

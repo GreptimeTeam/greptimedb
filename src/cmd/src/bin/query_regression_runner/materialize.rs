@@ -66,7 +66,9 @@ async fn materialize(
 }
 
 fn fs_operator(root: &Path) -> Result<ObjectStore> {
-    Ok(ObjectStore::new(Fs::default().root(&root.to_string_lossy()))?.finish())
+    Ok(ObjectStore::new(
+        Fs::default().root(&root.to_string_lossy()),
+    )?)
 }
 
 fn validate_region_dir(region_dir: &str) -> Result<String> {

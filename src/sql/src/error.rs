@@ -164,6 +164,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid database option value for {}: {}, {}", key, value, reason))]
+    InvalidDatabaseOptionValue {
+        key: String,
+        value: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid table name: {}", name))]
     InvalidTableName {
         name: String,
@@ -285,13 +294,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to set VECTOR index option"))]
-    SetVectorIndexOption {
-        source: datatypes::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display(
         "Invalid partition number: {}, should be in range [2, 65536]",
         partition_num
@@ -339,6 +341,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(transparent)]
+    Datatypes {
+        #[snafu(implicit)]
+        location: Location,
+        source: datatypes::error::Error,
+    },
 }
 
 impl ErrorExt for Error {
@@ -368,6 +377,7 @@ impl ErrorExt for Error {
             | InvalidExprAsOptionValue { .. }
             | InvalidDatabaseName { .. }
             | InvalidDatabaseOption { .. }
+            | InvalidDatabaseOptionValue { .. }
             | ColumnTypeMismatch { .. }
             | InvalidTableName { .. }
             | InvalidFlowName { .. }
@@ -384,7 +394,9 @@ impl ErrorExt for Error {
             #[cfg(feature = "enterprise")]
             InvalidTriggerWebhookOption { .. } => StatusCode::InvalidArguments,
 
-            SerializeColumnDefaultConstraint { source, .. } => source.status_code(),
+            SerializeColumnDefaultConstraint { source, .. } | Datatypes { source, .. } => {
+                source.status_code()
+            }
 
             ConvertToGrpcDataType { source, .. } => source.status_code(),
             SqlCommon { source, .. } => source.status_code(),
@@ -392,9 +404,7 @@ impl ErrorExt for Error {
             ConvertValue { .. } => StatusCode::Unsupported,
 
             PermissionDenied { .. } => StatusCode::PermissionDenied,
-            SetFulltextOption { .. }
-            | SetSkippingIndexOption { .. }
-            | SetVectorIndexOption { .. } => StatusCode::Unexpected,
+            SetFulltextOption { .. } | SetSkippingIndexOption { .. } => StatusCode::Unexpected,
         }
     }
 

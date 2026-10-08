@@ -61,9 +61,7 @@ tokio-stream.workspace = true
 
 [dev-dependencies]
 cache.workspace = true
-catalog = { workspace = true, features = ["testing"] }
 chrono.workspace = true
 common-meta = { workspace = true, features = ["testing"] }
 common-query = { workspace = true, features = ["testing"] }
-object-store.workspace = true
 tokio.workspace = true

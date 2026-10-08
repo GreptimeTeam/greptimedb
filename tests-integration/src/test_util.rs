@@ -12,17 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+#[cfg(test)]
+use std::collections::HashMap;
 use std::env;
 use std::fmt::Display;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use auth::{DefaultPermissionChecker, PermissionCheckerRef, UserProviderRef};
+use api::v1::Basic;
+use auth::{
+    DefaultPermissionChecker, PermissionCheckerRef, UserProviderRef, user_provider_from_option,
+};
 use axum::Router;
 use catalog::kvbackend::KvBackendCatalogManager;
+use client::{Client, Database};
 use common_base::Plugins;
+use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::Configurable;
+use common_event_recorder::EventRecorderOptions;
+#[cfg(test)]
+use common_meta::DatanodeId;
 use common_meta::key::TableMetadataManager;
 use common_meta::key::catalog_name::CatalogNameKey;
 use common_meta::key::schema_name::SchemaNameKey;
@@ -34,8 +45,13 @@ use common_test_util::ports;
 use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use common_wal::config::DatanodeWalConfig;
 use datanode::config::{DatanodeOptions, StorageConfig};
+#[cfg(test)]
+use datanode::datanode::Datanode;
 use frontend::instance::Instance;
 use frontend::service_config::{MysqlOptions, PostgresOptions};
+#[cfg(test)]
+use meta_srv::metasrv::Metasrv;
+use mito2::engine::MitoEngine;
 use mito2::gc::GcConfig;
 use object_store::config::{
     AzblobConfig, FileConfig, GcsConfig, ObjectStoreConfig, OssConfig, S3Config,
@@ -43,6 +59,7 @@ use object_store::config::{
 use object_store::services::{Azblob, Gcs, Oss, S3};
 use object_store::test_util::TempFolder;
 use object_store::{AzblobConnection, GcsConnection, ObjectStore, OssConnection, S3Connection};
+use servers::batcher::logical_table::LogicalTablePendingRowsBatcher;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::{FlightCompression, GrpcOptions, GrpcServer, GrpcServerConfig};
@@ -50,7 +67,6 @@ use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::otel_arrow::OtelArrowServiceHandler;
-use servers::pending_rows_batcher::PendingRowsBatcher;
 use servers::postgres::PostgresServer;
 use servers::prom_remote_write::validation::PromValidationMode;
 use servers::query_handler::sql::SqlQueryHandler;
@@ -58,8 +74,177 @@ use servers::request_memory_limiter::ServerMemoryLimiter;
 use servers::server::Server;
 use servers::tls::ReloadableTlsServerConfig;
 use session::context::QueryContext;
+use store_api::metric_engine_consts::METRIC_METADATA_REGION_GROUP;
+use store_api::region_engine::RegionEngine;
+use store_api::region_request::{RegionFlushRequest, RegionRequest};
+use store_api::storage::RegionId;
 
+use crate::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
+
+/// Maps `(node_id, region_id)` to `(flushed_sequence, flushed_entry_id)`.
+pub type WalSnapshot = BTreeMap<(u64, RegionId), (u64, u64)>;
+
+/// Flush user data regions before observing their persisted WAL watermarks.
+/// Metadata regions write WAL independently and are excluded from this check.
+async fn flush_and_snapshot_region_wal(engine: &MitoEngine) -> WalSnapshot {
+    let mut snapshot = BTreeMap::new();
+    for region in engine.regions() {
+        let id = region.region_id();
+        if id.table_id() < MIN_USER_TABLE_ID || id.region_group() == METRIC_METADATA_REGION_GROUP {
+            continue;
+        }
+        engine
+            .handle_request(id, RegionRequest::Flush(RegionFlushRequest::default()))
+            .await
+            .unwrap();
+        let statistic = engine.region_statistic(id).unwrap();
+        snapshot.insert(
+            (0, id),
+            (
+                region.flushed_sequence(),
+                statistic.manifest.data_flushed_entry_id(),
+            ),
+        );
+    }
+    snapshot
+}
+
+/// Require a real write, then check WAL policy independently of row deduplication.
+pub fn assert_wal_delta(before: &WalSnapshot, after: &WalSnapshot, skip_wal: bool) {
+    assert_eq!(
+        before.keys().collect::<Vec<_>>(),
+        after.keys().collect::<Vec<_>>(),
+        "warm up table creation before taking the snapshot"
+    );
+    let mut written = 0;
+    for (id, &(flushed_sequence, flushed_entry_id)) in after {
+        let (previous_flushed_sequence, previous_flushed_entry_id) = before[id];
+        if flushed_sequence > previous_flushed_sequence {
+            written += 1;
+            if skip_wal {
+                assert_eq!(
+                    flushed_entry_id, previous_flushed_entry_id,
+                    "region {id:?} wrote WAL despite the request policy"
+                );
+            } else {
+                assert!(
+                    flushed_entry_id > previous_flushed_entry_id,
+                    "region {id:?} did not write WAL"
+                );
+            }
+        }
+    }
+    assert!(
+        written > 0,
+        "request must reach a data region, not merely return success"
+    );
+}
+
+/// A test instance backed by embedded storage or a distributed cluster.
+pub enum MockInstanceImpl {
+    Standalone(GreptimeDbStandalone),
+    Distributed(GreptimeDbCluster),
+}
+
+impl MockInstanceImpl {
+    /// Returns the metasrv of a distributed instance.
+    ///
+    /// # Panics
+    /// Panics if this is a standalone instance.
+    #[cfg(test)]
+    pub(crate) fn metasrv(&self) -> &Arc<Metasrv> {
+        match self {
+            Self::Standalone(_) => unreachable!(),
+            Self::Distributed(instance) => &instance.metasrv,
+        }
+    }
+
+    /// Returns the datanodes of a distributed instance.
+    ///
+    /// # Panics
+    /// Panics if this is a standalone instance.
+    #[cfg(test)]
+    pub(crate) fn datanodes(&self) -> &HashMap<DatanodeId, Datanode> {
+        match self {
+            Self::Standalone(_) => unreachable!(),
+            Self::Distributed(instance) => &instance.datanode_instances,
+        }
+    }
+
+    /// Creates a standalone instance or a three-datanode cluster using local storage.
+    pub async fn new(name: &str, distributed: bool) -> Self {
+        let name = format!(
+            "{name}_{}",
+            if distributed {
+                "distributed"
+            } else {
+                "standalone"
+            }
+        );
+        if distributed {
+            // The repository cluster harness uses real tonic/protobuf services
+            // over duplex transports between FE and datanodes, not direct calls.
+            Self::Distributed(
+                GreptimeDbClusterBuilder::new(&name)
+                    .await
+                    .with_datanodes(3)
+                    .build(false)
+                    .await,
+            )
+        } else {
+            Self::Standalone(GreptimeDbStandaloneBuilder::new(&name).build().await)
+        }
+    }
+
+    /// Returns the frontend instance.
+    pub fn frontend(&self) -> Arc<Instance> {
+        match self {
+            Self::Standalone(instance) => instance.fe_instance().clone(),
+            Self::Distributed(cluster) => cluster.fe_instance().clone(),
+        }
+    }
+
+    /// Flushes user data regions and returns their write and WAL watermarks.
+    pub async fn flush_and_snapshot_wal(&self) -> WalSnapshot {
+        match self {
+            Self::Standalone(instance) => {
+                flush_and_snapshot_region_wal(&instance.mito_engine).await
+            }
+            Self::Distributed(cluster) => {
+                let mut result = BTreeMap::new();
+                for (node_id, datanode) in &cluster.datanode_instances {
+                    let engine = datanode.region_server().mito_engine().unwrap();
+                    result.extend(
+                        flush_and_snapshot_region_wal(&engine)
+                            .await
+                            .into_iter()
+                            .map(|((_, region_id), watermarks)| {
+                                ((*node_id, region_id), watermarks)
+                            }),
+                    );
+                }
+                result
+            }
+        }
+    }
+
+    /// Shuts down cluster services and removes the test storage.
+    pub async fn shutdown(&mut self) {
+        match self {
+            Self::Standalone(instance) => instance.guard.remove_all().await,
+            Self::Distributed(cluster) => {
+                cluster.metasrv.shutdown().await.unwrap();
+                for datanode in cluster.datanode_instances.values_mut() {
+                    datanode.shutdown().await.unwrap();
+                }
+                for guard in &mut cluster.guards {
+                    guard.remove_all().await;
+                }
+            }
+        }
+    }
+}
 
 pub const PEER_PLACEHOLDER_ADDR: &str = "127.0.0.1:3001";
 
@@ -144,6 +329,18 @@ impl StorageType {
     }
 }
 
+/// Event recorder options for tests.
+///
+/// The production flush interval is 5s, and the event tests interleave "run a
+/// DDL, wait for its event, run the next DDL", so each barrier costs a full
+/// window. A short interval removes that wait without changing what is asserted.
+pub fn test_event_recorder_options() -> EventRecorderOptions {
+    EventRecorderOptions {
+        flush_interval: Duration::from_millis(100),
+        ..Default::default()
+    }
+}
+
 fn s3_test_config() -> S3Config {
     S3Config {
         connection: S3Connection {
@@ -178,8 +375,8 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
 
             let builder = Gcs::from(&gcs_config.connection);
             let config = ObjectStoreConfig::Gcs(gcs_config);
-            let store = ObjectStore::new(builder).unwrap().finish();
-            (config, TempDirGuard::Gcs(TempFolder::new(&store, "/")))
+            let store = ObjectStore::new(builder).unwrap();
+            (config, TempDirGuard::remote(TempFolder::new(&store, "/")))
         }
         StorageType::Azblob => {
             let azblob_config = AzblobConfig {
@@ -196,8 +393,8 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
 
             let builder = Azblob::from(&azblob_config.connection);
             let config = ObjectStoreConfig::Azblob(azblob_config);
-            let store = ObjectStore::new(builder).unwrap().finish();
-            (config, TempDirGuard::Azblob(TempFolder::new(&store, "/")))
+            let store = ObjectStore::new(builder).unwrap();
+            (config, TempDirGuard::remote(TempFolder::new(&store, "/")))
         }
         StorageType::Oss => {
             let oss_config = OssConfig {
@@ -213,33 +410,58 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
 
             let builder = Oss::from(&oss_config.connection);
             let config = ObjectStoreConfig::Oss(oss_config);
-            let store = ObjectStore::new(builder).unwrap().finish();
-            (config, TempDirGuard::Oss(TempFolder::new(&store, "/")))
+            let store = ObjectStore::new(builder).unwrap();
+            (config, TempDirGuard::remote(TempFolder::new(&store, "/")))
         }
         StorageType::S3 | StorageType::S3WithCache => {
             let mut s3_config = s3_test_config();
 
-            if *store_type == StorageType::S3WithCache {
-                s3_config.cache.cache_path = "/tmp/greptimedb_cache".to_string();
+            // The datanode wipes `<cache_path>/cache/object/read` on startup, so a
+            // path shared between concurrently running tests lets a starting test
+            // delete the read cache of a running one.
+            let cache_dir = if *store_type == StorageType::S3WithCache {
+                let dir = create_temp_dir("gt_s3_read_cache");
+                s3_config.cache.cache_path = dir.path().to_string_lossy().to_string();
+                Some(dir)
             } else {
                 s3_config.cache.enable_read_cache = false;
-            }
+                None
+            };
 
             let builder = S3::from(&s3_config.connection);
             let config = ObjectStoreConfig::S3(s3_config);
-            let store = ObjectStore::new(builder).unwrap().finish();
-            (config, TempDirGuard::S3(TempFolder::new(&store, "/")))
+            let store = ObjectStore::new(builder).unwrap();
+            (
+                config,
+                TempDirGuard {
+                    remote: Some(TempFolder::new(&store, "/")),
+                    local_cache: cache_dir,
+                },
+            )
         }
-        StorageType::File => (ObjectStoreConfig::File(FileConfig {}), TempDirGuard::None),
+        StorageType::File => (
+            ObjectStoreConfig::File(FileConfig {}),
+            TempDirGuard::default(),
+        ),
     }
 }
 
-pub enum TempDirGuard {
-    None,
-    S3(TempFolder),
-    Oss(TempFolder),
-    Azblob(TempFolder),
-    Gcs(TempFolder),
+#[derive(Default)]
+pub struct TempDirGuard {
+    /// Prefix to wipe from the remote object store, absent for the file backend.
+    remote: Option<TempFolder>,
+    /// Local read cache directory. Only held so it is removed when the guard drops.
+    #[allow(dead_code)]
+    local_cache: Option<TempDir>,
+}
+
+impl TempDirGuard {
+    fn remote(folder: TempFolder) -> Self {
+        Self {
+            remote: Some(folder),
+            local_cache: None,
+        }
+    }
 }
 
 pub struct TestGuard {
@@ -262,11 +484,7 @@ pub struct StorageGuard(pub TempDirGuard);
 impl TestGuard {
     pub async fn remove_all(&mut self) {
         for storage_guard in self.storage_guards.iter_mut() {
-            if let TempDirGuard::S3(guard)
-            | TempDirGuard::Oss(guard)
-            | TempDirGuard::Azblob(guard)
-            | TempDirGuard::Gcs(guard) = &mut storage_guard.0
-            {
+            if let Some(guard) = &mut storage_guard.0.remote {
                 guard.remove_all().await.unwrap()
             }
         }
@@ -281,11 +499,8 @@ impl Drop for TestGuard {
         common_runtime::spawn_global(async move {
             let mut errors = vec![];
             for guard in guards {
-                if let TempDirGuard::S3(guard)
-                | TempDirGuard::Oss(guard)
-                | TempDirGuard::Azblob(guard)
-                | TempDirGuard::Gcs(guard) = guard.0
-                    && let Err(e) = guard.remove_all().await
+                if let Some(remote) = guard.0.remote
+                    && let Err(e) = remote.remove_all().await
                 {
                     errors.push(e);
                 }
@@ -532,22 +747,25 @@ pub async fn setup_test_http_app_with_frontend_and_custom_options(
         ..Default::default()
     });
 
-    let mut http_server = HttpServerBuilder::new(http_opts)
+    // The memory limiter must be wired before the handlers: routes capture
+    // the builder's limiter at wiring time (mirrors `frontend::server`).
+    let mut http_server = HttpServerBuilder::new(http_opts);
+    if let Some(limiter) = memory_limiter {
+        http_server = http_server.with_memory_limiter(limiter);
+    }
+    let mut http_server = http_server
         .with_sql_handler(instance.fe_instance().clone())
         .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
         .with_logs_handler(instance.fe_instance().clone())
         .with_influxdb_handler(instance.fe_instance().clone())
         .with_otlp_handler(instance.fe_instance().clone(), true)
+        .with_prometheus_handler(instance.fe_instance().clone())
         .with_jaeger_handler(instance.fe_instance().clone())
         .with_dashboard_handler(instance.fe_instance().clone())
         .with_greptime_config_options(instance.opts.to_toml().unwrap());
 
     if let Some(user_provider) = user_provider {
         http_server = http_server.with_user_provider(user_provider);
-    }
-
-    if let Some(limiter) = memory_limiter {
-        http_server = http_server.with_memory_limiter(limiter);
     }
 
     let http_server = http_server.build();
@@ -568,14 +786,7 @@ pub async fn setup_test_prom_app_with_frontend(
     store_type: StorageType,
     name: &str,
 ) -> (Router, TestGuard) {
-    setup_test_prom_app_with_frontend_inner(store_type, name, false, false).await
-}
-
-pub async fn setup_test_prom_app_with_frontend_native_histogram(
-    store_type: StorageType,
-    name: &str,
-) -> (Router, TestGuard) {
-    setup_test_prom_app_with_frontend_inner(store_type, name, false, true).await
+    setup_test_prom_app_with_frontend_inner(store_type, name, false, None).await
 }
 
 /// Like [`setup_test_prom_app_with_frontend`] but enables the pending-rows batcher,
@@ -585,14 +796,25 @@ pub async fn setup_test_prom_app_with_frontend_batched(
     store_type: StorageType,
     name: &str,
 ) -> (Router, TestGuard) {
-    setup_test_prom_app_with_frontend_inner(store_type, name, true, false).await
+    setup_test_prom_app_with_frontend_inner(store_type, name, true, None).await
+}
+
+/// Like [`setup_test_prom_app_with_frontend`] but wires a shared request-memory
+/// limiter into the server, mirroring production deployments that configure
+/// `max_in_flight_write_bytes`.
+pub async fn setup_test_prom_app_with_frontend_and_memory_limiter(
+    store_type: StorageType,
+    name: &str,
+    memory_limiter: Option<ServerMemoryLimiter>,
+) -> (Router, TestGuard) {
+    setup_test_prom_app_with_frontend_inner(store_type, name, false, memory_limiter).await
 }
 
 async fn setup_test_prom_app_with_frontend_inner(
     store_type: StorageType,
     name: &str,
     enable_batcher: bool,
-    experimental_enable_prometheus_native_histogram: bool,
+    memory_limiter: Option<ServerMemoryLimiter>,
 ) -> (Router, TestGuard) {
     unsafe {
         std::env::set_var("TZ", "UTC");
@@ -641,15 +863,33 @@ async fn setup_test_prom_app_with_frontend_inner(
     let sql = "INSERT INTO mito(host, val, ts) VALUES (1, 1.1, 0)";
     run_sql(sql, &instance).await;
 
+    let http_server = build_test_prom_server(
+        instance.fe_instance().clone(),
+        enable_batcher,
+        memory_limiter,
+    )
+    .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+    .build();
+    let app = http_server.build(http_server.make_app()).unwrap();
+    (app, instance.guard)
+}
+
+/// Builds Prometheus HTTP routes for either a standalone or distributed frontend.
+/// `memory_limiter` must be set before the handlers are wired (handlers capture
+/// the limiter at wiring time, mirroring production in `frontend::server`).
+pub fn build_test_prom_server(
+    frontend_ref: Arc<Instance>,
+    enable_batcher: bool,
+    memory_limiter: Option<ServerMemoryLimiter>,
+) -> HttpServerBuilder {
     let http_opts = HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
         ..Default::default()
     };
-    let frontend_ref = instance.fe_instance().clone();
     // Mirror the production wiring at `frontend::server`: build the batcher from the
     // instance's managers. A short flush interval keeps the test responsive.
     let pending_rows_batcher = if enable_batcher {
-        PendingRowsBatcher::try_new(
+        LogicalTablePendingRowsBatcher::try_new(
             frontend_ref.partition_manager().clone(),
             frontend_ref.node_manager().clone(),
             frontend_ref.catalog_manager().clone(),
@@ -666,22 +906,22 @@ async fn setup_test_prom_app_with_frontend_inner(
     } else {
         None
     };
-    let http_server = HttpServerBuilder::new(http_opts)
+    assert_eq!(pending_rows_batcher.is_some(), enable_batcher);
+    let mut builder = HttpServerBuilder::new(http_opts)
         .with_sql_handler(frontend_ref.clone())
-        .with_logs_handler(instance.fe_instance().clone())
+        .with_logs_handler(frontend_ref.clone());
+    if let Some(limiter) = memory_limiter {
+        builder = builder.with_memory_limiter(limiter);
+    }
+    builder
         .with_prom_handler(
             frontend_ref.clone(),
             Some(frontend_ref.clone()),
             true,
             PromValidationMode::Strict,
-            experimental_enable_prometheus_native_histogram,
             pending_rows_batcher,
         )
         .with_prometheus_handler(frontend_ref)
-        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
-        .build();
-    let app = http_server.build(http_server.make_app()).unwrap();
-    (app, instance.guard)
 }
 
 pub async fn setup_grpc_server(
@@ -732,13 +972,62 @@ async fn setup_grpc_server_for_instance(
     grpc_config: Option<GrpcServerConfig>,
     memory_limiter: Option<servers::request_memory_limiter::ServerMemoryLimiter>,
 ) -> (GreptimeDbStandalone, Arc<GrpcServer>) {
+    let grpc_server = setup_grpc_server_for_frontend_instance_with(
+        instance.fe_instance().clone(),
+        user_provider,
+        grpc_config,
+        memory_limiter,
+    )
+    .await;
+    (instance, grpc_server)
+}
+
+/// Builds and starts an authenticated gRPC server on an existing frontend instance.
+pub async fn setup_grpc_server_for_frontend_instance(
+    instance: Arc<Instance>,
+    user_provider: Option<UserProviderRef>,
+) -> Arc<GrpcServer> {
+    setup_grpc_server_for_frontend_instance_with(instance, user_provider, None, None).await
+}
+
+/// Starts a gRPC server backed by `instance` and returns a client authenticated
+/// as the supplied test user. The server handle keeps the listener alive.
+pub async fn setup_authenticated_grpc_database(
+    instance: Arc<Instance>,
+    username: &str,
+    password: &str,
+) -> (Database, Arc<GrpcServer>) {
+    let user_provider =
+        user_provider_from_option(&format!("static_user_provider:cmd:{username}={password}"))
+            .unwrap();
+    let grpc_server = setup_grpc_server_for_frontend_instance(instance, Some(user_provider)).await;
+    let grpc_addr = grpc_server.bind_addr().unwrap().to_string();
+    let mut database = Database::new_with_dbname(
+        "greptime-public",
+        Client::with_query_and_control_managers(
+            Default::default(),
+            Default::default(),
+            vec![grpc_addr],
+        ),
+    );
+    database.set_auth(api::v1::auth_header::AuthScheme::Basic(Basic {
+        username: username.to_string(),
+        password: password.to_string(),
+    }));
+    (database, grpc_server)
+}
+
+async fn setup_grpc_server_for_frontend_instance_with(
+    fe_instance_ref: Arc<Instance>,
+    user_provider: Option<UserProviderRef>,
+    grpc_config: Option<GrpcServerConfig>,
+    memory_limiter: Option<servers::request_memory_limiter::ServerMemoryLimiter>,
+) -> Arc<GrpcServer> {
     let runtime: Runtime = RuntimeBuilder::default()
         .worker_threads(2)
         .thread_name("grpc-handlers")
         .build()
         .unwrap();
-
-    let fe_instance_ref = instance.fe_instance().clone();
 
     let greptime_request_handler = GreptimeRequestHandler::new(
         fe_instance_ref.clone(),
@@ -769,7 +1058,7 @@ async fn setup_grpc_server_for_instance(
     let fe_grpc_addr = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     grpc_server.start(fe_grpc_addr).await.unwrap();
 
-    (instance, Arc::new(grpc_server))
+    Arc::new(grpc_server)
 }
 
 pub async fn setup_mysql_server(
@@ -973,6 +1262,61 @@ pub async fn setup_pg_server_with_user_provider(
         .unwrap();
 
     (instance.guard, Arc::new(pg_server))
+}
+
+/// Sets up a standalone instance with both a Prometheus remote-write HTTP app
+/// (native histograms enabled) and a Postgres server attached, so native
+/// histogram data written via remote-write can be queried over the Postgres
+/// protocol.
+pub async fn setup_pg_server_with_prom_native_histogram(
+    store_type: StorageType,
+    name: &str,
+) -> (TestGuard, Router, Arc<Box<dyn Server>>) {
+    unsafe {
+        std::env::set_var("TZ", "UTC");
+    }
+
+    let instance = setup_standalone_instance(name, store_type).await;
+
+    // Prometheus remote-write HTTP app with native histograms enabled.
+    let http_server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let app = http_server.build(http_server.make_app()).unwrap();
+
+    // Postgres server on the same instance.
+    let runtime = RuntimeBuilder::default()
+        .worker_threads(2)
+        .thread_name("pg-runtime")
+        .build()
+        .unwrap();
+
+    let fe_pg_addr = format!("127.0.0.1:{}", ports::get_port());
+    let opts = PostgresOptions {
+        addr: fe_pg_addr.clone(),
+        ..Default::default()
+    };
+    let tls_server_config = Arc::new(
+        ReloadableTlsServerConfig::try_new(opts.tls.clone())
+            .expect("Failed to load certificates and keys"),
+    );
+
+    let mut pg_server = Box::new(PostgresServer::new(
+        instance.fe_instance().clone(),
+        opts.tls.should_force_tls(),
+        tls_server_config,
+        0,
+        runtime,
+        None,
+        None,
+    ));
+
+    pg_server
+        .start(fe_pg_addr.parse::<SocketAddr>().unwrap())
+        .await
+        .unwrap();
+
+    (instance.guard, app, Arc::new(pg_server))
 }
 
 pub(crate) async fn prepare_another_catalog_and_schema(instance: &Instance) {

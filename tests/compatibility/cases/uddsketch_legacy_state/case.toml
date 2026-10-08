@@ -1,0 +1,9 @@
+name = "uddsketch_legacy_state"
+reason = "Verify UDDSketch state bytes persisted by old binaries (wrapped legacy bincode UddSketchState) are read directly by uddsketch_calc, uddsketch_rank, and uddsketch_merge on the new binary, merged into canonical v1, and merged together with newly generated canonical states."
+introduced_by = "PR #8867"
+topologies = ["distributed", "standalone"]
+from_range = [">=v1.0.0"]
+to_range = ["*"]
+features = ["table", "query", "udf", "aggregate"]
+owner = "query"
+namespace = "uddsketch_legacy_state"

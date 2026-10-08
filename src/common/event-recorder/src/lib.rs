@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(duration_constructors)]
-
 pub mod context;
 pub mod error;
 pub mod event_table;
@@ -22,5 +20,5 @@ pub mod recorder;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
-pub use context::{PersistentEventContext, TriggerReason};
+pub use context::{PersistentEventContext, ProcedureEventInput, TriggerReason};
 pub use recorder::*;

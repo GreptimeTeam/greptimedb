@@ -59,9 +59,10 @@ select sum(val) from t;
 +-+-+-+
 | stage | node | plan_|
 +-+-+-+
-| 0_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[sum(t.val)] REDACTED
+| 0_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__sum_merge(__sum_state(t.val)) as sum(t.val)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[sum(t.val)] REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__sum_merge(__sum_state(t.val)) as sum(t.val)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__sum_state(t.val)] REDACTED
@@ -93,9 +94,10 @@ select sum(val) from t group by idc;
 | stage | node | plan_|
 +-+-+-+
 | 0_| 0_|_ProjectionExec: expr=[sum(t.val)@1 as sum(t.val)] REDACTED
-|_|_|_AggregateExec: mode=FinalPartitioned, gby=[idc@0 as idc], aggr=[sum(t.val)] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[idc@0 as idc], aggr=[__sum_merge(__sum_state(t.val)) as sum(t.val)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[idc@0 as idc], aggr=[sum(t.val)] REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[idc@0 as idc], aggr=[__sum_merge(__sum_state(t.val)) as sum(t.val)] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[idc@0 as idc], aggr=[__sum_state(t.val)] REDACTED
@@ -110,6 +112,54 @@ select sum(val) from t group by idc;
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+
+
+insert into t values
+    (1000, 1, '1000-x', 'a'),
+    (1000, 2, '1000-y', 'a'),
+    (1000, 3, '2000-x', 'a'),
+    (1000, 4, '2000-y', 'a');
+
+Affected Rows: 4
+
+-- group keys derived from the partition column span regions
+select substr(host, 6, 1) as g, count(*), sum(val) from t group by g order by g;
+
++---+----------+------------+
+| g | count(*) | sum(t.val) |
++---+----------+------------+
+| x | 2        | 4.0        |
+| y | 2        | 6.0        |
++---+----------+------------+
+
+-- grouping sets are computed on the frontend, only the PostgreSQL dialect parses them
+-- SQLNESS PROTOCOL POSTGRES
+select host, idc, sum(val) from t group by grouping sets ((host, idc), (host)) order by host, idc;
+
++--------+-----+------------+
+| host   | idc | sum(t.val) |
++--------+-----+------------+
+| 1000-x | a   | 1.0        |
+| 1000-x |     | 1.0        |
+| 1000-y | a   | 2.0        |
+| 1000-y |     | 2.0        |
+| 2000-x | a   | 3.0        |
+| 2000-x |     | 3.0        |
+| 2000-y | a   | 4.0        |
+| 2000-y |     | 4.0        |
++--------+-----+------------+
+
+-- SQLNESS PROTOCOL POSTGRES
+select host, sum(val) from t group by rollup(host) order by host;
+
++--------+------------+
+| host   | sum(t.val) |
++--------+------------+
+| 1000-x | 1.0        |
+| 1000-y | 2.0        |
+| 2000-x | 3.0        |
+| 2000-y | 4.0        |
+|        | 10.0       |
++--------+------------+
 
 drop table t;
 

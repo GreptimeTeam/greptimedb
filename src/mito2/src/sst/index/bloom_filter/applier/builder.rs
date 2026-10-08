@@ -375,7 +375,7 @@ mod tests {
     }
 
     fn test_object_store() -> ObjectStore {
-        ObjectStore::new(Memory::default()).unwrap().finish()
+        ObjectStore::new(Memory::default()).unwrap()
     }
 
     fn column(name: &str) -> Expr {

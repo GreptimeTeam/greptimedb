@@ -174,7 +174,7 @@ impl AlterTableExecutor {
             .await
     }
 
-    /// Alters all replicas for the irreversible skip-WAL flow.
+    /// Alters all replicas for the skip-WAL flow.
     pub(crate) async fn on_alter_skip_wal_regions(
         &self,
         node_manager: &NodeManagerRef,
@@ -333,10 +333,11 @@ fn build_new_table_info(
         }
         AlterKind::DropColumns { .. }
         | AlterKind::ModifyColumnTypes { .. }
+        | AlterKind::SetJsonSettings { .. }
         | AlterKind::SetTableOptions { .. }
         | AlterKind::UnsetTableOptions { .. }
-        | AlterKind::SetRepartitionColumnHint { .. }
-        | AlterKind::UnsetRepartitionColumnHint
+        | AlterKind::SetAnnotations { .. }
+        | AlterKind::UnsetAnnotations { .. }
         | AlterKind::SetIndexes { .. }
         | AlterKind::UnsetIndexes { .. }
         | AlterKind::DropDefaults { .. }

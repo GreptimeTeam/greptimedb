@@ -142,6 +142,8 @@ impl MetricEngineInner {
         let data_region_id = to_data_region_id(physical_region_id);
         let primary_key_encoding = self.get_primary_key_encoding(data_region_id)?;
 
+        // TODO(weny): Consolidate validation and merging to avoid redundant request traversals,
+        // while ensuring the entire batch is validated before writing.
         // Validate all requests
         self.validate_batch_requests(physical_region_id, &mut requests)
             .await?;
@@ -176,6 +178,18 @@ impl MetricEngineInner {
         physical_region_id: RegionId,
         requests: &mut [(RegionId, RegionPutRequest)],
     ) -> Result<()> {
+        let skip_wal = requests
+            .first()
+            .is_some_and(|(_, request)| request.skip_wal);
+        ensure!(
+            requests
+                .iter()
+                .all(|(_, request)| request.skip_wal == skip_wal),
+            InvalidRequestSnafu {
+                region_id: physical_region_id,
+                reason: "inconsistent WAL policy in batch"
+            }
+        );
         for (logical_region_id, request) in requests {
             self.verify_rows(
                 *logical_region_id,
@@ -194,6 +208,9 @@ impl MetricEngineInner {
         physical_region_id: RegionId,
         requests: Vec<(RegionId, RegionPutRequest)>,
     ) -> Result<(RegionPutRequest, AffectedRows)> {
+        let skip_wal = requests
+            .first()
+            .is_some_and(|(_, request)| request.skip_wal);
         let total_rows: usize = requests.iter().map(|(_, req)| req.rows.rows.len()).sum();
         let mut modified_requests = Vec::with_capacity(requests.len());
         let mut total_affected_rows: AffectedRows = 0;
@@ -233,6 +250,7 @@ impl MetricEngineInner {
         }
 
         let merged_request = RegionPutRequest {
+            skip_wal,
             rows: Rows {
                 schema,
                 rows: merged_rows,
@@ -256,6 +274,9 @@ impl MetricEngineInner {
         data_region_id: RegionId,
         requests: Vec<(RegionId, RegionPutRequest)>,
     ) -> Result<(RegionPutRequest, AffectedRows)> {
+        let skip_wal = requests
+            .first()
+            .is_some_and(|(_, request)| request.skip_wal);
         // Build union schema from all requests
         let merged_schema =
             Self::build_union_schema(requests.iter().map(|(_, req)| req.rows.schema.as_slice()));
@@ -291,6 +312,7 @@ impl MetricEngineInner {
         };
 
         let merged_request = RegionPutRequest {
+            skip_wal,
             rows: final_rows,
             hint: None,
             partition_expr_version: merged_version,
@@ -554,7 +576,7 @@ impl MetricEngineInner {
                     region_id: data_region_id,
                 })?;
             (
-                physical_state.physical_columns().clone(),
+                physical_state.physical_columns_snapshot(),
                 physical_state.time_index_column_name().to_string(),
             )
         };
@@ -769,24 +791,273 @@ mod tests {
     use common_function::utils::partition_expr_version;
     use common_query::prelude::{greptime_native_histogram, greptime_timestamp, greptime_value};
     use common_recordbatch::RecordBatches;
+    use datatypes::arrow::array::{
+        Float64Array, TimestampMicrosecondArray, TimestampMillisecondArray,
+    };
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
     use datatypes::value::Value as PartitionValue;
     use partition::expr::col;
     use store_api::metadata::ColumnMetadata;
     use store_api::metric_engine_consts::{
-        DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, PRIMARY_KEY_ENCODING,
+        DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, METRIC_ENGINE_NAME,
+        PHYSICAL_TABLE_METADATA_KEY, PRIMARY_KEY_ENCODING,
     };
     use store_api::path_utils::table_dir;
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::{
-        EnterStagingRequest, RegionRequest, StagingPartitionDirective,
+        EnterStagingRequest, PathType, RegionCloseRequest, RegionOpenRequest, RegionRequest,
+        StagingPartitionDirective,
     };
     use store_api::storage::ScanRequest;
     use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
     use super::*;
+    use crate::engine::MetricEngine;
     use crate::test_util::{self, TestEnv};
+
+    async fn scan_timestamp_values(engine: &MetricEngine, region_id: RegionId) -> Vec<(i64, f64)> {
+        let stream = engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        let mut rows = Vec::new();
+        for batch in batches.iter() {
+            let batch = batch.df_record_batch();
+            let timestamp_index = batch.schema().index_of(greptime_timestamp()).unwrap();
+            let value_index = batch.schema().index_of(greptime_value()).unwrap();
+            let timestamps = batch
+                .column(timestamp_index)
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap();
+            let values = batch
+                .column(value_index)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            rows.extend(
+                timestamps
+                    .values()
+                    .iter()
+                    .copied()
+                    .zip(values.values().iter().copied()),
+            );
+        }
+        rows.sort_unstable_by_key(|(timestamp, _)| *timestamp);
+        rows
+    }
+
+    #[tokio::test]
+    async fn test_batch_partition_versions() {
+        check_batch_partition_versions("sparse").await;
+        check_batch_partition_versions("dense").await;
+    }
+
+    async fn check_batch_partition_versions(encoding: &str) {
+        let env = TestEnv::new().await;
+        let physical_region_id = env.default_physical_region_id();
+        let logical_region_id = env.default_logical_region_id();
+        env.create_physical_region(
+            physical_region_id,
+            &TestEnv::default_table_dir(),
+            vec![(PRIMARY_KEY_ENCODING.to_string(), encoding.to_string())],
+        )
+        .await;
+        create_logical_region_with_tags(&env, physical_region_id, logical_region_id, &["job"])
+            .await;
+        let build_requests = |versions: [Option<u64>; 3]| {
+            versions
+                .into_iter()
+                .map(|partition_expr_version| {
+                    (
+                        logical_region_id,
+                        RegionPutRequest {
+                            skip_wal: false,
+                            rows: Rows {
+                                schema: test_util::row_schema_with_tags(&["job"]),
+                                rows: test_util::build_rows(1, 1),
+                            },
+                            hint: None,
+                            partition_expr_version,
+                        },
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        // Conflicting explicit versions must fail before any data is written.
+        let err = env
+            .metric()
+            .inner
+            .put_regions_batch_single_physical(
+                physical_region_id,
+                build_requests([None, Some(10), Some(11)]),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("inconsistent partition expr version")
+        );
+        assert!(
+            scan_timestamp_values(&env.metric(), logical_region_id)
+                .await
+                .is_empty()
+        );
+
+        for (versions, expected) in [
+            ([None, None, None], None),
+            ([None, Some(7), None], Some(7)),
+            ([Some(7), None, Some(7)], Some(7)),
+        ] {
+            let mut requests = build_requests(versions);
+            let engine = env.metric();
+            engine
+                .inner
+                .validate_batch_requests(physical_region_id, &mut requests)
+                .await
+                .unwrap();
+            let (merged, _) = match encoding {
+                "sparse" => engine
+                    .inner
+                    .merge_sparse_batch(physical_region_id, requests),
+                "dense" => engine
+                    .inner
+                    .merge_dense_batch(to_data_region_id(physical_region_id), requests),
+                _ => unreachable!(),
+            }
+            .unwrap();
+            assert_eq!(merged.partition_expr_version, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_put_skip_wal_batch_recovery() {
+        check_put_skip_wal_batch_recovery("sparse", false).await;
+        check_put_skip_wal_batch_recovery("sparse", true).await;
+        check_put_skip_wal_batch_recovery("dense", false).await;
+        check_put_skip_wal_batch_recovery("dense", true).await;
+    }
+
+    async fn check_put_skip_wal_batch_recovery(encoding: &str, skip_wal: bool) {
+        let env = TestEnv::new().await;
+        let engine = env.metric();
+        engine.inner.flush_task.stop().await.unwrap();
+        let physical_region_id = env.default_physical_region_id();
+        let logical_region_id = env.default_logical_region_id();
+        env.create_physical_region(
+            physical_region_id,
+            &TestEnv::default_table_dir(),
+            vec![(PRIMARY_KEY_ENCODING.to_string(), encoding.to_string())],
+        )
+        .await;
+        create_logical_region_with_tags(&env, physical_region_id, logical_region_id, &["job"])
+            .await;
+        let metadata_before = engine.get_metadata(logical_region_id).await.unwrap();
+
+        let requests = [skip_wal; 3]
+            .into_iter()
+            .enumerate()
+            .map(|(index, skip_wal)| {
+                let timestamp = index as i64 + 1;
+                let value = timestamp as f64 * 10.0;
+                // Every request updates the same key at timestamp zero and
+                // also inserts a distinct key to verify merge order.
+                let rows = [0, timestamp]
+                    .into_iter()
+                    .map(|timestamp| Row {
+                        values: vec![
+                            Value {
+                                value_data: Some(ValueData::TimestampMillisecondValue(timestamp)),
+                            },
+                            Value {
+                                value_data: Some(ValueData::F64Value(value)),
+                            },
+                            Value {
+                                value_data: Some(ValueData::StringValue("tag_0".to_string())),
+                            },
+                        ],
+                    })
+                    .collect();
+                (
+                    logical_region_id,
+                    RegionPutRequest {
+                        rows: Rows {
+                            schema: test_util::row_schema_with_tags(&["job"]),
+                            rows,
+                        },
+                        hint: None,
+                        partition_expr_version: None,
+                        skip_wal,
+                    },
+                )
+            });
+        let affected_rows = engine.inner.put_regions_batch(requests).await.unwrap();
+        assert_eq!(affected_rows, 6);
+        assert_eq!(
+            scan_timestamp_values(&engine, logical_region_id).await,
+            vec![(0, 30.0), (1, 10.0), (2, 20.0), (3, 30.0)]
+        );
+
+        // Neither data nor metadata has an SST to hide missing WAL.
+        for region_id in [
+            to_data_region_id(physical_region_id),
+            crate::utils::to_metadata_region_id(physical_region_id),
+        ] {
+            let stat = env.mito().region_statistic(region_id).unwrap();
+            assert!(stat.memtable_size > 0);
+            assert_eq!(stat.sst_num, 0);
+        }
+        engine
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Close(RegionCloseRequest {
+                    flush_on_close: false,
+                }),
+            )
+            .await
+            .unwrap();
+
+        // Recreate the wrapper as well, discarding its metadata cache.
+        let reopened = MetricEngine::try_new(env.mito(), Default::default()).unwrap();
+        reopened.inner.flush_task.stop().await.unwrap();
+        reopened
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Open(RegionOpenRequest {
+                    engine: METRIC_ENGINE_NAME.to_string(),
+                    table_dir: TestEnv::default_table_dir(),
+                    path_type: PathType::Bare,
+                    options: [
+                        (PHYSICAL_TABLE_METADATA_KEY.to_string(), String::new()),
+                        (PRIMARY_KEY_ENCODING.to_string(), encoding.to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    skip_wal_replay: false,
+                    checkpoint: None,
+                    requirements: Default::default(),
+                }),
+            )
+            .await
+            .unwrap();
+        let recovered_metadata = reopened.get_metadata(logical_region_id).await.unwrap();
+        assert_eq!(
+            metadata_before.column_metadatas,
+            recovered_metadata.column_metadatas
+        );
+        let expected = if skip_wal {
+            vec![]
+        } else {
+            vec![(0, 30.0), (1, 10.0), (2, 20.0), (3, 30.0)]
+        };
+        assert_eq!(
+            scan_timestamp_values(&reopened, logical_region_id).await,
+            expected,
+            "encoding={encoding}, skip_wal={skip_wal}"
+        );
+    }
 
     fn assert_merged_schema(rows: &Rows, expect_sparse: bool) {
         let column_names: HashSet<String> = rows
@@ -847,6 +1118,91 @@ mod tests {
         expr.as_json_str().unwrap()
     }
 
+    #[tokio::test]
+    async fn test_put_and_scan_microsecond_physical_region() {
+        let env = TestEnv::new().await;
+        let engine = env.metric();
+        let physical_region_id = env.default_physical_region_id();
+        let logical_region_id = env.default_logical_region_id();
+        env.create_physical_region_with_ts_type(
+            physical_region_id,
+            &TestEnv::default_table_dir(),
+            vec![],
+            ConcreteDataType::timestamp_microsecond_datatype(),
+        )
+        .await;
+
+        // A logical region with a matching microsecond time index is accepted.
+        let region_create_request = test_util::create_logical_region_request_with_ts_type(
+            &["job"],
+            physical_region_id,
+            &table_dir("test", logical_region_id.table_id()),
+            ConcreteDataType::timestamp_microsecond_datatype(),
+        );
+        engine
+            .handle_request(
+                logical_region_id,
+                RegionRequest::Create(region_create_request),
+            )
+            .await
+            .unwrap();
+
+        // Writing microsecond rows works.
+        let affected_rows = engine
+            .handle_request(
+                logical_region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    rows: Rows {
+                        schema: test_util::row_schema_with_tags_and_ts_datatype(
+                            &["job"],
+                            ColumnDataType::TimestampMicrosecond,
+                        ),
+                        rows: test_util::build_rows_with_ts_datatype(
+                            1,
+                            2,
+                            ColumnDataType::TimestampMicrosecond,
+                        ),
+                    },
+                    hint: None,
+                    partition_expr_version: None,
+                    skip_wal: false,
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(affected_rows.affected_rows, 2);
+
+        // The scan returns timestamps in the physical region's unit.
+        let stream = engine
+            .scan_to_stream(logical_region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        let mut rows = Vec::new();
+        for batch in batches.iter() {
+            let batch = batch.df_record_batch();
+            let timestamps = batch
+                .column(batch.schema().index_of(greptime_timestamp()).unwrap())
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap();
+            let values = batch
+                .column(batch.schema().index_of(greptime_value()).unwrap())
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            rows.extend(
+                timestamps
+                    .values()
+                    .iter()
+                    .copied()
+                    .zip(values.values().iter().copied()),
+            );
+        }
+        rows.sort_unstable_by_key(|(timestamp, _)| *timestamp);
+        assert_eq!(rows, vec![(0, 0.0), (1, 1.0)]);
+    }
+
     async fn create_logical_region_with_tags(
         env: &TestEnv,
         physical_region_id: RegionId,
@@ -872,6 +1228,45 @@ mod tests {
             .iter()
             .position(|col| col.column_name == name)
             .unwrap()
+    }
+
+    fn check_batch_merge_wal_policy(
+        env: &TestEnv,
+        physical_region_id: RegionId,
+        mut requests: Vec<(RegionId, RegionPutRequest)>,
+        expect_sparse: bool,
+        skip_wal: bool,
+    ) {
+        for (_, request) in &mut requests {
+            request.skip_wal = skip_wal;
+        }
+        let (merged_request, affected_rows) = if expect_sparse {
+            let (merged_request, affected_rows) = env
+                .metric()
+                .inner
+                .merge_sparse_batch(physical_region_id, requests)
+                .unwrap();
+            let hint = merged_request
+                .hint
+                .as_ref()
+                .expect("missing sparse write hint");
+            assert_eq!(
+                hint.primary_key_encoding,
+                PrimaryKeyEncodingProto::Sparse as i32
+            );
+            (merged_request, affected_rows)
+        } else {
+            let (merged_request, affected_rows) = env
+                .metric()
+                .inner
+                .merge_dense_batch(to_data_region_id(physical_region_id), requests)
+                .unwrap();
+            assert!(merged_request.hint.is_none());
+            (merged_request, affected_rows)
+        };
+        assert_merged_schema(&merged_request.rows, expect_sparse);
+        assert_eq!(merged_request.skip_wal, skip_wal);
+        assert_eq!(affected_rows, 5);
     }
 
     async fn run_batch_write_with_schema_variants(
@@ -921,6 +1316,7 @@ mod tests {
                 (
                     logical_region_1,
                     RegionPutRequest {
+                        skip_wal: false,
                         rows: Rows {
                             schema: schema_1.clone(),
                             rows: rows_1,
@@ -932,6 +1328,7 @@ mod tests {
                 (
                     logical_region_2,
                     RegionPutRequest {
+                        skip_wal: false,
                         rows: Rows {
                             schema: schema_2.clone(),
                             rows: rows_2,
@@ -943,32 +1340,41 @@ mod tests {
             ]
         };
 
-        let merged_request = if expect_sparse {
-            let (merged_request, _) = env
-                .metric()
-                .inner
-                .merge_sparse_batch(physical_region_id, build_requests())
-                .unwrap();
-            let hint = merged_request
-                .hint
-                .as_ref()
-                .expect("missing sparse write hint");
-            assert_eq!(
-                hint.primary_key_encoding,
-                PrimaryKeyEncodingProto::Sparse as i32
-            );
-            merged_request
-        } else {
-            let (merged_request, _) = env
-                .metric()
-                .inner
-                .merge_dense_batch(data_region_id, build_requests())
-                .unwrap();
-            assert!(merged_request.hint.is_none());
-            merged_request
-        };
+        check_batch_merge_wal_policy(
+            env,
+            physical_region_id,
+            build_requests(),
+            expect_sparse,
+            false,
+        );
+        check_batch_merge_wal_policy(
+            env,
+            physical_region_id,
+            build_requests(),
+            expect_sparse,
+            true,
+        );
 
-        assert_merged_schema(&merged_request.rows, expect_sparse);
+        for policies in [[false, true], [true, false]] {
+            let mut mixed_requests = build_requests();
+            for ((_, request), skip_wal) in mixed_requests.iter_mut().zip(policies) {
+                request.skip_wal = skip_wal;
+            }
+            let err = env
+                .metric()
+                .inner
+                .put_regions_batch(mixed_requests.into_iter())
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("inconsistent WAL policy in batch"));
+            for logical_region_id in [logical_region_1, logical_region_2] {
+                assert!(
+                    scan_timestamp_values(&env.metric(), logical_region_id)
+                        .await
+                        .is_empty()
+                );
+            }
+        }
 
         let affected_rows = env
             .metric()
@@ -1095,6 +1501,7 @@ mod tests {
         let schema = test_util::row_schema_with_tags(&["job"]);
         let rows = test_util::build_rows(1, 5);
         let request = RegionRequest::Put(RegionPutRequest {
+            skip_wal: false,
             rows: Rows { schema, rows },
             hint: None,
             partition_expr_version: None,
@@ -1170,6 +1577,7 @@ mod tests {
         let schema = test_util::row_schema_with_tags(columns);
         let rows = test_util::build_rows(3, 100);
         let request = RegionRequest::Put(RegionPutRequest {
+            skip_wal: false,
             rows: Rows { schema, rows },
             hint: None,
             partition_expr_version: None,
@@ -1193,6 +1601,7 @@ mod tests {
         let schema = test_util::row_schema_with_tags(&["abc"]);
         let rows = test_util::build_rows(1, 100);
         let request = RegionRequest::Put(RegionPutRequest {
+            skip_wal: false,
             rows: Rows { schema, rows },
             hint: None,
             partition_expr_version: None,
@@ -1214,6 +1623,7 @@ mod tests {
         let schema = test_util::row_schema_with_tags(&["def"]);
         let rows = test_util::build_rows(1, 100);
         let request = RegionRequest::Put(RegionPutRequest {
+            skip_wal: false,
             rows: Rows { schema, rows },
             hint: None,
             partition_expr_version: None,
@@ -1274,6 +1684,7 @@ mod tests {
             (
                 logical_region_1,
                 RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema: schema.clone(),
                         rows: rows1,
@@ -1285,6 +1696,7 @@ mod tests {
             (
                 logical_region_2,
                 RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema: schema.clone(),
                         rows: rows2,
@@ -1296,6 +1708,7 @@ mod tests {
             (
                 logical_region_3,
                 RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema: schema.clone(),
                         rows: rows3,
@@ -1347,6 +1760,7 @@ mod tests {
             (
                 logical_region_1,
                 RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema: schema.clone(),
                         rows: test_util::build_rows(1, 3),
@@ -1358,6 +1772,7 @@ mod tests {
             (
                 nonexistent_region,
                 RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema: schema.clone(),
                         rows: test_util::build_rows(1, 2),
@@ -1369,6 +1784,7 @@ mod tests {
             (
                 logical_region_2,
                 RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema: schema.clone(),
                         rows: test_util::build_rows(1, 5),
@@ -1407,6 +1823,7 @@ mod tests {
         let requests = vec![(
             physical_region_id,
             RegionPutRequest {
+                skip_wal: false,
                 rows: Rows {
                     schema,
                     rows: test_util::build_rows(1, 1),
@@ -1441,6 +1858,7 @@ mod tests {
             (
                 logical_region_id,
                 RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema: schema.clone(),
                         rows: test_util::build_rows(1, 1),
@@ -1452,6 +1870,7 @@ mod tests {
             (
                 physical_region_id,
                 RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema,
                         rows: test_util::build_rows(1, 1),
@@ -1487,6 +1906,7 @@ mod tests {
         let requests = vec![(
             logical_region_id,
             RegionPutRequest {
+                skip_wal: false,
                 rows: Rows {
                     schema,
                     rows: test_util::build_rows(1, 5),
@@ -1565,6 +1985,7 @@ mod tests {
             .handle_request(
                 logical_region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows,
                     hint: None,
                     partition_expr_version: Some(1),
@@ -1607,6 +2028,7 @@ mod tests {
             .handle_request(
                 logical_region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows: rows.clone(),
                     hint: None,
                     partition_expr_version: Some(expected_version.wrapping_add(1)),
@@ -1621,6 +2043,7 @@ mod tests {
             .handle_request(
                 logical_region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows: rows.clone(),
                     hint: None,
                     partition_expr_version: None,
@@ -1635,6 +2058,7 @@ mod tests {
             .handle_request(
                 logical_region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows,
                     hint: None,
                     partition_expr_version: Some(expected_version),
@@ -1703,6 +2127,7 @@ mod tests {
             .handle_request(
                 logical_region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows { schema, rows },
                     hint: None,
                     partition_expr_version: None,
@@ -1759,6 +2184,7 @@ mod tests {
             .handle_request(
                 logical_region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows { schema, rows },
                     hint: None,
                     partition_expr_version: None,
@@ -1813,6 +2239,7 @@ mod tests {
             .handle_request(
                 logical_region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows { schema, rows },
                     hint: None,
                     partition_expr_version: None,

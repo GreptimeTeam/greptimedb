@@ -28,7 +28,10 @@ use crate::aggrs::count_hash::CountHash;
 use crate::aggrs::vector::VectorFunction as VectorAggrFunction;
 use crate::function::{Function, FunctionRef};
 use crate::function_factory::ScalarFunctionFactory;
+#[cfg(feature = "ai_functions")]
+use crate::scalars::ai;
 use crate::scalars::anomaly::AnomalyFunction;
+use crate::scalars::avg_calc::AvgCalcFunction;
 use crate::scalars::date::DateFunction;
 use crate::scalars::expression::ExpressionFunction;
 use crate::scalars::hll_count::HllCalcFunction;
@@ -41,7 +44,9 @@ use crate::scalars::primary_key::DecodePrimaryKeyFunction;
 use crate::scalars::string::register_string_functions;
 use crate::scalars::timestamp::TimestampFunction;
 use crate::scalars::uddsketch_calc::UddSketchCalcFunction;
+use crate::scalars::uddsketch_rank::UddSketchRankFunction;
 use crate::scalars::vector::VectorFunction as VectorScalarFunction;
+use crate::scalars::welford_stddev::WelfordStddevFunction;
 use crate::system::SystemFunction;
 
 #[derive(Default)]
@@ -189,6 +194,11 @@ impl FunctionRegistry {
             .collect()
     }
 
+    /// Returns a registered aggregate function by name.
+    pub fn get_aggr_func(&self, name: &str) -> Option<AggregateUDF> {
+        self.aggregate_functions.read().unwrap().get(name).cloned()
+    }
+
     /// Returns true if an aggregate function with the given name exists in the registry.
     pub fn is_aggr_func_exist(&self, name: &str) -> bool {
         self.aggregate_functions.read().unwrap().contains_key(name)
@@ -208,13 +218,18 @@ pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(||
     TimestampFunction::register(&function_registry);
     DateFunction::register(&function_registry);
     ExpressionFunction::register(&function_registry);
+    AvgCalcFunction::register(&function_registry);
     UddSketchCalcFunction::register(&function_registry);
+    UddSketchRankFunction::register(&function_registry);
     HllCalcFunction::register(&function_registry);
+    WelfordStddevFunction::register(&function_registry);
     DecodePrimaryKeyFunction::register(&function_registry);
 
     // Full text search function
     MatchesFunction::register(&function_registry);
     MatchesTermFunction::register(&function_registry);
+    #[cfg(feature = "ai_functions")]
+    ai::register(&function_registry);
 
     // System and administration functions
     SystemFunction::register(&function_registry);
@@ -361,6 +376,25 @@ mod tests {
         registry.register_scalar(TestAndFunction::default());
         let _ = registry.get_function("test_and").unwrap();
         assert_eq!(1, registry.scalar_functions().len());
+    }
+
+    #[test]
+    fn test_uddsketch_rank_registered() {
+        assert!(FUNCTION_REGISTRY.get_function("uddsketch_rank").is_some());
+    }
+
+    #[test]
+    fn test_ai_registration_matches_feature() {
+        for name in ["ai_match", "ai_choose", "ai_score"] {
+            assert_eq!(
+                FUNCTION_REGISTRY.get_function(name).is_some(),
+                cfg!(feature = "ai_functions"),
+                "{name}"
+            );
+        }
+        for name in ["jev", "jev_choice", "jev_score"] {
+            assert!(FUNCTION_REGISTRY.get_function(name).is_none(), "{name}");
+        }
     }
 
     #[test]

@@ -17,12 +17,13 @@ use std::path;
 
 use common_error::root_source;
 use common_telemetry::{debug, error, info, warn};
-use opendal::ErrorKind;
 use opendal::layers::{
     LoggingInterceptor, LoggingLayer, RetryEvent, RetryInterceptor, RetryLayer, TracingLayer,
 };
-use opendal::raw::{AccessorInfo, HttpClient, Operation};
+use opendal::raw::{Operation, ServiceInfo};
 use opendal::services::FS_SCHEME;
+use opendal::{ErrorKind, HttpTransporter, OperationContext};
+use opendal_http_transport_reqwest::ReqwestTransport;
 use snafu::ResultExt;
 
 use crate::config::HttpClientConfig;
@@ -173,7 +174,7 @@ impl LoggingInterceptor for DefaultLoggingInterceptor {
     #[inline]
     fn log(
         &self,
-        info: &AccessorInfo,
+        info: &ServiceInfo,
         operation: Operation,
         context: &[(&str, &str)],
         message: &str,
@@ -211,7 +212,8 @@ impl LoggingInterceptor for DefaultLoggingInterceptor {
     }
 }
 
-pub(crate) fn build_http_client(config: &HttpClientConfig) -> error::Result<HttpClient> {
+/// Builds an [`OperationContext`] with a custom HTTP transport from `config`.
+pub(crate) fn build_http_context(config: &HttpClientConfig) -> error::Result<OperationContext> {
     if config.skip_ssl_validation {
         common_telemetry::warn!(
             "Skipping SSL validation for object storage HTTP client. Please ensure the environment is trusted."
@@ -226,7 +228,8 @@ pub(crate) fn build_http_client(config: &HttpClientConfig) -> error::Result<Http
         .danger_accept_invalid_certs(config.skip_ssl_validation)
         .build()
         .context(error::BuildHttpClientSnafu)?;
-    Ok(HttpClient::with(client))
+    let transport = HttpTransporter::new(ReqwestTransport::new(client));
+    Ok(OperationContext::new().with_http_transport(transport))
 }
 
 pub fn clean_temp_dir(dir: &str) -> error::Result<()> {
@@ -302,9 +305,7 @@ mod tests {
 
     #[test]
     fn test_fs_is_not_object_storage() {
-        let object_store = ObjectStore::new(Fs::default().root("/tmp"))
-            .unwrap()
-            .finish();
+        let object_store = ObjectStore::new(Fs::default().root("/tmp")).unwrap();
 
         assert_eq!(FS_SCHEME, object_store.info().scheme());
         assert!(!is_object_storage(&object_store));

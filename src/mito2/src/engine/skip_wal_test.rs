@@ -16,7 +16,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::Rows;
+use common_error::ext::ErrorExt;
 use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
+use rstest::rstest;
+use rstest_reuse::{self, apply};
 use store_api::logstore::provider::Provider;
 use store_api::mito_engine_options::SKIP_WAL_KEY;
 use store_api::region_engine::{RegionEngine, RegionRole};
@@ -29,8 +32,18 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::engine::listener::AlterFlushListener;
 use crate::test_util::{
-    CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, rows_schema,
+    CreateRequestBuilder, LogStoreFactory, TestEnv, build_rows, flush_region,
+    kafka_log_store_factory, multiple_log_store_factories, prepare_test_for_kafka_log_store,
+    put_rows, raft_engine_log_store_factory, rows_schema,
 };
+
+fn set_skip_wal_request(skip_wal: bool) -> RegionRequest {
+    RegionRequest::Alter(RegionAlterRequest {
+        kind: AlterKind::SetRegionOptions {
+            options: vec![SetRegionOption::SkipWal(skip_wal)],
+        },
+    })
+}
 
 #[tokio::test]
 async fn test_close_region_skip_wal_with_pending_data() {
@@ -76,25 +89,11 @@ async fn test_alter_skip_wal_stops_wal_and_flushes_on_close() {
     assert!(!before_alter.version.memtables.is_empty());
 
     engine
-        .handle_request(
-            region_id,
-            RegionRequest::Alter(RegionAlterRequest {
-                kind: AlterKind::SetRegionOptions {
-                    options: vec![SetRegionOption::SkipWal],
-                },
-            }),
-        )
+        .handle_request(region_id, set_skip_wal_request(true))
         .await
         .unwrap();
     engine
-        .handle_request(
-            region_id,
-            RegionRequest::Alter(RegionAlterRequest {
-                kind: AlterKind::SetRegionOptions {
-                    options: vec![SetRegionOption::SkipWal],
-                },
-            }),
-        )
+        .handle_request(region_id, set_skip_wal_request(true))
         .await
         .unwrap();
 
@@ -170,6 +169,176 @@ async fn test_alter_skip_wal_stops_wal_and_flushes_on_close() {
     );
 }
 
+#[apply(multiple_log_store_factories)]
+async fn test_alter_skip_wal_round_trip_reuses_provider(factory: Option<LogStoreFactory>) {
+    let Some(factory) = factory else {
+        return;
+    };
+    let mut env = TestEnv::with_prefix("alter-skip-wal-round-trip")
+        .await
+        .with_log_store_factory(factory.clone());
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let topic = prepare_test_for_kafka_log_store(&factory).await;
+    let request = CreateRequestBuilder::new().kafka_topic(topic).build();
+    let schema = rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let provider = region.provider.clone();
+    assert!(!matches!(&provider, Provider::Noop));
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: build_rows(0, 1),
+        },
+    )
+    .await;
+    let last_entry_id = region.version_control.current().last_entry_id;
+
+    engine
+        .handle_request(region_id, set_skip_wal_request(true))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: build_rows(1, 2),
+        },
+    )
+    .await;
+    assert_eq!(
+        last_entry_id,
+        region.version_control.current().last_entry_id
+    );
+
+    for _ in 0..2 {
+        engine
+            .handle_request(region_id, set_skip_wal_request(false))
+            .await
+            .unwrap();
+    }
+    assert!(!region.version().options.skip_wal);
+    assert_eq!(&provider, &region.provider);
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: build_rows(2, 3),
+        },
+    )
+    .await;
+    assert!(region.version_control.current().last_entry_id > last_entry_id);
+}
+
+#[apply(multiple_log_store_factories)]
+async fn test_create_skipped_region_with_real_wal_can_reenable(factory: Option<LogStoreFactory>) {
+    let Some(factory) = factory else {
+        return;
+    };
+    let mut env = TestEnv::with_prefix("create-skipped-with-real-wal")
+        .await
+        .with_log_store_factory(factory.clone());
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let topic = prepare_test_for_kafka_log_store(&factory).await;
+    let request = CreateRequestBuilder::new()
+        .kafka_topic(topic)
+        .insert_option(SKIP_WAL_KEY, "true")
+        .build();
+    let schema = rows_schema(&request);
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let provider = region.provider.clone();
+    assert!(!matches!(&provider, Provider::Noop));
+    assert!(region.version().options.skip_wal);
+
+    let last_entry_id = region.version_control.current().last_entry_id;
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: build_rows(0, 1),
+        },
+    )
+    .await;
+    assert_eq!(
+        last_entry_id,
+        region.version_control.current().last_entry_id
+    );
+
+    engine
+        .handle_request(region_id, set_skip_wal_request(false))
+        .await
+        .unwrap();
+    assert!(!region.version().options.skip_wal);
+    assert_eq!(&provider, &region.provider);
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: build_rows(1, 2),
+        },
+    )
+    .await;
+    assert!(region.version_control.current().last_entry_id > last_entry_id);
+}
+
+#[tokio::test]
+async fn test_alter_skip_wal_rejects_noop_provider() {
+    let mut env = TestEnv::with_prefix("alter-skip-wal-noop").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new().build();
+    request.options.insert(
+        WAL_OPTIONS_KEY.to_string(),
+        serde_json::to_string(&WalOptions::Noop).unwrap(),
+    );
+    request
+        .options
+        .insert(SKIP_WAL_KEY.to_string(), "true".to_string());
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let provider = region.provider.clone();
+    assert!(matches!(&provider, Provider::Noop));
+
+    engine
+        .handle_request(region_id, set_skip_wal_request(true))
+        .await
+        .unwrap();
+    assert!(region.version().options.skip_wal);
+    assert_eq!(&provider, &region.provider);
+
+    let error = engine
+        .handle_request(region_id, set_skip_wal_request(false))
+        .await
+        .unwrap_err();
+
+    assert!(error.output_msg().contains("uses the Noop WAL provider"));
+    assert!(region.version().options.skip_wal);
+    assert_eq!(&provider, &region.provider);
+}
+
 #[tokio::test]
 async fn test_alter_skip_wal_on_follower_survives_promotion() {
     let mut env = TestEnv::with_prefix("alter-skip-wal-follower").await;
@@ -186,20 +355,19 @@ async fn test_alter_skip_wal_on_follower_survives_promotion() {
         .set_region_role(region_id, RegionRole::Follower)
         .unwrap();
     engine
-        .handle_request(
-            region_id,
-            RegionRequest::Alter(RegionAlterRequest {
-                kind: AlterKind::SetRegionOptions {
-                    options: vec![SetRegionOption::SkipWal],
-                },
-            }),
-        )
+        .handle_request(region_id, set_skip_wal_request(true))
         .await
         .unwrap();
 
     let region = engine.get_region(region_id).unwrap();
     assert!(region.is_follower());
     assert!(region.version().options.skip_wal);
+
+    engine
+        .handle_request(region_id, set_skip_wal_request(false))
+        .await
+        .unwrap();
+    assert!(!region.version().options.skip_wal);
 
     engine
         .set_region_role(region_id, RegionRole::Leader)
@@ -214,10 +382,7 @@ async fn test_alter_skip_wal_on_follower_survives_promotion() {
         },
     )
     .await;
-    assert_eq!(
-        last_entry_id,
-        region.version_control.current().last_entry_id
-    );
+    assert!(region.version_control.current().last_entry_id > last_entry_id);
 }
 
 async fn test_close_region_skip_wal(insert: bool) {
@@ -522,6 +687,7 @@ async fn test_close_region_skip_wal_rejects_writes_queued_after_close() {
         .handle_request(
             region_id,
             RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
                 rows: Rows {
                     schema: rows_schema(&request),
                     rows: build_rows(3, 4),
@@ -553,6 +719,7 @@ async fn test_close_region_skip_wal_rejects_writes_queued_after_close() {
             .handle_request(
                 region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema: rows_schema(&request_cloned),
                         rows: build_rows(4, 5),
@@ -579,6 +746,7 @@ async fn test_close_region_skip_wal_rejects_writes_queued_after_close() {
             .handle_request(
                 region_id,
                 RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows {
                         schema: rows_schema(&request_cloned),
                         rows: build_rows(5, 6),

@@ -24,10 +24,11 @@ use file_engine::config::EngineConfig as FileEngineConfig;
 use flow::FlowConfig;
 use frontend::frontend::FrontendOptions;
 use frontend::service_config::{
-    InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, PostgresOptions,
-    PromStoreOptions,
+    InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, OtlpOptions,
+    PendingRowsBatcherOptions, PostgresOptions, PromStoreOptions,
 };
 use mito2::config::MitoConfig;
+use pipeline::PipelineOptions;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
@@ -43,6 +44,8 @@ pub struct StandaloneOptions {
     /// Upper bound: when `false`, missing tables are never auto-created even if a
     /// request sets the `auto_create_table` hint to `true`. Default: `true`.
     pub auto_create_table: bool,
+    /// Enables experimental Parquet database exports using shared Metric scans.
+    pub experimental_metric_export: bool,
     /// Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
     /// Set to 0 to disable the limit. Default: "0" (unlimited)
     pub max_in_flight_write_bytes: ReadableSize,
@@ -55,7 +58,10 @@ pub struct StandaloneOptions {
     pub postgres: PostgresOptions,
     pub opentsdb: OpentsdbOptions,
     pub influxdb: InfluxdbOptions,
+    /// Ordinary-table batching with independent logical-table controls.
+    pub pending_rows_batcher: PendingRowsBatcherOptions,
     pub jaeger: JaegerOptions,
+    pub otlp: OtlpOptions,
     pub prom_store: PromStoreOptions,
     pub wal: DatanodeWalConfig,
     pub storage: StorageConfig,
@@ -72,6 +78,8 @@ pub struct StandaloneOptions {
     pub slow_query: SlowQueryOptions,
     pub query: QueryOptions,
     pub memory: MemoryOptions,
+    /// The pipeline options.
+    pub pipeline: PipelineOptions,
     /// The event recorder options.
     pub event_recorder: EventRecorderOptions,
     /// Environment variable keys to read and report in heartbeat messages.
@@ -85,6 +93,7 @@ impl Default for StandaloneOptions {
             default_timezone: None,
             default_column_prefix: None,
             auto_create_table: true,
+            experimental_metric_export: false,
             max_in_flight_write_bytes: ReadableSize(0),
             write_bytes_exhausted_policy: OnExhaustedPolicy::default(),
             http: HttpOptions::default(),
@@ -93,7 +102,9 @@ impl Default for StandaloneOptions {
             postgres: PostgresOptions::default(),
             opentsdb: OpentsdbOptions::default(),
             influxdb: InfluxdbOptions::default(),
+            pending_rows_batcher: PendingRowsBatcherOptions::default(),
             jaeger: JaegerOptions::default(),
+            otlp: OtlpOptions::default(),
             prom_store: PromStoreOptions::default(),
             wal: DatanodeWalConfig::default(),
             storage: StorageConfig::default(),
@@ -112,6 +123,7 @@ impl Default for StandaloneOptions {
             slow_query: SlowQueryOptions::default(),
             query: QueryOptions::default(),
             memory: MemoryOptions::default(),
+            pipeline: PipelineOptions::default(),
             event_recorder: EventRecorderOptions::default(),
             heartbeat_env_vars: vec![],
         }
@@ -124,6 +136,8 @@ impl Configurable for StandaloneOptions {
             "heartbeat_env_vars",
             "wal.broker_endpoints",
             "event_recorder.event_types",
+            "pending_rows_batcher.protocols",
+            "pending_rows_batcher.logical_table.protocols",
         ])
     }
 }
@@ -144,6 +158,7 @@ impl StandaloneOptions {
         FrontendOptions {
             default_timezone: cloned_opts.default_timezone,
             auto_create_table: cloned_opts.auto_create_table,
+            experimental_metric_export: cloned_opts.experimental_metric_export,
             max_in_flight_write_bytes: cloned_opts.max_in_flight_write_bytes,
             write_bytes_exhausted_policy: cloned_opts.write_bytes_exhausted_policy,
             http: cloned_opts.http,
@@ -152,12 +167,16 @@ impl StandaloneOptions {
             postgres: cloned_opts.postgres,
             opentsdb: cloned_opts.opentsdb,
             influxdb: cloned_opts.influxdb,
+            pending_rows_batcher: cloned_opts.pending_rows_batcher,
             jaeger: cloned_opts.jaeger,
+            otlp: cloned_opts.otlp,
             prom_store: cloned_opts.prom_store,
             meta_client: None,
             logging: cloned_opts.logging,
             user_provider: cloned_opts.user_provider,
+            query: cloned_opts.query,
             slow_query: cloned_opts.slow_query,
+            pipeline: cloned_opts.pipeline,
             event_recorder: cloned_opts.event_recorder,
             heartbeat_env_vars: cloned_opts.heartbeat_env_vars.clone(),
             ..Default::default()
@@ -198,8 +217,126 @@ mod tests {
     use std::sync::Arc;
 
     use common_event_recorder::EventTypeFilter;
+    use servers::batcher::BatchingProtocol;
 
-    use super::*;
+    use crate::options::*;
+
+    #[test]
+    fn test_logical_batcher_config_forwarding() {
+        let opts: StandaloneOptions = toml::from_str("[pending_rows_batcher]\nprotocols = ['influxdb']\n[pending_rows_batcher.logical_table]\nprotocols = ['otlp', 'prom']\npending_rows_flush_interval = '10ms'").unwrap();
+        let frontend = opts.frontend_options();
+        assert_eq!(frontend.pending_rows_batcher, opts.pending_rows_batcher);
+        assert_eq!(
+            frontend.pending_rows_batcher.logical_table,
+            opts.pending_rows_batcher.logical_table
+        );
+        let restored: StandaloneOptions = toml::from_str(&toml::to_string(&opts).unwrap()).unwrap();
+        assert_eq!(
+            restored.pending_rows_batcher.logical_table,
+            opts.pending_rows_batcher.logical_table
+        );
+        assert!(
+            toml::from_str::<StandaloneOptions>(
+                "[pending_rows_batcher.logical_table]\nprotocols = ['logs']"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_logical_batcher_protocols_from_env() {
+        temp_env::with_vars(
+            [
+                (
+                    "STANDALONE_LOGICAL_TEST__PENDING_ROWS_BATCHER__PROTOCOLS",
+                    Some("otlp,influxdb"),
+                ),
+                (
+                    "STANDALONE_LOGICAL_TEST__PENDING_ROWS_BATCHER__LOGICAL_TABLE__PROTOCOLS",
+                    Some("prom,otlp"),
+                ),
+            ],
+            || {
+                let options =
+                    StandaloneOptions::load_layered_options(None, "STANDALONE_LOGICAL_TEST")
+                        .unwrap();
+                assert_eq!(options.pending_rows_batcher.table.protocols.len(), 2);
+                assert_eq!(
+                    options
+                        .pending_rows_batcher
+                        .logical_table
+                        .unwrap()
+                        .protocols,
+                    vec![BatchingProtocol::Prom, BatchingProtocol::Otlp]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_batcher_protocols_from_env() {
+        temp_env::with_vars(
+            [(
+                "STANDALONE_BATCHER_TEST__PENDING_ROWS_BATCHER__PROTOCOLS",
+                Some("influxdb,http_sql"),
+            )],
+            || {
+                let options =
+                    StandaloneOptions::load_layered_options(None, "STANDALONE_BATCHER_TEST")
+                        .unwrap();
+                assert_eq!(
+                    options.pending_rows_batcher.table.protocols,
+                    vec![BatchingProtocol::Influxdb, BatchingProtocol::HttpSql]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_protocol_pending_rows_batcher_config() {
+        let defaults: StandaloneOptions = toml::from_str("").unwrap();
+        assert!(
+            !defaults
+                .pending_rows_batcher
+                .table
+                .pending_rows_batching_enabled()
+        );
+        let options: StandaloneOptions = toml::from_str(
+            r#"
+[pending_rows_batcher]
+protocols = ["influxdb", "http_sql"]
+pending_rows_flush_interval = "5ms"
+max_batch_rows = 25
+flow_notification_queue_capacity = 17
+"#,
+        )
+        .unwrap();
+        assert_eq!(options.pending_rows_batcher.table.max_batch_rows, 25);
+        assert_eq!(options.pending_rows_batcher.table.protocols.len(), 2);
+        assert_eq!(
+            options
+                .pending_rows_batcher
+                .table
+                .flow_notification_queue_capacity
+                .get(),
+            17
+        );
+        assert!(
+            options
+                .pending_rows_batcher
+                .table
+                .pending_rows_batching_enabled()
+        );
+        let serialized = toml::to_string(&options).unwrap();
+        let parsed: StandaloneOptions = toml::from_str(&serialized).unwrap();
+        assert_eq!(options.influxdb, parsed.influxdb);
+        assert_eq!(options.opentsdb, parsed.opentsdb);
+        assert_eq!(options.pending_rows_batcher, parsed.pending_rows_batcher);
+        let frontend = options.frontend_options();
+        assert_eq!(options.influxdb, frontend.influxdb);
+        assert_eq!(options.opentsdb, frontend.opentsdb);
+        assert_eq!(options.pending_rows_batcher, frontend.pending_rows_batcher);
+    }
 
     #[test]
     fn test_event_recorder_event_types_preserve_filter_semantics() {
@@ -226,5 +363,17 @@ mod tests {
             &selected.event_recorder.event_types,
             &frontend_options.event_recorder.event_types,
         ));
+    }
+
+    #[test]
+    fn test_query_options_propagated_to_components() {
+        let mut options = StandaloneOptions::default();
+        assert!(!options.frontend_options().experimental_metric_export);
+        options.experimental_metric_export = true;
+        assert!(options.frontend_options().experimental_metric_export);
+        options.query.parallelism = 4;
+
+        assert_eq!(options.frontend_options().query.parallelism, 4);
+        assert_eq!(options.datanode_options().query.parallelism, 4);
     }
 }

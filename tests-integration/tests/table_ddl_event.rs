@@ -29,6 +29,10 @@ use common_event_recorder::event_table::{
     CATALOG_NAME_COLUMN, PAYLOAD_COLUMN, PHYSICAL_TABLE_ID_COLUMN, PROCEDURE_ID_COLUMN,
     PROCEDURE_TRIGGER_COLUMN, SCHEMA_NAME_COLUMN, TABLE_ID_COLUMN, TABLE_NAME_COLUMN, TYPE_COLUMN,
 };
+#[cfg(feature = "enterprise")]
+use common_event_recorder::{PersistentEventContext, TriggerReason};
+#[cfg(feature = "enterprise")]
+use common_procedure::ProcedureContext;
 use common_test_util::temp_dir::create_temp_dir;
 use frontend::instance::Instance;
 use meta_srv::gc::GcSchedulerOptions;
@@ -37,9 +41,13 @@ use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{Channel, QueryContext};
 use tests_integration::cluster::GreptimeDbClusterBuilder;
+use tests_integration::test_util::{
+    setup_authenticated_grpc_database, test_event_recorder_options,
+};
 
 use crate::event_recorder_test_util::{
-    assert_eventually_eq, assert_single_event, find_eventually_string, find_eventually_u32,
+    assert_eventually_eq, assert_procedure_actor, assert_single_event, find_eventually_string,
+    find_eventually_u32,
 };
 
 const EVENTS_TABLE: &str = "greptime_private.events";
@@ -49,6 +57,8 @@ const LOGICAL_TABLE: &str = "table_ddl_events_logical";
 const AUTO_TABLE: &str = "table_ddl_events_auto";
 const AUTO_INFLUX_TABLE: &str = "table_ddl_events_auto_influx";
 const GRPC_TABLE: &str = "table_ddl_events_grpc";
+const PROCEDURE_ACTOR: &str = "procedure_actor";
+const PROCEDURE_ACTOR_PASSWORD: &str = "procedure_actor_pwd";
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_table_ddl_procedure_events() {
@@ -71,6 +81,7 @@ async fn test_table_ddl_procedure_events() {
     }
     let cluster = GreptimeDbClusterBuilder::new("table_ddl_procedure_events")
         .await
+        .with_event_recorder_options(test_event_recorder_options())
         .with_datanodes(1)
         .with_metasrv_gc_config(gc_options)
         .with_datanode_gc_config(GcConfig {
@@ -146,6 +157,7 @@ async fn test_table_ddl_procedure_events() {
     .unwrap();
     let grpc_create_procedure_id =
         submitted_procedure_id(&frontend, "create_table", GRPC_TABLE).await;
+    assert_procedure_actor(&frontend, &grpc_create_procedure_id, Some("greptime")).await;
     assert_event_context(
         &frontend,
         "create_table",
@@ -196,26 +208,27 @@ async fn test_table_ddl_procedure_events() {
 
     // Act / Assert: Create Table retains its rich submitted row and records the
     // created table ID when it completes.
-    run_sql_with_context(
-        &frontend,
-        &format!(
-            "CREATE TABLE {TABLE} (host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE)"
-        ),
-        Arc::new(QueryContext::with_channel(
-            "greptime",
-            "public",
-            Channel::HttpSql,
-        )),
+    let (actor_db, _actor_grpc_server) = setup_authenticated_grpc_database(
+        frontend.clone(),
+        PROCEDURE_ACTOR,
+        PROCEDURE_ACTOR_PASSWORD,
     )
     .await;
+    actor_db
+        .sql(format!(
+            "CREATE TABLE {TABLE} (host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE)"
+        ))
+        .await
+        .unwrap();
     let table_id = find_table_id(&frontend, TABLE).await;
     let create_table_procedure_id = submitted_procedure_id(&frontend, "create_table", TABLE).await;
+    assert_procedure_actor(&frontend, &create_table_procedure_id, Some(PROCEDURE_ACTOR)).await;
     assert_event_context(
         &frontend,
         "create_table",
         &create_table_procedure_id,
         "manual",
-        Some("httpsql"),
+        Some("grpc"),
     )
     .await;
     assert_named_submitted_event(
@@ -377,9 +390,9 @@ async fn test_table_ddl_procedure_events() {
             .ddl_manager()
             .submit_undrop_table_task(
                 common_meta::rpc::ddl::UndropTableTask { table_id },
-                common_meta::rpc::ddl::PersistentEventContext::new(
-                    common_meta::rpc::ddl::TriggerReason::Manual,
-                ),
+                ProcedureContext::from_event_context(PersistentEventContext::new(
+                    TriggerReason::Manual,
+                )),
             )
             .await
             .unwrap();
@@ -419,9 +432,9 @@ async fn test_table_ddl_procedure_events() {
             .ddl_manager()
             .submit_purge_dropped_table_task(
                 common_meta::rpc::ddl::PurgeDroppedTableTask { table_id },
-                common_meta::rpc::ddl::PersistentEventContext::new(
-                    common_meta::rpc::ddl::TriggerReason::Manual,
-                ),
+                ProcedureContext::from_event_context(PersistentEventContext::new(
+                    TriggerReason::Manual,
+                )),
             )
             .await
             .unwrap();

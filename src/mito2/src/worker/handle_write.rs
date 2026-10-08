@@ -128,6 +128,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 let mut region_ctx = region_ctxs.into_values().next().unwrap();
                 region_ctx.write_memtable().await;
                 region_ctx.write_bulk().await;
+                region_ctx.publish_sequence_and_entry_id();
                 put_rows += region_ctx.put_num;
                 delete_rows += region_ctx.delete_num;
             } else {
@@ -138,6 +139,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         common_runtime::spawn_global(async move {
                             region_ctx.write_memtable().await;
                             region_ctx.write_bulk().await;
+                            region_ctx.publish_sequence_and_entry_id();
                             (region_ctx.put_num, region_ctx.delete_num)
                         })
                     })
@@ -449,6 +451,7 @@ impl<S> RegionWorkerLoop<S> {
                 sender_req.request.hint,
                 sender_req.sender,
                 None,
+                sender_req.request.skip_wal,
             );
         }
     }
@@ -558,7 +561,7 @@ impl<S> RegionWorkerLoop<S> {
             }
 
             // Collect requests by region.
-            if !region_ctx.push_bulk(bulk_req.sender, bulk_req.request, None) {
+            if !region_ctx.push_bulk(bulk_req.sender, bulk_req.request, None, bulk_req.skip_wal) {
                 return;
             }
         }
@@ -611,13 +614,20 @@ async fn write_wal<S: LogStore>(
     region_ctxs: &mut HashMap<RegionId, RegionWriteCtx>,
 ) -> bool {
     let mut wal_writer = wal.writer();
+    let mut has_wal_entries = false;
     for region_ctx in region_ctxs.values_mut() {
         if region_ctx.skip_wal() {
             continue;
         }
         if let Err(e) = region_ctx.add_wal_entry(&mut wal_writer).map_err(Arc::new) {
             region_ctx.set_error(e);
+        } else {
+            has_wal_entries = true;
         }
+    }
+    // All-skipped batches should not touch the log store, even with an empty append.
+    if !has_wal_entries {
+        return true;
     }
     match wal_writer.write_to_wal().await.map_err(Arc::new) {
         Ok(response) => {
@@ -734,7 +744,12 @@ fn check_partition_expr_version(
 
 #[cfg(test)]
 mod tests {
-    use api::v1::{Row, Rows};
+    use api::v1::helper::{tag_column_schema, time_index_column_schema};
+    use api::v1::value::ValueData;
+    use api::v1::{ColumnDataType, Row, Rows};
+    use common_recordbatch::DfRecordBatch;
+    use datatypes::arrow::array::{ArrayRef, StringArray, TimestampMillisecondArray};
+    use datatypes::arrow::datatypes::{DataType, Field, Schema};
     use futures::stream;
     use log_store::error::{
         Error as LogStoreError, IllegalStateSnafu, InvalidProviderSnafu, Result as LogStoreResult,
@@ -746,8 +761,38 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
+    use crate::memtable::bulk::part::BulkPart;
     use crate::request::OptionOutputTx;
+    use crate::test_util::ts_ms_value;
     use crate::test_util::version_util::VersionControlBuilder;
+
+    fn new_bulk_part(num_rows: i64) -> BulkPart {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("tag_0", DataType::Utf8, true),
+            Field::new(
+                "ts",
+                DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+        let tag = Arc::new(StringArray::from_iter_values(
+            (0..num_rows).map(|value| value.to_string()),
+        )) as ArrayRef;
+        let ts = Arc::new(TimestampMillisecondArray::from(
+            (0..num_rows).collect::<Vec<_>>(),
+        )) as ArrayRef;
+        let batch = DfRecordBatch::try_new(schema, vec![tag, ts]).unwrap();
+
+        BulkPart {
+            batch,
+            max_timestamp: num_rows - 1,
+            min_timestamp: 0,
+            sequence: 0,
+            min_sequence: 0,
+            timestamp_index: 1,
+            raw_data: None,
+        }
+    }
 
     /// A log store that fails to build entries for `failing_region` and fails the
     /// whole batch when `fail_append` is true.
@@ -842,9 +887,9 @@ mod tests {
         }
     }
 
-    /// Creates a write context for `region_id` with one pending mutation of one row.
     fn new_region_ctx(
         region_id: RegionId,
+        skip_wal: bool,
     ) -> (RegionWriteCtx, oneshot::Receiver<Result<AffectedRows>>) {
         let version_control = Arc::new(VersionControlBuilder::new().build());
         let mut ctx = RegionWriteCtx::new(
@@ -857,14 +902,71 @@ mod tests {
         ctx.push_mutation(
             OpType::Put as i32,
             Some(Rows {
-                schema: vec![],
-                rows: vec![Row { values: vec![] }],
+                schema: vec![
+                    time_index_column_schema("ts", ColumnDataType::TimestampMillisecond),
+                    tag_column_schema("tag_0", ColumnDataType::String),
+                ],
+                rows: vec![Row {
+                    values: vec![
+                        ts_ms_value(0),
+                        api::v1::Value {
+                            value_data: Some(ValueData::StringValue("a".to_string())),
+                        },
+                    ],
+                }],
             }),
             None,
             OptionOutputTx::from(tx),
             None,
+            skip_wal,
         );
         (ctx, rx)
+    }
+
+    #[tokio::test]
+    async fn test_request_skip_wal_does_not_append_empty_batch() {
+        // Only change the request flag. A failing log store demonstrates that
+        // the all-skipped path never invokes append_batch, including empty appends.
+        check_request_skip_wal_does_not_append_empty_batch(false, false).await;
+        check_request_skip_wal_does_not_append_empty_batch(false, true).await;
+        check_request_skip_wal_does_not_append_empty_batch(true, false).await;
+        check_request_skip_wal_does_not_append_empty_batch(true, true).await;
+    }
+
+    async fn check_request_skip_wal_does_not_append_empty_batch(skip_wal: bool, bulk: bool) {
+        let region_id = RegionId::new(1, 1);
+        let wal = Wal::new(Arc::new(MockLogStore {
+            fail_append: true,
+            ..Default::default()
+        }));
+        let (ctx, rx) = if bulk {
+            let version_control = Arc::new(VersionControlBuilder::new().build());
+            let mut ctx = RegionWriteCtx::new(
+                region_id,
+                &version_control,
+                Provider::raft_engine_provider(region_id.as_u64()),
+                None,
+            );
+            let (tx, rx) = oneshot::channel();
+            assert!(ctx.push_bulk(OptionOutputTx::from(tx), new_bulk_part(1), None, skip_wal));
+            (ctx, rx)
+        } else {
+            new_region_ctx(region_id, skip_wal)
+        };
+        let version_control = ctx.version_control().clone();
+        let mut contexts = HashMap::from([(region_id, ctx)]);
+        assert_eq!(write_wal(&wal, &mut contexts).await, skip_wal);
+        if skip_wal {
+            let ctx = contexts.get_mut(&region_id).unwrap();
+            assert_eq!(ctx.next_entry_id(), 1);
+            ctx.write_memtable().await;
+            ctx.write_bulk().await;
+            ctx.publish_sequence_and_entry_id();
+            assert_eq!(version_control.committed_sequence(), 1);
+            assert_eq!(version_control.current().last_entry_id, 0);
+        }
+        drop(contexts);
+        assert_eq!(rx.await.unwrap().is_ok(), skip_wal);
     }
 
     #[tokio::test]
@@ -877,23 +979,104 @@ mod tests {
         }));
 
         let mut region_ctxs = HashMap::new();
-        let (ctx, failing_rx) = new_region_ctx(failing_region);
+        let (ctx, failing_rx) = new_region_ctx(failing_region, false);
+        let failing_committed_sequence = ctx.version_control().committed_sequence();
         region_ctxs.insert(failing_region, ctx);
-        let (ctx, ok_rx) = new_region_ctx(ok_region);
+        let (ctx, ok_rx) = new_region_ctx(ok_region, false);
+        let ok_committed_sequence = ctx.version_control().committed_sequence();
         region_ctxs.insert(ok_region, ctx);
         let entry_id = region_ctxs[&ok_region].next_entry_id();
 
-        // The failed region must not fail the batch or panic the worker.
+        // The failed region must not fail the batch.
         assert!(write_wal(&wal, &mut region_ctxs).await);
 
         assert!(region_ctxs[&failing_region].is_failed());
         assert!(!region_ctxs[&ok_region].is_failed());
         assert_eq!(entry_id + 1, region_ctxs[&ok_region].next_entry_id());
 
-        // Waiters of the failed region get the error while others get the result.
+        for region_ctx in region_ctxs.values_mut() {
+            region_ctx.write_memtable().await;
+            region_ctx.write_bulk().await;
+            region_ctx.publish_sequence_and_entry_id();
+        }
+
+        assert_eq!(
+            failing_committed_sequence,
+            region_ctxs[&failing_region]
+                .version_control()
+                .committed_sequence()
+        );
+        assert_eq!(
+            ok_committed_sequence + 1,
+            region_ctxs[&ok_region]
+                .version_control()
+                .committed_sequence()
+        );
+
         drop(region_ctxs);
         assert!(failing_rx.await.unwrap().is_err());
         assert_eq!(1, ok_rx.await.unwrap().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_bulk_write_sequence_not_committed_before_install_worker_level() {
+        check_bulk_write_sequence_not_committed_before_install_worker_level(false).await;
+        check_bulk_write_sequence_not_committed_before_install_worker_level(true).await;
+    }
+
+    async fn check_bulk_write_sequence_not_committed_before_install_worker_level(skip_wal: bool) {
+        let region_id = RegionId::new(1, 1);
+        let version_control = Arc::new(VersionControlBuilder::new().build());
+
+        let mut region_ctxs = HashMap::new();
+        let mut ctx = RegionWriteCtx::new(
+            region_id,
+            &version_control,
+            Provider::raft_engine_provider(region_id.as_u64()),
+            None,
+        );
+        let (tx, rx) = oneshot::channel();
+        assert!(ctx.push_bulk(OptionOutputTx::from(tx), new_bulk_part(3), None, skip_wal));
+        region_ctxs.insert(region_id, ctx);
+
+        let wal = Wal::new(Arc::new(MockLogStore::default()));
+        assert!(write_wal(&wal, &mut region_ctxs).await);
+        assert!(!region_ctxs[&region_id].is_failed());
+
+        let mut barrier = crate::region_write_ctx::test_hooks::arm_bulk_install_barrier(
+            region_id,
+            version_control.clone(),
+        );
+
+        let write_handle = tokio::spawn(async move {
+            let mut region_ctx = region_ctxs.remove(&region_id).unwrap();
+            region_ctx.write_memtable().await;
+            region_ctx.write_bulk().await;
+            region_ctx.publish_sequence_and_entry_id();
+        });
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            barrier.wait_until_reached(),
+        )
+        .await
+        .expect("bulk write never reached the install barrier");
+
+        assert_eq!(
+            0,
+            version_control.committed_sequence(),
+            "committed sequence leaked before the bulk part was installed"
+        );
+
+        barrier.release();
+        write_handle.await.expect("bulk write should complete");
+        assert_eq!(
+            3,
+            version_control.committed_sequence(),
+            "committed sequence must cover the installed bulk rows"
+        );
+
+        assert_eq!(3, rx.await.unwrap().unwrap());
     }
 
     #[tokio::test]
@@ -905,7 +1088,7 @@ mod tests {
         }));
 
         let mut region_ctxs = HashMap::new();
-        let (ctx, rx) = new_region_ctx(failing_region);
+        let (ctx, rx) = new_region_ctx(failing_region, false);
         region_ctxs.insert(failing_region, ctx);
 
         // Writing an empty batch to the WAL succeeds, the failed region must not panic
@@ -926,7 +1109,7 @@ mod tests {
         }));
 
         let mut region_ctxs = HashMap::new();
-        let (ctx, rx) = new_region_ctx(region_id);
+        let (ctx, rx) = new_region_ctx(region_id, false);
         region_ctxs.insert(region_id, ctx);
 
         assert!(!write_wal(&wal, &mut region_ctxs).await);

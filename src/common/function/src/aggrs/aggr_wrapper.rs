@@ -25,7 +25,7 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, BooleanArray, StructArray};
+use arrow::array::{ArrayData, ArrayRef, BooleanArray, StructArray, make_array};
 use arrow_schema::{FieldRef, Fields};
 use common_telemetry::debug;
 use datafusion::functions_aggregate::all_default_aggregate_functions;
@@ -33,15 +33,15 @@ use datafusion::functions_aggregate::count::Count;
 use datafusion::functions_aggregate::min_max::{Max, Min};
 use datafusion::optimizer::AnalyzerRule;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
-use datafusion::physical_planner::create_aggregate_expr_and_maybe_filter;
 use datafusion_common::{Column, ScalarValue};
 use datafusion_expr::expr::{AggregateFunction, AggregateFunctionParams};
 use datafusion_expr::function::StateFieldsArgs;
+use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion_expr::{
     Accumulator, Aggregate, AggregateUDF, AggregateUDFImpl, EmitTo, Expr, ExprSchemable,
     GroupsAccumulator, LogicalPlan, Signature,
 };
-use datafusion_physical_expr::aggregate::AggregateFunctionExpr;
+use datafusion_physical_expr::aggregate::{AggregateFunctionExpr, LoweredAggregateBuilder};
 use datatypes::arrow::datatypes::{DataType, Field};
 
 use crate::aggrs::aggr_wrapper::fix_order::FixStateUdafOrderingAnalyzer;
@@ -65,6 +65,12 @@ pub fn aggr_merge_func_name(aggr_name: &str) -> String {
     format!("__{}_merge", aggr_name)
 }
 
+/// Returns the globally registered name used to merge a delta state with a
+/// persisted state.
+pub fn aggr_delta_merge_func_name(state_aggregate_name: &str) -> String {
+    format!("__{}_delta_merge", state_aggregate_name)
+}
+
 /// Check if the given aggregate expression is steppable.
 /// As in if it can be split into multiple steps:
 /// i.e. on datanode first call `state(input)` then
@@ -75,6 +81,19 @@ pub fn is_all_aggr_exprs_steppable(aggr_exprs: &[Expr]) -> bool {
             if aggr_func.params.distinct {
                 // Distinct aggregate functions are not steppable(yet).
                 // TODO(discord9): support distinct aggregate functions.
+                return false;
+            }
+
+            // DataFusion only sorts the input of an aggregate with a hard ordering requirement
+            // when the requirement is already satisfied or the aggregate has a reverse
+            // expression (apache/datafusion#25676). The state wrapper has none, so e.g.
+            // `nth_value(.. ORDER BY ..)` would read unsorted input on datanodes. Ordered-set
+            // aggregates like `approx_percentile_cont(..) WITHIN GROUP (ORDER BY ..)` are
+            // exempt: their ORDER BY names the value, and they don't need sorted input.
+            if !aggr_func.params.order_by.is_empty()
+                && aggr_func.func.order_sensitivity().hard_requires()
+                && !aggr_func.func.supports_within_group_clause()
+            {
                 return false;
             }
 
@@ -204,12 +223,25 @@ impl StateMergeHelper {
             lower_aggr_exprs.push(expr);
 
             // then create the merge function using the physical expression of the original aggregate function
-            let (original_phy_expr, _filter, _ordering) = create_aggregate_expr_and_maybe_filter(
+            let (name, human_display) = match aggr_expr {
+                Expr::Alias(alias) => (alias.name.clone(), aggr_expr.human_display().to_string()),
+                Expr::AggregateFunction(_) => (
+                    aggr_expr.schema_name().to_string(),
+                    aggr_expr.human_display().to_string(),
+                ),
+                _ => unreachable!("aggregate expression was validated above"),
+            };
+            let original_phy_expr = LoweredAggregateBuilder::new(
                 aggr_expr,
                 aggr.input.schema(),
                 aggr.input.schema().as_arrow(),
                 &Default::default(),
-            )?;
+                &PhysicalPlanningContext::default(),
+            )
+            .with_name(name)
+            .with_human_display(human_display)
+            .build()?
+            .aggregate;
 
             let merge_func = MergeWrapper::new(
                 (*aggr_func.func).clone(),
@@ -365,9 +397,6 @@ impl AggregateUDFImpl for StateWrapper {
         Ok(Box::new(StateGroupsAccum::new(inner, state_type)?))
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     fn name(&self) -> &str {
         self.name.as_str()
     }
@@ -437,7 +466,7 @@ impl AggregateUDFImpl for StateWrapper {
         &self,
         statistics_args: &datafusion_expr::StatisticsArgs,
     ) -> Option<ScalarValue> {
-        let inner = self.inner().inner().as_any();
+        let inner = self.inner().inner();
         // only count/min/max need special handling here, for getting result from statistics
         // the result of count/min/max is also the result of count_state so can return directly
         let can_use_stat = inner.is::<Count>() || inner.is::<Max>() || inner.is::<Min>();
@@ -510,43 +539,7 @@ impl StateGroupsAccum {
     }
 
     fn wrap_state_arrays(&self, arrays: Vec<ArrayRef>) -> datafusion_common::Result<ArrayRef> {
-        let array_type = arrays
-            .iter()
-            .map(|array| array.data_type().clone())
-            .collect::<Vec<_>>();
-        let expected_type = self
-            .state_fields
-            .iter()
-            .map(|field| field.data_type().clone())
-            .collect::<Vec<_>>();
-        if array_type != expected_type {
-            debug!(
-                "State mismatch, expected: {}, got: {} for expected fields: {:?} and given array types: {:?}",
-                self.state_fields.len(),
-                arrays.len(),
-                self.state_fields,
-                array_type,
-            );
-            let guess_schema = arrays
-                .iter()
-                .enumerate()
-                .map(|(index, array)| {
-                    Field::new(
-                        format!("col_{index}[mismatch_state]").as_str(),
-                        array.data_type().clone(),
-                        true,
-                    )
-                })
-                .collect::<Fields>();
-            let array = StructArray::try_new(guess_schema, arrays, None)?;
-            return Ok(Arc::new(array));
-        }
-
-        Ok(Arc::new(StructArray::try_new(
-            self.state_fields.clone(),
-            arrays,
-            None,
-        )?))
+        Ok(Arc::new(state_struct_array(&self.state_fields, arrays)?))
     }
 }
 
@@ -566,11 +559,10 @@ impl GroupsAccumulator for StateGroupsAccum {
         &mut self,
         values: &[ArrayRef],
         group_indices: &[usize],
-        opt_filter: Option<&BooleanArray>,
         total_num_groups: usize,
     ) -> datafusion_common::Result<()> {
         self.inner
-            .merge_batch(values, group_indices, opt_filter, total_num_groups)
+            .merge_batch(values, group_indices, total_num_groups)
     }
 
     fn evaluate(&mut self, emit_to: EmitTo) -> datafusion_common::Result<ArrayRef> {
@@ -590,13 +582,84 @@ impl GroupsAccumulator for StateGroupsAccum {
         self.inner.convert_to_state(values, opt_filter)
     }
 
-    fn supports_convert_to_state(&self) -> bool {
-        self.inner.supports_convert_to_state()
-    }
-
     fn size(&self) -> usize {
         self.inner.size()
     }
+}
+
+/// Wraps the state arrays of an accumulator into a struct of the declared state fields.
+///
+/// The declared state type is derived from logical expressions, while the accumulator names
+/// nested fields after physical expressions. For example, `array_agg(v ORDER BY ts)` declares
+/// its orderings as `List(Struct("ts": ..))` but produces `List(Struct("ts@0": ..))`. Arrays that
+/// differ only in nested field names are cast to the declared type; any other difference is an
+/// error.
+fn state_struct_array(
+    state_fields: &Fields,
+    arrays: Vec<ArrayRef>,
+) -> datafusion_common::Result<StructArray> {
+    if arrays.len() != state_fields.len() {
+        return Err(datafusion_common::DataFusionError::Internal(format!(
+            "Expected {} state arrays for fields {:?}, got {}",
+            state_fields.len(),
+            state_fields,
+            arrays.len()
+        )));
+    }
+    let arrays = arrays
+        .into_iter()
+        .zip(state_fields.iter())
+        .map(|(array, field)| {
+            let expected = field.data_type();
+            if array.data_type() == expected {
+                Ok(array)
+            } else if array.data_type().equals_datatype(expected) {
+                Ok(make_array(relabel_nested_fields(
+                    array.to_data(),
+                    expected,
+                )?))
+            } else {
+                Err(datafusion_common::DataFusionError::Internal(format!(
+                    "State field `{}` expects type {expected}, but the accumulator produced {}",
+                    field.name(),
+                    array.data_type()
+                )))
+            }
+        })
+        .collect::<datafusion_common::Result<Vec<_>>>()?;
+    Ok(StructArray::try_new(state_fields.clone(), arrays, None)?)
+}
+
+/// Rebuilds `data` with the type `target`, which must match it position by position apart
+/// from nested field names and metadata. Unlike a cast, children are never matched by name.
+fn relabel_nested_fields(
+    data: ArrayData,
+    target: &DataType,
+) -> datafusion_common::Result<ArrayData> {
+    let child_types = match target {
+        DataType::List(field)
+        | DataType::LargeList(field)
+        | DataType::FixedSizeList(field, _)
+        | DataType::Map(field, _) => vec![field.data_type()],
+        DataType::Struct(fields) => fields.iter().map(|f| f.data_type()).collect(),
+        _ if data.child_data().is_empty() => vec![],
+        _ => {
+            return Err(datafusion_common::DataFusionError::NotImplemented(format!(
+                "Relabeling nested fields of {target}"
+            )));
+        }
+    };
+    let children = data
+        .child_data()
+        .iter()
+        .zip(child_types)
+        .map(|(child, child_type)| relabel_nested_fields(child.clone(), child_type))
+        .collect::<datafusion_common::Result<Vec<_>>>()?;
+    Ok(data
+        .into_builder()
+        .data_type(target.clone())
+        .child_data(children)
+        .build()?)
 }
 
 impl StateAccum {
@@ -625,40 +688,7 @@ impl Accumulator for StateAccum {
             .iter()
             .map(|s| s.to_array())
             .collect::<Result<Vec<_>, _>>()?;
-        let array_type = array
-            .iter()
-            .map(|a| a.data_type().clone())
-            .collect::<Vec<_>>();
-        let expected_type: Vec<_> = self
-            .state_fields
-            .iter()
-            .map(|f| f.data_type().clone())
-            .collect();
-        if array_type != expected_type {
-            debug!(
-                "State mismatch, expected: {}, got: {} for expected fields: {:?} and given array types: {:?}",
-                self.state_fields.len(),
-                array.len(),
-                self.state_fields,
-                array_type,
-            );
-            let guess_schema = array
-                .iter()
-                .enumerate()
-                .map(|(index, array)| {
-                    Field::new(
-                        format!("col_{index}[mismatch_state]").as_str(),
-                        array.data_type().clone(),
-                        true,
-                    )
-                })
-                .collect::<Fields>();
-            let arr = StructArray::try_new(guess_schema, array, None)?;
-
-            return Ok(ScalarValue::Struct(Arc::new(arr)));
-        }
-
-        let struct_array = StructArray::try_new(self.state_fields.clone(), array, None)?;
+        let struct_array = state_struct_array(&self.state_fields, array)?;
         Ok(ScalarValue::Struct(Arc::new(struct_array)))
     }
 
@@ -674,6 +704,218 @@ impl Accumulator for StateAccum {
         values: &[datatypes::arrow::array::ArrayRef],
     ) -> datafusion_common::Result<()> {
         self.inner.update_batch(values)
+    }
+
+    fn size(&self) -> usize {
+        self.inner.size()
+    }
+
+    fn state(&mut self) -> datafusion_common::Result<Vec<ScalarValue>> {
+        self.inner.state()
+    }
+}
+
+/// A globally registerable wrapper for a state-family merge UDAF.
+///
+/// The wrapped merge function has the family contract `P..., State`. This
+/// wrapper exposes `P..., delta_state, persisted_state` and forwards the two
+/// state columns to the existing accumulator in that order. State values are
+/// opaque to this adapter; null is the inner merge family's identity value.
+#[derive(Debug, Clone)]
+pub(crate) struct DeltaMergeWrapper {
+    inner: AggregateUDF,
+    name: String,
+    signature: Signature,
+    inner_types: Vec<DataType>,
+    state_type: DataType,
+}
+
+impl DeltaMergeWrapper {
+    /// Build the wrapper for one of the explicitly supported exact merge UDAFs.
+    ///
+    /// The caller supplies the known merge signature, so construction cannot
+    /// fail while inspecting an arbitrary UDAF signature.
+    pub(crate) fn new(
+        inner: AggregateUDF,
+        state_name: &str,
+        inner_types: Vec<DataType>,
+        state_type: DataType,
+    ) -> Self {
+        let mut wrapper_types = inner_types.clone();
+        wrapper_types.push(state_type.clone());
+        Self {
+            name: aggr_delta_merge_func_name(state_name),
+            signature: Signature::exact(wrapper_types, inner.signature().volatility),
+            inner,
+            inner_types,
+            state_type,
+        }
+    }
+
+    fn resolve_inner_args(
+        &self,
+        input_fields: &[FieldRef],
+    ) -> datafusion_common::Result<Vec<FieldRef>> {
+        if input_fields.len() != self.inner_types.len() + 1 {
+            return Err(datafusion_common::DataFusionError::Plan(
+                "delta merge requires parameters, delta state, and persisted state".to_string(),
+            ));
+        }
+        for (field, expected_type) in input_fields[..self.inner_types.len()]
+            .iter()
+            .zip(&self.inner_types)
+        {
+            if field.data_type() != expected_type {
+                return Err(datafusion_common::DataFusionError::Plan(format!(
+                    "delta merge argument type does not match its exact signature: {:?} != {expected_type:?}",
+                    field.data_type()
+                )));
+            }
+        }
+        let persisted = &input_fields[self.inner_types.len()];
+        if persisted.data_type() != &self.state_type && persisted.data_type() != &DataType::Null {
+            return Err(datafusion_common::DataFusionError::Plan(format!(
+                "persisted state type does not match the exact state type: {:?} != {:?}",
+                persisted.data_type(),
+                self.state_type
+            )));
+        }
+        Ok(input_fields[..self.inner_types.len()].to_vec())
+    }
+}
+
+impl AggregateUDFImpl for DeltaMergeWrapper {
+    fn accumulator<'a, 'b>(
+        &'a self,
+        acc_args: datafusion_expr::function::AccumulatorArgs<'b>,
+    ) -> datafusion_common::Result<Box<dyn Accumulator>> {
+        if acc_args.exprs.len() != acc_args.expr_fields.len() {
+            return Err(datafusion_common::DataFusionError::Plan(
+                "delta merge expression and field arities differ".to_string(),
+            ));
+        }
+        let inner_fields = self.resolve_inner_args(acc_args.expr_fields)?;
+        for (expr, expected_type) in acc_args.exprs.iter().zip(
+            self.inner_types
+                .iter()
+                .chain(std::iter::once(&self.state_type)),
+        ) {
+            if expr.data_type(acc_args.schema)? != *expected_type {
+                return Err(datafusion_common::DataFusionError::Internal(
+                    "delta merge physical expression type is not resolved".to_string(),
+                ));
+            }
+        }
+        let state_index = self.inner_types.len() - 1;
+        let inner_args = datafusion_expr::function::AccumulatorArgs {
+            return_field: acc_args.return_field,
+            schema: acc_args.schema,
+            ignore_nulls: acc_args.ignore_nulls,
+            order_bys: acc_args.order_bys,
+            is_reversed: acc_args.is_reversed,
+            name: self.inner.name(),
+            is_distinct: acc_args.is_distinct,
+            exprs: &acc_args.exprs[..=state_index],
+            expr_fields: &inner_fields,
+        };
+        Ok(Box::new(DeltaMergeAccum {
+            inner: self.inner.accumulator(inner_args)?,
+            params: state_index,
+        }))
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn is_nullable(&self) -> bool {
+        self.inner.is_nullable()
+    }
+
+    fn return_type(&self, arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
+        let fields = arg_types
+            .iter()
+            .enumerate()
+            .map(|(index, data_type)| {
+                Arc::new(Field::new(index.to_string(), data_type.clone(), true))
+            })
+            .collect::<Vec<_>>();
+        let inner_fields = self.resolve_inner_args(&fields)?;
+        self.inner.return_type(
+            &inner_fields
+                .iter()
+                .map(|field| field.data_type().clone())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn return_field(&self, arg_fields: &[FieldRef]) -> datafusion_common::Result<FieldRef> {
+        let inner_fields = self.resolve_inner_args(arg_fields)?;
+        self.inner.return_field(&inner_fields)
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn state_fields(
+        &self,
+        args: datafusion_expr::function::StateFieldsArgs,
+    ) -> datafusion_common::Result<Vec<FieldRef>> {
+        let inner_fields = self.resolve_inner_args(args.input_fields)?;
+        self.inner
+            .state_fields(datafusion_expr::function::StateFieldsArgs {
+                name: args.name,
+                input_fields: &inner_fields,
+                return_field: args.return_field,
+                ordering_fields: args.ordering_fields,
+                is_distinct: args.is_distinct,
+            })
+    }
+}
+
+impl PartialEq for DeltaMergeWrapper {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.inner == other.inner
+    }
+}
+impl Eq for DeltaMergeWrapper {}
+impl Hash for DeltaMergeWrapper {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.inner.hash(state);
+    }
+}
+
+#[derive(Debug)]
+struct DeltaMergeAccum {
+    inner: Box<dyn Accumulator>,
+    params: usize,
+}
+
+impl Accumulator for DeltaMergeAccum {
+    fn evaluate(&mut self) -> datafusion_common::Result<ScalarValue> {
+        self.inner.evaluate()
+    }
+
+    fn update_batch(&mut self, values: &[ArrayRef]) -> datafusion_common::Result<()> {
+        if values.len() != self.params + 2 {
+            return Err(datafusion_common::DataFusionError::Plan(format!(
+                "delta merge expected {} arguments, got {}",
+                self.params + 2,
+                values.len()
+            )));
+        }
+        // Null-state identity is an inner family precondition. The wrapper
+        // forwards opaque states and never decodes or filters them.
+        let mut inner_values = values[..self.params + 1].to_vec();
+        self.inner.update_batch(&inner_values)?;
+        inner_values[self.params] = values[self.params + 1].clone();
+        self.inner.update_batch(&inner_values)
+    }
+
+    fn merge_batch(&mut self, states: &[ArrayRef]) -> datafusion_common::Result<()> {
+        self.inner.merge_batch(states)
     }
 
     fn size(&self) -> usize {
@@ -751,9 +993,6 @@ impl AggregateUDFImpl for MergeWrapper {
         Ok(Box::new(MergeAccum::new(inner_accum, &fields)))
     }
 
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
     fn name(&self) -> &str {
         self.name.as_str()
     }

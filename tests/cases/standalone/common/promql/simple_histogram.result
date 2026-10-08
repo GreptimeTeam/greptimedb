@@ -134,8 +134,10 @@ tql eval (3000, 3000, '1s') label_replace(histogram_quantile(0.8, histogram_buck
 -- SQLNESS SORT_RESULT 3 1
 tql eval (3000, 3000, '1s') histogram_quantile(0.2, rate(histogram_bucket[10m]));
 
-++
-++
++----+------------------------------------------+---+
+| ts | prom_rate(ts_range,val,ts,Int64(600000)) | s |
++----+------------------------------------------+---+
++----+------------------------------------------+---+
 
 drop table histogram_bucket;
 
@@ -347,8 +349,10 @@ Affected Rows: 0
 -- SQLNESS SORT_RESULT 3 1
 tql eval(0, 10, '10s') histogram_quantile(0.99, sum by(pod,instance, fff) (rate(greptime_servers_postgres_query_elapsed_bucket{instance=~"xxx"}[1m])));
 
-++
-++
++------+----------------------------------------------------+
+| time | sum(prom_rate(time_range,value,time,Int64(60000))) |
++------+----------------------------------------------------+
++------+----------------------------------------------------+
 
 -- test case where table exists but doesn't have 'le' column should raise error
 CREATE TABLE greptime_servers_postgres_query_elapsed_no_le (
@@ -365,14 +369,18 @@ Affected Rows: 0
 -- SQLNESS SORT_RESULT 3 1
 tql eval(0, 10, '10s') histogram_quantile(0.99, sum by(pod,instance, le) (rate(greptime_servers_postgres_query_elapsed_no_le{instance=~"xxx"}[1m])));
 
-++
-++
++-----+----------+---+------------------------------------------+
+| pod | instance | t | sum(prom_rate(t_range,v,t,Int64(60000))) |
++-----+----------+---+------------------------------------------+
++-----+----------+---+------------------------------------------+
 
 -- SQLNESS SORT_RESULT 3 1
 tql eval(0, 10, '10s') histogram_quantile(0.99, sum by(pod,instance, fbf) (rate(greptime_servers_postgres_query_elapsed_no_le{instance=~"xxx"}[1m])));
 
-++
-++
++-----+----------+---+------------------------------------------+
+| pod | instance | t | sum(prom_rate(t_range,v,t,Int64(60000))) |
++-----+----------+---+------------------------------------------+
++-----+----------+---+------------------------------------------+
 
 drop table greptime_servers_postgres_query_elapsed_no_le;
 
@@ -425,6 +433,95 @@ tql eval (3000, 3015, '3s') histogram_quantile(0.5, histogram5_bucket);
 +---------------------+---+--------------------+
 
 drop table histogram5_bucket;
+
+Affected Rows: 0
+
+-- Issue #9443: string labels stay distinct during aggregation, but equal
+-- numeric bucket boundaries must be coalesced before monotonicity repair.
+CREATE TABLE equivalent_bounds_bucket (
+    ts TIMESTAMP TIME INDEX,
+    instance STRING,
+    le STRING,
+    val DOUBLE,
+    PRIMARY KEY (instance, le)
+);
+
+Affected Rows: 0
+
+INSERT INTO equivalent_bounds_bucket VALUES
+    (3000000, 'a', '10', 40),
+    (3000000, 'a', '100', 50),
+    (3000000, 'a', '+Inf', 50),
+    (3000000, 'b', '10.0', 40),
+    (3000000, 'b', '100.0', 50),
+    (3000000, 'b', '1000.0', 50),
+    (3000000, 'b', '+Inf', 50);
+
+Affected Rows: 7
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') sum by (le) (equivalent_bounds_bucket);
+
++--------+---------------------+-----------------------------------+
+| le     | ts                  | sum(equivalent_bounds_bucket.val) |
++--------+---------------------+-----------------------------------+
+| +Inf   | 1970-01-01T00:50:00 | 100.0                             |
+| 10     | 1970-01-01T00:50:00 | 40.0                              |
+| 10.0   | 1970-01-01T00:50:00 | 40.0                              |
+| 100    | 1970-01-01T00:50:00 | 50.0                              |
+| 100.0  | 1970-01-01T00:50:00 | 50.0                              |
+| 1000.0 | 1970-01-01T00:50:00 | 50.0                              |
++--------+---------------------+-----------------------------------+
+
+tql eval (3000, 3000, '1s') histogram_quantile(0.95, sum by (le) (equivalent_bounds_bucket));
+
++---------------------+-----------------------------------+
+| ts                  | sum(equivalent_bounds_bucket.val) |
++---------------------+-----------------------------------+
+| 1970-01-01T00:50:00 | 77.5                              |
++---------------------+-----------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') histogram_quantile(0.95, sum by (instance, le) (equivalent_bounds_bucket));
+
++----------+---------------------+-----------------------------------+
+| instance | ts                  | sum(equivalent_bounds_bucket.val) |
++----------+---------------------+-----------------------------------+
+| a        | 1970-01-01T00:50:00 | 77.5                              |
+| b        | 1970-01-01T00:50:00 | 77.5                              |
++----------+---------------------+-----------------------------------+
+
+DROP TABLE equivalent_bounds_bucket;
+
+Affected Rows: 0
+
+-- Equivalent infinity labels belong to the same histogram until the group ends.
+CREATE TABLE infinity_bounds_bucket (
+    ts TIMESTAMP TIME INDEX,
+    le STRING,
+    val DOUBLE,
+    PRIMARY KEY (le)
+);
+
+Affected Rows: 0
+
+INSERT INTO infinity_bounds_bucket VALUES
+    (3000000, '10', 20),
+    (3000000, '10.0', 20),
+    (3000000, '+Inf', 25),
+    (3000000, '+inf', 25);
+
+Affected Rows: 4
+
+tql eval (3000, 3000, '1s') histogram_quantile(0.5, infinity_bounds_bucket);
+
++---------------------+------+
+| ts                  | val  |
++---------------------+------+
+| 1970-01-01T00:50:00 | 6.25 |
++---------------------+------+
+
+DROP TABLE infinity_bounds_bucket;
 
 Affected Rows: 0
 

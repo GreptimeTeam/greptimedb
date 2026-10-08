@@ -1,0 +1,104 @@
+name: Query Regression Nightly
+
+# After a successful GreptimeDB Nightly Build, compare that commit against
+# the previous successful nightly. The reusable Query Regression workflow
+# still compiles both SHAs; this wrapper only resolves which two SHAs.
+
+on:
+  workflow_run:
+    workflows:
+      - GreptimeDB Nightly Build
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: Base ref/SHA (empty = previous successful nightly)
+        required: false
+        type: string
+        default: ""
+      candidate_ref:
+        description: Candidate ref/SHA (empty = latest successful nightly)
+        required: false
+        type: string
+        default: ""
+      candidate_run_id:
+        description: Nightly Build run id to treat as candidate (empty = latest)
+        required: false
+        type: string
+        default: ""
+      case:
+        description: Query perf case path(s), all, or heavy
+        required: false
+        type: string
+        default: all
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  resolve-refs:
+    name: Resolve previous vs current nightly SHAs
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      skip: ${{ steps.refs.outputs.skip }}
+      reason: ${{ steps.refs.outputs.reason }}
+      base_sha: ${{ steps.refs.outputs.base_sha }}
+      candidate_sha: ${{ steps.refs.outputs.candidate_sha }}
+    steps:
+      - name: Checkout ref resolver
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Resolve nightly SHAs
+        id: refs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          CANDIDATE_RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || inputs.candidate_run_id || '' }}
+          BASE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.base_ref || '' }}
+          CANDIDATE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.candidate_ref || '' }}
+        run: python3 .github/scripts/query-regression-nightly-refs.py
+
+      - name: Summarize comparison
+        if: always()
+        env:
+          SKIP: ${{ steps.refs.outputs.skip }}
+          REASON: ${{ steps.refs.outputs.reason }}
+          BASE_SHA: ${{ steps.refs.outputs.base_sha }}
+          CANDIDATE_SHA: ${{ steps.refs.outputs.candidate_sha }}
+          BASE_RUN_URL: ${{ steps.refs.outputs.base_run_url }}
+          CANDIDATE_RUN_URL: ${{ steps.refs.outputs.candidate_run_url }}
+        run: |
+          set -euo pipefail
+          {
+            if [[ "${SKIP}" == "true" ]]; then
+              printf 'Skipping query-regression nightly: %s\n' "${REASON}"
+            else
+              printf 'Comparing previous nightly `%s` -> current nightly `%s`\n' \
+                "${BASE_SHA}" "${CANDIDATE_SHA}"
+              if [[ -n "${BASE_RUN_URL}" ]]; then
+                printf -- '- Previous Nightly Build: %s\n' "${BASE_RUN_URL}"
+              fi
+              if [[ -n "${CANDIDATE_RUN_URL}" ]]; then
+                printf -- '- Current Nightly Build: %s\n' "${CANDIDATE_RUN_URL}"
+              fi
+            fi
+          } | tee -a "${GITHUB_STEP_SUMMARY}"
+
+  query-regression:
+    name: Query regression nightly
+    needs: [resolve-refs]
+    if: ${{ needs.resolve-refs.outputs.skip != 'true' && needs.resolve-refs.outputs.base_sha != '' && needs.resolve-refs.outputs.candidate_sha != '' }}
+    uses: ./.github/workflows/query-regression.yml
+    secrets: inherit
+    with:
+      case: ${{ github.event_name == 'workflow_dispatch' && inputs.case || 'all' }}
+      base_ref: ${{ needs.resolve-refs.outputs.base_sha }}
+      candidate_ref: ${{ needs.resolve-refs.outputs.candidate_sha }}
+      cargo_profile: nightly
+      runner: aliyun-ecs

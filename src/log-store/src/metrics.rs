@@ -54,6 +54,10 @@ lazy_static! {
         "greptime_logstore_op_elapsed",
         "logstore operation elapsed",
         &[LOGSTORE_LABEL, OPTYPE_LABEL],
+        vec![
+            0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
+            45.0, 60.0,
+        ],
     )
     .unwrap();
     /// Timer of the append_batch operation on the kafka logstore.
@@ -83,6 +87,14 @@ lazy_static! {
         "greptime_logstore_kafka_client_produce_elapsed",
         "kafka logstore produce operation elapsed",
         &[LOGSTORE_LABEL, PARTITION_LABEL],
+    )
+    .unwrap();
+
+    /// Counter of segments a read of the object store logstore skipped because
+    /// they did not decode.
+    pub static ref METRIC_OBJECT_STORE_WAL_SKIPPED_SEGMENTS_TOTAL: IntCounter = register_int_counter!(
+        "greptime_logstore_object_store_wal_skipped_segments_total",
+        "object store logstore skipped corrupted segments total",
     )
     .unwrap();
 }

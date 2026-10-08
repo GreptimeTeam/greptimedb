@@ -26,7 +26,8 @@ use tokio::sync::Semaphore;
 
 use crate::cache::manifest_cache::ManifestCache;
 use crate::error::{
-    CompressObjectSnafu, DecompressObjectSnafu, InvalidScanIndexSnafu, OpenDalSnafu, Result,
+    CompressObjectSnafu, DecompressObjectSnafu, InvalidScanIndexSnafu, ManifestDeltaNotFoundSnafu,
+    OpenDalSnafu, Result,
 };
 use crate::manifest::storage::size_tracker::Tracker;
 use crate::manifest::storage::utils::{
@@ -212,11 +213,16 @@ impl<T: Tracker> DeltaStorage<T> {
 
             // Fetch from remote object store
             let compress_type = file_compress_type(entry.name());
-            let bytes = self
-                .object_store
-                .read(entry.path())
-                .await
-                .context(OpenDalSnafu)?;
+            let bytes = match self.object_store.read(entry.path()).await {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == ErrorKind::NotFound => {
+                    return Err(error).context(ManifestDeltaNotFoundSnafu {
+                        version: *v,
+                        path: entry.path(),
+                    });
+                }
+                Err(error) => return Err(error).context(OpenDalSnafu),
+            };
             let data = compress_type
                 .decode(bytes)
                 .await

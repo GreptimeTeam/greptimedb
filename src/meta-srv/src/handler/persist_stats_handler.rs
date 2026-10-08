@@ -22,7 +22,7 @@ use client::inserter::{Context as InserterContext, Inserter};
 use common_catalog::consts::DEFAULT_PRIVATE_SCHEMA_NAME;
 use common_macro::{Schema, ToRow};
 use common_meta::DatanodeId;
-use common_meta::datanode::RegionStat;
+use common_meta::datanode::{REGION_STATS_HISTORY_TABLE_NAME, RegionStat};
 use common_telemetry::warn;
 use dashmap::DashMap;
 use store_api::region_engine::RegionRole;
@@ -40,8 +40,6 @@ pub struct PersistStatsHandler {
     persist_interval: Duration,
 }
 
-/// The name of the table to persist region stats.
-const META_REGION_STATS_HISTORY_TABLE_NAME: &str = "region_statistics_history";
 /// The default context to persist region stats.
 const DEFAULT_CONTEXT: InserterContext = InserterContext {
     catalog: DEFAULT_CATALOG_NAME,
@@ -156,9 +154,9 @@ fn align_ts(ts: i64, interval: Duration) -> i64 {
 impl PersistStatsHandler {
     /// Creates a new [`PersistStatsHandler`].
     pub fn new(inserter: Box<dyn Inserter>, mut persist_interval: Duration) -> Self {
-        if persist_interval < Duration::from_mins(10) {
+        if persist_interval < Duration::from_secs(10 * 60) {
             warn!("persist_interval is less than 10 minutes, set to 10 minutes");
-            persist_interval = Duration::from_mins(10);
+            persist_interval = Duration::from_secs(10 * 60);
         }
 
         Self {
@@ -207,7 +205,7 @@ impl PersistStatsHandler {
                 &DEFAULT_CONTEXT,
                 RowInsertRequests {
                     inserts: vec![RowInsertRequest {
-                        table_name: META_REGION_STATS_HISTORY_TABLE_NAME.to_string(),
+                        table_name: REGION_STATS_HISTORY_TABLE_NAME.to_string(),
                         rows: Some(Rows {
                             schema: PersistRegionStat::schema(),
                             rows,
@@ -304,6 +302,8 @@ mod tests {
             query_scanned_bytes: 0,
             data_topic_latest_entry_id: 200,
             metadata_topic_latest_entry_id: 200,
+            min_timestamp: None,
+            max_timestamp: None,
         }
     }
 
@@ -537,7 +537,7 @@ mod tests {
         };
         assert_eq!(
             request.table_name,
-            META_REGION_STATS_HISTORY_TABLE_NAME.to_string()
+            REGION_STATS_HISTORY_TABLE_NAME.to_string()
         );
         assert_eq!(request.rows.unwrap().rows, vec![expected_row]);
 

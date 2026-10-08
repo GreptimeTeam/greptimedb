@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::io::Write;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::Duration;
 
 use cmd::options::GreptimeOptions;
@@ -29,6 +30,7 @@ use datanode::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use file_engine::config::EngineConfig as FileEngineConfig;
 use flow::FlownodeOptions;
 use frontend::frontend::FrontendOptions;
+use frontend::service_config::PendingRowsBatcherOptions;
 use meta_client::MetaClientOptions;
 use meta_srv::metasrv::MetasrvOptions;
 use meta_srv::selector::SelectorType;
@@ -50,6 +52,12 @@ fn test_load_datanode_runtime_options_from_runtime_section() {
         compact_rt_max_blocking_threads = 6
         ingest_rt_size = 8
         query_rt_size = 7
+
+        [runtime.experimental_workload_scheduler]
+        enable = true
+        query_weight = 1
+        write_weight = 4
+        sample_every_polls = 32
     "#;
 
     let options: GreptimeOptions<DatanodeOptions> = toml::from_str(toml).unwrap();
@@ -59,6 +67,44 @@ fn test_load_datanode_runtime_options_from_runtime_section() {
     assert_eq!(6, options.runtime.compact_rt_max_blocking_threads);
     assert_eq!(8, options.runtime.ingest_rt_size);
     assert_eq!(7, options.runtime.query_rt_size);
+    assert!(options.runtime.experimental_workload_scheduler.enable);
+    assert_eq!(
+        NonZeroU32::new(1).unwrap(),
+        options.runtime.experimental_workload_scheduler.query_weight
+    );
+    assert_eq!(
+        NonZeroU32::new(4).unwrap(),
+        options.runtime.experimental_workload_scheduler.write_weight
+    );
+    assert_eq!(
+        NonZeroUsize::new(32).unwrap(),
+        options
+            .runtime
+            .experimental_workload_scheduler
+            .sample_every_polls
+    );
+}
+
+#[test]
+fn test_load_runtime_options_rejects_zero_scheduler_sampling() {
+    let toml = r#"
+        [runtime.experimental_workload_scheduler]
+        sample_every_polls = 0
+    "#;
+
+    let result = toml::from_str::<GreptimeOptions<DatanodeOptions>>(toml);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_load_runtime_options_rejects_zero_scheduler_weight() {
+    let toml = r#"
+        [runtime.experimental_workload_scheduler]
+        query_weight = 0
+    "#;
+
+    let result = toml::from_str::<GreptimeOptions<DatanodeOptions>>(toml);
+    assert!(result.is_err());
 }
 
 #[test]
@@ -77,6 +123,44 @@ fn test_load_runtime_options_without_max_blocking_threads() {
         RuntimeOptions::default().compact_rt_max_blocking_threads,
         options.runtime.compact_rt_max_blocking_threads
     );
+}
+
+#[test]
+#[cfg(feature = "hdfs-object-store")]
+fn test_load_datanode_hdfs_config() {
+    let config = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        config.path(),
+        r#"
+            [storage]
+            type = "Hdfs"
+            name = "local-hdfs"
+            root = "/greptimedb"
+            name_node = "hdfs://127.0.0.1:9000"
+            enable_read_cache = false
+            options = { "dfs.client.block.write.replace-datanode-on-failure.enable" = "true" }
+        "#,
+    )
+    .unwrap();
+
+    let options =
+        GreptimeOptions::<DatanodeOptions>::load_layered_options(config.path().to_str(), "")
+            .unwrap();
+    let object_store::config::ObjectStoreConfig::Hdfs(hdfs) = options.component.storage.store
+    else {
+        unreachable!()
+    };
+
+    assert_eq!("local-hdfs", hdfs.name);
+    assert_eq!("/greptimedb", hdfs.connection.root);
+    assert_eq!("hdfs://127.0.0.1:9000", hdfs.connection.name_node);
+    assert_eq!(
+        Some(&"true".to_string()),
+        hdfs.connection
+            .options
+            .get("dfs.client.block.write.replace-datanode-on-failure.enable")
+    );
+    assert!(!hdfs.cache.enable_read_cache);
 }
 
 #[allow(deprecated)]
@@ -113,7 +197,8 @@ fn test_load_datanode_example_config() {
             },
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
-                    auto_flush_interval: Duration::from_secs(3600),
+                    experimental_series_index_max_size: ReadableSize::gb(5),
+                    auto_flush_interval: Duration::from_secs(10 * 60),
                     default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     scan_memory_limit: MemoryLimit::Unlimited,
@@ -155,6 +240,10 @@ fn test_load_frontend_example_config() {
             .unwrap();
     let expected = GreptimeOptions::<FrontendOptions> {
         component: FrontendOptions {
+            pending_rows_batcher: PendingRowsBatcherOptions {
+                logical_table: Some(Default::default()),
+                ..Default::default()
+            },
             default_timezone: Some("UTC".to_string()),
             default_column_prefix: Some("greptime".to_string()),
             auto_create_table: true,
@@ -301,6 +390,7 @@ fn test_load_flownode_example_config() {
                 allow_query_fallback: false,
                 memory_pool_size: MemoryLimit::Percentage(50),
                 enable_per_region_metrics: false,
+                ..Default::default()
             },
             meta_client: Some(MetaClientOptions {
                 metasrv_addrs: vec!["127.0.0.1:3002".to_string()],
@@ -331,6 +421,10 @@ fn test_load_standalone_example_config() {
             .unwrap();
     let expected = GreptimeOptions::<StandaloneOptions> {
         component: StandaloneOptions {
+            pending_rows_batcher: PendingRowsBatcherOptions {
+                logical_table: Some(Default::default()),
+                ..Default::default()
+            },
             default_timezone: Some("UTC".to_string()),
             default_column_prefix: Some("greptime".to_string()),
             auto_create_table: true,
@@ -342,7 +436,8 @@ fn test_load_standalone_example_config() {
             }),
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
-                    auto_flush_interval: Duration::from_secs(3600),
+                    experimental_series_index_max_size: ReadableSize::gb(5),
+                    auto_flush_interval: Duration::from_secs(10 * 60),
                     default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
                     scan_memory_limit: MemoryLimit::Unlimited,
@@ -369,6 +464,7 @@ fn test_load_standalone_example_config() {
                 cors_allowed_origins: vec!["https://example.com".to_string()],
                 ..Default::default()
             },
+            grpc: GrpcOptions::default(),
             query: QueryOptions {
                 memory_pool_size: MemoryLimit::Percentage(50),
                 ..Default::default()
@@ -378,6 +474,292 @@ fn test_load_standalone_example_config() {
         ..Default::default()
     };
     similar_asserts::assert_eq!(options, expected);
+}
+
+/// Renders an example config with its `#+` options enabled, as `config.md`
+/// lists them. With `drop_none_default`, options annotated with
+/// `@toml2docs:none-default` are removed, because `config.md` does not present
+/// their example value as the default.
+fn render_example(example: &str, drop_none_default: bool) -> String {
+    let mut rendered = String::new();
+    let mut none_default = false;
+    for line in example.lines() {
+        let line = line.trim_start();
+        if line.starts_with("##") {
+            none_default |= line.contains("@toml2docs:none-default");
+            continue;
+        }
+        let line = line.strip_prefix("#+").map_or(line, str::trim_start);
+        let is_option = !line.starts_with('[') && line.contains('=');
+        if !(is_option && drop_none_default && none_default) {
+            rendered.push_str(line);
+            rendered.push('\n');
+        }
+        none_default = false;
+    }
+    rendered
+}
+
+/// Flattens leaf values into dotted paths. Arrays of tables such as
+/// `region_engine` are merged, since each element is keyed by its engine name.
+fn leaf_values(value: &toml::Value, prefix: &str, leaves: &mut Vec<(String, toml::Value)>) {
+    match value {
+        toml::Value::Table(table) => {
+            for (key, value) in table {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                leaf_values(value, &path, leaves);
+            }
+        }
+        toml::Value::Array(array)
+            if array.iter().all(toml::Value::is_table) && !array.is_empty() =>
+        {
+            for element in array {
+                leaf_values(element, prefix, leaves);
+            }
+        }
+        _ => leaves.push((prefix.to_string(), value.clone())),
+    }
+}
+
+/// Removes the option at a dotted path produced by [`leaf_values`].
+fn remove_leaf(value: &mut toml::Value, path: &str) -> bool {
+    match value {
+        toml::Value::Array(array) => array.iter_mut().any(|element| remove_leaf(element, path)),
+        toml::Value::Table(table) => match path.split_once('.') {
+            None => table.remove(path).is_some(),
+            Some((head, rest)) => table
+                .get_mut(head)
+                .is_some_and(|value| remove_leaf(value, rest)),
+        },
+        _ => false,
+    }
+}
+
+fn load_as_leaves<T>(
+    config: Option<&str>,
+) -> common_config::error::Result<std::collections::HashMap<String, toml::Value>>
+where
+    T: Configurable + serde::Serialize,
+{
+    let file = config.map(|config| {
+        let mut file = create_named_temp_file();
+        file.write_all(config.as_bytes()).unwrap();
+        file
+    });
+    let options = GreptimeOptions::<T>::load_layered_options(
+        file.as_ref().map(|file| file.path().to_str().unwrap()),
+        "",
+    )?;
+    let mut leaves = Vec::new();
+    leaf_values(&toml::Value::try_from(&options).unwrap(), "", &mut leaves);
+    Ok(leaves.into_iter().collect())
+}
+
+/// Returns the default of an option inside the example's other settings, so
+/// that options in sections absent by default still have one to compare with.
+/// Removes the closest enclosing table that still loads without the option.
+fn default_within_example<T>(full: &toml::Value, path: &str) -> Option<toml::Value>
+where
+    T: Configurable + serde::Serialize,
+{
+    let mut removed = path;
+    loop {
+        let mut without = full.clone();
+        assert!(remove_leaf(&mut without, removed));
+        if let Ok(defaults) = load_as_leaves::<T>(Some(&toml::to_string(&without).unwrap())) {
+            return defaults.get(path).cloned();
+        }
+        removed = removed
+            .rsplit_once('.')
+            .unwrap_or_else(|| panic!("the example does not load without `{path}`"))
+            .0;
+    }
+}
+
+/// Checks that every option in an example config exists, and that every value
+/// `config.md` presents as a default is the actual default.
+///
+/// `variants` lists tagged sections, e.g. `("wal", "provider", ["kafka"])`,
+/// whose options only deserialize under a specific tag value.
+fn check_example_defaults<T>(name: &str, variants: &[(&str, &str, &[&str])]) -> Vec<String>
+where
+    T: Configurable + serde::Serialize,
+{
+    let example = std::fs::read_to_string(common_test_util::find_workspace_path(&format!(
+        "config/{name}"
+    )))
+    .unwrap();
+    let full: toml::Value = toml::from_str(&render_example(&example, false)).unwrap();
+    let documented: toml::Value = toml::from_str(&render_example(&example, true)).unwrap();
+
+    // (options loaded from the example, options loaded without config) per variant
+    let mut loaded = vec![(
+        load_as_leaves::<T>(Some(&toml::to_string(&full).unwrap())).unwrap(),
+        load_as_leaves::<T>(None).unwrap(),
+    )];
+    for (section, tag, values) in variants {
+        for value in *values {
+            let mut variant = full.clone();
+            variant[section][tag] = toml::Value::String(value.to_string());
+            loaded.push((
+                load_as_leaves::<T>(Some(&toml::to_string(&variant).unwrap())).unwrap(),
+                load_as_leaves::<T>(Some(&format!("[{section}]\n{tag} = \"{value}\"\n"))).unwrap(),
+            ));
+        }
+    }
+
+    // Deserialize-only fields, invisible in the serialized options.
+    const SKIP_SERIALIZING: &[&str] = &[
+        "storage.access_key_id",
+        "storage.secret_access_key",
+        "storage.access_key_secret",
+        "storage.account_name",
+        "storage.account_key",
+        "storage.credential_path",
+        "storage.credential",
+        "region_engine.mito.inverted_index.intermediate_path",
+    ];
+
+    let mut errors = Vec::new();
+    let mut full_leaves = Vec::new();
+    leaf_values(&full, "", &mut full_leaves);
+    for (path, _) in full_leaves {
+        if SKIP_SERIALIZING.contains(&path.as_str())
+            || (path == "tracing.tokio_console_addr" && !cfg!(feature = "tokio-console"))
+        {
+            continue;
+        }
+        if !loaded
+            .iter()
+            .any(|(example, _)| example.contains_key(&path))
+        {
+            errors.push(format!("{name}: `{path}` is not a known option"));
+        }
+    }
+
+    // Options left unset by default and resolved where they are used.
+    let resolved_at_runtime: [(&str, toml::Value); 7] = [
+        (
+            "logging.dir",
+            format!("{DEFAULT_DATA_HOME}/{DEFAULT_LOGGING_DIR}").into(),
+        ),
+        ("logging.otlp_endpoint", DEFAULT_OTLP_HTTP_ENDPOINT.into()),
+        ("logging.otlp_export_protocol", "http".into()),
+        ("logging.tracing_sample_ratio.default_ratio", 1.0.into()),
+        ("wal.sync_period", "5s".into()),
+        (
+            "storage.copy_root",
+            format!("{DEFAULT_DATA_HOME}/copy").into(),
+        ),
+        ("flow.batching_mode.frontend_tls.enabled", false.into()),
+    ];
+
+    let mut documented_leaves = Vec::new();
+    leaf_values(&documented, "", &mut documented_leaves);
+    for (path, documented_value) in documented_leaves {
+        if SKIP_SERIALIZING.contains(&path.as_str()) {
+            continue;
+        }
+        if let Some((_, resolved)) = resolved_at_runtime.iter().find(|(p, _)| *p == path) {
+            if &documented_value != resolved {
+                errors.push(format!(
+                    "{name}: `{path}` is documented as default `{documented_value}`, but resolves to `{resolved}`"
+                ));
+            }
+            continue;
+        }
+        let mut pairs = loaded
+            .iter()
+            .filter_map(|(example, default)| Some((example.get(&path)?, default.get(&path)?)))
+            .map(|(example, default)| (example.clone(), default.clone()))
+            .collect::<Vec<_>>();
+        if pairs.is_empty() {
+            // The option sits in a section that is absent without config, or
+            // is itself optional.
+            match default_within_example::<T>(&full, &path) {
+                Some(default) => pairs.push((loaded[0].0[&path].clone(), default)),
+                None => {
+                    errors.push(format!(
+                        "{name}: `{path}` has no default to compare with; annotate it with \
+                         `@toml2docs:none-default` or list its runtime default in this test"
+                    ));
+                    continue;
+                }
+            }
+        }
+        if pairs.iter().all(|(example, default)| example != default) {
+            let (example, default) = &pairs[0];
+            errors.push(format!(
+                "{name}: `{path}` is documented as default `{example}`, but the default is `{default}`; \
+                 fix the value or annotate it with `@toml2docs:none-default`"
+            ));
+        }
+    }
+    errors
+}
+
+// The examples document HDFS storage options.
+#[cfg(feature = "hdfs-object-store")]
+#[test]
+fn test_example_configs_document_actual_defaults() {
+    const WAL: (&str, &str, &[&str]) = ("wal", "provider", &["kafka", "experimental_object_store"]);
+    const STORAGE: (&str, &str, &[&str]) =
+        ("storage", "type", &["S3", "Oss", "Azblob", "Gcs", "Hdfs"]);
+
+    let mut errors =
+        check_example_defaults::<StandaloneOptions>("standalone.example.toml", &[WAL, STORAGE]);
+    errors.extend(check_example_defaults::<FrontendOptions>(
+        "frontend.example.toml",
+        &[],
+    ));
+    errors.extend(check_example_defaults::<DatanodeOptions>(
+        "datanode.example.toml",
+        &[WAL, STORAGE],
+    ));
+    errors.extend(check_example_defaults::<MetasrvOptions>(
+        "metasrv.example.toml",
+        &[("wal", "provider", &["kafka"])],
+    ));
+    errors.extend(check_example_defaults::<FlownodeOptions>(
+        "flownode.example.toml",
+        &[],
+    ));
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+}
+
+#[test]
+fn test_load_removed_histogram_options() {
+    for enabled in [false, true] {
+        let config = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            config.path(),
+            format!(
+                "[otlp]\nexperimental_enable_exponential_histogram = {enabled}\n\
+                 [prom_store]\nenable = true\nwith_metric_engine = true\n\
+                 experimental_enable_prometheus_native_histogram = {enabled}\n"
+            ),
+        )
+        .unwrap();
+
+        let frontend =
+            GreptimeOptions::<FrontendOptions>::load_layered_options(config.path().to_str(), "")
+                .unwrap();
+        let standalone =
+            GreptimeOptions::<StandaloneOptions>::load_layered_options(config.path().to_str(), "")
+                .unwrap();
+        let defaults = FrontendOptions::default();
+        for options in [frontend.component, standalone.component.frontend_options()] {
+            assert_eq!(options.otlp, defaults.otlp);
+            assert_eq!(options.prom_store, defaults.prom_store);
+            let serialized = toml::to_string(&options).unwrap();
+            assert!(!serialized.contains("experimental_enable_exponential_histogram"));
+            assert!(!serialized.contains("experimental_enable_prometheus_native_histogram"));
+        }
+    }
 }
 
 #[test]

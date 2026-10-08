@@ -422,23 +422,14 @@ impl BloomFilterIndexApplier {
         reader: R,
         predicates: &[InListPredicate],
         output: &mut [(usize, Vec<Range<usize>>)],
-        mut metrics: Option<&mut BloomFilterIndexApplyMetrics>,
+        metrics: Option<&mut BloomFilterIndexApplyMetrics>,
     ) -> std::result::Result<(), index::bloom_filter::error::Error> {
         let mut applier = BloomFilterApplier::new(Box::new(reader)).await?;
-
-        for (_, row_group_output) in output.iter_mut() {
-            // All rows are filtered out, skip the search
-            if row_group_output.is_empty() {
-                continue;
-            }
-
-            let read_metrics = metrics.as_deref_mut().map(|m| &mut m.read_metrics);
-            *row_group_output = applier
-                .search(predicates, row_group_output, read_metrics)
-                .await?;
-        }
-
-        Ok(())
+        let mut row_groups = output.iter_mut().map(|(_, r)| r).collect::<Vec<_>>();
+        let read_metrics = metrics.map(|m| &mut m.read_metrics);
+        applier
+            .search_groups(predicates, &mut row_groups, read_metrics)
+            .await
     }
 
     /// Returns compatible bloom filter predicates with the given SST metadata.
@@ -517,7 +508,7 @@ mod tests {
     async fn test_compatible_predicate_for_sst() {
         let (_d, puffin_manager_factory) =
             PuffinManagerFactory::new_for_test_async("test_plan_for_sst_basic_").await;
-        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
         let table_dir = "table_dir".to_string();
 
         let predicates = BTreeMap::from_iter([(
@@ -545,7 +536,7 @@ mod tests {
     async fn test_compatible_predicate_for_sst_type_mismatch() {
         let (_d, puffin_manager_factory) =
             PuffinManagerFactory::new_for_test_async("test_plan_for_sst_type_mismatch_").await;
-        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
         let table_dir = "table_dir".to_string();
 
         let predicates = BTreeMap::from_iter([(
@@ -573,7 +564,7 @@ mod tests {
     async fn test_compatible_predicate_for_sst_partial_type_mismatch() {
         let (_d, puffin_manager_factory) =
             PuffinManagerFactory::new_for_test_async("test_plan_for_sst_partial_mismatch_").await;
-        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
         let table_dir = "table_dir".to_string();
 
         // Column 1 (tag_str): expected string — matches SST (compatible).

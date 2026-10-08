@@ -19,6 +19,7 @@ use common_meta::ddl::create_table::executor::CreateTableExecutor;
 use common_meta::ddl::create_table::template::{
     CreateRequestBuilder, build_template_from_raw_table_info_for_physical_table,
 };
+use common_meta::ddl::utils::get_region_wal_options;
 use common_meta::lock_key::TableLock;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::PeerAllocContext;
@@ -28,6 +29,7 @@ use common_meta::wal_provider::{
 };
 use common_procedure::{Context as ProcedureContext, Status};
 use common_telemetry::{debug, info};
+use common_wal::options::WalOptions;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{OptionExt, ResultExt};
 use store_api::region_request::RegionRequirements;
@@ -165,6 +167,34 @@ impl ExecutePlan {
             )
             .await
             .context(error::AllocateRegionRoutesSnafu { table_id })?;
+        let skip_wal = table_info_value.table_info.meta.options.skip_wal;
+        let allocate_noop = if skip_wal {
+            let table_route_value = ctx.get_table_route_value().await?;
+            let region_wal_options =
+                get_region_wal_options(&ctx.table_metadata_manager, &table_route_value, table_id)
+                    .await
+                    .context(error::AllocateWalOptionsSnafu { table_id })?;
+            // A table disabled after creation keeps its real providers. A table
+            // created with skip_wal has Noop providers and must keep them.
+            !table_route_value
+                .region_routes()
+                .unwrap()
+                .iter()
+                .all(|route| {
+                    region_wal_options
+                        .get(&route.region.id.region_number())
+                        .is_none_or(|option| {
+                            matches!(
+                                option,
+                                WalOptions::RaftEngine
+                                    | WalOptions::Kafka(_)
+                                    | WalOptions::ObjectStore(_)
+                            )
+                        })
+                })
+        } else {
+            false
+        };
         let mut wal_options = ctx
             .wal_options_allocator
             .allocate(
@@ -172,7 +202,7 @@ impl ExecutePlan {
                     .iter()
                     .map(|r| r.region_id.region_number())
                     .collect::<Vec<_>>(),
-                table_info_value.table_info.meta.options.skip_wal,
+                allocate_noop,
             )
             .await
             .context(error::AllocateWalOptionsSnafu { table_id })?;
@@ -414,14 +444,21 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::region::region_request::Body;
+    use common_meta::ddl::allocator::wal_options::WalOptionsAllocator;
     use common_meta::ddl::test_util::datanode_handler::DatanodeWatcher;
     use common_meta::key::TableMetadataManagerRef;
     use common_meta::key::datanode_table::DatanodeTableKey;
+    use common_meta::key::table_route::TableRouteValue;
+    use common_meta::key::test_utils::new_test_table_info_with_name;
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
     use common_meta::test_util::MockDatanodeManager;
     use common_procedure::{ContextProvider, ProcedureId, ProcedureState};
     use common_procedure_test::MockContextProvider;
+    use common_wal::options::{
+        KafkaWalOptions, ObjectStoreWalOptions, WAL_OPTIONS_KEY, WalOptions,
+    };
+    use store_api::mito_engine_options::SKIP_WAL_KEY;
     use store_api::storage::RegionId;
     use tokio::sync::{mpsc, watch};
     use uuid::Uuid;
@@ -508,6 +545,29 @@ mod tests {
         table_id: TableId,
         concurrent_region_route: RegionRoute,
         region_wal_options: RegionWalOptions,
+    }
+
+    struct TestKafkaWalOptionsAllocator;
+
+    #[async_trait::async_trait]
+    impl WalOptionsAllocator for TestKafkaWalOptionsAllocator {
+        async fn allocate(
+            &self,
+            region_numbers: &[RegionNumber],
+            skip_wal: bool,
+        ) -> common_meta::error::Result<RegionWalOptions> {
+            Ok(region_numbers
+                .iter()
+                .map(|&region_number| {
+                    let options = if skip_wal {
+                        WalOptions::Noop
+                    } else {
+                        WalOptions::Kafka(KafkaWalOptions::new("new-topic".to_string()))
+                    };
+                    (region_number, options)
+                })
+                .collect())
+        }
     }
 
     #[async_trait::async_trait]
@@ -802,6 +862,111 @@ mod tests {
                 RegionId::new(table_id, 3),
             ]
         );
+    }
+
+    async fn check_execute_plan_skip_wal_provider(existing_wal_options: Option<WalOptions>) {
+        let env = TestingEnv::new();
+        let table_id = 1024;
+        let routes = create_current_region_routes(table_id, &[1]);
+        let mut table_info = new_test_table_info_with_name(table_id, "test_table");
+        table_info.meta.column_ids = vec![0, 1, 2];
+        table_info.meta.options.skip_wal = true;
+        let stored_wal_options = existing_wal_options
+            .clone()
+            .map(|options| HashMap::from([(1, options)]))
+            .unwrap_or_default();
+        env.table_metadata_manager
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::physical(routes),
+                stored_wal_options,
+            )
+            .await
+            .unwrap();
+
+        let (sender, mut receiver) = mpsc::channel(1);
+        let node_manager = Arc::new(MockDatanodeManager::new(DatanodeWatcher::new(sender)));
+        let mut ctx = new_parent_context(&env, node_manager, table_id);
+        if matches!(&existing_wal_options, Some(WalOptions::Kafka(_))) {
+            ctx.wal_options_allocator = Arc::new(TestKafkaWalOptionsAllocator);
+        }
+        ctx.persistent_ctx.plans = vec![RepartitionPlanEntry {
+            group_id: Uuid::new_v4(),
+            source_regions: vec![],
+            target_regions: vec![create_target_region_descriptor(table_id, 2, "x", 0, 100)],
+            allocated_region_ids: vec![RegionId::new(table_id, 2)],
+            pending_deallocate_region_ids: vec![],
+            transition_map: vec![],
+            original_target_routes: vec![],
+        }];
+        let mut state = ExecutePlan;
+        state
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap();
+
+        let (_, request) = receiver.recv().await.unwrap();
+        let Some(Body::Create(create)) = request.body else {
+            unreachable!()
+        };
+        assert_eq!(
+            Some("true"),
+            create.options.get(SKIP_WAL_KEY).map(String::as_str)
+        );
+        let new_wal_options: WalOptions =
+            serde_json::from_str(create.options.get(WAL_OPTIONS_KEY).unwrap()).unwrap();
+        let expected = match &existing_wal_options {
+            Some(WalOptions::Noop) => WalOptions::Noop,
+            Some(WalOptions::Kafka(_)) => WalOptions::Kafka(KafkaWalOptions {
+                topic: "new-topic".to_string(),
+                initial_pruned_entry_id: Some(0),
+            }),
+            None | Some(WalOptions::RaftEngine) | Some(WalOptions::ObjectStore(_)) => {
+                WalOptions::RaftEngine
+            }
+        };
+        assert_eq!(expected, new_wal_options);
+        let route = ctx.get_table_route_value().await.unwrap();
+        let wal_options = get_region_wal_options(&ctx.table_metadata_manager, &route, table_id)
+            .await
+            .unwrap();
+        assert_eq!(Some(&expected), wal_options.get(&2));
+        let legacy_default = WalOptions::RaftEngine;
+        assert_eq!(
+            Some(existing_wal_options.as_ref().unwrap_or(&legacy_default)),
+            wal_options.get(&1)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_plan_keeps_real_wal_provider_for_skipped_table() {
+        check_execute_plan_skip_wal_provider(Some(WalOptions::RaftEngine)).await;
+    }
+
+    #[tokio::test]
+    async fn test_execute_plan_keeps_legacy_raft_provider_for_skipped_table() {
+        check_execute_plan_skip_wal_provider(None).await;
+    }
+
+    #[tokio::test]
+    async fn test_execute_plan_keeps_kafka_wal_provider_for_skipped_table() {
+        check_execute_plan_skip_wal_provider(Some(WalOptions::Kafka(KafkaWalOptions::new(
+            "existing-topic".to_string(),
+        ))))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_execute_plan_treats_object_store_as_real_wal_provider_for_skipped_table() {
+        check_execute_plan_skip_wal_provider(Some(WalOptions::ObjectStore(
+            ObjectStoreWalOptions::new("wal".to_string()),
+        )))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_execute_plan_keeps_noop_for_table_created_without_wal() {
+        check_execute_plan_skip_wal_provider(Some(WalOptions::Noop)).await;
     }
 
     #[test]

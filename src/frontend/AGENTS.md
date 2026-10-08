@@ -39,10 +39,37 @@ remote datanodes via `operator`/`client`.
 - **SQL query** (`instance.rs`): `do_query_inner` handles parsing, interceptors,
   permission checks, timeout/cancellation, and delegates planning/execution to
   `StatementExecutor`. Distributed scans enter through `region_query.rs`.
+- **Logical-table batch DDL** (`instance.rs`): dedicated SQL handler → bounded
+  parse/interception → all-member permissions → operator CREATE preparation →
+  one logical-table batch procedure. Keep pre-submission validation side-effect free.
 - **Insert** (`instance/grpc.rs`): `handle_inserts` / `handle_row_inserts` →
   `check_permission` → `operator`'s `Inserter` (schema validation, optional
-  auto-create, partition routing) → local `RegionServer` (standalone) or RPC to
-  datanodes (distributed).
+  auto-create, partition routing, meter admission) → local `RegionServer`
+  (standalone) or RPC to datanodes (distributed). Arrow bulk inserts pass the
+  request channel to `Inserter` and check meter admission for each nonempty batch.
+- Finite ingestion requests split internally admit their total rows per database
+  before dispatch (`operator::insert::admit_write` / `admit_row_insert_batches`).
+  The returned context covers chunks and derived writes while preserving WCU
+  accounting and the original protocol channel.
+- Internal gRPC listeners mark requests with `Channel::Internal` in middleware
+  (`server.rs`), including requests handled by Enterprise Flight wrappers.
+
+- **Flight bulk insert** (`instance/grpc.rs`): initializes on the first batch after
+  the lazy schema handshake; checks permissions and reconciles missing columns
+  through `Inserter` once per stream, then reuses the refreshed table.
+
+- **Logical-table batching** (`instance/logical_batcher.rs`): `Services` initializes
+  one shared batcher for opted-in HTTP Prom and nonlegacy OTLP metric-engine
+  writes. Downstream routers can initialize it when enabling replacement endpoints.
+  `Instance::handle_otlp_metric_row_inserts` shares OTLP eligibility and dispatch
+  between converters and falls back for incompatible tables.
+  The schema adapter holds a weak instance reference to avoid an ownership cycle.
+
+- **Table batching** (`instance/builder.rs`): protocol entry points opt in through
+  `QueryContext`. The primary inserter prepares eligible ordinary-table writes
+  for `servers::batcher::table::TablePendingRowsBatcher`. A separate execution-only
+  inserter, with no batcher attached, sends the prepared bulk writes to datanodes,
+  avoiding recursive batching. The batcher handles successful-write Flow notifications.
 
 ## Public surface
 

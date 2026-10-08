@@ -32,7 +32,7 @@ use std::fmt::{Debug, Display};
 use std::time::Duration;
 
 use common_error::ext::BoxedError;
-use common_event_recorder::Event;
+use common_event_recorder::{Event, PersistentEventContext};
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::RegionFailureDetectorControllerRef;
 use common_meta::instruction::CacheIdent;
@@ -45,7 +45,7 @@ use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::lock_key::{CatalogLock, RegionLock, SchemaLock, TableLock};
 use common_meta::peer::Peer;
 use common_meta::region_keeper::{MemoryRegionKeeperRef, OperatingRegionGuard};
-use common_meta::rpc::ddl::{PersistentEventContext, TriggerReason};
+use common_meta::rpc::ddl::TriggerReason;
 use common_procedure::error::{
     Error as ProcedureError, FromJsonSnafu, Result as ProcedureResult, ToJsonSnafu,
 };

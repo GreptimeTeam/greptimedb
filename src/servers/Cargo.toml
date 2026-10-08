@@ -24,7 +24,7 @@ api.workspace = true
 arrow.workspace = true
 arrow-flight.workspace = true
 arrow-ipc.workspace = true
-arrow-pg = "0.14"
+arrow-pg = "0.15"
 arrow-schema.workspace = true
 async-trait.workspace = true
 auth.workspace = true
@@ -36,10 +36,10 @@ bytes.workspace = true
 catalog.workspace = true
 chrono.workspace = true
 common-base.workspace = true
+common-batcher.workspace = true
 common-catalog.workspace = true
 common-decimal.workspace = true
 common-error.workspace = true
-common-frontend.workspace = true
 common-grpc.workspace = true
 common-macro.workspace = true
 common-mem-prof = { workspace = true, optional = true }
@@ -57,7 +57,6 @@ common-telemetry.workspace = true
 common-time.workspace = true
 common-version = { workspace = true, features = ["codec"] }
 csv = "1.3"
-dashmap.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
@@ -71,6 +70,7 @@ headers = "0.4"
 hex.workspace = true
 hostname = "0.3"
 http.workspace = true
+http-body = "1"
 humantime.workspace = true
 humantime-serde.workspace = true
 hyper = { workspace = true, features = ["full"] }
@@ -81,22 +81,23 @@ jsonb.workspace = true
 lazy_static.workspace = true
 log-query.workspace = true
 loki-proto.workspace = true
+meter-core.workspace = true
+meter-macros.workspace = true
 metric-engine.workspace = true
 mime_guess = "2.0"
-mysql_common = "0.34"
+mysql_common = "0.38"
 notify.workspace = true
 object-pool = "0.5"
 once_cell.workspace = true
-openmetrics-parser = "0.4"
 # Wait for https://github.com/databendlabs/opensrv/pull/81
-opensrv-mysql = { git = "https://github.com/GreptimeTeam/opensrv", rev = "6c5a451544194b7bb60a8318d155d4f892b49f2c" }
+opensrv-mysql = { git = "https://github.com/GreptimeTeam/opensrv", rev = "f3135e5f00401e06075cf241c0cc26489e45b20a" }
 opentelemetry-proto.workspace = true
 operator.workspace = true
 otel-arrow-rust.workspace = true
 parking_lot.workspace = true
 partition.workspace = true
-pg_interval = "0.5"
-pgwire = { version = "0.40", default-features = false, features = [
+pg_interval = "0.6"
+pgwire = { version = "0.41", default-features = false, features = [
     "server-api-aws-lc-rs",
     "pg-ext-types",
 ] }
@@ -116,11 +117,11 @@ rust_decimal = { workspace = true, features = ["db-postgres"] }
 rustls = { workspace = true, default-features = false, features = ["aws_lc_rs", "logging", "std", "tls12"] }
 rustls-pemfile = "2.0"
 rustls-pki-types = "1.0"
+ryu.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 session.workspace = true
 simd-json.workspace = true
-simdutf8 = "0.1"
 smallvec.workspace = true
 snafu.workspace = true
 snap = "1"
@@ -139,38 +140,44 @@ tonic-web = "0.14"
 tower = { workspace = true, features = ["full"] }
 tower-http = { version = "0.6", features = ["full"] }
 tracing.workspace = true
-tracing-opentelemetry.workspace = true
 urlencoding = "2.1"
 uuid.workspace = true
 vrl.workspace = true
 zstd.workspace = true
 
 [target.'cfg(not(windows))'.dependencies]
-tikv-jemalloc-ctl = { version = "0.6", features = ["use_std", "stats"] }
+tikv-jemalloc-ctl = { version = "0.7", features = ["use_std", "stats"] }
 
 [dev-dependencies]
 auth = { workspace = true, features = ["testing"] }
 catalog = { workspace = true, features = ["testing"] }
 client = { workspace = true, features = ["testing"] }
 common-base.workspace = true
+common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 criterion = "0.5"
 json5 = "0.4"
 moka.workspace = true
-mysql_async = { version = "0.35", default-features = false, features = [
+mysql_async = { version = "0.37", default-features = false, features = [
     "default-rustls",
 ] }
+operator = { workspace = true, features = ["testing"] }
 permutation = "0.4"
 rand.workspace = true
 serde_json.workspace = true
-session = { workspace = true, features = ["testing"] }
+servers = { workspace = true, features = ["testing"] }
+simdutf8 = "0.1"
 table.workspace = true
 tempfile = "3.0.0"
-tokio-postgres = "0.7"
-tokio-postgres-rustls = "0.12"
+tokio = { workspace = true, features = ["test-util"] }
+tokio-postgres.workspace = true
+tokio-postgres-rustls = "0.14"
 
 [target.'cfg(unix)'.dev-dependencies]
-pprof = { version = "0.14", features = ["criterion", "flamegraph"] }
+pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
+
+[target.'cfg(not(windows))'.dev-dependencies]
+tikv-jemallocator = "0.7"
 
 [build-dependencies]
 common-version.workspace = true
@@ -180,7 +187,16 @@ name = "bench_prom"
 harness = false
 
 [[bench]]
+name = "prom_decode"
+harness = false
+required-features = ["testing"]
+
+[[bench]]
 name = "to_http_output"
+harness = false
+
+[[bench]]
+name = "prometheus_response"
 harness = false
 
 [[bench]]
