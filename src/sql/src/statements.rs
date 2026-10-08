@@ -151,17 +151,26 @@ pub fn column_to_schema(
 
     column_schema.set_inverted_index(column.extensions.inverted_index_options.is_some());
 
-    if let Some(extension) = json2_extension(
-        column.data_type(),
-        column
-            .extensions
-            .build_json_settings()?
-            .unwrap_or_else(JsonSettings::new_v2),
-    ) {
+    set_json2_extension(&mut column_schema, column)?;
+
+    Ok(column_schema)
+}
+
+/// Attaches extension metadata and settings to JSON2 columns.
+fn set_json2_extension(column_schema: &mut ColumnSchema, column: &Column) -> Result<()> {
+    if !column_schema.data_type.is_json2() {
+        return Ok(());
+    }
+
+    let settings = column
+        .extensions
+        .build_json_settings()?
+        .unwrap_or_else(JsonSettings::new_v2);
+    if let Some(extension) = json2_extension(column.data_type(), settings) {
         column_schema.with_extension_type(&extension);
     }
 
-    Ok(column_schema)
+    Ok(())
 }
 
 /// Convert `ColumnDef` in sqlparser to `ColumnDef` in gRPC proto.

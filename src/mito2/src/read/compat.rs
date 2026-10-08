@@ -192,12 +192,11 @@ impl FlatCompatBatch {
                 });
             } else {
                 // Create a default vector with 1 element for that column.
-                // `expect_data_type` may be a query-concretized JSON2 type,
-                // while region metadata still carries its unconcretized type.
-                // The default vector must match the target Arrow field above.
-                let default_vector = if expect_column.column_schema.is_nullable()
-                    && expect_column.column_schema.default_constraint().is_none()
-                {
+                let default_vector = if expect_data_type.is_json2() {
+                    // JSON2 columns do not support defaults, so missing columns use NULL.
+                    // `expect_data_type` may be a query-concretized JSON2 type,
+                    // while region metadata still carries its unconcretized type.
+                    // The default vector must match the target Arrow field above.
                     Helper::try_into_vector(new_null_array(&expect_data_type.as_arrow_type(), 1))
                         .context(CreateDefaultSnafu {
                             region_id: expect_metadata.region_id,
