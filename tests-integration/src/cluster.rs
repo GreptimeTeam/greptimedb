@@ -41,7 +41,7 @@ use common_datasource::object_store::LocalFileAccess;
 use common_event_recorder::EventRecorderOptions;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::DatanodeId;
-use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistry, LayeredCacheRegistryBuilder};
+use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
