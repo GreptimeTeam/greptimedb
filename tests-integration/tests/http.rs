@@ -11652,6 +11652,12 @@ pub async fn test_jaeger_v3_query_api(
                     timestamp(start + 2000),
                     encode(r#"{"http.status_code":"500","failed":"true"}"#)
                 ),
+                format!(
+                    "traces?query.startTimeMin={}&query.startTimeMax={}&query.attributes={}",
+                    timestamp(start + 1000),
+                    timestamp(start + 2000),
+                    encode(r#"{"service.instance.id":"two"}"#)
+                ),
             ] {
                 let response = client
                     .get(&format!("/v1/jaeger/api/v3/{path}"))
@@ -11756,6 +11762,18 @@ pub async fn test_jaeger_v3_query_api(
                     }
                 }
             }
+            // Instance `one` is on the parent, which starts before the search window.
+            let response = client
+                .get(&format!(
+                    "/v1/jaeger/api/v3/traces?query.startTimeMin={}&query.startTimeMax={}&query.attributes={}",
+                    timestamp(start + 1000),
+                    timestamp(start + 2000),
+                    encode(r#"{"service.instance.id":"one"}"#)
+                ))
+                .header("x-greptime-trace-table-name", &table)
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{pipeline}");
         }
         // Legacy clients continue receiving Jaeger JSON at the old URL.
         let response = client
