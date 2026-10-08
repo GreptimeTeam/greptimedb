@@ -2557,28 +2557,21 @@ impl PromPlanner {
             // for it, or the column exists but is NULL on that row — the latter
             // is the norm for logical metrics sharing a physical table, which
             // holds the union of their label columns.
+            let mut null_label = None;
             let col = if let Some(column_name) = column_name {
                 let column = DfExpr::Column(Column::from_name(&column_name));
                 let field = table_schema
                     .index_of_column_by_name(None, &column_name)
                     .map(|index| table_schema.field(index));
                 if accepts_empty
-                    && let Some(data_type) = field
-                        .filter(|field| {
-                            field.is_nullable()
-                                && Self::string_value_data_type(field.data_type()).is_some()
-                        })
-                        .map(|field| field.data_type())
-                {
-                    let empty = Self::string_scalar_value(data_type, Some(String::new()))
-                        .expect("nullable label has a string type");
-                    DfExpr::ScalarFunction(ScalarFunction {
-                        func: coalesce(),
-                        args: vec![column, DfExpr::Literal(empty, None)],
+                    && field.is_some_and(|field| {
+                        field.is_nullable()
+                            && Self::string_value_data_type(field.data_type()).is_some()
                     })
-                } else {
-                    column
+                {
+                    null_label = Some(column.clone().is_null());
                 }
+                column
             } else {
                 DfExpr::Literal(ScalarValue::Utf8(Some(String::new())), None)
             };
@@ -2630,6 +2623,10 @@ impl PromPlanner {
                         })
                     }
                 }
+            };
+            let expr = match null_label {
+                Some(null_label) => null_label.or(expr),
+                None => expr,
             };
             exprs.push(expr);
         }
