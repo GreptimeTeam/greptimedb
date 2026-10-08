@@ -130,6 +130,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Subquery step must be positive"))]
+    ZeroSubqueryStep {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "invalid expression type \"range vector\" for range query, must be Scalar or instant Vector"
     ))]
@@ -252,6 +258,7 @@ impl ErrorExt for Error {
             | ExpectRangeSelector { .. }
             | ZeroRangeSelector { .. }
             | RangeVectorInRangeQuery { .. }
+            | ZeroSubqueryStep { .. }
             | InvalidTimeRange { .. }
             | ColumnNotFound { .. }
             | FunctionInvalidArgument { .. }

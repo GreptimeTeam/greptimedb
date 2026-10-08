@@ -34,4 +34,13 @@ tql eval (35, 35, '1s') range_vector_result[4s:10s];
 
 tql eval (0, 30, '10s') range_vector_result[20s];
 
+-- SQLNESS SORT_RESULT 3 1
+tql eval (30, 30, '1s') range_vector_result[20s] as v;
+
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+tql explain (30, 30, '1s') range_vector_result[20s];
+
+tql eval (30, 30, '0') range_vector_result[30s:];
+
 drop table range_vector_result;

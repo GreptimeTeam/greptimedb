@@ -110,7 +110,7 @@ use crate::promql::error::{
     MultipleVectorSnafu, NoMetricMatcherSnafu, RangeVectorInRangeQuerySnafu, Result,
     TableNameNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu,
     UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, ValueNotFoundSnafu,
-    ZeroRangeSelectorSnafu,
+    ZeroRangeSelectorSnafu, ZeroSubqueryStepSnafu,
 };
 use crate::query_engine::QueryEngineState;
 
@@ -313,21 +313,9 @@ impl PromPlanner {
             promql_annotations,
         };
 
-        let plan = if stmt.expr.value_type() == ValueType::Matrix {
-            // Prometheus only accepts a range-vector expression in an instant query, whose
-            // result is the matrix of samples the expression selects.
-            ensure!(
-                planner.ctx.start == planner.ctx.end,
-                RangeVectorInRangeQuerySnafu
-            );
-            planner
-                .prom_range_vector_result_to_plan(&stmt.expr, query_engine_state)
-                .await?
-        } else {
-            planner
-                .prom_expr_to_plan(&stmt.expr, query_engine_state)
-                .await?
-        };
+        let plan = planner
+            .prom_root_expr_to_plan(&stmt.expr, query_engine_state)
+            .await?;
 
         // Never leak internal series identifier to output.
         planner.strip_tsid_column(plan)
@@ -410,6 +398,26 @@ impl PromPlanner {
         Ok(res)
     }
 
+    /// Plans the root expression of a statement, or the expression wrapped by a root extension
+    /// such as `EXPLAIN` or an alias.
+    ///
+    /// Prometheus only accepts a range-vector expression in an instant query, whose result is
+    /// the matrix of samples the expression selects.
+    async fn prom_root_expr_to_plan(
+        &mut self,
+        prom_expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<LogicalPlan> {
+        if matches!(prom_expr, PromExpr::Extension(_))
+            || prom_expr.value_type() != ValueType::Matrix
+        {
+            return self.prom_expr_to_plan(prom_expr, query_engine_state).await;
+        }
+        ensure!(self.ctx.start == self.ctx.end, RangeVectorInRangeQuerySnafu);
+        self.prom_range_vector_result_to_plan(prom_expr, query_engine_state)
+            .await
+    }
+
     /// Plans the result of a range-vector expression in an instant query: the raw samples of a
     /// range selector, or the evaluation points of a subquery, with their own timestamps.
     ///
@@ -490,6 +498,7 @@ impl PromPlanner {
             self.ctx.interval = step.as_millis() as _;
         }
         let interval = self.ctx.interval;
+        ensure!(interval > 0, ZeroSubqueryStepSnafu);
         let lower = Self::anchor_sub(end, range.as_millis() as Millisecond)?;
         // Prometheus aligns subquery evaluation to absolute multiples of the step, and the
         // window is left-open.
@@ -2257,7 +2266,7 @@ impl PromPlanner {
         let expr = &ext_expr.expr;
         let children = expr.children();
         let plan = self
-            .prom_expr_to_plan(&children[0], query_engine_state)
+            .prom_root_expr_to_plan(&children[0], query_engine_state)
             .await?;
         // Wrapper for the explanation/analyze of the existing plan
         // https://docs.rs/datafusion-expr/latest/datafusion_expr/logical_plan/builder/struct.LogicalPlanBuilder.html#method.explain
