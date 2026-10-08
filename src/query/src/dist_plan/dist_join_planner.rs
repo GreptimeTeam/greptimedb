@@ -33,7 +33,7 @@ use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_expr::utils::{can_hash, find_valid_equijoin_key_pair, split_conjunction};
 use datafusion_expr::{
-    Expr, ExprSchemable, Join, JoinType, LogicalPlan, Operator, TableScan,
+    Expr, ExprSchemable, Join, JoinType, LogicalPlan, Operator, Projection, TableScan,
     UserDefinedLogicalNodeCore,
 };
 use datafusion_optimizer::analyzer::AnalyzerRule;
@@ -110,8 +110,7 @@ impl DistJoinStats {
     /// approximate disk sizes the regions report, not a measured or predicted amount of network
     /// traffic.
     ///
-    /// The sides are never swapped, and a missing table, a table without regions or bytes, or an
-    /// overflowing product means "no".
+    /// A missing table, a table without regions or bytes, or an overflowing product means "no".
     pub fn favors_right_build(&self, probe: TableId, build: TableId) -> bool {
         let (Some(probe), Some(build)) = (self.tables.get(&probe), self.tables.get(&build)) else {
             return false;
@@ -132,9 +131,9 @@ impl DistJoinStats {
 /// The base tables of one plausible candidate join of the cost heuristic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CandidateJoin {
-    /// The base table of the left (probe) side.
+    /// The base table of the left side, used as the candidate region-driving side.
     pub probe: TableId,
-    /// The base table of the right (build) side.
+    /// The base table of the right side, considered as the candidate small build side.
     pub build: TableId,
 }
 
@@ -309,11 +308,13 @@ pub(crate) fn expected_region_ids(
     (!regions.is_empty()).then_some(regions)
 }
 
-/// Nests the build side's `MergeScan` inside the probe side's one, so the join runs on
-/// the datanodes holding the probe regions.
+/// Nests the small side's `MergeScan` inside the large side's boundary, so each datanode
+/// hashes the small side and probes with its local large-side rows. The outer boundary is
+/// routed by the large table's regions.
 ///
-/// Keeps the join node as is, so its schema, join conditions, residual filter and NULL
-/// semantics are preserved; unmatched shapes are returned unchanged.
+/// The join inputs are reversed for physical hash-build/probe roles, then a projection restores
+/// the original output schema and column order. Join conditions, residual filter and NULL
+/// semantics are preserved; unaddressable schemas and unmatched shapes stay unchanged.
 #[derive(Debug)]
 pub struct DistJoinPlanner;
 
@@ -332,8 +333,7 @@ impl AnalyzerRule for DistJoinPlanner {
     }
 }
 
-/// Rewriter nesting the build side `MergeScan` of a supported join inside the probe side's
-/// `MergeScan`.
+/// Rewriter nesting the small-side `MergeScan` inside the large-side boundary of a supported join.
 struct NestedBroadcastJoinRewriter<'a> {
     /// Per-table statistics fetched for this query, see [`DistJoinStats`].
     stats: &'a DistJoinStats,
@@ -357,57 +357,68 @@ impl NestedBroadcastJoinRewriter<'_> {
             return None;
         }
 
-        let (probe_plan, probe_merge_scan) = strip_merge_scan(&join.left)?;
-        let (_, build_merge_scan) = strip_merge_scan(&join.right)?;
-        if probe_merge_scan.is_placeholder() || build_merge_scan.is_placeholder() {
+        let (large_plan, large_merge_scan) = strip_merge_scan(&join.left)?;
+        let (_, small_merge_scan) = strip_merge_scan(&join.right)?;
+        if large_merge_scan.is_placeholder() || small_merge_scan.is_placeholder() {
             return None;
         }
 
-        // Replacing the probe input must not change the join input schema.
-        if probe_plan.schema() != join.left.schema() {
+        // Replacing the large input must not change its schema. The small input remains under
+        // its boundary, nested on each large-side region.
+        if large_plan.schema() != join.left.schema() {
             return None;
         }
 
         // A nested boundary is hidden from the remaining analyzer passes, so a boundary
         // schema `JsonSchemaConcretizeRule` still has to fix up cannot be repaired
         // anymore.
-        if has_json2_boundary(&probe_merge_scan) || has_json2_boundary(&build_merge_scan) {
+        if has_json2_boundary(&large_merge_scan) || has_json2_boundary(&small_merge_scan) {
             return None;
         }
 
-        // The right input is the only candidate build side, because moving a left build side
-        // would change the join schema.
-        let (probe_table, build_table) = (
-            side_base_table_id(probe_merge_scan.input())?,
-            side_base_table_id(build_merge_scan.input())?,
+        let (large_table, small_table) = (
+            side_base_table_id(large_merge_scan.input())?,
+            side_base_table_id(small_merge_scan.input())?,
         );
-        if !self.stats.favors_right_build(probe_table, build_table) {
+        if !self.stats.favors_right_build(large_table, small_table) {
             return None;
         }
 
-        // Keep the rewrite at two levels: the probe side must be local and the build side
+        // Keep the rewrite at two levels: the large side must be local and the small side
         // must not contain another distributed boundary.
-        if contains_merge_scan(&probe_plan) || contains_merge_scan(build_merge_scan.input()) {
+        if contains_merge_scan(&large_plan) || contains_merge_scan(small_merge_scan.input()) {
             return None;
         }
 
-        // Join the probe regions against the build plan kept above; the probe table's
-        // partition columns route the outer scan.
-        let new_join = Join {
-            left: Arc::new(probe_plan),
-            right: join.right.clone(),
-            ..join.clone()
-        };
+        // Swapping the logical inputs gives DataFusion's hash join its intended small build
+        // side and large probe side. Refuse schemas whose original output columns cannot be
+        // mapped uniquely to the swapped output; the restoration projection then preserves
+        // SQL-visible names, qualifiers, metadata, and order exactly.
+        let swapped_join = Join::try_new(
+            join.right.clone(),
+            Arc::new(large_plan),
+            join.on
+                .iter()
+                .map(|(left, right)| (right.clone(), left.clone()))
+                .collect(),
+            join.filter.clone(),
+            join.join_type,
+            join.join_constraint,
+            join.null_equality,
+            join.null_aware,
+        )
+        .ok()?;
+        let restored_plan = restore_join_schema(swapped_join, join.schema.clone())?;
         let mut merge_scan = MergeScanLogicalPlan::new(
-            LogicalPlan::Join(new_join),
+            restored_plan,
             false,
-            probe_merge_scan.partition_cols().clone(),
+            large_merge_scan.partition_cols().clone(),
         );
-        // The outer boundary keeps the probe boundary's remote dynamic filter identity
+        // The outer boundary keeps the large boundary's remote dynamic filter identity
         // when it has one. A missing id only disables remote dynamic filter pushdown for
         // that boundary (`MergeScanExec` fails open), and serialization drops the ids of
         // the nested payload, so an absent id is not a rewrite blocker.
-        if let Some(producer_id) = probe_merge_scan.remote_dyn_filter_producer_id() {
+        if let Some(producer_id) = large_merge_scan.remote_dyn_filter_producer_id() {
             merge_scan = merge_scan.with_remote_dyn_filter_producer_id(producer_id);
         }
 
@@ -451,6 +462,41 @@ fn strip_merge_scan(plan: &LogicalPlan) -> Option<(LogicalPlan, MergeScanLogical
     }
 }
 
+/// Wraps a swapped join in a projection restoring the original schema, only when each
+/// original output column uniquely addresses its corresponding swapped input position.
+fn restore_join_schema(join: Join, schema: datafusion_common::DFSchemaRef) -> Option<LogicalPlan> {
+    let left_len = join.right.schema().fields().len();
+    let right_len = join.left.schema().fields().len();
+    if schema.fields().len() != left_len + right_len {
+        return None;
+    }
+
+    let columns = schema.columns();
+    for (index, column) in columns.iter().enumerate() {
+        let intended_index = if index < left_len {
+            right_len + index
+        } else {
+            index - left_len
+        };
+        if join
+            .schema
+            .columns()
+            .iter()
+            .filter(|candidate| *candidate == column)
+            .count()
+            != 1
+            || join.schema.maybe_index_of_column(column) != Some(intended_index)
+        {
+            return None;
+        }
+    }
+
+    Some(LogicalPlan::Projection(Projection::new_from_schema(
+        Arc::new(LogicalPlan::Join(join)),
+        schema,
+    )))
+}
+
 /// Whether `plan` contains a visible `MergeScan` node.
 fn contains_merge_scan(plan: &LogicalPlan) -> bool {
     if let LogicalPlan::Extension(extension) = plan
@@ -462,34 +508,35 @@ fn contains_merge_scan(plan: &LogicalPlan) -> bool {
     plan.inputs().into_iter().any(contains_merge_scan)
 }
 
-/// Returns the local probe input that decides the regions of a supported nested broadcast
+/// Returns the local large-side input that decides regions for a supported nested broadcast
 /// join, or `None` for any other plan.
 ///
-/// Region pruning clears the collected predicates at a node with several inputs (the
-/// join), so the outer `MergeScan` of the rewritten plan would be routed by the join
-/// itself and scan every region of the probe table. Routing by the returned side keeps
-/// the probe predicate pruning, while the full payload is still dispatched to the
-/// selected regions.
+/// Region pruning clears collected predicates at a multi-input join, so route by the local
+/// large-side input rather than the join itself. This preserves large-table pruning while
+/// dispatching the full nested payload to selected regions.
 ///
-/// Only the supported shape of [`DistJoinPlanner`] returns a side: an `INNER` equi-join
-/// whose left input is a local plan and whose right input reaches its `MergeScan`
-/// through projections.
+/// Only the supported shape returns a side: an `INNER` equi-join (possibly behind schema
+/// restoration projections) with a small-side `MergeScan` and a local large-side input.
 pub(crate) fn nested_broadcast_join_probe_input(plan: &LogicalPlan) -> Option<&LogicalPlan> {
+    let mut plan = plan;
+    while let LogicalPlan::Projection(projection) = plan {
+        plan = &projection.input;
+    }
     let LogicalPlan::Join(join) = plan else {
         return None;
     };
     if join.join_type != JoinType::Inner || join.on.is_empty() {
         return None;
     }
-    if contains_merge_scan(&join.left) {
+    if contains_merge_scan(&join.right) {
         return None;
     }
-    let (_, build_merge_scan) = strip_merge_scan(&join.right)?;
-    if build_merge_scan.is_placeholder() {
+    let (_, small_merge_scan) = strip_merge_scan(&join.left)?;
+    if small_merge_scan.is_placeholder() {
         return None;
     }
 
-    Some(&join.left)
+    Some(&join.right)
 }
 
 /// Whether the `MergeScan` boundary exposes a JSON2 column.
@@ -514,7 +561,7 @@ mod tests {
     use common_meta::datanode::RegionManifestInfo;
     use common_meta::rpc::router::Region;
     use datafusion::datasource::DefaultTableSource;
-    use datafusion_common::{DFSchema, DFSchemaRef, JoinConstraint, NullEquality};
+    use datafusion_common::{DFSchema, DFSchemaRef, JoinConstraint, NullEquality, TableReference};
     use datafusion_expr::{Expr, LogicalPlanBuilder, build_join_schema, col, lit};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::extension::json::JsonExtensionType;
@@ -611,15 +658,22 @@ mod tests {
     }
 
     fn rewrite(plan: LogicalPlan) -> LogicalPlan {
+        rewrite_with_stats(
+            plan,
+            &[
+                (1, table_stats(10_000, 2)),
+                (2, table_stats(1_000, 1)),
+                (3, table_stats(500, 1)),
+            ],
+        )
+    }
+
+    fn rewrite_with_stats(
+        plan: LogicalPlan,
+        tables: &[(TableId, DistJoinTableStats)],
+    ) -> LogicalPlan {
         DistJoinPlanner {}
-            .analyze(
-                plan,
-                &rewrite_config(&[
-                    (1, table_stats(10_000, 2)),
-                    (2, table_stats(1_000, 1)),
-                    (3, table_stats(500, 1)),
-                ]),
-            )
+            .analyze(plan, &rewrite_config(tables))
             .unwrap()
     }
 
@@ -657,7 +711,11 @@ mod tests {
             .as_any()
             .downcast_ref::<MergeScanLogicalPlan>()
             .unwrap_or_else(|| panic!("expected the outer node to be a MergeScan, got: {plan}"));
-        let LogicalPlan::Join(join) = merge_scan.input() else {
+        let mut input = merge_scan.input();
+        while let LogicalPlan::Projection(projection) = input {
+            input = &projection.input;
+        }
+        let LogicalPlan::Join(join) = input else {
             panic!(
                 "expected the outer MergeScan to wrap a join, got: {}",
                 merge_scan.input()
@@ -680,8 +738,8 @@ mod tests {
         assert_eq!(2, merge_scans(&result).len());
     }
 
-    /// When statistics favor the right build side, its `MergeScan` becomes the inner scan
-    /// of the outer `MergeScan`, which is routed by the probe table's regions.
+    /// When statistics favor the small right side as build, its `MergeScan` becomes the
+    /// inner scan, while the large left side probes locally on regions selected by its routes.
     ///
     /// The rewrite must only move where the join runs: the join fields, the residual
     /// filter, the NULL semantics and the output schema stay as the join had them.
@@ -696,13 +754,20 @@ mod tests {
             null_equality: NullEquality::NullEqualsNull,
             ..original_join.clone()
         });
-        let probe_scan = merge_scans(&plan).first().cloned().unwrap();
+        let large_scan = merge_scans(&plan).first().cloned().unwrap();
 
         let result = rewrite(plan.clone());
 
         let join = outer_join(&result);
         assert_eq!(JoinType::Inner, join.join_type);
-        assert_eq!(original_join.on, join.on);
+        assert_eq!(
+            original_join
+                .on
+                .iter()
+                .map(|(l, r)| (r.clone(), l.clone()))
+                .collect::<Vec<_>>(),
+            join.on
+        );
         assert_eq!(
             Some(col("t1.number").gt(lit(1u32))),
             join.filter,
@@ -712,26 +777,25 @@ mod tests {
         assert_eq!(NullEquality::NullEqualsNull, join.null_equality);
         assert_eq!(original_join.null_aware, join.null_aware);
         assert!(
-            !contains_merge_scan(&join.left),
-            "probe side must be local, got: {}",
+            contains_merge_scan(&join.left),
+            "small hash-build side must keep its MergeScan, got: {}",
             join.left
         );
         assert!(
-            contains_merge_scan(&join.right),
-            "build side must keep its MergeScan, got: {}",
+            !contains_merge_scan(&join.right),
+            "large probe side must be local, got: {}",
             join.right
         );
 
-        // The outer scan must be routed by the probe table's regions and keep the
-        // probe boundary's partition columns.
+        // The outer scan must be routed by the large table's regions and keep the
+        // large boundary's partition columns.
         assert_eq!(
             "t1",
-            table_name_of(&LogicalPlan::Join(join.clone()))
-                .unwrap()
-                .table_name
+            table_name_of(&join.right).unwrap().table_name,
+            "the large local probe input controls outer region routing"
         );
         let outer_scan = merge_scans(&result).first().cloned().unwrap();
-        assert_eq!(probe_scan.partition_cols(), outer_scan.partition_cols());
+        assert_eq!(large_scan.partition_cols(), outer_scan.partition_cols());
         assert_eq!(plan.schema(), result.schema());
     }
 
@@ -750,6 +814,15 @@ mod tests {
         assert_eq!(2, scans.len());
         assert_eq!(Some(probe_id), scans[0].remote_dyn_filter_producer_id());
         assert_eq!(Some(build_id), scans[1].remote_dyn_filter_producer_id());
+        let join = outer_join(&result);
+        assert!(contains_merge_scan(&join.left));
+        assert!(!contains_merge_scan(&join.right));
+        assert_eq!(
+            "t1",
+            table_name_of(nested_broadcast_join_probe_input(scans[0].input()).unwrap())
+                .unwrap()
+                .table_name
+        );
     }
 
     /// Boundaries without a remote dynamic filter producer id are still rewritten: a
@@ -772,6 +845,15 @@ mod tests {
         assert_eq!(2, scans.len());
         assert_eq!(None, scans[0].remote_dyn_filter_producer_id());
         assert_eq!(None, scans[1].remote_dyn_filter_producer_id());
+        let join = outer_join(&result);
+        assert!(contains_merge_scan(&join.left));
+        assert!(!contains_merge_scan(&join.right));
+        assert_eq!(
+            "t1",
+            table_name_of(nested_broadcast_join_probe_input(scans[0].input()).unwrap())
+                .unwrap()
+                .table_name
+        );
         assert_eq!(plan.schema(), result.schema());
     }
 
@@ -804,10 +886,10 @@ mod tests {
         let result = rewrite(projected.clone());
 
         let join = outer_join(&result);
-        assert!(matches!(*join.left, LogicalPlan::Projection(_)));
-        assert!(!contains_merge_scan(&join.left));
+        assert!(matches!(join.left.as_ref(), LogicalPlan::Projection(_)));
+        assert!(contains_merge_scan(&join.left));
         assert!(matches!(join.right.as_ref(), LogicalPlan::Projection(_)));
-        assert!(contains_merge_scan(&join.right));
+        assert!(!contains_merge_scan(&join.right));
         assert_eq!(projected.schema(), result.schema());
     }
 
@@ -838,6 +920,89 @@ mod tests {
         })
     }
 
+    /// Original output columns with the same basename but distinct qualifiers remain
+    /// addressable in the reversed join and preserve their source positions.
+    #[test]
+    fn restore_join_schema_supports_same_basename_under_distinct_qualifiers() {
+        let left = table_scan("large", 1, "large");
+        let right = table_scan("small", 2, "small");
+        let original_schema = DFSchemaRef::new(
+            build_join_schema(left.schema(), right.schema(), &JoinType::Inner).unwrap(),
+        );
+        let swapped = LogicalPlan::Join(
+            Join::try_new(
+                Arc::new(right),
+                Arc::new(left),
+                vec![(col("small.number"), col("large.number"))],
+                None,
+                JoinType::Inner,
+                JoinConstraint::On,
+                NullEquality::NullEqualsNothing,
+                false,
+            )
+            .unwrap(),
+        );
+
+        let LogicalPlan::Join(swapped_join) = swapped else {
+            unreachable!("the schema restoration test constructs a join");
+        };
+        let restored = restore_join_schema(swapped_join, original_schema.clone()).unwrap();
+
+        assert_eq!(&original_schema, restored.schema());
+        let LogicalPlan::Projection(projection) = restored else {
+            panic!("expected output-order restoration projection");
+        };
+        assert_eq!(
+            original_schema.columns(),
+            projection
+                .expr
+                .iter()
+                .map(|expr| {
+                    match expr {
+                        Expr::Column(column) => column.clone(),
+                        other => panic!("expected column projection, got {other}"),
+                    }
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Bare and partial references with the same table name are distinct for DFSchema's
+    /// exact-name uniqueness check, but `resolved_eq` treats them as the same qualifier.
+    /// The first matching swapped position is wrong for one original field, so restoration
+    /// must decline.
+    #[test]
+    fn restore_join_schema_rejects_resolved_qualifier_ambiguity() {
+        let left = table_scan("same", 1, "large");
+        let source = Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(test_table(2, "small")),
+        )));
+        let right = LogicalPlanBuilder::scan(
+            TableReference::partial(DEFAULT_SCHEMA_NAME, "same"),
+            source,
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let original_schema = DFSchemaRef::new(
+            build_join_schema(left.schema(), right.schema(), &JoinType::Inner).unwrap(),
+        );
+        let swapped = Join::try_new(
+            Arc::new(right),
+            Arc::new(left),
+            vec![],
+            None,
+            JoinType::Inner,
+            JoinConstraint::On,
+            NullEquality::NullEqualsNothing,
+            false,
+        )
+        .unwrap();
+
+        assert!(restore_join_schema(swapped, original_schema).is_none());
+    }
+
     /// Only `INNER` joins are rewritten.
     #[test]
     fn nested_broadcast_join_rewrite_ignores_non_inner_join() {
@@ -849,10 +1014,10 @@ mod tests {
         assert_eq!(plan.to_string(), result.to_string());
     }
 
-    /// A build table on the left input is not rewritten: swapping the inputs would change
-    /// the join output schema, which the rewrite must preserve.
+    /// The cost heuristic currently selects only an original right-side build candidate.
+    /// A plan whose original right table is larger is therefore left unchanged.
     #[test]
-    fn nested_broadcast_join_rewrite_ignores_left_side_build() {
+    fn nested_broadcast_join_does_not_rewrite_unfavorable_right_candidate() {
         let plan = distributed_join_plan();
         let LogicalPlan::Join(join) = &plan else {
             panic!("expected a join on top, got: {plan}");
@@ -891,8 +1056,8 @@ mod tests {
         assert_eq!(plan.to_string(), result.to_string());
     }
 
-    /// The routing helper returns the probe side of the supported nested shape and `None`
-    /// for the join of two boundaries (the shape before the rewrite).
+    /// The routing helper returns the large local side of the supported nested shape and
+    /// `None` for the join of two boundaries (the shape before the rewrite).
     #[test]
     fn nested_broadcast_join_probe_input_only_for_supported_shape() {
         let plan = distributed_join_plan();
@@ -914,10 +1079,24 @@ mod tests {
             .as_any()
             .downcast_ref::<MergeScanLogicalPlan>()
             .unwrap();
-        let (probe_plan, _) = strip_merge_scan(&join.left).unwrap();
+        let large_plan = nested_broadcast_join_probe_input(merge_scan.input()).unwrap();
+        let (expected_large, _) = strip_merge_scan(&join.left).unwrap();
         assert_eq!(
-            Some(probe_plan.to_string()),
+            Some(expected_large.to_string()),
             nested_broadcast_join_probe_input(merge_scan.input()).map(|plan| plan.to_string())
+        );
+        assert_eq!(large_plan.schema(), expected_large.schema());
+
+        let mut projected = merge_scan.input().clone();
+        for _ in 0..4 {
+            let schema = projected.schema().clone();
+            projected =
+                LogicalPlan::Projection(Projection::new_from_schema(Arc::new(projected), schema));
+        }
+        assert_eq!(
+            Some(large_plan.to_string()),
+            nested_broadcast_join_probe_input(&projected).map(ToString::to_string),
+            "routing should look through four ordinary projection wrappers"
         );
     }
 
@@ -1185,8 +1364,8 @@ mod tests {
         );
     }
 
-    /// The cost heuristic nests the build side only when the statistics favor it: the same
-    /// statistics in the other order never swap the sides, and missing statistics keep the plan.
+    /// The cost heuristic nests the candidate build side only when its statistics favor it: the same
+    /// statistics in the other order do not favor this candidate order, and missing statistics keep the plan.
     #[test]
     fn nested_broadcast_join_rewrite_with_stats() {
         let plan = distributed_join_plan();
@@ -1199,18 +1378,17 @@ mod tests {
         let join = outer_join(&result);
         assert_eq!(2, merge_scans(&result).len());
         assert!(
-            !contains_merge_scan(&join.left),
-            "probe side must become local, got: {}",
+            contains_merge_scan(&join.left),
+            "small hash-build side must keep its MergeScan, got: {}",
             join.left
         );
         assert!(
-            contains_merge_scan(&join.right),
-            "build side must keep its MergeScan, got: {}",
+            !contains_merge_scan(&join.right),
+            "large probe side must become local, got: {}",
             join.right
         );
 
-        // The sides are never swapped: the same statistics in the other order do not favor the
-        // right build side.
+        // The reversed candidate sizes do not favor the right build side for this input order.
         let swapped = stats_config(&[(1, table_stats(1_000, 1)), (2, table_stats(10_000, 2))]);
         let result = DistJoinPlanner {}.analyze(plan.clone(), &swapped).unwrap();
         assert_eq!(plan.to_string(), result.to_string());
