@@ -75,8 +75,9 @@ use crate::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use crate::error::{
     self, BuildDatanodeSnafu, BuildMetricEngineSnafu, BuildMitoEngineSnafu, CreateDirSnafu,
     DataFusionSnafu, DuplicateRegionEngineConfigSnafu, GetMetadataSnafu,
-    InvalidObjectStoreWalConfigSnafu, MissingNodeIdSnafu, ObjectStoreWalNotStandaloneSnafu,
-    OpenLogStoreSnafu, Result, ShutdownInstanceSnafu, ShutdownServerSnafu, StartServerSnafu,
+    InvalidObjectStoreWalConfigSnafu, MissingCacheSnafu, MissingNodeIdSnafu,
+    ObjectStoreWalNotStandaloneSnafu, OpenLogStoreSnafu, Result, ShutdownInstanceSnafu,
+    ShutdownServerSnafu, StartServerSnafu,
 };
 use crate::event_listener::{
     NoopRegionServerEventListener, RegionServerEventListenerRef, RegionServerEventReceiver,
