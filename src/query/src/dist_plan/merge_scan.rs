@@ -615,12 +615,12 @@ impl MergeScanExec {
         let Some(rows_per_region) = remote_plan_row_bound(&self.plan) else {
             return self
                 .row_estimate
-                .map_or(Precision::Absent, |estimate| Precision::Inexact(estimate));
+                .map_or(Precision::Absent, Precision::Inexact);
         };
         let Some(row_bound) = rows_per_region.checked_mul(self.regions.len()) else {
             return self
                 .row_estimate
-                .map_or(Precision::Absent, |estimate| Precision::Inexact(estimate));
+                .map_or(Precision::Absent, Precision::Inexact);
         };
         Precision::Inexact(
             self.row_estimate
