@@ -30,7 +30,21 @@ use datafusion::execution::{FunctionRegistry, SessionStateBuilder};
 use datafusion::logical_expr::{Extension, LogicalPlan};
 use datafusion_expr::{Expr, UserDefinedLogicalNode};
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
-use promql::functions::register_promql_functions;
+use promql::functions::{
+    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
+    IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime, MixedRange,
+    NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
+    NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime, NativeHistogramChanges,
+    NativeHistogramCount, NativeHistogramCountOverTime, NativeHistogramDelta,
+    NativeHistogramDivScalar, NativeHistogramDrop, NativeHistogramEq, NativeHistogramFraction,
+    NativeHistogramIDelta, NativeHistogramIRate, NativeHistogramIncrease,
+    NativeHistogramLastOverTime, NativeHistogramMulScalar, NativeHistogramNeg,
+    NativeHistogramNotEq, NativeHistogramPresentOverTime, NativeHistogramQuantile,
+    NativeHistogramRate, NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev,
+    NativeHistogramStdvar, NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime,
+    NativeHistogramToString, PredictLinear, PresentOverTime, PromqlFloatToString, QuantileOverTime,
+    Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime, quantile_udaf,
+};
 use prost::Message;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::ResultExt;
@@ -142,15 +156,26 @@ impl SubstraitConsumer for MergeScanSubstraitConsumer<'_> {
         );
         let schema_name = resolved.schema.as_ref();
         let catalog_name = resolved.catalog.as_ref();
-        let schema = catalog_list
-            .catalog(catalog_name)
-            .ok_or_else(|| {
-                DataFusionError::Plan(format!("failed to resolve catalog: {catalog_name}"))
-            })?
-            .schema(schema_name)
-            .ok_or_else(|| {
-                DataFusionError::Plan(format!("failed to resolve schema: {schema_name}"))
-            })?;
+        let schema = if self.session_state.config().information_schema()
+            && schema_name == datafusion::catalog::information_schema::INFORMATION_SCHEMA
+        {
+            Arc::new(
+                datafusion::catalog::information_schema::InformationSchemaProvider::new(
+                    catalog_list.clone(),
+                )
+                .with_table_functions(self.session_state.table_functions().clone()),
+            ) as Arc<dyn datafusion::catalog::SchemaProvider>
+        } else {
+            catalog_list
+                .catalog(catalog_name)
+                .ok_or_else(|| {
+                    DataFusionError::Plan(format!("failed to resolve catalog: {catalog_name}"))
+                })?
+                .schema(schema_name)
+                .ok_or_else(|| {
+                    DataFusionError::Plan(format!("failed to resolve schema: {schema_name}"))
+                })?
+        };
         schema.table(&resolved.table).await
     }
 
@@ -206,7 +231,11 @@ impl SubstraitConsumer for MergeScanSubstraitConsumer<'_> {
 
         let input = self.decode_payload(merge_scan.input).await?;
 
-        Ok(MergeScanLogicalPlan::new(input, merge_scan.is_placeholder).into_logical_plan())
+        // `PbMergeScan` lacks `partition_cols`; decoded plans lose this optimization and may repartition.
+        Ok(
+            MergeScanLogicalPlan::new(input, merge_scan.is_placeholder, Default::default())
+                .into_logical_plan(),
+        )
     }
 
     // Keep child dispatch on this consumer; delegating the parent bypasses async MergeScan decoding.
@@ -319,7 +348,79 @@ fn register_greptime_functions(
             .context(RegisterUdfSnafu { name })?;
     }
 
-    register_promql_functions(session_state);
+    let _ = session_state.register_udaf(quantile_udaf());
+
+    let _ = session_state.register_udf(Arc::new(IDelta::<false>::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(IDelta::<true>::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Rate::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Increase::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Delta::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Resets::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Changes::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Deriv::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Round::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(AvgOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(MinOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(MaxOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(SumOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(CountOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(LastOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(AbsentOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(PresentOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(StddevOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(StdvarOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(QuantileOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(PredictLinear::scalar_udf()));
+    let double_exponential_smoothing_udf =
+        DoubleExponentialSmoothing::scalar_udf().with_aliases(["prom_holt_winters"]);
+    let _ = session_state.register_udf(Arc::new(double_exponential_smoothing_udf));
+
+    for udf in [
+        NativeHistogramAbsentOverTime::scalar_udf(),
+        NativeHistogramAdd::scalar_udf(),
+        NativeHistogramAvg::scalar_udf(),
+        NativeHistogramAvgOverTime::scalar_udf(),
+        NativeHistogramChanges::scalar_udf(),
+        NativeHistogramCount::scalar_udf(),
+        NativeHistogramCountOverTime::scalar_udf(),
+        NativeHistogramDelta::scalar_udf(),
+        NativeHistogramDivScalar::scalar_udf(),
+        NativeHistogramDrop::bool_false_udf(String::new(), None),
+        NativeHistogramDrop::bool_true_udf(String::new(), None),
+        NativeHistogramDrop::float_null_udf(String::new(), None),
+        NativeHistogramEq::scalar_udf(),
+        NativeHistogramFraction::scalar_udf(),
+        NativeHistogramIDelta::scalar_udf(),
+        NativeHistogramIRate::scalar_udf(),
+        NativeHistogramIncrease::scalar_udf(),
+        NativeHistogramLastOverTime::scalar_udf(),
+        MixedRange::float_udf(None),
+        MixedRange::histogram_udf(None),
+        NativeHistogramMulScalar::scalar_udf(),
+        NativeHistogramNeg::scalar_udf(),
+        NativeHistogramNotEq::scalar_udf(),
+        NativeHistogramPresentOverTime::scalar_udf(),
+        NativeHistogramQuantile::scalar_udf(),
+        NativeHistogramRate::scalar_udf(),
+        NativeHistogramResets::scalar_udf(),
+        NativeHistogramScalarMul::scalar_udf(),
+        NativeHistogramStddev::scalar_udf(),
+        NativeHistogramStdvar::scalar_udf(),
+        NativeHistogramSub::scalar_udf(),
+        NativeHistogramSum::scalar_udf(),
+        NativeHistogramSumOverTime::scalar_udf(),
+        NativeHistogramToString::scalar_udf(),
+        PromqlFloatToString::scalar_udf(),
+    ] {
+        let _ = session_state.register_udf(Arc::new(udf));
+    }
+
+    for udaf in [
+        NativeHistogramAggAvg::aggregate_udf(),
+        NativeHistogramAggSum::aggregate_udf(),
+    ] {
+        let _ = session_state.register_udaf(Arc::new(udaf));
+    }
 
     Ok(())
 }
@@ -357,9 +458,9 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
 #[cfg(test)]
 mod tests {
     use std::any::Any;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    use catalog::error::Result as CatalogResult;
+    use catalog::error::{QueryAccessDeniedSnafu, Result as CatalogResult};
     use catalog::{CatalogManager, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
     use common_function::aggrs::aggr_wrapper::StateWrapper;
@@ -381,10 +482,6 @@ mod tests {
     use datatypes::data_type::DataType;
     use futures::stream::BoxStream;
     use promql::extension_plan::{RangeManipulate, SeriesNormalize, UnionDistinctOn};
-    use promql::functions::{
-        MixedRange, NativeHistogramAggAvg, NativeHistogramAggSum, NativeHistogramCount,
-        NativeHistogramDrop, PromqlFloatToString,
-    };
     use session::context::QueryContext;
     use table::TableRef;
     use table::metadata::{TableId, TableInfoRef};
@@ -433,7 +530,6 @@ mod tests {
 
         let plan_decoder = engine
             .engine_context(QueryContext::arc())
-            .unwrap()
             .new_plan_decoder()
             .unwrap();
         let catalog_list = Arc::new(DummyCatalogList::with_table_provider(table_provider));
@@ -526,7 +622,6 @@ mod tests {
         let table_provider = Arc::new(MemTable::try_new(schema, vec![vec![]]).unwrap());
         let plan_decoder = engine
             .engine_context(QueryContext::arc())
-            .unwrap()
             .new_plan_decoder()
             .unwrap();
 
@@ -629,19 +724,55 @@ mod tests {
 
     #[tokio::test]
     async fn test_serializer_decode_merge_scan() {
-        let engine = QueryEngineFactory::new(
-            numbers_catalog_manager(),
+        let catalog_manager = catalog::memory::new_memory_catalog_manager().unwrap();
+        // Payload tables must be registered in the engine catalog.
+        catalog_manager
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: NUMBERS_TABLE_NAME.to_string(),
+                table_id: NUMBERS_TABLE_ID,
+                table: NumbersTable::table(NUMBERS_TABLE_ID),
+            })
+            .unwrap();
+        let factory = QueryEngineFactory::new(
+            catalog_manager,
             None,
             None,
             None,
             None,
             false,
             QueryOptions::default(),
+        );
+        let engine = factory.query_engine();
+
+        let input = LogicalPlanBuilder::scan(
+            NUMBERS_TABLE_NAME,
+            Arc::new(LogicalTableSource::new(
+                NumbersTable::schema().arrow_schema().clone(),
+            )),
+            None,
         )
-        .query_engine();
-        let plan = merge_scan(numbers_scan(), true);
-        let decoded = plan_decoder(engine.as_ref())
-            .decode(encode_plan(&plan), request_catalog_list(), false)
+        .unwrap()
+        .build()
+        .unwrap();
+        let plan =
+            MergeScanLogicalPlan::new(input.clone(), true, Default::default()).into_logical_plan();
+
+        let bytes = DFLogicalSubstraitConvertor
+            .encode(&plan, DefaultSerializer)
+            .unwrap();
+        let plan_decoder = engine
+            .engine_context(QueryContext::arc())
+            .new_plan_decoder()
+            .unwrap();
+        // Must not bind payload tables through the request catalog.
+        let catalog_list = Arc::new(DummyCatalogList::with_table_provider(Arc::new(
+            mock_table_provider(1.into()),
+        )));
+
+        let decoded = plan_decoder
+            .decode(bytes, catalog_list, false)
             .await
             .unwrap();
 
@@ -654,28 +785,60 @@ mod tests {
             .downcast_ref::<MergeScanLogicalPlan>()
             .expect("Expect a MergeScan plan node");
         assert!(merge_scan.is_placeholder());
-        assert_eq!(merge_scan.input().to_string(), numbers_scan().to_string());
+        assert_eq!(merge_scan.input().to_string(), input.to_string());
+        // `PbMergeScan` doesn't carry `partition_cols`, so decoded nodes have an empty mapping.
+        assert!(merge_scan.partition_cols().is_empty());
     }
 
     /// Payload table binding uses the engine catalog, not the request catalog.
     #[tokio::test]
     async fn test_serializer_decode_merge_scan_with_engine_catalog() {
-        let engine = QueryEngineFactory::new(
-            numbers_catalog_manager(),
+        let catalog_manager = catalog::memory::new_memory_catalog_manager().unwrap();
+        catalog_manager
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: NUMBERS_TABLE_NAME.to_string(),
+                table_id: NUMBERS_TABLE_ID,
+                table: NumbersTable::table(NUMBERS_TABLE_ID),
+            })
+            .unwrap();
+        let factory = QueryEngineFactory::new(
+            catalog_manager,
             None,
             None,
             None,
             None,
             false,
             QueryOptions::default(),
+        );
+        let engine = factory.query_engine();
+
+        let input = LogicalPlanBuilder::scan(
+            NUMBERS_TABLE_NAME,
+            Arc::new(LogicalTableSource::new(
+                NumbersTable::schema().arrow_schema().clone(),
+            )),
+            None,
         )
-        .query_engine();
-        let decoded = plan_decoder(engine.as_ref())
-            .decode(
-                encode_plan(&merge_scan(numbers_scan(), false)),
-                request_catalog_list(),
-                false,
-            )
+        .unwrap()
+        .build()
+        .unwrap();
+        let plan = MergeScanLogicalPlan::new(input, false, Default::default()).into_logical_plan();
+        let bytes = DFLogicalSubstraitConvertor
+            .encode(&plan, DefaultSerializer)
+            .unwrap();
+
+        // This request catalog deliberately has a different schema.
+        let table_provider = Arc::new(mock_table_provider(1.into()));
+        let catalog_list = Arc::new(DummyCatalogList::with_table_provider(table_provider));
+
+        let plan_decoder = engine
+            .engine_context(QueryContext::arc())
+            .new_plan_decoder()
+            .unwrap();
+        let decoded = plan_decoder
+            .decode(bytes, catalog_list, false)
             .await
             .unwrap();
 
@@ -698,26 +861,62 @@ mod tests {
     /// Nested `MergeScan` payloads decode recursively.
     #[tokio::test]
     async fn test_serializer_decode_nested_merge_scan() {
-        let engine = QueryEngineFactory::new(
-            numbers_catalog_manager(),
+        let catalog_manager = catalog::memory::new_memory_catalog_manager().unwrap();
+        catalog_manager
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: NUMBERS_TABLE_NAME.to_string(),
+                table_id: NUMBERS_TABLE_ID,
+                table: NumbersTable::table(NUMBERS_TABLE_ID),
+            })
+            .unwrap();
+        let factory = QueryEngineFactory::new(
+            catalog_manager,
             None,
             None,
             None,
             None,
             false,
             QueryOptions::default(),
-        )
-        .query_engine();
-        let inner = merge_scan(numbers_scan(), false);
+        );
+        let engine = factory.query_engine();
+
+        let numbers_scan = || {
+            LogicalPlanBuilder::scan(
+                NUMBERS_TABLE_NAME,
+                Arc::new(LogicalTableSource::new(
+                    NumbersTable::schema().arrow_schema().clone(),
+                )),
+                None,
+            )
+            .unwrap()
+            .build()
+            .unwrap()
+        };
+        let inner = MergeScanLogicalPlan::new(numbers_scan(), false, Default::default())
+            .into_logical_plan();
         let input = LogicalPlanBuilder::from(inner)
             .filter(col("number").lt(lit(10u32)))
             .unwrap()
             .build()
             .unwrap();
-        let plan = merge_scan(input, false);
+        let plan =
+            MergeScanLogicalPlan::new(input.clone(), false, Default::default()).into_logical_plan();
 
-        let decoded = plan_decoder(engine.as_ref())
-            .decode(encode_plan(&plan), request_catalog_list(), false)
+        let bytes = DFLogicalSubstraitConvertor
+            .encode(&plan, DefaultSerializer)
+            .unwrap();
+        let plan_decoder = engine
+            .engine_context(QueryContext::arc())
+            .new_plan_decoder()
+            .unwrap();
+        let catalog_list = Arc::new(DummyCatalogList::with_table_provider(Arc::new(
+            mock_table_provider(1.into()),
+        )));
+
+        let decoded = plan_decoder
+            .decode(bytes, catalog_list, false)
             .await
             .unwrap();
 
@@ -801,52 +1000,48 @@ mod tests {
     /// Request state registration keeps Greptime `date_format` ahead of DataFusion aliases.
     #[tokio::test]
     async fn test_serializer_decode_keeps_greptime_date_format() {
-        // Repeat to expose nondeterministic function-registration order.
-        for _ in 0..8 {
-            let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
-            let factory = QueryEngineFactory::new(
-                catalog_list,
-                None,
-                None,
-                None,
-                None,
-                false,
-                QueryOptions::default(),
-            );
-            let engine = factory.query_engine();
+        let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
+        let factory = QueryEngineFactory::new(
+            catalog_list,
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        );
+        let engine = factory.query_engine();
 
-            let table_provider = Arc::new(mock_table_provider(1.into()));
-            let query_ctx = date_format_query_ctx();
-            let plan = LogicalPlanBuilder::scan(
-                "devices",
-                Arc::new(LogicalTableSource::new(table_provider.schema().clone())),
-                None,
+        let table_provider = Arc::new(mock_table_provider(1.into()));
+        let query_ctx = date_format_query_ctx();
+        let plan = LogicalPlanBuilder::scan(
+            "devices",
+            Arc::new(LogicalTableSource::new(table_provider.schema().clone())),
+            None,
+        )
+        .unwrap()
+        .project(vec![greptime_date_format_expr(&query_ctx, col("ts"))])
+        .unwrap()
+        .build()
+        .unwrap();
+
+        let bytes = DFLogicalSubstraitConvertor
+            .encode(&plan, DefaultSerializer)
+            .unwrap();
+        let plan_decoder = engine
+            .engine_context(query_ctx.clone())
+            .new_plan_decoder()
+            .unwrap();
+        let decoded = plan_decoder
+            .decode(
+                bytes,
+                Arc::new(DummyCatalogList::with_table_provider(table_provider)),
+                false,
             )
-            .unwrap()
-            .project(vec![greptime_date_format_expr(&query_ctx, col("ts"))])
-            .unwrap()
-            .build()
+            .await
             .unwrap();
 
-            let bytes = DFLogicalSubstraitConvertor
-                .encode(&plan, DefaultSerializer)
-                .unwrap();
-            let plan_decoder = engine
-                .engine_context(query_ctx.clone())
-                .unwrap()
-                .new_plan_decoder()
-                .unwrap();
-            let decoded = plan_decoder
-                .decode(
-                    bytes,
-                    Arc::new(DummyCatalogList::with_table_provider(table_provider)),
-                    false,
-                )
-                .await
-                .unwrap();
-
-            assert_only_function_is_greptime_date_format(&decoded, &query_ctx);
-        }
+        assert_only_function_is_greptime_date_format(&decoded, &query_ctx);
     }
 
     /// Nested payload decoding retains the Greptime `date_format` binding.
@@ -863,67 +1058,64 @@ mod tests {
             })
             .unwrap();
 
-        for _ in 0..8 {
-            let factory = QueryEngineFactory::new(
-                catalog_manager.clone(),
-                None,
-                None,
-                None,
-                None,
-                false,
-                QueryOptions::default(),
-            );
-            let engine = factory.query_engine();
-            let query_ctx = date_format_query_ctx();
+        let factory = QueryEngineFactory::new(
+            catalog_manager.clone(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        );
+        let engine = factory.query_engine();
+        let query_ctx = date_format_query_ctx();
 
-            let input = LogicalPlanBuilder::scan(
-                NUMBERS_TABLE_NAME,
-                Arc::new(LogicalTableSource::new(
-                    NumbersTable::schema().arrow_schema().clone(),
-                )),
-                None,
-            )
-            .unwrap()
-            .project(vec![greptime_date_format_expr(
-                &query_ctx,
-                Expr::Cast(Cast::new(
-                    Box::new(col("number")),
-                    ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
-                )),
-            )])
-            .unwrap()
-            .build()
+        let input = LogicalPlanBuilder::scan(
+            NUMBERS_TABLE_NAME,
+            Arc::new(LogicalTableSource::new(
+                NumbersTable::schema().arrow_schema().clone(),
+            )),
+            None,
+        )
+        .unwrap()
+        .project(vec![greptime_date_format_expr(
+            &query_ctx,
+            Expr::Cast(Cast::new(
+                Box::new(col("number")),
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+            )),
+        )])
+        .unwrap()
+        .build()
+        .unwrap();
+        let plan = MergeScanLogicalPlan::new(input, false, Default::default()).into_logical_plan();
+
+        let bytes = DFLogicalSubstraitConvertor
+            .encode(&plan, DefaultSerializer)
             .unwrap();
-            let plan = MergeScanLogicalPlan::new(input, false).into_logical_plan();
+        let plan_decoder = engine
+            .engine_context(query_ctx.clone())
+            .new_plan_decoder()
+            .unwrap();
+        let catalog_list = Arc::new(DummyCatalogList::with_table_provider(Arc::new(
+            mock_table_provider(1.into()),
+        )));
 
-            let bytes = DFLogicalSubstraitConvertor
-                .encode(&plan, DefaultSerializer)
-                .unwrap();
-            let plan_decoder = engine
-                .engine_context(query_ctx.clone())
-                .unwrap()
-                .new_plan_decoder()
-                .unwrap();
-            let catalog_list = Arc::new(DummyCatalogList::with_table_provider(Arc::new(
-                mock_table_provider(1.into()),
-            )));
+        let decoded = plan_decoder
+            .decode(bytes, catalog_list, false)
+            .await
+            .unwrap();
 
-            let decoded = plan_decoder
-                .decode(bytes, catalog_list, false)
-                .await
-                .unwrap();
+        let LogicalPlan::Extension(extension) = &decoded else {
+            panic!("Expect a MergeScan plan, got: {decoded}");
+        };
+        let merge_scan = extension
+            .node
+            .as_any()
+            .downcast_ref::<MergeScanLogicalPlan>()
+            .expect("Expect a MergeScan plan node");
 
-            let LogicalPlan::Extension(extension) = &decoded else {
-                panic!("Expect a MergeScan plan, got: {decoded}");
-            };
-            let merge_scan = extension
-                .node
-                .as_any()
-                .downcast_ref::<MergeScanLogicalPlan>()
-                .expect("Expect a MergeScan plan node");
-
-            assert_only_function_is_greptime_date_format(merge_scan.input(), &query_ctx);
-        }
+        assert_only_function_is_greptime_date_format(merge_scan.input(), &query_ctx);
     }
 
     /// Registers a `numbers` table in a memory catalog manager.
@@ -956,7 +1148,7 @@ mod tests {
     }
 
     fn merge_scan(input: LogicalPlan, is_placeholder: bool) -> LogicalPlan {
-        MergeScanLogicalPlan::new(input, is_placeholder).into_logical_plan()
+        MergeScanLogicalPlan::new(input, is_placeholder, Default::default()).into_logical_plan()
     }
 
     fn encode_plan(plan: &LogicalPlan) -> Bytes {
@@ -968,7 +1160,6 @@ mod tests {
     fn plan_decoder(engine: &dyn crate::QueryEngine) -> SubstraitPlanDecoderRef {
         engine
             .engine_context(QueryContext::arc())
-            .unwrap()
             .new_plan_decoder()
             .unwrap()
     }
@@ -1002,11 +1193,7 @@ mod tests {
             QueryOptions::default(),
         )
         .query_engine();
-        let mut state = engine
-            .engine_context(resolver_ctx.clone())
-            .unwrap()
-            .state()
-            .clone();
+        let mut state = engine.engine_context(resolver_ctx.clone()).state().clone();
         state.config_mut().set_extension(resolver_ctx);
         let extensions = Extensions::default();
         let consumer = MergeScanSubstraitConsumer {
@@ -1063,11 +1250,18 @@ mod tests {
 
     /// How [`InterceptingCatalogManager`] resolves payload tables.
     enum TableResolution {
+        /// Fails with the frontend's cross-catalog access error.
+        AccessDenied,
         /// Records catalog lookup and request context values.
         ObserveContext(Arc<std::sync::Mutex<Vec<[String; 5]>>>),
         /// Resolves once another task on the caller runtime signals.
         AwaitSignal {
             notify: Arc<tokio::sync::Notify>,
+            entered: Arc<AtomicBool>,
+        },
+        /// Never resolves, holding `live` until the caller drops the decode future.
+        Pending {
+            live: Arc<AtomicUsize>,
             entered: Arc<AtomicBool>,
         },
     }
@@ -1149,13 +1343,23 @@ mod tests {
                     ]);
                     Ok(Some(NumbersTable::table(NUMBERS_TABLE_ID)))
                 }
-
+                TableResolution::AccessDenied => QueryAccessDeniedSnafu {
+                    catalog: catalog.to_string(),
+                    schema: schema.to_string(),
+                }
+                .fail(),
                 TableResolution::AwaitSignal { notify, entered } => {
                     entered.store(true, Ordering::SeqCst);
                     notify.notified().await;
                     self.inner
                         .table(catalog, schema, table_name, query_ctx)
                         .await
+                }
+                TableResolution::Pending { live, entered } => {
+                    entered.store(true, Ordering::SeqCst);
+                    let _guard = LiveGuard::new(live);
+                    std::future::pending::<()>().await;
+                    unreachable!("pending resolution never completes")
                 }
             }
         }
@@ -1180,6 +1384,23 @@ mod tests {
             query_ctx: Option<&'a QueryContext>,
         ) -> BoxStream<'a, CatalogResult<TableRef>> {
             self.inner.tables(catalog, schema, query_ctx)
+        }
+    }
+
+    /// Counts live payload resolutions, so a dropped decode leaves no work behind.
+    struct LiveGuard(Arc<AtomicUsize>);
+
+    impl LiveGuard {
+        fn new(live: &Arc<AtomicUsize>) -> Self {
+            let live = live.clone();
+            live.fetch_add(1, Ordering::SeqCst);
+            Self(live)
+        }
+    }
+
+    impl Drop for LiveGuard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
         }
     }
 
@@ -1233,13 +1454,40 @@ mod tests {
         assert_eq!(decoded.to_string(), plan.to_string());
     }
 
-    /// A missing engine-catalog table does not fall back to the usable request catalog.
+    /// Dropping a decode parked on the catalog cancels it; no detached job keeps running.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_serializer_decode_dropped_pending_payload_leaves_no_job() {
+        let live = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(AtomicBool::new(false));
+        let engine = engine_with_intercepting_catalog(TableResolution::Pending {
+            live: live.clone(),
+            entered: entered.clone(),
+        });
+        let bytes = encode_plan(&merge_scan(numbers_scan(), false));
+
+        let decoder = plan_decoder(engine.as_ref());
+        {
+            let mut decode = Box::pin(decoder.decode(bytes, request_catalog_list(), false));
+            assert!(futures::poll!(decode.as_mut()).is_pending());
+            assert_eq!(live.load(Ordering::SeqCst), 1);
+            assert!(entered.load(Ordering::SeqCst));
+        }
+
+        assert_eq!(
+            live.load(Ordering::SeqCst),
+            0,
+            "dropping the decode future must cancel its payload work"
+        );
+    }
+
+    /// A payload table missing from the engine catalog must not fall back to the request catalog.
     #[tokio::test]
-    async fn test_serializer_decode_missing_engine_catalog_table() {
-        let missing_manager: CatalogManagerRef =
+    async fn test_serializer_decode_payload_missing_in_engine_catalog() {
+        // The engine catalog deliberately has no `numbers` table.
+        let catalog_manager: CatalogManagerRef =
             catalog::memory::new_memory_catalog_manager().unwrap();
         let engine = QueryEngineFactory::new(
-            missing_manager,
+            catalog_manager,
             None,
             None,
             None,
@@ -1258,6 +1506,24 @@ mod tests {
         let err = format!("{err:?}");
         assert!(
             err.contains("Table not found: greptime.public.numbers"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A payload table denied by the engine catalog must not fall back to the request catalog.
+    #[tokio::test]
+    async fn test_serializer_decode_payload_access_denied_in_engine_catalog() {
+        let engine = engine_with_intercepting_catalog(TableResolution::AccessDenied);
+        let bytes = encode_plan(&merge_scan(numbers_scan(), false));
+
+        let err = plan_decoder(engine.as_ref())
+            .decode(bytes, request_catalog_list(), false)
+            .await
+            .unwrap_err();
+
+        let err = format!("{err:?}");
+        assert!(
+            err.contains("Illegal access to catalog"),
             "unexpected error: {err}"
         );
     }
@@ -1313,6 +1579,67 @@ mod tests {
 
         assert_eq!(decoded.to_string(), plan.to_string());
         assert_eq!(decoded.schema().as_arrow(), plan.schema().as_arrow());
+    }
+
+    /// Payload information-schema resolution exposes registered table functions as routines.
+    #[tokio::test]
+    async fn test_serializer_payload_information_schema_exposes_table_functions() {
+        let query_ctx = Arc::new(QueryContext::with("manual_cat", "manual_schema"));
+        let engine = QueryEngineFactory::new(
+            numbers_catalog_manager(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine();
+        let state = engine.engine_context(query_ctx).state().clone();
+        let config = state.config().clone().with_information_schema(true);
+        let state = SessionStateBuilder::new_from_existing(state)
+            .with_config(config)
+            .with_table_function_list(datafusion::functions_table::all_default_table_functions())
+            .build();
+
+        let extensions = Extensions::default();
+        let consumer = MergeScanSubstraitConsumer {
+            inner: DefaultSubstraitConsumer::new(&extensions, &state),
+            session_state: &state,
+            catalog_manager: state
+                .config()
+                .get_extension::<QueryEngineState>()
+                .map(|s| s.catalog_manager().clone()),
+            payload: true,
+        };
+        let provider = consumer
+            .resolve_table_ref(&TableReference::partial("information_schema", "routines"))
+            .await
+            .unwrap()
+            .unwrap();
+        let plan = provider.scan(&state, None, &[], None).await.unwrap();
+        let batches = datafusion::physical_plan::collect(plan, state.task_ctx())
+            .await
+            .unwrap();
+        let schema = provider.schema();
+        let routine_name_index = schema.index_of("routine_name").unwrap();
+        let function_type_index = schema.index_of("function_type").unwrap();
+        assert!(batches.iter().any(|batch| {
+            let routine_names = batch
+                .column(routine_name_index)
+                .as_any()
+                .downcast_ref::<datatypes::arrow::array::StringArray>()
+                .unwrap();
+            let function_types = batch
+                .column(function_type_index)
+                .as_any()
+                .downcast_ref::<datatypes::arrow::array::StringArray>()
+                .unwrap();
+            (0..batch.num_rows()).any(|row| {
+                routine_names.value(row) == "generate_series"
+                    && function_types.value(row) == "TABLE"
+            })
+        }));
     }
 
     /// `MergeScan` decodes under an ordinary single-input extension parent.
@@ -1479,11 +1806,7 @@ mod tests {
         )
         .query_engine();
         let mut state = SessionStateBuilder::new_from_existing(
-            engine
-                .engine_context(QueryContext::arc())
-                .unwrap()
-                .state()
-                .clone(),
+            engine.engine_context(QueryContext::arc()).state().clone(),
         )
         .with_serializer_registry(Arc::new(DefaultSerializer))
         .build();
