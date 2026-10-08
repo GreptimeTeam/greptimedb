@@ -368,9 +368,10 @@ fn test_validate_flow_options_rejects_schedule_and_internal_keys_as_unknown() {
             .insert(key.to_string(), "value".to_string());
 
         let err = validate_flow_options(&task).unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
         assert!(
             err.to_string()
-                .contains(&format!("Unknown flow option '{key}'")),
+                .contains(&format!("unknown flow option '{key}'")),
             "unexpected error for {key}: {err}"
         );
     }
@@ -906,10 +907,10 @@ async fn test_create_flow_rejects_unknown_option_in_meta_task() {
     let mut procedure = CreateFlowProcedure::new(task, query_ctx, ddl_context);
 
     let err = procedure.on_prepare().await.unwrap_err();
-    assert_matches!(err, error::Error::Unexpected { .. });
+    assert_eq!(StatusCode::InvalidArguments, err.status_code());
     assert!(
         err.to_string()
-            .contains("Unknown flow option 'unknown_option'")
+            .contains("unknown flow option 'unknown_option'")
     );
 }
 
