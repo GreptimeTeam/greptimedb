@@ -94,7 +94,7 @@ use sql::statements::create::{
 use sql::statements::statement::Statement;
 use sqlparser::ast::{Expr, Ident, UnaryOperator, Value as ParserValue};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
-use store_api::mito_engine_options::APPEND_MODE_KEY;
+use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::TableRef;
 use table::dist_table::DistTable;
@@ -118,6 +118,7 @@ use crate::error::{
     UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper::{self, RepartitionRequest, RepartitionSource};
+use crate::insert::is_instant_ttl;
 use crate::statement::StatementExecutor;
 use crate::statement::show::create_partitions_stmt;
 use crate::utils::{to_executor_context, to_executor_context_with_origin_frontend};
@@ -472,6 +473,18 @@ impl StatementExecutor {
                 .table_options
                 .contains_key(LOGICAL_TABLE_METADATA_KEY)
         {
+            if create_table
+                .table_options
+                .get(TTL_KEY)
+                .is_some_and(|ttl| !is_instant_ttl(ttl))
+            {
+                return CreateLogicalTablesSnafu {
+                    reason: format!(
+                        "Retention TTL is not supported on metric logical tables; set `{TTL_KEY}` on the physical table instead"
+                    ),
+                }
+                .fail();
+            }
             if let Some(partitions) = partitions.as_ref()
                 && !partitions.exprs.is_empty()
             {
@@ -2037,6 +2050,24 @@ impl StatementExecutor {
         } else {
             // This is logical table. Annotation alters only rewrite its own
             // metadata; `AlterLogicalTablesProcedure` only handles column adds.
+            // `ttl='instant'` stays supported on logical tables (the Inserter
+            // uses it to forward rows to flows); retention TTLs are rejected.
+            let alters_retention_ttl = expr.kind.as_ref().is_some_and(|kind| match kind {
+                Kind::SetTableOptions(options) => options
+                    .table_options
+                    .iter()
+                    .any(|option| option.key == TTL_KEY && !is_instant_ttl(&option.value)),
+                Kind::UnsetTableOptions(options) => options.keys.iter().any(|key| key == TTL_KEY),
+                _ => false,
+            });
+            if alters_retention_ttl {
+                return CreateLogicalTablesSnafu {
+                    reason: format!(
+                        "Retention TTL is not supported on metric logical tables; set `{TTL_KEY}` on the physical table instead"
+                    ),
+                }
+                .fail();
+            }
             let annotation_alter = match expr.kind.as_ref() {
                 Some(kind) => common_grpc_expr::annotation_alter_family(kind)
                     .context(AlterExprToRequestSnafu)?
