@@ -95,6 +95,31 @@ TQL EVAL (0, 0, '1s') count(max by(host)(matching_groups_host_only_left));
 DROP TABLE matching_groups_host_only_left;
 DROP TABLE matching_groups_host_only_right;
 
+-- Label removal must normalize its output before matching a stored NULL label.
+CREATE TABLE matching_groups_label_left (
+  host STRING NULL,
+  ts TIMESTAMP(3) TIME INDEX,
+  greptime_value DOUBLE,
+  PRIMARY KEY(host)
+);
+CREATE TABLE matching_groups_label_right (
+  host STRING NULL,
+  ts TIMESTAMP(3) TIME INDEX,
+  greptime_value DOUBLE,
+  PRIMARY KEY(host)
+);
+INSERT INTO matching_groups_label_left VALUES ('x', 0, 6);
+INSERT INTO matching_groups_label_right VALUES (NULL, 0, 3);
+TQL EVAL (0, 0, '1s') label_replace(matching_groups_label_left, "host", "", "host", ".*") / on(host) matching_groups_label_right;
+TQL EVAL (0, 0, '1s') label_replace(matching_groups_label_left, "host", "", "missing", ".*") / on(host) matching_groups_label_right;
+TQL EVAL (0, 0, '1s') label_join(matching_groups_label_left, "host", "", "missing") / on(host) matching_groups_label_right;
+TQL EVAL (0, 0, '1s') label_join(matching_groups_label_left, "host", "") / on(host) matching_groups_label_right;
+-- Removing x now collides with the existing normalized empty label.
+INSERT INTO matching_groups_label_left VALUES (NULL, 0, 9);
+TQL EVAL (0, 0, '1s') label_replace(matching_groups_label_left, "host", "", "host", "x");
+DROP TABLE matching_groups_label_left;
+DROP TABLE matching_groups_label_right;
+
 -- bottomk partitions by host when zone is excluded from grouping.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 0, '1s') bottomk without(zone)(1, matching_groups_left) / on(host,zone) matching_groups_right{host="x"};

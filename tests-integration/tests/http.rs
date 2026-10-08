@@ -167,6 +167,7 @@ macro_rules! http_tests {
                 test_prometheus_promql_api,
                 test_promql_over_non_millisecond_physical_tables,
                 test_prometheus_label_replace_response,
+                test_prometheus_empty_labels_response,
                 test_prom_http_api,
                 test_prom_remote_compression_bomb_rejected,
                 test_prom_remote_write_decoded_body_charged,
@@ -1046,6 +1047,116 @@ pub async fn test_prometheus_label_replace_response(store_type: StorageType) {
         }))
         .unwrap()
     );
+
+    guard.remove_all().await;
+}
+
+pub async fn test_prometheus_empty_labels_response(store_type: StorageType) {
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend(store_type, "prometheus_empty_labels_response").await;
+    let client = TestClient::new(app).await;
+    let sql = r#"
+        CREATE TABLE empty_labels_a (
+            ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING, PRIMARY KEY(host)
+        );
+        CREATE TABLE empty_labels_null (
+            ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING, PRIMARY KEY(host)
+        );
+        CREATE TABLE empty_labels_empty (
+            ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING, PRIMARY KEY(host)
+        );
+        INSERT INTO empty_labels_a VALUES (0, 6.0, 'x');
+        INSERT INTO empty_labels_null VALUES
+            (0, 3.0, NULL), (1000, 4.0, NULL), (0, 5.0, 'kept'), (1000, 6.0, 'kept');
+        INSERT INTO empty_labels_empty VALUES
+            (0, 3.0, ''), (1000, 4.0, ''), (0, 5.0, 'kept'), (1000, 6.0, 'kept');
+    "#;
+    let res = client
+        .get(&format!("/v1/sql?db=public&sql={}", encode(sql)))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let setup = res.json::<GreptimedbV1Response>().await;
+    let expected = serde_json::from_value::<Vec<GreptimeQueryOutput>>(json!([
+        {"affectedrows": 0}, {"affectedrows": 0}, {"affectedrows": 0},
+        {"affectedrows": 1}, {"affectedrows": 4}, {"affectedrows": 4}
+    ]))
+    .unwrap();
+    assert_eq!(setup.output(), expected.as_slice());
+
+    for table in ["empty_labels_null", "empty_labels_empty"] {
+        let res = client
+            .get(&format!(
+                "/v1/prometheus/api/v1/query?db=public&query={table}&time=0"
+            ))
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.json::<PrometheusJsonResponse>().await;
+        assert_eq!(body.status, "success");
+        let PrometheusResponse::PromData(data) = body.data else {
+            panic!("expected Prometheus data");
+        };
+        let PromQueryResult::Vector(mut series) = data.result else {
+            panic!("expected vector response");
+        };
+        series.sort_by(|left, right| left.metric.cmp(&right.metric));
+        assert_eq!(
+            serde_json::to_value(series).unwrap(),
+            json!([
+                {"metric": {"__name__": table}, "value": [0.0, "3.0"]},
+                {"metric": {"__name__": table, "host": "kept"}, "value": [0.0, "5.0"]}
+            ])
+        );
+
+        let res = client
+            .get(&format!(
+                "/v1/prometheus/api/v1/query_range?db=public&query={table}&start=0&end=1&step=1"
+            ))
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.json::<PrometheusJsonResponse>().await;
+        assert_eq!(body.status, "success");
+        assert_eq!(
+            body.data,
+            serde_json::from_value::<PrometheusResponse>(json!({
+                "resultType": "matrix",
+                "result": [
+                    {"metric": {"__name__": table},
+                     "values": [[0.0, "3.0"], [1.0, "4.0"]]},
+                    {"metric": {"__name__": table, "host": "kept"},
+                     "values": [[0.0, "5.0"], [1.0, "6.0"]]}
+                ]
+            }))
+            .unwrap()
+        );
+    }
+
+    for query in [
+        r#"label_replace(empty_labels_a, "host", "", "host", ".*") / on(host) empty_labels_null"#,
+        r#"label_join(empty_labels_a, "host", "", "missing") / on(host) empty_labels_null"#,
+    ] {
+        let res = client
+            .get(&format!(
+                "/v1/prometheus/api/v1/query?db=public&query={}&time=0",
+                encode(query)
+            ))
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.json::<PrometheusJsonResponse>().await;
+        assert_eq!(body.status, "success");
+        assert_eq!(
+            body.data,
+            serde_json::from_value::<PrometheusResponse>(json!({
+                "resultType": "vector",
+                "result": [{"metric": {}, "value": [0.0, "2.0"]}]
+            }))
+            .unwrap(),
+            "{query}"
+        );
+    }
 
     guard.remove_all().await;
 }

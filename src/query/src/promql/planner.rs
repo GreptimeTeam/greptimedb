@@ -1827,7 +1827,7 @@ impl PromPlanner {
         } else {
             Ok(manipulate)
         }?;
-        self.normalize_nullable_tag_labels(selected)
+        self.normalize_nullable_tag_labels(selected, None)
     }
 
     /// Converts the timestamp column `column` into PromQL seconds, truncated to milliseconds.
@@ -1994,7 +1994,7 @@ impl PromPlanner {
             }
         };
 
-        self.normalize_nullable_tag_labels(manipulate)
+        self.normalize_nullable_tag_labels(manipulate, None)
     }
 
     async fn prom_call_expr_to_plan(
@@ -2124,16 +2124,22 @@ impl PromPlanner {
 
         // Rewriting a label the input series already have can map several of them onto the same
         // label set, which PromQL rejects. A new label keeps the series distinct.
-        let may_duplicate_label_sets = matches!(func.name, "label_join" | "label_replace")
-            && new_tags.iter().any(|tag| input_tag_columns.contains(tag));
+        let is_label_function = matches!(func.name, "label_join" | "label_replace");
+        let may_duplicate_label_sets =
+            is_label_function && new_tags.iter().any(|tag| input_tag_columns.contains(tag));
+
+        let mut plan = builder.build().context(DataFusionPlanningSnafu)?;
+        if is_label_function {
+            // Label removal produces NULL in the function projection. Normalize it before
+            // checking label-set uniqueness or passing the result to another expression.
+            plan = self.normalize_nullable_tag_labels(plan, Some(&new_tags))?;
+        }
 
         // Update context tags after building plan
         // We can't push them before planning, because they won't exist until projection.
         for tag in new_tags {
             self.ctx.tag_columns.push(tag);
         }
-
-        let mut plan = builder.build().context(DataFusionPlanningSnafu)?;
         if may_duplicate_label_sets {
             let labels = self.ctx.tag_columns.clone();
             plan = Self::assert_unique_match_group(
@@ -2444,10 +2450,16 @@ impl PromPlanner {
 
     /// PromQL has no distinct NULL label value. Keep raw tags through series selection, then
     /// expose empty strings to grouping, matching, and result projection.
-    fn normalize_nullable_tag_labels(&mut self, plan: LogicalPlan) -> Result<LogicalPlan> {
-        let tags = self
-            .ctx
-            .tag_columns
+    ///
+    /// An explicit label list limits normalization to label-function destinations, leaving
+    /// existing grouping columns (which can be value fields) unchanged.
+    fn normalize_nullable_tag_labels(
+        &mut self,
+        plan: LogicalPlan,
+        labels: Option<&[String]>,
+    ) -> Result<LogicalPlan> {
+        let tags = labels
+            .unwrap_or(&self.ctx.tag_columns)
             .iter()
             .map(String::as_str)
             .collect::<HashSet<_>>();
@@ -4236,9 +4248,9 @@ impl PromPlanner {
         }))
     }
 
-    /// An empty label value means the label is absent in PromQL. Label functions represent it
-    /// as NULL, like a series that never had the label, so that both compare equal when label
-    /// sets are matched and neither is reported as a label.
+    /// Represents an absent destination label as NULL inside a label-function projection.
+    /// The function plan normalizes it to an empty string before checking or matching labels;
+    /// the Prometheus HTTP response omits empty labels.
     fn empty_label_to_null(value: DfExpr) -> DfExpr {
         DfExpr::ScalarFunction(ScalarFunction {
             func: datafusion_functions::core::nullif(),

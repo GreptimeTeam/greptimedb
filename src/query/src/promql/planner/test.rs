@@ -5056,7 +5056,11 @@ async fn native_histogram_mixed_field_table_behaves() {
     .await
     .unwrap();
     let plan_str = plan.display_indent_schema().to_string();
-    let filter = plan_str.lines().next().unwrap();
+    let filter = plan_str
+        .lines()
+        .find(|line| line.trim_start().starts_with("Filter: "))
+        .unwrap()
+        .trim_start();
     assert!(
         filter.starts_with("Filter: ")
             && filter.contains("greptime_native_histogram IS NOT NULL")
@@ -5908,13 +5912,14 @@ async fn test_label_join() {
         .unwrap();
 
     let expected = r#"
-Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8]
-  Projection: up.timestamp, up.field_0, nullif(concat_ws(Utf8(","), coalesce(up.tag_1, Utf8("")), coalesce(up.tag_2, Utf8("")), coalesce(up.tag_3, Utf8(""))), Utf8("")) AS foo, up.tag_0, up.tag_1, up.tag_2, up.tag_3 [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8]
-    PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
-      PromSeriesDivide: tags=["tag_0", "tag_1", "tag_2", "tag_3"] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
-        Sort: up.tag_0 ASC NULLS FIRST, up.tag_1 ASC NULLS FIRST, up.tag_2 ASC NULLS FIRST, up.tag_3 ASC NULLS FIRST, up.timestamp ASC NULLS FIRST [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
-          Filter: up.tag_0 = Utf8("api-server") AND up.timestamp >= TimestampMillisecond(-999, None) AND up.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
-            TableScan: up [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]"#;
+Projection: up.timestamp, up.field_0, coalesce(foo, Utf8("")) AS foo, up.tag_0, up.tag_1, up.tag_2, up.tag_3 [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8]
+  Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8]
+    Projection: up.timestamp, up.field_0, nullif(concat_ws(Utf8(","), coalesce(up.tag_1, Utf8("")), coalesce(up.tag_2, Utf8("")), coalesce(up.tag_3, Utf8(""))), Utf8("")) AS foo, up.tag_0, up.tag_1, up.tag_2, up.tag_3 [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8]
+      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
+        PromSeriesDivide: tags=["tag_0", "tag_1", "tag_2", "tag_3"] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
+          Sort: up.tag_0 ASC NULLS FIRST, up.tag_1 ASC NULLS FIRST, up.tag_2 ASC NULLS FIRST, up.tag_3 ASC NULLS FIRST, up.timestamp ASC NULLS FIRST [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
+            Filter: up.tag_0 = Utf8("api-server") AND up.timestamp >= TimestampMillisecond(-999, None) AND up.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
+              TableScan: up [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]"#;
 
     let ret = plan.display_indent_schema().to_string();
     assert_eq!(format!("\n{ret}"), expected, "\n{}", ret);
@@ -5943,13 +5948,14 @@ async fn test_label_replace() {
         .unwrap();
 
     let expected = r#"
-Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8]
-  Projection: up.timestamp, up.field_0, CASE WHEN regexp_like(coalesce(up.tag_0, Utf8("")), Utf8("^(?s:(.*):.*)$")) THEN nullif(regexp_replace(coalesce(up.tag_0, Utf8("")), Utf8("^(?s:(.*):.*)$"), Utf8("$1")), Utf8("")) ELSE Utf8(NULL) END AS foo, up.tag_0 [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8]
-    PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
-      PromSeriesDivide: tags=["tag_0"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
-        Sort: up.tag_0 ASC NULLS FIRST, up.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
-          Filter: up.tag_0 = Utf8("a:c") AND up.timestamp >= TimestampMillisecond(-999, None) AND up.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
-            TableScan: up [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]"#;
+Projection: up.timestamp, up.field_0, coalesce(foo, Utf8("")) AS foo, up.tag_0 [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8, tag_0:Utf8]
+  Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8]
+    Projection: up.timestamp, up.field_0, CASE WHEN regexp_like(coalesce(up.tag_0, Utf8("")), Utf8("^(?s:(.*):.*)$")) THEN nullif(regexp_replace(coalesce(up.tag_0, Utf8("")), Utf8("^(?s:(.*):.*)$"), Utf8("$1")), Utf8("")) ELSE Utf8(NULL) END AS foo, up.tag_0 [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8]
+      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
+        PromSeriesDivide: tags=["tag_0"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
+          Sort: up.tag_0 ASC NULLS FIRST, up.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
+            Filter: up.tag_0 = Utf8("a:c") AND up.timestamp >= TimestampMillisecond(-999, None) AND up.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
+              TableScan: up [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]"#;
 
     let ret = plan.display_indent_schema().to_string();
     assert_eq!(format!("\n{ret}"), expected, "\n{}", ret);
@@ -6998,6 +7004,107 @@ async fn one_to_one_rejects_normalized_collisions_on_either_side() {
         assert!(
             error.contains("matching labels must be unique on one side"),
             "{error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn label_functions_normalize_empty_outputs_before_matching() {
+    for label_expr in [
+        r#"label_replace(a, "host", "", "host", ".*")"#,
+        r#"label_replace(a, "host", "", "missing", ".*")"#,
+        r#"label_join(a, "host", "", "missing")"#,
+        r#"label_join(a, "host", "")"#,
+    ] {
+        let query = format!("{label_expr} / on(host) b");
+        let plan = nullable_label_query(
+            vec![
+                nullable_label_table("a", 2101, &[("host", &[Some("x")])], &[Some(6.0)]),
+                nullable_label_table("b", 2102, &[("host", &[None])], &[Some(3.0)]),
+            ],
+            &query,
+        )
+        .await;
+        let (_, batches) = execute(plan, &build_query_engine_state()).await;
+        assert_eq!(
+            batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+            1,
+            "{query}"
+        );
+        let batch = batches.iter().find(|batch| batch.num_rows() != 0).unwrap();
+        let host = batch
+            .column_by_name("host")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert!(!host.is_null(0), "{query}");
+        assert_eq!(host.value(0), "", "{query}");
+        let value = batch
+            .columns()
+            .iter()
+            .find_map(|column| column.as_any().downcast_ref::<Float64Array>())
+            .unwrap();
+        assert_eq!(value.value(0), 2.0, "{query}");
+    }
+}
+
+#[tokio::test]
+async fn label_functions_keep_value_grouping_columns_unchanged() {
+    let plan = nullable_label_query(
+        vec![nullable_label_table(
+            "a",
+            2101,
+            &[("host", &[Some("x")])],
+            &[Some(6.0)],
+        )],
+        r#"label_replace(max by(v)(a), "copy", "e", "missing", ".*")"#,
+    )
+    .await;
+    let (_, batches) = execute(plan, &build_query_engine_state()).await;
+    assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+    let batch = batches.iter().find(|batch| batch.num_rows() != 0).unwrap();
+    let group = batch
+        .column_by_name("v")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert_eq!(group.iter().collect::<Vec<_>>(), vec![Some(6.0)]);
+    let label = batch
+        .column_by_name("copy")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(label.iter().collect::<Vec<_>>(), vec![Some("e")]);
+}
+
+#[tokio::test]
+async fn label_functions_check_collisions_after_normalization() {
+    for query in [
+        r#"label_replace(a, "host", "", "host", "x")"#,
+        r#"label_join(a, "host", "", "missing")"#,
+    ] {
+        let plan = nullable_label_query(
+            vec![nullable_label_table(
+                "a",
+                2101,
+                &[("host", &[Some("x"), None])],
+                &[Some(6.0), Some(9.0)],
+            )],
+            query,
+        )
+        .await;
+        let state = build_query_engine_state();
+        let (_, physical) = optimize_and_create_physical_plan(&state, plan).await;
+        let error = datafusion::physical_plan::collect(physical, state.session_state().task_ctx())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("vector cannot contain metrics with the same labelset"),
+            "{query}: {error}"
         );
     }
 }

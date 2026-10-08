@@ -544,6 +544,7 @@ fn merge_batch(
                     }
                     for (tag_column, tag_name) in tag_columns.iter().zip(layout.tag_names.iter()) {
                         if let Some(tag_value) = string_array_value_at_index(tag_column, row_index)
+                            .filter(|value| !value.is_empty())
                         {
                             tags.push((tag_name.as_str(), tag_value));
                         }
@@ -1603,7 +1604,60 @@ mod tests {
     }
 
     #[test]
-    fn label_runs_keep_null_and_empty_labels_apart_across_batches() {
+    fn vector_response_omits_empty_labels() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondVector::from_vec(vec![0, 0, 1_000, 0])) as _,
+                Arc::new(StringVector::from(vec![
+                    None,
+                    Some("x"),
+                    Some(""),
+                    Some(" "),
+                ])) as _,
+                Arc::new(Float64Vector::from(vec![
+                    Some(1.0),
+                    Some(3.0),
+                    Some(2.0),
+                    Some(4.0),
+                ])) as _,
+            ],
+        )
+        .unwrap();
+        let response = PrometheusJsonResponse::record_batches_to_data(
+            RecordBatches::try_new(schema, vec![batch]).unwrap(),
+            Some("metric".to_string()),
+            ValueType::Vector,
+        )
+        .unwrap();
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Vector(series),
+            ..
+        }) = response
+        else {
+            panic!("expected vector response");
+        };
+        assert_eq!(
+            serde_json::to_value(series).unwrap(),
+            serde_json::json!([
+                {"metric": {"__name__": "metric"}, "value": [1.0, "2.0"]},
+                {"metric": {"__name__": "metric", "host": "x"}, "value": [0.0, "3.0"]},
+                {"metric": {"__name__": "metric", "host": " "}, "value": [0.0, "4.0"]},
+            ])
+        );
+    }
+
+    #[test]
+    fn label_runs_merge_null_and_empty_labels_across_batches() {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
                 "timestamp",
@@ -1614,11 +1668,10 @@ mod tests {
             ColumnSchema::new("rack", ConcreteDataType::string_datatype(), true),
             ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
         ]));
-        // Two batches of two runs each, with only `rack` changing: a null label
-        // and an empty one must not share a run, and the run opening the second
-        // batch continues the series that ended the first one.
+        // Raw NULL and empty labels form separate runs, but both must be omitted from the
+        // response key and merged into one series, including across batch boundaries.
         let mut batches = Vec::new();
-        let mut expected = vec![Vec::new(), Vec::new()];
+        let mut expected = Vec::new();
         for (batch_index, leading_null) in [true, false].into_iter().enumerate() {
             let mut racks = Vec::new();
             let mut values = Vec::new();
@@ -1627,7 +1680,7 @@ mod tests {
                 let null_rack = (row < 512) == leading_null;
                 racks.push((!null_rack).then_some(""));
                 values.push(Some(value));
-                expected[usize::from(!null_rack)].push((value, PromSampleValue::Number(value)));
+                expected.push((value, PromSampleValue::Number(value)));
             }
             batches.push(
                 RecordBatch::new(
@@ -1650,9 +1703,7 @@ mod tests {
                 batch.num_rows()
             ));
         }
-        for series in &mut expected {
-            series.sort_by(|left, right| left.0.total_cmp(&right.0));
-        }
+        expected.sort_by(|left, right| left.0.total_cmp(&right.0));
 
         let response = PrometheusJsonResponse::record_batches_to_data(
             RecordBatches::try_new(schema, batches).unwrap(),
@@ -1667,17 +1718,12 @@ mod tests {
         else {
             panic!("expected matrix response");
         };
-        assert_eq!(series.len(), 2);
+        assert_eq!(series.len(), 1);
         assert_eq!(
             series[0].metric,
             BTreeMap::from([("host".into(), "a".into())])
         );
-        assert_eq!(series[0].values, expected[0]);
-        assert_eq!(
-            series[1].metric,
-            BTreeMap::from([("host".into(), "a".into()), ("rack".into(), "".into())])
-        );
-        assert_eq!(series[1].values, expected[1]);
+        assert_eq!(series[0].values, expected);
     }
 
     #[test]
@@ -1776,19 +1822,19 @@ mod tests {
 
         // Pin the canonical arrangement itself, not only its stability.
         assert_eq!(
-            serde_json::to_value(&clustered[..4]).unwrap(),
+            serde_json::to_value(&clustered[..3]).unwrap(),
             serde_json::json!([
-                {"metric": {"__name__": "metric"}, "values": [[6.0, "6.0"], [8.0, "8.0"]]},
-                {"metric": {"__name__": "metric", "host": ""}, "values": [[7.0, "7.0"]]},
+                {"metric": {"__name__": "metric"}, "values": [[6.0, "6.0"], [7.0, "7.0"], [8.0, "8.0"]]},
                 {"metric": {"__name__": "metric", "host": "a"},
                  "values": [[4.0, "4.0"], [5.0, "5.0"]]},
                 {"metric": {"__name__": "metric", "host": "a", "rack": "r"},
                  "values": [[1.0, "1.0"], [2.0, "2.0"], [3.0, "3.0"]]},
             ])
         );
-        assert_eq!(clustered[4].metric["host"], "h");
+        assert_eq!(clustered.len(), 4);
+        assert_eq!(clustered[3].metric["host"], "h");
         assert_eq!(
-            clustered[4]
+            clustered[3]
                 .histograms
                 .iter()
                 .map(|(timestamp, histogram)| (*timestamp, histogram.sum.as_str()))
