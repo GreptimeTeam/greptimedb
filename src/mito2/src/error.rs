@@ -453,6 +453,14 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to wait for the WAL to be durable, region_id: {}", region_id))]
+    WaitWalDurable {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     // Shared error for each writer in the write group.
     #[snafu(display("Failed to write region"))]
     WriteGroup { source: Arc<Error> },
@@ -1439,9 +1447,10 @@ impl ErrorExt for Error {
             OpenDal { .. } | ManifestDeltaNotFound { .. } | ReadParquet { .. } => {
                 StatusCode::StorageUnavailable
             }
-            WriteWal { source, .. } | ReadWal { source, .. } | DeleteWal { source, .. } => {
-                source.status_code()
-            }
+            WriteWal { source, .. }
+            | ReadWal { source, .. }
+            | DeleteWal { source, .. }
+            | WaitWalDurable { source, .. } => source.status_code(),
             CompressObject { .. }
             | DecompressObject { .. }
             | SerdeJson { .. }
@@ -1651,6 +1660,7 @@ impl ErrorExt for Error {
             WriteWal { source, .. }
             | ReadWal { source, .. }
             | DeleteWal { source, .. }
+            | WaitWalDurable { source, .. }
             | FetchManifests { source, .. }
             | External { source, .. } => source.retry_hint(),
 

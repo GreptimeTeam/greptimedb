@@ -34,6 +34,8 @@ pub enum MatchGroupViolation {
     ImplicitManyToOne,
     /// A group modifier left several matches with the same result label set.
     AmbiguousGroupLabels,
+    /// A function rewrote labels so that several series share the same label set.
+    DuplicateLabelSet,
 }
 
 impl MatchGroupViolation {
@@ -54,6 +56,9 @@ impl MatchGroupViolation {
             Self::AmbiguousGroupLabels => format!(
                 "multiple matches for labels {group}: grouping labels must ensure unique matches"
             ),
+            Self::DuplicateLabelSet => {
+                "vector cannot contain metrics with the same labelset".to_string()
+            }
         }
     }
 }

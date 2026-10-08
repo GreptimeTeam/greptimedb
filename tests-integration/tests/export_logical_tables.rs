@@ -1541,6 +1541,20 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool) {
     .await;
     sql(instance, "INSERT INTO audit VALUES ('a',1,1),('z',NULL,3)").await;
     sql(instance, "CREATE VIEW dashboard AS SELECT * FROM audit").await;
+    let special_name = "audit.dashboard";
+    let quoted_special = special_name.replace('"', "\"\"");
+    sql(
+        instance,
+        &format!("CREATE VIEW \"{quoted_special}\" AS SELECT * FROM audit"),
+    )
+    .await;
+    if packed && !s3 {
+        for id in 0..128 {
+            let name = format!("batch_{id:03}");
+            sql(instance, &format!("CREATE TABLE {name} (host STRING PRIMARY KEY, val DOUBLE, ts TIMESTAMP TIME INDEX) ENGINE=metric WITH (on_physical_table='v2_a')")).await;
+            names.push(name);
+        }
+    }
     sql(instance, "CREATE DATABASE z_later").await;
     if packed {
         sql(instance, "CREATE DATABASE empty_schema").await;
@@ -1573,6 +1587,21 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool) {
         names.push("bulk".into());
     }
     let (addr, server) = export_http(instance.clone()).await;
+    if packed && !s3 {
+        let client = cli::DatabaseClient::new(
+            addr.clone(),
+            "greptime".into(),
+            None,
+            std::time::Duration::from_secs(60),
+            None,
+            true,
+        );
+        let error = client.sql_in_public(
+            "SHOW CREATE TABLE audit; SHOW CREATE TABLE missing_middle; SHOW CREATE VIEW dashboard"
+        ).await.unwrap_err();
+        assert!(error.to_string().contains("SQL request failed"), "{error}");
+    }
+
     let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
     for experimental in [false, true] {
         for layout in ["packed", "invalid"] {
@@ -1876,6 +1905,23 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool) {
         )
         .await
     );
+    for view in ["dashboard", special_name] {
+        let query = format!(
+            "SELECT * FROM \"{}\" ORDER BY ts,host",
+            view.replace('"', "\"\"")
+        );
+        assert_eq!(
+            values(instance, &query).await,
+            values(target.fe_instance(), &query).await
+        );
+        assert_eq!(
+            table(instance, view).await.schema().column_schemas(),
+            table(target.fe_instance(), view)
+                .await
+                .schema()
+                .column_schemas()
+        );
+    }
     if packed {
         let schema_uri = format!("{uri}/schema-only");
         let mut schema_args = vec![

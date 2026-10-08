@@ -32,7 +32,7 @@ use crate::cache::file_cache::{FileType, IndexKey};
 use crate::config::IndexBuildMode;
 use crate::error::{EditRegionSnafu, RegionBusySnafu, RegionNotFoundSnafu, Result};
 use crate::manifest::action::{
-    RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate,
+    RegionChange, RegionEdit, RegionMetaAction, RegionMetaActionList, RegionTruncate, TruncateKind,
 };
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::WRITE_CACHE_INFLIGHT_DOWNLOAD;
@@ -484,17 +484,31 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let request_sender = self.sender.clone();
         let manifest_ctx = region.manifest_ctx.clone();
         let is_staging = region.is_staging();
+        let durability_barrier = self
+            .wal
+            .durability_barrier(region.region_id, &region.provider);
 
         // Updates manifest in background.
         common_runtime::spawn_global(async move {
+            // The truncated entry id becomes the replay frontier, so the WAL
+            // must be durable through it before the manifest names it.
+            let durable = match &truncate.kind {
+                TruncateKind::All {
+                    truncated_entry_id, ..
+                } => durability_barrier.wait(*truncated_entry_id).await,
+                _ => Ok(()),
+            };
             // Write region truncated to manifest.
             let action_list =
                 RegionMetaActionList::with_action(RegionMetaAction::Truncate(truncate.clone()));
 
-            let result = manifest_ctx
-                .update_manifest(RegionLeaderState::Truncating, action_list, is_staging)
-                .await
-                .map(|_| ());
+            let result = match durable {
+                Ok(()) => manifest_ctx
+                    .update_manifest(RegionLeaderState::Truncating, action_list, is_staging)
+                    .await
+                    .map(|_| ()),
+                Err(e) => Err(e),
+            };
 
             // Sends the result back to the request sender.
             let truncate_result = TruncateResult {
@@ -531,10 +545,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let region_id = region.region_id;
         let request_sender = self.sender.clone();
         let manifest_ctx = region.manifest_ctx.clone();
+        let durability_barrier = self.wal.durability_barrier(region_id, &region.provider);
 
         common_runtime::spawn_global(async move {
             // The frontier moves to the last written entry and sequence, so replaying the
-            // WAL after a restart skips everything the memtables held.
+            // WAL after a restart skips everything the memtables held. The WAL must be
+            // durable through that entry before the manifest names it.
             let edit = RegionEdit {
                 files_to_add: Vec::new(),
                 files_to_remove: Vec::new(),
@@ -545,10 +561,13 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 committed_sequence: None,
             };
             let action_list = RegionMetaActionList::with_action(RegionMetaAction::Edit(edit));
-            let result = manifest_ctx
-                .update_manifest(RegionLeaderState::Truncating, action_list, false)
-                .await
-                .map(|_| ());
+            let result = match durability_barrier.wait(discarded_entry_id).await {
+                Ok(()) => manifest_ctx
+                    .update_manifest(RegionLeaderState::Truncating, action_list, false)
+                    .await
+                    .map(|_| ()),
+                Err(e) => Err(e),
+            };
 
             let result = DiscardUnflushedResult {
                 region_id,
