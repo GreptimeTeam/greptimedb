@@ -44,7 +44,7 @@ use common_meta::procedure_executor::{LocalProcedureExecutor, ProcedureExecutorR
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
 use common_meta::sequence::{Sequence, SequenceBuilder};
-use common_meta::wal_provider::{WalProviderRef, build_wal_provider};
+use common_meta::wal_provider::{WalProvider, WalProviderRef, build_wal_provider};
 use common_options::plugin_options::StandaloneFlag;
 use common_procedure::ProcedureManagerRef;
 use common_query::prelude::set_default_prefix;
@@ -52,6 +52,8 @@ use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
 use common_time::timezone::set_default_timezone;
 use common_version::{short_version, verbose_version};
+use common_wal::config::DatanodeWalConfig;
+use common_wal::config::object_store::STANDALONE_GENERATION;
 use datanode::config::{DatanodeOptions, StorageConfig};
 use datanode::datanode::{Datanode, DatanodeBuilder};
 use datanode::region_server::RegionServer;
@@ -82,6 +84,34 @@ use crate::options::{GlobalOptions, GreptimeOptions};
 use crate::{App, create_resource_limit_metrics, error, log_versions, maybe_activate_heap_profile};
 
 pub const APP_NAME: &str = "greptime-standalone";
+
+/// Builds the WAL provider that allocates region WAL options in standalone mode.
+///
+/// The object store WAL allocates the node prefix of `node_id`, the datanode id
+/// of the standalone instance; an absent id is treated as 0, the id
+/// `StandaloneOptions::datanode_options` assigns.
+pub async fn build_standalone_wal_provider(
+    wal: &DatanodeWalConfig,
+    node_id: Option<DatanodeId>,
+    kv_backend: KvBackendRef,
+) -> Result<WalProvider> {
+    match wal {
+        DatanodeWalConfig::ObjectStore(config) => Ok(WalProvider::ObjectStore {
+            prefix: config.node_prefix(node_id.unwrap_or(0), STANDALONE_GENERATION),
+        }),
+        DatanodeWalConfig::RaftEngine(_)
+        | DatanodeWalConfig::Kafka(_)
+        | DatanodeWalConfig::Noop => {
+            let metasrv_wal_config = wal
+                .clone()
+                .try_into()
+                .context(error::InvalidWalProviderSnafu)?;
+            build_wal_provider(&metasrv_wal_config, kv_backend)
+                .await
+                .context(error::BuildWalProviderSnafu)
+        }
+    }
+}
 
 fn standalone_local_file_access(
     storage: &StorageConfig,
@@ -610,15 +640,8 @@ impl StartCommand {
                 .step(10)
                 .build(),
         );
-        let kafka_options = opts
-            .wal
-            .clone()
-            .try_into()
-            .context(error::InvalidWalProviderSnafu)?;
-        let wal_provider = build_wal_provider(&kafka_options, kv_backend.clone())
-            .await
-            .context(error::BuildWalProviderSnafu)?;
-        let wal_provider = Arc::new(wal_provider);
+        let wal_provider =
+            Arc::new(build_standalone_wal_provider(&opts.wal, node_id, kv_backend.clone()).await?);
         let table_metadata_allocator = Arc::new(TableMetadataAllocator::new(
             table_id_allocator.clone(),
             wal_provider.clone(),
@@ -1035,15 +1058,56 @@ mod tests {
     use clap::{CommandFactory, Parser};
     use common_base::readable_size::ReadableSize;
     use common_config::ENV_VAR_SEP;
+    use common_meta::ddl::allocator::wal_options::WalOptionsAllocator;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_options::plugin_options::StandaloneFlag;
     use common_test_util::temp_dir::{create_named_temp_file, create_temp_dir};
-    use common_wal::config::DatanodeWalConfig;
+    use common_wal::config::object_store::ObjectStoreWalConfig;
+    use common_wal::options::{ObjectStoreWalOptions, WalOptions};
     use frontend::frontend::FrontendOptions;
     use object_store::config::{FileConfig, GcsConfig};
     use servers::grpc::GrpcOptions;
 
     use super::*;
     use crate::options::GlobalOptions;
+
+    #[tokio::test]
+    async fn test_build_standalone_wal_provider() {
+        let kv_backend = Arc::new(MemoryKvBackend::new()) as KvBackendRef;
+
+        let config = ObjectStoreWalConfig {
+            prefix: "cluster-a/wal".to_string(),
+            ..Default::default()
+        };
+        // The regions persist the node prefix the datanode runs its store under.
+        let node_prefix = config.node_prefix(0, STANDALONE_GENERATION);
+        assert_eq!(node_prefix, "cluster-a/wal/datanodes/0/epochs/0");
+        let provider = build_standalone_wal_provider(
+            &DatanodeWalConfig::ObjectStore(config),
+            Some(0),
+            kv_backend.clone(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            &provider,
+            WalProvider::ObjectStore { prefix } if *prefix == node_prefix
+        ));
+        let regions = vec![0, 1];
+        let wal_options = provider.allocate(&regions, false).await.unwrap();
+        for region in regions {
+            assert_eq!(
+                wal_options[&region],
+                WalOptions::ObjectStore(ObjectStoreWalOptions::new(node_prefix.clone()))
+            );
+        }
+
+        let provider =
+            build_standalone_wal_provider(&DatanodeWalConfig::default(), Some(0), kv_backend)
+                .await
+                .unwrap();
+        assert!(matches!(provider, WalProvider::RaftEngine));
+    }
 
     #[test]
     fn test_standalone_local_file_access_config() {

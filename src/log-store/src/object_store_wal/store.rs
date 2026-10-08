@@ -88,7 +88,7 @@ const RECOVERY_TAIL_WINDOW: usize = 64 * 1024;
 /// `enqueued` mode it returns on admission and the object is created in the
 /// background. While [`MAX_SEALED_BATCHES`] batches
 /// wait to become durable no append is admitted.
-pub(crate) struct ObjectStoreLogStore {
+pub struct ObjectStoreLogStore {
     prefix: String,
     ack_mode: AckMode,
     io: Arc<dyn WalObjectIo>,
@@ -104,6 +104,12 @@ pub(crate) struct ObjectStoreLogStore {
     creates_held: watch::Sender<bool>,
     #[cfg(any(test, feature = "testing"))]
     creates_fail: Arc<AtomicBool>,
+    #[cfg(any(test, feature = "testing"))]
+    next_create_fails_after_write: Arc<AtomicBool>,
+    #[cfg(any(test, feature = "testing"))]
+    parked_creates: watch::Receiver<usize>,
+    #[cfg(any(test, feature = "testing"))]
+    durability_waits: watch::Receiver<usize>,
 }
 
 type ObsoleteEntryIds = Arc<Mutex<HashMap<RegionId, EntryId>>>;
@@ -124,7 +130,7 @@ impl ObjectStoreLogStore {
     /// recovering the catalog from the objects that already exist and writing
     /// the object that starts the epoch of this instance. Recovery fails on the
     /// first corrupted or conflicting object.
-    pub(crate) async fn try_new(
+    pub async fn try_new(
         object_store: ObjectStore,
         config: &ObjectStoreWalConfig,
         node_id: u64,
@@ -203,6 +209,12 @@ impl ObjectStoreLogStore {
         let (creates_held_tx, creates_held_rx) = watch::channel(false);
         #[cfg(any(test, feature = "testing"))]
         let creates_fail = Arc::new(AtomicBool::new(false));
+        #[cfg(any(test, feature = "testing"))]
+        let next_create_fails_after_write = Arc::new(AtomicBool::new(false));
+        #[cfg(any(test, feature = "testing"))]
+        let (parked_creates_tx, parked_creates_rx) = watch::channel(0);
+        #[cfg(any(test, feature = "testing"))]
+        let (durability_waits_tx, durability_waits_rx) = watch::channel(0);
 
         let actor = Actor {
             io: io.clone(),
@@ -237,6 +249,12 @@ impl ObjectStoreLogStore {
             creates_held: creates_held_rx,
             #[cfg(any(test, feature = "testing"))]
             creates_fail: creates_fail.clone(),
+            #[cfg(any(test, feature = "testing"))]
+            next_create_fails_after_write: next_create_fails_after_write.clone(),
+            #[cfg(any(test, feature = "testing"))]
+            parked_creates: Arc::new(parked_creates_tx),
+            #[cfg(any(test, feature = "testing"))]
+            durability_waits: durability_waits_tx,
         };
         common_runtime::spawn_global(actor.run());
         Ok(Arc::new(Self {
@@ -255,6 +273,12 @@ impl ObjectStoreLogStore {
             creates_held: creates_held_tx,
             #[cfg(any(test, feature = "testing"))]
             creates_fail,
+            #[cfg(any(test, feature = "testing"))]
+            next_create_fails_after_write,
+            #[cfg(any(test, feature = "testing"))]
+            parked_creates: parked_creates_rx,
+            #[cfg(any(test, feature = "testing"))]
+            durability_waits: durability_waits_rx,
         }))
     }
 
@@ -313,6 +337,20 @@ impl ObjectStoreLogStore {
     }
 }
 
+/// The transient object store error of a create that a testing hook fails.
+#[cfg(any(test, feature = "testing"))]
+fn injected_create_failure(io: &dyn WalObjectIo, object_seq: u64) -> Result<PutResult> {
+    let error = object_store::Error::new(
+        object_store::ErrorKind::Unexpected,
+        "injected create failure",
+    )
+    .set_temporary();
+    Err(error).context(crate::error::WalObjectStoreSnafu {
+        operation: "write",
+        path: io.object_path(object_seq),
+    })
+}
+
 /// Records the obsolete watermark of `region_id`, which never moves down.
 fn record_obsolete(obsolete_entry_ids: &ObsoleteEntryIds, region_id: RegionId, entry_id: EntryId) {
     obsolete_entry_ids
@@ -336,7 +374,7 @@ fn positive_bytes(bytes: u64, name: &str) -> Result<usize> {
 impl ObjectStoreLogStore {
     /// Waits until the actor has admitted at least `expected` append calls
     /// since the store was built.
-    pub(crate) async fn wait_for_admitted_appends(&self, expected: usize) -> Result<()> {
+    pub async fn wait_for_admitted_appends(&self, expected: usize) -> Result<()> {
         self.admitted_appends
             .clone()
             .wait_for(|count| *count >= expected)
@@ -348,7 +386,7 @@ impl ObjectStoreLogStore {
 
     /// Seals the open batch regardless of its size and age and returns once
     /// its object is durable and indexed, or with the error that failed it.
-    pub(crate) async fn seal_open_batch(&self) -> Result<()> {
+    pub async fn seal_open_batch(&self) -> Result<()> {
         ensure!(
             !self.stopped.load(Ordering::Acquire),
             ObjectStoreWalStoppedSnafu
@@ -368,24 +406,75 @@ impl ObjectStoreLogStore {
     /// [`release_creates`](Self::release_creates), so a test can observe
     /// entries that are admitted but not durable. A create that is parked when
     /// the store is dropped never runs.
-    pub(crate) fn hold_creates(&self) {
+    pub fn hold_creates(&self) {
         self.creates_held.send_replace(true);
     }
 
     /// Lets the creates parked by [`hold_creates`](Self::hold_creates) run.
-    pub(crate) fn release_creates(&self) {
+    pub fn release_creates(&self) {
         self.creates_held.send_replace(false);
     }
 
     /// Makes every create that runs from now on fail with a transient object
     /// store error instead of writing.
-    pub(crate) fn fail_creates(&self) {
+    pub fn fail_creates(&self) {
         self.creates_fail.store(true, Ordering::Release);
+    }
+
+    /// Makes the next create that writes its object report a transient object
+    /// store error afterwards, so the object exists although its create
+    /// failed.
+    pub fn fail_next_create_after_write(&self) {
+        self.next_create_fails_after_write
+            .store(true, Ordering::Release);
+    }
+
+    /// Waits until at least `expected` creates have been parked by
+    /// [`hold_creates`](Self::hold_creates) since the store was built.
+    pub async fn wait_for_parked_creates(&self, expected: usize) -> Result<()> {
+        self.parked_creates
+            .clone()
+            .wait_for(|count| *count >= expected)
+            .await
+            .ok()
+            .map(|_| ())
+            .context(ObjectStoreWalStoppedSnafu)
+    }
+
+    /// Waits until at least `expected` calls of
+    /// [`wait_durable`](LogStore::wait_durable) have had to wait for an entry
+    /// that is not durable since the store was built.
+    pub async fn wait_for_durability_waits(&self, expected: usize) -> Result<()> {
+        self.durability_waits
+            .clone()
+            .wait_for(|count| *count >= expected)
+            .await
+            .ok()
+            .map(|_| ())
+            .context(ObjectStoreWalStoppedSnafu)
+    }
+
+    /// Ends the actor the way a crash of the process would: nothing more is
+    /// written, creates that have not completed are dropped, and every caller
+    /// still waiting for the store fails. Returns once the actor has exited.
+    pub async fn crash(&self) {
+        self.stopped.store(true, Ordering::Release);
+        let (response_tx, response_rx) = oneshot::channel();
+        if self
+            .command_tx
+            .send(Command::Crash {
+                response: response_tx,
+            })
+            .await
+            .is_ok()
+        {
+            let _ = response_rx.await;
+        }
     }
 
     /// Sets the stopped flag without sending the stop command, which is the
     /// state a store is in between the two steps of [`stop`](LogStore::stop).
-    pub(crate) fn begin_stop(&self) {
+    pub fn begin_stop(&self) {
         self.stopped.store(true, Ordering::Release);
     }
 }
@@ -662,6 +751,8 @@ enum Command {
     Seal {
         response: oneshot::Sender<Result<()>>,
     },
+    #[cfg(any(test, feature = "testing"))]
+    Crash { response: oneshot::Sender<()> },
 }
 
 /// An append waiting for the object that holds its entries.
@@ -797,6 +888,12 @@ struct Actor {
     creates_held: watch::Receiver<bool>,
     #[cfg(any(test, feature = "testing"))]
     creates_fail: Arc<AtomicBool>,
+    #[cfg(any(test, feature = "testing"))]
+    next_create_fails_after_write: Arc<AtomicBool>,
+    #[cfg(any(test, feature = "testing"))]
+    parked_creates: Arc<watch::Sender<usize>>,
+    #[cfg(any(test, feature = "testing"))]
+    durability_waits: watch::Sender<usize>,
 }
 
 impl Actor {
@@ -834,6 +931,12 @@ impl Actor {
                     #[cfg(any(test, feature = "testing"))]
                     Some(Command::Seal { response }) => {
                         self.handle_seal(response);
+                    }
+                    #[cfg(any(test, feature = "testing"))]
+                    Some(Command::Crash { response }) => {
+                        self.handle_crash();
+                        let _ = response.send(());
+                        return;
                     }
                     // Every sender is gone: the store was dropped without
                     // `stop`. The creates in flight are dropped with the actor.
@@ -1076,6 +1179,10 @@ impl Actor {
             let mut creates_held = self.creates_held.clone();
             #[cfg(any(test, feature = "testing"))]
             let creates_fail = self.creates_fail.clone();
+            #[cfg(any(test, feature = "testing"))]
+            let next_create_fails_after_write = self.next_create_fails_after_write.clone();
+            #[cfg(any(test, feature = "testing"))]
+            let parked_creates = self.parked_creates.clone();
             self.creates.push(Box::pin(async move {
                 if !delay.is_zero() {
                     tokio::time::sleep(delay).await;
@@ -1083,21 +1190,16 @@ impl Actor {
                 // The store was dropped while the create was parked: it never
                 // runs.
                 #[cfg(any(test, feature = "testing"))]
+                if *creates_held.borrow() {
+                    parked_creates.send_modify(|count| *count += 1);
+                }
+                #[cfg(any(test, feature = "testing"))]
                 if creates_held.wait_for(|held| !*held).await.is_err() {
                     return (object_seq, Err(ObjectStoreWalStoppedSnafu.build()));
                 }
                 #[cfg(any(test, feature = "testing"))]
                 if creates_fail.load(Ordering::Acquire) {
-                    let error = object_store::Error::new(
-                        object_store::ErrorKind::Unexpected,
-                        "injected create failure",
-                    )
-                    .set_temporary();
-                    let result = Err(error).context(crate::error::WalObjectStoreSnafu {
-                        operation: "write",
-                        path: io.object_path(object_seq),
-                    });
-                    return (object_seq, result);
+                    return (object_seq, injected_create_failure(io.as_ref(), object_seq));
                 }
                 // Any conflict poisons an `enqueued` store, so only the
                 // `durable` mode reads the epoch of the existing object.
@@ -1109,6 +1211,10 @@ impl Actor {
                     }
                     result => result,
                 };
+                #[cfg(any(test, feature = "testing"))]
+                if result.is_ok() && next_create_fails_after_write.swap(false, Ordering::AcqRel) {
+                    return (object_seq, injected_create_failure(io.as_ref(), object_seq));
+                }
                 (object_seq, result)
             }));
         }
@@ -1354,6 +1460,8 @@ impl Actor {
             entry_id,
             response,
         });
+        #[cfg(any(test, feature = "testing"))]
+        self.durability_waits.send_modify(|count| *count += 1);
     }
 
     /// Makes sure no id of the region at or below `entry_id` is assigned
@@ -1487,6 +1595,21 @@ impl Actor {
         }
         let result = terminal(&self.terminal_error).map_or(Ok(()), |error| Err(shared(&error)));
         let _ = response.send(result);
+    }
+
+    /// Fails every caller that waits for the store; the creates are
+    /// dropped with the actor.
+    #[cfg(any(test, feature = "testing"))]
+    fn handle_crash(&mut self) {
+        let stopped = || ObjectStoreWalStoppedSnafu.build();
+        for batch in self.sealed.drain(..) {
+            batch.fail(stopped);
+        }
+        self.reset_open_batch();
+        self.fail_unacknowledged(stopped);
+        for response in self.stop.drain(..) {
+            let _ = response.send(Err(stopped()));
+        }
     }
 
     fn is_stopped(&self) -> bool {
@@ -2759,6 +2882,9 @@ mod tests {
             admitted_appends: watch::channel(0).1,
             creates_held: watch::channel(false).0,
             creates_fail: Arc::default(),
+            next_create_fails_after_write: Arc::default(),
+            parked_creates: watch::channel(0).1,
+            durability_waits: watch::channel(0).1,
         };
         (store, command_rx)
     }
@@ -3954,6 +4080,63 @@ mod tests {
         store.begin_stop();
         assert_stopped(&append(&store, region_id, "a3").await.unwrap_err());
         store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_hook_fails_the_next_create_after_it_writes() {
+        let store = open(memory_store(), &eager()).await;
+        let region_id = region(1);
+
+        // Object 1 is stored, but its create reports a failure, so the
+        // append fails and the region has no durable entry.
+        store.fail_next_create_after_write();
+        let error = append(&store, region_id, "a1").await.unwrap_err();
+        assert!(
+            matches!(unwrap_shared(&error), Error::WalObjectStore { .. }),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(vec![0, 1], object_seqs(store.io.as_ref()).await);
+        assert_eq!(0, latest(&store, region_id));
+
+        // Only that create failed.
+        let response = append(&store, region_id, "a2").await.unwrap();
+        assert_eq!(
+            HashMap::from([(region_id, id(2, 1))]),
+            response.last_entry_ids
+        );
+        assert_eq!(vec![0, 1, 2], object_seqs(store.io.as_ref()).await);
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_hooks_observe_parked_creates_waits_and_crash() {
+        let store = open(memory_store(), &enqueued(eager())).await;
+        let region_id = region(1);
+
+        // The append is acknowledged and its create parks; a wait for its
+        // entry has to wait.
+        store.hold_creates();
+        append(&store, region_id, "a1").await.unwrap();
+        timeout(WAIT, store.wait_for_parked_creates(1))
+            .await
+            .unwrap()
+            .unwrap();
+        let wait = {
+            let store = store.clone();
+            tokio::spawn(async move { store.wait_durable(&provider(region_id), id(1, 1)).await })
+        };
+        timeout(WAIT, store.wait_for_durability_waits(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!wait.is_finished());
+
+        // The crash fails the waiter and the store, and the parked create
+        // never writes its object.
+        store.crash().await;
+        assert_stopped(&timeout(WAIT, wait).await.unwrap().unwrap().unwrap_err());
+        assert_stopped(&append(&store, region_id, "a2").await.unwrap_err());
+        assert_eq!(vec![0], object_seqs(store.io.as_ref()).await);
     }
 
     #[tokio::test]

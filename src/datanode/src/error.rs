@@ -319,8 +319,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Object store WAL is not supported yet"))]
-    ObjectStoreWalNotSupported {
+    #[snafu(display("Object store WAL is only supported in standalone mode"))]
+    ObjectStoreWalNotStandalone {
         #[snafu(implicit)]
         location: Location,
     },
@@ -499,6 +499,7 @@ impl ErrorExt for Error {
             | TomlFormat { .. }
             | DuplicateRegionEngineConfig { .. }
             | InvalidObjectStoreWalConfig { .. }
+            | ObjectStoreWalNotStandalone { .. }
             | BuildDatanode { .. } => StatusCode::InvalidArguments,
 
             PayloadNotExist { .. }
@@ -523,9 +524,7 @@ impl ErrorExt for Error {
 
             OpenLogStore { source, .. } => source.status_code(),
             MetaClientInit { source, .. } => source.status_code(),
-            UnsupportedOutput { .. }
-            | NotYetImplemented { .. }
-            | ObjectStoreWalNotSupported { .. } => StatusCode::Unsupported,
+            UnsupportedOutput { .. } | NotYetImplemented { .. } => StatusCode::Unsupported,
             HandleRegionRequest { source, .. }
             | GetRegionMetadata { source, .. }
             | HandleBatchOpenRequest { source, .. }
