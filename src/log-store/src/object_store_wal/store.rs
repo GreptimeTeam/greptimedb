@@ -293,9 +293,7 @@ impl ObjectStoreLogStore {
                 path: io.object_path(start.object_seq),
             })?;
         // No watermark is recorded yet.
-        let writer_reclaim_boundary = catalog
-            .reclaim_boundary(&HashMap::new())
-            .max(reclaim_boundary);
+        let writer_reclaim_boundary = catalog.reclaim_boundary(reclaim_boundary, &HashMap::new());
         let catalog = Arc::new(RwLock::new(catalog));
         let obsolete_entry_ids = ObsoleteEntryIds::default();
         let wal_holes = WalHoles::default();
@@ -1734,9 +1732,9 @@ impl Actor {
             self.catalog
                 .read()
                 .unwrap_or_else(PoisonError::into_inner)
-                .reclaim_boundary(&obsolete_entry_ids)
+                .reclaim_boundary(self.reclaim_boundary, &obsolete_entry_ids)
         };
-        self.reclaim_boundary = self.reclaim_boundary.max(boundary);
+        self.reclaim_boundary = boundary;
     }
 
     /// Starts a collection, which also attempts the deletes that failed since

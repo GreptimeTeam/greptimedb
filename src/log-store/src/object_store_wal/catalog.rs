@@ -158,33 +158,38 @@ impl ObjectCatalog {
     }
 
     /// Returns the reclaim boundary the indexed objects and the obsolete
-    /// watermarks allow: every object below it holds only segments whose
-    /// maximum entry id is at or below the watermark of their region.
+    /// watermarks allow, given that every object below `from` holds no live
+    /// segment: the first indexed object at or above `from` that holds a
+    /// live segment, or the sequence after the last indexed object when none
+    /// does, and never less than `from`.
     ///
-    /// Each region contributes the first indexed object holding a segment
-    /// above its watermark, or its first indexed object when it has no
-    /// watermark; a region whose watermark is [`EntryId::MAX`] contributes
-    /// nothing. The boundary is the smallest contribution, or the sequence
-    /// after the last indexed object when no region contributes.
-    pub(crate) fn reclaim_boundary(&self, obsolete_entry_ids: &HashMap<RegionId, EntryId>) -> u64 {
-        self.regions
-            .iter()
-            .filter_map(|(region_id, objects)| {
-                let watermark = obsolete_entry_ids.get(region_id);
-                objects
-                    .iter()
-                    .find(|(_, entry)| {
-                        watermark.is_none_or(|obsolete| entry.max_entry_id > *obsolete)
-                    })
-                    .map(|(object_seq, _)| *object_seq)
+    /// A segment is live when its maximum entry id is above the watermark of
+    /// its region, or its region has no watermark; a region whose watermark
+    /// is [`EntryId::MAX`] holds no live segment. Watermarks never move down
+    /// and a region first appears in an object above the boundary, so the
+    /// scan starts at the previous boundary and never reads an object twice
+    /// once the boundary has passed it.
+    pub(crate) fn reclaim_boundary(
+        &self,
+        from: u64,
+        obsolete_entry_ids: &HashMap<RegionId, EntryId>,
+    ) -> u64 {
+        let live = self.objects.range(from..).find(|(_, footer)| {
+            footer.iter().any(|entry| {
+                obsolete_entry_ids
+                    .get(&entry.region_id)
+                    .is_none_or(|obsolete| entry.max_entry_id > *obsolete)
             })
-            .min()
-            .or_else(|| {
-                self.objects
-                    .last_key_value()
-                    .map(|(object_seq, _)| object_seq.saturating_add(1))
-            })
-            .unwrap_or(0)
+        });
+        match live {
+            Some((&object_seq, _)) => object_seq,
+            None => self
+                .objects
+                .last_key_value()
+                .map_or(from, |(&object_seq, _)| {
+                    object_seq.saturating_add(1).max(from)
+                }),
+        }
     }
 
     /// Returns the objects that hold entries of `region_id` overlapping
@@ -516,7 +521,7 @@ mod tests {
             )
             .unwrap();
         let boundary = |catalog: &ObjectCatalog, obsolete: &[(RegionId, EntryId)]| {
-            catalog.reclaim_boundary(&obsolete.iter().copied().collect())
+            catalog.reclaim_boundary(0, &obsolete.iter().copied().collect())
         };
 
         // A region without a watermark holds the boundary at its first object.
@@ -553,6 +558,10 @@ mod tests {
                 &[(region_one, entry_id(2, 1)), (region_two, EntryId::MAX)]
             )
         );
+
+        // Objects below the previous boundary are not scanned again.
+        assert_eq!(3, catalog.reclaim_boundary(3, &HashMap::new()));
+        assert_eq!(5, catalog.reclaim_boundary(5, &HashMap::new()));
 
         // Removing objects keeps the largest entry id of every region, and a
         // region without indexed objects contributes nothing.
