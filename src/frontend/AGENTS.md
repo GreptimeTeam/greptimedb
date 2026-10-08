@@ -63,6 +63,9 @@ remote datanodes via `operator`/`client`.
   `otlp.trace_aux_cache_capacity` sets its entry limit at startup; zero disables it.
   Async main writes retain completion results; a frontend task writes auxiliary
   rows only for confirmed chunks before populating the cache.
+  Cold async trace requests reserve a shared auxiliary slot before main writes,
+  bounded separately by the table batcher's `max_inflight_requests`; confirmed
+  cache hits bypass this admission. The slot lasts through auxiliary completion.
   These tables are ingestion-managed; manual mutation requires restarting
   serving frontends.
 

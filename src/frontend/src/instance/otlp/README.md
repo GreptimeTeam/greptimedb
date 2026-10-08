@@ -183,9 +183,8 @@ take effect on frontend or standalone restart. There is no time-based expiry.
 Services and operations are cached independently. Only a successful
 auxiliary write populates the cache. Auxiliary writes always bypass batching,
 including when main spans use asynchronous batching. Failures, eviction,
-frontend restarts, and concurrent misses can cause repeat writes. Main-span
-writes and admission are unaffected, while write cost reflects only the writes
-actually performed.
+frontend restarts, and concurrent misses can cause repeat writes. Write cost
+reflects only the writes actually performed.
 
 Successful auxiliary writes with `skip_wal` enabled are cached too. If a
 datanode crashes before flushing those rows while the frontend survives, the
@@ -200,6 +199,13 @@ rows only for successful chunks. Failed chunks do not populate the auxiliary
 tables or cache. Deferred auxiliary failures are logged; they cannot change an
 already returned response. Deferred writes retain the original request's row
 admission, and their write cost is not included in the early response.
+
+Async trace requests with cache misses acquire one shared auxiliary-work slot
+before submitting main chunks. Each frontend limits these requests separately
+from main-table batching, using `pending_rows_batcher.max_inflight_requests`.
+The slot is held through auxiliary completion, including failures. Requests
+whose service/operation entries are all cached bypass this admission and need
+no deferred task. Cache lookups and updates hold no lock across storage writes.
 
 The auxiliary tables are ingestion-managed. When caching is enabled, manual
 `DROP`, `TRUNCATE`, `DELETE`, or other mutations require clearing the affected

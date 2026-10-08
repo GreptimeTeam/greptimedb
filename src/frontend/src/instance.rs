@@ -48,6 +48,7 @@ use catalog::process_manager::{
 use client::OutputData;
 use common_base::Plugins;
 use common_base::cancellation::CancellableFuture;
+use common_batcher::request_limiter::RequestLimiter;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_event_recorder::EventRecorderRef;
 use common_meta::cache::TableFlownodeSetCacheRef;
@@ -142,6 +143,7 @@ pub struct Instance {
     influxdb_default_merge_mode: InfluxdbMergeMode,
     trace_ingest_chunk_size: usize,
     trace_aux_cache: otlp::TraceAuxCache,
+    trace_aux_limiter: Option<RequestLimiter>,
     otlp_resource_info: bool,
     suspend: Arc<AtomicBool>,
 

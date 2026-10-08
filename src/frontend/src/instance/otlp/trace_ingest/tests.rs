@@ -20,6 +20,7 @@ use api::v1::{
     ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
     RowInsertRequest, Rows, SemanticType, Value,
 };
+use common_batcher::request_limiter::RequestLimiter;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_query::WriteCompletion;
@@ -155,6 +156,40 @@ fn test_trace_aux_cache_zero_capacity_disables_caching() {
     assert_eq!(cache.filter(table, &mut repeated).len(), 2);
     assert_eq!(repeated.services.len(), 1);
     assert_eq!(repeated.operations.len(), 1);
+}
+
+#[tokio::test]
+async fn test_trace_aux_admission_rechecks_cache() {
+    let cache = TraceAuxCache::new(100);
+    let limiter = RequestLimiter::try_new(1).unwrap();
+    let table = TableName::new("greptime", "public", "traces");
+    let data = || trace_aux_data("svc", "span", "server");
+    let permit = cache
+        .acquire_for_misses(&limiter, table.clone(), data())
+        .await
+        .unwrap()
+        .unwrap();
+    let cloned_cache = cache.clone();
+    let cloned_limiter = limiter.clone();
+    let mut waiting =
+        Box::pin(cloned_cache.acquire_for_misses(&cloned_limiter, table.clone(), data()));
+    assert!(futures::poll!(waiting.as_mut()).is_pending());
+
+    // Successful storage populates the shared cache before releasing admission.
+    cache.record(cache.filter(table.clone(), &mut data()));
+    assert!(
+        cloned_cache
+            .acquire_for_misses(&cloned_limiter, table.clone(), data())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    drop(permit);
+    assert!(waiting.await.unwrap().is_none());
+
+    // Rechecking a now-warm request must release its briefly acquired slot.
+    let other = cache.acquire_for_misses(&limiter, table, trace_aux_data("svc", "other", "server"));
+    assert!(futures::poll!(Box::pin(other).as_mut()).is_ready());
 }
 
 #[test]

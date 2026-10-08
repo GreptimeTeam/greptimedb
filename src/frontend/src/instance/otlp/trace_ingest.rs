@@ -22,6 +22,7 @@ use api::v1::{
     RowInsertRequest, RowInsertRequests, Rows, Value,
 };
 use client::Output;
+use common_batcher::request_limiter::RequestLimiter;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_meta::rpc::ddl::TriggerReason;
@@ -46,6 +47,7 @@ use table::requests::{
     SOURCE_OPENTELEMETRY, TABLE_DATA_MODEL_TRACE_V1, TABLE_DATA_MODEL_TRACE_V2,
 };
 use table::table_name::TableName;
+use tokio::sync::OwnedSemaphorePermit;
 
 use crate::instance::Instance;
 use crate::instance::otlp::trace_semconv::trace_semconv_fixed_type;
@@ -113,6 +115,26 @@ impl TraceAuxCache {
             self.entries.insert(key, ());
         }
     }
+
+    /// Reserves background capacity only for misses, without holding a cache lock.
+    async fn acquire_for_misses(
+        &self,
+        limiter: &RequestLimiter,
+        table: TableName,
+        mut aux_data: TraceAuxData,
+    ) -> ServerResult<Option<Arc<OwnedSemaphorePermit>>> {
+        self.filter(table.clone(), &mut aux_data);
+        if aux_data.is_empty() {
+            return Ok(None);
+        }
+        let permit = limiter
+            .acquire()
+            .await
+            .map_err(|_| error::BatcherChannelClosedSnafu.build())?;
+        // Another request may have confirmed these entries while admission waited.
+        self.filter(table, &mut aux_data);
+        Ok((!aux_data.is_empty()).then_some(permit))
+    }
 }
 
 /// Merge converted V2 rows only when their fixed schemas agree.
@@ -162,6 +184,7 @@ struct TraceChunkIngestContext<'a> {
 
 /// Accumulates trace outcomes, auxiliary rows, and bounded failure details.
 struct TraceIngestState {
+    needs_aux_write: bool,
     aux_data: TraceAuxData,
     pending_aux_data: Vec<(TraceAuxData, Vec<WriteCompletion>)>,
     outcome: TraceIngestOutcome,
@@ -977,6 +1000,27 @@ impl Instance {
         conventions: &str,
         ctx: QueryContextRef,
     ) -> ServerResult<TraceIngestOutcome> {
+        let aux_limiter = self
+            .trace_aux_limiter
+            .as_ref()
+            .filter(|_| ctx.batching_enabled());
+        // Reserve once per request, before any main chunks are submitted. Main
+        // batcher permits remain independent so multi-chunk requests can progress.
+        let aux_permit = if let Some(limiter) = aux_limiter {
+            let mut aux_data = TraceAuxData::default();
+            for span in groups.iter().flat_map(|group| &group.spans) {
+                aux_data.observe_span(span);
+            }
+            self.trace_aux_cache
+                .acquire_for_misses(
+                    limiter,
+                    TableName::new(ctx.current_catalog(), ctx.current_schema(), &table_name),
+                    aux_data,
+                )
+                .await?
+        } else {
+            None
+        };
         let is_trace_v1_model = matches!(pipeline, PipelineWay::OtlpTraceDirectV1);
         let data_model = match pipeline {
             PipelineWay::OtlpTraceDirectV1 => Some(TABLE_DATA_MODEL_TRACE_V1),
@@ -1019,6 +1063,9 @@ impl Instance {
             table_name: &table_name,
         };
         let mut ingest_state = TraceIngestState {
+            // Confirmed hits stay satisfied for this request even if evicted
+            // later: cache eviction does not delete the stored lookup rows.
+            needs_aux_write: aux_limiter.is_none() || aux_permit.is_some(),
             aux_data: TraceAuxData::default(),
             pending_aux_data: Vec::new(),
             outcome: TraceIngestOutcome::default(),
@@ -1101,6 +1148,7 @@ impl Instance {
             let table_name = table_name.clone();
             let ctx = ctx.clone();
             common_runtime::spawn_ingest(async move {
+                let _permit = aux_permit;
                 let aux_data = confirmed_trace_aux_data(pending).await;
                 let result: ServerResult<()> = async {
                     let (requests, keys) =
@@ -1369,11 +1417,13 @@ impl Instance {
 
         Self::add_trace_write_cost(&mut ingest_state.outcome, output.meta.cost);
         ingest_state.outcome.accepted_spans += chunk_rows;
-        let mut aux_data = TraceAuxData::default();
-        for span in &chunk {
-            aux_data.observe_span(span);
+        if ingest_state.needs_aux_write {
+            let mut aux_data = TraceAuxData::default();
+            for span in &chunk {
+                aux_data.observe_span(span);
+            }
+            ingest_state.add_aux_data(aux_data, output.meta.write_completions);
         }
-        ingest_state.add_aux_data(aux_data, output.meta.write_completions);
 
         Ok(())
     }
@@ -1549,9 +1599,11 @@ impl Instance {
 
         Self::add_trace_write_cost(&mut ingest_state.outcome, output.meta.cost);
         ingest_state.outcome.accepted_spans += span_count;
-        let mut aux_data = TraceAuxData::default();
-        retry.add_to_aux_data(&mut aux_data);
-        ingest_state.add_aux_data(aux_data, output.meta.write_completions);
+        if ingest_state.needs_aux_write {
+            let mut aux_data = TraceAuxData::default();
+            retry.add_to_aux_data(&mut aux_data);
+            ingest_state.add_aux_data(aux_data, output.meta.write_completions);
+        }
 
         Ok(())
     }
@@ -1634,9 +1686,11 @@ impl Instance {
 
             Self::add_trace_write_cost(&mut ingest_state.outcome, output.meta.cost);
             ingest_state.outcome.accepted_spans += 1;
-            let mut aux_data = TraceAuxData::default();
-            span.add_to_aux_data(&mut aux_data);
-            ingest_state.add_aux_data(aux_data, output.meta.write_completions);
+            if ingest_state.needs_aux_write {
+                let mut aux_data = TraceAuxData::default();
+                span.add_to_aux_data(&mut aux_data);
+                ingest_state.add_aux_data(aux_data, output.meta.write_completions);
+            }
         }
 
         Ok(())
