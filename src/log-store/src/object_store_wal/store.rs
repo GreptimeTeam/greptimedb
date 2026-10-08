@@ -2717,7 +2717,7 @@ mod tests {
     }
 
     /// Waits for the next operation that `ParkedIo` parked.
-    async fn next_create(
+    async fn next_parked_operation(
         parked: &mut mpsc::UnboundedReceiver<(u64, oneshot::Sender<bool>)>,
     ) -> (u64, oneshot::Sender<bool>) {
         timeout(WAIT, parked.recv()).await.unwrap().unwrap()
@@ -2725,13 +2725,13 @@ mod tests {
 
     /// Waits for `count` parked operations and returns their releases by
     /// sequence.
-    async fn parked_creates(
+    async fn parked_operations(
         parked: &mut mpsc::UnboundedReceiver<(u64, oneshot::Sender<bool>)>,
         count: usize,
     ) -> HashMap<u64, oneshot::Sender<bool>> {
         let mut releases = HashMap::new();
         for _ in 0..count {
-            let (object_seq, release) = next_create(parked).await;
+            let (object_seq, release) = next_parked_operation(parked).await;
             releases.insert(object_seq, release);
         }
         releases
@@ -4222,7 +4222,7 @@ mod tests {
         let appends = spawn_appends(&store, region_id, MAX_IN_FLIGHT_CREATES + 2).await;
 
         // At most the limit of creates run at a time; the rest wait for a slot.
-        let mut releases = parked_creates(&mut parked, MAX_IN_FLIGHT_CREATES).await;
+        let mut releases = parked_operations(&mut parked, MAX_IN_FLIGHT_CREATES).await;
         assert_eq!(
             (1..=MAX_IN_FLIGHT_CREATES as u64).collect::<BTreeSet<_>>(),
             releases.keys().copied().collect::<BTreeSet<_>>()
@@ -4235,7 +4235,7 @@ mod tests {
         // each, but nothing is acknowledged ahead of object 1.
         for (released, expected_next) in [(3, 5), (2, 6)] {
             releases.remove(&released).unwrap().send(true).unwrap();
-            let (object_seq, release) = next_create(&mut parked).await;
+            let (object_seq, release) = next_parked_operation(&mut parked).await;
             assert_eq!(expected_next, object_seq);
             releases.insert(object_seq, release);
         }
@@ -4319,7 +4319,7 @@ mod tests {
         let region_id = region(1);
         // Every slot is taken; the last batch waits for one.
         let appends = spawn_appends(&store, region_id, MAX_IN_FLIGHT_CREATES + 1).await;
-        let mut releases = parked_creates(&mut parked, MAX_IN_FLIGHT_CREATES).await;
+        let mut releases = parked_operations(&mut parked, MAX_IN_FLIGHT_CREATES).await;
         round_trip_actor(&store).await;
         assert!(parked.try_recv().is_err());
 
@@ -4341,14 +4341,14 @@ mod tests {
         // one retry starts until they complete; what they store is off the
         // chain.
         let retries = spawn_appends(&store, region_id, 2).await;
-        let (object_seq, first) = next_create(&mut parked).await;
+        let (object_seq, first) = next_parked_operation(&mut parked).await;
         assert_eq!(6, object_seq);
         round_trip_actor(&store).await;
         assert!(parked.try_recv().is_err());
         for release in releases.into_values() {
             release.send(true).unwrap();
         }
-        let (object_seq, second) = next_create(&mut parked).await;
+        let (object_seq, second) = next_parked_operation(&mut parked).await;
         assert_eq!(7, object_seq);
         first.send(true).unwrap();
         second.send(true).unwrap();
@@ -4372,7 +4372,7 @@ mod tests {
         let (store, io, mut parked) = open_parking_creates(object_store.clone(), &eager()).await;
         let region_id = region(1);
         let appends = spawn_appends(&store, region_id, 2).await;
-        let mut releases = parked_creates(&mut parked, 2).await;
+        let mut releases = parked_operations(&mut parked, 2).await;
 
         // Object 2 is created while object 1 failed: both batches fail, and
         // the store keeps serving.
@@ -4396,7 +4396,7 @@ mod tests {
 
         // The retry extends the start object, not the failed batches.
         let retry = spawn_appends(&store, region_id, 1).await;
-        let (object_seq, release) = next_create(&mut parked).await;
+        let (object_seq, release) = next_parked_operation(&mut parked).await;
         assert_eq!(3, object_seq);
         release.send(true).unwrap();
         let response = timeout(WAIT, retry.into_iter().next().unwrap())
@@ -4438,7 +4438,7 @@ mod tests {
         // Another writer of the same epoch took sequence 1.
         put_foreign(&object_store, 1, 1).await;
         let appends = spawn_appends(&store, region_id, 2).await;
-        let mut releases = parked_creates(&mut parked, 2).await;
+        let mut releases = parked_operations(&mut parked, 2).await;
 
         // Object 2 is created; object 1 conflicts with the foreign object.
         releases.remove(&2).unwrap().send(true).unwrap();
@@ -4475,7 +4475,11 @@ mod tests {
         // A late object of an earlier epoch lands under sequence 1.
         put_foreign(&object_store, 1, 0).await;
         let append = spawn_appends(&store, region_id, 1).await;
-        next_create(&mut parked).await.1.send(true).unwrap();
+        next_parked_operation(&mut parked)
+            .await
+            .1
+            .send(true)
+            .unwrap();
         let error = timeout(WAIT, append.into_iter().next().unwrap())
             .await
             .unwrap()
@@ -4496,7 +4500,7 @@ mod tests {
 
         // The store keeps serving: the retry takes the next sequence.
         let retry = spawn_appends(&store, region_id, 1).await;
-        let (object_seq, release) = next_create(&mut parked).await;
+        let (object_seq, release) = next_parked_operation(&mut parked).await;
         assert_eq!(2, object_seq);
         release.send(true).unwrap();
         let response = timeout(WAIT, retry.into_iter().next().unwrap())
@@ -4678,7 +4682,7 @@ mod tests {
         let region_one = region(1);
         let region_two = region(2);
         let pending = spawn_append_batch(&store, vec![entry(&store, region_one, "a1")]);
-        let (_, release) = next_create(&mut parked).await;
+        let (_, release) = next_parked_operation(&mut parked).await;
 
         // Object 1 is in flight and the open batch is empty: the floor moves
         // the next sequence, which a failure of object 1 does not move back.
@@ -4690,7 +4694,11 @@ mod tests {
         timeout(WAIT, pending).await.unwrap().unwrap().unwrap_err();
 
         let write = spawn_append_batch(&store, vec![entry(&store, region_two, "b1")]);
-        next_create(&mut parked).await.1.send(true).unwrap();
+        next_parked_operation(&mut parked)
+            .await
+            .1
+            .send(true)
+            .unwrap();
         let response = timeout(WAIT, write).await.unwrap().unwrap().unwrap();
         assert_eq!(
             HashMap::from([(region_two, id(6, 1))]),
@@ -4862,7 +4870,7 @@ mod tests {
         let sealed = spawn_append_batch(&store, vec![entry(&store, region_id, "a1")]);
         store.wait_for_admitted_appends(1).await.unwrap();
         let seal = spawn_seal();
-        let (_, release) = next_create(&mut parked).await;
+        let (_, release) = next_parked_operation(&mut parked).await;
         let open = spawn_append_batch(&store, vec![entry(&store, region_id, "a2")]);
         store.wait_for_admitted_appends(2).await.unwrap();
         release.send(false).unwrap();
@@ -4880,7 +4888,11 @@ mod tests {
         let retry = spawn_append_batch(&store, vec![entry(&store, region_id, "b1")]);
         store.wait_for_admitted_appends(3).await.unwrap();
         let seal = spawn_seal();
-        next_create(&mut parked).await.1.send(true).unwrap();
+        next_parked_operation(&mut parked)
+            .await
+            .1
+            .send(true)
+            .unwrap();
         timeout(WAIT, seal).await.unwrap().unwrap().unwrap();
         let response = timeout(WAIT, retry).await.unwrap().unwrap().unwrap();
         assert_eq!(
@@ -4896,7 +4908,7 @@ mod tests {
         let sealed = spawn_append_batch(&store, vec![entry(&store, region_id, "c1")]);
         store.wait_for_admitted_appends(4).await.unwrap();
         let seal = spawn_seal();
-        let (_, release) = next_create(&mut parked).await;
+        let (_, release) = next_parked_operation(&mut parked).await;
         let open = spawn_append_batch(&store, vec![entry(&store, region_id, "c2")]);
         store.wait_for_admitted_appends(5).await.unwrap();
         put_foreign(&object_store, 3, 1).await;
@@ -4957,7 +4969,7 @@ mod tests {
             let entries = vec![entry(&store, region_id, &format!("w{index}"))];
             appends.push(spawn_append_batch(&store, entries));
         }
-        let mut releases = parked_creates(&mut parked, MAX_IN_FLIGHT_CREATES).await;
+        let mut releases = parked_operations(&mut parked, MAX_IN_FLIGHT_CREATES).await;
         round_trip_actor(&store).await;
         assert_eq!(MAX_SEALED_BATCHES - 1, admitted());
 
@@ -4976,7 +4988,11 @@ mod tests {
         for release in releases.into_values() {
             release.send(true).unwrap();
         }
-        next_create(&mut parked).await.1.send(true).unwrap();
+        next_parked_operation(&mut parked)
+            .await
+            .1
+            .send(true)
+            .unwrap();
         timeout(WAIT, stop).await.unwrap().unwrap().unwrap();
         let mut acknowledged = 0;
         for append in appends {
@@ -5006,7 +5022,7 @@ mod tests {
     async fn test_store_stop_during_failed_flush_reports_stopped() {
         let (store, io, mut parked) = open_parking_creates(memory_store(), &eager()).await;
         let pending = spawn_append_batch(&store, vec![entry(&store, region(1), "a1")]);
-        let (_, release) = next_create(&mut parked).await;
+        let (_, release) = next_parked_operation(&mut parked).await;
         let stop = begin_spawned_stop(&store).await;
         assert!(!stop.is_finished());
 
@@ -5024,7 +5040,7 @@ mod tests {
         let region_id = region(1);
         // Four creates are in flight, the fifth batch waits for a slot.
         let appends = spawn_appends(&store, region_id, MAX_IN_FLIGHT_CREATES + 1).await;
-        let mut releases = parked_creates(&mut parked, MAX_IN_FLIGHT_CREATES).await;
+        let mut releases = parked_operations(&mut parked, MAX_IN_FLIGHT_CREATES).await;
         assert!(parked.try_recv().is_err());
 
         let stop = begin_spawned_stop(&store).await;
@@ -5077,7 +5093,7 @@ mod tests {
         let (store, _, mut parked) = open_parking_creates(object_store.clone(), &eager()).await;
         let region_id = region(1);
         let pending = spawn_append_batch(&store, vec![entry(&store, region_id, "a1")]);
-        let (_, release) = next_create(&mut parked).await;
+        let (_, release) = next_parked_operation(&mut parked).await;
         let stop = begin_spawned_stop(&store).await;
         // Another writer of the same epoch takes the sequence before the
         // create runs.
@@ -5569,7 +5585,7 @@ mod tests {
             HashMap::from([(region_one, id(1, 1))]),
             response.last_entry_ids
         );
-        let (object_seq, release) = next_create(&mut parked).await;
+        let (object_seq, release) = next_parked_operation(&mut parked).await;
         assert_eq!(1, object_seq);
         assert_eq!(0, store.durable_entry_id(&provider(region_one)).unwrap());
         let wait = |entry_id| {
@@ -5610,7 +5626,7 @@ mod tests {
         // Object 1 holds region A's id(1, 1) and object 2 region B's id(2, 1).
         for (region_id, data) in [(region_a, "a1"), (region_b, "b1")] {
             let response = append(&store, region_id, data).await.unwrap();
-            let (_, release) = next_create(&mut parked).await;
+            let (_, release) = next_parked_operation(&mut parked).await;
             release.send(true).unwrap();
             let entry_id = response.last_entry_ids[&region_id];
             timeout(WAIT, store.wait_durable(&provider(region_id), entry_id))
@@ -5623,7 +5639,7 @@ mod tests {
             HashMap::from([(region_a, id(3, 1))]),
             response.last_entry_ids
         );
-        let (object_seq, release) = next_create(&mut parked).await;
+        let (object_seq, release) = next_parked_operation(&mut parked).await;
         assert_eq!(3, object_seq);
 
         // Every entry of region A up to id(2, 1) is durable, so the wait does
@@ -5713,7 +5729,7 @@ mod tests {
 
         let stalled = spawn_append_batch(&store, vec![entry(&store, region_id, "a2")]);
         // The stall seals the open batch so that an upload is in flight.
-        let (object_seq, release) = next_create(&mut parked).await;
+        let (object_seq, release) = next_parked_operation(&mut parked).await;
         assert_eq!(1, object_seq);
         for _ in 0..16 {
             tokio::task::yield_now().await;
@@ -5752,7 +5768,7 @@ mod tests {
         assert_eq!(vec![1], collected_object_seqs(&store).await);
         assert_eq!(id(1, 1), latest(&store, region_id));
         for (append, object_seq) in [(third, 2), (fourth, 3)] {
-            let (parked_seq, release) = next_create(&mut parked).await;
+            let (parked_seq, release) = next_parked_operation(&mut parked).await;
             assert_eq!(object_seq, parked_seq);
             release.send(true).unwrap();
             let response = timeout(WAIT, append).await.unwrap().unwrap().unwrap();
@@ -5895,7 +5911,7 @@ mod tests {
             let store = store.clone();
             tokio::spawn(async move { store.seal_open_batch().await })
         };
-        let (object_seq, release) = next_create(&mut parked).await;
+        let (object_seq, release) = next_parked_operation(&mut parked).await;
         assert_eq!(1, object_seq);
 
         // Stop began, but the actor has not received the stop command when
@@ -6173,7 +6189,7 @@ mod tests {
         let failed = METRIC_OBJECT_STORE_WAL_FAILED_DELETES_TOTAL.get();
         append(&store, region_id, "a1").await.unwrap();
         append(&store, region_id, "a2").await.unwrap();
-        let (object_seq, release) = next_create(&mut parked).await;
+        let (object_seq, release) = next_parked_operation(&mut parked).await;
         assert_eq!(0, object_seq);
         release.send(false).unwrap();
 
@@ -6196,7 +6212,7 @@ mod tests {
             .obsolete(&provider(region_id), region_id, id(1, 1))
             .await
             .unwrap();
-        let (object_seq, release) = next_create(&mut parked).await;
+        let (object_seq, release) = next_parked_operation(&mut parked).await;
         assert_eq!(0, object_seq);
         release.send(true).unwrap();
         assert_eq!(vec![1, 2, 3], collected_object_seqs(&store).await);
@@ -6224,7 +6240,7 @@ mod tests {
             append(&store, region_id, "a6").await.unwrap();
             // Objects 0 to 5 are below the durable boundary; four are deleted
             // at a time.
-            let releases = parked_creates(&mut parked, MAX_IN_FLIGHT_DELETES).await;
+            let releases = parked_operations(&mut parked, MAX_IN_FLIGHT_DELETES).await;
             assert!(parked.try_recv().is_err());
 
             let mut stop = None;
@@ -6325,7 +6341,7 @@ mod tests {
         let region_id = region(1);
         // Object 1 fails while the create of object 2 is in flight.
         let appends = spawn_appends(&store, region_id, 2).await;
-        let mut releases = parked_creates(&mut parked, 2).await;
+        let mut releases = parked_operations(&mut parked, 2).await;
         releases.remove(&1).unwrap().send(false).unwrap();
         for append in appends {
             timeout(WAIT, append).await.unwrap().unwrap().unwrap_err();
@@ -6335,7 +6351,7 @@ mod tests {
         // its create is in flight.
         for object_seq in [3, 4] {
             let append = spawn_append_batch(&store, vec![entry(&store, region_id, "a")]);
-            let (parked_seq, release) = next_create(&mut parked).await;
+            let (parked_seq, release) = next_parked_operation(&mut parked).await;
             assert_eq!(object_seq, parked_seq);
             release.send(true).unwrap();
             timeout(WAIT, append).await.unwrap().unwrap().unwrap();
@@ -6346,7 +6362,7 @@ mod tests {
         // collection.
         io.deletes_parked.store(true, Ordering::SeqCst);
         releases.remove(&2).unwrap().send(true).unwrap();
-        let (object_seq, release) = next_create(&mut parked).await;
+        let (object_seq, release) = next_parked_operation(&mut parked).await;
         assert_eq!(2, object_seq);
         release.send(true).unwrap();
         assert_eq!(vec![3, 4], collected_object_seqs(&store).await);
@@ -6432,7 +6448,11 @@ mod tests {
             let region_id = region(1);
             let skipped = METRIC_OBJECT_STORE_WAL_SKIPPED_SEGMENTS_TOTAL.get();
             append(&store, region_id, "a1").await.unwrap();
-            next_create(&mut parked).await.1.send(true).unwrap();
+            next_parked_operation(&mut parked)
+                .await
+                .1
+                .send(true)
+                .unwrap();
             append(&store, region_id, "a2").await.unwrap();
 
             // The read lists objects 1 and 2. The delete of object 1 removes
@@ -6443,7 +6463,7 @@ mod tests {
                 .await
                 .unwrap();
             append(&store, region_id, "a3").await.unwrap();
-            let (object_seq, release) = next_create(&mut parked).await;
+            let (object_seq, release) = next_parked_operation(&mut parked).await;
             assert_eq!(1, object_seq);
             object_store
                 .delete(&object_path(&object_store, 1))
