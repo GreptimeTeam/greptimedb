@@ -1000,48 +1000,51 @@ mod tests {
     /// Request state registration keeps Greptime `date_format` ahead of DataFusion aliases.
     #[tokio::test]
     async fn test_serializer_decode_keeps_greptime_date_format() {
-        let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
-        let factory = QueryEngineFactory::new(
-            catalog_list,
-            None,
-            None,
-            None,
-            None,
-            false,
-            QueryOptions::default(),
-        );
-        let engine = factory.query_engine();
-
-        let table_provider = Arc::new(mock_table_provider(1.into()));
-        let query_ctx = date_format_query_ctx();
-        let plan = LogicalPlanBuilder::scan(
-            "devices",
-            Arc::new(LogicalTableSource::new(table_provider.schema().clone())),
-            None,
-        )
-        .unwrap()
-        .project(vec![greptime_date_format_expr(&query_ctx, col("ts"))])
-        .unwrap()
-        .build()
-        .unwrap();
-
-        let bytes = DFLogicalSubstraitConvertor
-            .encode(&plan, DefaultSerializer)
-            .unwrap();
-        let plan_decoder = engine
-            .engine_context(query_ctx.clone())
-            .new_plan_decoder()
-            .unwrap();
-        let decoded = plan_decoder
-            .decode(
-                bytes,
-                Arc::new(DummyCatalogList::with_table_provider(table_provider)),
+        // Repeat to expose nondeterministic function-registration order.
+        for _ in 0..8 {
+            let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
+            let factory = QueryEngineFactory::new(
+                catalog_list,
+                None,
+                None,
+                None,
+                None,
                 false,
+                QueryOptions::default(),
+            );
+            let engine = factory.query_engine();
+
+            let table_provider = Arc::new(mock_table_provider(1.into()));
+            let query_ctx = date_format_query_ctx();
+            let plan = LogicalPlanBuilder::scan(
+                "devices",
+                Arc::new(LogicalTableSource::new(table_provider.schema().clone())),
+                None,
             )
-            .await
+            .unwrap()
+            .project(vec![greptime_date_format_expr(&query_ctx, col("ts"))])
+            .unwrap()
+            .build()
             .unwrap();
 
-        assert_only_function_is_greptime_date_format(&decoded, &query_ctx);
+            let bytes = DFLogicalSubstraitConvertor
+                .encode(&plan, DefaultSerializer)
+                .unwrap();
+            let plan_decoder = engine
+                .engine_context(query_ctx.clone())
+                .new_plan_decoder()
+                .unwrap();
+            let decoded = plan_decoder
+                .decode(
+                    bytes,
+                    Arc::new(DummyCatalogList::with_table_provider(table_provider)),
+                    false,
+                )
+                .await
+                .unwrap();
+
+            assert_only_function_is_greptime_date_format(&decoded, &query_ctx);
+        }
     }
 
     /// Nested payload decoding retains the Greptime `date_format` binding.
@@ -1058,64 +1061,67 @@ mod tests {
             })
             .unwrap();
 
-        let factory = QueryEngineFactory::new(
-            catalog_manager.clone(),
-            None,
-            None,
-            None,
-            None,
-            false,
-            QueryOptions::default(),
-        );
-        let engine = factory.query_engine();
-        let query_ctx = date_format_query_ctx();
+        for _ in 0..8 {
+            let factory = QueryEngineFactory::new(
+                catalog_manager.clone(),
+                None,
+                None,
+                None,
+                None,
+                false,
+                QueryOptions::default(),
+            );
+            let engine = factory.query_engine();
+            let query_ctx = date_format_query_ctx();
 
-        let input = LogicalPlanBuilder::scan(
-            NUMBERS_TABLE_NAME,
-            Arc::new(LogicalTableSource::new(
-                NumbersTable::schema().arrow_schema().clone(),
-            )),
-            None,
-        )
-        .unwrap()
-        .project(vec![greptime_date_format_expr(
-            &query_ctx,
-            Expr::Cast(Cast::new(
-                Box::new(col("number")),
-                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
-            )),
-        )])
-        .unwrap()
-        .build()
-        .unwrap();
-        let plan = MergeScanLogicalPlan::new(input, false, Default::default()).into_logical_plan();
-
-        let bytes = DFLogicalSubstraitConvertor
-            .encode(&plan, DefaultSerializer)
+            let input = LogicalPlanBuilder::scan(
+                NUMBERS_TABLE_NAME,
+                Arc::new(LogicalTableSource::new(
+                    NumbersTable::schema().arrow_schema().clone(),
+                )),
+                None,
+            )
+            .unwrap()
+            .project(vec![greptime_date_format_expr(
+                &query_ctx,
+                Expr::Cast(Cast::new(
+                    Box::new(col("number")),
+                    ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                )),
+            )])
+            .unwrap()
+            .build()
             .unwrap();
-        let plan_decoder = engine
-            .engine_context(query_ctx.clone())
-            .new_plan_decoder()
-            .unwrap();
-        let catalog_list = Arc::new(DummyCatalogList::with_table_provider(Arc::new(
-            mock_table_provider(1.into()),
-        )));
+            let plan =
+                MergeScanLogicalPlan::new(input, false, Default::default()).into_logical_plan();
 
-        let decoded = plan_decoder
-            .decode(bytes, catalog_list, false)
-            .await
-            .unwrap();
+            let bytes = DFLogicalSubstraitConvertor
+                .encode(&plan, DefaultSerializer)
+                .unwrap();
+            let plan_decoder = engine
+                .engine_context(query_ctx.clone())
+                .new_plan_decoder()
+                .unwrap();
+            let catalog_list = Arc::new(DummyCatalogList::with_table_provider(Arc::new(
+                mock_table_provider(1.into()),
+            )));
 
-        let LogicalPlan::Extension(extension) = &decoded else {
-            panic!("Expect a MergeScan plan, got: {decoded}");
-        };
-        let merge_scan = extension
-            .node
-            .as_any()
-            .downcast_ref::<MergeScanLogicalPlan>()
-            .expect("Expect a MergeScan plan node");
+            let decoded = plan_decoder
+                .decode(bytes, catalog_list, false)
+                .await
+                .unwrap();
 
-        assert_only_function_is_greptime_date_format(merge_scan.input(), &query_ctx);
+            let LogicalPlan::Extension(extension) = &decoded else {
+                panic!("Expect a MergeScan plan, got: {decoded}");
+            };
+            let merge_scan = extension
+                .node
+                .as_any()
+                .downcast_ref::<MergeScanLogicalPlan>()
+                .expect("Expect a MergeScan plan node");
+
+            assert_only_function_is_greptime_date_format(merge_scan.input(), &query_ctx);
+        }
     }
 
     /// Registers a `numbers` table in a memory catalog manager.
@@ -1421,6 +1427,68 @@ mod tests {
             QueryOptions::default(),
         )
         .query_engine()
+    }
+
+    /// Decoding must not need a Tokio runtime: the public path is only `async`.
+    #[test]
+    fn test_serializer_decode_nested_merge_scan_without_tokio_runtime() {
+        let engine = QueryEngineFactory::new(
+            numbers_catalog_manager(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine();
+        let plan = merge_scan(merge_scan(numbers_scan(), false), true);
+        let bytes = encode_plan(&plan);
+
+        let decoded = futures::executor::block_on(plan_decoder(engine.as_ref()).decode(
+            bytes,
+            request_catalog_list(),
+            false,
+        ))
+        .unwrap();
+
+        assert_eq!(decoded.to_string(), plan.to_string());
+        assert_eq!(decoded.to_string().matches("MergeScan [").count(), 2);
+    }
+
+    /// Payload decoding must not block a multi-thread runtime either.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_serializer_decode_deeply_nested_merge_scan_without_blocking() {
+        let engine = QueryEngineFactory::new(
+            numbers_catalog_manager(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine();
+        let plan = merge_scan(
+            merge_scan(
+                LogicalPlanBuilder::from(merge_scan(numbers_scan(), false))
+                    .filter(col("number").lt(lit(10u32)))
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+                false,
+            ),
+            false,
+        );
+        let bytes = encode_plan(&plan);
+
+        let decoded = plan_decoder(engine.as_ref())
+            .decode(bytes, request_catalog_list(), false)
+            .await
+            .unwrap();
+
+        assert_eq!(decoded.to_string(), plan.to_string());
+        assert_eq!(decoded.to_string().matches("MergeScan [").count(), 3);
     }
 
     /// A payload lookup parked on a caller-runtime task must keep the decode async.
