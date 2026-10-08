@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, hash_map};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -40,7 +40,7 @@ use crate::request::{OptionOutputTx, OutputTx, SenderDdlRequest, WorkerRequestWi
 #[cfg(test)]
 use crate::schedule::CancellableTaskState;
 use crate::schedule::RequestCancelResult;
-use crate::sst::file::FileHandle;
+use crate::sst::file::{FileHandle, RegionFileId};
 use crate::worker::WorkerListener;
 
 /// Identifies an accepted compaction attempt and keeps its SST reservations alive.
@@ -224,7 +224,7 @@ impl ActiveCompaction {
 /// Owns atomic reservations for every SST selected by a compaction plan.
 #[derive(Debug, Clone)]
 pub(super) struct CompactingFiles {
-    files: Vec<Arc<CompactingFile>>,
+    files: HashMap<RegionFileId, Arc<CompactingFile>>,
 }
 
 /// Keeps an SST reserved until the last shared lease is dropped.
@@ -249,17 +249,16 @@ impl CompactingFiles {
     pub(super) fn try_reserve<'a>(
         selected_files: impl IntoIterator<Item = &'a FileHandle>,
     ) -> Option<Self> {
-        let mut seen = HashSet::new();
-        let mut files = Vec::new();
+        let mut files = HashMap::new();
 
         for file in selected_files {
-            if !seen.insert(file.file_id()) {
+            let hash_map::Entry::Vacant(entry) = files.entry(file.file_id()) else {
                 continue;
-            }
+            };
             if !file.try_set_compacting() {
                 return None;
             }
-            files.push(Arc::new(CompactingFile { file: file.clone() }));
+            entry.insert(Arc::new(CompactingFile { file: file.clone() }));
         }
 
         Some(Self { files })
@@ -267,21 +266,24 @@ impl CompactingFiles {
 
     /// Transfers a dependency group's leases without briefly releasing any input.
     /// A delayed remote notifier may retain the same leases across local fallback.
+    /// Indexing keeps splitting proportional to the group's input count.
     pub(super) fn for_inputs(&self, inputs: &[FileHandle]) -> Self {
-        let ids: HashSet<_> = inputs.iter().map(FileHandle::file_id).collect();
         Self {
-            files: self
-                .files
+            files: inputs
                 .iter()
-                .filter(|lease| ids.contains(&lease.file.file_id()))
-                .cloned()
+                .filter_map(|file| {
+                    let id = file.file_id();
+                    self.files.get(&id).map(|lease| (id, lease.clone()))
+                })
                 .collect(),
         }
     }
 
     #[cfg(test)]
     pub(super) fn empty() -> Self {
-        Self { files: Vec::new() }
+        Self {
+            files: HashMap::new(),
+        }
     }
 }
 
@@ -564,11 +566,16 @@ mod lease_tests {
     fn test_compaction_unit_input_leases_release_independently() {
         let x = new_file_handle(FileId::random(), 0, 100, 0);
         let y = new_file_handle(FileId::random(), 100, 200, 0);
-        let reserved = CompactingFiles::try_reserve([&x, &y]).unwrap();
-        let first = reserved.for_inputs(std::slice::from_ref(&x));
+        let unused = new_file_handle(FileId::random(), 200, 300, 0);
+        let reserved = CompactingFiles::try_reserve([&x, &y, &x, &unused]).unwrap();
+        let first = reserved.for_inputs(&[x.clone(), x.clone()]);
         let second = reserved.for_inputs(std::slice::from_ref(&y));
         drop(reserved);
         assert!(x.compacting() && y.compacting());
+        assert!(
+            !unused.compacting(),
+            "unit leases must not retain unrelated inputs"
+        );
         drop(first);
         assert!(!x.compacting() && y.compacting());
         let notification = second.clone();
