@@ -114,7 +114,7 @@ env:
   RUNTIME_CPUS: ${{ inputs.runtime_cpus }}
   RUNTIME_MEMORY: ${{ inputs.runtime_memory }}
   BENCHMARK_ROOT: ${{ inputs.benchmark_root }}
-  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || inputs.provider == 'AWS' && 'public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime:2c1de0dfb467@sha256:ec49a8179a369836a6e5ff268e5d13fc5ffbf761311d778c95ebb13f1ea6caa8' || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:2c1de0dfb467@sha256:ec49a8179a369836a6e5ff268e5d13fc5ffbf761311d778c95ebb13f1ea6caa8' }}
+  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || inputs.provider == 'AWS' && 'public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime:2f40fb3fdbdc@sha256:8940782216bf5d066308fd71f6e346d950073c41cfb5756c5f3dc8aacf069cbc' || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:2f40fb3fdbdc@sha256:8940782216bf5d066308fd71f6e346d950073c41cfb5756c5f3dc8aacf069cbc' }}
   PROVIDER: ${{ inputs.provider }}
   REQUESTED_INSTANCE_TYPE: ${{ inputs.instance_type }}
   SYSTEM_DISK_GIB: ${{ inputs.system_disk_gib }}
@@ -219,6 +219,10 @@ jobs:
         [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
         # Refuse runtimes without the trace runner and its validated dataset/report contract.
         help=$(docker run --rm "${runtime_limits[@]}" "$resolved" scripts/run_tracesbench_docker.py --help)
+        if [[ "$COMPARE_GREPTIMEDB" == true ]]; then
+          grep -F -- '--baseline-run' <<< "$help" \
+            || { echo 'Comparison requires a runtime with --baseline-run report support'; exit 1; }
+        fi
         grep -F -- '--dataset {sanity,preflight,main}' <<< "$help"
         grep -F -- '--runtime-cpus' <<< "$help"
         grep -F -- '--runtime-memory' <<< "$help"
@@ -396,7 +400,7 @@ jobs:
       run: |
         comparison_args=()
         if [[ "$COMPARE_GREPTIMEDB" == true ]]; then
-          comparison_args+=(--version-comparison "$RUN_ROOT/version-comparison.json")
+          comparison_args+=(--baseline-run "$RUN_ROOT/baseline/runs/greptimedb/run.json")
         fi
         python3 o11ybench/scripts/run_tracesbench_docker.py --stage report --targets "$TARGETS" "${comparison_args[@]}" \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
