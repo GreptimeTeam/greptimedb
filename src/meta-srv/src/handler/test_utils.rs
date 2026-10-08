@@ -13,9 +13,13 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
+use common_meta::cache_invalidator::{
+    CacheInvalidator, CacheInvalidatorRef, Context as InvalidationContext, DummyCacheInvalidator,
+};
 use common_meta::distributed_time_constants::BASE_HEARTBEAT_INTERVAL;
+use common_meta::instruction::CacheIdent;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
@@ -95,5 +99,36 @@ impl TestEnv {
             gc_enabled: false,
             is_handshake: false,
         }
+    }
+}
+
+/// Counts failed notification attempts without requiring heartbeat connections.
+#[derive(Default)]
+pub(crate) struct FailingCacheInvalidator {
+    attempts: AtomicUsize,
+}
+
+impl FailingCacheInvalidator {
+    pub(crate) fn attempts(&self) -> usize {
+        self.attempts.load(Ordering::Relaxed)
+    }
+}
+
+#[async_trait::async_trait]
+impl CacheInvalidator for FailingCacheInvalidator {
+    async fn invalidate(
+        &self,
+        _: &InvalidationContext,
+        _: &[CacheIdent],
+    ) -> common_meta::error::Result<()> {
+        self.attempts.fetch_add(1, Ordering::Relaxed);
+        common_meta::error::UnexpectedSnafu {
+            err_msg: "injected notification failure",
+        }
+        .fail()
+    }
+
+    fn invalidate_all(&self) -> common_meta::error::Result<()> {
+        Ok(())
     }
 }
