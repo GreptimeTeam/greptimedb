@@ -50,7 +50,9 @@
 //! Recovery lists the objects, reads and verifies only the header, trailer and
 //! footer of each, and indexes the footers of the chain in sequence order to
 //! rebuild the object catalog, which rejects a sequence it already holds.
-//! Segments are read and checksummed only when a read decodes them.
+//! Segments are read and checksummed only when a read decodes them; a segment
+//! that does not decode is fetched once more and then skipped as a hole of its
+//! region or fails the read, as `on_corrupted_segment` says.
 //!
 //! Entry ids are object-sequence-major, see [`entry_id`]: the high bits of an
 //! id name the object that holds the entry, the low bits its position among
@@ -63,4 +65,4 @@ mod io;
 mod store;
 
 pub use batch::entry_id;
-pub use store::ObjectStoreLogStore;
+pub use store::{ObjectStoreLogStore, WalHole};
