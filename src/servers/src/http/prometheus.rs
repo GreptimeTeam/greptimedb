@@ -1379,9 +1379,9 @@ fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
 /// Follows Prometheus' `shouldDropMetricName` and `resultMetric`: set operators
 /// and comparisons keep the name, while arithmetic operators drop it. A
 /// comparison also drops it when it returns a bool or is a one-to-one
-/// `on(...)` match that does not keep `__name__`. Prometheus narrows such a
-/// result to the `on(...)` labels via `lb.Keep(matching.MatchingLabels...)`, so
-/// listing `__name__` preserves the metric name.
+/// `on(...)` match that does not keep `__name__` or an `ignoring(...)` match
+/// that excludes it. Prometheus keeps only the `on(...)` labels or deletes the
+/// `ignoring(...)` labels for one-to-one matches.
 fn binary_keeps_metric_name(op: &TokenType, modifier: Option<&BinModifier>) -> bool {
     if op.is_set_operator() {
         return true;
@@ -1399,11 +1399,20 @@ fn binary_keeps_metric_name(op: &TokenType, modifier: Option<&BinModifier>) -> b
         return false;
     }
 
-    if m.card == VectorMatchCardinality::OneToOne
-        && let Some(LabelModifier::Include(labels)) = &m.matching
-        && !labels.labels.contains(&METRIC_NAME.to_string())
-    {
-        return false;
+    if m.card == VectorMatchCardinality::OneToOne {
+        match &m.matching {
+            Some(LabelModifier::Include(labels))
+                if !labels.labels.contains(&METRIC_NAME.to_string()) =>
+            {
+                return false;
+            }
+            Some(LabelModifier::Exclude(labels))
+                if labels.labels.contains(&METRIC_NAME.to_string()) =>
+            {
+                return false;
+            }
+            _ => {}
+        }
     }
 
     true
@@ -3290,10 +3299,9 @@ mod tests {
             // left operand, but `group_right` takes it from the right operand and
             // a scalar left operand leaves the vector on the right. The name is
             // dropped when the comparison returns a bool or is a one-to-one
-            // `on(...)` match that does not keep `__name__`; such a match keeps
-            // only the listed labels, so listing `__name__` preserves the name. A
-            // `group_left`/`group_right` modifier does not reduce the labels, so
-            // the name is kept.
+            // `on(...)` match that does not keep `__name__` or an `ignoring(...)`
+            // match that excludes it. A `group_left`/`group_right` modifier does
+            // not reduce the labels, so the name is kept.
             TestCase {
                 name: "bool comparison between metrics",
                 promql: "a > bool b",
@@ -3339,6 +3347,34 @@ mod tests {
             TestCase {
                 name: "comparison with ignoring",
                 promql: "a > ignoring(x) b",
+                expected_metric: Some("a"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "comparison with ignoring __name__",
+                promql: "a > ignoring(__name__) b",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "comparison with ignoring __name__ and group_left",
+                promql: "a > ignoring(__name__) group_left b",
+                expected_metric: Some("a"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "comparison with ignoring __name__ and group_right",
+                promql: "a > ignoring(__name__) group_right b",
+                expected_metric: Some("b"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "unless with ignoring __name__",
+                promql: "a unless ignoring(__name__) b",
                 expected_metric: Some("a"),
                 expected_type: ValueType::Vector,
                 should_error: false,
