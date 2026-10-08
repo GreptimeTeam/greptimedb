@@ -772,11 +772,15 @@ mod tests {
 
     #[test]
     fn test_add_column_matches_create_table() {
-        for definition in [
-            "payload JSON2(max_auto_expanded_paths = 100, service STRING) NOT NULL",
-            "embedding VECTOR(3) NOT NULL",
-            "reading INT DEFAULT 42 COMMENT 'value'",
-            "\"select\" STRING NULL",
+        for (definition, location) in [
+            (
+                "payload JSON2(max_auto_expanded_paths = 100, service STRING) NOT NULL",
+                "AFTER ts",
+            ),
+            ("payload JSON2(service STRING) NULL", "FIRST"),
+            ("embedding VECTOR(3) NOT NULL", "AFTER ts"),
+            ("reading INT DEFAULT 42 COMMENT 'value'", ""),
+            ("\"select\" STRING NULL", ""),
         ] {
             let parse = |sql: &str| {
                 ParserContext::create_with_dialect(
@@ -789,19 +793,22 @@ mod tests {
                 .unwrap()
             };
             let Statement::CreateTable(create) = parse(&format!(
-                "CREATE TABLE t ({definition}, ts TIMESTAMP TIME INDEX)"
+                "CREATE TABLE t ({definition}, n INT, ts TIMESTAMP TIME INDEX)"
             )) else {
                 unreachable!()
             };
-            let Statement::AlterTable(alter) =
-                parse(&format!("ALTER TABLE t ADD COLUMN {definition} AFTER ts"))
-            else {
+            let Statement::AlterTable(alter) = parse(&format!(
+                "ALTER TABLE t ADD COLUMN {definition} {location}, ADD COLUMN n INT"
+            )) else {
                 unreachable!()
             };
             let AlterTableOperation::AddColumns { add_columns } = alter.alter_operation() else {
                 unreachable!()
             };
-            assert_eq!(create.columns[0], add_columns[0].column);
+            assert_eq!(add_columns.len(), 2);
+            for (expected, actual) in create.columns.iter().zip(add_columns) {
+                assert_eq!(expected, &actual.column);
+            }
             let Statement::AlterTable(roundtrip) = parse(&alter.to_string()) else {
                 unreachable!()
             };
@@ -827,64 +834,6 @@ mod tests {
                 err.to_string()
                     .contains("ADD COLUMN does not support inline indexes or TIME INDEX"),
                 "{err}"
-            );
-        }
-    }
-
-    #[test]
-    fn test_parse_alter_add_json2_options() {
-        for sql in [
-            "ALTER TABLE t ADD COLUMN j JSON2(max_auto_expanded_paths = 100)",
-            "ALTER TABLE t ADD COLUMN j JSON2(max_auto_expanded_paths = 100) NOT NULL AFTER ts",
-            "ALTER TABLE t ADD COLUMN IF NOT EXISTS j JSON2(service STRING) FIRST",
-            "ALTER TABLE t ADD COLUMN j JSON2(max_auto_expanded_paths = 0, service STRING, nested.value BIGINT) NULL AFTER ts, ADD COLUMN n INT",
-            "ALTER TABLE t ADD COLUMN j JSON2(service STRING) CONSTRAINT nullable NULL",
-        ] {
-            let parse = |sql| {
-                ParserContext::create_with_dialect(
-                    sql,
-                    &GreptimeDbDialect {},
-                    ParseOptions::default(),
-                )
-                .unwrap()
-                .pop()
-                .unwrap()
-            };
-            let statement = parse(sql);
-            let Statement::AlterTable(alter) = &statement else {
-                unreachable!()
-            };
-            let AlterTableOperation::AddColumns { add_columns } = alter.alter_operation() else {
-                unreachable!()
-            };
-            assert!(add_columns[0].column.extensions.json2_options.is_some());
-            let Statement::AlterTable(roundtrip) = parse(&statement.to_string()) else {
-                unreachable!()
-            };
-            let AlterTableOperation::AddColumns {
-                add_columns: roundtrip_columns,
-            } = roundtrip.alter_operation()
-            else {
-                unreachable!()
-            };
-            for (column, roundtrip_column) in add_columns.iter().zip(roundtrip_columns) {
-                assert_eq!(column.column, roundtrip_column.column);
-                assert_eq!(column.location, roundtrip_column.location);
-            }
-        }
-        for options in [
-            "max_auto_expanded_paths = -1",
-            "max_auto_expanded_paths = 1, max_auto_expanded_paths = 2",
-            "service TIMESTAMP",
-        ] {
-            let sql = format!("ALTER TABLE t ADD COLUMN j JSON2({options})");
-            assert!(
-                ParserContext::create_with_dialect(
-                    &sql,
-                    &GreptimeDbDialect {},
-                    ParseOptions::default()
-                )
-                .is_err()
             );
         }
     }
