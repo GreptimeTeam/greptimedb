@@ -31,6 +31,8 @@ use datafusion::logical_expr::{
 use datafusion_common::ScalarValue;
 use datafusion_functions_aggregate_common::aggregate::groups_accumulator::prim_op::PrimitiveGroupsAccumulator;
 
+use crate::function_registry::FunctionRegistry;
+
 /// `max` or `min` with PromQL NaN semantics.
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct Extremum {
@@ -43,12 +45,19 @@ impl Extremum {
     pub const MAX_NAME: &'static str = "prom_max";
     pub const MIN_NAME: &'static str = "prom_min";
 
-    pub fn max_udaf() -> Arc<AggregateUDF> {
-        Arc::new(AggregateUDF::from(Self::new(Self::MAX_NAME, true)))
+    /// Registers both functions; the registry also derives their state functions, which
+    /// distributed plans need to split the aggregation between datanodes and the frontend.
+    pub fn register(registry: &FunctionRegistry) {
+        registry.register_aggr(Self::max_udaf());
+        registry.register_aggr(Self::min_udaf());
     }
 
-    pub fn min_udaf() -> Arc<AggregateUDF> {
-        Arc::new(AggregateUDF::from(Self::new(Self::MIN_NAME, false)))
+    pub fn max_udaf() -> AggregateUDF {
+        AggregateUDF::from(Self::new(Self::MAX_NAME, true))
+    }
+
+    pub fn min_udaf() -> AggregateUDF {
+        AggregateUDF::from(Self::new(Self::MIN_NAME, false))
     }
 
     fn new(name: &'static str, is_max: bool) -> Self {

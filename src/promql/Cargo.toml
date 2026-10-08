@@ -18,7 +18,6 @@ common-telemetry.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
-datafusion-functions-aggregate-common.workspace = true
 datatypes.workspace = true
 futures.workspace = true
 greptime-proto.workspace = true

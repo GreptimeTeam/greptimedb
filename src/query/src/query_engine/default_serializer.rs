@@ -30,7 +30,7 @@ use datafusion_expr::UserDefinedLogicalNode;
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
 use promql::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
-    Extremum, IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime, MixedRange,
+    IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime, MixedRange,
     NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
     NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime, NativeHistogramChanges,
     NativeHistogramCount, NativeHistogramCountOverTime, NativeHistogramDelta,
@@ -151,8 +151,6 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
         }
 
         let _ = session_state.register_udaf(quantile_udaf());
-        let _ = session_state.register_udaf(Extremum::max_udaf());
-        let _ = session_state.register_udaf(Extremum::min_udaf());
 
         let _ = session_state.register_udf(Arc::new(IDelta::<false>::scalar_udf()));
         let _ = session_state.register_udf(Arc::new(IDelta::<true>::scalar_udf()));

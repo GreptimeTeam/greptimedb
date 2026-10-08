@@ -28,6 +28,7 @@ use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_function::aggrs::extremum::Extremum;
 use common_function::function::FunctionContext;
 use common_query::native_histogram::native_histogram_value_type;
 use common_query::prelude::{
@@ -70,8 +71,8 @@ use promql::extension_plan::{
 };
 use promql::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
-    Extremum, IDelta, Increase, LastOverTime, MatchGroupViolation, MaxOverTime, MinOverTime,
-    MixedRange, NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
+    IDelta, Increase, LastOverTime, MatchGroupViolation, MaxOverTime, MinOverTime, MixedRange,
+    NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
     NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime, NativeHistogramChanges,
     NativeHistogramCount, NativeHistogramCountOverTime, NativeHistogramDelta,
     NativeHistogramDivScalar, NativeHistogramDrop, NativeHistogramEq, NativeHistogramIDelta,

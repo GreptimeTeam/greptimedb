@@ -15,6 +15,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use common_function::aggrs::extremum::Extremum;
 use datafusion::config::ConfigOptions;
 use datafusion::functions_aggregate::count::count_udaf;
 use datafusion::logical_expr::{Extension, LogicalPlan, LogicalPlanBuilder, Sort};
@@ -22,7 +23,6 @@ use datafusion_common::Result;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_expr::{Expr, UserDefinedLogicalNodeCore, lit};
 use promql::extension_plan::{InstantManipulate, SeriesDivide, SeriesNormalize};
-use promql::functions::Extremum;
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
 use crate::QueryEngineContext;

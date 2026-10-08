@@ -25,6 +25,7 @@ use crate::admin::AdminFunction;
 use crate::aggrs::aggr_wrapper::StateMergeHelper;
 use crate::aggrs::approximate::ApproximateFunction;
 use crate::aggrs::count_hash::CountHash;
+use crate::aggrs::extremum::Extremum;
 use crate::aggrs::vector::VectorFunction as VectorAggrFunction;
 use crate::function::{Function, FunctionRef};
 use crate::function_factory::ScalarFunctionFactory;
@@ -259,6 +260,9 @@ pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(||
 
     // CountHash function
     CountHash::register(&function_registry);
+
+    // PromQL min/max; registered before the state functions are derived.
+    Extremum::register(&function_registry);
 
     // state function of supported aggregate functions
     StateMergeHelper::register(&function_registry);
