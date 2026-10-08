@@ -174,7 +174,7 @@ fn set_json2_extension(column_schema: &mut ColumnSchema, column: &Column) -> Res
 }
 
 /// Converts a SQL [`Column`] to a `ColumnDef` in gRPC proto.
-pub fn sql_column_to_grpc_column_def(
+pub fn sql_col_to_grpc_col_def(
     column: &Column,
     timezone: Option<&Timezone>,
 ) -> Result<api::v1::ColumnDef> {
@@ -492,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_sql_column_to_grpc_column_def() {
+    pub fn test_sql_col_to_grpc_col_def() {
         // test basic
         let column = Column {
             column_def: ColumnDef {
@@ -503,7 +503,7 @@ mod tests {
             extensions: ColumnExtensions::default(),
         };
 
-        let grpc_column_def = sql_column_to_grpc_column_def(&column, None).unwrap();
+        let grpc_column_def = sql_col_to_grpc_col_def(&column, None).unwrap();
 
         assert_eq!("col", grpc_column_def.name);
         assert!(grpc_column_def.is_nullable); // nullable when options are empty
@@ -524,7 +524,7 @@ mod tests {
             extensions: ColumnExtensions::default(),
         };
 
-        let grpc_column_def = sql_column_to_grpc_column_def(&column, None).unwrap();
+        let grpc_column_def = sql_col_to_grpc_col_def(&column, None).unwrap();
         assert!(!grpc_column_def.is_nullable);
 
         // test primary key
@@ -547,12 +547,12 @@ mod tests {
             extensions: ColumnExtensions::default(),
         };
 
-        let grpc_column_def = sql_column_to_grpc_column_def(&column, None).unwrap();
+        let grpc_column_def = sql_col_to_grpc_col_def(&column, None).unwrap();
         assert_eq!(grpc_column_def.semantic_type, SemanticType::Tag as i32);
     }
 
     #[test]
-    pub fn test_sql_column_to_grpc_column_def_with_timezone() {
+    pub fn test_sql_col_to_grpc_col_def_with_timezone() {
         let column = Column {
             column_def: ColumnDef {
                 name: "col".into(),
@@ -569,7 +569,7 @@ mod tests {
         };
 
         // with timezone "Asia/Shanghai"
-        let grpc_column_def = sql_column_to_grpc_column_def(
+        let grpc_column_def = sql_col_to_grpc_col_def(
             &column,
             Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap()),
         )
@@ -590,7 +590,7 @@ mod tests {
         );
 
         // without timezone
-        let grpc_column_def = sql_column_to_grpc_column_def(&column, None).unwrap();
+        let grpc_column_def = sql_col_to_grpc_col_def(&column, None).unwrap();
         assert_eq!("col", grpc_column_def.name);
         assert!(grpc_column_def.is_nullable); // nullable when options are empty
         assert_eq!(
