@@ -3805,6 +3805,7 @@ mod tests {
                 }],
             },
         };
+        let instant_only = instant_request.clone();
         let mut request = instant_request;
         request.normal_requests.requests.push(RegionInsertRequest {
             region_id: RegionId::new(1, 1).as_u64(),
@@ -3814,14 +3815,16 @@ mod tests {
             }),
             ..Default::default()
         });
-        let error = inserter
-            .do_request(request, &table_infos, &ctx)
-            .await
-            .unwrap_err();
-        assert_eq!(error.status_code(), StatusCode::InvalidArguments);
-        assert!(error.to_string().contains("ttl=instant"));
-        assert!(datanode_rx.try_recv().is_err());
-        assert!(flownode_rx.try_recv().is_err());
+        for (label, request) in [("instant-only", instant_only), ("mixed", request)] {
+            let error = inserter
+                .do_request(request, &table_infos, &ctx)
+                .await
+                .unwrap_err();
+            assert_eq!(error.status_code(), StatusCode::InvalidArguments, "{label}");
+            assert!(error.to_string().contains("ttl=instant"), "{label}");
+            assert!(datanode_rx.try_recv().is_err(), "{label}");
+            assert!(flownode_rx.try_recv().is_err(), "{label}");
+        }
     }
 
     #[tokio::test]
@@ -3947,6 +3950,289 @@ mod tests {
             assert_eq!(1, marker.table_id);
             assert_eq!(expected, marker.timestamps);
             assert!(marker.time_ranges.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn flow_mirror_new_handles_timestamp_defaults_and_impure_values() {
+        use datatypes::schema::{ColumnDefaultConstraint, SchemaBuilder};
+        use datatypes::value::Value as DataValue;
+
+        let backend = prepare_mocked_backend().await;
+        let cache = Arc::new(new_table_flownode_set_cache(
+            String::new(),
+            Cache::new(10),
+            backend,
+        ));
+        let peer = flownode_peer();
+        cache
+            .invalidate(&[common_meta::instruction::CacheIdent::CreateFlow(
+                common_meta::instruction::CreateFlow {
+                    flow_id: 1,
+                    source_table_ids: vec![1],
+                    partition_to_peer_mapping: vec![(0, peer.clone())],
+                },
+            )])
+            .await
+            .unwrap();
+
+        let timestamp_column = |default| {
+            let column = ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true);
+            match default {
+                Some(default) => column.with_default_constraint(Some(default)).unwrap(),
+                None => column,
+            }
+        };
+        let info_for = |column| {
+            let mut info = new_test_table_info(1, "source", [1].into_iter());
+            info.meta.schema = Arc::new(
+                SchemaBuilder::try_from_columns(vec![
+                    ColumnSchema::new("a", ConcreteDataType::int32_datatype(), true),
+                    column,
+                ])
+                .unwrap()
+                .build()
+                .unwrap(),
+            );
+            Arc::new(info)
+        };
+        let request =
+            |schema: Vec<api::v1::ColumnSchema>, values: Vec<Value>| RegionInsertRequest {
+                region_id: RegionId::new(1, 1).as_u64(),
+                rows: Some(Rows {
+                    schema,
+                    rows: vec![api::v1::Row { values }],
+                }),
+                ..Default::default()
+            };
+        let field = field_column_schema("a", ColumnDataType::Int32);
+        let field_value: Value = ValueData::I32Value(1).into();
+        let constant = ColumnDefaultConstraint::Value(DataValue::Timestamp(
+            Timestamp::new_millisecond(197000),
+        ));
+        let constant_info = info_for(timestamp_column(Some(constant)));
+        let omitted = request(vec![field.clone()], vec![field_value.clone()]);
+        for _ in 0..2 {
+            let task = FlowMirrorTask::new(
+                &cache,
+                std::iter::once(&omitted),
+                &HashMap::from_iter([(1, constant_info.clone())]),
+            )
+            .await
+            .unwrap();
+            assert_eq!(vec![197000], task.requests[&peer].requests[0].timestamps);
+        }
+
+        let impure_info = info_for(timestamp_column(Some(ColumnDefaultConstraint::Function(
+            "now()".into(),
+        ))));
+        let supplied = request(
+            vec![
+                field.clone(),
+                time_index_column_schema("ts", ColumnDataType::TimestampMillisecond),
+            ],
+            vec![
+                field_value.clone(),
+                ValueData::TimestampMillisecondValue(123456789).into(),
+            ],
+        );
+        let task = FlowMirrorTask::new(
+            &cache,
+            std::iter::once(&supplied),
+            &HashMap::from_iter([(1, impure_info.clone())]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(vec![123456789], task.requests[&peer].requests[0].timestamps);
+
+        let explicit_null = request(
+            vec![
+                field.clone(),
+                time_index_column_schema("ts", ColumnDataType::TimestampMillisecond),
+            ],
+            vec![field_value.clone(), Value::default()],
+        );
+        assert!(
+            FlowMirrorTask::new(
+                &cache,
+                std::iter::once(&explicit_null),
+                &HashMap::from_iter([(1, constant_info)]),
+            )
+            .await
+            .is_err()
+        );
+
+        let no_default_info = info_for(timestamp_column(None));
+        assert!(
+            FlowMirrorTask::new(
+                &cache,
+                std::iter::once(&omitted),
+                &HashMap::from_iter([(1, no_default_info)]),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            FlowMirrorTask::new(
+                &cache,
+                std::iter::once(&omitted),
+                &HashMap::from_iter([(1, impure_info)]),
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn do_request_keeps_storage_ack_when_flow_mirror_fails_or_is_over_budget() {
+        let _guard = lock_mirror_metrics().await;
+        use common_meta::instruction::{CacheIdent, CreateFlow};
+
+        for (case, over_budget, fail_flownode) in [
+            ("budget", true, false),
+            ("cache", false, false),
+            ("prepare", false, false),
+            ("rpc", false, true),
+        ] {
+            let backend = prepare_mocked_backend().await;
+            if case == "cache" {
+                backend
+                    .put(
+                        common_meta::rpc::store::PutRequest::new()
+                            .with_key(b"__flow/source_table/1/201/1/0".to_vec())
+                            .with_value(b"invalid-json".to_vec()),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let partition = create_partition_rule_manager(backend.clone()).await;
+            let (datanode_tx, mut datanode_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (flownode_tx, mut flownode_rx) = tokio::sync::mpsc::unbounded_channel();
+            let dirty_requests = Arc::new(std::sync::Mutex::new(vec![]));
+            let node_manager = Arc::new(RecordingNodeManager {
+                datanode_dispatch: datanode_tx,
+                flownode_dispatch: flownode_tx,
+                gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                fail_flownode,
+                datanode_gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
+                failed_datanodes: Arc::new(std::sync::Mutex::new(HashSet::new())),
+                dirty_requests: dirty_requests.clone(),
+            });
+            let cache = Arc::new(new_table_flownode_set_cache(
+                String::new(),
+                Cache::new(10),
+                backend,
+            ));
+            let flow_peer = Peer::new(201, "127.0.0.1:4201");
+            if case != "cache" {
+                cache
+                    .invalidate(&[CacheIdent::CreateFlow(CreateFlow {
+                        flow_id: 1,
+                        source_table_ids: vec![1],
+                        partition_to_peer_mapping: vec![(0, flow_peer)],
+                    })])
+                    .await
+                    .unwrap();
+            }
+            if case == "cache" {
+                assert!(cache.get(1).await.is_err());
+            }
+            let mut inserter = Inserter::new(
+                catalog::memory::MemoryCatalogManager::new(),
+                partition,
+                node_manager,
+                cache,
+                true,
+            );
+            let initial_pending = if over_budget {
+                MAX_MIRROR_PENDING_ROWS as u64
+            } else {
+                0
+            };
+            inserter.mirror_pending_rows = Arc::new(AtomicU64::new(initial_pending));
+            let info = Arc::new(new_test_table_info(1, "source", [1].into_iter()));
+            let table_infos = HashMap::from_iter([(1, info)]);
+            let ctx = Arc::new(QueryContext::with(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+            ));
+            let request = RegionInsertRequest {
+                region_id: RegionId::new(1, 1).as_u64(),
+                rows: Some(Rows {
+                    schema: vec![
+                        field_column_schema("a", ColumnDataType::Int32),
+                        time_index_column_schema("ts", ColumnDataType::TimestampMillisecond),
+                        field_column_schema("b", ColumnDataType::Int32),
+                    ],
+                    rows: vec![api::v1::Row {
+                        values: vec![
+                            ValueData::I32Value(1).into(),
+                            if case == "prepare" {
+                                Value::default()
+                            } else {
+                                ValueData::TimestampMillisecondValue(123).into()
+                            },
+                            ValueData::I32Value(2).into(),
+                        ],
+                    }],
+                }),
+                ..Default::default()
+            };
+            let before_success = crate::metrics::DIST_MIRROR_ROW_COUNT.get();
+            let output = inserter
+                .do_request(
+                    InstantAndNormalInsertRequests {
+                        normal_requests: RegionInsertRequests {
+                            requests: vec![request],
+                        },
+                        instant_requests: RegionInsertRequests::default(),
+                    },
+                    &table_infos,
+                    &ctx,
+                )
+                .await
+                .unwrap();
+            assert!(matches!(output.data, OutputData::AffectedRows(1)), "{case}");
+            assert!(
+                tokio::time::timeout(Duration::from_secs(10), datanode_rx.recv())
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "{case}"
+            );
+            if over_budget {
+                assert!(flownode_rx.try_recv().is_err(), "{case}");
+                assert_eq!(
+                    initial_pending,
+                    inserter.mirror_pending_rows.load(Ordering::Relaxed)
+                );
+                assert!(crate::metrics::DIST_MIRROR_DROPPED_ROW_COUNT.get() > 0);
+            } else if case == "cache" || case == "prepare" {
+                assert!(flownode_rx.try_recv().is_err(), "{case}");
+                assert_eq!(0, inserter.mirror_pending_rows.load(Ordering::Relaxed));
+                assert!(dirty_requests.lock().unwrap().is_empty(), "{case}");
+            } else {
+                tokio::time::timeout(Duration::from_secs(10), flownode_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while inserter.mirror_pending_rows.load(Ordering::Relaxed) != 0 {
+                    assert!(Instant::now() < deadline, "{case}: pending mirror leaked");
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(1, dirty_requests.lock().unwrap().len(), "{case}");
+            }
+            assert_eq!(
+                before_success,
+                crate::metrics::DIST_MIRROR_ROW_COUNT.get(),
+                "{case}"
+            );
         }
     }
 
@@ -4184,6 +4470,7 @@ mod tests {
         ));
 
         let gauge_before = crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get();
+        let successes_before = crate::metrics::DIST_MIRROR_ROW_COUNT.get();
         FlowMirrorTask { requests }.detach(node_manager, pending.clone());
 
         // Both per-peer payloads are counted, so the budget is exactly full
@@ -4192,7 +4479,6 @@ mod tests {
             MAX_MIRROR_PENDING_ROWS as u64,
             pending.load(Ordering::Relaxed)
         );
-
         // Let both tasks finish and check that the budget lands back on its
         // starting value: over-releasing a shared reservation would saturate it.
         // The gauge is checked too because `release_mirror_pending_rows` moves
@@ -4200,7 +4486,8 @@ mod tests {
         // pending `gauge.sub` into the next test holding the metrics lock.
         gate.add_permits(2);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while pending.load(Ordering::Relaxed) != start
+        while crate::metrics::DIST_MIRROR_ROW_COUNT.get() != successes_before + total_rows
+            || pending.load(Ordering::Relaxed) != start
             || crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get() != gauge_before
         {
             assert!(
