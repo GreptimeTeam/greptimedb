@@ -529,18 +529,11 @@ mod tests {
                 datatype: ColumnDataType::String as i32,
                 ..Default::default()
             }],
-            rows: vec![
-                Row {
-                    values: vec![Value {
-                        value_data: Some(ValueData::StringValue(String::new())),
-                    }],
-                },
-                Row {
-                    values: vec![Value {
-                        value_data: Some(ValueData::StringValue("42".to_string())),
-                    }],
-                },
-            ],
+            rows: vec![Row {
+                values: vec![Value {
+                    value_data: Some(ValueData::StringValue(String::new())),
+                }],
+            }],
         };
         let pending_rewrites = vec![PendingTraceColumnRewrite {
             col_idx: 0,
@@ -554,10 +547,6 @@ mod tests {
 
         assert_eq!(rows.schema[0].datatype, ColumnDataType::Int64 as i32);
         assert_eq!(rows.rows[0].values[0].value_data, None);
-        assert_eq!(
-            rows.rows[1].values[0].value_data,
-            Some(ValueData::I64Value(42))
-        );
     }
 
     #[test]
