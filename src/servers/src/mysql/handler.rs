@@ -85,6 +85,7 @@ pub struct MysqlInstanceShim {
     prepared_stmts_counter: AtomicU32,
     process_id: u32,
     prepared_stmt_cache_size: usize,
+    batching_enabled: bool,
 }
 
 impl MysqlInstanceShim {
@@ -122,7 +123,20 @@ impl MysqlInstanceShim {
             prepared_stmts_counter: AtomicU32::new(1),
             process_id,
             prepared_stmt_cache_size,
+            batching_enabled: false,
         }
+    }
+
+    /// Enables ordinary-table batching for this connection.
+    pub fn with_batching_enabled(mut self, enabled: bool) -> Self {
+        self.batching_enabled = enabled;
+        self
+    }
+
+    fn new_query_context(&self) -> QueryContextRef {
+        let mut ctx = self.session.new_query_context();
+        Arc::make_mut(&mut ctx).set_batching_enabled(self.batching_enabled);
+        ctx
     }
 
     #[tracing::instrument(skip_all, name = "mysql::do_query")]
@@ -495,7 +509,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         raw_query: &'a str,
         w: StatementMetaWriter<'a, W>,
     ) -> Result<()> {
-        let query_ctx = self.session.new_query_context();
+        let query_ctx = self.new_query_context();
         let stmt_id = self.prepared_stmts_counter.fetch_add(1, Ordering::Relaxed);
         let stmt_key = uuid::Uuid::from_u128(stmt_id as u128).to_string();
         let (params, columns) = match self
@@ -525,7 +539,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
     ) -> Result<()> {
         self.session.clear_warnings();
 
-        let query_ctx = self.session.new_query_context();
+        let query_ctx = self.new_query_context();
         let db = query_ctx.get_db_string();
         let _timer = crate::metrics::METRIC_MYSQL_QUERY_TIMER
             .with_label_values(&[crate::metrics::METRIC_MYSQL_BINQUERY, db.as_str()])
@@ -569,7 +583,7 @@ impl<W: AsyncWrite + Send + Sync + Unpin> AsyncMysqlShim<W> for MysqlInstanceShi
         query: &'a str,
         writer: QueryResultWriter<'a, W>,
     ) -> Result<()> {
-        let query_ctx = self.session.new_query_context();
+        let query_ctx = self.new_query_context();
         let db = query_ctx.get_db_string();
         let _timer = crate::metrics::METRIC_MYSQL_QUERY_TIMER
             .with_label_values(&[crate::metrics::METRIC_MYSQL_TEXTQUERY, db.as_str()])
@@ -1037,6 +1051,17 @@ mod tests {
             1,
             1024,
         )
+    }
+
+    #[test]
+    fn test_batching_context() {
+        for enabled in [false, true] {
+            let shim = create_shim().with_batching_enabled(enabled);
+            let ctx = shim.new_query_context();
+            assert_eq!(ctx.batching_enabled(), enabled);
+            assert!(!ctx.logical_batching_enabled());
+            assert_eq!(ctx.channel(), Channel::Mysql);
+        }
     }
 
     fn statement_with_transformed_placeholders(query: &str) -> Statement {

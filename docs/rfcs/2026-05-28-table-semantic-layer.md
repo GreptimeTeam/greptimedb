@@ -93,13 +93,25 @@ Two design decisions worth pinning down up front, because they constrain everyth
 - **Conflict.** Some table-level keys (`trace.conventions` lifted from `schema_url`, `metric.temporality`, ...) cannot represent the truth when a long-lived table sees rows from multiple sources. v1 records `mixed` or `unknown` rather than a fictitious single value. Downstream consumers must treat any single-valued semantic key as best-effort, not strong evidence.
 - **Update.** Semantic options are stamped at table creation. v1 does not specify an update path; promoting `metadata_quality` from `inferred` to `declared`, refreshing `resource.attributes_preserved`, or revising `trace.conventions` on later writes is deferred. If real usage shows update is needed, it lands as a separate RFC.
 
+OTLP delta sums and explicit histograms store raw interval values without
+accumulating across timestamps. Delta-to-cumulative conversion and its
+per-series ingestion state are intentionally out of scope. Explicit histogram
+bucket counts are prefix-summed only within each point to produce the classic
+histogram representation. Delta exponential histograms are currently rejected;
+[planned raw-delta support](2026-08-04-native-histograms.md#planned-raw-delta-exponential-histograms)
+will store their interval values in the canonical native-histogram Struct using
+the same temporality tag and a gauge reset hint. The tag will select histogram
+summation for `increase()` and summation divided by range duration for `rate()`,
+without cumulative reset correction or extrapolation.
+
 OTLP delta sums and explicit histograms additionally store the query-visible
 String tag `otlp_aggregation_temporality="delta"` on each generated row. Its
 name is fixed and does not follow `default_column_prefix`. The tag is part of
 series identity and is authoritative for per-series float `rate()` and
 `increase()` behavior; the table option is never used as a row-level
-discriminator. Native histograms retain their native algorithms. Prometheus
-metadata reports `unknown` for counter, histogram, and up/down-counter tables
+discriminator. Native histograms currently retain their native algorithms;
+the planned delta extension will change only tagged delta histogram series.
+Prometheus metadata reports `unknown` for counter, histogram, and up/down-counter tables
 whose catalog temporality is `delta` or `mixed`. A same-request conflict can
 create `mixed`; a later write does not update an existing table option, so the
 catalog value can also be stale while the row tag remains authoritative.

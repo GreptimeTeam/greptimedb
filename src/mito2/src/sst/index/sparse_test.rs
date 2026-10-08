@@ -141,8 +141,6 @@ async fn sparse_and_materialized_tags_produce_identical_indexes() {
         inverted_index_config: Default::default(),
         fulltext_index_config: Default::default(),
         bloom_filter_index_config: Default::default(),
-        #[cfg(feature = "vector_index")]
-        vector_index_config: Default::default(),
     };
     let mut expected = None;
     for batch in [materialized, sparse, mixed] {

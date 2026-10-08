@@ -475,7 +475,7 @@ async fn delta_mixed_ranges_drop_and_float_ranges_sum() {
             );
             let state = build_query_engine_state();
             let (mut exprs, _) = planner
-                .create_function_expr(&call.func, vec![], input.schema(), &state)
+                .create_function_expr(&call.func, vec![], input.schema(), &state, None)
                 .unwrap();
             exprs.insert(0, planner.create_time_index_column_expr().unwrap());
             let plan = LogicalPlanBuilder::from(input)
@@ -1102,12 +1102,12 @@ async fn delta_offsets_survive_optimized_plan_serialization() {
         (
             "timestamp positive offset",
             r#"timestamp(delta_metric{series="cumulative"} offset 60s)"#,
-            120.0,
+            60.0,
         ),
         (
             "timestamp negative offset",
             r#"timestamp(delta_metric{series="cumulative"} offset -60s)"#,
-            120.0,
+            180.0,
         ),
         (
             "range positive offset",

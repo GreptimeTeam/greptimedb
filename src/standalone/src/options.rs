@@ -58,7 +58,7 @@ pub struct StandaloneOptions {
     pub postgres: PostgresOptions,
     pub opentsdb: OpentsdbOptions,
     pub influxdb: InfluxdbOptions,
-    /// Shared experimental ordinary-table batching; independent of Prom batching.
+    /// Ordinary-table batching with independent logical-table controls.
     pub pending_rows_batcher: PendingRowsBatcherOptions,
     pub jaeger: JaegerOptions,
     pub otlp: OtlpOptions,
@@ -137,6 +137,7 @@ impl Configurable for StandaloneOptions {
             "wal.broker_endpoints",
             "event_recorder.event_types",
             "pending_rows_batcher.protocols",
+            "pending_rows_batcher.logical_table.protocols",
         ])
     }
 }
@@ -216,8 +217,61 @@ mod tests {
     use std::sync::Arc;
 
     use common_event_recorder::EventTypeFilter;
+    use servers::batcher::BatchingProtocol;
 
     use crate::options::*;
+
+    #[test]
+    fn test_logical_batcher_config_forwarding() {
+        let opts: StandaloneOptions = toml::from_str("[pending_rows_batcher]\nprotocols = ['influxdb']\n[pending_rows_batcher.logical_table]\nprotocols = ['otlp', 'prom']\npending_rows_flush_interval = '10ms'").unwrap();
+        let frontend = opts.frontend_options();
+        assert_eq!(frontend.pending_rows_batcher, opts.pending_rows_batcher);
+        assert_eq!(
+            frontend.pending_rows_batcher.logical_table,
+            opts.pending_rows_batcher.logical_table
+        );
+        let restored: StandaloneOptions = toml::from_str(&toml::to_string(&opts).unwrap()).unwrap();
+        assert_eq!(
+            restored.pending_rows_batcher.logical_table,
+            opts.pending_rows_batcher.logical_table
+        );
+        assert!(
+            toml::from_str::<StandaloneOptions>(
+                "[pending_rows_batcher.logical_table]\nprotocols = ['logs']"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn test_logical_batcher_protocols_from_env() {
+        temp_env::with_vars(
+            [
+                (
+                    "STANDALONE_LOGICAL_TEST__PENDING_ROWS_BATCHER__PROTOCOLS",
+                    Some("otlp,influxdb"),
+                ),
+                (
+                    "STANDALONE_LOGICAL_TEST__PENDING_ROWS_BATCHER__LOGICAL_TABLE__PROTOCOLS",
+                    Some("prom,otlp"),
+                ),
+            ],
+            || {
+                let options =
+                    StandaloneOptions::load_layered_options(None, "STANDALONE_LOGICAL_TEST")
+                        .unwrap();
+                assert_eq!(options.pending_rows_batcher.table.protocols.len(), 2);
+                assert_eq!(
+                    options
+                        .pending_rows_batcher
+                        .logical_table
+                        .unwrap()
+                        .protocols,
+                    vec![BatchingProtocol::Prom, BatchingProtocol::Otlp]
+                );
+            },
+        );
+    }
 
     #[test]
     fn test_batcher_protocols_from_env() {
@@ -231,11 +285,8 @@ mod tests {
                     StandaloneOptions::load_layered_options(None, "STANDALONE_BATCHER_TEST")
                         .unwrap();
                 assert_eq!(
-                    options.pending_rows_batcher.protocols,
-                    vec![
-                        servers::http::BatchingProtocol::Influxdb,
-                        servers::http::BatchingProtocol::HttpSql
-                    ]
+                    options.pending_rows_batcher.table.protocols,
+                    vec![BatchingProtocol::Influxdb, BatchingProtocol::HttpSql]
                 );
             },
         );
@@ -247,6 +298,7 @@ mod tests {
         assert!(
             !defaults
                 .pending_rows_batcher
+                .table
                 .pending_rows_batching_enabled()
         );
         let options: StandaloneOptions = toml::from_str(
@@ -259,16 +311,22 @@ flow_notification_queue_capacity = 17
 "#,
         )
         .unwrap();
-        assert_eq!(options.pending_rows_batcher.max_batch_rows, 25);
-        assert_eq!(options.pending_rows_batcher.protocols.len(), 2);
+        assert_eq!(options.pending_rows_batcher.table.max_batch_rows, 25);
+        assert_eq!(options.pending_rows_batcher.table.protocols.len(), 2);
         assert_eq!(
             options
                 .pending_rows_batcher
+                .table
                 .flow_notification_queue_capacity
                 .get(),
             17
         );
-        assert!(options.pending_rows_batcher.pending_rows_batching_enabled());
+        assert!(
+            options
+                .pending_rows_batcher
+                .table
+                .pending_rows_batching_enabled()
+        );
         let serialized = toml::to_string(&options).unwrap();
         let parsed: StandaloneOptions = toml::from_str(&serialized).unwrap();
         assert_eq!(options.influxdb, parsed.influxdb);

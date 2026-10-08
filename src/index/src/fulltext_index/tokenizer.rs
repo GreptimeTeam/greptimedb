@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::Bytes;
+use crate::bloom_filter::element_hash;
 use crate::fulltext_index::error::Result;
 
 lazy_static::lazy_static! {
@@ -140,6 +141,30 @@ impl Analyzer {
         }
     }
 
+    /// Returns the bloom filter hash of each token in the given text.
+    ///
+    /// Equivalent to hashing every token returned by [`Analyzer::analyze_text`] with
+    /// [`element_hash`]. Only case-insensitive non-ASCII tokens allocate, in `to_lowercase`;
+    /// case-insensitive ASCII tokens are lowercased in `buf`.
+    pub fn analyze_text_hashes<'a>(
+        &self,
+        text: &'a str,
+        buf: &'a mut Vec<u8>,
+    ) -> impl Iterator<Item = u64> + use<'a> {
+        let case_sensitive = self.case_sensitive;
+        self.tokenizer.tokenize(text).into_iter().map(move |token| {
+            if case_sensitive {
+                element_hash(token.as_bytes())
+            } else if token.is_ascii() {
+                buf.clear();
+                buf.extend(token.bytes().map(|b| b.to_ascii_lowercase()));
+                element_hash(buf)
+            } else {
+                element_hash(token.to_lowercase().as_bytes())
+            }
+        })
+    }
+
     /// Analyzes the given text into a list of tokens.
     pub fn analyze_text(&self, text: &str) -> Result<Vec<Bytes>> {
         let res = self
@@ -161,6 +186,28 @@ impl Analyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_analyze_text_hashes_matches_analyze_text() {
+        let text = "Hello, WORLD ship_Ship 清洁表面 ÄÖÜ straße İstanbul x";
+        for (tokenizer, case_sensitive) in [
+            (Box::new(EnglishTokenizer) as Box<dyn Tokenizer>, false),
+            (Box::new(EnglishTokenizer), true),
+            (Box::new(ChineseTokenizer), false),
+        ] {
+            let analyzer = Analyzer::new(tokenizer, case_sensitive);
+            let expected = analyzer
+                .analyze_text(text)
+                .unwrap()
+                .iter()
+                .map(|t| element_hash(t))
+                .collect::<Vec<_>>();
+            let hashes = analyzer
+                .analyze_text_hashes(text, &mut Vec::new())
+                .collect::<Vec<_>>();
+            assert_eq!(expected, hashes);
+        }
+    }
 
     #[test]
     fn test_english_tokenizer() {
@@ -215,6 +262,8 @@ mod tests {
         let text = "[2026/04/09/ 13:56:11.031]2026-04-09 13:56:11.031 - [ trace_id=340a6a44b0bd8e37bb7697ss7da61ff0 span_id=085ff5ttf1e0a23b trace_flags=01] - [http-nio-8081-exec-16] INFO c.h.p.xx.web.service.impl.CCCXForwardKKKServiceImpl.pushout(188) - 登录手机号18888888888的动态key：829889AC8 ship_ship ship__ship _ __ __IDENTIFIER__ _ship ship_ EOF";
         let tokens = tokenizer.tokenize(text);
 
+        // Jieba 0.11 preserves ASCII compounds and emits searchable alphabetic parts.
+        // The underscore fallback also retains leading, trailing, and repeated underscores.
         assert_eq!(
             tokens,
             vec![
@@ -224,36 +273,34 @@ mod tests {
                 "13",
                 "56",
                 "11.031",
-                "2026-04",
-                "09",
+                "2026-04-09",
                 "13",
                 "56",
                 "11.031",
                 "trace",
-                "_",
                 "id",
+                "trace_id",
                 "340a6a44b0bd8e37bb7697ss7da61ff0",
                 "span",
-                "_",
                 "id",
+                "span_id",
                 "085ff5ttf1e0a23b",
                 "trace",
-                "_",
                 "flags",
+                "trace_flags",
                 "01",
                 "http",
-                "nio-8081",
-                "exec-16",
+                "nio",
+                "exec",
+                "http-nio-8081-exec-16",
                 "INFO",
-                "c",
-                "h",
-                "p",
                 "xx",
                 "web",
                 "service",
                 "impl",
                 "CCCXForwardKKKServiceImpl",
                 "pushout",
+                "c.h.p.xx.web.service.impl.CCCXForwardKKKServiceImpl.pushout",
                 "188",
                 "登录",
                 "手机",
@@ -264,8 +311,8 @@ mod tests {
                 "key",
                 "829889AC8",
                 "ship",
-                "_",
                 "ship",
+                "ship_ship",
                 "ship",
                 "__",
                 "ship",
@@ -320,8 +367,8 @@ mod tests {
                 "_",
                 "id",
                 "trace",
-                "_",
                 "id",
+                "trace_id",
                 "手机",
                 "手机号",
                 "_",

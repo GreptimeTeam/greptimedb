@@ -29,7 +29,8 @@ pub trait PendingRowsBatcher: Send + Sync {
     /// Acquires one slot per original request, shared by all of its table submissions.
     async fn acquire(&self) -> Result<Arc<OwnedSemaphorePermit>>;
 
-    /// Waits for the submitted rows to be written, retaining the slot through completion.
+    /// Submits rows according to the acknowledgement policy, retaining the slot until
+    /// writing completes even when the response acknowledges queue admission only.
     /// Cancelling the response wait does not retract an already enqueued submission.
     async fn submit(
         &self,

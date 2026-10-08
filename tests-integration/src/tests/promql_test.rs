@@ -644,28 +644,57 @@ async fn two_aggregators_combined_aggrs(instance: Arc<dyn MockInstance>) {
 // eval instant at 50m stddev by (instance)(http_requests)
 //   {instance="0"} 223.60679774998
 //   {instance="1"} 223.60679774998
+//
+// The values are compared with a tolerance rather than against a rendered table:
+// `stddev_pop` merges partial aggregates in a parallelism-dependent order, so the
+// last digits of its output are not stable across runs.
 #[apply(both_instances_cases)]
-#[ignore = "TODO(ruihang): fix this case"]
 async fn stddev_by_label(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
-    create_insert_query_assert(
+    execute_all(&instance, AGGREGATORS_CREATE_TABLE, QueryContext::arc()).await;
+    execute_all(&instance, AGGREGATORS_INSERT_DATA, QueryContext::arc()).await;
+
+    let batches = promql_query_as_batches(
         instance,
-        AGGREGATORS_CREATE_TABLE,
-        AGGREGATORS_INSERT_DATA,
         r#"stddev by (instance)(http_requests)"#,
+        None,
+        QueryContext::arc(),
         UNIX_EPOCH,
         unix_epoch_plus_100s(),
         Duration::from_secs(60),
         Duration::from_secs(0),
-        "+----------+---------------------+--------------------------------+\
-        \n| instance | ts                  | STDDEVPOP(http_requests.value) |\
-        \n+----------+---------------------+--------------------------------+\
-        \n| 0        | 1970-01-01T00:00:00 | 223.606797749979               |\
-        \n| 1        | 1970-01-01T00:00:00 | 223.606797749979               |\
-        \n+----------+---------------------+--------------------------------+",
     )
     .await;
+
+    let batches = batches.iter().collect::<Vec<_>>();
+    assert_eq!(batches.len(), 1);
+    // Tag columns come back dictionary-encoded.
+    let instances = cast(
+        batches[0].column_by_name("instance").unwrap(),
+        &DataType::Utf8,
+    )
+    .unwrap();
+    let instances = instances.as_any().downcast_ref::<StringArray>().unwrap();
+    let values = batches[0]
+        .column_by_name("stddev_pop(http_requests.value)")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+
+    let mut actual = (0..values.len())
+        .map(|i| (instances.value(i), values.value(i)))
+        .collect::<Vec<_>>();
+    actual.sort_by(|a, b| a.0.cmp(b.0));
+    assert_eq!(actual.len(), 2, "{}", batches[0].pretty_print());
+    for (expected_instance, (instance, value)) in ["0", "1"].into_iter().zip(actual) {
+        assert_eq!(instance, expected_instance);
+        assert!(
+            (value - 223.606_797_749_979).abs() < 1e-9,
+            "instance {instance}: {value}"
+        );
+    }
 }
 
 // This is not derived from prometheus

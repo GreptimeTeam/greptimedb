@@ -778,6 +778,7 @@ mod tests {
         ));
         let store = env.access_layer.object_store().clone();
         let entry = SeriesIndexEntry {
+            file_size: 0,
             index_uuid: FileId::random(),
             bucket_start: Timestamp::new_millisecond(0),
             bucket_end: Timestamp::new_millisecond(20),

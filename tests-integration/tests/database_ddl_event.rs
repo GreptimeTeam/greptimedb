@@ -21,6 +21,7 @@ use tests_integration::cluster::GreptimeDbClusterBuilder;
 use tests_integration::standalone::GreptimeDbStandaloneBuilder;
 use tests_integration::test_util::{
     StorageType, execute_sql, get_test_store_config, setup_authenticated_grpc_database,
+    test_event_recorder_options,
 };
 
 use crate::event_recorder_test_util::{
@@ -42,7 +43,7 @@ async fn test_event_table_auto_creation_with_auto_create_disabled() {
             event_types: Arc::new(EventTypeFilter::Only(
                 [String::from("create_database")].into_iter().collect(),
             )),
-            ..Default::default()
+            ..test_event_recorder_options()
         })
         .build()
         .await;
@@ -94,7 +95,7 @@ async fn test_event_table_schema_reconciliation_with_auto_create_disabled() {
             event_types: Arc::new(EventTypeFilter::Only(
                 [String::from("create_database")].into_iter().collect(),
             )),
-            ..Default::default()
+            ..test_event_recorder_options()
         })
         .build()
         .await;
@@ -185,6 +186,7 @@ async fn test_database_ddl_events() {
     let home_dir = create_temp_dir("test_database_ddl_events_data_home");
     let cluster = GreptimeDbClusterBuilder::new("test_database_ddl_events")
         .await
+        .with_event_recorder_options(test_event_recorder_options())
         .with_datanodes(1)
         .with_frontend_auto_create_table(false)
         .with_store_config(store_config)
@@ -208,6 +210,7 @@ async fn test_database_ddl_events() {
 async fn test_standalone_database_ddl_events() {
     common_telemetry::init_default_ut_logging();
     let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_database_ddl_events")
+        .with_event_recorder_options(test_event_recorder_options())
         .build()
         .await;
     let instance = standalone.fe_instance();

@@ -21,6 +21,7 @@ mod import_packed;
 mod influxdb;
 mod jaeger;
 mod log_handler;
+mod logical_batcher;
 mod logs;
 mod opentsdb;
 mod otlp;
@@ -31,7 +32,7 @@ mod region_query;
 use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, atomic};
+use std::sync::{Arc, OnceLock, atomic};
 use std::time::{Duration, SystemTime};
 
 use async_stream::stream;
@@ -78,6 +79,7 @@ use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryStatement};
 use query::query_engine::DescribeResult;
 use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
+use servers::batcher::logical_table::LogicalTablePendingRowsBatcher;
 use servers::error::{
     self as server_error, AuthSnafu, CommonMetaSnafu, ExecuteQuerySnafu,
     OtlpMetricModeIncompatibleSnafu, UnexpectedResultSnafu,
@@ -130,6 +132,7 @@ pub struct Instance {
     query_engine: QueryEngineRef,
     plugins: Plugins,
     inserter: InserterRef,
+    logical_batcher: Arc<OnceLock<Option<Arc<LogicalTablePendingRowsBatcher>>>>,
     deleter: DeleterRef,
     table_metadata_manager: TableMetadataManagerRef,
     event_recorder: EventRecorderRef,
@@ -2760,12 +2763,12 @@ mod tests {
         )
     }
 
-    struct ReleasedExportSource {
+    struct CancellableExportSource {
         schema: GtSchemaRef,
         channels: std::sync::Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
     }
 
-    impl DataSource for ReleasedExportSource {
+    impl DataSource for CancellableExportSource {
         fn get_stream(
             &self,
             _request: ScanRequest,
@@ -2785,15 +2788,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_metric_export_http_timeout_drains_ordinary_writer() {
+    async fn test_metric_export_http_timeout_cancels_ordinary_source() {
         let destination = common_test_util::temp_dir::create_temp_dir("metric_export_timeout");
         let (started_tx, started_rx) = oneshot::channel();
-        let (release_tx, release_rx) = oneshot::channel();
+        let (mut release_tx, release_rx) = oneshot::channel();
         let info = test_table_info(1024, "source").unwrap();
         let source = Arc::new(Table::new(
             Arc::new(info.clone()),
             FilterPushDownType::Unsupported,
-            Arc::new(ReleasedExportSource {
+            Arc::new(CancellableExportSource {
                 schema: info.meta.schema.clone(),
                 channels: std::sync::Mutex::new(Some((started_tx, release_rx))),
             }),
@@ -2831,9 +2834,9 @@ mod tests {
         let server_task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
+        let uri = reqwest::Url::from_directory_path(destination.path()).unwrap();
         let sql = format!(
-            "COPY DATABASE greptime.public TO '{}/' WITH (experimental_metric_export='true')",
-            destination.path().display()
+            "COPY DATABASE greptime.public TO '{uri}' WITH (experimental_metric_export='true')"
         );
         let request = tokio::spawn(async move {
             reqwest::Client::builder()
@@ -2852,21 +2855,10 @@ mod tests {
             .unwrap();
         let response = request.await.unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::REQUEST_TIMEOUT);
-        // A dropped ordinary stream would close this receiver before release.
-        release_tx.send(()).unwrap();
-        let file = destination.path().join("source.parquet");
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if std::fs::read(&file)
-                    .is_ok_and(|bytes| bytes.len() > 8 && bytes.ends_with(b"PAR1"))
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), release_tx.closed())
+            .await
+            .unwrap();
+        assert!(!destination.path().join("source.parquet").exists());
         server_task.abort();
     }
 

@@ -36,6 +36,7 @@ use client::client_manager::NodeClients;
 use cmd::frontend::create_heartbeat_task;
 use common_base::Plugins;
 use common_datasource::object_store::LocalFileAccess;
+use common_event_recorder::EventRecorderOptions;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::DatanodeId;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
@@ -174,6 +175,7 @@ pub struct GreptimeDbClusterBuilder {
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
     local_file_access: LocalFileAccess,
+    event_recorder_options: EventRecorderOptions,
 }
 
 impl GreptimeDbClusterBuilder {
@@ -209,6 +211,7 @@ impl GreptimeDbClusterBuilder {
             shared_home_dir: None,
             meta_selector: None,
             local_file_access: LocalFileAccess::default(),
+            event_recorder_options: EventRecorderOptions::default(),
         }
     }
 
@@ -250,6 +253,15 @@ impl GreptimeDbClusterBuilder {
 
     pub fn with_metasrv_gc_config(mut self, metasrv_gc_config: GcSchedulerOptions) -> Self {
         self.metasrv_gc_config = metasrv_gc_config;
+        self
+    }
+
+    #[must_use]
+    pub fn with_event_recorder_options(
+        mut self,
+        event_recorder_options: EventRecorderOptions,
+    ) -> Self {
+        self.event_recorder_options = event_recorder_options;
         self
     }
 
@@ -303,6 +315,7 @@ impl GreptimeDbClusterBuilder {
                 ..Default::default()
             },
             gc: self.metasrv_gc_config.clone(),
+            event_recorder: self.event_recorder_options.clone(),
             ..Default::default()
         };
 
@@ -550,6 +563,7 @@ impl GreptimeDbClusterBuilder {
     fn build_frontend_options(&self) -> FrontendOptions {
         let mut fe_opts = FrontendOptions {
             auto_create_table: self.frontend_auto_create_table,
+            event_recorder: self.event_recorder_options.clone(),
             ..Default::default()
         };
 
@@ -668,11 +682,15 @@ async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
 
     (
         addr.to_string(),
-        Client::with_manager_and_urls(channel_manager, [addr]),
+        // The mock connector pool lives on this single manager, so both lanes
+        // intentionally share it (same semantics as the legacy constructor).
+        Client::with_query_and_control_managers(channel_manager.clone(), channel_manager, [addr]),
     )
 }
 
+// Mock connectors are registered on a shared channel manager.
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use api::v1::flow::FlowRequest;
     use api::v1::region::{

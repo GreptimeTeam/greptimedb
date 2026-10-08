@@ -86,6 +86,7 @@ pub struct MysqlSpawnConfig {
     reject_no_database: bool,
     // prepared statement cache capacity
     prepared_stmt_cache_size: usize,
+    batching_enabled: bool,
 }
 
 impl MysqlSpawnConfig {
@@ -102,7 +103,14 @@ impl MysqlSpawnConfig {
             keep_alive_secs,
             reject_no_database,
             prepared_stmt_cache_size,
+            batching_enabled: false,
         }
+    }
+
+    /// Enables ordinary-table batching for connections accepted by this server.
+    pub fn with_batching_enabled(mut self, enabled: bool) -> Self {
+        self.batching_enabled = enabled;
+        self
     }
 
     fn tls(&self) -> Option<Arc<ServerConfig>> {
@@ -213,7 +221,8 @@ impl MysqlServer {
             stream.peer_addr()?,
             process_id,
             spawn_config.prepared_stmt_cache_size,
-        );
+        )
+        .with_batching_enabled(spawn_config.batching_enabled);
         let (mut r, w) = stream.into_split();
         let mut w = BufWriter::with_capacity(DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE, w);
 

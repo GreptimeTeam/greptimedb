@@ -25,11 +25,12 @@ use common_query::AddColumnLocation;
 use common_time::TimeToLive;
 use common_time::range::TimestampRange;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::json::JsonSettings;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{
     ColumnDefaultConstraint, ColumnSchema, FulltextOptions, Schema, SkippingIndexOptions,
 };
-use greptime_proto::v1::region::compact_request;
+use greptime_proto::v1::region::{build_index_request, compact_request};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{
@@ -48,7 +49,6 @@ use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 
 use crate::error::{ConflictingTableOptionsSnafu, ParseTableOptionSnafu, Result};
 use crate::metadata::{TableId, TableVersion};
-use crate::table_reference::TableReference;
 
 mod semantic;
 pub use semantic::*;
@@ -371,6 +371,13 @@ pub struct ModifyColumnTypeRequest {
     pub target_type: ConcreteDataType,
 }
 
+/// Set JSON2 settings request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetJsonSettingsRequest {
+    pub column_name: String,
+    pub settings: JsonSettings,
+}
+
 /// A family of annotation table options: pure metadata markers that no region
 /// consumes. Setting or unsetting them only rewrites the table's
 /// `extra_options`, so the alter skips region dispatch entirely.
@@ -661,6 +668,9 @@ pub enum AlterKind {
     ModifyColumnTypes {
         columns: Vec<ModifyColumnTypeRequest>,
     },
+    SetJsonSettings {
+        request: SetJsonSettingsRequest,
+    },
     RenameTable {
         new_table_name: String,
     },
@@ -794,6 +804,8 @@ pub struct FlushTableRequest {
 
 #[derive(Debug, Clone, Default)]
 pub struct BuildIndexTableRequest {
+    /// The index build mode. Absent options select SST indexes.
+    pub options: Option<build_index_request::Options>,
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,
@@ -818,25 +830,6 @@ impl Default for CompactTableRequest {
             compact_options: compact_request::Options::Regular(Default::default()),
             parallelism: 1,
             time_range: None,
-        }
-    }
-}
-
-/// Truncate table request
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TruncateTableRequest {
-    pub catalog_name: String,
-    pub schema_name: String,
-    pub table_name: String,
-    pub table_id: TableId,
-}
-
-impl TruncateTableRequest {
-    pub fn table_ref(&self) -> TableReference<'_> {
-        TableReference {
-            catalog: &self.catalog_name,
-            schema: &self.schema_name,
-            table: &self.table_name,
         }
     }
 }
