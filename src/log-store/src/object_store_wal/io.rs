@@ -138,6 +138,16 @@ impl ObjectStoreIo {
             })
     }
 
+    /// Deletes the object `object_seq`. Deleting an object that does not
+    /// exist succeeds.
+    pub(crate) async fn delete(&self, object_seq: u64) -> Result<()> {
+        let path = self.object_path(object_seq);
+        self.store.delete(&path).await.context(WalObjectStoreSnafu {
+            operation: "delete",
+            path,
+        })
+    }
+
     /// Lists the objects under the prefix, ordered by object sequence. Keys
     /// that do not follow the object layout are ignored.
     pub(crate) async fn list(&self) -> Result<Vec<ListedObject>> {
@@ -357,6 +367,11 @@ mod tests {
             vec![1, 1, 2],
             objects.iter().map(|object| object.size).collect::<Vec<_>>()
         );
+
+        // A delete of an object that is already gone succeeds.
+        io.delete(2).await.unwrap();
+        io.delete(2).await.unwrap();
+        assert_eq!(vec![1, 10], object_seqs(io.list().await.unwrap()));
     }
 
     #[tokio::test]

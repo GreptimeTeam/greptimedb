@@ -32,8 +32,9 @@ const FORMAT_VERSION: u16 = 1;
 const NO_PREDECESSOR: u64 = u64::MAX;
 
 /// Length of the object header: magic, version, object sequence, epoch,
-/// predecessor sequence, predecessor epoch and the CRC32 of the header.
-pub(crate) const HEADER_LEN: usize = 8 + 2 + 8 + 8 + 8 + 8 + 4;
+/// predecessor sequence, predecessor epoch, reclaim boundary and the CRC32 of
+/// the header.
+pub(crate) const HEADER_LEN: usize = 8 + 2 + 8 + 8 + 8 + 8 + 8 + 4;
 /// Length of the fixed trailer: footer offset, footer length, footer CRC32,
 /// object CRC32 and magic.
 pub(crate) const TRAILER_LEN: usize = 8 + 8 + 4 + 4 + 8;
@@ -55,6 +56,10 @@ pub(crate) struct Header {
     pub(crate) epoch: u64,
     /// The object this object extends, `None` for the first object of a chain.
     pub(crate) prev: Option<ChainLink>,
+    /// Every object below this sequence was fully flushed when this object
+    /// was sealed, so the chain recovery replays need not reach below it. It
+    /// is at or below the sequence of the object.
+    pub(crate) reclaim_boundary: u64,
 }
 
 /// Names the object another object extends: its sequence and the epoch
@@ -224,12 +229,21 @@ pub(crate) fn decode_header(bytes: &[u8]) -> Result<Header> {
     let epoch = reader.u64("header")?;
     let prev_object_seq = reader.u64("header")?;
     let prev_epoch = reader.u64("header")?;
+    let reclaim_boundary = reader.u64("header")?;
     let header_crc32 = reader.u32("header")?;
     let checksum = crc32fast::hash(&bytes[..HEADER_LEN - 4]);
     ensure!(
         checksum == header_crc32,
         CorruptedWalObjectSnafu {
             reason: checksum_mismatch("header", header_crc32, checksum),
+        }
+    );
+    ensure!(
+        reclaim_boundary <= object_seq,
+        CorruptedWalObjectSnafu {
+            reason: format!(
+                "reclaim boundary {reclaim_boundary} is above the object sequence {object_seq}"
+            ),
         }
     );
     let prev = (prev_object_seq != NO_PREDECESSOR).then_some(ChainLink {
@@ -240,6 +254,7 @@ pub(crate) fn decode_header(bytes: &[u8]) -> Result<Header> {
         object_seq,
         epoch,
         prev,
+        reclaim_boundary,
     })
 }
 
@@ -582,6 +597,7 @@ fn encode_header(header: &Header, output: &mut BytesMut) {
     });
     output.put_u64(prev.object_seq);
     output.put_u64(prev.epoch);
+    output.put_u64(header.reclaim_boundary);
     output.put_u32(crc32fast::hash(&output[start..]));
 }
 
@@ -730,6 +746,7 @@ mod tests {
                 object_seq: 40,
                 epoch: 4,
             }),
+            reclaim_boundary: 37,
         }
     }
 
@@ -838,7 +855,7 @@ mod tests {
 
         // Every field after the version is covered by the header checksum,
         // which recovery verifies without reading the whole object.
-        for offset in [10, 18, 26, 34, HEADER_LEN - 1] {
+        for offset in [10, 18, 26, 34, 42, HEADER_LEN - 1] {
             let mut bad_field = encoded.bytes.to_vec();
             bad_field[offset] ^= 1;
             assert_corrupted(decode_header(&bad_field), "header checksum mismatch");
@@ -853,6 +870,19 @@ mod tests {
         };
         let encoded = encode_object(first.clone(), &records()).unwrap();
         assert_eq!(first, decode_object(&encoded.bytes).unwrap().header);
+    }
+
+    #[test]
+    fn test_format_rejects_a_reclaim_boundary_above_the_object() {
+        let above = Header {
+            reclaim_boundary: header().object_seq + 1,
+            ..header()
+        };
+        let encoded = encode_object(above, &records()).unwrap();
+        assert_corrupted(
+            decode_header(&encoded.bytes),
+            "reclaim boundary 43 is above the object sequence 42",
+        );
     }
 
     #[test]
@@ -971,15 +1001,16 @@ mod tests {
     /// the encoder and the decoder change together.
     const FIXTURE_V1_HEX: &str = concat!(
         // Header: magic, version 1, object sequence 7, epoch 3, predecessor
-        // sequence 6, predecessor epoch 2, header CRC32.
+        // sequence 6, predecessor epoch 2, reclaim boundary 5, header CRC32.
         "475457414c4f424a",
         "0001",
         "0000000000000007",
         "0000000000000003",
         "0000000000000006",
         "0000000000000002",
-        "1ca121b1",
-        // Segment of region 1 at offset 46: region id, entry count, then
+        "0000000000000005",
+        "118e773f",
+        // Segment of region 1 at offset 54: region id, entry count, then
         // (entry id, payload length, payload) per entry.
         "0000000100000001",
         "00000003",
@@ -992,7 +1023,7 @@ mod tests {
         "0000000000000003",
         "00000003",
         "636363",
-        // Segment of region 2 at offset 100.
+        // Segment of region 2 at offset 108.
         "0000000200000001",
         "00000002",
         "000000000000000a",
@@ -1001,28 +1032,28 @@ mod tests {
         "000000000000000b",
         "00000002",
         "7979",
-        // Footer at offset 139: entry count, then per segment region id, min and
+        // Footer at offset 147: entry count, then per segment region id, min and
         // max entry id, entry count, segment offset, length and CRC32.
         "00000002",
         "0000000100000001",
         "0000000000000001",
         "0000000000000003",
         "00000003",
-        "000000000000002e",
+        "0000000000000036",
         "0000000000000036",
         "25ac0486",
         "0000000200000001",
         "000000000000000a",
         "000000000000000b",
         "00000002",
-        "0000000000000064",
+        "000000000000006c",
         "0000000000000027",
         "65dc08ec",
         // Trailer: footer offset, footer length, footer CRC32, object CRC32, magic.
-        "000000000000008b",
+        "0000000000000093",
         "0000000000000064",
-        "6b97e3e4",
-        "631bb7d1",
+        "d80c9f07",
+        "65c91839",
         "475457414c54524c",
     );
 
@@ -1060,6 +1091,7 @@ mod tests {
                 object_seq: 6,
                 epoch: 2,
             }),
+            reclaim_boundary: 5,
         };
         let footer = vec![
             FooterEntry {
@@ -1067,7 +1099,7 @@ mod tests {
                 min_entry_id: 1,
                 max_entry_id: 3,
                 entry_count: 3,
-                segment_offset: 46,
+                segment_offset: 54,
                 segment_len: 54,
                 segment_crc32: 0x25ac0486,
             },
@@ -1076,12 +1108,12 @@ mod tests {
                 min_entry_id: 10,
                 max_entry_id: 11,
                 entry_count: 2,
-                segment_offset: 100,
+                segment_offset: 108,
                 segment_len: 39,
                 segment_crc32: 0x65dc08ec,
             },
         ];
-        assert_eq!(271, fixture.len());
+        assert_eq!(279, fixture.len());
 
         let decoded = decode_object(&fixture).unwrap();
         assert_eq!(header, decoded.header);
@@ -1089,10 +1121,10 @@ mod tests {
         assert_eq!(fixture_records(), decoded.records);
         assert_eq!(
             FixedTrailer {
-                footer_offset: 139,
+                footer_offset: 147,
                 footer_len: 100,
-                footer_crc32: 0x6b97e3e4,
-                object_crc32: 0x631bb7d1,
+                footer_crc32: 0xd80c9f07,
+                object_crc32: 0x65c91839,
             },
             decode_trailer(&fixture[fixture.len() - TRAILER_LEN..]).unwrap()
         );

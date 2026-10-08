@@ -373,6 +373,98 @@ async fn test_reopen_after_partial_flush_replays_only_unflushed_regions(#[case] 
     assert_eq!(5, engine.get_region_statistic(REGION_B).unwrap().num_rows);
 }
 
+/// Waits until no WAL object delete is in flight.
+async fn wait_for_collection(store: &ObjectStoreLogStore) {
+    tokio::time::timeout(WAIT, store.wait_for_garbage_collection())
+        .await
+        .expect("collection must complete");
+}
+
+#[rstest]
+#[case(AckMode::Durable)]
+#[case(AckMode::Enqueued)]
+#[tokio::test]
+async fn test_flush_collects_objects_below_the_watermark(#[case] ack_mode: AckMode) {
+    let mut env = TestEnv::with_prefix("object-store-wal-collection").await;
+    let object_store = memory_store();
+    let store = open_store(&object_store, ack_mode).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (table_dir_a, schema_a) = create_region(&engine, REGION_A, &[]).await;
+    let (table_dir_b, schema_b) = create_region(&engine, REGION_B, &[]).await;
+
+    // Object 1 holds entries of both regions, object 2 of region A and
+    // object 3 of region B. Object 1 carries the boundary past the start
+    // object, which is collected.
+    let mut writer = SealedWriter::new(&store);
+    writer
+        .put_and_seal(
+            &engine,
+            vec![
+                (REGION_A, rows(&schema_a, 0, 2)),
+                (REGION_B, rows(&schema_b, 0, 3)),
+            ],
+        )
+        .await;
+    writer
+        .put_and_seal(&engine, vec![(REGION_A, rows(&schema_a, 2, 4))])
+        .await;
+    writer
+        .put_and_seal(&engine, vec![(REGION_B, rows(&schema_b, 3, 5))])
+        .await;
+    wait_for_collection(&store).await;
+    assert_eq!(vec![1, 2, 3], wal_object_seqs(&object_store).await);
+
+    // Region B has no watermark and still needs object 1, so flushing
+    // region A collects nothing.
+    flush_region(&engine, REGION_A, None).await;
+    writer
+        .put_and_seal(&engine, vec![(REGION_A, rows(&schema_a, 4, 6))])
+        .await;
+    wait_for_collection(&store).await;
+    assert_eq!(vec![1, 2, 3, 4], wal_object_seqs(&object_store).await);
+
+    // Once region B is flushed, the first object a region needs is object 4,
+    // the unflushed entry of region A; object 5 carries that boundary.
+    flush_region(&engine, REGION_B, None).await;
+    writer
+        .put_and_seal(&engine, vec![(REGION_B, rows(&schema_b, 5, 7))])
+        .await;
+    wait_for_collection(&store).await;
+    assert_eq!(vec![4, 5], wal_object_seqs(&object_store).await);
+    let rows_a = scan_rows(&engine, REGION_A).await;
+    let rows_b = scan_rows(&engine, REGION_B).await;
+    engine.stop().await.unwrap();
+    drop(engine);
+    drop(writer);
+    drop(store);
+
+    // Recovery stops at the boundary and each region replays its entry above
+    // its flushed id.
+    let store = open_store(&object_store, ack_mode).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    open_region(&engine, REGION_A, &table_dir_a, &[])
+        .await
+        .unwrap();
+    open_region(&engine, REGION_B, &table_dir_b, &[])
+        .await
+        .unwrap();
+    for (region_id, flushed_entry_id, last_entry_id) in [
+        (REGION_A, entry_id(2, 1), entry_id(4, 1)),
+        (REGION_B, entry_id(3, 1), entry_id(5, 1)),
+    ] {
+        let state = region_recovery_state(&engine, region_id).await;
+        assert_eq!(flushed_entry_id, state.flushed_entry_id);
+        assert_eq!(last_entry_id, state.last_entry_id);
+        assert_eq!(2, state.memtable_rows);
+    }
+    assert_eq!(rows_a, scan_rows(&engine, REGION_A).await);
+    assert_eq!(rows_b, scan_rows(&engine, REGION_B).await);
+    assert_eq!(6, engine.get_region_statistic(REGION_A).unwrap().num_rows);
+    assert_eq!(7, engine.get_region_statistic(REGION_B).unwrap().num_rows);
+    wait_for_collection(&store).await;
+    assert_eq!(vec![4, 5, 6], wal_object_seqs(&object_store).await);
+}
+
 #[rstest]
 #[case(AckMode::Durable)]
 #[case(AckMode::Enqueued)]
@@ -600,12 +692,14 @@ async fn test_reopen_on_empty_prefix_without_durable_entries() {
     assert_eq!(rows_b, scan_rows(&engine, REGION_B).await);
 
     // The region is usable and its first entry lands in the first object
-    // after the start object.
+    // after the start object, which carries the boundary past the start
+    // object.
     let mut writer = SealedWriter::new(&store);
     writer
         .put_and_seal(&engine, vec![(REGION_A, rows(&schema_a, 0, 2))])
         .await;
-    assert_eq!(vec![0, 1], wal_object_seqs(&object_store).await);
+    wait_for_collection(&store).await;
+    assert_eq!(vec![1], wal_object_seqs(&object_store).await);
     assert_eq!(entry_id(1, 1), latest(&store, REGION_A));
     assert_eq!(
         entry_id(1, 1),
@@ -766,7 +860,10 @@ async fn test_reopen_after_a_failed_create_shows_only_the_acknowledged_write() {
     writer
         .put_and_seal(&engine, vec![(REGION_A, key_rows(2))])
         .await;
-    assert_eq!(vec![0, 1, 2], wal_object_seqs(&object_store).await);
+    // Object 2 carries the boundary past the start object, which is
+    // collected.
+    wait_for_collection(&store).await;
+    assert_eq!(vec![1, 2], wal_object_seqs(&object_store).await);
     assert_eq!(entry_id(2, 1), latest(&store, REGION_A));
     let region_a = region(&engine, REGION_A);
     assert_eq!(1, region_a.version_control.committed_sequence());
@@ -979,7 +1076,10 @@ async fn test_enqueued_crash_before_the_object_exists_replays_durable_entries() 
         entry_id(2, 1),
         region_recovery_state(&engine, REGION_A).await.last_entry_id
     );
-    assert_eq!(vec![0, 1, 2], wal_object_seqs(&object_store).await);
+    // Opening the region recorded its watermark, so object 2 carries the
+    // boundary past both start objects.
+    wait_for_collection(&store).await;
+    assert_eq!(vec![2], wal_object_seqs(&object_store).await);
     let rows_before = scan_rows(&engine, REGION_A).await;
     assert_eq!(2, engine.get_region_statistic(REGION_A).unwrap().num_rows);
     drop(writer);

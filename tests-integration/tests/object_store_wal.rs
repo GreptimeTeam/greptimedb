@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::path::Path;
+use std::time::Duration;
 
 use common_procedure::options::ProcedureConfig;
 use common_query::Output;
@@ -67,6 +68,18 @@ async fn count_wal_objects(standalone: &GreptimeDbStandalone) -> usize {
         .count()
 }
 
+/// Waits until collection leaves `expected` WAL objects under [`WAL_ROOT`].
+async fn wait_for_wal_objects(standalone: &GreptimeDbStandalone, expected: usize) {
+    let collected = async {
+        while count_wal_objects(standalone).await != expected {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(30), collected)
+        .await
+        .unwrap_or_else(|_| panic!("expected {expected} WAL objects after collection"));
+}
+
 /// Stops the procedure manager, the region server and the WAL of the
 /// instance.
 async fn shutdown(standalone: &mut GreptimeDbStandalone) {
@@ -103,7 +116,8 @@ async fn restart(
 }
 
 /// Writes batches that land in separate WAL objects, restarts before and
-/// after a flush, and checks that the rows survive both restarts.
+/// after a flush, and checks that the rows survive both restarts and that the
+/// flush lets collection delete every earlier object.
 async fn run_restarts_on_object_store_wal(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let wal_config = ObjectStoreWalConfig {
@@ -129,29 +143,14 @@ async fn run_restarts_on_object_store_wal(store_type: StorageType) {
     // Every insert returns once its entries are durable, so the batches land
     // in separate WAL objects after the object that started the epoch.
     for batch in 0..BATCHES {
-        let values = (0..ROWS_PER_BATCH)
-            .map(|row| {
-                let i = batch * ROWS_PER_BATCH + row;
-                format!(
-                    "('host_{i}', {i}.0, {})",
-                    1_686_567_600_000 + i as i64 * 1000
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        execute_sql(
-            standalone.fe_instance(),
-            &format!("INSERT INTO cpu VALUES {values}"),
-        )
-        .await;
+        insert_batch(&standalone, batch).await;
     }
     let expected = query_rows(&standalone).await;
     assert_eq!(BATCHES * ROWS_PER_BATCH + 4, expected.lines().count());
-    let objects = count_wal_objects(&standalone).await;
-    assert!(
-        objects > BATCHES,
-        "expected more than {BATCHES} WAL objects"
-    );
+    // The region has no watermark, so its first object holds the boundary
+    // and only the object that started the epoch is collected.
+    wait_for_wal_objects(&standalone, BATCHES).await;
+    let objects = BATCHES;
     // No Raft Engine log store is created as a fallback.
     assert!(
         !Path::new(&standalone.opts.storage.data_home)
@@ -165,11 +164,35 @@ async fn run_restarts_on_object_store_wal(store_type: StorageType) {
     assert_eq!(expected, query_rows(&standalone).await);
     assert!(count_wal_objects(&standalone).await > objects);
 
-    // The flushed rows come back from the SST files.
+    // After the flush the next object carries a reclaim boundary past every
+    // earlier object, so collection leaves that object alone. The flushed
+    // rows come back from the SST files and the last batch from the WAL.
     execute_sql(standalone.fe_instance(), "ADMIN FLUSH_TABLE('cpu')").await;
+    insert_batch(&standalone, BATCHES).await;
+    wait_for_wal_objects(&standalone, 1).await;
+    let expected = query_rows(&standalone).await;
     let mut standalone = restart(&builder, standalone).await;
     assert_eq!(expected, query_rows(&standalone).await);
     shutdown(&mut standalone).await;
+}
+
+/// Inserts the rows of `batch`, which land in one WAL object.
+async fn insert_batch(standalone: &GreptimeDbStandalone, batch: usize) {
+    let values = (0..ROWS_PER_BATCH)
+        .map(|row| {
+            let i = batch * ROWS_PER_BATCH + row;
+            format!(
+                "('host_{i}', {i}.0, {})",
+                1_686_567_600_000 + i as i64 * 1000
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    execute_sql(
+        standalone.fe_instance(),
+        &format!("INSERT INTO cpu VALUES {values}"),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
