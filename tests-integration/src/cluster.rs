@@ -16,8 +16,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::net::TcpListener;
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -88,28 +88,20 @@ use crate::test_util::{
     create_tmp_dir_and_datanode_opts,
 };
 
-/// The gRPC requests another node sent to a datanode over its network address (see
+/// Flight `DoGet` requests another node sent to a datanode over its network address (see
 /// [`GreptimeDbClusterBuilder::with_real_datanode_grpc_addr`]).
 ///
-/// The frontend and the datanodes inside the test process talk to a datanode through an
-/// in-process client, so a request counted here comes from a remote node, e.g. the region query
-/// that a datanode issues for the regions of another datanode.
+/// The frontend and datanodes inside the test process use in-process clients, so counted requests
+/// come from remote nodes querying regions owned by this datanode.
 #[derive(Debug, Default)]
 pub struct DatanodeRpcStats {
-    requests: AtomicUsize,
-    paths: Mutex<BTreeSet<String>>,
+    do_get_requests: AtomicUsize,
 }
 
 impl DatanodeRpcStats {
-    /// The number of gRPC requests another node sent to the datanode.
+    /// The number of Flight `DoGet` requests another node sent to the datanode.
     pub fn requests(&self) -> usize {
-        self.requests.load(Ordering::Relaxed)
-    }
-
-    /// The gRPC paths of those requests, e.g.
-    /// `/arrow.flight.protocol.FlightService/DoGet` for a region query.
-    pub fn paths(&self) -> BTreeSet<String> {
-        self.paths.lock().unwrap().clone()
+        self.do_get_requests.load(Ordering::Relaxed)
     }
 }
 
@@ -121,11 +113,6 @@ pub struct GreptimeDbCluster {
     /// The stats of the network address of every datanode, empty unless the cluster serves the
     /// datanodes at their own addresses.
     pub datanode_rpc_stats: HashMap<DatanodeId, Arc<DatanodeRpcStats>>,
-    /// The layered cache registry of every datanode, i.e. the registry that the datanode
-    /// invalidates locally after it received an invalidation instruction from metasrv. A test can
-    /// invalidate a cache ident (e.g. an unrelated `TableId`) exactly the way the datanode does
-    /// when it handles the broadcast of metasrv.
-    pub datanode_cache_registries: HashMap<DatanodeId, Arc<LayeredCacheRegistry>>,
     pub kv_backend: KvBackendRef,
     pub metasrv: Arc<Metasrv>,
     pub frontend: Arc<Frontend>,
@@ -392,7 +379,7 @@ impl GreptimeDbClusterBuilder {
         )
         .await;
 
-        let (datanode_instances, datanode_cache_registries) = self
+        let datanode_instances = self
             .build_datanodes_with_options(&metasrv, &datanode_options)
             .await;
 
@@ -431,7 +418,6 @@ impl GreptimeDbClusterBuilder {
             guards,
             datanode_instances,
             datanode_rpc_stats,
-            datanode_cache_registries,
             kv_backend: self.kv_backend.clone(),
             metasrv: metasrv.metasrv,
             frontend: Arc::new(frontend),
@@ -514,22 +500,16 @@ impl GreptimeDbClusterBuilder {
         &self,
         metasrv: &MockInfo,
         options: &[DatanodeOptions],
-    ) -> (
-        HashMap<DatanodeId, Datanode>,
-        HashMap<DatanodeId, Arc<LayeredCacheRegistry>>,
-    ) {
+    ) -> HashMap<DatanodeId, Datanode> {
         let mut instances = HashMap::with_capacity(options.len());
-        let mut cache_registries = HashMap::with_capacity(options.len());
 
         for opts in options {
-            let (datanode, cache_registry) =
-                self.create_datanode(opts.clone(), metasrv.clone()).await;
+            let datanode = self.create_datanode(opts.clone(), metasrv.clone()).await;
             let datanode_id = opts.node_id.unwrap();
             instances.insert(datanode_id, datanode);
-            cache_registries.insert(datanode_id, cache_registry);
         }
 
-        (instances, cache_registries)
+        instances
     }
 
     async fn wait_datanodes_alive(
@@ -555,11 +535,7 @@ impl GreptimeDbClusterBuilder {
         panic!("Some Datanodes are not alive in 10 seconds!")
     }
 
-    async fn create_datanode(
-        &self,
-        opts: DatanodeOptions,
-        metasrv: MockInfo,
-    ) -> (Datanode, Arc<LayeredCacheRegistry>) {
+    async fn create_datanode(&self, opts: DatanodeOptions, metasrv: MockInfo) -> Datanode {
         let mut meta_client = MetaClientBuilder::datanode_default_options(opts.node_id.unwrap())
             .channel_manager(metasrv.channel_manager)
             .build();
@@ -568,8 +544,6 @@ impl GreptimeDbClusterBuilder {
 
         let meta_backend = new_read_only_meta_kv_backend(meta_client.clone());
 
-        // Use the same layered registry as the datanode of a running instance, so the derived
-        // caches of the test are invalidated after the caches they are derived from.
         let layered_cache_registry =
             Arc::new(build_datanode_layered_cache_registry(meta_backend.clone()));
 
@@ -581,10 +555,7 @@ impl GreptimeDbClusterBuilder {
 
         datanode.start_heartbeat().await.unwrap();
 
-        // The datanode invalidates this registry locally when it receives an invalidation
-        // instruction, so a test can drive the same path: see
-        // [`GreptimeDbCluster::datanode_cache_registries`].
-        (datanode, layered_cache_registry)
+        datanode
     }
 
     async fn build_frontend(
@@ -840,7 +811,7 @@ async fn create_datanode_client(
     )
 }
 
-/// Counts the gRPC requests that the wrapped server receives.
+/// Counts Flight `DoGet` requests received by the wrapped server.
 #[derive(Clone)]
 struct CountRequests<S> {
     inner: S,
@@ -860,13 +831,10 @@ where
     }
 
     fn call(&mut self, request: http::Request<ReqBody>) -> Self::Future {
-        if let Some(rpc_stats) = &self.rpc_stats {
-            rpc_stats.requests.fetch_add(1, Ordering::Relaxed);
-            rpc_stats
-                .paths
-                .lock()
-                .unwrap()
-                .insert(request.uri().path().to_string());
+        if request.uri().path() == "/arrow.flight.protocol.FlightService/DoGet"
+            && let Some(rpc_stats) = &self.rpc_stats
+        {
+            rpc_stats.do_get_requests.fetch_add(1, Ordering::Relaxed);
         }
 
         self.inner.call(request)
