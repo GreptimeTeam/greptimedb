@@ -2349,6 +2349,9 @@ mod tests {
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_meta::cache::new_table_flownode_set_cache;
     use common_meta::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
+    use common_meta::key::TableMetadataManager;
+    use common_meta::key::table_route::TableRouteValue;
+    use common_meta::rpc::router::{Region, RegionRoute};
     use common_meta::test_util::{MockDatanodeManager, MockFlownodeHandler, MockFlownodeManager};
     use common_query::native_histogram::NATIVE_HISTOGRAM_FIELD;
     use common_query::prelude::{greptime_native_histogram, set_default_prefix};
@@ -3702,12 +3705,12 @@ mod tests {
             &self,
             request: api::v1::flow::DirtyWindowRequests,
         ) -> common_meta::error::Result<FlowResponse> {
-            let _ = self.manager.flownode_dispatch.send(self.peer.clone());
             self.manager
                 .dirty_requests
                 .lock()
                 .unwrap()
                 .push((self.peer.clone(), request.clone()));
+            let _ = self.manager.flownode_dispatch.send(self.peer.clone());
             if self.manager.fail_flownode {
                 return Err(common_meta::error::UnexpectedSnafu {
                     err_msg: "test flownode failure".to_string(),
@@ -4016,17 +4019,30 @@ mod tests {
             Timestamp::new_millisecond(197000),
         ));
         let constant_info = info_for(timestamp_column(Some(constant)));
-        let omitted = request(vec![field.clone()], vec![field_value.clone()]);
-        for _ in 0..2 {
-            let task = FlowMirrorTask::new(
-                &cache,
-                std::iter::once(&omitted),
-                &HashMap::from_iter([(1, constant_info.clone())]),
-            )
-            .await
-            .unwrap();
-            assert_eq!(vec![197000], task.requests[&peer].requests[0].timestamps);
-        }
+        let omitted = RegionInsertRequest {
+            region_id: RegionId::new(1, 1).as_u64(),
+            rows: Some(Rows {
+                schema: vec![field.clone()],
+                rows: vec![
+                    api::v1::Row {
+                        values: vec![field_value.clone()],
+                    };
+                    2
+                ],
+            }),
+            ..Default::default()
+        };
+        let task = FlowMirrorTask::new(
+            &cache,
+            std::iter::once(&omitted),
+            &HashMap::from_iter([(1, constant_info.clone())]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            vec![197000, 197000],
+            task.requests[&peer].requests[0].timestamps
+        );
 
         let impure_info = info_for(timestamp_column(Some(ColumnDefaultConstraint::Function(
             "now()".into(),
@@ -4111,6 +4127,28 @@ mod tests {
                     .unwrap();
             }
             let partition = create_partition_rule_manager(backend.clone()).await;
+            if case == "cache" || case == "prepare" {
+                TableMetadataManager::new(backend.clone())
+                    .create_table_metadata(
+                        new_test_table_info(2, "healthy", [1].into_iter()),
+                        TableRouteValue::physical(vec![RegionRoute {
+                            region: Region {
+                                id: 1.into(),
+                                name: "r1".to_string(),
+                                attrs: Default::default(),
+                                partition_expr: String::new(),
+                            },
+                            leader_peer: Some(Peer::new(1, "")),
+                            follower_peers: vec![],
+                            leader_state: None,
+                            leader_down_since: None,
+                            write_route_policy: None,
+                        }]),
+                        std::collections::HashMap::new(),
+                    )
+                    .await
+                    .unwrap();
+            }
             let (datanode_tx, mut datanode_rx) = tokio::sync::mpsc::unbounded_channel();
             let (flownode_tx, mut flownode_rx) = tokio::sync::mpsc::unbounded_channel();
             let dirty_requests = Arc::new(std::sync::Mutex::new(vec![]));
@@ -4129,18 +4167,30 @@ mod tests {
                 backend,
             ));
             let flow_peer = Peer::new(201, "127.0.0.1:4201");
-            if case != "cache" {
+            if case == "cache" {
                 cache
                     .invalidate(&[CacheIdent::CreateFlow(CreateFlow {
-                        flow_id: 1,
-                        source_table_ids: vec![1],
-                        partition_to_peer_mapping: vec![(0, flow_peer)],
+                        flow_id: 2,
+                        source_table_ids: vec![2],
+                        partition_to_peer_mapping: vec![(0, flow_peer.clone())],
                     })])
                     .await
                     .unwrap();
-            }
-            if case == "cache" {
                 assert!(cache.get(1).await.is_err());
+                assert!(cache.get(2).await.is_ok());
+            } else {
+                cache
+                    .invalidate(&[CacheIdent::CreateFlow(CreateFlow {
+                        flow_id: 1,
+                        source_table_ids: if case == "prepare" {
+                            vec![1, 2]
+                        } else {
+                            vec![1]
+                        },
+                        partition_to_peer_mapping: vec![(0, flow_peer.clone())],
+                    })])
+                    .await
+                    .unwrap();
             }
             let mut inserter = Inserter::new(
                 catalog::memory::MemoryCatalogManager::new(),
@@ -4156,13 +4206,19 @@ mod tests {
             };
             inserter.mirror_pending_rows = Arc::new(AtomicU64::new(initial_pending));
             let info = Arc::new(new_test_table_info(1, "source", [1].into_iter()));
-            let table_infos = HashMap::from_iter([(1, info)]);
+            let mut table_infos = HashMap::from_iter([(1, info)]);
+            if case == "cache" || case == "prepare" {
+                table_infos.insert(
+                    2,
+                    Arc::new(new_test_table_info(2, "healthy", [1].into_iter())),
+                );
+            }
             let ctx = Arc::new(QueryContext::with(
                 DEFAULT_CATALOG_NAME,
                 DEFAULT_SCHEMA_NAME,
             ));
-            let request = RegionInsertRequest {
-                region_id: RegionId::new(1, 1).as_u64(),
+            let make_request = |table_id: u32, timestamp: Value| RegionInsertRequest {
+                region_id: RegionId::new(table_id, 1).as_u64(),
                 rows: Some(Rows {
                     schema: vec![
                         field_column_schema("a", ColumnDataType::Int32),
@@ -4172,24 +4228,34 @@ mod tests {
                     rows: vec![api::v1::Row {
                         values: vec![
                             ValueData::I32Value(1).into(),
-                            if case == "prepare" {
-                                Value::default()
-                            } else {
-                                ValueData::TimestampMillisecondValue(123).into()
-                            },
+                            timestamp,
                             ValueData::I32Value(2).into(),
                         ],
                     }],
                 }),
                 ..Default::default()
             };
+            let mut requests = vec![make_request(
+                1,
+                if case == "prepare" {
+                    Value::default()
+                } else {
+                    ValueData::TimestampMillisecondValue(123).into()
+                },
+            )];
+            if case == "cache" || case == "prepare" {
+                requests.push(make_request(
+                    2,
+                    ValueData::TimestampMillisecondValue(456).into(),
+                ));
+            }
             let before_success = crate::metrics::DIST_MIRROR_ROW_COUNT.get();
+            let gauge_before = crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get();
+            let dropped_before = crate::metrics::DIST_MIRROR_DROPPED_ROW_COUNT.get();
             let output = inserter
                 .do_request(
                     InstantAndNormalInsertRequests {
-                        normal_requests: RegionInsertRequests {
-                            requests: vec![request],
-                        },
+                        normal_requests: RegionInsertRequests { requests },
                         instant_requests: RegionInsertRequests::default(),
                     },
                     &table_infos,
@@ -4197,42 +4263,71 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert!(matches!(output.data, OutputData::AffectedRows(1)), "{case}");
+            let expected_rows = if case == "cache" || case == "prepare" {
+                2
+            } else {
+                1
+            };
             assert!(
+                matches!(output.data, OutputData::AffectedRows(rows) if rows == expected_rows),
+                "{case}: {:?}",
+                output.data
+            );
+            assert_eq!(
+                expected_rows,
                 tokio::time::timeout(Duration::from_secs(10), datanode_rx.recv())
                     .await
                     .unwrap()
-                    .is_some(),
+                    .unwrap(),
                 "{case}"
             );
             if over_budget {
-                assert!(flownode_rx.try_recv().is_err(), "{case}");
                 assert_eq!(
-                    initial_pending,
-                    inserter.mirror_pending_rows.load(Ordering::Relaxed)
+                    dropped_before + 1,
+                    crate::metrics::DIST_MIRROR_DROPPED_ROW_COUNT.get()
                 );
-                assert!(crate::metrics::DIST_MIRROR_DROPPED_ROW_COUNT.get() > 0);
-            } else if case == "cache" || case == "prepare" {
+            }
+            let expected_markers = usize::from(case == "cache" || case == "rpc");
+            if expected_markers == 0 {
                 assert!(flownode_rx.try_recv().is_err(), "{case}");
-                assert_eq!(0, inserter.mirror_pending_rows.load(Ordering::Relaxed));
-                assert!(dirty_requests.lock().unwrap().is_empty(), "{case}");
             } else {
-                tokio::time::timeout(Duration::from_secs(10), flownode_rx.recv())
-                    .await
-                    .unwrap()
-                    .unwrap();
-                let deadline = Instant::now() + Duration::from_secs(10);
-                while inserter.mirror_pending_rows.load(Ordering::Relaxed) != 0 {
-                    assert!(Instant::now() < deadline, "{case}: pending mirror leaked");
-                    tokio::task::yield_now().await;
+                assert_eq!(
+                    flow_peer,
+                    tokio::time::timeout(Duration::from_secs(10), flownode_rx.recv())
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    "{case}"
+                );
+            }
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while inserter.mirror_pending_rows.load(Ordering::Relaxed) != initial_pending
+                || crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get() != gauge_before
+                || crate::metrics::DIST_MIRROR_ROW_COUNT.get()
+                    != before_success + u64::from(case == "cache")
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "{case}: mirror metrics did not settle"
+                );
+                tokio::task::yield_now().await;
+            }
+            {
+                let recorded = dirty_requests.lock().unwrap();
+                assert_eq!(expected_markers, recorded.len(), "{case}");
+                if case == "cache" {
+                    assert_eq!(1, recorded[0].1.requests.len());
+                    assert_eq!(2, recorded[0].1.requests[0].table_id);
+                    assert_eq!(vec![456], recorded[0].1.requests[0].timestamps);
+                    assert!(recorded[0].1.requests[0].time_ranges.is_empty());
                 }
-                assert_eq!(1, dirty_requests.lock().unwrap().len(), "{case}");
             }
             assert_eq!(
-                before_success,
-                crate::metrics::DIST_MIRROR_ROW_COUNT.get(),
+                gauge_before,
+                crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get(),
                 "{case}"
             );
+            assert!(flownode_rx.try_recv().is_err(), "{case}");
         }
     }
 
@@ -4371,6 +4466,9 @@ mod tests {
             DEFAULT_CATALOG_NAME,
             DEFAULT_SCHEMA_NAME,
         ));
+        let pending_before = inserter.mirror_pending_rows.load(Ordering::Relaxed);
+        let gauge_before = crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get();
+        let success_before = crate::metrics::DIST_MIRROR_ROW_COUNT.get();
         let task = common_runtime::spawn_global({
             let inserter = inserter.clone();
             let table_infos = table_infos.clone();
@@ -4402,6 +4500,15 @@ mod tests {
                 .unwrap()
                 .unwrap()
         );
+        assert!(task.await.unwrap().is_err());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while inserter.mirror_pending_rows.load(Ordering::Relaxed) != pending_before
+            || crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get() != gauge_before
+            || crate::metrics::DIST_MIRROR_ROW_COUNT.get() != success_before + 3
+        {
+            assert!(Instant::now() < deadline, "mirror metrics did not settle");
+            tokio::task::yield_now().await;
+        }
         {
             let recorded = dirty_requests.lock().unwrap();
             assert_eq!(1, recorded.len());
@@ -4412,7 +4519,7 @@ mod tests {
             assert!(recorded[0].1.requests[0].time_ranges.is_empty());
             assert!(!recorded[0].1.requests[0].timestamps.contains(&79));
         }
-        assert!(task.await.unwrap().is_err());
+        assert!(flownode_rx.try_recv().is_err());
     }
 
     #[tokio::test]
