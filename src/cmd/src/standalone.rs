@@ -1088,9 +1088,88 @@ mod tests {
     use frontend::frontend::FrontendOptions;
     use object_store::config::{FileConfig, GcsConfig};
     use servers::grpc::GrpcOptions;
+    use servers::server::ServerHandlers;
+    use store_api::logstore::LogStore;
 
     use super::*;
     use crate::options::GlobalOptions;
+
+    struct FailingLeaderServices;
+
+    #[async_trait]
+    impl StandaloneLeaderServicesController for FailingLeaderServices {
+        async fn start(&self, _context: LeaderServicesContext) -> Result<()> {
+            Ok(())
+        }
+
+        async fn stop(
+            &self,
+            _procedure_manager: ProcedureManagerRef,
+            _region_server: RegionServer,
+        ) -> Result<()> {
+            error::IllegalConfigSnafu {
+                msg: "leader services failed to stop",
+            }
+            .fail()
+        }
+    }
+
+    struct FailingServer;
+
+    #[async_trait]
+    impl servers::server::Server for FailingServer {
+        async fn shutdown(&self) -> servers::error::Result<()> {
+            servers::error::InternalSnafu {
+                err_msg: "server failed to stop",
+            }
+            .fail()
+        }
+
+        async fn start(&mut self, _listening: SocketAddr) -> servers::error::Result<()> {
+            Ok(())
+        }
+
+        fn name(&self) -> &str {
+            "failing"
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stop_runs_every_step_and_returns_the_first_error() {
+        common_telemetry::init_default_ut_logging();
+        let data_home = create_temp_dir("standalone-stop");
+        let mut opts = StandaloneOptions {
+            wal: DatanodeWalConfig::ObjectStore(ObjectStoreWalConfig::default()),
+            ..Default::default()
+        };
+        opts.storage.data_home = data_home.path().to_str().unwrap().to_string();
+        let creator = InstanceCreator::default()
+            .with_leader_services_controller(Box::new(FailingLeaderServices));
+        let (mut instance, _) = StartCommand::build_with(opts, vec![], creator)
+            .await
+            .unwrap();
+        let log_store = instance.datanode.object_store_log_store().unwrap();
+        // The datanode fails to stop its servers after the leader services failed.
+        let mut services = ServerHandlers::default();
+        services.insert((Box::new(FailingServer), "127.0.0.1:0".parse().unwrap()));
+        services.start_all().await.unwrap();
+        instance.datanode.setup_services(services);
+
+        let err = instance.stop().await.unwrap_err();
+
+        assert!(
+            matches!(&err, error::Error::IllegalConfig { msg, .. } if msg == "leader services failed to stop"),
+            "unexpected error: {err:?}"
+        );
+        assert!(matches!(
+            log_store.append_batch(vec![]).await,
+            Err(log_store::error::Error::ObjectStoreWalStopped { .. })
+        ));
+    }
 
     #[tokio::test]
     async fn test_build_standalone_wal_provider() {

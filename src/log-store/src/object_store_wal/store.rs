@@ -641,7 +641,7 @@ impl LogStore for ObjectStoreLogStore {
                     Err(error @ Error::InvalidWalObject { .. })
                         if on_corrupted_segment == CorruptedSegmentAction::Skip =>
                     {
-                        skip_segment(&wal_holes, io.as_ref(), object_seq, &footer_entry, &error);
+                        record_skipped_segment(&wal_holes, io.as_ref(), object_seq, &footer_entry, &error);
                         continue;
                     }
                     Err(error) => Err(error)?,
@@ -1736,7 +1736,7 @@ async fn fetch_segment(
 
 /// Records the segment `entry` describes in the object `object_seq` as a hole
 /// of its region, once per object, counts the skip and warns about it.
-fn skip_segment(
+fn record_skipped_segment(
     wal_holes: &WalHoles,
     io: &dyn WalObjectIo,
     object_seq: u64,

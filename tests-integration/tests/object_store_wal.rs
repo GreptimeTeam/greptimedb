@@ -173,7 +173,7 @@ async fn run_restarts_on_object_store_wal(store_type: StorageType) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_standalone_object_store_wal_round_trip() {
+async fn test_standalone_object_store_wal_survives_restarts_on_file() {
     run_restarts_on_object_store_wal(StorageType::File).await;
 }
 
