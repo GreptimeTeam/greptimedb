@@ -137,7 +137,7 @@ pub struct CreateTable {
     pub partitions: Option<Partitions>,
 }
 
-/// Column definition in `CREATE TABLE` statement.
+/// Column definition shared by `CREATE TABLE` and `ALTER TABLE ADD COLUMN`.
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub struct Column {
     /// `ColumnDef` from `sqlparser::ast`

@@ -69,7 +69,7 @@ use sql::statements::create::{
 };
 use sql::statements::{
     OptionMap, column_to_schema, concrete_data_type_to_sql_data_type,
-    sql_column_def_to_grpc_column_def, sql_data_type_to_concrete_data_type, value_to_sql_value,
+    sql_column_to_grpc_column_def, sql_data_type_to_concrete_data_type, value_to_sql_value,
 };
 use sql::util::extract_tables_from_query;
 use store_api::mito_engine_options::{COMPACTION_OVERRIDE, COMPACTION_TYPE};
@@ -828,9 +828,8 @@ pub(crate) fn to_alter_table_expr(
             add_columns: add_columns
                 .into_iter()
                 .map(|add_column| {
-                    let column_def = sql_column_def_to_grpc_column_def(
-                        &add_column.column_def,
-                        add_column.json2_options.as_ref(),
+                    let column_def = sql_column_to_grpc_column_def(
+                        &add_column.column,
                         Some(&query_ctx.timezone()),
                     )
                     .map_err(BoxedError::new)

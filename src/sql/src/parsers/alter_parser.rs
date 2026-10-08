@@ -40,7 +40,7 @@ use crate::statements::alter::{
     DropDefaultsOperation, KeyValueOption, RepartitionOperation, SetDefaultsOperation,
     SetIndexOperation, UnsetIndexOperation,
 };
-use crate::statements::create::Json2Options;
+use crate::statements::create::{Column, ColumnExtensions};
 use crate::statements::statement::Statement;
 use crate::util::{OptionValue, parse_option_string};
 
@@ -709,8 +709,8 @@ fn parse_add_columns(parser: &mut Parser) -> std::result::Result<AddColumn, Pars
     parser.expect_keyword(Keyword::ADD)?;
     let _ = parser.parse_keyword(Keyword::COLUMN);
     let add_if_not_exists = parser.parse_keywords(&[Keyword::IF, Keyword::NOT, Keyword::EXISTS]);
-    let (mut column_def, json2_options) = parse_add_column_def(parser)?;
-    column_def.name = ParserContext::canonicalize_identifier(column_def.name);
+    let mut column = parse_add_column_def(parser)?;
+    column.column_def.name = ParserContext::canonicalize_identifier(column.column_def.name);
     let location = if parser.parse_keyword(Keyword::FIRST) {
         Some(AddColumnLocation::First)
     } else if let Token::Word(word) = parser.peek_token().token {
@@ -727,25 +727,23 @@ fn parse_add_columns(parser: &mut Parser) -> std::result::Result<AddColumn, Pars
         None
     };
     Ok(AddColumn {
-        column_def,
-        json2_options,
+        column,
         location,
         add_if_not_exists,
     })
 }
 
 /// Parses JSON2 options while preserving sqlparser's grammar for other column types.
-fn parse_add_column_def(
-    parser: &mut Parser,
-) -> std::result::Result<(ColumnDef, Option<Json2Options>), ParserError> {
+fn parse_add_column_def(parser: &mut Parser) -> std::result::Result<Column, ParserError> {
     let name = parser.parse_identifier()?;
     let Some((data_type, json2_options)) = parse_json2_type_and_options(parser)
         .map_err(|err| ParserError::ParserError(err.to_string()))?
     else {
         parser.prev_token();
-        return parser
-            .parse_column_def()
-            .map(|column_def| (column_def, None));
+        return parser.parse_column_def().map(|column_def| Column {
+            column_def,
+            extensions: ColumnExtensions::default(),
+        });
     };
 
     let mut options = Vec::new();
@@ -769,14 +767,17 @@ fn parse_add_column_def(
             option,
         });
     }
-    Ok((
-        ColumnDef {
+    Ok(Column {
+        column_def: ColumnDef {
             name,
             data_type,
             options,
         },
-        json2_options,
-    ))
+        extensions: ColumnExtensions {
+            json2_options,
+            ..Default::default()
+        },
+    })
 }
 
 /// Parses a comma separated list of string literals.
@@ -802,6 +803,7 @@ mod tests {
     fn test_parse_alter_add_json2_options() {
         for sql in [
             "ALTER TABLE t ADD COLUMN j JSON2(max_auto_expanded_paths = 100)",
+            "ALTER TABLE t ADD COLUMN j JSON2(max_auto_expanded_paths = 100) NOT NULL AFTER ts",
             "ALTER TABLE t ADD COLUMN IF NOT EXISTS j JSON2(service STRING) FIRST",
             "ALTER TABLE t ADD COLUMN j JSON2(max_auto_expanded_paths = 0, service STRING, nested.value BIGINT) NULL AFTER ts, ADD COLUMN n INT",
             "ALTER TABLE t ADD COLUMN j JSON2(service STRING) CONSTRAINT nullable NULL",
@@ -823,7 +825,7 @@ mod tests {
             let AlterTableOperation::AddColumns { add_columns } = alter.alter_operation() else {
                 unreachable!()
             };
-            assert!(add_columns[0].json2_options.is_some());
+            assert!(add_columns[0].column.extensions.json2_options.is_some());
             let Statement::AlterTable(roundtrip) = parse(&statement.to_string()) else {
                 unreachable!()
             };
@@ -834,8 +836,7 @@ mod tests {
                 unreachable!()
             };
             for (column, roundtrip_column) in add_columns.iter().zip(roundtrip_columns) {
-                assert_eq!(column.column_def, roundtrip_column.column_def);
-                assert_eq!(column.json2_options, roundtrip_column.json2_options);
+                assert_eq!(column.column, roundtrip_column.column);
                 assert_eq!(column.location, roundtrip_column.location);
             }
         }
@@ -935,10 +936,14 @@ mod tests {
                 match alter_operation {
                     AlterTableOperation::AddColumns { add_columns } => {
                         assert_eq!(add_columns.len(), 1);
-                        assert_eq!("tagk_i", add_columns[0].column_def.name.value);
-                        assert_eq!(DataType::String(None), add_columns[0].column_def.data_type);
+                        assert_eq!("tagk_i", add_columns[0].column.column_def.name.value);
+                        assert_eq!(
+                            DataType::String(None),
+                            add_columns[0].column.column_def.data_type
+                        );
                         assert!(
                             add_columns[0]
+                                .column
                                 .column_def
                                 .options
                                 .iter()
@@ -971,10 +976,14 @@ mod tests {
                 assert_matches!(alter_operation, AlterTableOperation::AddColumns { .. });
                 match alter_operation {
                     AlterTableOperation::AddColumns { add_columns } => {
-                        assert_eq!("tagk_i", add_columns[0].column_def.name.value);
-                        assert_eq!(DataType::String(None), add_columns[0].column_def.data_type);
+                        assert_eq!("tagk_i", add_columns[0].column.column_def.name.value);
+                        assert_eq!(
+                            DataType::String(None),
+                            add_columns[0].column.column_def.data_type
+                        );
                         assert!(
                             add_columns[0]
+                                .column
                                 .column_def
                                 .options
                                 .iter()
@@ -1036,7 +1045,7 @@ mod tests {
                             .zip(expecteds)
                             .collect::<Vec<(&AddColumn, (Option<AddColumnLocation>, ColumnDef))>>()
                         {
-                            assert_eq!(add_column.column_def, expected.1);
+                            assert_eq!(add_column.column.column_def, expected.1);
                             assert_eq!(&expected.0, &add_column.location);
                         }
                     }
@@ -1067,32 +1076,38 @@ mod tests {
                     AlterTableOperation::AddColumns { add_columns } => {
                         let expected = [
                             AddColumn {
-                                column_def: ColumnDef {
-                                    name: Ident::new("a"),
-                                    data_type: DataType::Integer(None),
-                                    options: vec![],
+                                column: Column {
+                                    column_def: ColumnDef {
+                                        name: Ident::new("a"),
+                                        data_type: DataType::Integer(None),
+                                        options: vec![],
+                                    },
+                                    extensions: ColumnExtensions::default(),
                                 },
-                                json2_options: None,
                                 location: None,
                                 add_if_not_exists: true,
                             },
                             AddColumn {
-                                column_def: ColumnDef {
-                                    name: Ident::new("b"),
-                                    data_type: DataType::String(None),
-                                    options: vec![],
+                                column: Column {
+                                    column_def: ColumnDef {
+                                        name: Ident::new("b"),
+                                        data_type: DataType::String(None),
+                                        options: vec![],
+                                    },
+                                    extensions: ColumnExtensions::default(),
                                 },
-                                json2_options: None,
                                 location: None,
                                 add_if_not_exists: false,
                             },
                             AddColumn {
-                                column_def: ColumnDef {
-                                    name: Ident::new("c"),
-                                    data_type: DataType::Int(None),
-                                    options: vec![],
+                                column: Column {
+                                    column_def: ColumnDef {
+                                        name: Ident::new("c"),
+                                        data_type: DataType::Int(None),
+                                        options: vec![],
+                                    },
+                                    extensions: ColumnExtensions::default(),
                                 },
-                                json2_options: None,
                                 location: None,
                                 add_if_not_exists: true,
                             },

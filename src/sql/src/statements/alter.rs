@@ -22,11 +22,11 @@ use common_query::AddColumnLocation;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use itertools::Itertools;
 use serde::Serialize;
-use sqlparser::ast::{ColumnDef, DataType, Expr, Ident, ObjectName, TableConstraint};
+use sqlparser::ast::{DataType, Expr, Ident, ObjectName, TableConstraint};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::statements::OptionMap;
-use crate::statements::create::{Json2Options, Partitions};
+use crate::statements::create::{Column, Json2Options, Partitions};
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct AlterTable {
@@ -229,21 +229,14 @@ pub enum UnsetIndexOperation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
 pub struct AddColumn {
-    pub column_def: ColumnDef,
-    pub json2_options: Option<Json2Options>,
+    pub column: Column,
     pub location: Option<AddColumnLocation>,
     pub add_if_not_exists: bool,
 }
 
 impl Display for AddColumn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} {}", self.column_def.name, self.column_def.data_type)?;
-        if let Some(options) = &self.json2_options {
-            write!(f, "{options}")?;
-        }
-        for option in &self.column_def.options {
-            write!(f, " {option}")?;
-        }
+        write!(f, "{}", self.column)?;
         if let Some(location) = &self.location {
             write!(f, " {location}")?;
         }
