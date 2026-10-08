@@ -1,0 +1,114 @@
+-- Only the SST written by the old binary.
+SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg @@ 'world' ORDER BY ts;
+
++-------------------------+-------------+
+| ts                      | msg         |
++-------------------------+-------------+
+| 1970-01-01T00:00:00.001 | hello_world |
++-------------------------+-------------+
+
+SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg @@ 'error' ORDER BY ts;
+
++-------------------------+---------------+
+| ts                      | msg           |
++-------------------------+---------------+
+| 1970-01-01T00:00:00.002 | 错误error日志 |
++-------------------------+---------------+
+
+SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg @@ '农业' ORDER BY ts;
+
++-------------------------+--------------+
+| ts                      | msg          |
++-------------------------+--------------+
+| 1970-01-01T00:00:00.003 | 中国农业银行 |
++-------------------------+--------------+
+
+SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg LIKE 'hello\_%' ORDER BY ts;
+
++-------------------------+-------------+
+| ts                      | msg         |
++-------------------------+-------------+
+| 1970-01-01T00:00:00.001 | hello_world |
++-------------------------+-------------+
+
+INSERT INTO t_fulltext_bloom_tokens VALUES
+    (4, 'hello_world again'),
+    (5, '农业 error');
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('t_fulltext_bloom_tokens');
+
++----------------------------------------------+
+| ADMIN FLUSH_TABLE('t_fulltext_bloom_tokens') |
++----------------------------------------------+
+| 0                                            |
++----------------------------------------------+
+
+-- Old and new SSTs.
+SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg @@ 'world' ORDER BY ts;
+
++-------------------------+-------------------+
+| ts                      | msg               |
++-------------------------+-------------------+
+| 1970-01-01T00:00:00.001 | hello_world       |
+| 1970-01-01T00:00:00.004 | hello_world again |
++-------------------------+-------------------+
+
+SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg @@ 'error' ORDER BY ts;
+
++-------------------------+---------------+
+| ts                      | msg           |
++-------------------------+---------------+
+| 1970-01-01T00:00:00.002 | 错误error日志 |
+| 1970-01-01T00:00:00.005 | 农业 error    |
++-------------------------+---------------+
+
+SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg @@ '农业' ORDER BY ts;
+
++-------------------------+--------------+
+| ts                      | msg          |
++-------------------------+--------------+
+| 1970-01-01T00:00:00.003 | 中国农业银行 |
+| 1970-01-01T00:00:00.005 | 农业 error   |
++-------------------------+--------------+
+
+SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg LIKE 'hello\_%' ORDER BY ts;
+
++-------------------------+-------------------+
+| ts                      | msg               |
++-------------------------+-------------------+
+| 1970-01-01T00:00:00.001 | hello_world       |
+| 1970-01-01T00:00:00.004 | hello_world again |
++-------------------------+-------------------+
+
+ADMIN COMPACT_TABLE('t_fulltext_bloom_tokens');
+
++------------------------------------------------+
+| ADMIN COMPACT_TABLE('t_fulltext_bloom_tokens') |
++------------------------------------------------+
+| 0                                              |
++------------------------------------------------+
+
+-- After compaction.
+SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg @@ 'world' ORDER BY ts;
+
++-------------------------+-------------------+
+| ts                      | msg               |
++-------------------------+-------------------+
+| 1970-01-01T00:00:00.001 | hello_world       |
+| 1970-01-01T00:00:00.004 | hello_world again |
++-------------------------+-------------------+
+
+SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg @@ '农业' ORDER BY ts;
+
++-------------------------+--------------+
+| ts                      | msg          |
++-------------------------+--------------+
+| 1970-01-01T00:00:00.003 | 中国农业银行 |
+| 1970-01-01T00:00:00.005 | 农业 error   |
++-------------------------+--------------+
+
+DROP TABLE t_fulltext_bloom_tokens;
+
+Affected Rows: 0

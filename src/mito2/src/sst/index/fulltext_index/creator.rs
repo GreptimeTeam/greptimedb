@@ -778,28 +778,8 @@ mod tests {
         let row_ids = applier_factory(vec![(1, "World")], vec![], None).await;
         assert_eq!(row_ids, Some(rows([3])));
 
+        // Terms are left to the bloom backend.
         let row_ids = applier_factory(vec![], vec![(1, vec![(false, "hello")])], None).await;
-        assert_eq!(row_ids, Some(rows([0])));
-
-        let row_ids = applier_factory(vec![], vec![(1, vec![(true, "hello")])], None).await;
-        assert_eq!(row_ids, None);
-
-        let row_ids = applier_factory(vec![], vec![(1, vec![(false, "world")])], None).await;
-        assert_eq!(row_ids, Some(rows([1])));
-
-        let row_ids = applier_factory(vec![], vec![(1, vec![(true, "world")])], None).await;
-        assert_eq!(row_ids, None);
-
-        let row_ids = applier_factory(vec![], vec![(1, vec![(false, "Hello")])], None).await;
-        assert_eq!(row_ids, Some(rows([3])));
-
-        let row_ids = applier_factory(vec![], vec![(1, vec![(true, "Hello")])], None).await;
-        assert_eq!(row_ids, None);
-
-        let row_ids = applier_factory(vec![], vec![(1, vec![(false, "Hello, World")])], None).await;
-        assert_eq!(row_ids, Some(rows([3])));
-
-        let row_ids = applier_factory(vec![], vec![(1, vec![(true, "Hello, World")])], None).await;
         assert_eq!(row_ids, None);
     }
 
@@ -939,30 +919,6 @@ mod tests {
 
         let row_ids = applier_factory(vec![(2, "World")], vec![], None).await;
         assert_eq!(row_ids, Some(rows([2, 3])));
-
-        let row_ids = applier_factory(vec![], vec![(2, vec![(false, "hello")])], None).await;
-        assert_eq!(row_ids, Some(rows([0, 3])));
-
-        let row_ids = applier_factory(vec![], vec![(2, vec![(true, "hello")])], None).await;
-        assert_eq!(row_ids, Some(rows([0, 3])));
-
-        let row_ids = applier_factory(vec![], vec![(2, vec![(false, "world")])], None).await;
-        assert_eq!(row_ids, Some(rows([2, 3])));
-
-        let row_ids = applier_factory(vec![], vec![(2, vec![(true, "world")])], None).await;
-        assert_eq!(row_ids, Some(rows([2, 3])));
-
-        let row_ids = applier_factory(vec![], vec![(2, vec![(false, "Hello")])], None).await;
-        assert_eq!(row_ids, Some(rows([0, 3])));
-
-        let row_ids = applier_factory(vec![], vec![(2, vec![(true, "Hello")])], None).await;
-        assert_eq!(row_ids, Some(rows([0, 3])));
-
-        let row_ids = applier_factory(vec![], vec![(2, vec![(false, "World")])], None).await;
-        assert_eq!(row_ids, Some(rows([2, 3])));
-
-        let row_ids = applier_factory(vec![], vec![(2, vec![(true, "World")])], None).await;
-        assert_eq!(row_ids, Some(rows([2, 3])));
     }
 
     #[tokio::test]
@@ -997,22 +953,6 @@ mod tests {
 
         let row_ids = applier_factory(
             vec![],
-            vec![(2, vec![(true, "hello")])],
-            Some(BitVec::from_slice(&[0b1111])),
-        )
-        .await;
-        assert_eq!(row_ids, Some(rows([0, 3])));
-
-        let row_ids = applier_factory(
-            vec![],
-            vec![(2, vec![(true, "hello")])],
-            Some(BitVec::from_slice(&[0b1110])), // row 0 is filtered out
-        )
-        .await;
-        assert_eq!(row_ids, Some(rows([3])));
-
-        let row_ids = applier_factory(
-            vec![],
             vec![(2, vec![(false, "world")])],
             Some(BitVec::from_slice(&[0b1111])),
         )
@@ -1022,22 +962,6 @@ mod tests {
         let row_ids = applier_factory(
             vec![],
             vec![(2, vec![(false, "world")])],
-            Some(BitVec::from_slice(&[0b1011])), // row 2 is filtered out
-        )
-        .await;
-        assert_eq!(row_ids, Some(rows([3])));
-
-        let row_ids = applier_factory(
-            vec![],
-            vec![(2, vec![(true, "world")])],
-            Some(BitVec::from_slice(&[0b1111])),
-        )
-        .await;
-        assert_eq!(row_ids, Some(rows([2, 3])));
-
-        let row_ids = applier_factory(
-            vec![],
-            vec![(2, vec![(true, "world")])],
             Some(BitVec::from_slice(&[0b1011])), // row 2 is filtered out
         )
         .await;
@@ -1061,22 +985,6 @@ mod tests {
 
         let row_ids = applier_factory(
             vec![],
-            vec![(2, vec![(true, "Hello")])],
-            Some(BitVec::from_slice(&[0b1111])),
-        )
-        .await;
-        assert_eq!(row_ids, Some(rows([0, 3])));
-
-        let row_ids = applier_factory(
-            vec![],
-            vec![(2, vec![(true, "Hello")])],
-            Some(BitVec::from_slice(&[0b1110])), // row 0 is filtered out
-        )
-        .await;
-        assert_eq!(row_ids, Some(rows([3])));
-
-        let row_ids = applier_factory(
-            vec![],
             vec![(2, vec![(false, "World")])],
             Some(BitVec::from_slice(&[0b1111])),
         )
@@ -1091,21 +999,14 @@ mod tests {
         .await;
         assert_eq!(row_ids, Some(rows([2])));
 
+        // `lower(col)` may split words differently from `col`, so it gets no probes.
         let row_ids = applier_factory(
             vec![],
-            vec![(2, vec![(true, "World")])],
+            vec![(2, vec![(true, "hello")])],
             Some(BitVec::from_slice(&[0b1111])),
         )
         .await;
-        assert_eq!(row_ids, Some(rows([2, 3])));
-
-        let row_ids = applier_factory(
-            vec![],
-            vec![(2, vec![(true, "World")])],
-            Some(BitVec::from_slice(&[0b1011])), // row 2 is filtered out
-        )
-        .await;
-        assert_eq!(row_ids, Some(rows([3])));
+        assert_eq!(row_ids, None);
     }
 
     #[tokio::test]
@@ -1126,12 +1027,6 @@ mod tests {
         assert_eq!(row_ids, Some(rows([0, 3])));
 
         let row_ids = applier_factory(vec![(3, "世界")], vec![], None).await;
-        assert_eq!(row_ids, Some(rows([2, 3])));
-
-        let row_ids = applier_factory(vec![], vec![(3, vec![(false, "你好")])], None).await;
-        assert_eq!(row_ids, Some(rows([0, 3])));
-
-        let row_ids = applier_factory(vec![], vec![(3, vec![(false, "世界")])], None).await;
         assert_eq!(row_ids, Some(rows([2, 3])));
     }
 
@@ -1180,61 +1075,6 @@ mod tests {
         )
         .await;
         assert_eq!(row_ids, Some(rows([3])));
-    }
-
-    #[tokio::test]
-    async fn test_fulltext_index_multi_terms_case_sensitive_tantivy() {
-        let applier_factory = build_fulltext_applier_factory(
-            "test_fulltext_index_multi_terms_case_sensitive_tantivy_",
-            FulltextBackend::Tantivy,
-            &[
-                (Some("Hello"), None, None),
-                (Some("World"), None, None),
-                (None, None, None),
-                (Some("Hello, World"), None, None),
-            ],
-        )
-        .await;
-
-        let row_ids = applier_factory(
-            vec![],
-            vec![(1, vec![(false, "hello"), (false, "world")])],
-            None,
-        )
-        .await;
-        assert_eq!(row_ids, Some(rows([])));
-
-        let row_ids = applier_factory(
-            vec![],
-            vec![(1, vec![(false, "Hello"), (false, "World")])],
-            None,
-        )
-        .await;
-        assert_eq!(row_ids, Some(rows([3])));
-
-        let row_ids = applier_factory(
-            vec![],
-            vec![(1, vec![(true, "Hello"), (false, "World")])],
-            None,
-        )
-        .await;
-        assert_eq!(row_ids, Some(rows([1, 3])));
-
-        let row_ids = applier_factory(
-            vec![],
-            vec![(1, vec![(false, "Hello"), (true, "World")])],
-            None,
-        )
-        .await;
-        assert_eq!(row_ids, Some(rows([0, 3])));
-
-        let row_ids = applier_factory(
-            vec![],
-            vec![(1, vec![(true, "Hello"), (true, "World")])],
-            None,
-        )
-        .await;
-        assert_eq!(row_ids, None);
     }
 
     #[tokio::test]
@@ -1293,53 +1133,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fulltext_index_multi_terms_case_insensitive_tantivy() {
-        let applier_factory = build_fulltext_applier_factory(
-            "test_fulltext_index_multi_terms_case_insensitive_tantivy_",
-            FulltextBackend::Tantivy,
-            &[
-                (None, Some("hello"), None),
-                (None, None, None),
-                (None, Some("world"), None),
-                (None, Some("Hello, World"), None),
-            ],
-        )
-        .await;
-
-        let row_ids = applier_factory(
-            vec![],
-            vec![(2, vec![(false, "hello"), (false, "world")])],
-            None,
-        )
-        .await;
-        assert_eq!(row_ids, Some(rows([3])));
-
-        let row_ids = applier_factory(
-            vec![],
-            vec![(2, vec![(true, "hello"), (false, "world")])],
-            None,
-        )
-        .await;
-        assert_eq!(row_ids, Some(rows([3])));
-
-        let row_ids = applier_factory(
-            vec![],
-            vec![(2, vec![(false, "hello"), (true, "world")])],
-            None,
-        )
-        .await;
-        assert_eq!(row_ids, Some(rows([3])));
-
-        let row_ids = applier_factory(
-            vec![],
-            vec![(2, vec![(true, "hello"), (true, "world")])],
-            None,
-        )
-        .await;
-        assert_eq!(row_ids, Some(rows([3])));
-    }
-
-    #[tokio::test]
     async fn test_fulltext_index_multi_terms_case_insensitive_bloom() {
         let applier_factory = build_fulltext_applier_factory(
             "test_fulltext_index_multi_terms_case_insensitive_bloom_",
@@ -1367,7 +1160,7 @@ mod tests {
             Some(BitVec::from_slice(&[0b1111])),
         )
         .await;
-        assert_eq!(row_ids, Some(rows([3])));
+        assert_eq!(row_ids, Some(rows([2, 3])));
 
         let row_ids = applier_factory(
             vec![],
@@ -1375,7 +1168,7 @@ mod tests {
             Some(BitVec::from_slice(&[0b1111])),
         )
         .await;
-        assert_eq!(row_ids, Some(rows([3])));
+        assert_eq!(row_ids, Some(rows([0, 3])));
 
         let row_ids = applier_factory(
             vec![],
@@ -1383,7 +1176,7 @@ mod tests {
             Some(BitVec::from_slice(&[0b1111])),
         )
         .await;
-        assert_eq!(row_ids, Some(rows([3])));
+        assert_eq!(row_ids, None);
     }
 
     #[tokio::test]
@@ -1404,16 +1197,10 @@ mod tests {
         )
         .await;
 
-        let row_ids = applier_factory(
-            vec![(1, "Hello"), (3, "你好")],
-            vec![(2, vec![(false, "world")])],
-            None,
-        )
-        .await;
-        assert_eq!(row_ids, Some(rows([3])));
+        let row_ids = applier_factory(vec![(1, "Hello"), (3, "你好")], vec![], None).await;
+        assert_eq!(row_ids, Some(rows([0, 3])));
 
-        let row_ids =
-            applier_factory(vec![(2, "World")], vec![(1, vec![(false, "World")])], None).await;
+        let row_ids = applier_factory(vec![(1, "World"), (2, "World")], vec![], None).await;
         assert_eq!(row_ids, Some(rows([1, 3])));
     }
 

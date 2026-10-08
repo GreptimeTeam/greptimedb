@@ -18,6 +18,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use arrow::array::BooleanArray;
+use common_base::term_token::term_probes;
 use common_function::scalars::matches_term::MatchesTermFinder;
 use datafusion::config::ConfigOptions;
 use datafusion::error::Result as DfResult;
@@ -179,12 +180,8 @@ impl PhysicalOptimizerRule for MatchesConstantTermOptimizer {
                             {
                                 let finder = MatchesTermFinder::new(term);
 
-                                // For debugging purpose. Not really precise but enough for most cases.
-                                let probes = term
-                                    .split(|c: char| !c.is_alphanumeric() && c != '_')
-                                    .filter(|s| !s.is_empty())
-                                    .map(|s| s.to_string())
-                                    .collect();
+                                // Shown in plans to explain fulltext bloom pruning.
+                                let probes = term_probes(term);
 
                                 let expr = PreCompiledMatchesTermExpr {
                                     text: args[0].clone(),
@@ -491,7 +488,7 @@ mod tests {
         let plan_str = get_plan_string(&physical_plan).join("\n");
         assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"foo\", probes: [\"foo\"]"));
         assert!(plan_str.contains(
-            "MatchesConstTerm(text@0, term: \"hello wo_rld\", probes: [\"hello\", \"wo_rld\"]"
+            "MatchesConstTerm(text@0, term: \"hello wo_rld\", probes: [\"hello\", \"wo\", \"rld\"]"
         ));
         assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"world\", probes: [\"world\"]"));
         assert!(

@@ -40,6 +40,7 @@ use crate::sst::file::RegionIndexId;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE as BLOOM_BLOB_TYPE;
 use crate::sst::index::fulltext_index::{
     INDEX_BLOB_TYPE_BLOOM as FULLTEXT_BLOOM_BLOB_TYPE,
+    INDEX_BLOB_TYPE_BLOOM_V1 as FULLTEXT_BLOOM_V1_BLOB_TYPE,
     INDEX_BLOB_TYPE_TANTIVY as FULLTEXT_TANTIVY_BLOB_TYPE,
 };
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE as INVERTED_BLOB_TYPE;
@@ -451,7 +452,10 @@ impl<'a> BlobIndexTypeTargetKey<'a> {
         if let Some(target_key) = Self::target_key_from_blob(blob_type, BLOOM_BLOB_TYPE) {
             Some(BlobIndexTypeTargetKey::BloomFilter(target_key))
         } else if let Some(target_key) =
-            Self::target_key_from_blob(blob_type, FULLTEXT_BLOOM_BLOB_TYPE)
+            // v2 goes first: the v1 type is a prefix of it.
+            Self::target_key_from_blob(blob_type, FULLTEXT_BLOOM_BLOB_TYPE).or_else(
+                    || Self::target_key_from_blob(blob_type, FULLTEXT_BLOOM_V1_BLOB_TYPE),
+                )
         {
             Some(BlobIndexTypeTargetKey::FulltextBloom(target_key))
         } else if let Some(target_key) =

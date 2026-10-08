@@ -14,9 +14,11 @@
 
 use std::collections::BTreeMap;
 
+use common_base::term_token::like_probes;
 use datafusion_common::ScalarValue;
-use datafusion_expr::expr::ScalarFunction;
+use datafusion_expr::expr::{Like, ScalarFunction};
 use datafusion_expr::{BinaryExpr, Expr, Operator};
+use datatypes::schema::FulltextBackend;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use store_api::metadata::RegionMetadata;
@@ -36,31 +38,8 @@ use crate::sst::index::puffin_manager::PuffinManagerFactory;
 pub struct FulltextRequest {
     pub queries: Vec<FulltextQuery>,
     pub terms: Vec<FulltextTerm>,
-}
-
-impl FulltextRequest {
-    /// Convert terms to a query string.
-    ///
-    /// For example, if the terms are ["foo", "bar"], the query string will be `r#"+"foo" +"bar""#`.
-    /// Need to escape the `"` in the term.
-    ///
-    /// `skip_lowercased` is used for the situation that lowercased terms are not indexed.
-    pub fn terms_as_query(&self, skip_lowercased: bool) -> FulltextQuery {
-        let mut query = String::new();
-        for term in &self.terms {
-            if skip_lowercased && term.col_lowered {
-                continue;
-            }
-            // Escape the `"` in the term.
-            let escaped_term = term.term.replace("\"", "\\\"");
-            if query.is_empty() {
-                query = format!("+\"{escaped_term}\"");
-            } else {
-                query.push_str(&format!(" +\"{escaped_term}\""));
-            }
-        }
-        FulltextQuery(query)
-    }
+    /// Patterns of case-sensitive `LIKE` predicates, e.g. "%foo%" in `text LIKE '%foo%'`.
+    pub like_patterns: Vec<String>,
 }
 
 /// A query to be matched in fulltext index.
@@ -144,9 +123,11 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
         }
 
         // Check if any requests have queries or terms
-        let has_requests = requests
-            .iter()
-            .any(|(_, request)| !request.queries.is_empty() || !request.terms.is_empty());
+        let has_requests = requests.iter().any(|(_, request)| {
+            !request.queries.is_empty()
+                || !request.terms.is_empty()
+                || !request.like_patterns.is_empty()
+        });
 
         Ok(has_requests.then(|| {
             FulltextIndexApplier::new(
@@ -175,6 +156,15 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             }) => {
                 Self::extract_requests(left, metadata, requests);
                 Self::extract_requests(right, metadata, requests);
+            }
+            Expr::Like(like) => {
+                if let Some((column_id, pattern)) = Self::expr_to_like_pattern(metadata, like) {
+                    requests
+                        .entry(column_id)
+                        .or_default()
+                        .like_patterns
+                        .push(pattern);
+                }
             }
             Expr::ScalarFunction(func) => {
                 if let Some((column_id, query)) = Self::expr_to_query(metadata, func) {
@@ -261,6 +251,47 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
         ))
     }
 
+    fn expr_to_like_pattern(metadata: &RegionMetadata, like: &Like) -> Option<(ColumnId, String)> {
+        // `ILIKE` uses Unicode case folding, which disagrees with the index's
+        // `to_lowercase` on characters like 'ſ', so its probes could miss rows.
+        if like.negated || like.case_insensitive {
+            return None;
+        }
+        // Probes assume arrow's default `\` escape.
+        if !matches!(like.escape_char, None | Some('\\')) {
+            return None;
+        }
+
+        let Expr::Column(c) = like.expr.as_ref() else {
+            return None;
+        };
+        let column = metadata.column_by_name(&c.name)?;
+        if column.column_schema.data_type != ConcreteDataType::string_datatype() {
+            return None;
+        }
+        // `LIKE` is common on unindexed columns and with patterns like '%word%' that have
+        // no probe; skip them instead of opening every SST's index for nothing.
+        let options = column.column_schema.fulltext_options().ok()??;
+        if !options.enable || options.backend != FulltextBackend::Bloom {
+            return None;
+        }
+
+        let Expr::Literal(
+            ScalarValue::Utf8(Some(pattern))
+            | ScalarValue::LargeUtf8(Some(pattern))
+            | ScalarValue::Utf8View(Some(pattern)),
+            _,
+        ) = like.pattern.as_ref()
+        else {
+            return None;
+        };
+        if like_probes(pattern).is_empty() {
+            return None;
+        }
+
+        Some((column.column_id, pattern.clone()))
+    }
+
     fn extract_lower_arg(lower_func: &ScalarFunction) -> Option<&Expr> {
         if lower_func.args.len() != 1 {
             return None;
@@ -289,9 +320,9 @@ mod tests {
     use common_function::scalars::matches_term::MatchesTermFunction;
     use datafusion::functions::string::lower;
     use datafusion_common::Column;
-    use datafusion_expr::expr::ScalarFunction;
+    use datafusion_expr::expr::{Like, ScalarFunction};
     use datafusion_expr::{Literal, ScalarUDF};
-    use datatypes::schema::ColumnSchema;
+    use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextOptions};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
@@ -512,6 +543,84 @@ mod tests {
         assert_eq!(request.queries[0], FulltextQuery("foo".to_string()));
     }
 
+    fn mock_metadata_with_fulltext(backend: FulltextBackend) -> RegionMetadata {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("text", ConcreteDataType::string_datatype(), true)
+                    .with_fulltext_options(FulltextOptions::new_unchecked(
+                        true,
+                        FulltextAnalyzer::English,
+                        false,
+                        backend,
+                        10240,
+                        0.01,
+                    ))
+                    .unwrap(),
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 2,
+            });
+
+        builder.build().unwrap()
+    }
+
+    #[test]
+    fn test_expr_to_like_pattern() {
+        let like = |negated, case_insensitive, escape_char, pattern: &str| Like {
+            negated,
+            expr: Box::new(Expr::Column(Column::from_name("text"))),
+            pattern: Box::new(pattern.lit()),
+            escape_char,
+            case_insensitive,
+        };
+        let bloom = mock_metadata_with_fulltext(FulltextBackend::Bloom);
+
+        for escape_char in [None, Some('\\')] {
+            assert_eq!(
+                FulltextIndexApplierBuilder::expr_to_like_pattern(
+                    &bloom,
+                    &like(false, false, escape_char, "%foo bar baz%")
+                ),
+                Some((1, "%foo bar baz%".to_string()))
+            );
+        }
+        // NOT LIKE, ILIKE and other escape characters can't use the probes, and
+        // '%foo%' has none.
+        for like in [
+            like(true, false, None, "%foo bar baz%"),
+            like(false, true, None, "%foo bar baz%"),
+            like(false, false, Some('!'), "%foo bar baz%"),
+            like(false, false, None, "%foo%"),
+        ] {
+            assert_eq!(
+                FulltextIndexApplierBuilder::expr_to_like_pattern(&bloom, &like),
+                None
+            );
+        }
+        // Only columns with a bloom fulltext index.
+        for metadata in [
+            mock_metadata(),
+            mock_metadata_with_fulltext(FulltextBackend::Tantivy),
+        ] {
+            assert_eq!(
+                FulltextIndexApplierBuilder::expr_to_like_pattern(
+                    &metadata,
+                    &like(false, false, None, "%foo bar baz%")
+                ),
+                None
+            );
+        }
+    }
+
     #[test]
     fn test_extract_multiple_requests() {
         let metadata = mock_metadata();
@@ -549,94 +658,6 @@ mod tests {
                 col_lowered: false,
                 term: "bar".to_string(),
             }
-        );
-    }
-
-    #[test]
-    fn test_terms_as_query() {
-        // Test with empty terms
-        let request = FulltextRequest::default();
-        assert_eq!(request.terms_as_query(false), FulltextQuery(String::new()));
-        assert_eq!(request.terms_as_query(true), FulltextQuery(String::new()));
-
-        // Test with a single term (not lowercased)
-        let mut request = FulltextRequest::default();
-        request.terms.push(FulltextTerm {
-            col_lowered: false,
-            term: "foo".to_string(),
-        });
-        assert_eq!(
-            request.terms_as_query(false),
-            FulltextQuery("+\"foo\"".to_string())
-        );
-        assert_eq!(
-            request.terms_as_query(true),
-            FulltextQuery("+\"foo\"".to_string())
-        );
-
-        // Test with a single lowercased term and skip_lowercased=true
-        let mut request = FulltextRequest::default();
-        request.terms.push(FulltextTerm {
-            col_lowered: true,
-            term: "foo".to_string(),
-        });
-        assert_eq!(
-            request.terms_as_query(false),
-            FulltextQuery("+\"foo\"".to_string())
-        );
-        assert_eq!(request.terms_as_query(true), FulltextQuery(String::new())); // Should skip lowercased term
-
-        // Test with multiple terms, mix of lowercased and not
-        let mut request = FulltextRequest::default();
-        request.terms.push(FulltextTerm {
-            col_lowered: false,
-            term: "foo".to_string(),
-        });
-        request.terms.push(FulltextTerm {
-            col_lowered: true,
-            term: "bar".to_string(),
-        });
-        assert_eq!(
-            request.terms_as_query(false),
-            FulltextQuery("+\"foo\" +\"bar\"".to_string())
-        );
-        assert_eq!(
-            request.terms_as_query(true),
-            FulltextQuery("+\"foo\"".to_string()) // Only the non-lowercased term
-        );
-
-        // Test with term containing quotes that need escaping
-        let mut request = FulltextRequest::default();
-        request.terms.push(FulltextTerm {
-            col_lowered: false,
-            term: "foo\"bar".to_string(),
-        });
-        assert_eq!(
-            request.terms_as_query(false),
-            FulltextQuery("+\"foo\\\"bar\"".to_string())
-        );
-
-        // Test with a complex mix of terms
-        let mut request = FulltextRequest::default();
-        request.terms.push(FulltextTerm {
-            col_lowered: false,
-            term: "foo".to_string(),
-        });
-        request.terms.push(FulltextTerm {
-            col_lowered: true,
-            term: "bar\"quoted\"".to_string(),
-        });
-        request.terms.push(FulltextTerm {
-            col_lowered: false,
-            term: "baz\\escape".to_string(),
-        });
-        assert_eq!(
-            request.terms_as_query(false),
-            FulltextQuery("+\"foo\" +\"bar\\\"quoted\\\"\" +\"baz\\escape\"".to_string())
-        );
-        assert_eq!(
-            request.terms_as_query(true),
-            FulltextQuery("+\"foo\" +\"baz\\escape\"".to_string()) // Skips the lowercased term
         );
     }
 }

@@ -1,0 +1,8 @@
+name = "fulltext_bloom_tokens"
+reason = "Verify matches_term and LIKE return every matching row from fulltext bloom SSTs written by older binaries, whose tokens don't follow matches_term boundaries, alone and mixed with SSTs written by the current binary."
+introduced_by = "fix: fulltext bloom index drops rows matched by matches_term"
+topologies = ["distributed", "standalone"]
+from_range = [">=v1.0.0"]
+to_range = ["*"]
+features = ["table", "sst", "fulltext"]
+owner = "storage"
