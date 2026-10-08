@@ -2035,10 +2035,16 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
         assert!(schema_manifest.schema_only && schema_manifest.chunks.is_empty());
         assert_eq!(schema_manifest.version, 1);
         assert!(schema_manifest.data_layout.is_none());
+        let schema_target = GreptimeDbStandaloneBuilder::new("schema_only_target")
+            .build()
+            .await;
+        let (schema_addr, schema_server, schema_requests) =
+            import_http(schema_target.fe_instance().clone(), false).await;
+        schema_requests.fail_batch.store(false, Ordering::SeqCst);
         let mut schema_import = vec![
             "import-v2",
             "--addr",
-            &target_addr,
+            &schema_addr,
             "--from",
             &schema_uri,
             "--no-proxy",
@@ -2046,15 +2052,22 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
             "never",
         ];
         schema_import.extend(storage_args.iter().map(String::as_str));
-        let probes = requests.capabilities.load(Ordering::SeqCst);
+        let probes = schema_requests.capabilities.load(Ordering::SeqCst);
         schema_import.push("--dry-run");
         run_data_cli(&schema_import).await.unwrap();
-        assert_eq!(requests.capabilities.load(Ordering::SeqCst), probes);
+        assert_eq!(schema_requests.capabilities.load(Ordering::SeqCst), probes);
         schema_import.pop();
-        let batches = requests.batches.load(Ordering::SeqCst);
+        let batches = schema_requests.batches.load(Ordering::SeqCst);
         run_data_cli(&schema_import).await.unwrap();
-        assert!(requests.batches.load(Ordering::SeqCst) > batches);
+        assert!(schema_requests.batches.load(Ordering::SeqCst) > batches);
         assert!(!state.exists());
+        assert!(
+            values(schema_target.fe_instance(), "SELECT * FROM dashboard")
+                .await
+                .is_empty()
+        );
+        schema_server.abort();
+        let _ = schema_server.await;
     }
     server.abort();
     target_server.abort();

@@ -214,10 +214,20 @@ impl DatabaseClient {
             .http_client()
             .await?
             .post(&url)
-            .form(&params)
             .header("Content-Type", "application/x-www-form-urlencoded");
         if endpoint == "ddl/logical-tables" {
-            request = request.timeout(self.timeout);
+            let body = url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs(&params)
+                .finish();
+            // A streaming body cannot be cloned for reqwest's protocol retries.
+            request = request
+                .timeout(self.timeout)
+                .header(reqwest::header::CONTENT_LENGTH, body.len())
+                .body(reqwest::Body::wrap_stream(futures::stream::once(
+                    std::future::ready(Ok::<_, std::io::Error>(body)),
+                )));
+        } else {
+            request = request.form(&params);
         }
         if let Some(ref auth) = self.auth_header {
             request = request.header("Authorization", auth);
@@ -284,7 +294,19 @@ impl DatabaseClient {
     async fn http_client(&self) -> Result<&reqwest::Client> {
         self.client
             .get_or_try_init(|| async {
-                let mut builder = reqwest::Client::builder();
+                let mut builder = reqwest::Client::builder().redirect(
+                    reqwest::redirect::Policy::custom(|attempt| {
+                        if attempt
+                            .previous()
+                            .first()
+                            .is_some_and(|url| url.path() == "/v1/ddl/logical-tables")
+                        {
+                            attempt.stop()
+                        } else {
+                            reqwest::redirect::Policy::default().redirect(attempt)
+                        }
+                    }),
+                );
                 if let Some(proxy) = self.proxy.clone() {
                     builder = builder.proxy(proxy);
                 }
@@ -447,6 +469,30 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn batch_redirects_are_not_replayed() {
+        for status in [303, 307, 308] {
+            let (client, requests, server) = test_server(
+                status,
+                r#"{"execution_time_ms":0,"output":[{"affectedrows":0}]}"#,
+            )
+            .await;
+            assert!(
+                client
+                    .logical_tables("CREATE TABLE t", "public", 1)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(requests.lock().unwrap().len(), 1);
+            assert!(requests.lock().unwrap()[0].starts_with("POST /v1/ddl/logical-tables "));
+            // Ordinary SQL retains the shared client's existing redirect behavior.
+            assert!(client.sql("SELECT 1", "public").await.is_err());
+            assert!(requests.lock().unwrap().len() > 2);
+            server.abort();
+            let _ = server.await;
+        }
+    }
+
+    #[tokio::test]
     async fn batch_disconnect_and_timeout_are_errors() {
         use tokio::io::AsyncReadExt;
         for disconnect in [true, false] {
@@ -533,7 +579,12 @@ pub(crate) mod tests {
                     .lock()
                     .unwrap()
                     .push(String::from_utf8(bytes).unwrap());
-                socket.write_all(format!("HTTP/1.1 {status} Response\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                let location = if (300..400).contains(&status) {
+                    "Location: /v1/sql\r\n"
+                } else {
+                    ""
+                };
+                socket.write_all(format!("HTTP/1.1 {status} Response\r\n{location}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
             }
         });
         (client, requests, server)

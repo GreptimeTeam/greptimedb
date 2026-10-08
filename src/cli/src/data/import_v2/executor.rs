@@ -96,9 +96,9 @@ impl<'a> DdlExecutor<'a> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
 struct LogicalTable {
     catalog: String,
+    execution_schema: String,
     schema: String,
     physical: String,
     name: String,
@@ -133,6 +133,11 @@ fn classify(stmt: &DdlStatement, catalog: &str) -> crate::error::Result<Option<L
     };
     Ok(Some(LogicalTable {
         catalog: catalog.into(),
+        execution_schema: stmt
+            .execution_schema
+            .as_deref()
+            .unwrap_or(DEFAULT_SCHEMA_NAME)
+            .into(),
         schema: schema.into(),
         physical: physical.into(),
         name: name.into(),
@@ -167,7 +172,10 @@ struct LogicalBatch {
 impl LogicalBatch {
     fn accepts(&self, table: &LogicalTable, sql: &str) -> bool {
         self.group.as_ref().is_none_or(|g| {
-            g.catalog == table.catalog && g.schema == table.schema && g.physical == table.physical
+            g.catalog == table.catalog
+                && g.schema == table.schema
+                && g.physical == table.physical
+                && g.execution_schema == table.execution_schema
         }) && !self.names.contains(&table.name)
             && self.names.len() < MAX_LOGICAL_TABLE_DDL_STATEMENTS
             && self.sql.len() + (if self.sql.is_empty() { 0 } else { 2 }) + sql.len()
@@ -186,7 +194,7 @@ impl LogicalBatch {
     async fn flush(&mut self, client: &DatabaseClient) -> Result<()> {
         if let Some(group) = self.group.as_ref() {
             client
-                .logical_tables(&self.sql, &group.schema, self.names.len())
+                .logical_tables(&self.sql, &group.execution_schema, self.names.len())
                 .await
                 .context(DatabaseSnafu)?;
             self.sql.clear();
@@ -212,7 +220,7 @@ mod tests {
         let mut batch = LogicalBatch::default();
         for (name, context, physical, expected) in [
             ("A", "public", "p.q", true),
-            ("public.b", "other", "p.q", true),
+            ("public.b", "other", "p.q", false),
             ("greptime.public.c", "public", "p.q", true),
             ("a", "public", "p.q", false),
             ("\"A\"", "public", "p.q", true),
@@ -260,6 +268,41 @@ mod tests {
         let oversized =
             DdlStatement::new(logical("large", &"x".repeat(MAX_LOGICAL_TABLE_DDL_BYTES)));
         assert!(classify(&oversized, "greptime").is_err());
+    }
+
+    #[tokio::test]
+    async fn qualified_targets_preserve_request_context() {
+        let (client, requests, server) = crate::database::tests::test_server(
+            200,
+            r#"{"execution_time_ms":0,"output":[{"affectedrows":0}]}"#,
+        )
+        .await;
+        let statements = [
+            DdlStatement::new(logical("other.metrics.a", "p")),
+            DdlStatement::with_execution_schema(
+                logical("other.metrics.b", "p"),
+                "existing_schema".into(),
+            ),
+        ];
+        DdlExecutor::new(&client)
+            .execute_strict(&statements, true)
+            .await
+            .unwrap();
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            for (request, schema) in requests.iter().zip(["public", "existing_schema"]) {
+                assert!(request.starts_with("POST /v1/ddl/logical-tables "));
+                let body = request.split_once("\r\n\r\n").unwrap().1;
+                let db = url::form_urlencoded::parse(body.as_bytes())
+                    .find(|(k, _)| k == "db")
+                    .unwrap()
+                    .1;
+                assert_eq!(db, format!("greptime-{schema}"));
+            }
+        }
+        server.abort();
+        let _ = server.await;
     }
 
     #[tokio::test]
