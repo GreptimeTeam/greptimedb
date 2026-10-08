@@ -58,6 +58,19 @@ alter table json2_alter_non_append add column j json2;
 
 drop table json2_alter_non_append;
 
+create table json2_alter_add_settings (
+    ts timestamp time index
+) with (
+    'append_mode' = 'true'
+);
+
+-- ALTER TABLE ADD COLUMN does not yet support JSON2 settings or type hints.
+alter table json2_alter_add_settings add column j json2(max_auto_expanded_paths = 100);
+
+alter table json2_alter_add_settings add column k json2(service string);
+
+drop table json2_alter_add_settings;
+
 create table json2_set_append_mode_false (
     ts timestamp time index,
     j json2

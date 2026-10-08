@@ -36,7 +36,10 @@ pub mod truncate;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::SemanticType;
+use api::v1::{ColumnOptions, SemanticType};
+use arrow_schema::extension::{
+    EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
+};
 use common_sql::default_constraint::parse_column_default_constraint;
 use common_time::timezone::Timezone;
 use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
@@ -148,25 +151,26 @@ pub fn column_to_schema(
 
     column_schema.set_inverted_index(column.extensions.inverted_index_options.is_some());
 
-    let is_json2_column = if let SqlDataType::Custom(object_name, _) = column.data_type() {
-        object_name
-            .0
-            .first()
-            .map(|x| x.to_string_unquoted().eq_ignore_ascii_case(JSON2_TYPE_NAME))
-            .unwrap_or_default()
-    } else {
-        false
-    };
-    if is_json2_column {
-        let settings = column
-            .extensions
-            .build_json_settings()?
-            .unwrap_or_else(JsonSettings::new_v2);
-        let extension = Json2ExtensionType::new(Arc::new(JsonMetadata::new(settings)));
+    set_json2_extension(&mut column_schema, column)?;
+
+    Ok(column_schema)
+}
+
+/// Attaches extension metadata and settings to JSON2 columns.
+fn set_json2_extension(column_schema: &mut ColumnSchema, column: &Column) -> Result<()> {
+    if !column_schema.data_type.is_json2() {
+        return Ok(());
+    }
+
+    let settings = column
+        .extensions
+        .build_json_settings()?
+        .unwrap_or_else(JsonSettings::new_v2);
+    if let Some(extension) = json2_extension(column.data_type(), settings) {
         column_schema.with_extension_type(&extension);
     }
 
-    Ok(column_schema)
+    Ok(())
 }
 
 /// Convert `ColumnDef` in sqlparser to `ColumnDef` in gRPC proto.
@@ -204,6 +208,22 @@ pub fn sql_column_def_to_grpc_column_def(
         SemanticType::Field
     };
 
+    // TODO(fys): Extend the ALTER TABLE ADD COLUMN parser to support JSON2
+    // type hints and pass the parsed JsonSettings through this conversion.
+    let options = json2_extension(&col.data_type, JsonSettings::new_v2()).map(|extension| {
+        let mut options = ColumnOptions::default();
+        options.options.insert(
+            EXTENSION_TYPE_NAME_KEY.to_string(),
+            Json2ExtensionType::NAME.to_string(),
+        );
+        if let Some(metadata) = extension.serialize_metadata() {
+            options
+                .options
+                .insert(EXTENSION_TYPE_METADATA_KEY.to_string(), metadata);
+        }
+        options
+    });
+
     Ok(api::v1::ColumnDef {
         name,
         data_type: datatype as i32,
@@ -212,8 +232,24 @@ pub fn sql_column_def_to_grpc_column_def(
         semantic_type: semantic_type as _,
         comment: String::new(),
         datatype_extension: datatype_ext,
-        options: None,
+        options,
     })
+}
+
+fn json2_extension(data_type: &SqlDataType, settings: JsonSettings) -> Option<Json2ExtensionType> {
+    let SqlDataType::Custom(name, _) = data_type else {
+        return None;
+    };
+    if !name.0.first().is_some_and(|name| {
+        name.to_string_unquoted()
+            .eq_ignore_ascii_case(JSON2_TYPE_NAME)
+    }) {
+        return None;
+    }
+
+    Some(Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+        settings,
+    ))))
 }
 
 pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<ConcreteDataType> {

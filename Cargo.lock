@@ -14005,6 +14005,7 @@ version = "1.4.0-alpha.0"
 dependencies = [
  "api",
  "arrow-buffer 59.2.0",
+ "arrow-schema 59.2.0",
  "chrono",
  "common-base",
  "common-catalog",
