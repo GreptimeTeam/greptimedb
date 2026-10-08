@@ -155,7 +155,7 @@ Error: 2000(InvalidSyntax), Invalid TQL syntax: sql parser error: Expected expre
 CREATE FLOW calc_reqs SINK TO cnt_reqs EVAL INTERVAL '1m' AS
 TQL EVAL (now() - now(), now()-(now()+'15s'::interval), '5s') count_values("status_code", http_requests);
 
-Error: 3001(EngineExecuteQuery), Failed to convert float seconds to duration, raw: -15
+Error: 3001(EngineExecuteQuery), The end time must be greater than start time, start: 0, end: -15000
 
 CREATE FLOW calc_reqs SINK TO cnt_reqs EVAL INTERVAL '1m' AS
 TQL EVAL (now() - now(), now()-now()+'15s'::interval, '5s') count_values("status_code", http_requests);
