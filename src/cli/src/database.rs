@@ -320,12 +320,8 @@ impl DatabaseClient {
 }
 
 fn form_encoded_len(value: &str) -> usize {
-    value
-        .bytes()
-        .map(|b| match b {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'*' | b'-' | b'.' | b'_' | b' ' => 1,
-            _ => 3,
-        })
+    url::form_urlencoded::byte_serialize(value.as_bytes())
+        .map(str::len)
         .sum()
 }
 

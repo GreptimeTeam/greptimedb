@@ -23,6 +23,9 @@ use snafu::ResultExt;
 use sql::dialect::GreptimeDbDialect;
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
+use store_api::metric_engine_consts::{
+    LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
+};
 
 use crate::data::import_v2::error::{DatabaseSnafu, Result};
 use crate::database::DatabaseClient;
@@ -112,10 +115,12 @@ fn classify(stmt: &DdlStatement, catalog: &str) -> crate::error::Result<Option<L
     let [Statement::CreateTable(create)] = parsed.as_slice() else {
         return Ok(None);
     };
-    let Some(physical) = create.options.get("on_physical_table") else {
+    let Some(physical) = create.options.get(LOGICAL_TABLE_METADATA_KEY) else {
         return Ok(None);
     };
-    if create.engine != "metric" || create.options.value("physical_metric_table").is_some() {
+    if create.engine != METRIC_ENGINE_NAME
+        || create.options.value(PHYSICAL_TABLE_METADATA_KEY).is_some()
+    {
         return Ok(None);
     }
     let parts: Vec<_> = create
