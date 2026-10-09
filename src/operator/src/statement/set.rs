@@ -298,31 +298,6 @@ pub fn set_query_option(variable: &str, exprs: Vec<Expr>, ctx: QueryContextRef) 
     Ok(true)
 }
 
-/// Set the allow query fallback configuration parameter to true or false based on the provided expressions.
-///
-pub fn set_allow_query_fallback(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
-    let allow_fallback_expr = exprs.first().context(NotSupportedSnafu {
-        feat: "No allow query fallback value find in set variable statement",
-    })?;
-    match allow_fallback_expr {
-        Expr::Value(ValueWithSpan {
-            value: Value::Boolean(allow),
-            span: _,
-        }) => {
-            ctx.configuration_parameter()
-                .set_allow_query_fallback(*allow);
-            Ok(())
-        }
-        expr => NotSupportedSnafu {
-            feat: format!(
-                "Unsupported allow query fallback expr {} in set variable statement",
-                expr
-            ),
-        }
-        .fail(),
-    }
-}
-
 pub fn set_intervalstyle(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
     let Some((var_value, [])) = exprs.split_first() else {
         return NotSupportedSnafu {
