@@ -120,9 +120,22 @@ tql explain (30, 30, '1s') range_vector_result[20s];
 |               |                                                                                                                                                                                    |
 +---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
-tql eval (30, 30, '0') range_vector_result[30s:];
+tql eval (30, 30, '1s') range_vector_result[30s:0.0001];
 
 Error: 1004(InvalidArguments), Subquery step must be positive
+
+-- A subquery without a step uses the one-minute default, not the query step.
+tql eval (300, 300, '1s') vector(1)[5m:];
+
++---------------------+----------------+
+| time                | greptime_value |
++---------------------+----------------+
+| 1970-01-01T00:01:00 | 1.0            |
+| 1970-01-01T00:02:00 | 1.0            |
+| 1970-01-01T00:03:00 | 1.0            |
+| 1970-01-01T00:04:00 | 1.0            |
+| 1970-01-01T00:05:00 | 1.0            |
++---------------------+----------------+
 
 drop table range_vector_result;
 
