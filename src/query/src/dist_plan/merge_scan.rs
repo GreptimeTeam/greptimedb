@@ -46,7 +46,6 @@ use datafusion_common::stats::Precision;
 use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::{DFSchemaRef, DataFusionError, Result, Statistics};
 use datafusion_expr::{Expr, Extension, FetchType, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion_physical_expr::expressions::Column;
 use datafusion_physical_expr::{EquivalenceProperties, PhysicalSortExpr};
 use datatypes::extension::json::is_any_json_extension_type;
 use futures_util::StreamExt;
@@ -1350,13 +1349,14 @@ mod tests {
     };
     use datafusion::common::NullEquality;
     use datafusion::config::ConfigOptions;
-    use datafusion::execution::{SessionConfig, SessionStateBuilder};
+    use datafusion::execution::SessionStateBuilder;
     use datafusion::physical_optimizer::PhysicalOptimizerRule;
     use datafusion::physical_plan::filter_pushdown::ChildFilterPushdownResult;
     use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
     use datafusion::physical_plan::repartition::RepartitionExec;
     use datafusion::physical_plan::{ExecutionPlanProperties, Partitioning};
     use datafusion::physical_plan::{StatisticsArgs, StatisticsContext};
+    use datafusion::prelude::SessionConfig;
     use datafusion_expr::{JoinType, LogicalPlanBuilder, col, lit};
     use datafusion_physical_expr::PhysicalExpr;
     use datafusion_physical_expr::expressions::{
@@ -1661,19 +1661,9 @@ mod tests {
             datafusion::physical_optimizer::ensure_requirements::EnsureRequirements::new()
                 .optimize(join, &session.config_options())
                 .unwrap();
-        let repartition_count = optimized
-            .children()
-            .iter()
-            .filter(|child| child.as_any().is::<RepartitionExec>())
-            .count();
-        assert!(
-            repartition_count > 0,
-            "EnsureRequirements must insert actual shuffles"
-        );
         let mut producer_ids = Vec::new();
         for child in optimized.children() {
             let repartition = child
-                .as_any()
                 .downcast_ref::<RepartitionExec>()
                 .expect("EnsureRequirements must wrap both join inputs in a shuffle");
             let scan = repartition
