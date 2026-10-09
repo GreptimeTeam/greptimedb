@@ -14,6 +14,7 @@
 
 mod executor;
 mod metadata;
+mod partition_compat;
 mod region_request;
 
 use std::collections::HashSet;
@@ -147,6 +148,10 @@ impl AlterTableProcedure {
         )?;
         self.new_table_info = Some(new_table_info);
 
+        // Reject schema changes that the persisted partition expressions of some
+        // region cannot survive, before any region is altered.
+        self.validate_region_partition_exprs().await?;
+
         // Safety: Checked in `AlterTableProcedure::new`.
         let alter_kind = self.data.task.alter_table.kind.as_ref().unwrap();
         if sets_skip_wal(alter_kind) {
@@ -239,6 +244,44 @@ impl AlterTableProcedure {
         }
         self.data.state = self.data.flow()?.after_prepare();
         Ok(Status::executing(true))
+    }
+
+    /// Validates the persisted partition expressions of every region against the
+    /// schema proposed by this ALTER TABLE, so an ALTER that would break a region's
+    /// partition predicate is rejected before any region is modified.
+    async fn validate_region_partition_exprs(&self) -> Result<()> {
+        // Safety: filled in `fill_table_info`.
+        let old_schema = &self
+            .data
+            .table_info_value
+            .as_ref()
+            .unwrap()
+            .table_info
+            .meta
+            .schema;
+        // Safety: set right after the new table info is built in `on_prepare`.
+        let new_schema = &self.new_table_info.as_ref().unwrap().meta.schema;
+        let changed_columns = partition_compat::changed_column_types(old_schema, new_schema);
+        if changed_columns.is_empty() {
+            return Ok(());
+        }
+
+        let (physical_table_id, physical_table_route) = self
+            .context
+            .table_metadata_manager
+            .table_route_manager()
+            .get_physical_table_route(self.data.table_id())
+            .await?;
+        if physical_table_id != self.data.table_id() {
+            // Partition expressions are persisted on the regions of the physical
+            // table; the altered schema here belongs to a logical table.
+            return Ok(());
+        }
+
+        partition_compat::validate_region_partition_bounds(
+            &changed_columns,
+            &physical_table_route.region_routes,
+        )
     }
 
     fn table_poison_key(&self) -> PoisonKey {

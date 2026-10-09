@@ -1478,3 +1478,176 @@ async fn test_annotation_alter_is_metadata_only() {
         }
     }
 }
+
+/// Builds the persisted partition expression `ts < <millis>` in the format the
+/// partition crate writes to region metadata.
+fn test_ts_partition_bound(millis: i64) -> String {
+    format!(
+        r#"{{"Expr":{{"lhs":{{"Column":"ts"}},"op":"Lt","rhs":{{"Value":{{"Timestamp":{{"value":{millis},"unit":"Millisecond"}}}}}}}}}}"#
+    )
+}
+
+fn test_partitioned_table_route(table_id: u32, region_bounds: &[i64]) -> TableRouteValue {
+    TableRouteValue::physical(
+        region_bounds
+            .iter()
+            .enumerate()
+            .map(|(index, bound)| RegionRoute {
+                region: Region {
+                    id: RegionId::new(table_id, index as u32 + 1),
+                    partition_expr: test_ts_partition_bound(*bound),
+                    ..Default::default()
+                },
+                leader_peer: Some(Peer::empty(index as u64 + 1)),
+                ..Default::default()
+            })
+            .collect(),
+    )
+}
+
+fn test_widen_ts_unit_task(table_name: &str, target_type: ColumnDataType) -> AlterTableTask {
+    AlterTableTask {
+        alter_table: AlterTableExpr {
+            catalog_name: DEFAULT_CATALOG_NAME.to_string(),
+            schema_name: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: table_name.to_string(),
+            kind: Some(Kind::ModifyColumnTypes(api::v1::ModifyColumnTypes {
+                modify_column_types: vec![api::v1::ModifyColumnType {
+                    column_name: "ts".to_string(),
+                    target_type: target_type as i32,
+                    target_type_extension: None,
+                }],
+            })),
+        },
+    }
+}
+
+#[tokio::test]
+async fn test_widen_ts_unit_rejects_incompatible_partition_bounds_before_altering() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
+    let table_name = "foo";
+    let table_id = 1024;
+    let task = test_create_table_task(table_name, table_id);
+
+    // Region 1 holds 2024-01-01, which fits nanoseconds. Region 2 holds 3000-01-01,
+    // which fits milliseconds but overflows nanoseconds.
+    let routes = test_partitioned_table_route(table_id, &[1_704_067_200_000, 32_503_680_000_000]);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(task.table_info.clone(), routes.clone(), HashMap::new())
+        .await
+        .unwrap();
+
+    let task = test_widen_ts_unit_task(table_name, ColumnDataType::TimestampNanosecond);
+    let mut procedure = AlterTableProcedure::new(table_id, task, ddl_context.clone()).unwrap();
+    let err = procedure.on_prepare().await.unwrap_err();
+
+    assert_matches!(err, Error::PartitionExprIncompatible { .. });
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+    // The rejection names the offending region and column.
+    assert!(
+        err.to_string().contains("4398046511106"),
+        "unexpected error: {err}"
+    );
+    assert!(err.to_string().contains("'ts'"), "unexpected error: {err}");
+
+    // The rejected ALTER left the table schema and the whole route unchanged.
+    let table_info = ddl_context
+        .table_metadata_manager
+        .table_info_manager()
+        .get(table_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_inner()
+        .table_info;
+    assert_eq!(
+        table_info
+            .meta
+            .schema
+            .column_schema_by_name("ts")
+            .unwrap()
+            .data_type(),
+        &ConcreteDataType::timestamp_millisecond_datatype()
+    );
+    let (physical_table_id, physical_table_route) = ddl_context
+        .table_metadata_manager
+        .table_route_manager()
+        .get_physical_table_route(table_id)
+        .await
+        .unwrap();
+    assert_eq!(physical_table_id, table_id);
+    assert_eq!(
+        routes,
+        TableRouteValue::physical(physical_table_route.region_routes)
+    );
+}
+
+#[tokio::test]
+async fn test_widen_ts_unit_with_compatible_partition_bounds_completes() {
+    let node_manager = Arc::new(MockDatanodeManager::new(()));
+    let ddl_context = new_ddl_context(node_manager);
+    let table_name = "foo";
+    let table_id = 1024;
+    let task = test_create_table_task(table_name, table_id);
+
+    // Both persisted bounds fit nanoseconds.
+    let routes = test_partitioned_table_route(table_id, &[0, 1_704_067_200_000]);
+    ddl_context
+        .table_metadata_manager
+        .create_table_metadata(task.table_info.clone(), routes, HashMap::new())
+        .await
+        .unwrap();
+
+    let task = test_widen_ts_unit_task(table_name, ColumnDataType::TimestampNanosecond);
+    let procedure_id = ProcedureId::random();
+    let provider = Arc::new(MockContextProvider::default());
+    let mut procedure = AlterTableProcedure::new(table_id, task, ddl_context.clone()).unwrap();
+    procedure.on_prepare().await.unwrap();
+    procedure
+        .submit_alter_region_requests(procedure_id, provider.as_ref())
+        .await
+        .unwrap();
+    procedure.mut_data().set_column_metadatas(vec![
+        ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 0,
+        },
+        ColumnMetadata {
+            column_schema: ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            semantic_type: SemanticType::Tag,
+            column_id: 1,
+        },
+        ColumnMetadata {
+            column_schema: ColumnSchema::new("cpu", ConcreteDataType::float64_datatype(), false),
+            semantic_type: SemanticType::Field,
+            column_id: 2,
+        },
+    ]);
+    procedure.on_update_metadata().await.unwrap();
+
+    let table_info = ddl_context
+        .table_metadata_manager
+        .table_info_manager()
+        .get(table_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_inner()
+        .table_info;
+    assert_eq!(
+        table_info
+            .meta
+            .schema
+            .column_schema_by_name("ts")
+            .unwrap()
+            .data_type(),
+        &ConcreteDataType::timestamp_nanosecond_datatype()
+    );
+}

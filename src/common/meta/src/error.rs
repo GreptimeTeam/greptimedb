@@ -1142,6 +1142,20 @@ pub enum Error {
         actual_column_id: u32,
     },
 
+    #[snafu(display(
+        "Partition expression of region {} is incompatible with the altered column '{}': the persisted bound cannot be converted to type {}",
+        region_id,
+        column,
+        target_type
+    ))]
+    PartitionExprIncompatible {
+        region_id: RegionId,
+        column: String,
+        target_type: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[cfg(feature = "enterprise")]
     #[snafu(display("Too large duration"))]
     TooLargeDuration {
@@ -1260,7 +1274,8 @@ impl ErrorExt for Error {
             | InvalidFileName { .. }
             | InvalidFlowRequestBody { .. }
             | InvalidFilePath { .. }
-            | ConflictingSchemaOptions { .. } => StatusCode::InvalidArguments,
+            | ConflictingSchemaOptions { .. }
+            | PartitionExprIncompatible { .. } => StatusCode::InvalidArguments,
 
             #[cfg(feature = "enterprise")]
             MissingInterval { .. } | NegativeDuration { .. } | TooLargeDuration { .. } => {
