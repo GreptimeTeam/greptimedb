@@ -116,7 +116,7 @@ impl<'a, 'b> SparsePrimaryKeyView<'a, 'b> {
         // encoded_value checked the markers and every chunk length. Reserve once
         // before unchunking so the buffer does not grow for each 8-byte chunk.
         buffer.reserve(encoded.len() - 2);
-        for chunk in encoded[2..].chunks_exact(9) {
+        for chunk in encoded[2..].as_chunks::<9>().0 {
             let len = usize::from(chunk[8]).min(8);
             buffer.extend_from_slice(&chunk[..len]);
         }

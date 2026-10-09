@@ -20,8 +20,8 @@ default_column_prefix = "greptime"
 ## Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",
 ## "mysql_native_password:<hex_sha1_sha1_password>",
 ## "pg_scram_sha256:<iterations>:<hex_salt>:<hex_stored_key>:<hex_server_key>"
-## "pbkdf2_sha256" and "pg_scram_sha256" protect passwords at rest, but cannot authenticate over MySQL's
-## native password handshake; a MySQL client must send the password in cleartext for such users.
+## "pbkdf2_sha256" and "pg_scram_sha256" protect passwords at rest, but such users cannot log in over MySQL:
+## `static_user_provider` and `watch_file_user_provider` only negotiate `mysql_native_password`, which cannot verify these formats.
 ## "mysql_native_password" is MySQL-specific and cannot authenticate over PostgreSQL at all.
 ## PostgreSQL SCRAM only covers "plain" and "pg_scram_sha256" users; if any user is "pbkdf2_sha256" or
 ## "mysql_native_password", PostgreSQL falls back to cleartext password auth for every user.
@@ -33,12 +33,11 @@ default_column_prefix = "greptime"
 
 ## Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
 ## Set to 0 to disable the limit. Default: "0" (unlimited)
-## @toml2docs:none-default
+## @toml2docs:none-default="0"
 #+ max_in_flight_write_bytes = "1GB"
 
 ## Policy when write bytes quota is exhausted.
 ## Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail"
-## @toml2docs:none-default
 #+ write_bytes_exhausted_policy = "wait"
 
 ## Initialize all regions in the background during the startup.
@@ -48,20 +47,22 @@ init_regions_in_background = false
 ## Parallelism of initializing regions.
 init_regions_parallelism = 16
 
-## The maximum concurrent queries allowed to be executed. Zero means unlimited.
-max_concurrent_queries = 0
-
 ## Enable telemetry to collect anonymous usage data. Enabled by default.
 #+ enable_telemetry = true
 
 ## The runtime options.
 #+ [runtime]
 ## The number of threads to execute the runtime for global read operations.
+## Defaults to max(num_cpus, 2).
+## @toml2docs:none-default="Auto"
 #+ global_rt_size = 8
 ## The number of threads to execute compact operations.
+## Defaults to max(num_cpus / 2, 2).
+## @toml2docs:none-default="Auto"
 #+ compact_rt_size = 4
 ## The maximum number of blocking threads for compact operations.
 ## Defaults to max(num_cpus / 2, 2).
+## @toml2docs:none-default="Auto"
 #+ compact_rt_max_blocking_threads = 4
 
 ## Experimental weighted, work-conserving query/write task scheduler.
@@ -111,6 +112,11 @@ api_server_addr = "127.0.0.1:4006"
 bind_addr = "127.0.0.1:4001"
 ## The number of server worker threads.
 runtime_size = 8
+## Enable CORS for gRPC-Web clients in browsers. Disabled by default.
+#+ enable_cors = false
+## Origins allowed by gRPC CORS. An empty list allows any origin.
+## @toml2docs:none-default
+#+ cors_allowed_origins = ["https://example.com"]
 ## The maximum connection age for gRPC connection.
 ## The value can be a human-readable time string. For example: `10m` for ten minutes or `1h` for one hour.
 ## Refer to https://grpc.io/docs/guides/keepalive/ for more details.
@@ -299,7 +305,7 @@ prom_validation_mode = "strict"
 ## The provider of the WAL.
 ## - `raft_engine`: the wal is stored in the local file system by raft-engine.
 ## - `kafka`: it's remote wal that data is stored in Kafka.
-## - `experimental_object_store`: the wal is stored as objects in an object store.<br/>**Notes: experimental and not supported yet.**
+## - `experimental_object_store`: the wal is stored as objects in an object store.<br/>**Notes: experimental.**
 provider = "raft_engine"
 
 ## The directory to store the WAL files.
@@ -339,7 +345,8 @@ prefill_log_files = false
 ## **It's only used when the provider is `raft_engine`**.
 sync_period = "5s"
 
-## Parallelism during WAL recovery.
+## Parallelism during WAL recovery. Defaults to the number of CPU cores; this example sets it to 2.
+## @toml2docs:none-default="Auto"
 recovery_parallelism = 2
 
 ## The Kafka broker endpoints.
@@ -414,9 +421,24 @@ overwrite_entry_start_id = false
 
 ## The interval of flushing buffered entries to the object store, at least `10ms`, defaults to `100ms`.
 ## Each non-empty timer-triggered flush creates one object, and a batch that reaches `max_batch_bytes` is flushed immediately, so under sustained load the batch seals on size and the interval no longer matters.
-## When writes are sparse, a shorter interval lowers the acknowledgement latency of appends and raises the number of object requests: timer-triggered sealing creates at most one object per interval per node.
+## When writes are sparse, a shorter interval lowers the acknowledgement latency of `durable` appends and raises the number of object requests: timer-triggered sealing creates at most one object per interval per node, and in `enqueued` mode the backlog thresholds can seal earlier. An `enqueued` append does not wait for its batch to seal once it is admitted, but the backlog thresholds can delay admission.
 ## **It's only used when the provider is `experimental_object_store`**.
 #+ flush_interval = "100ms"
+
+## When an append to the object store WAL returns.
+## - `durable`: an append returns after the object holding its entries is durable (the default).
+## - `enqueued`: an append returns once its entries are admitted and their ids are assigned, and the object is created in the background. A crash loses the unpersisted backlog.
+## **It's only used when the provider is `experimental_object_store`**.
+#+ ack_mode = "durable"
+
+## The size of the unpersisted backlog at which new appends stall until an upload completes, in `enqueued` mode.
+## Nothing is dropped and nothing is rejected; the threshold does not bound what a crash during an outage can lose.
+## **It's only used when the provider is `experimental_object_store` and `ack_mode` is `enqueued`**.
+#+ max_unpersisted_bytes = "64MB"
+
+## The age of the oldest unpersisted entry at which new appends stall until an upload completes, in `enqueued` mode.
+## **It's only used when the provider is `experimental_object_store` and `ack_mode` is `enqueued`**.
+#+ max_unpersisted_age = "8s"
 
 ## What a read does with a segment that still does not decode after a second fetch, because its checksum does not match or its content disagrees with its footer entry.
 ## - `skip`: the segment is skipped and recorded as a WAL hole of its region, a metric is incremented and a warning is logged; the other regions of the object are unaffected (the default).
@@ -462,12 +484,6 @@ retry_delay = "500ms"
 ## If the number of running procedures exceeds this limit, the procedure will be rejected.
 max_running_procedures = 128
 
-## flow engine options.
-[flow]
-## The number of flow worker in flownode.
-## Not setting(or set to 0) this value will use the number of CPU cores divided by 2.
-#+num_workers=0
-
 # Example of using S3 as the storage.
 # [storage]
 # type = "S3"
@@ -509,6 +525,13 @@ max_running_procedures = 128
 # credential = "base64-credential"
 # endpoint = "https://storage.googleapis.com"
 
+# Example of using HDFS as the storage with the native Rust client.
+# [storage]
+# type = "Hdfs"
+# root = "/greptimedb"
+# name_node = "hdfs://127.0.0.1:9000"
+# options = { "dfs.client.block.write.replace-datanode-on-failure.enable" = "true" }
+
 ## The query engine options.
 [query]
 ## Parallelism of the query engine.
@@ -517,9 +540,10 @@ parallelism = 0
 
 ## Memory pool size for query execution operators (aggregation, sorting, join).
 ## Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").
-## Setting it to 0 disables the limit (unbounded, default behavior).
+## Setting it to 0 disables the limit. Defaults to 0 (unlimited); this example sets it to `50%`.
 ## When this limit is reached, queries will fail with ResourceExhausted error.
 ## NOTE: This does NOT limit memory used by table scans.
+## @toml2docs:none-default="0"
 memory_pool_size = "50%"
 
 ## Experimental memory pool allocation policy:
@@ -566,6 +590,7 @@ data_home = "./greptimedb_data"
 ## - `Gcs`: the data is stored in the Google Cloud Storage.
 ## - `Azblob`: the data is stored in the Azure Blob Storage.
 ## - `Oss`: the data is stored in the Aliyun OSS.
+## - `Hdfs`: the data is stored in the Hadoop Distributed File System.
 type = "File"
 
 ## The S3 bucket name.
@@ -573,10 +598,20 @@ type = "File"
 ## @toml2docs:none-default
 bucket = "greptimedb"
 
-## The S3 data will be stored in the specified prefix, for example, `s3://${bucket}/${root}`.
-## **It's only used when the storage type is `S3`, `Oss` and `Azblob`**.
+## The directory or object prefix under which data is stored.
+## **It's only used when the storage type is `S3`, `Oss`, `Gcs`, `Azblob` and `Hdfs`**.
 ## @toml2docs:none-default
 root = "greptimedb"
+
+## The HDFS NameNode URI, for example, `hdfs://127.0.0.1:9000`.
+## **It's only used when the storage type is `Hdfs`**.
+## @toml2docs:none-default
+name_node = "hdfs://127.0.0.1:9000"
+
+## Additional options passed to the native HDFS client.
+## **It's only used when the storage type is `Hdfs`**.
+## @toml2docs:none-default
+options = {}
 
 ## The access key id of the aws account.
 ## It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.
@@ -688,7 +723,8 @@ skip_ssl_validation = false
 ## The Mito engine options.
 [region_engine.mito]
 
-## Number of region workers.
+## Number of region workers. Defaults to half of the available CPU cores, rounded up.
+## @toml2docs:none-default="Auto"
 #+ num_workers = 8
 
 ## Request channel size of each worker.
@@ -859,7 +895,7 @@ schedule_compaction_after_edit = true
 default_flat_format = true
 
 ## Whether to enable the experimental two-phase mode for eligible metric series scans.
-experimental_series_scan_v2 = true
+experimental_series_scan_v2 = false
 
 ## The options for index in Mito engine.
 [region_engine.mito.index]
@@ -1030,19 +1066,21 @@ default_ratio = 1.0
 ## The slow query log options.
 [slow_query]
 ## Whether to enable slow query log.
-#+ enable = false
+enable = true
 
 ## The record type of slow queries. It can be `system_table` or `log`.
-## @toml2docs:none-default
-#+ record_type = "system_table"
+## If `system_table` is selected, the slow queries will be recorded in a system table `greptime_private.slow_queries`.
+## If `log` is selected, the slow queries will be logged in a log file `greptimedb-slow-queries.*`.
+record_type = "system_table"
 
-## The threshold of slow query.
-## @toml2docs:none-default
-#+ threshold = "10s"
+## The threshold of slow query. It can be human readable time string, for example: `10s`, `100ms`, `1s`.
+threshold = "30s"
 
-## The sampling ratio of slow query log. The value should be in the range of (0, 1].
-## @toml2docs:none-default
-#+ sample_ratio = 1.0
+## The sampling ratio of slow query log. The value should be in the range of (0, 1]. For example, `0.1` means 10% of the slow queries will be logged and `1.0` means all slow queries will be logged.
+sample_ratio = 1.0
+
+## The TTL of the `slow_queries` system table. Default is `90d` when `record_type` is `system_table`.
+ttl = "90d"
 
 ## The tracing options. Only effect when compiled with `tokio-console` feature.
 #+ [tracing]
@@ -1067,6 +1105,7 @@ ttl = "90d"
 ## `reconcile_database`, `reconcile_table`, `reconcile_logical_tables`.
 ## When omitted, all current and future event types are recorded.
 ## Set to an empty array to disable event recording.
+## @toml2docs:none-default="All"
 #+ event_types = ["create_database"]
 
 ## The memory options.

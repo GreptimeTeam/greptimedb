@@ -21,6 +21,7 @@ mod tables;
 #[cfg(test)]
 mod test_util;
 
+use std::collections::{HashMap, HashSet};
 use std::future::{Future, ready};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -35,11 +36,13 @@ use common_batcher::worker_registry::WorkerRegistry;
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::node_manager::NodeManagerRef;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
+use common_time::timestamp::TimeUnit;
 use meter_core::data::MeterRecord;
 use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
+use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use tokio::sync::{Semaphore, broadcast, mpsc, oneshot};
 
 use crate::batcher::flow_notifier::{FlowNotifier, start_flow_notification_worker};
@@ -67,15 +70,15 @@ const PHYSICAL_TABLE_KEY: &str = "physical_table";
 const WORKER_IDLE_TIMEOUT_MULTIPLIER: u32 = 3;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
-struct BatchKey {
-    catalog: String,
-    schema: String,
-    physical_table: String,
-    skip_wal: bool,
+pub(crate) struct BatchKey {
+    pub(crate) catalog: String,
+    pub(crate) schema: String,
+    pub(crate) physical_table: String,
+    pub(crate) skip_wal: bool,
 }
 
 // Requests can share a batch only when their write target and WAL policy match.
-fn batch_key_from_ctx(ctx: &QueryContextRef) -> BatchKey {
+pub(crate) fn batch_key_from_ctx(ctx: &QueryContextRef) -> BatchKey {
     let physical_table = ctx
         .extension(PHYSICAL_TABLE_KEY)
         .unwrap_or(GREPTIME_PHYSICAL_TABLE)
@@ -169,6 +172,97 @@ impl LogicalTablePendingRowsBatcher {
         self.submit_with(requests, ctx, |_| ready(Ok(())))
             .await
             .map(|(rows, ())| rows)
+    }
+
+    /// Returns the physical metric table's time index unit resolved from
+    /// `ctx`, defaulting to millisecond when the table does not exist yet
+    /// (the schema alterer auto-creates it as millisecond).
+    async fn physical_time_index_unit_or_default(&self, ctx: &QueryContextRef) -> TimeUnit {
+        let key = batch_key_from_ctx(ctx);
+        let Ok(Some(table)) = self
+            .catalog_manager
+            .table(&key.catalog, &key.schema, &key.physical_table, None)
+            .await
+        else {
+            return TimeUnit::Millisecond;
+        };
+        table
+            .table_info()
+            .meta
+            .schema
+            .timestamp_column()
+            .and_then(|col| col.data_type.as_timestamp().map(|ts| ts.unit()))
+            .unwrap_or(TimeUnit::Millisecond)
+    }
+
+    /// Returns whether the bulk path can accept `batches`: every existing
+    /// destination table must be a metric logical table bound to the
+    /// physical table selected by its context. A destination bound to
+    /// another physical table would be flushed through the selected
+    /// physical's regions, silently misplacing its rows, so such requests
+    /// must stay on the ordinary insert path (which routes per destination).
+    /// New tables are always fine: they are created on the selected physical
+    /// table. Time index units need no check here — the bulk encode converts
+    /// each request to its destination's unit. Destinations are resolved
+    /// once per distinct (schema, table).
+    pub(crate) async fn accepts_bulk_destinations(
+        &self,
+        batches: impl Iterator<Item = &(QueryContextRef, RowInsertRequests)>,
+    ) -> bool {
+        // One request can select different physical tables per batch (e.g.
+        // per-series physical-table labels), so the dedupe key includes the
+        // selected physical table: every distinct (schema, table, physical)
+        // triple is validated against the table's actual binding.
+        let mut checked = HashSet::new();
+        // For missing tables, one request must not select two different
+        // physical tables: the batcher would create the table through one
+        // selection and flush its rows through the other's regions.
+        let mut missing_selections: HashMap<(String, String), String> = HashMap::new();
+        for (ctx, requests) in batches {
+            let physical_table = batch_key_from_ctx(ctx).physical_table;
+            let schema = ctx.current_schema();
+            for request in &requests.inserts {
+                if !checked.insert((
+                    schema.clone(),
+                    request.table_name.clone(),
+                    physical_table.clone(),
+                )) {
+                    continue;
+                }
+                let Ok(Some(table)) = self
+                    .catalog_manager
+                    .table(ctx.current_catalog(), &schema, &request.table_name, None)
+                    .await
+                else {
+                    // New table: created on the selected physical table, but
+                    // a conflicting selection within the same request cannot
+                    // be batched.
+                    if missing_selections
+                        .insert(
+                            (schema.clone(), request.table_name.clone()),
+                            physical_table.clone(),
+                        )
+                        .is_some_and(|previous| previous != physical_table)
+                    {
+                        return false;
+                    }
+                    continue;
+                };
+                let info = table.table_info();
+                if info.meta.engine != METRIC_ENGINE_NAME
+                    || info
+                        .meta
+                        .options
+                        .extra_options
+                        .get(LOGICAL_TABLE_METADATA_KEY)
+                        .map(String::as_str)
+                        != Some(physical_table.as_str())
+                {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Submits with request-level accounting after schema preparation and before

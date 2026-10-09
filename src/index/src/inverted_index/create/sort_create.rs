@@ -42,6 +42,9 @@ pub struct SortIndexCreator {
 
     /// Number of rows in each segment, used to produce sorters
     segment_row_count: NonZeroUsize,
+
+    /// Indexes whose sorter asked to spill its buffer.
+    pending_spills: Vec<IndexName>,
 }
 
 #[async_trait]
@@ -50,22 +53,33 @@ impl InvertedIndexCreator for SortIndexCreator {
     ///
     /// If the index does not exist, a new index is created even if `n` is 0.
     /// Caller may leverage this behavior to create indexes with no data.
-    async fn push_with_name_n(
+    fn push_with_name_n(
         &mut self,
         index_name: &str,
         value: Option<BytesRef<'_>>,
         n: usize,
-    ) -> Result<()> {
-        match self.sorters.get_mut(index_name) {
-            Some(sorter) => sorter.push_n(value, n).await,
+    ) -> bool {
+        let sorter = match self.sorters.get_mut(index_name) {
+            Some(sorter) => sorter,
             None => {
-                let index_name = index_name.to_string();
-                let mut sorter = (self.sorter_factory)(index_name.clone(), self.segment_row_count);
-                sorter.push_n(value, n).await?;
-                self.sorters.insert(index_name, sorter);
-                Ok(())
+                let sorter = (self.sorter_factory)(index_name.to_string(), self.segment_row_count);
+                self.sorters.entry(index_name.to_string()).or_insert(sorter)
+            }
+        };
+        if sorter.push_n(value, n) {
+            self.pending_spills.push(index_name.to_string());
+            return true;
+        }
+        false
+    }
+
+    async fn spill(&mut self) -> Result<()> {
+        for index_name in std::mem::take(&mut self.pending_spills) {
+            if let Some(sorter) = self.sorters.get_mut(&index_name) {
+                sorter.spill().await?;
             }
         }
+        Ok(())
     }
 
     /// Finalizes the sorting for all indexes and writes them using the inverted index writer
@@ -110,6 +124,7 @@ impl SortIndexCreator {
             sorter_factory,
             sorters: HashMap::new(),
             segment_row_count,
+            pending_spills: Vec::new(),
         }
     }
 }
@@ -117,6 +132,7 @@ impl SortIndexCreator {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
 
     use common_base::BitVec;
     use futures::{StreamExt, stream};
@@ -140,10 +156,7 @@ mod tests {
 
         for (index_name, values) in index_values {
             for value in values {
-                creator
-                    .push_with_name(index_name, Some(value))
-                    .await
-                    .unwrap();
+                assert!(!creator.push_with_name(index_name, Some(value)));
             }
         }
 
@@ -189,10 +202,7 @@ mod tests {
 
         for (index_name, values) in index_values {
             for value in values {
-                creator
-                    .push_with_name(index_name, Some(value))
-                    .await
-                    .unwrap();
+                assert!(!creator.push_with_name(index_name, Some(value)));
             }
         }
 
@@ -221,9 +231,9 @@ mod tests {
         let mut creator =
             SortIndexCreator::new(NaiveSorter::factory(), NonZeroUsize::new(1).unwrap());
 
-        creator.push_with_name_n("a", None, 0).await.unwrap();
-        creator.push_with_name_n("b", None, 0).await.unwrap();
-        creator.push_with_name_n("c", None, 0).await.unwrap();
+        assert!(!creator.push_with_name_n("a", None, 0));
+        assert!(!creator.push_with_name_n("b", None, 0));
+        assert!(!creator.push_with_name_n("c", None, 0));
 
         let mut mock_writer = MockInvertedIndexWriter::new();
         mock_writer
@@ -248,6 +258,51 @@ mod tests {
             .finish(&mut mock_writer, BitmapType::Roaring)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sort_index_creator_spills_requested_sorters() {
+        let spilled = Arc::new(Mutex::new(Vec::new()));
+        let factory: SorterFactory = {
+            let spilled = spilled.clone();
+            Box::new(move |index_name, _| {
+                Box::new(SpillRecordingSorter {
+                    index_name,
+                    spilled: spilled.clone(),
+                })
+            })
+        };
+        let mut creator = SortIndexCreator::new(factory, NonZeroUsize::new(1).unwrap());
+
+        assert!(creator.push_with_name("a", Some(b"1")));
+        assert!(!creator.push_with_name("b", Some(b"1")));
+        creator.spill().await.unwrap();
+        assert_eq!(*spilled.lock().unwrap(), vec!["a"]);
+
+        creator.spill().await.unwrap();
+        assert_eq!(*spilled.lock().unwrap(), vec!["a"]);
+    }
+
+    /// Requests a spill on every push to index `a` and records the spills it receives.
+    struct SpillRecordingSorter {
+        index_name: String,
+        spilled: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Sorter for SpillRecordingSorter {
+        fn push_n(&mut self, _value: Option<BytesRef<'_>>, _n: usize) -> bool {
+            self.index_name == "a"
+        }
+
+        async fn spill(&mut self) -> Result<()> {
+            self.spilled.lock().unwrap().push(self.index_name.clone());
+            Ok(())
+        }
+
+        async fn output(&mut self) -> Result<SortOutput> {
+            unreachable!()
+        }
     }
 
     fn set_bit(bit_vec: &mut BitVec, index: usize) {
@@ -277,20 +332,18 @@ mod tests {
 
     #[async_trait]
     impl Sorter for NaiveSorter {
-        async fn push(&mut self, value: Option<BytesRef<'_>>) -> Result<()> {
-            let segment_index = self.total_row_count / self.segment_row_count;
-            self.total_row_count += 1;
+        fn push_n(&mut self, value: Option<BytesRef<'_>>, n: usize) -> bool {
+            for _ in 0..n {
+                let segment_index = self.total_row_count / self.segment_row_count;
+                self.total_row_count += 1;
 
-            let bitmap = self.values.entry(value.map(Into::into)).or_default();
-            set_bit(bitmap, segment_index);
-
-            Ok(())
+                let bitmap = self.values.entry(value.map(Into::into)).or_default();
+                set_bit(bitmap, segment_index);
+            }
+            false
         }
 
-        async fn push_n(&mut self, value: Option<BytesRef<'_>>, n: usize) -> Result<()> {
-            for _ in 0..n {
-                self.push(value).await?;
-            }
+        async fn spill(&mut self) -> Result<()> {
             Ok(())
         }
 

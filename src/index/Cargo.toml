@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+ahash.workspace = true
 async-trait.workspace = true
 asynchronous-codec = "0.7.0"
 bytemuck.workspace = true
@@ -22,7 +23,7 @@ fst.workspace = true
 futures.workspace = true
 greptime-proto.workspace = true
 itertools.workspace = true
-jieba-rs = "0.10"
+jieba-rs = "0.11"
 lazy_static.workspace = true
 mockall.workspace = true
 pin-project.workspace = true
@@ -36,7 +37,7 @@ serde_json.workspace = true
 snafu.workspace = true
 store-api.workspace = true
 tantivy = { version = "0.26", features = ["zstd-compression"] }
-tantivy-jieba = "0.20"
+tantivy-jieba = "0.21"
 tokio.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true
@@ -56,4 +57,8 @@ harness = false
 
 [[bench]]
 name = "bytes_to_u64_vec"
+harness = false
+
+[[bench]]
+name = "index_build_bench"
 harness = false

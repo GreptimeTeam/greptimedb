@@ -89,4 +89,26 @@ lazy_static! {
         &[LOGSTORE_LABEL, PARTITION_LABEL],
     )
     .unwrap();
+
+    /// Counter of segments a read of the object store logstore skipped because
+    /// they did not decode.
+    pub static ref METRIC_OBJECT_STORE_WAL_SKIPPED_SEGMENTS_TOTAL: IntCounter = register_int_counter!(
+        "greptime_logstore_object_store_wal_skipped_segments_total",
+        "object store logstore skipped corrupted segments total",
+    )
+    .unwrap();
+    /// Counter of objects the object store logstore deleted because no
+    /// region needs them any more.
+    pub static ref METRIC_OBJECT_STORE_WAL_DELETED_OBJECTS_TOTAL: IntCounter = register_int_counter!(
+        "greptime_logstore_object_store_wal_deleted_objects_total",
+        "object store logstore deleted objects total",
+    )
+    .unwrap();
+    /// Counter of object deletes of the object store logstore that failed and
+    /// are attempted again at the next collection.
+    pub static ref METRIC_OBJECT_STORE_WAL_FAILED_DELETES_TOTAL: IntCounter = register_int_counter!(
+        "greptime_logstore_object_store_wal_failed_deletes_total",
+        "object store logstore failed object deletes total",
+    )
+    .unwrap();
 }

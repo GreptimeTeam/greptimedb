@@ -45,6 +45,7 @@ bind_addr = "127.0.0.1:3001"
 ## The address advertised to the metasrv, and used for connections from outside the host.
 ## If left empty or unset, the server will automatically use the IP address of the first network interface
 ## on the host, with the same port number as the one specified in `grpc.bind_addr`.
+## @toml2docs:none-default
 server_addr = "127.0.0.1:3001"
 ## The number of server worker threads.
 runtime_size = 8
@@ -57,7 +58,7 @@ max_send_message_size = "512MB"
 ## - `transport`: only enable gRPC transport compression (zstd)
 ## - `arrow_ipc`: only enable Arrow IPC compression (lz4)
 ## - `all`: enable all compression.
-## Default to `none`
+## Default to `arrow_ipc`.
 flight_compression = "arrow_ipc"
 
 ## gRPC server TLS options, see `mysql.tls` section.
@@ -80,16 +81,24 @@ watch = false
 ## The runtime options.
 #+ [runtime]
 ## The number of threads to execute the runtime for global read operations.
+## Defaults to max(num_cpus, 2).
+## @toml2docs:none-default="Auto"
 #+ global_rt_size = 8
 ## The number of threads to execute compact operations.
+## Defaults to max(num_cpus / 2, 2).
+## @toml2docs:none-default="Auto"
 #+ compact_rt_size = 4
 ## The maximum number of blocking threads for compact operations.
 ## Defaults to max(num_cpus / 2, 2).
+## @toml2docs:none-default="Auto"
 #+ compact_rt_max_blocking_threads = 4
 ## The number of threads to execute datanode query operations.
 ## Defaults to max(num_cpus - 1, 2).
+## @toml2docs:none-default="Auto"
 #+ query_rt_size = 7
 ## The number of threads to execute datanode ingestion operations.
+## Defaults to max(num_cpus, 2).
+## @toml2docs:none-default="Auto"
 #+ ingest_rt_size = 8
 
 ## Experimental weighted, work-conserving query/write task scheduler.
@@ -136,7 +145,7 @@ metadata_cache_tti = "5m"
 ## - `raft_engine`: the wal is stored in the local file system by raft-engine.
 ## - `kafka`: it's remote wal that data is stored in Kafka.
 ## - `noop`: it's a no-op WAL provider that does not store any WAL data.<br/>**Notes: any unflushed data will be lost when the datanode is shutdown.**
-## - `experimental_object_store`: the wal is stored as objects in an object store.<br/>**Notes: experimental and not supported yet.**
+## - `experimental_object_store`: the wal is stored as objects in an object store.<br/>**Notes: experimental.**
 provider = "raft_engine"
 
 ## The directory to store the WAL files.
@@ -176,7 +185,8 @@ prefill_log_files = false
 ## **It's only used when the provider is `raft_engine`**.
 sync_period = "5s"
 
-## Parallelism during WAL recovery.
+## Parallelism during WAL recovery. Defaults to the number of CPU cores; this example sets it to 2.
+## @toml2docs:none-default="Auto"
 recovery_parallelism = 2
 
 ## The Kafka broker endpoints.
@@ -231,9 +241,24 @@ overwrite_entry_start_id = false
 
 ## The interval of flushing buffered entries to the object store, at least `10ms`, defaults to `100ms`.
 ## Each non-empty timer-triggered flush creates one object, and a batch that reaches `max_batch_bytes` is flushed immediately, so under sustained load the batch seals on size and the interval no longer matters.
-## When writes are sparse, a shorter interval lowers the acknowledgement latency of appends and raises the number of object requests: timer-triggered sealing creates at most one object per interval per node.
+## When writes are sparse, a shorter interval lowers the acknowledgement latency of `durable` appends and raises the number of object requests: timer-triggered sealing creates at most one object per interval per node, and in `enqueued` mode the backlog thresholds can seal earlier. An `enqueued` append does not wait for its batch to seal once it is admitted, but the backlog thresholds can delay admission.
 ## **It's only used when the provider is `experimental_object_store`**.
 #+ flush_interval = "100ms"
+
+## When an append to the object store WAL returns.
+## - `durable`: an append returns after the object holding its entries is durable (the default).
+## - `enqueued`: an append returns once its entries are admitted and their ids are assigned, and the object is created in the background. A crash loses the unpersisted backlog.
+## **It's only used when the provider is `experimental_object_store`**.
+#+ ack_mode = "durable"
+
+## The size of the unpersisted backlog at which new appends stall until an upload completes, in `enqueued` mode.
+## Nothing is dropped and nothing is rejected; the threshold does not bound what a crash during an outage can lose.
+## **It's only used when the provider is `experimental_object_store` and `ack_mode` is `enqueued`**.
+#+ max_unpersisted_bytes = "64MB"
+
+## The age of the oldest unpersisted entry at which new appends stall until an upload completes, in `enqueued` mode.
+## **It's only used when the provider is `experimental_object_store` and `ack_mode` is `enqueued`**.
+#+ max_unpersisted_age = "8s"
 
 ## What a read does with a segment that still does not decode after a second fetch, because its checksum does not match or its content disagrees with its footer entry.
 ## - `skip`: the segment is skipped and recorded as a WAL hole of its region, a metric is incremented and a warning is logged; the other regions of the object are unaffected (the default).
@@ -300,6 +325,13 @@ overwrite_entry_start_id = false
 # credential = "base64-credential"
 # endpoint = "https://storage.googleapis.com"
 
+# Example of using HDFS as the storage with the native Rust client.
+# [storage]
+# type = "Hdfs"
+# root = "/greptimedb"
+# name_node = "hdfs://127.0.0.1:9000"
+# options = { "dfs.client.block.write.replace-datanode-on-failure.enable" = "true" }
+
 ## The query engine options.
 [query]
 ## Parallelism of the query engine.
@@ -308,9 +340,10 @@ parallelism = 0
 
 ## Memory pool size for query execution operators (aggregation, sorting, join).
 ## Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").
-## Setting it to 0 disables the limit (unbounded, default behavior).
+## Setting it to 0 disables the limit. Defaults to 0 (unlimited); this example sets it to `50%`.
 ## When this limit is reached, queries will fail with ResourceExhausted error.
 ## NOTE: This does NOT limit memory used by table scans.
+## @toml2docs:none-default="0"
 memory_pool_size = "50%"
 
 ## Experimental memory pool allocation policy:
@@ -348,6 +381,7 @@ data_home = "./greptimedb_data"
 ## - `Gcs`: the data is stored in the Google Cloud Storage.
 ## - `Azblob`: the data is stored in the Azure Blob Storage.
 ## - `Oss`: the data is stored in the Aliyun OSS.
+## - `Hdfs`: the data is stored in the Hadoop Distributed File System.
 type = "File"
 
 ## The S3 bucket name.
@@ -355,10 +389,20 @@ type = "File"
 ## @toml2docs:none-default
 bucket = "greptimedb"
 
-## The S3 data will be stored in the specified prefix, for example, `s3://${bucket}/${root}`.
-## **It's only used when the storage type is `S3`, `Oss` and `Azblob`**.
+## The directory or object prefix under which data is stored.
+## **It's only used when the storage type is `S3`, `Oss`, `Gcs`, `Azblob` and `Hdfs`**.
 ## @toml2docs:none-default
 root = "greptimedb"
+
+## The HDFS NameNode URI, for example, `hdfs://127.0.0.1:9000`.
+## **It's only used when the storage type is `Hdfs`**.
+## @toml2docs:none-default
+name_node = "hdfs://127.0.0.1:9000"
+
+## Additional options passed to the native HDFS client.
+## **It's only used when the storage type is `Hdfs`**.
+## @toml2docs:none-default
+options = {}
 
 ## The access key id of the aws account.
 ## It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.
@@ -470,7 +514,8 @@ skip_ssl_validation = false
 ## The Mito engine options.
 [region_engine.mito]
 
-## Number of region workers.
+## Number of region workers. Defaults to half of the available CPU cores, rounded up.
+## @toml2docs:none-default="Auto"
 #+ num_workers = 8
 
 ## Request channel size of each worker.
@@ -654,7 +699,7 @@ schedule_compaction_after_edit = true
 default_flat_format = true
 
 ## Whether to enable the experimental two-phase mode for eligible metric series scans.
-experimental_series_scan_v2 = true
+experimental_series_scan_v2 = false
 
 ## The options for index in Mito engine.
 [region_engine.mito.index]

@@ -22,7 +22,6 @@ use common_recordbatch::recordbatch::merge_record_batches;
 use common_recordbatch::{RecordBatch, util};
 use common_time::Timestamp;
 use datafusion_common::ScalarValue;
-use datafusion_common::tree_node::TreeNode as _;
 use datafusion_expr::{GroupingSet, TableScanBuilder};
 use datatypes::arrow::array::{Array, AsArray};
 use datatypes::arrow::datatypes::{Float64Type, Int64Type, UInt64Type};

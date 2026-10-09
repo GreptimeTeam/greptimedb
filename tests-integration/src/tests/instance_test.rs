@@ -2648,7 +2648,7 @@ async fn test_execute_copy_from_orc_with_cast(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(
         &instance,
-        &format!("copy demo from '{}' WITH(FORMAT='orc');", &filepath),
+        &format!("copy demo from '{}' WITH(FORMAT='orc');", filepath),
     )
     .await
     .data;
@@ -2687,7 +2687,7 @@ async fn test_execute_copy_from_orc(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(
         &instance,
-        &format!("copy demo from '{}' WITH(FORMAT='orc');", &filepath),
+        &format!("copy demo from '{}' WITH(FORMAT='orc');", filepath),
     )
     .await
     .data;
@@ -2724,7 +2724,7 @@ async fn test_cast_type_issue_1594(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(
         &instance,
-        &format!("copy tsbs_cpu from '{}' WITH(FORMAT='csv');", &filepath),
+        &format!("copy tsbs_cpu from '{}' WITH(FORMAT='csv');", filepath),
     )
     .await;
 
@@ -2762,7 +2762,7 @@ async fn test_copy_from_csv_skip_bad_records(instance: Arc<dyn MockInstance>) {
         &instance,
         &format!(
             "copy csv_skip_bad_records from '{}' WITH(FORMAT='csv', skip_bad_records='true');",
-            &filepath
+            filepath
         ),
     )
     .await
@@ -3342,7 +3342,7 @@ async fn test_histogram_ingestion_storage_lifecycle(#[case] metric_engine: bool)
     let mut context = TestContext::new(builder).await;
     let make_router = |frontend: Arc<Instance>| {
         let builder = if metric_engine {
-            build_test_prom_server(frontend.clone(), true)
+            build_test_prom_server(frontend.clone(), true, None)
         } else {
             HttpServerBuilder::new(HttpOptions::default())
                 .with_sql_handler(frontend.clone())

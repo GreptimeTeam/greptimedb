@@ -811,6 +811,7 @@ impl PromPlanner {
             .iter()
             .cloned()
             .chain([left_time_index])
+            .map(Column::from_name)
             .collect::<Vec<_>>();
         let right_join_keys = join_keys
             .into_iter()

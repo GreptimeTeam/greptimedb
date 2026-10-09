@@ -81,6 +81,7 @@ pub mod publish_heartbeat_handler;
 pub mod region_lease_handler;
 pub mod remap_flow_peer_handler;
 pub mod response_header_handler;
+mod utils;
 
 #[cfg(test)]
 pub mod test_utils;

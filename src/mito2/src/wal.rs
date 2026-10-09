@@ -36,7 +36,7 @@ use store_api::logstore::provider::Provider;
 use store_api::logstore::{AppendBatchResponse, LogStore, WalIndex};
 use store_api::storage::RegionId;
 
-use crate::error::{BuildEntrySnafu, DeleteWalSnafu, Result, WriteWalSnafu};
+use crate::error::{BuildEntrySnafu, DeleteWalSnafu, Result, WaitWalDurableSnafu, WriteWalSnafu};
 use crate::wal::entry_reader::{LogStoreEntryReader, WalEntryReader};
 use crate::wal::raw_entry_reader::{LogStoreRawEntryReader, RegionRawEntryReader};
 
@@ -44,6 +44,36 @@ use crate::wal::raw_entry_reader::{LogStoreRawEntryReader, RegionRawEntryReader}
 pub type EntryId = store_api::logstore::entry::Id;
 /// A stream that yields tuple of WAL entry id and corresponding entry.
 pub type WalEntryStream<'a> = BoxStream<'a, Result<(EntryId, WalEntry)>>;
+
+/// Waits until the WAL of one region is durable through an entry id.
+///
+/// A flush calls it before it records an entry id as flushed in the manifest:
+/// a log store that acknowledges an append before its entries are durable
+/// hands out entry ids that a crash can lose, and a manifest watermark that
+/// names such an id would skip the entries assigned again after a restart.
+#[derive(Clone)]
+pub(crate) struct DurabilityBarrier(
+    Arc<dyn Fn(EntryId) -> BoxFuture<'static, Result<()>> + Send + Sync>,
+);
+
+impl DurabilityBarrier {
+    /// Returns once the region is durable through `entry_id`.
+    pub(crate) async fn wait(&self, entry_id: EntryId) -> Result<()> {
+        (self.0)(entry_id).await
+    }
+
+    /// A barrier that never waits, for tests without a log store.
+    #[cfg(test)]
+    pub(crate) fn noop() -> Self {
+        Self(Arc::new(|_| Box::pin(async { Ok(()) })))
+    }
+}
+
+impl std::fmt::Debug for DurabilityBarrier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DurabilityBarrier")
+    }
+}
 
 /// Write ahead log.
 ///
@@ -102,6 +132,30 @@ impl<S: LogStore> Wal<S> {
                     .context(DeleteWalSnafu { region_id })
             })
         }
+    }
+
+    /// Returns the [DurabilityBarrier] of the region written through `provider`.
+    pub(crate) fn durability_barrier(
+        &self,
+        region_id: RegionId,
+        provider: &Provider,
+    ) -> DurabilityBarrier {
+        let store = self.store.clone();
+        let provider = provider.clone();
+        DurabilityBarrier(Arc::new(move |entry_id| {
+            let store = store.clone();
+            let provider = provider.clone();
+            Box::pin(async move {
+                if let Provider::Noop = provider {
+                    return Ok(());
+                }
+                store
+                    .wait_durable(&provider, entry_id)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(WaitWalDurableSnafu { region_id })
+            })
+        }))
     }
 
     /// Returns a [WalEntryReader]

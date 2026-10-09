@@ -37,7 +37,7 @@ use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::datasource::{MemTable, provider_as_source};
 use datafusion::execution::context::SessionContext;
-use datafusion::logical_expr::Extension;
+use datafusion::logical_expr::{Extension, col};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use promql::extension_plan::HistogramFold;
@@ -1211,8 +1211,10 @@ fn classic_and_native_histogram_table_provider(
     let table_name = "mixed_histogram";
     let catalog = MemoryCatalogManager::with_default_setup();
     let schema = Arc::new(Schema::new(vec![
+        // A dotted tag name guards the mixed histogram_quantile projection
+        // against qualified-name parsing (#9390).
         ColumnSchema::new(
-            "tag".to_string(),
+            "service.name".to_string(),
             ConcreteDataType::string_datatype(),
             false,
         ),
@@ -1698,12 +1700,13 @@ async fn single_timestamp_plan_preserves_source_value() {
         "Filter: value IS NOT NULL [timestamp:Timestamp(ms), value:Float64, tag_0:Utf8]\
             \n  Projection: some_metric.timestamp, value AS value, some_metric.tag_0 [timestamp:Timestamp(ms), value:Float64, tag_0:Utf8]\
             \n    Projection: some_metric.timestamp, __promql_timestamp_value_ AS value, some_metric.tag_0 [timestamp:Timestamp(ms), value:Float64, tag_0:Utf8]\
-            \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_timestamp_value_:Float64]\
-            \n        Projection: some_metric.tag_0, some_metric.timestamp, some_metric.field_0, CAST(CAST(CAST(CAST(some_metric.timestamp AS Int64) AS Decimal128(19, 0)) * Decimal128(1,1,0) + Decimal128(0,19,0) AS Int64) AS Float64) / Float64(1000) AS __promql_timestamp_value_ [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_timestamp_value_:Float64]\
-            \n          PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
-            \n            Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
-            \n              Filter: some_metric.tag_0 != Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
-            \n                TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]",
+            \n      Filter: some_metric.field_0 IS NOT NULL [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_timestamp_value_:Float64]\
+            \n        PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_timestamp_value_:Float64]\
+            \n          Projection: some_metric.tag_0, some_metric.timestamp, some_metric.field_0, CAST(CAST(some_metric.timestamp AS Int64) AS Float64) / Float64(1000) AS __promql_timestamp_value_ [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_timestamp_value_:Float64]\
+            \n            PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n              Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n                Filter: some_metric.tag_0 != Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n                  TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]",
     );
 
     assert_eq!(plan.display_indent_schema().to_string(), expected);
@@ -1928,6 +1931,600 @@ async fn tsid_is_used_for_series_divide_when_available() {
         .unwrap(),
     ))));
     assert!(format!("{exec:?}").contains("reuse_tsid_column: true"));
+}
+
+async fn build_at_modifier_plan(query: &str, start_secs: u64, end_secs: u64) -> LogicalPlan {
+    let eval_stmt = build_at_modifier_eval_stmt(query, start_secs, end_secs);
+    let table_provider = build_test_table_provider(
+        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        1,
+        1,
+    )
+    .await;
+    PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+        .await
+        .unwrap()
+}
+
+fn build_at_modifier_eval_stmt(query: &str, start_secs: u64, end_secs: u64) -> EvalStmt {
+    EvalStmt {
+        expr: parser::parse(query).unwrap(),
+        start: UNIX_EPOCH
+            .checked_add(Duration::from_secs(start_secs))
+            .unwrap(),
+        end: UNIX_EPOCH
+            .checked_add(Duration::from_secs(end_secs))
+            .unwrap(),
+        interval: Duration::from_secs(5),
+        lookback_delta: Duration::from_secs(1),
+    }
+}
+
+/// Every selector of an `@` anchored query must scan around the anchor only, instead of the
+/// whole evaluation range.
+#[tokio::test]
+async fn at_modifier_anchors_selector_scan_window() {
+    // `@ 100` anchors at t=100s; the lookback delta is 1s, so the scan covers (99s, 100s].
+    let plan = build_at_modifier_plan("some_metric @ 100", 0, 1000).await;
+    let plan_str = plan.display_indent_schema().to_string();
+    assert!(
+        plan_str.contains(
+            "some_metric.timestamp >= TimestampMillisecond(99001, None) AND some_metric.timestamp <= TimestampMillisecond(100000, None)"
+        ),
+        "{plan_str}"
+    );
+    // The result is reported at the evaluation timestamps, not at the anchor.
+    assert!(plan_str.contains("range=[0..1000000]"), "{plan_str}");
+
+    // `@ start()` / `@ end()` resolve to the evaluation range of the statement.
+    let plan = build_at_modifier_plan("some_metric @ start()", 0, 1000).await;
+    let plan_str = plan.display_indent_schema().to_string();
+    assert!(
+        plan_str.contains(
+            "some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(0, None)"
+        ),
+        "{plan_str}"
+    );
+
+    let plan = build_at_modifier_plan("some_metric @ end()", 0, 1000).await;
+    let plan_str = plan.display_indent_schema().to_string();
+    assert!(
+        plan_str.contains(
+            "some_metric.timestamp >= TimestampMillisecond(999001, None) AND some_metric.timestamp <= TimestampMillisecond(1000000, None)"
+        ),
+        "{plan_str}"
+    );
+
+    // `offset` moves the anchor backwards and is not applied twice.
+    let plan = build_at_modifier_plan("some_metric @ 200 offset 50s", 0, 1000).await;
+    let plan_str = plan.display_indent_schema().to_string();
+    assert!(
+        plan_str.contains(
+            "some_metric.timestamp >= TimestampMillisecond(149001, None) AND some_metric.timestamp <= TimestampMillisecond(150000, None)"
+        ),
+        "{plan_str}"
+    );
+
+    // A timestamp before the Unix epoch is accepted, as in Prometheus.
+    let plan = build_at_modifier_plan("some_metric @ -1", 0, 1000).await;
+    let plan_str = plan.display_indent_schema().to_string();
+    assert!(
+        plan_str.contains(
+            "some_metric.timestamp >= TimestampMillisecond(-1999, None) AND some_metric.timestamp <= TimestampMillisecond(-1000, None)"
+        ),
+        "{plan_str}"
+    );
+}
+
+/// A call over one range selector anchored by `@` is evaluated once, at the start of the
+/// evaluation, and its result is reported at every step: the window is folded around the anchor
+/// instead of following the outer evaluation grid. This is the planner's counterpart of
+/// Prometheus' `StepInvariantExpr` wrapper; see [`PromPlanner::promotes_anchored_range_call`].
+#[tokio::test]
+async fn at_modifier_promotes_anchored_range_call() {
+    let plan = build_at_modifier_plan("rate(some_metric[5m] @ 300)", 0, 1000).await;
+    let plan_str = plan.display_indent_schema().to_string();
+    // The scan is limited to the anchored window (offset by `eval_start - anchor`).
+    assert!(
+        plan_str.contains(
+            "some_metric.timestamp >= TimestampMillisecond(1, None) AND some_metric.timestamp <= TimestampMillisecond(300000, None)"
+        ),
+        "{plan_str}"
+    );
+    // A single fold, at the anchor...
+    assert_eq!(
+        plan_str
+            .matches("PromRangeManipulate: req range=[0..0]")
+            .count(),
+        1,
+        "{plan_str}"
+    );
+    // ... never a fold per step of the outer grid.
+    assert!(
+        !plan_str.contains("PromRangeManipulate: req range=[0..1000000]"),
+        "{plan_str}"
+    );
+    // A single replay of the function result over the whole grid...
+    assert_eq!(
+        plan_str.matches("PromInstantManipulate").count(),
+        1,
+        "{plan_str}"
+    );
+    assert!(
+        plan_str.contains("PromInstantManipulate: range=[0..1000000], lookback=[1000001]"),
+        "{plan_str}"
+    );
+    // ... so `rate` itself is evaluated below that replay node, on the single evaluation
+    // instant of the anchored subtree, instead of once per step.
+    let replay = plan_str
+        .find("PromInstantManipulate")
+        .expect("instant manipulate node");
+    let rate = plan_str.find("prom_rate(").expect("rate projection");
+    assert!(
+        replay < rate,
+        "`rate` must be evaluated below the replay node:\n{plan_str}"
+    );
+}
+
+/// Parentheses around the range argument are transparent: `rate((some_metric[5m] @ 300))` gets
+/// the same fixed-window promotion as `rate(some_metric[5m] @ 300)`, with the anchored window
+/// folded once and its result replayed at every step of the grid. Only that one argument is
+/// looked through, so a parenthesis above the call promotes no operator of its own and a
+/// parenthesized subtree is planned exactly like the bare one.
+#[tokio::test]
+async fn at_modifier_promotes_parenthesized_range_argument() {
+    // Each form is planned exactly like its unparenthesized counterpart: parentheses below the
+    // call are transparent, a parenthesis around the call adds nothing, and a parenthesis above
+    // it does not widen the promotion.
+    for (query, plain) in [
+        (
+            "rate((some_metric[5m] @ 300))",
+            "rate(some_metric[5m] @ 300)",
+        ),
+        (
+            "rate(((some_metric[5m] @ 300)))",
+            "rate(some_metric[5m] @ 300)",
+        ),
+        (
+            "(rate(some_metric[5m] @ 300))",
+            "rate(some_metric[5m] @ 300)",
+        ),
+        (
+            "abs((rate(some_metric[5m] @ 300)))",
+            "abs(rate(some_metric[5m] @ 300))",
+        ),
+    ] {
+        assert_eq!(
+            build_at_modifier_plan(query, 0, 1000)
+                .await
+                .display_indent_schema()
+                .to_string(),
+            build_at_modifier_plan(plain, 0, 1000)
+                .await
+                .display_indent_schema()
+                .to_string(),
+            "`{query}` must be planned like `{plain}`"
+        );
+    }
+
+    // The parentheses do not push the enclosing operator into the promotion either: `abs` stays
+    // above the replay of the promoted call, exactly as it does without them. The promotion
+    // itself (one anchored fold, one replay, `rate` below it) is asserted for the
+    // unparenthesized form by `at_modifier_promotes_anchored_range_call`, and the form above is
+    // planned identically to it.
+    let plan_str = build_at_modifier_plan("abs((rate(some_metric[5m] @ 300)))", 0, 1000)
+        .await
+        .display_indent_schema()
+        .to_string();
+    let replay = plan_str
+        .find("PromInstantManipulate")
+        .expect("instant manipulate node");
+    assert!(
+        plan_str.find("abs(").expect("`abs` projection") < replay,
+        "`abs` must be evaluated above the replay of the promoted call:\n{plan_str}"
+    );
+}
+
+/// `@ start()` and `@ end()` are fixed anchors for the whole statement, so a call using them is
+/// promoted as well.
+#[tokio::test]
+async fn at_modifier_promotes_start_and_end_anchored_call() {
+    for query in [
+        "rate(some_metric[5m] @ start())",
+        "rate(some_metric[5m] @ end())",
+        "max_over_time(some_metric[5m] @ end())",
+    ] {
+        let plan = build_at_modifier_plan(query, 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert_eq!(
+            plan_str
+                .matches("PromRangeManipulate: req range=[0..0]")
+                .count(),
+            1,
+            "{query}:\n{plan_str}"
+        );
+        assert!(
+            plan_str.contains("PromInstantManipulate: range=[0..1000000], lookback=[1000001]"),
+            "{query}:\n{plan_str}"
+        );
+    }
+
+    // Only the call itself is promoted: a call above it (`abs`) is planned as usual and
+    // evaluated at every step over the replayed result of the promoted call. The window is
+    // still folded once, around the anchor.
+    let plan = build_at_modifier_plan("abs(max_over_time(some_metric[5m] @ end()))", 0, 1000).await;
+    let plan_str = plan.display_indent_schema().to_string();
+    assert_eq!(
+        plan_str
+            .matches("PromRangeManipulate: req range=[0..0]")
+            .count(),
+        1,
+        "{plan_str}"
+    );
+    let abs = plan_str.find("abs(").expect("`abs` projection");
+    let replay = plan_str
+        .find("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+        .expect("replay node");
+    assert!(
+        abs < replay,
+        "`abs` must be evaluated above the replay of the promoted call:\n{plan_str}"
+    );
+    // The window is the only one folded once, and it sits below the replay: the promoted call
+    // feeds the grid from there.
+    let fold = plan_str.find("PromRangeManipulate").expect("range fold");
+    assert!(
+        replay < fold,
+        "the anchored window must be folded below the replay:\n{plan_str}"
+    );
+
+    // An aggregation above the promoted call stays above it as well: `sum` aggregates the
+    // replayed per-series rows at every step, instead of aggregating the single anchored
+    // instant and replaying the aggregation — which would also have to replay rows of several
+    // groups through the one-series-per-batch `InstantManipulate`.
+    let plan = build_at_modifier_plan("sum(rate(some_metric[5m] @ start()))", 0, 1000).await;
+    let plan_str = plan.display_indent_schema().to_string();
+    assert_eq!(
+        plan_str
+            .matches("PromRangeManipulate: req range=[0..0]")
+            .count(),
+        1,
+        "{plan_str}"
+    );
+    // A single replay, and it sits below the aggregation node: `sum` aggregates the replayed
+    // per-series rows at every step.
+    assert_eq!(
+        plan_str.matches("PromInstantManipulate").count(),
+        1,
+        "{plan_str}"
+    );
+    let aggregate = plan_str.find("Aggregate:").expect("aggregate node");
+    let replay = plan_str
+        .find("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+        .expect("replay node");
+    assert!(
+        aggregate < replay,
+        "the aggregation must stay above the replay of the promoted call:\n{plan_str}"
+    );
+
+    // Without `@` nothing is promoted: the function keeps folding one window per step.
+    let plan = build_at_modifier_plan("rate(some_metric[5m])", 0, 1000).await;
+    let plan_str = plan.display_indent_schema().to_string();
+    assert!(
+        plan_str.contains("PromRangeManipulate: req range=[0..1000000]"),
+        "{plan_str}"
+    );
+    assert!(!plan_str.contains("lookback=[1000001]"), "{plan_str}");
+}
+
+/// A call or a unary operator above the anchored range call is planned as usual: the inner range
+/// call is promoted on its own (it is the direct call over the anchored range selector), and the
+/// operator above it is evaluated at every step over the replayed result.
+#[tokio::test]
+async fn at_modifier_promotes_inner_range_call_below_wrappers() {
+    for (query, wrapper) in [
+        ("abs(rate(some_metric[5m] @ 300))", "abs(prom_rate("),
+        ("-rate(some_metric[5m] @ 300)", "(- prom_rate("),
+        (
+            "abs(max_over_time(some_metric[5m] @ 300))",
+            "abs(prom_max_over_time(",
+        ),
+    ] {
+        let plan = build_at_modifier_plan(query, 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        // The anchored window is folded once, and the wrapper sits above its replay.
+        assert_eq!(
+            plan_str
+                .matches("PromRangeManipulate: req range=[0..0]")
+                .count(),
+            1,
+            "{query}:\n{plan_str}"
+        );
+        assert_eq!(
+            plan_str.matches("PromInstantManipulate").count(),
+            1,
+            "{query}:\n{plan_str}"
+        );
+        let wrapper = plan_str
+            .find(wrapper)
+            .unwrap_or_else(|| panic!("no `{wrapper}` projection in:\n{plan_str}"));
+        let replay = plan_str
+            .find("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+            .expect("replay node");
+        assert!(
+            wrapper < replay,
+            "the wrapper must be evaluated above the replay of the range call:\n{plan_str}"
+        );
+    }
+}
+
+/// `anchored + plain`: only the binary operand that is a call over the anchored range selector
+/// is promoted, and the plain side keeps following the evaluation step.
+#[tokio::test]
+async fn at_modifier_promotes_only_anchored_binary_operand() {
+    let plan = build_at_modifier_plan("rate(some_metric[5m] @ 300) + some_metric", 0, 1000).await;
+    let plan_str = plan.display_indent_schema().to_string();
+    // The anchored operand is folded once and its result replayed over the whole grid.
+    assert_eq!(
+        plan_str
+            .matches("PromRangeManipulate: req range=[0..0]")
+            .count(),
+        1,
+        "{plan_str}"
+    );
+    assert!(
+        plan_str.contains("PromInstantManipulate: range=[0..1000000], lookback=[1000001]"),
+        "{plan_str}"
+    );
+    // The plain operand still selects one sample per step with the default lookback.
+    assert!(
+        plan_str.contains("PromInstantManipulate: range=[0..1000000], lookback=[1000]"),
+        "{plan_str}"
+    );
+    assert_eq!(
+        plan_str.matches("PromInstantManipulate").count(),
+        2,
+        "{plan_str}"
+    );
+
+    // Both operands anchored: the binary expression is not promoted as a whole, because a join
+    // emits the rows of several series in shared batches and the replay needs one series per
+    // batch. Each operand anchors and replays on its own instead, and the join runs at every
+    // step over those per-series results.
+    let plan = build_at_modifier_plan("some_metric @ 300 + some_metric @ 0", 0, 1000).await;
+    let plan_str = plan.display_indent_schema().to_string();
+    // One anchoring node and one replay per operand...
+    assert_eq!(
+        plan_str.matches("PromInstantManipulate").count(),
+        4,
+        "{plan_str}"
+    );
+    assert_eq!(
+        plan_str
+            .matches("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+            .count(),
+        2,
+        "{plan_str}"
+    );
+    // ... and the two operands are anchored at different timestamps, so both select their own
+    // sample.
+    assert_eq!(
+        plan_str
+            .matches("PromInstantManipulate: range=[0..0], lookback=[1000]")
+            .count(),
+        2,
+        "{plan_str}"
+    );
+}
+
+/// Only a direct call over an anchored range selector is promoted. A value function or a unary
+/// operator over an anchored *instant* selector needs no promotion: the selector anchors and
+/// replays its sample per series on its own, and the operator above it is row-wise, so it can be
+/// evaluated at every step over that replay.
+#[tokio::test]
+async fn at_modifier_does_not_promote_value_calls_over_anchored_selectors() {
+    for (query, value_expr) in [
+        ("abs(some_metric @ 300)", "abs(some_metric.field_0)"),
+        ("-some_metric @ 300", "(- some_metric.field_0)"),
+    ] {
+        let plan = build_at_modifier_plan(query, 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        // The scan is limited to the anchored sample (the lookback delta of this test is 1s).
+        assert!(
+            plan_str.contains(
+                "some_metric.timestamp >= TimestampMillisecond(299001, None) AND some_metric.timestamp <= TimestampMillisecond(300000, None)"
+            ),
+            "{query}:\n{plan_str}"
+        );
+        // ... and the result is replayed at every step by the selector itself: the anchored
+        // selection, then the grid replay, with no promoted subtree on top of the operator.
+        assert!(
+            !plan_str.starts_with("PromInstantManipulate"),
+            "{query}:\n{plan_str}"
+        );
+        assert_eq!(
+            plan_str
+                .matches("PromInstantManipulate: range=[0..0], lookback=[1000]")
+                .count(),
+            1,
+            "{query}:\n{plan_str}"
+        );
+        let replay = plan_str
+            .find("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+            .unwrap_or_else(|| panic!("replay node:\n{plan_str}"));
+        let value = plan_str
+            .find(value_expr)
+            .unwrap_or_else(|| panic!("no `{value_expr}` projection in:\n{plan_str}"));
+        assert!(
+            value < replay,
+            "`{value_expr}` must be evaluated above the per-series replay:\n{plan_str}"
+        );
+    }
+}
+
+/// A call whose argument merges series (an aggregation or a join) or whose own output reorders
+/// the whole vector (`sort*`, the histogram folds) is never the promoted root either: it is
+/// planned as usual over the leaf-level anchoring of its selectors, which replays every selector
+/// per series and keeps the one-series-per-batch layout the replay needs.
+#[tokio::test]
+async fn at_modifier_keeps_multi_series_roots_out_of_promoted_subtree() {
+    // An aggregation below the call emits one row per group in shared batches, so the call is
+    // not promoted: the replay of the anchored selector stays below the aggregate.
+    let plan = build_at_modifier_plan("abs(sum(some_metric @ 300))", 0, 1000).await;
+    let plan_str = plan.display_indent_schema().to_string();
+    let aggregate = plan_str.find("Aggregate:").expect("aggregate node");
+    let replay = plan_str
+        .find("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+        .expect("replay node");
+    assert!(
+        aggregate < replay,
+        "the aggregation must stay above the replay:\n{plan_str}"
+    );
+
+    // A join of two anchored selectors below the call: neither the join nor the call is
+    // promoted, so each operand is replayed on its own.
+    let plan = build_at_modifier_plan("abs(some_metric @ 300 + some_metric @ 0)", 0, 1000).await;
+    let plan_str = plan.display_indent_schema().to_string();
+    assert!(!plan_str.starts_with("PromInstantManipulate"), "{plan_str}");
+    assert_eq!(
+        plan_str
+            .matches("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+            .count(),
+        2,
+        "{plan_str}"
+    );
+
+    // A call that reorders the whole vector keeps its sort above the per-series replay.
+    let plan = build_at_modifier_plan("sort_by_label(some_metric @ 300, \"tag_0\")", 0, 1000).await;
+    let plan_str = plan.display_indent_schema().to_string();
+    assert!(plan_str.starts_with("Sort:"), "{plan_str}");
+    assert_eq!(
+        plan_str
+            .matches("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+            .count(),
+        1,
+        "{plan_str}"
+    );
+}
+
+/// `label_join` rewrites the labels of its input series, so it is never the promoted root: the
+/// anchored selector keeps replaying one series per batch, and the join runs at every step above
+/// that replay (see [`Self::promotes_anchored_range_call`]). Promoting it would replay the
+/// joined rows through the labels the join just rewrote, which merges the distinct input series
+/// into one timeline.
+#[tokio::test]
+async fn at_modifier_does_not_promote_label_join() {
+    for query in [
+        // Directly above the anchored instant selector...
+        "label_join(some_metric @ 300, \"tag_0\", \"-\", \"tag_0\", \"tag_0\")",
+        // ... and below another call, which is planned as usual over the join.
+        "abs(label_join(some_metric @ 300, \"tag_0\", \"-\", \"tag_0\", \"tag_0\"))",
+    ] {
+        let plan = build_at_modifier_plan(query, 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        // The join is not wrapped in a replay of its own; the only replay over the grid is the
+        // one of the anchored selector...
+        assert!(
+            !plan_str.starts_with("PromInstantManipulate"),
+            "{query}:\n{plan_str}"
+        );
+        assert_eq!(
+            plan_str
+                .matches("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+                .count(),
+            1,
+            "{query}:\n{plan_str}"
+        );
+        // ... and the projected join stays above it, evaluated at every step.
+        let join = plan_str
+            .find("concat_ws(")
+            .unwrap_or_else(|| panic!("no `label_join` projection in:\n{plan_str}"));
+        let replay = plan_str
+            .find("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+            .expect("replay node");
+        assert!(
+            join < replay,
+            "`label_join` must be evaluated above the per-series replay:\n{plan_str}"
+        );
+    }
+
+    // A range call below the join is still promoted on its own: the anchored window is folded
+    // once per series, and the join above it is evaluated at every step over that replay.
+    let plan = build_at_modifier_plan(
+        "label_join(rate(some_metric[5m] @ 300), \"tag_0\", \"-\", \"tag_0\", \"tag_0\")",
+        0,
+        1000,
+    )
+    .await;
+    let plan_str = plan.display_indent_schema().to_string();
+    assert_eq!(
+        plan_str
+            .matches("PromRangeManipulate: req range=[0..0]")
+            .count(),
+        1,
+        "{plan_str}"
+    );
+    assert!(!plan_str.starts_with("PromInstantManipulate"), "{plan_str}");
+    let join = plan_str.find("concat_ws(").expect("join projection");
+    let replay = plan_str
+        .find("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+        .expect("replay node");
+    assert!(
+        join < replay,
+        "the join must be evaluated above the replay of the range call:\n{plan_str}"
+    );
+}
+
+#[test]
+fn at_modifier_rejects_subtraction_overflow() {
+    for (anchor, offset) in [(i64::MAX, -1), (i64::MIN, 1)] {
+        let err = PromPlanner::anchor_sub(anchor, offset).unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+        assert!(
+            err.to_string()
+                .contains("Timestamp out of range for the `@` modifier"),
+            "{err}"
+        );
+    }
+    assert_eq!(PromPlanner::anchor_sub(-1, 1).unwrap(), -2);
+}
+
+/// `@` beyond the representable millisecond range is rejected instead of silently wrapping.
+///
+/// `@ 1e16` is 10^19 milliseconds, beyond `i64::MAX`. A Unix `SystemTime` can hold it, so
+/// the planner rejects the anchor it cannot represent. A Windows `SystemTime` tops out
+/// below `i64::MAX` milliseconds, so the same literal is already rejected while parsing.
+#[tokio::test]
+async fn at_modifier_rejects_unrepresentable_timestamp() {
+    #[cfg(windows)]
+    {
+        let err = parser::parse("some_metric @ 1e16").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("timestamp out of bounds for @ modifier"),
+            "{err}"
+        );
+    }
+
+    #[cfg(not(windows))]
+    {
+        let eval_stmt = build_eval_stmt("some_metric @ 1e16");
+        let table_provider = build_test_table_provider(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await;
+        let err =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Timestamp out of range for the `@` modifier"),
+            "{err}"
+        );
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+    }
 }
 
 #[tokio::test]
@@ -3422,7 +4019,7 @@ async fn binary_op_column_column() {
     assert_eq!(plan.display_indent_schema().to_string(), expected);
 }
 
-async fn indie_query_plan_compare<T: AsRef<str>>(query: &str, expected: T) {
+async fn indie_query_plan(query: &str) -> String {
     let prom_expr = parser::parse(query).unwrap();
     let eval_stmt = EvalStmt {
         expr: prom_expr,
@@ -3450,7 +4047,12 @@ async fn indie_query_plan_compare<T: AsRef<str>>(query: &str, expected: T) {
         .await
         .unwrap();
 
-    assert_eq!(plan.display_indent_schema().to_string(), expected.as_ref());
+    plan.display_indent_schema().to_string()
+}
+
+async fn indie_query_plan_compare<T: AsRef<str>>(query: &str, expected: T) {
+    let plan = indie_query_plan(query).await;
+    assert_eq!(plan, expected.as_ref());
 }
 
 #[tokio::test]
@@ -3536,6 +4138,51 @@ async fn increase_aggr() {
     );
 
     indie_query_plan_compare(query, expected).await;
+}
+
+#[tokio::test]
+async fn predict_linear_injects_the_eval_timestamp() {
+    // The fourth argument is the evaluation instant of each row, which the fold offset
+    // recovers from the row's time index (here: no `@` and no `offset`, so the step itself).
+    let query = "predict_linear(some_metric[5m], 60)";
+    let expected = String::from(
+        "Filter: prom_predict_linear(timestamp_range,field_0,Float64(60)) IS NOT NULL [timestamp:Timestamp(ms), prom_predict_linear(timestamp_range,field_0,Float64(60)):Float64;N, tag_0:Utf8]\
+        \n  Projection: some_metric.timestamp, prom_predict_linear(timestamp_range, field_0, CAST(Float64(60) AS Int64), CAST(CAST(some_metric.timestamp AS Int64) + Int64(0) AS Timestamp(ms))) AS prom_predict_linear(timestamp_range,field_0,Float64(60)), some_metric.tag_0 [timestamp:Timestamp(ms), prom_predict_linear(timestamp_range,field_0,Float64(60)):Float64;N, tag_0:Utf8]\
+        \n    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[300000], time index=[timestamp], values=[\"field_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Dictionary(Int64, Float64);N, timestamp_range:Dictionary(Int64, Timestamp(ms))]\
+        \n      PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [true] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+        \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+        \n          Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+        \n            Filter: some_metric.timestamp >= TimestampMillisecond(-299999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+        \n              TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]",
+    );
+
+    indie_query_plan_compare(query, expected).await;
+}
+
+/// The evaluation instant follows the selector's fold offset, not the projection's: an
+/// `@`-anchored selector is folded with `at_offset`, which is what the window's timestamps were
+/// shifted by. The evaluation starts at 0s here, so `@ 100` anchors 100s in the future and
+/// yields `at_offset` = -100000ms.
+#[tokio::test]
+async fn predict_linear_eval_ts_follows_the_fold_offset() {
+    for (query, expected_offset) in [
+        (
+            "predict_linear(some_metric[5m] @ 100, 60)",
+            "Int64(-100000)",
+        ),
+        (
+            "predict_linear(some_metric[5m] offset 2m, 60)",
+            "Int64(120000)",
+        ),
+    ] {
+        let plan = indie_query_plan(query).await;
+        assert!(
+            plan.contains(&format!(
+                "some_metric.timestamp AS Int64) + {expected_offset}"
+            )),
+            "{query}\n{plan}"
+        );
+    }
 }
 
 async fn native_histogram_plan(query: &str) -> String {
@@ -3743,7 +4390,7 @@ async fn mixed_histogram_helpers_execute_classic_and_native_samples() {
             .iter()
             .flat_map(|batch| {
                 let tags = batch
-                    .column_by_name("tag")
+                    .column_by_name("service.name")
                     .unwrap()
                     .as_any()
                     .downcast_ref::<StringArray>()
@@ -4216,6 +4863,27 @@ async fn mixed_native_histogram_ranges_use_coordinated_udfs() {
 }
 
 #[tokio::test]
+async fn mixed_native_histogram_predict_linear_forwards_the_eval_timestamp() {
+    let query = "predict_linear(some_metric[5m], 60)";
+    let plan = PromPlanner::stmt_to_plan(
+        build_test_mixed_native_histogram_table_provider("some_metric").await,
+        &build_eval_stmt(query),
+        &build_query_engine_state(),
+    )
+    .await
+    .unwrap()
+    .display_indent_schema()
+    .to_string();
+
+    assert!(
+        plan.contains(
+            "prom_mixed_range_float(Utf8(\"predict_linear\"), timestamp_range, greptime_value, greptime_native_histogram, CAST(Float64(60) AS Int64), CAST(CAST(some_metric.timestamp AS Int64) + Int64(0) AS Timestamp(ms)))"
+        ),
+        "{query}\n{plan}"
+    );
+}
+
+#[tokio::test]
 async fn mixed_native_histogram_rate_executes_real_ranges() {
     let schema = Arc::new(ArrowSchema::new(vec![
         Field::new(
@@ -4289,7 +4957,7 @@ async fn mixed_native_histogram_rate_executes_real_ranges() {
     );
     let state = build_query_engine_state();
     let (mut exprs, _) = planner
-        .create_function_expr(&call.func, vec![], input.schema(), &state)
+        .create_function_expr(&call.func, vec![], input.schema(), &state, None)
         .unwrap();
     exprs.insert(0, planner.create_time_index_column_expr().unwrap());
     let plan = LogicalPlanBuilder::from(input)
@@ -4443,6 +5111,627 @@ async fn count_over_time_subquery() {
             \n                  TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]",
     );
     indie_query_plan_compare(query, expected).await;
+}
+
+/// `offset` on a subquery must shift the inner evaluation window back and be
+/// carried into the outer range manipulation. See
+/// <https://github.com/GreptimeTeam/greptimedb/issues/9330>.
+#[tokio::test]
+async fn count_over_time_subquery_with_offset() {
+    let query = "count_over_time(some_metric[10m:1m] offset 5m)";
+    let expected = String::from(
+        "Filter: prom_count_over_time(timestamp_range,field_0) IS NOT NULL [timestamp:Timestamp(ms), prom_count_over_time(timestamp_range,field_0):Float64;N, tag_0:Utf8]\
+        \n  Projection: some_metric.timestamp, prom_count_over_time(timestamp_range, field_0) AS prom_count_over_time(timestamp_range,field_0), some_metric.tag_0 [timestamp:Timestamp(ms), prom_count_over_time(timestamp_range,field_0):Float64;N, tag_0:Utf8]\
+        \n    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[600000], time index=[timestamp], values=[\"field_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Dictionary(Int64, Float64);N, timestamp_range:Dictionary(Int64, Timestamp(ms))]\
+        \n      PromSeriesNormalize: offset=[300000], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+        \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+        \n          Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+        \n            PromInstantManipulate: range=[-840000..99700000], lookback=[1000], interval=[60000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+        \n              PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+        \n                Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+        \n                  Filter: some_metric.timestamp >= TimestampMillisecond(-840999, None) AND some_metric.timestamp <= TimestampMillisecond(99700000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+        \n                    TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]",
+    );
+    indie_query_plan_compare(query, expected).await;
+}
+
+/// Time-varying samples on and off the subquery step grid expose incorrect window folding.
+async fn build_subquery_offset_probe_provider() -> DfTableSourceProvider {
+    let catalog_list = MemoryCatalogManager::with_default_setup();
+    let probe_rows = (0..=6_i64)
+        .map(|step| (step * 10_000, (step + 1) as f64))
+        .collect::<Vec<_>>();
+    let offgrid_rows = (0..6_i64)
+        .map(|step| (step * 10_000 + 5_000, (step + 1) as f64))
+        .collect::<Vec<_>>();
+
+    for (table_id, name, rows) in [
+        (7_001_u32, "subquery_offset_probe", &probe_rows),
+        (7_002_u32, "subquery_offset_offgrid", &offgrid_rows),
+    ] {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "host".to_string(),
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                "timestamp".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new(
+                "val".to_string(),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.arrow_schema().clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["a"; rows.len()])),
+                Arc::new(TimestampMillisecondArray::from_iter_values(
+                    rows.iter().map(|(ts, _)| *ts),
+                )),
+                Arc::new(Float64Array::from_iter_values(
+                    rows.iter().map(|(_, value)| *value),
+                )),
+            ],
+        )
+        .unwrap();
+        let backing = GreptimeMemTable::new_with_catalog(
+            name,
+            GreptimeRecordBatch::from_df_record_batch(schema.clone(), batch),
+            table_id,
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+        );
+        let table_meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .value_indices(vec![2])
+            .next_column_id(3)
+            .build()
+            .unwrap();
+        let table_info = Arc::new(
+            TableInfoBuilder::default()
+                .table_id(table_id)
+                .name(name)
+                .meta(table_meta)
+                .build()
+                .unwrap(),
+        );
+        let table = Arc::new(Table::new(
+            table_info,
+            FilterPushDownType::Unsupported,
+            backing.data_source(),
+        ));
+        assert!(
+            catalog_list
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: name.to_string(),
+                    table_id,
+                    table,
+                })
+                .is_ok()
+        );
+    }
+
+    DfTableSourceProvider::new(
+        catalog_list,
+        false,
+        QueryContext::arc(),
+        DummyDecoder::arc(),
+        false,
+    )
+}
+
+/// Plans on a seconds-based evaluation grid.
+async fn plan_subquery_offset_probe(
+    query: &str,
+    start: u64,
+    end: u64,
+    step: u64,
+) -> Result<LogicalPlan> {
+    let eval_stmt = EvalStmt {
+        expr: parser::parse(query).unwrap(),
+        start: UNIX_EPOCH + Duration::from_secs(start),
+        end: UNIX_EPOCH + Duration::from_secs(end),
+        interval: Duration::from_secs(step),
+        lookback_delta: Duration::from_secs(300),
+    };
+    PromPlanner::stmt_to_plan(
+        build_subquery_offset_probe_provider().await,
+        &eval_stmt,
+        &build_query_engine_state(),
+    )
+    .await
+}
+
+/// Evaluates seconds-based bounds and returns sorted `(timestamp_ms, value)` rows.
+async fn run_subquery_offset_probe(
+    query: &str,
+    start: u64,
+    end: u64,
+    step: u64,
+) -> Vec<(i64, f64)> {
+    let state = build_query_engine_state();
+    let plan = plan_subquery_offset_probe(query, start, end, step)
+        .await
+        .unwrap();
+
+    let (_, batches) = execute(plan, &state).await;
+    let mut rows = Vec::new();
+    for batch in &batches {
+        let timestamp_index = batch
+            .schema()
+            .fields()
+            .iter()
+            .position(|field| matches!(field.data_type(), ArrowDataType::Timestamp(..)))
+            .expect("no timestamp column");
+        let value_index = batch
+            .schema()
+            .fields()
+            .iter()
+            .position(|field| field.data_type() == &ArrowDataType::Float64)
+            .expect("no Float64 value column");
+        let timestamps = batch
+            .column(timestamp_index)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("timestamp column is not a millisecond timestamp");
+        let values = batch
+            .column(value_index)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("value column is not Float64");
+        rows.extend(
+            timestamps
+                .iter()
+                .zip(values.iter())
+                .map(|(timestamp, value)| (timestamp.unwrap(), value.unwrap())),
+        );
+    }
+    rows.sort_by_key(|(timestamp, _)| *timestamp);
+    rows
+}
+
+#[tokio::test]
+async fn subquery_own_offset_shifts_the_inner_window_but_keeps_evaluation_timestamps() {
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_probe[20s:10s] offset 30s)",
+            45,
+            45,
+            1
+        )
+        .await,
+        vec![(45_000, 3.0)],
+    );
+    assert_eq!(
+        run_subquery_offset_probe("sum_over_time(subquery_offset_probe[20s:10s])", 15, 15, 1).await,
+        vec![(15_000, 3.0)],
+    );
+
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_probe[20s:10s] offset 30s)",
+            30,
+            60,
+            30
+        )
+        .await,
+        vec![(30_000, 1.0), (60_000, 7.0)],
+    );
+    assert_eq!(
+        run_subquery_offset_probe("sum_over_time(subquery_offset_probe[20s:10s])", 0, 30, 30).await,
+        vec![(0, 1.0), (30_000, 7.0)],
+    );
+
+    // Negative offsets look ahead while retaining outer timestamps.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_probe[20s:10s] offset -30s)",
+            0,
+            30,
+            30
+        )
+        .await,
+        vec![(0, 7.0), (30_000, 13.0)],
+    );
+    assert_eq!(
+        run_subquery_offset_probe("sum_over_time(subquery_offset_probe[20s:10s])", 30, 60, 30)
+            .await,
+        vec![(30_000, 7.0), (60_000, 13.0)],
+    );
+}
+
+/// Expectations match Prometheus v3.14.0.
+#[tokio::test]
+async fn subquery_inner_points_are_anchored_on_absolute_step_multiples() {
+    assert_eq!(
+        run_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[20s:10s])", 45, 45, 1)
+            .await,
+        vec![(45_000, 7.0)],
+    );
+
+    // An off-grid offset distinguishes absolute anchoring from re-phasing.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s] offset 5s)",
+            30,
+            30,
+            1
+        )
+        .await,
+        vec![(30_000, 3.0)],
+    );
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s] offset 5s)",
+            45,
+            45,
+            1
+        )
+        .await,
+        vec![(45_000, 7.0)],
+    );
+
+    // The window starts before the first sample.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s] offset 15s)",
+            30,
+            30,
+            1
+        )
+        .await,
+        vec![(30_000, 1.0)],
+    );
+
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s] offset -5s)",
+            15,
+            15,
+            1
+        )
+        .await,
+        vec![(15_000, 3.0)],
+    );
+
+    // The negative grid start exercises Euclidean alignment.
+    assert_eq!(
+        run_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[40s:10s])", 15, 15, 1)
+            .await,
+        vec![(15_000, 1.0)],
+    );
+
+    // Multi-step evaluation starts off the subquery grid.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s])",
+            35,
+            65,
+            30
+        )
+        .await,
+        vec![(35_000, 5.0), (65_000, 11.0)],
+    );
+
+    // Child points reach no sample at the first evaluation.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s] offset 30s)",
+            30,
+            60,
+            30
+        )
+        .await,
+        vec![(60_000, 5.0)],
+    );
+}
+
+#[test]
+fn subquery_child_window_is_the_child_grid_window() {
+    let child_window = PromPlanner::subquery_child_window;
+    // Exclusive lower bound; upper bound is the last parent evaluation step.
+    assert_eq!(
+        child_window(30_000, 60_000, 10_000, 0, 20_000, 10_000).unwrap(),
+        Some((20_000, 60_000))
+    );
+    assert_eq!(
+        child_window(45_000, 60_000, 10_000, 0, 20_000, 10_000).unwrap(),
+        Some((30_000, 55_000))
+    );
+    assert_eq!(
+        child_window(25_000, 60_000, 10_000, 0, 20_000, 10_000).unwrap(),
+        Some((10_000, 55_000))
+    );
+    assert_eq!(
+        child_window(35_000, 65_000, 30_000, 0, 20_000, 10_000).unwrap(),
+        Some((20_000, 65_000))
+    );
+    assert_eq!(
+        child_window(0, 55_000, 30_000, 0, 20_000, 10_000).unwrap(),
+        Some((-10_000, 30_000))
+    );
+    // A nonempty child window can contribute no parent rows.
+    assert_eq!(
+        child_window(35_000, 65_000, 10_000, 0, 5_000, 10_000).unwrap(),
+        Some((40_000, 65_000))
+    );
+    // The first child point is past the parent’s last evaluation.
+    assert_eq!(
+        child_window(35_000, 44_000, 10_000, 0, 5_000, 10_000).unwrap(),
+        None
+    );
+    assert_eq!(
+        child_window(30_000, 30_000, 1_000, 5_000, 20_000, 10_000).unwrap(),
+        Some((10_000, 25_000))
+    );
+    assert_eq!(
+        child_window(15_000, 15_000, 1_000, -5_000, 20_000, 10_000).unwrap(),
+        Some((10_000, 20_000))
+    );
+    // Boundaries before the epoch floor towards minus infinity.
+    assert_eq!(
+        child_window(-15_000, -15_000, 1_000, 0, 20_000, 10_000).unwrap(),
+        Some((-30_000, -15_000))
+    );
+    assert_eq!(
+        child_window(-45_000, -45_000, 1_000, -10_000, 20_000, 10_000).unwrap(),
+        Some((-50_000, -35_000))
+    );
+    // A grid start before the first sample is not clamped to it.
+    assert_eq!(
+        child_window(0, 0, 1_000, 0, 20_000, 10_000).unwrap(),
+        Some((-10_000, 0))
+    );
+    // A zero parent interval leaves the upper bound unaligned.
+    assert_eq!(
+        child_window(0, 55_000, 0, 0, 20_000, 10_000).unwrap(),
+        Some((-10_000, 55_000))
+    );
+
+    // Only the derived start overflows.
+    let err = child_window(i64::MIN + 1_000, i64::MIN + 1_000, 1_000, 0, 2_000, 10).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::promql::error::Error::SubqueryTimestampOutOfRange { timestamp, .. }
+                if timestamp.contains("grid start") && timestamp.contains("-9223372036854776800")
+        ),
+        "{err}"
+    );
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err}");
+    // Only the derived end overflows.
+    let err = child_window(i64::MAX - 1_000, i64::MAX - 1_000, 1, -2_000, 3_000, 10).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::promql::error::Error::SubqueryTimestampOutOfRange { timestamp, .. }
+                if timestamp.contains("grid end") && timestamp.contains("9223372036854776807")
+        ),
+        "{err}"
+    );
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err}");
+    // The wide window is nonempty even though its start overflows.
+    let err = child_window(i64::MIN, i64::MAX, 10_000, i64::MAX, i64::MAX, 1_000).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::promql::error::Error::SubqueryTimestampOutOfRange { timestamp, .. }
+                if timestamp.contains("grid start")
+        ),
+        "{err}"
+    );
+    // Both derived bounds overflow; report the exact start without clipping.
+    let err = child_window(i64::MAX - 1_000, i64::MAX - 1_000, 1, i64::MIN, 10, 1).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::promql::error::Error::SubqueryTimestampOutOfRange { timestamp, .. }
+                if timestamp.contains("grid start")
+                    && timestamp.contains("18446744073709550606")
+        ),
+        "{err}"
+    );
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err}");
+    // Check emptiness before converting overflowing bounds.
+    assert_eq!(
+        child_window(i64::MAX, i64::MAX, 1_000, i64::MIN, 0, 1_000).unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn subquery_child_window_without_a_step_reports_no_row() {
+    // The first child point is after the parent’s only evaluation.
+    assert_eq!(
+        run_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[5s:10s])", 35, 44, 10)
+            .await,
+        vec![],
+    );
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[5s:10s]) or vector(1)",
+            35,
+            44,
+            10
+        )
+        .await,
+        vec![(35_000, 1.0)],
+    );
+    // Multi-step: every step of the grid reports no child point and falls back.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[5s:10s]) or vector(1)",
+            35,
+            65,
+            10
+        )
+        .await,
+        vec![(35_000, 1.0), (45_000, 1.0), (55_000, 1.0), (65_000, 1.0)],
+    );
+    // A nonempty child grid can yield no parent rows; a longer range does.
+    assert_eq!(
+        run_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[5s:10s])", 35, 65, 10)
+            .await,
+        vec![],
+    );
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s])",
+            35,
+            65,
+            10
+        )
+        .await,
+        vec![(35_000, 5.0), (45_000, 7.0), (55_000, 9.0), (65_000, 11.0)],
+    );
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s] offset 5s)",
+            35,
+            65,
+            10
+        )
+        .await,
+        vec![(35_000, 5.0), (45_000, 7.0), (55_000, 9.0), (65_000, 11.0)],
+    );
+    // A negative offset makes the short window reach a child point.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[5s:10s] offset -5s)",
+            35,
+            44,
+            10
+        )
+        .await,
+        vec![(35_000, 4.0)],
+    );
+
+    // An empty outer window suppresses inner results, but not an outer fallback.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time((sum_over_time(subquery_offset_offgrid[5s:10s]))[5s:10s])",
+            35,
+            44,
+            10
+        )
+        .await,
+        vec![],
+    );
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time((sum_over_time(subquery_offset_offgrid[5s:10s]))[5s:10s]) or vector(1)",
+            35,
+            44,
+            10
+        )
+        .await,
+        vec![(35_000, 1.0)],
+    );
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time((sum_over_time(subquery_offset_offgrid[5s:10s]) or vector(1))[5s:10s])",
+            35,
+            44,
+            10
+        )
+        .await,
+        vec![],
+    );
+}
+
+#[tokio::test]
+async fn subquery_rejects_invalid_range_and_zero_step() {
+    let err =
+        plan_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[5s:10s])", 44, 35, 10)
+            .await
+            .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::promql::error::Error::InvalidTimeRange {
+                start: 44_000,
+                end: 35_000,
+                ..
+            }
+        ),
+        "{err}"
+    );
+    let err = plan_subquery_offset_probe(
+        "sum_over_time((sum_over_time(subquery_offset_offgrid[5s:10s]))[5s:10s])",
+        44,
+        35,
+        10,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err}");
+
+    // `[5s:0]` parses to zero; planning rejects it.
+    let err = plan_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[5s:0])", 60, 60, 1)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, crate::promql::error::Error::ZeroRangeSelector { .. }),
+        "{err}"
+    );
+    // An omitted child step inherits the zero parent step.
+    let err = plan_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[5s:])", 60, 60, 0)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, crate::promql::error::Error::ZeroRangeSelector { .. }),
+        "{err}"
+    );
+}
+
+/// Rejects nonempty child windows whose derived millisecond bounds are unrepresentable.
+#[tokio::test]
+async fn subquery_rejects_a_child_window_out_of_the_representable_range() {
+    // Offset is i64::MAX milliseconds; only the derived start overflows.
+    let err = plan_subquery_offset_probe(
+        "sum_over_time(subquery_offset_offgrid[21366776s:10s] offset 292471208y21366775s807ms)",
+        0,
+        60,
+        10,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::promql::error::Error::SubqueryTimestampOutOfRange { timestamp, .. }
+                if timestamp.contains("grid start = -9223372058221550000")
+        ),
+        "{err}"
+    );
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err}");
+    // Offset is -i64::MAX milliseconds; only the derived end overflows.
+    let err = plan_subquery_offset_probe(
+        "sum_over_time(subquery_offset_offgrid[20s:10s] offset -292471208y21366775s807ms)",
+        0,
+        60,
+        10,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::promql::error::Error::SubqueryTimestampOutOfRange { timestamp, .. }
+                if timestamp.contains("grid end = 9223372036854835807")
+        ),
+        "{err}"
+    );
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err}");
 }
 
 #[tokio::test]
@@ -5214,7 +6503,7 @@ async fn test_label_join() {
 
     let expected = r#"
 Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8]
-  Projection: up.timestamp, up.field_0, concat_ws(Utf8(","), up.tag_1, up.tag_2, up.tag_3) AS foo, up.tag_0, up.tag_1, up.tag_2, up.tag_3 [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8]
+  Projection: up.timestamp, up.field_0, nullif(concat_ws(Utf8(","), coalesce(up.tag_1, Utf8("")), coalesce(up.tag_2, Utf8("")), coalesce(up.tag_3, Utf8(""))), Utf8("")) AS foo, up.tag_0, up.tag_1, up.tag_2, up.tag_3 [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8]
     PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
       PromSeriesDivide: tags=["tag_0", "tag_1", "tag_2", "tag_3"] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
         Sort: up.tag_0 ASC NULLS FIRST, up.tag_1 ASC NULLS FIRST, up.tag_2 ASC NULLS FIRST, up.tag_3 ASC NULLS FIRST, up.timestamp ASC NULLS FIRST [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
@@ -5249,7 +6538,7 @@ async fn test_label_replace() {
 
     let expected = r#"
 Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8]
-  Projection: up.timestamp, up.field_0, regexp_replace(up.tag_0, Utf8("^(?s:(.*):.*)$"), Utf8("$1")) AS foo, up.tag_0 [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8]
+  Projection: up.timestamp, up.field_0, CASE WHEN regexp_like(coalesce(up.tag_0, Utf8("")), Utf8("^(?s:(.*):.*)$")) THEN nullif(regexp_replace(coalesce(up.tag_0, Utf8("")), Utf8("^(?s:(.*):.*)$"), Utf8("$1")), Utf8("")) ELSE Utf8(NULL) END AS foo, up.tag_0 [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8]
     PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
       PromSeriesDivide: tags=["tag_0"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
         Sort: up.tag_0 ASC NULLS FIRST, up.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
@@ -7728,7 +9017,7 @@ async fn test_mixed_or_routes_float_histogram_and_label_functions() {
         };
         let state = build_query_engine_state();
         let (mut exprs, _) = planner
-            .create_function_expr(&call.func, vec![], input.schema(), &state)
+            .create_function_expr(&call.func, vec![], input.schema(), &state, None)
             .unwrap();
         exprs.insert(0, planner.create_time_index_column_expr().unwrap());
         exprs.extend(planner.create_tag_column_exprs().unwrap());
@@ -7781,7 +9070,7 @@ async fn test_mixed_or_routes_float_histogram_and_label_functions() {
     let args = planner.create_function_args(&call.args.args).unwrap();
     let state = build_query_engine_state();
     let (mut exprs, _) = planner
-        .create_function_expr(&call.func, args.literals, input.schema(), &state)
+        .create_function_expr(&call.func, args.literals, input.schema(), &state, None)
         .unwrap();
     exprs.insert(0, planner.create_time_index_column_expr().unwrap());
     exprs.extend(planner.create_tag_column_exprs().unwrap());

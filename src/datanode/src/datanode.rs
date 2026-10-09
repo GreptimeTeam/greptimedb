@@ -36,9 +36,10 @@ use common_stat::ResourceStatImpl;
 use common_telemetry::{error, info, warn};
 use common_wal::config::DatanodeWalConfig;
 use common_wal::config::kafka::DatanodeKafkaConfig;
-use common_wal::config::object_store::ObjectStoreWalConfig;
+use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATION};
 use common_wal::config::raft_engine::RaftEngineConfig;
 use file_engine::engine::FileRegionEngine;
+use log_store::ObjectStoreLogStore;
 use log_store::kafka::log_store::KafkaLogStore;
 use log_store::kafka::{GlobalIndexCollector, default_index_file};
 use log_store::noop::log_store::NoopLogStore;
@@ -49,12 +50,14 @@ use mito2::config::MitoConfig;
 use mito2::engine::{MitoEngine, MitoEngineBuilder};
 use mito2::region::opener::PartitionExprFetcherRef;
 use mito2::sst::file_ref::{FileReferenceManager, FileReferenceManagerRef};
+use object_store::ObjectStore;
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::util::normalize_dir;
 use query::QueryEngineFactory;
 use query::dummy_catalog::{DummyCatalogManager, TableProviderFactoryRef};
 use servers::server::ServerHandlers;
 use snafu::{OptionExt, ResultExt, ensure};
+use store_api::logstore::LogStore;
 use store_api::path_utils::WAL_DIR;
 use store_api::region_engine::{
     RegionEngineRef, RegionRole, SetRegionRoleStateResponse, SettableRegionRoleState,
@@ -67,7 +70,7 @@ use crate::error::{
     self, BuildDatanodeSnafu, BuildMetricEngineSnafu, BuildMitoEngineSnafu, CreateDirSnafu,
     DataFusionSnafu, DuplicateRegionEngineConfigSnafu, GetMetadataSnafu,
     InvalidObjectStoreWalConfigSnafu, MissingCacheSnafu, MissingNodeIdSnafu,
-    ObjectStoreWalNotSupportedSnafu, OpenLogStoreSnafu, Result, ShutdownInstanceSnafu,
+    ObjectStoreWalNotStandaloneSnafu, OpenLogStoreSnafu, Result, ShutdownInstanceSnafu,
     ShutdownServerSnafu, StartServerSnafu,
 };
 use crate::event_listener::{
@@ -90,6 +93,7 @@ pub struct Datanode {
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     leases_notifier: Option<Arc<Notify>>,
     plugins: Plugins,
+    object_store_log_store: Option<Arc<ObjectStoreLogStore>>,
 }
 
 impl Datanode {
@@ -135,25 +139,51 @@ impl Datanode {
         self.services = services;
     }
 
+    /// Shuts down every component in order. A failed step does not skip the
+    /// later ones; the first error is returned and the rest are logged.
     pub async fn shutdown(&mut self) -> Result<()> {
-        self.services
-            .shutdown_all()
-            .await
-            .context(ShutdownServerSnafu)?;
+        let mut first_error = None;
+        record_shutdown_error(
+            &mut first_error,
+            self.services
+                .shutdown_all()
+                .await
+                .context(ShutdownServerSnafu),
+        );
 
         let _ = self.greptimedb_telemetry_task.stop().await;
         if let Some(heartbeat_task) = &self.heartbeat_task {
-            heartbeat_task
-                .close()
-                .map_err(BoxedError::new)
-                .context(ShutdownInstanceSnafu)?;
+            record_shutdown_error(
+                &mut first_error,
+                heartbeat_task
+                    .close()
+                    .map_err(BoxedError::new)
+                    .context(ShutdownInstanceSnafu),
+            );
         }
-        self.region_server.stop().await?;
-        Ok(())
+        record_shutdown_error(&mut first_error, self.region_server.stop().await);
+        if let Some(log_store) = &self.object_store_log_store {
+            record_shutdown_error(
+                &mut first_error,
+                log_store
+                    .stop()
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(ShutdownInstanceSnafu),
+            );
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     pub fn region_server(&self) -> RegionServer {
         self.region_server.clone()
+    }
+
+    /// Returns the object store log store when the datanode runs on the object
+    /// store WAL.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn object_store_log_store(&self) -> Option<Arc<ObjectStoreLogStore>> {
+        self.object_store_log_store.clone()
     }
 
     pub fn plugins(&self) -> Plugins {
@@ -173,6 +203,8 @@ pub struct DatanodeBuilder {
     local_file_access: LocalFileAccess,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<mito2::extension::BoxedExtensionRangeProviderFactory>,
+    /// Set as soon as the object store log store exists so that a failed build can stop it.
+    object_store_log_store: Option<Arc<ObjectStoreLogStore>>,
 }
 
 impl DatanodeBuilder {
@@ -189,6 +221,7 @@ impl DatanodeBuilder {
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
             topic_stats_reporter: None,
+            object_store_log_store: None,
         }
     }
 
@@ -256,6 +289,22 @@ impl DatanodeBuilder {
     }
 
     pub async fn build(mut self) -> Result<Datanode> {
+        self.try_build().await
+    }
+
+    /// Builds the datanode and stops the object store log store if a later step fails.
+    async fn try_build(&mut self) -> Result<Datanode> {
+        let result = self.build_inner().await;
+        if result.is_err()
+            && let Some(log_store) = &self.object_store_log_store
+            && let Err(err) = log_store.stop().await
+        {
+            warn!(err; "Failed to stop the object store log store after a failed build");
+        }
+        result
+    }
+
+    async fn build_inner(&mut self) -> Result<Datanode> {
         validate_region_engine_config(&self.opts.region_engine)?;
         let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
         set_default_prefix(self.opts.default_column_prefix.as_deref())
@@ -269,6 +318,7 @@ impl DatanodeBuilder {
         // writable upon open.
         let controlled_by_metasrv = meta_client.is_some();
         if let DatanodeWalConfig::ObjectStore(config) = &self.opts.wal {
+            ensure!(!controlled_by_metasrv, ObjectStoreWalNotStandaloneSnafu);
             validate_object_store_wal_config(config)?;
         }
 
@@ -372,6 +422,7 @@ impl DatanodeBuilder {
             region_event_receiver,
             leases_notifier,
             plugins: self.plugins.clone(),
+            object_store_log_store: self.object_store_log_store.take(),
         })
     }
 
@@ -660,9 +711,55 @@ impl DatanodeBuilder {
 
                 builder.try_build().await.context(BuildMitoEngineSnafu)?
             }
-            DatanodeWalConfig::ObjectStore(_) => return ObjectStoreWalNotSupportedSnafu.fail(),
+            DatanodeWalConfig::ObjectStore(object_store_config) => {
+                let object_store = wal_object_store(
+                    &object_store_manager,
+                    &opts.storage,
+                    &object_store_config.storage_provider,
+                )?;
+                let node_id = opts.node_id.context(MissingNodeIdSnafu)?;
+                let log_store =
+                    Self::build_object_store_log_store(object_store, object_store_config, node_id)
+                        .await?;
+                self.object_store_log_store = Some(log_store.clone());
+
+                let builder = MitoEngineBuilder::new(
+                    &opts.storage.data_home,
+                    config,
+                    log_store,
+                    object_store_manager,
+                    schema_metadata_manager,
+                    file_ref_manager,
+                    partition_expr_fetcher,
+                    plugins,
+                );
+
+                #[cfg(feature = "enterprise")]
+                let builder = builder.with_extension_range_provider_factory(
+                    self.extension_range_provider_factory.take(),
+                );
+
+                builder.try_build().await.context(BuildMitoEngineSnafu)?
+            }
         };
         Ok(mito_engine)
+    }
+
+    /// Builds [ObjectStoreLogStore] under the node prefix of `node_id` in the
+    /// standalone generation, the prefix the regions persist in their WAL options.
+    async fn build_object_store_log_store(
+        object_store: ObjectStore,
+        config: &ObjectStoreWalConfig,
+        node_id: u64,
+    ) -> Result<Arc<ObjectStoreLogStore>> {
+        info!(
+            "Creating object store logstore with config: {:?}, node id: {}",
+            config, node_id
+        );
+        ObjectStoreLogStore::try_new(object_store, config, node_id, STANDALONE_GENERATION)
+            .await
+            .map_err(Box::new)
+            .context(OpenLogStoreSnafu)
     }
 
     /// Builds [RaftEngineLogStore].
@@ -712,6 +809,43 @@ impl DatanodeBuilder {
     ) -> GlobalIndexCollector {
         GlobalIndexCollector::new(dump_index_interval, operator, path)
     }
+}
+
+/// Keeps the first shutdown error and logs the later ones.
+pub(crate) fn record_shutdown_error(first_error: &mut Option<error::Error>, result: Result<()>) {
+    if let Err(err) = result {
+        if first_error.is_none() {
+            *first_error = Some(err);
+        } else {
+            warn!(err; "Ignored a later shutdown error");
+        }
+    }
+}
+
+/// Returns the object store that holds the WAL objects: the default one for an
+/// empty `storage_provider`, otherwise the configured provider with that name.
+fn wal_object_store(
+    object_store_manager: &ObjectStoreManager,
+    storage: &StorageConfig,
+    storage_provider: &str,
+) -> Result<ObjectStore> {
+    if storage_provider.is_empty() {
+        return Ok(object_store_manager.default_object_store().clone());
+    }
+    object_store_manager
+        .find(storage_provider)
+        .cloned()
+        .with_context(|| {
+            let configured = std::iter::once(&storage.store)
+                .chain(storage.providers.iter())
+                .map(|store| store.config_name())
+                .collect::<Vec<_>>();
+            InvalidObjectStoreWalConfigSnafu {
+                field: "storage_provider",
+                value: storage_provider,
+                reason: format!("must name a configured storage provider, one of {configured:?}"),
+            }
+        })
 }
 
 /// Rejects repeated engine types before their configs can silently overwrite each other.
@@ -777,6 +911,22 @@ fn validate_object_store_wal_config(config: &ObjectStoreWalConfig) -> Result<()>
         InvalidObjectStoreWalConfigSnafu {
             field: "max_batch_bytes",
             value: config.max_batch_bytes.to_string(),
+            reason: "must be greater than 0",
+        }
+    );
+    ensure!(
+        config.max_unpersisted_bytes.as_bytes() > 0,
+        InvalidObjectStoreWalConfigSnafu {
+            field: "max_unpersisted_bytes",
+            value: config.max_unpersisted_bytes.to_string(),
+            reason: "must be greater than 0",
+        }
+    );
+    ensure!(
+        config.max_unpersisted_age > Duration::ZERO,
+        InvalidObjectStoreWalConfigSnafu {
+            field: "max_unpersisted_age",
+            value: format!("{:?}", config.max_unpersisted_age),
             reason: "must be greater than 0",
         }
     );
@@ -907,6 +1057,7 @@ mod tests {
     use std::io::Write;
     use std::path::Path;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use cache::build_datanode_cache_registry;
@@ -923,15 +1074,22 @@ mod tests {
     use common_test_util::temp_dir::{create_named_temp_file, create_temp_dir};
     use common_wal::config::DatanodeWalConfig;
     use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATION};
+    use log_store::ObjectStoreLogStore;
+    use log_store::error::Error as LogStoreError;
+    use meta_client::client::MetaClientBuilder;
     use mito2::engine::MITO_ENGINE_NAME;
+    use object_store::ObjectStore;
+    use object_store::manager::ObjectStoreManager;
+    use store_api::logstore::LogStore;
     use store_api::region_request::RegionRequest;
     use store_api::storage::RegionId;
 
-    use crate::config::{DatanodeOptions, RegionEngineConfig};
+    use crate::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
     use crate::datanode::{
         DatanodeBuilder, validate_object_store_wal_config, validate_region_engine_config,
+        wal_object_store,
     };
-    use crate::error::Error;
+    use crate::error::{self, Error};
     use crate::tests::{MockRegionEngine, mock_region_server};
 
     async fn setup_table_datanode(kv: &KvBackendRef) {
@@ -1041,6 +1199,14 @@ mod tests {
 
     fn is_empty_dir(dir: &Path) -> bool {
         std::fs::read_dir(dir).unwrap().next().is_none()
+    }
+
+    /// Returns true if the store rejects even an empty append, which it does only once stopped.
+    async fn is_stopped(log_store: &ObjectStoreLogStore) -> bool {
+        matches!(
+            log_store.append_batch(vec![]).await,
+            Err(LogStoreError::ObjectStoreWalStopped { .. })
+        )
     }
 
     #[test]
@@ -1163,12 +1329,28 @@ mod tests {
                 },
                 "max_batch_bytes",
             ),
+            (
+                ObjectStoreWalConfig {
+                    max_unpersisted_bytes: ReadableSize(0),
+                    ..Default::default()
+                },
+                "max_unpersisted_bytes",
+            ),
+            (
+                ObjectStoreWalConfig {
+                    max_unpersisted_age: Duration::ZERO,
+                    ..Default::default()
+                },
+                "max_unpersisted_age",
+            ),
         ];
 
         for (config, expected_field) in cases {
             let expected_value = match expected_field {
                 "prefix" => config.prefix.clone(),
                 "flush_interval" => format!("{:?}", config.flush_interval),
+                "max_unpersisted_bytes" => config.max_unpersisted_bytes.to_string(),
+                "max_unpersisted_age" => format!("{:?}", config.max_unpersisted_age),
                 _ => config.max_batch_bytes.to_string(),
             };
             let data_home = create_temp_dir("object-store-wal-invalid-config");
@@ -1187,18 +1369,185 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_rejects_object_store_wal_as_not_supported() {
-        let data_home = create_temp_dir("object-store-wal-not-supported");
+    async fn test_build_rejects_object_store_wal_with_meta_client() {
+        let data_home = create_temp_dir("object-store-wal-meta-client");
+        let meta_client = Arc::new(MetaClientBuilder::datanode_default_options(0).build());
+
+        let mut builder = object_store_wal_builder(
+            data_home.path().to_str().unwrap(),
+            ObjectStoreWalConfig::default(),
+        );
+        builder.with_meta_client(meta_client);
+        let err = build_err(builder).await;
+
+        assert_matches!(err, Error::ObjectStoreWalNotStandalone { .. });
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+        // The builder stops before it creates any storage or log store.
+        assert!(is_empty_dir(data_home.path()));
+    }
+
+    #[tokio::test]
+    async fn test_build_rejects_unknown_wal_storage_provider() {
+        let data_home = create_temp_dir("object-store-wal-unknown-provider");
+        let builder = object_store_wal_builder(
+            data_home.path().to_str().unwrap(),
+            ObjectStoreWalConfig {
+                storage_provider: "s3".to_string(),
+                ..Default::default()
+            },
+        );
+        let err = build_err(builder).await;
+
+        let Error::InvalidObjectStoreWalConfig {
+            field,
+            value,
+            reason,
+            ..
+        } = &err
+        else {
+            panic!("unexpected error: {err:?}");
+        };
+        assert_eq!(*field, "storage_provider");
+        assert_eq!(value, "s3");
+        assert!(reason.contains(r#"["File"]"#), "{reason}");
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+        // No log store is created under the prefix.
+        assert!(!data_home.path().join("wal").exists());
+    }
+
+    #[test]
+    fn test_wal_object_store_selects_provider() {
+        fn fs_object_store(dir: &Path) -> ObjectStore {
+            let builder = object_store::services::Fs::default().root(dir.to_str().unwrap());
+            ObjectStore::new(builder).unwrap()
+        }
+
+        let default_dir = create_temp_dir("wal-object-store-default");
+        let named_dir = create_temp_dir("wal-object-store-named");
+        let mut manager = ObjectStoreManager::new("File", fs_object_store(default_dir.path()));
+        manager.add("Wal-Store", fs_object_store(named_dir.path()));
+        let storage = StorageConfig::default();
+
+        let root = |store: ObjectStore| store.info().root().clone();
+        assert_eq!(
+            root(wal_object_store(&manager, &storage, "").unwrap()),
+            root(manager.default_object_store().clone())
+        );
+        assert_eq!(
+            root(wal_object_store(&manager, &storage, "wal-store").unwrap()),
+            root(manager.find("Wal-Store").unwrap().clone())
+        );
+        assert_matches!(
+            wal_object_store(&manager, &storage, "missing").unwrap_err(),
+            Error::InvalidObjectStoreWalConfig {
+                field: "storage_provider",
+                ..
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_and_shutdown_with_raft_engine_wal() {
+        let data_home = create_temp_dir("raft-engine-wal");
+        let builder = datanode_builder(
+            data_home.path().to_str().unwrap(),
+            DatanodeWalConfig::default(),
+            Arc::new(MemoryKvBackend::new()),
+        );
+
+        let mut datanode = builder.build().await.unwrap();
+        assert!(datanode.object_store_log_store.is_none());
+        assert!(data_home.path().join("wal").exists());
+        datanode.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_build_and_shutdown_with_object_store_wal() {
+        common_telemetry::init_default_ut_logging();
+        let data_home = create_temp_dir("object-store-wal");
         let builder = object_store_wal_builder(
             data_home.path().to_str().unwrap(),
             ObjectStoreWalConfig::default(),
         );
-        let err = build_err(builder).await;
 
-        assert_matches!(err, Error::ObjectStoreWalNotSupported { .. });
-        assert_eq!(StatusCode::Unsupported, err.status_code());
-        // No log store is created under the prefix.
-        assert!(!data_home.path().join("wal").exists());
+        let mut datanode = builder.build().await.unwrap();
+        let log_store = datanode.object_store_log_store.clone().unwrap();
+        assert!(!is_stopped(&log_store).await);
+        // The store runs under the node prefix derived from the configured root.
+        assert!(format!("{log_store:?}").contains(r#"prefix: "wal/datanodes/0/epochs/0""#));
+
+        datanode.shutdown().await.unwrap();
+        assert!(is_stopped(&log_store).await);
+    }
+
+    #[tokio::test]
+    async fn test_build_with_named_wal_storage_provider() {
+        let data_home = create_temp_dir("object-store-wal-named-provider");
+        // The default file store is registered under its provider name.
+        let builder = object_store_wal_builder(
+            data_home.path().to_str().unwrap(),
+            ObjectStoreWalConfig {
+                storage_provider: "file".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let mut datanode = builder.build().await.unwrap();
+        assert!(datanode.object_store_log_store.is_some());
+        datanode.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_stops_every_engine_and_the_log_store_after_engine_failures() {
+        common_telemetry::init_default_ut_logging();
+        let data_home = create_temp_dir("object-store-wal-shutdown-failure");
+        let builder = object_store_wal_builder(
+            data_home.path().to_str().unwrap(),
+            ObjectStoreWalConfig::default(),
+        );
+        let mut datanode = builder.build().await.unwrap();
+        let log_store = datanode.object_store_log_store.clone().unwrap();
+        // Both engines fail to stop, so whichever the region server stops first fails.
+        let stop_calls = Arc::new(AtomicUsize::new(0));
+        for name in ["failing-a", "failing-b"] {
+            let stop_calls = stop_calls.clone();
+            let (engine, _) = MockRegionEngine::with_custom_apply_fn(name, move |engine| {
+                engine.handle_stop_mock_fn = Some(Box::new(move || {
+                    stop_calls.fetch_add(1, Ordering::Relaxed);
+                    error::UnexpectedSnafu {
+                        violated: "stop failed",
+                    }
+                    .fail()
+                }));
+            });
+            datanode.region_server().register_engine(engine);
+        }
+
+        let err = datanode.shutdown().await.unwrap_err();
+
+        assert_matches!(err, Error::StopRegionEngine { .. });
+        assert_eq!(2, stop_calls.load(Ordering::Relaxed));
+        assert!(is_stopped(&log_store).await);
+    }
+
+    #[tokio::test]
+    async fn test_failed_build_stops_object_store_log_store() {
+        common_telemetry::init_default_ut_logging();
+        let data_home = create_temp_dir("object-store-wal-failed-build");
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        // Regions registered in the metadata but missing on disk fail the region open
+        // that runs after the log store and the engines are built.
+        setup_table_datanode(&(kv_backend.clone() as _)).await;
+        let mut builder = datanode_builder(
+            data_home.path().to_str().unwrap(),
+            DatanodeWalConfig::ObjectStore(ObjectStoreWalConfig::default()),
+            kv_backend,
+        );
+
+        assert!(builder.try_build().await.is_err());
+
+        let log_store = builder.object_store_log_store.as_ref().unwrap();
+        assert!(is_stopped(log_store).await);
     }
 
     #[test]

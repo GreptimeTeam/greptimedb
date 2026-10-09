@@ -14,14 +14,15 @@
 
 use std::collections::BTreeSet;
 use std::ops::Range;
+use std::sync::Arc;
 
-use fastbloom::BloomFilter;
 use greptime_proto::v1::index::BloomFilterMeta;
 use itertools::Itertools;
 
 use crate::Bytes;
 use crate::bloom_filter::error::Result;
 use crate::bloom_filter::reader::{BloomFilterReadMetrics, BloomFilterReader};
+use crate::bloom_filter::{PrehashedBloomFilter, element_hash};
 
 /// Filter bytes one batch of [`BloomFilterApplier::search_groups`] reads. A single row
 /// group larger than this is still read as one batch, so this is not a memory limit; a
@@ -38,7 +39,7 @@ pub struct InListPredicate {
 
 pub struct BloomFilterApplier {
     reader: Box<dyn BloomFilterReader + Send>,
-    meta: BloomFilterMeta,
+    meta: Arc<BloomFilterMeta>,
 }
 
 impl BloomFilterApplier {
@@ -189,7 +190,7 @@ impl BloomFilterApplier {
         &mut self,
         segments: &[usize],
         metrics: Option<&mut BloomFilterReadMetrics>,
-    ) -> Result<(Vec<(u64, usize)>, Vec<BloomFilter>)> {
+    ) -> Result<(Vec<(u64, usize)>, Vec<PrehashedBloomFilter>)> {
         let segment_locations = segments
             .iter()
             .map(|&seg| (self.meta.segment_loc_indices[seg], seg))
@@ -214,11 +215,15 @@ impl BloomFilterApplier {
     fn find_matching_rows(
         &self,
         segment_locations: Vec<(u64, usize)>,
-        bloom_filters: Vec<BloomFilter>,
+        bloom_filters: Vec<PrehashedBloomFilter>,
         predicates: &[InListPredicate],
     ) -> Vec<Range<usize>> {
         let rows_per_segment = self.meta.rows_per_segment as usize;
         let mut matching_row_ranges = Vec::with_capacity(bloom_filters.len());
+        let predicate_hashes = predicates
+            .iter()
+            .map(|p| p.list.iter().map(|v| element_hash(v)).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
 
         // Group segments by their location index (since they have the same bloom filter) and check if they match all predicates
         for ((_loc_index, group), bloom_filter) in segment_locations
@@ -228,12 +233,9 @@ impl BloomFilterApplier {
             .zip(bloom_filters.iter())
         {
             // Check if this bloom filter matches each predicate (AND semantics)
-            let matches_all_predicates = predicates.iter().all(|predicate| {
+            let matches_all_predicates = predicate_hashes.iter().all(|hashes| {
                 // For each predicate, at least one probe must match (OR semantics)
-                predicate
-                    .list
-                    .iter()
-                    .any(|probe| bloom_filter.contains(probe))
+                hashes.iter().any(|hash| bloom_filter.contains(hash))
             });
 
             if !matches_all_predicates {
@@ -401,7 +403,7 @@ mod tests {
         async fn metadata(
             &self,
             metrics: Option<&mut BloomFilterReadMetrics>,
-        ) -> Result<BloomFilterMeta> {
+        ) -> Result<Arc<BloomFilterMeta>> {
             self.inner.metadata(metrics).await
         }
     }

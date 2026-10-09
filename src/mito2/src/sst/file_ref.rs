@@ -77,12 +77,8 @@ impl FileReferenceManager {
     }
 
     fn ref_file_set(&self, region_id: RegionId) -> Option<HashSet<FileRef>> {
-        let file_refs = if let Some(file_refs) = self.files_per_region.get(&region_id) {
-            file_refs.clone()
-        } else {
-            // region id not found.
-            return None;
-        };
+        // region id not found.
+        let file_refs = self.files_per_region.get(&region_id)?.clone();
 
         if file_refs.files.is_empty() {
             // still return an empty manifest to indicate no files are referenced.

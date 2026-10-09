@@ -142,6 +142,16 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "The subquery child window is outside the representable millisecond range: {}",
+        timestamp
+    ))]
+    SubqueryTimestampOutOfRange {
+        timestamp: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Cannot find column {col}"))]
     ColumnNotFound {
         col: String,
@@ -183,6 +193,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Timestamp out of range for the `@` modifier: {}", timestamp))]
+    AtModifierTimestampOutOfRange {
+        timestamp: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Timestamp out of range: {} of {:?}", timestamp, unit))]
     TimestampOutOfRange {
         timestamp: i64,
@@ -194,12 +211,6 @@ pub enum Error {
     #[snafu(display("Time out of the representable millisecond range: {:?}", time))]
     SystemTimeOutOfRange {
         time: SystemTime,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("vector cannot contain metrics with the same labelset"))]
-    SameLabelSet {
         #[snafu(implicit)]
         location: Location,
     },
@@ -231,14 +242,15 @@ impl ErrorExt for Error {
             | ExpectRangeSelector { .. }
             | ZeroRangeSelector { .. }
             | InvalidTimeRange { .. }
+            | SubqueryTimestampOutOfRange { .. }
             | ColumnNotFound { .. }
             | FunctionInvalidArgument { .. }
             | UnsupportedVectorMatch { .. }
             | UnexpectedPlanExpr { .. }
             | UnsupportedMatcherOp { .. }
-            | SameLabelSet { .. }
             | TimestampOutOfRange { .. }
             | SystemTimeOutOfRange { .. }
+            | AtModifierTimestampOutOfRange { .. }
             | InvalidRegularExpression { .. }
             | InvalidDestinationLabelName { .. } => StatusCode::InvalidArguments,
 
