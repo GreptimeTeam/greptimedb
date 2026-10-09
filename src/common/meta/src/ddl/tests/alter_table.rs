@@ -1568,7 +1568,7 @@ async fn test_widen_ts_unit_rejects_incompatible_partition_bounds_before_alterin
             .schema
             .column_schema_by_name("ts")
             .unwrap()
-            .data_type(),
+            .data_type,
         &ConcreteDataType::timestamp_millisecond_datatype()
     );
     let (physical_table_id, physical_table_route) = ddl_context
@@ -1647,7 +1647,7 @@ async fn test_widen_ts_unit_with_compatible_partition_bounds_completes() {
             .schema
             .column_schema_by_name("ts")
             .unwrap()
-            .data_type(),
+            .data_type,
         &ConcreteDataType::timestamp_nanosecond_datatype()
     );
 }
