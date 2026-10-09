@@ -825,7 +825,7 @@ mod tests {
     use datafusion::physical_plan::expressions::PhysicalSortExpr;
     use datafusion::physical_plan::joins::{HashJoinExec, JoinOn, PartitionMode};
     use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
-    use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr};
+    use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr, displayable};
     use datafusion::prelude::{col, lit};
     use datafusion_common::{JoinType, NullEquality, ScalarValue};
     use datafusion_physical_expr::expressions::Column;
@@ -843,6 +843,7 @@ mod tests {
     use table::table::scan::RegionScanExec;
 
     use super::*;
+    use crate::dist_plan::DistPlannerOptions;
     use crate::options::QueryOptions;
     use crate::parser::{QueryLanguageParser, QueryStatement};
     use crate::part_sort::PartSortExec;
@@ -1084,7 +1085,7 @@ mod tests {
         assert!(super::query_stat_counters(&plan).is_none());
     }
 
-    async fn create_test_engine() -> QueryEngineRef {
+    async fn create_test_engine_with_fallback(allow_query_fallback: bool) -> QueryEngineRef {
         let catalog_manager = catalog::memory::new_memory_catalog_manager().unwrap();
         let req = RegisterTableRequest {
             catalog: DEFAULT_CATALOG_NAME.to_string(),
@@ -1094,7 +1095,6 @@ mod tests {
             table: NumbersTable::table(NUMBERS_TABLE_ID),
         };
         catalog_manager.register_table_sync(req).unwrap();
-
         QueryEngineFactory::new(
             catalog_manager,
             None,
@@ -1102,9 +1102,219 @@ mod tests {
             None,
             None,
             false,
-            QueryOptions::default(),
+            QueryOptions {
+                allow_query_fallback,
+                ..QueryOptions::default()
+            },
         )
         .query_engine()
+    }
+
+    async fn create_test_engine() -> QueryEngineRef {
+        create_test_engine_with_fallback(false).await
+    }
+
+    #[tokio::test]
+    async fn test_query_fallback_request_overrides_engine_default() {
+        for server_default in [false, true] {
+            let engine = create_test_engine_with_fallback(server_default).await;
+            for session_default in [None, Some(false), Some(true)] {
+                for request in [None, Some("false"), Some("true")] {
+                    let mut ctx = QueryContextBuilder::default().build();
+                    if let Some(value) = session_default {
+                        ctx.configuration_parameter()
+                            .set_allow_query_fallback(value);
+                    }
+                    if let Some(value) = request {
+                        ctx.set_extension(QUERY_FALLBACK_HINT, value);
+                    }
+                    let engine_ctx = engine.engine_context(Arc::new(ctx)).unwrap();
+                    let fallback = engine_ctx
+                        .state()
+                        .config_options()
+                        .extensions
+                        .get::<DistPlannerOptions>()
+                        .is_some_and(|options| options.allow_query_fallback);
+                    assert_eq!(
+                        fallback,
+                        request
+                            .map(|v| v == "true")
+                            .or(session_default)
+                            .unwrap_or(server_default),
+                        "server={server_default}, session={session_default:?}, request={request:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn query_options_apply_to_engine_context_without_mutating_defaults() {
+        let engine = create_test_engine().await;
+        let mut ctx = QueryContextBuilder::default().build();
+        ctx.configuration_parameter()
+            .set_query_option("datafusion.optimizer.repartition_joins", "true")
+            .unwrap();
+        ctx.configuration_parameter()
+            .set_query_option("datafusion.optimizer.prefer_hash_join", "true")
+            .unwrap();
+        ctx.configuration_parameter()
+            .set_query_option("query.parallelism", "8")
+            .unwrap();
+        ctx.configuration_parameter().set_allow_query_fallback(true);
+        ctx.set_extension("query_parallelism", "3");
+        ctx.set_extension("datafusion.optimizer.prefer_hash_join", "false");
+
+        let engine_ctx = engine.engine_context(Arc::new(ctx)).unwrap();
+        let config = engine_ctx.state().config_options();
+        assert!(config.optimizer.repartition_joins);
+        assert!(!config.optimizer.prefer_hash_join);
+        assert_eq!(engine_ctx.state().config().target_partitions(), 3);
+        assert!(
+            config
+                .extensions
+                .get::<DistPlannerOptions>()
+                .unwrap()
+                .allow_query_fallback
+        );
+        assert!(
+            engine
+                .engine_context(QueryContext::arc())
+                .unwrap()
+                .state()
+                .config_options()
+                .optimizer
+                .prefer_hash_join
+        );
+    }
+
+    #[tokio::test]
+    async fn query_option_snapshot_survives_query_context_wire_round_trip() {
+        let engine = create_test_engine().await;
+        let mut ctx = QueryContextBuilder::default().build();
+        ctx.configuration_parameter()
+            .set_query_option("datafusion.optimizer.repartition_joins", "true")
+            .unwrap();
+        ctx.configuration_parameter()
+            .set_query_option("query.parallelism", "7")
+            .unwrap();
+        ctx.configuration_parameter()
+            .set_allow_query_fallback(false);
+        ctx.set_extension("query.enable_remote_dynamic_filter_pushdown", "false");
+        ctx.set_extension("flow.return_region_seq", "true");
+
+        let original_ctx = Arc::new(ctx);
+        let first = engine.engine_context(original_ctx.clone()).unwrap();
+        original_ctx
+            .configuration_parameter()
+            .set_query_option("query.parallelism", "9")
+            .unwrap();
+        let remote_ctx = QueryContext::from(api::v1::QueryContext::from(
+            first.query_ctx().as_ref().clone(),
+        ));
+        let remote = engine.engine_context(Arc::new(remote_ctx)).unwrap();
+        let config = remote.state().config_options();
+        assert!(config.optimizer.repartition_joins);
+        assert_eq!(remote.state().config().target_partitions(), 7);
+        assert!(
+            !config
+                .extensions
+                .get::<DistPlannerOptions>()
+                .unwrap()
+                .allow_query_fallback
+        );
+        assert_eq!(
+            remote
+                .query_ctx()
+                .extension("query.enable_remote_dynamic_filter_pushdown"),
+            Some("false")
+        );
+        assert_eq!(
+            remote.query_ctx().extension("flow.return_region_seq"),
+            Some("true")
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_query_options_fail_engine_context_creation() {
+        let engine = create_test_engine().await;
+        let mut ctx = QueryContextBuilder::default().build();
+        ctx.set_extension("datafusion.optimizer.repartition_joins", "not-a-bool");
+        let error = engine.engine_context(Arc::new(ctx)).unwrap_err();
+        use common_error::ext::ErrorExt;
+        assert_eq!(
+            error.status_code(),
+            common_error::status_code::StatusCode::InvalidArguments
+        );
+
+        let mut ctx = QueryContextBuilder::default().build();
+        ctx.set_extension("datafusion.execution.batch_size", "12");
+        let error = engine.engine_context(Arc::new(ctx)).unwrap_err();
+        assert_eq!(
+            error.status_code(),
+            common_error::status_code::StatusCode::InvalidArguments
+        );
+
+        let mut ctx = QueryContextBuilder::default().build();
+        ctx.set_extension("flow.scheduled_time_millis", "not-a-time");
+        let context = Arc::new(ctx);
+        let stmt = QueryLanguageParser::parse_sql("SELECT 1", &QueryContext::arc()).unwrap();
+        let error = engine.planner().plan(&stmt, context).await.unwrap_err();
+        assert_eq!(
+            error.status_code(),
+            common_error::status_code::StatusCode::InvalidArguments
+        );
+    }
+
+    #[tokio::test]
+    async fn approved_optimizer_option_changes_join_plan_without_changing_results() {
+        let engine = create_test_engine().await;
+        let sql = "SELECT l.number FROM numbers l JOIN numbers r ON l.number = r.number WHERE l.number < 4 ORDER BY l.number";
+        let mut plans = Vec::new();
+        let mut results = Vec::new();
+        for prefer_hash_join in [true, false] {
+            let mut ctx = QueryContextBuilder::default().build();
+            ctx.set_extension(
+                "datafusion.optimizer.prefer_hash_join",
+                if prefer_hash_join { "true" } else { "false" },
+            );
+            ctx.set_extension(QUERY_PARALLELISM_HINT, "2");
+            let context = Arc::new(ctx);
+            let stmt = QueryLanguageParser::parse_sql(sql, &context).unwrap();
+            let logical_plan = engine.planner().plan(&stmt, context.clone()).await.unwrap();
+            let output = engine.execute(logical_plan, context).await.unwrap();
+            plans.push(
+                displayable(output.meta.plan.as_ref().unwrap().as_ref())
+                    .indent(true)
+                    .to_string(),
+            );
+            let OutputData::Stream(stream) = output.data else {
+                panic!("expected query result stream")
+            };
+            results.push(util::collect(stream).await.unwrap());
+        }
+        assert!(plans[0].contains("HashJoinExec"), "{}", plans[0]);
+        assert!(plans[1].contains("SortMergeJoinExec"), "{}", plans[1]);
+        let values = results
+            .iter()
+            .map(|batches| {
+                batches
+                    .iter()
+                    .flat_map(|batch| {
+                        batch
+                            .column(0)
+                            .as_any()
+                            .downcast_ref::<datafusion::arrow::array::UInt32Array>()
+                            .unwrap()
+                            .values()
+                            .iter()
+                            .copied()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values[0], values[1]);
+        assert_eq!(values[0], vec![0, 1, 2, 3]);
     }
 
     #[tokio::test]

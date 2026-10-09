@@ -414,8 +414,95 @@ mod test {
     use session::context::{Channel, QueryContext};
     use sql::ast::{Expr, Value};
 
-    use super::set_skip_wal;
+    use super::{set_query_option, set_skip_wal};
     use crate::statement::set::parse_pg_query_timeout_input;
+
+    #[test]
+    fn test_set_query_option_storage_validation_and_isolation() {
+        let session = Session::new(None, Channel::Mysql, Default::default(), 0);
+        let ctx = session.new_query_context();
+        let other = Session::new(None, Channel::Mysql, Default::default(), 1);
+
+        assert!(
+            set_query_option(
+                "query_parallelism",
+                vec![Expr::Value(Value::Number("8".into(), false).into())],
+                ctx.clone(),
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            ctx.configuration_parameter()
+                .query_options()
+                .get("query.parallelism"),
+            Some(&"8".to_string())
+        );
+        assert!(
+            set_query_option(
+                "QUERY.ALLOW_QUERY_FALLBACK",
+                vec![Expr::Value(Value::Boolean(false).into())],
+                ctx.clone(),
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            ctx.configuration_parameter()
+                .query_options()
+                .get("query.allow_query_fallback"),
+            Some(&"false".to_string())
+        );
+        assert!(
+            other
+                .new_query_context()
+                .configuration_parameter()
+                .query_options()
+                .is_empty()
+        );
+        let mut hinted = ctx.as_ref().clone();
+        hinted.set_extension("query_parallelism", "16");
+        assert_eq!(
+            hinted
+                .effective_query_options()
+                .unwrap()
+                .get("query.parallelism"),
+            Some(&"16".to_string())
+        );
+        assert_eq!(
+            ctx.configuration_parameter()
+                .query_options()
+                .get("query.parallelism"),
+            Some(&"8".to_string())
+        );
+        assert!(!set_query_option("unrelated_client_option", vec![], ctx.clone()).unwrap());
+        assert!(
+            !set_query_option(
+                "unrelated_client_option",
+                vec![Expr::Identifier(sql::ast::Ident::new("true"))],
+                ctx.clone(),
+            )
+            .unwrap()
+        );
+        for (key, values) in [
+            (
+                "query.unknown",
+                vec![Expr::Value(Value::Boolean(true).into())],
+            ),
+            (
+                "datafusion.execution.batch_size",
+                vec![Expr::Value(Value::Number("1".into(), false).into())],
+            ),
+            (
+                "query.parallelism",
+                vec![Expr::Identifier(sql::ast::Ident::new("true"))],
+            ),
+            (
+                "query.allow_query_fallback",
+                vec![Expr::Value(Value::Boolean(true).into()); 2],
+            ),
+        ] {
+            assert!(set_query_option(key, values, ctx.clone()).is_err(), "{key}");
+        }
+    }
 
     #[test]
     fn test_set_skip_wal() {
