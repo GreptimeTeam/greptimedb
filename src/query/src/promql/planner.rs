@@ -2160,6 +2160,42 @@ impl PromPlanner {
             query_engine_state,
             range_fold_offset,
         )?;
+        // Lower dynamic clamps here to avoid mixed-shape SQL clamp arguments.
+        if matches!(func.name, "clamp_min" | "clamp_max")
+            && args
+                .literals
+                .iter()
+                .any(|param| matches!(param, ScalarParam::Dynamic(_)))
+        {
+            for expr in &mut func_exprs {
+                if let DfExpr::Alias(alias) = expr
+                    && let DfExpr::ScalarFunction(call) = alias.expr.as_ref()
+                    && matches!(call.func.name(), "clamp_min" | "clamp_max")
+                    && let [value, bound] = call.args.as_slice()
+                {
+                    let value = value.clone();
+                    let bound = bound.clone();
+                    let value_is_nan = DfExpr::ScalarFunction(ScalarFunction {
+                        func: datafusion_functions::math::isnan(),
+                        args: vec![value.clone()],
+                    });
+                    let bound_is_nan = DfExpr::ScalarFunction(ScalarFunction {
+                        func: datafusion_functions::math::isnan(),
+                        args: vec![bound.clone()],
+                    });
+                    let comparison = if call.func.name() == "clamp_min" {
+                        value.clone().lt(bound.clone())
+                    } else {
+                        value.clone().gt(bound.clone())
+                    };
+                    *alias.expr = when(value.clone().is_null().or(value_is_nan), value.clone())
+                        .when(bound_is_nan, lit(f64::NAN))
+                        .when(comparison, bound)
+                        .otherwise(value)
+                        .context(DataFusionPlanningSnafu)?;
+                }
+            }
+        }
         func_exprs.insert(0, self.create_time_index_column_expr()?);
         func_exprs.extend_from_slice(&self.create_tag_column_exprs()?);
         if let Some(tsid_col) =

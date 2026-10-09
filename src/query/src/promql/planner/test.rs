@@ -8468,7 +8468,7 @@ async fn test_mixed_or_routes_float_histogram_and_label_functions() {
     let args = planner.create_function_args(&call.args.args).unwrap();
     let state = build_query_engine_state();
     let literals = planner
-        .build_scalar_params(&call.func.name, &args.literals, &state)
+        .build_scalar_params(call.func.name, &args.literals, &state)
         .await
         .unwrap();
     let (mut exprs, _) = planner
@@ -8907,6 +8907,13 @@ fn build_function_registry_query_engine_state() -> QueryEngineState {
 /// dynamic scalar parameter can be told apart from the sample values in the
 /// assertions below.
 async fn build_dynamic_scalar_table_provider() -> DfTableSourceProvider {
+    build_dynamic_scalar_table_provider_with_series(&[("a", &[Some(1.0), Some(3.0)])]).await
+}
+
+/// Like [`build_dynamic_scalar_table_provider`], with caller-selected outer series.
+async fn build_dynamic_scalar_table_provider_with_series(
+    series: &[(&str, &[Option<f64>])],
+) -> DfTableSourceProvider {
     let catalog_list = MemoryCatalogManager::with_default_setup();
     let columns = vec![
         ColumnSchema::new("k".to_string(), ConcreteDataType::string_datatype(), false),
@@ -8938,12 +8945,21 @@ async fn build_dynamic_scalar_table_provider() -> DfTableSourceProvider {
             .build()
             .unwrap(),
     );
+    let mut labels = Vec::new();
+    let mut timestamps = Vec::new();
+    let mut values = Vec::new();
+    for (label, samples) in series {
+        assert_eq!(samples.len(), 2, "each test series needs two samples");
+        labels.extend([*label, *label]);
+        timestamps.extend([0, 1_000]);
+        values.extend(samples.iter().copied());
+    }
     let batch = RecordBatch::try_new(
         schema.arrow_schema().clone(),
         vec![
-            Arc::new(StringArray::from(vec!["a", "a"])),
-            Arc::new(TimestampMillisecondArray::from(vec![0, 1_000])),
-            Arc::new(Float64Array::from(vec![1.0, 3.0])),
+            Arc::new(StringArray::from(labels)),
+            Arc::new(TimestampMillisecondArray::from(timestamps)),
+            Arc::new(Float64Array::from(values)),
         ],
     )
     .unwrap();
@@ -9025,6 +9041,244 @@ fn float_column_values(batches: &[RecordBatch]) -> Vec<f64> {
         .collect()
 }
 
+/// Asserts row count, nullness, labels, timestamps and values.
+fn assert_dynamic_scalar_rows(batches: &[RecordBatch], expected: &[(&str, Option<f64>)]) {
+    let rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+    assert_eq!(rows, expected.len(), "unexpected result row count");
+    let mut actual = Vec::new();
+    for batch in batches {
+        let labels = batch
+            .column_by_name("k")
+            .expect("no outer label k")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("outer label k is not a string");
+        let timestamp_index = batch
+            .schema()
+            .fields()
+            .iter()
+            .position(|field| matches!(field.data_type(), ArrowDataType::Timestamp(_, _)))
+            .expect("no timestamp column");
+        let timestamps = batch
+            .column(timestamp_index)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("timestamp column is not milliseconds");
+        let value_index = batch
+            .schema()
+            .fields()
+            .iter()
+            .position(|field| field.data_type() == &ArrowDataType::Float64)
+            .expect("no Float64 value column");
+        let values = batch
+            .column(value_index)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("value column is not Float64");
+        for row in 0..batch.num_rows() {
+            assert!(labels.is_valid(row), "null outer label at row {row}");
+            assert!(timestamps.is_valid(row), "null timestamp at row {row}");
+            assert!(
+                values.is_valid(row),
+                "null Float64 result for label {}",
+                labels.value(row)
+            );
+            let value = values.value(row);
+            actual.push((labels.value(row).to_string(), timestamps.value(row), value));
+        }
+    }
+    actual.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut expected = expected.to_vec();
+    expected.sort_by(|left, right| left.0.cmp(right.0));
+    for ((label, timestamp, value), (expected_label, expected_value)) in
+        actual.into_iter().zip(expected)
+    {
+        assert_eq!(label, expected_label);
+        assert_eq!(timestamp, 1_000, "outer evaluation timestamp changed");
+        match expected_value {
+            Some(expected) => assert_eq!(value, expected, "label={label}"),
+            None => assert!(value.is_nan(), "label={label}, value={value}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn dynamic_scalar_param_nan_clamp_preserves_outer_series() {
+    let state = build_function_registry_query_engine_state();
+    for (function, parameter) in [
+        ("clamp_min", "scalar(dyn_scalar_metric{k=\"missing\"})"),
+        ("clamp_min", "scalar(dyn_scalar_metric)"),
+        ("clamp_max", "scalar(dyn_scalar_metric{k=\"missing\"})"),
+        ("clamp_max", "scalar(dyn_scalar_metric)"),
+    ] {
+        let query = format!("{function}(dyn_scalar_metric, {parameter})");
+        let plan = PromPlanner::stmt_to_plan(
+            build_dynamic_scalar_table_provider_with_series(&[
+                ("a", &[Some(1.0), Some(3.0)]),
+                ("b", &[Some(5.0), Some(7.0)]),
+            ])
+            .await,
+            &operator_eval_stmt(&query),
+            &state,
+        )
+        .await
+        .unwrap();
+        let (_, batches) = execute(plan, &state).await;
+        assert_dynamic_scalar_rows(&batches, &[("a", None), ("b", None)]);
+    }
+}
+
+#[tokio::test]
+async fn dynamic_scalar_param_nan_clamp_drops_nullable_input_samples() {
+    let state = build_function_registry_query_engine_state();
+    for function in ["clamp_min", "clamp_max"] {
+        let query =
+            format!("{function}(dyn_scalar_metric, scalar(dyn_scalar_metric{{k=\"missing\"}}))");
+        let plan = PromPlanner::stmt_to_plan(
+            build_dynamic_scalar_table_provider_with_series(&[
+                ("a", &[Some(1.0), Some(3.0)]),
+                ("b", &[None, None]),
+            ])
+            .await,
+            &operator_eval_stmt(&query),
+            &state,
+        )
+        .await
+        .unwrap();
+        let (_, batches) = execute(plan, &state).await;
+        assert_dynamic_scalar_rows(&batches, &[("a", None)]);
+    }
+}
+
+#[tokio::test]
+async fn dynamic_scalar_param_nan_quantile_preserves_outer_series() {
+    let state = build_query_engine_state();
+    for parameter in [
+        "scalar(dyn_scalar_metric{k=\"missing\"})",
+        "scalar(dyn_scalar_metric)",
+    ] {
+        let query = format!("quantile_over_time({parameter}, dyn_scalar_metric[2s])");
+        let plan = PromPlanner::stmt_to_plan(
+            build_dynamic_scalar_table_provider_with_series(&[
+                ("a", &[Some(1.0), Some(3.0)]),
+                ("b", &[Some(5.0), Some(7.0)]),
+            ])
+            .await,
+            &operator_eval_stmt(&query),
+            &state,
+        )
+        .await
+        .unwrap();
+        let (_, batches) = execute(plan, &state).await;
+        assert_dynamic_scalar_rows(&batches, &[("a", None), ("b", None)]);
+    }
+}
+
+#[tokio::test]
+async fn dynamic_scalar_param_finite_broadcast_preserves_outer_series_and_static_equivalence() {
+    let state = build_function_registry_query_engine_state();
+    for (query, expected) in [
+        (
+            "clamp_min(dyn_scalar_metric, scalar(vector(4)))",
+            [("a", 4.0), ("b", 7.0)],
+        ),
+        (
+            "clamp_max(dyn_scalar_metric, scalar(vector(2)))",
+            [("a", 2.0), ("b", 2.0)],
+        ),
+        ("clamp_min(dyn_scalar_metric, 4)", [("a", 4.0), ("b", 7.0)]),
+        ("clamp_max(dyn_scalar_metric, 2)", [("a", 2.0), ("b", 2.0)]),
+        (
+            "clamp_min(dyn_scalar_metric, scalar(dyn_scalar_metric{k=\"b\"} @ 0))",
+            [("a", 5.0), ("b", 7.0)],
+        ),
+        (
+            "clamp_max(dyn_scalar_metric, scalar(dyn_scalar_metric{k=\"a\"} @ 0))",
+            [("a", 1.0), ("b", 1.0)],
+        ),
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            build_dynamic_scalar_table_provider_with_series(&[
+                ("a", &[Some(1.0), Some(3.0)]),
+                ("b", &[Some(5.0), Some(7.0)]),
+            ])
+            .await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap();
+        let (_, batches) = execute(plan, &state).await;
+        assert_dynamic_scalar_rows(
+            &batches,
+            &expected.map(|(label, value)| (label, Some(value))),
+        );
+    }
+}
+
+#[tokio::test]
+async fn dynamic_scalar_param_clamp_preserves_input_nan_and_infinities() {
+    let state = build_function_registry_query_engine_state();
+    let special_inputs: &[(&str, &[Option<f64>])] = &[
+        ("a", &[Some(f64::NAN), Some(f64::NAN)][..]),
+        ("b", &[Some(f64::INFINITY), Some(f64::INFINITY)][..]),
+        ("c", &[Some(f64::NEG_INFINITY), Some(f64::NEG_INFINITY)][..]),
+    ];
+    let finite_inputs: &[(&str, &[Option<f64>])] = &[
+        ("a", &[Some(1.0), Some(3.0)][..]),
+        ("b", &[Some(5.0), Some(7.0)][..]),
+    ];
+    for (query, input, expected) in [
+        (
+            "clamp_min(dyn_scalar_metric, scalar(vector(2)))",
+            special_inputs,
+            &[("a", None), ("b", Some(f64::INFINITY)), ("c", Some(2.0))][..],
+        ),
+        (
+            "clamp_max(dyn_scalar_metric, scalar(vector(2)))",
+            special_inputs,
+            &[
+                ("a", None),
+                ("b", Some(2.0)),
+                ("c", Some(f64::NEG_INFINITY)),
+            ][..],
+        ),
+        (
+            "clamp_min(dyn_scalar_metric, scalar(vector(1/0)))",
+            finite_inputs,
+            &[("a", Some(f64::INFINITY)), ("b", Some(f64::INFINITY))][..],
+        ),
+        (
+            "clamp_max(dyn_scalar_metric, scalar(vector(1/0)))",
+            finite_inputs,
+            &[("a", Some(3.0)), ("b", Some(7.0))][..],
+        ),
+        (
+            "clamp_min(dyn_scalar_metric, scalar(vector(-1/0)))",
+            finite_inputs,
+            &[("a", Some(3.0)), ("b", Some(7.0))][..],
+        ),
+        (
+            "clamp_max(dyn_scalar_metric, scalar(vector(-1/0)))",
+            finite_inputs,
+            &[
+                ("a", Some(f64::NEG_INFINITY)),
+                ("b", Some(f64::NEG_INFINITY)),
+            ][..],
+        ),
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            build_dynamic_scalar_table_provider_with_series(input).await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap();
+        let (_, batches) = execute(plan, &state).await;
+        assert_dynamic_scalar_rows(&batches, expected);
+    }
+}
+
 #[tokio::test]
 async fn dynamic_scalar_param_clamp_functions_in_instant_query() {
     let state = build_function_registry_query_engine_state();
@@ -9047,19 +9301,81 @@ async fn dynamic_scalar_param_clamp_functions_in_instant_query() {
         )
         .await
         .unwrap();
-        // The runtime parameter is planned as a `scalar(...)` subquery.
+        // Repeated references use the same scalar parameter plan.
         let subqueries = scalar_subquery_plans(&plan);
-        assert_eq!(subqueries.len(), 1, "{query}\n{plan}");
-        assert!(
-            subqueries[0]
-                .display_indent()
-                .to_string()
-                .contains("ScalarCalculate"),
-            "{query}\n{plan}"
-        );
+        assert!(!subqueries.is_empty(), "{query}\n{plan}");
+        let first = &subqueries[0];
+        for subquery in &subqueries {
+            assert_eq!(subquery, first, "{query}\n{plan}");
+            assert!(
+                subquery
+                    .display_indent()
+                    .to_string()
+                    .contains("ScalarCalculate"),
+                "{query}\n{plan}"
+            );
+        }
 
         let (_, batches) = execute(plan, &state).await;
         assert_eq!(float_column_values(&batches), vec![expected], "{query}");
+    }
+}
+
+#[tokio::test]
+async fn dynamic_scalar_param_nan_clamp_drops_native_histograms_and_keeps_float_series() {
+    let state = build_function_registry_query_engine_state();
+    for function in ["clamp_min", "clamp_max"] {
+        let parameter = "scalar(lf{tag=\"missing\"})";
+        for (input, expect_float) in [("lh", false), ("lf or lh", true)] {
+            let query = format!("{function}({input}, {parameter})");
+            let plan = PromPlanner::stmt_to_plan(
+                operator_table_provider(),
+                &operator_eval_stmt(&query),
+                &state,
+            )
+            .await
+            .unwrap();
+            let value_name = plan
+                .schema()
+                .fields()
+                .iter()
+                .find(|field| field.data_type() == &ArrowDataType::Float64)
+                .expect("no Float64 result column")
+                .name()
+                .clone();
+            let (_, batches) = execute(plan, &state).await;
+            let rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+            assert_eq!(rows, usize::from(expect_float), "{query}");
+            if expect_float {
+                let batch = batches
+                    .iter()
+                    .find(|batch| batch.num_rows() > 0)
+                    .expect("expected a result batch");
+                let tag = batch
+                    .column_by_name("tag")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                assert!(tag.is_valid(0), "{query}");
+                assert_eq!(tag.value(0), "a", "{query}");
+                let timestamp = batch
+                    .column_by_name("ts")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .unwrap();
+                assert!(timestamp.is_valid(0), "{query}");
+                assert_eq!(timestamp.value(0), 1_000, "{query}");
+                let value = batch
+                    .column_by_name(&value_name)
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                assert!(value.is_valid(0) && value.value(0).is_nan(), "{query}");
+            }
+        }
     }
 }
 
