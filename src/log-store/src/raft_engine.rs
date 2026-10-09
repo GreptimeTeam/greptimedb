@@ -56,3 +56,21 @@ impl From<EntryImpl> for Entry {
         })
     }
 }
+
+/// Total size of the raft-engine log files in `dir`.
+///
+/// raft-engine preallocates the active log file ahead of the writes and only trims that
+/// tail when the engine is closed, so a closed engine leaves well under this much on disk.
+#[cfg(test)]
+pub(crate) fn log_files_len(dir: &std::path::Path) -> u64 {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "raftlog"))
+        .map(|path| std::fs::metadata(path).unwrap().len())
+        .sum()
+}
+
+/// Lower bound of what raft-engine preallocates for the active log file (2 MiB).
+#[cfg(test)]
+pub(crate) const PREALLOCATED_LEN: u64 = 1024 * 1024;
