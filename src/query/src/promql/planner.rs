@@ -503,20 +503,18 @@ impl PromPlanner {
         };
         let interval = self.ctx.interval;
         ensure!(interval > 0, ZeroSubqueryStepSnafu);
-        let lower = Self::anchor_sub(end, range.as_millis() as Millisecond)?;
-        // Prometheus aligns subquery evaluation to absolute multiples of the step, and the
-        // window is left-open.
-        let start = lower.div_euclid(interval) * interval + interval;
-        if start > end {
+        let window = Self::subquery_child_window(end, end, 0, 0, range.as_millis() as _, interval)?;
+        let Some((start, end)) = window else {
+            // No step multiple falls in the window; plan the inner expression only for its
+            // schema.
             self.ctx.start = end;
             self.ctx.end = end;
             let plan = self.prom_expr_to_plan(expr, query_engine_state).await?;
-            return LogicalPlanBuilder::from(plan)
-                .filter(lit(false))
-                .context(DataFusionPlanningSnafu)?
-                .build()
-                .context(DataFusionPlanningSnafu);
-        }
+            return Ok(LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: plan.schema().clone(),
+            }));
+        };
         self.ctx.start = start;
         self.ctx.end = end;
         self.prom_expr_to_plan(expr, query_engine_state).await
