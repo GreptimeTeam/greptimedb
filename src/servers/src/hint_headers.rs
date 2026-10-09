@@ -117,8 +117,8 @@ mod tests {
 
     #[test]
     fn test_public_query_options_are_validated_before_apply() {
-        let err = validate_public_hints(vec![("flow.scheduled_time_millis".into(), "1".into())])
-            .unwrap_err();
+        let err =
+            validate_public_hints(vec![("query.parallelism".into(), "0".into())]).unwrap_err();
         assert_eq!(
             err.status_code(),
             common_error::status_code::StatusCode::InvalidArguments

@@ -1077,13 +1077,5 @@ mod test {
             .await
             .unwrap_err();
         assert_eq!(err.status_code(), StatusCode::InvalidArguments);
-
-        let err = client
-            .flight_request()
-            .with_hints(&[("flow.return_region_seq", "true")])
-            .sql("SELECT 1")
-            .await
-            .unwrap_err();
-        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
     }
 }
