@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::fmt::{Display, Formatter};
+use std::fmt::{Display, Formatter, Write};
 
 use common_catalog::consts::FILE_ENGINE;
 use datatypes::json::{JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS, JsonSettings};
@@ -68,6 +68,36 @@ fn format_table_constraint(constraints: &[TableConstraint]) -> String {
     constraints.iter().map(|c| format_indent!(c)).join(LINE_SEP)
 }
 
+fn write_list<T: Display>(
+    f: &mut dyn Write,
+    values: &[T],
+    separator: &str,
+    prefix: &str,
+) -> std::fmt::Result {
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            f.write_str(separator)?;
+        }
+        write!(f, "{prefix}{value}")?;
+    }
+    Ok(())
+}
+
+// sqlparser's Custom Display joins all modifiers into an intermediate String.
+fn write_data_type(f: &mut dyn Write, data_type: &DataType) -> std::fmt::Result {
+    if let DataType::Custom(name, modifiers) = data_type {
+        write!(f, "{name}")?;
+        if !modifiers.is_empty() {
+            f.write_char('(')?;
+            write_list(f, modifiers, COMMA_SEP, "")?;
+            f.write_char(')')?;
+        }
+        Ok(())
+    } else {
+        write!(f, "{data_type}")
+    }
+}
+
 /// Table constraint for create table statement.
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub enum TableConstraint {
@@ -81,7 +111,9 @@ impl Display for TableConstraint {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             TableConstraint::PrimaryKey { columns } => {
-                write!(f, "PRIMARY KEY ({})", format_list_comma!(columns))
+                f.write_str("PRIMARY KEY (")?;
+                write_list(f, columns, COMMA_SEP, "")?;
+                f.write_str(")")
             }
             TableConstraint::TimeIndex { column } => {
                 write!(f, "TIME INDEX ({})", column)
@@ -105,7 +137,7 @@ pub struct CreateTable {
     pub partitions: Option<Partitions>,
 }
 
-/// Column definition in `CREATE TABLE` statement.
+/// Column definition in `CREATE TABLE` and `ALTER TABLE ADD COLUMN`.
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub struct Column {
     /// `ColumnDef` from `sqlparser::ast`
@@ -143,12 +175,34 @@ pub struct Json2Options {
 
 impl Display for Json2Options {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let mut options = Vec::with_capacity(self.type_hints.len() + 1);
+        f.write_str("(\n    ")?;
         if let Some(max) = self.max_auto_expanded_paths {
-            options.push(format!("max_auto_expanded_paths = {max}"));
+            write!(f, "max_auto_expanded_paths = {max}")?;
         }
-        options.extend(self.type_hints.iter().map(format_json_type_hint));
-        write!(f, "(\n    {}\n  )", options.iter().join(",\n    "))
+        for (index, hint) in self.type_hints.iter().enumerate() {
+            if index > 0 || self.max_auto_expanded_paths.is_some() {
+                f.write_str(",\n    ")?;
+            }
+            for (index, segment) in hint.path.iter().enumerate() {
+                if index > 0 {
+                    f.write_char('.')?;
+                }
+                f.write_char('"')?;
+                for part in segment.split_inclusive('"') {
+                    f.write_str(part)?;
+                    if part.ends_with('"') {
+                        f.write_char('"')?;
+                    }
+                }
+                f.write_char('"')?;
+            }
+            f.write_char(' ')?;
+            write_data_type(f, &hint.data_type)?;
+            if hint.inverted_index {
+                f.write_str(" INVERTED INDEX")?;
+            }
+        }
+        f.write_str("\n  )")
     }
 }
 
@@ -203,14 +257,21 @@ impl Column {
 
 impl Display for Column {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        if let Some(vector_options) = &self.extensions.vector_options
+        self.write_sql(f, false)
+    }
+}
+
+impl Column {
+    fn write_sql(&self, f: &mut dyn Write, complete: bool) -> std::fmt::Result {
+        if !complete
+            && let Some(vector_options) = &self.extensions.vector_options
             && let Some(dim) = vector_options.get(VECTOR_OPT_DIM)
         {
             write!(f, "{} VECTOR({})", self.column_def.name, dim)?;
-            return Ok(());
+        } else {
+            write!(f, "{} ", self.column_def.name)?;
+            write_data_type(f, &self.column_def.data_type)?;
         }
-
-        write!(f, "{} {}", self.column_def.name, self.column_def.data_type)?;
         if let Some(options) = &self.extensions.json2_options {
             write!(f, "{options}")?;
         }
@@ -218,30 +279,18 @@ impl Display for Column {
             write!(f, " {option}")?;
         }
 
-        if let Some(fulltext_options) = &self.extensions.fulltext_index_options {
-            if !fulltext_options.is_empty() {
-                let options = fulltext_options.kv_pairs();
-                write!(f, " FULLTEXT INDEX WITH({})", format_list_comma!(options))?;
-            } else {
-                write!(f, " FULLTEXT INDEX")?;
-            }
-        }
-
-        if let Some(skipping_index_options) = &self.extensions.skipping_index_options {
-            if !skipping_index_options.is_empty() {
-                let options = skipping_index_options.kv_pairs();
-                write!(f, " SKIPPING INDEX WITH({})", format_list_comma!(options))?;
-            } else {
-                write!(f, " SKIPPING INDEX")?;
-            }
-        }
-
-        if let Some(inverted_index_options) = &self.extensions.inverted_index_options {
-            if !inverted_index_options.is_empty() {
-                let options = inverted_index_options.kv_pairs();
-                write!(f, " INVERTED INDEX WITH({})", format_list_comma!(options))?;
-            } else {
-                write!(f, " INVERTED INDEX")?;
+        for (kind, options) in [
+            ("FULLTEXT", &self.extensions.fulltext_index_options),
+            ("SKIPPING", &self.extensions.skipping_index_options),
+            ("INVERTED", &self.extensions.inverted_index_options),
+        ] {
+            if let Some(options) = options {
+                write!(f, " {kind} INDEX")?;
+                if !options.is_empty() {
+                    f.write_str(" WITH(")?;
+                    options.write_sql(f, COMMA_SEP, "", complete)?;
+                    f.write_str(")")?;
+                }
             }
         }
 
@@ -317,24 +366,6 @@ fn json_type_hint_sql_data_type(data_type: &ConcreteDataType) -> Result<DataType
     Ok(sql_type)
 }
 
-fn format_json_type_hint(hint: &JsonTypeHint) -> String {
-    let path = hint
-        .path
-        .iter()
-        .map(|segment| format_json_path_segment(segment))
-        .join(".");
-    let inverted_index = if hint.inverted_index {
-        " INVERTED INDEX"
-    } else {
-        ""
-    };
-    format!("{} {}{}", path, hint.data_type, inverted_index)
-}
-
-fn format_json_path_segment(segment: &str) -> String {
-    format!("\"{}\"", segment.replace('"', "\"\""))
-}
-
 /// Partition on columns or values.
 ///
 /// - `column_list` is the list of columns in `PARTITION ON COLUMNS` clause.
@@ -359,12 +390,11 @@ impl Partitions {
 impl Display for Partitions {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         if !self.column_list.is_empty() {
-            write!(
-                f,
-                "PARTITION ON COLUMNS ({}) (\n{}\n)",
-                format_list_comma!(self.column_list),
-                format_list_indent!(self.exprs),
-            )?;
+            f.write_str("PARTITION ON COLUMNS (")?;
+            write_list(f, &self.column_list, COMMA_SEP, "")?;
+            f.write_str(") (\n")?;
+            write_list(f, &self.exprs, LINE_SEP, "  ")?;
+            f.write_str("\n)")?;
         }
         Ok(())
     }
@@ -372,6 +402,53 @@ impl Display for Partitions {
 
 impl Display for CreateTable {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        self.write_sql(f, false)
+    }
+}
+
+impl CreateTable {
+    /// Debits the SQL size of a rewritten AST, including unredacted and non-scalar
+    /// options. Returns false on exhaustion or a shape hidden by normal Display.
+    /// No SQL or secret value is returned. Delegated sqlparser formatters retain
+    /// their own allocation behavior; this is not a general AST memory limit.
+    pub fn consume_sql_size_budget(&self, remaining: &mut usize) -> bool {
+        struct Budget<'a>(&'a mut usize);
+        impl Write for Budget<'_> {
+            fn write_str(&mut self, value: &str) -> std::fmt::Result {
+                *self.0 = self.0.checked_sub(value.len()).ok_or(std::fmt::Error)?;
+                Ok(())
+            }
+        }
+        if self
+            .partitions
+            .as_ref()
+            .is_some_and(|p| p.column_list.is_empty() && !p.exprs.is_empty())
+        {
+            return false;
+        }
+        for column in &self.columns {
+            if let Some(options) = &column.extensions.vector_options {
+                let DataType::Custom(name, tokens) = &column.column_def.data_type else {
+                    return false;
+                };
+                if options.len() != 1
+                    || name.0.len() != 1
+                    || tokens.len() != 1
+                    || !name.0[0]
+                        .as_ident()
+                        .is_some_and(|name| name.value.eq_ignore_ascii_case("VECTOR"))
+                    || !tokens[0].parse::<u32>().ok().is_some_and(|dim| {
+                        options.get(VECTOR_OPT_DIM) == Some(dim.to_string().as_str())
+                    })
+                {
+                    return false;
+                }
+            }
+        }
+        self.write_sql(&mut Budget(remaining), true).is_ok()
+    }
+
+    fn write_sql(&self, f: &mut dyn Write, complete: bool) -> std::fmt::Result {
         write!(f, "CREATE ")?;
         if self.engine == FILE_ENGINE {
             write!(f, "EXTERNAL ")?;
@@ -380,17 +457,26 @@ impl Display for CreateTable {
         if self.if_not_exists {
             write!(f, "IF NOT EXISTS ")?;
         }
-        writeln!(f, "{} (", &self.name)?;
-        writeln!(f, "{},", format_list_indent!(self.columns))?;
-        writeln!(f, "{}", format_table_constraint(&self.constraints))?;
+        writeln!(f, "{} (", self.name)?;
+        for (index, column) in self.columns.iter().enumerate() {
+            if index > 0 {
+                f.write_str(LINE_SEP)?;
+            }
+            f.write_str("  ")?;
+            column.write_sql(f, complete)?;
+        }
+        f.write_str(",\n")?;
+        write_list(f, &self.constraints, LINE_SEP, "  ")?;
+        f.write_char('\n')?;
         writeln!(f, ")")?;
         if let Some(partitions) = &self.partitions {
             writeln!(f, "{partitions}")?;
         }
-        writeln!(f, "ENGINE={}", &self.engine)?;
+        writeln!(f, "ENGINE={}", self.engine)?;
         if !self.options.is_empty() {
-            let options = self.options.kv_pairs();
-            write!(f, "WITH(\n{}\n)", format_list_indent!(options))?;
+            f.write_str("WITH(\n")?;
+            self.options.write_sql(f, LINE_SEP, "  ", complete)?;
+            f.write_str("\n)")?;
         }
         Ok(())
     }
@@ -421,7 +507,7 @@ impl Display for CreateDatabase {
         if self.if_not_exists {
             write!(f, "IF NOT EXISTS ")?;
         }
-        write!(f, "{}", &self.name)?;
+        write!(f, "{}", self.name)?;
         if !self.options.is_empty() {
             let options = self.options.kv_pairs();
             write!(f, "\nWITH(\n{}\n)", format_list_indent!(options))?;
@@ -448,11 +534,11 @@ impl Display for CreateExternalTable {
         if self.if_not_exists {
             write!(f, "IF NOT EXISTS ")?;
         }
-        writeln!(f, "{} (", &self.name)?;
+        writeln!(f, "{} (", self.name)?;
         writeln!(f, "{},", format_list_indent!(self.columns))?;
         writeln!(f, "{}", format_table_constraint(&self.constraints))?;
         writeln!(f, ")")?;
-        writeln!(f, "ENGINE={}", &self.engine)?;
+        writeln!(f, "ENGINE={}", self.engine)?;
         if !self.options.is_empty() {
             let options = self.options.kv_pairs();
             write!(f, "WITH(\n{}\n)", format_list_indent!(options))?;
@@ -550,8 +636,8 @@ impl Display for CreateFlow {
         if self.if_not_exists {
             write!(f, "IF NOT EXISTS ")?;
         }
-        writeln!(f, "{}", &self.flow_name)?;
-        writeln!(f, "SINK TO {}", &self.sink_table_name)?;
+        writeln!(f, "{}", self.flow_name)?;
+        writeln!(f, "SINK TO {}", self.sink_table_name)?;
         if let Some(expire_after) = &self.expire_after {
             writeln!(f, "EXPIRE AFTER '{} s'", expire_after)?;
         }
@@ -572,7 +658,7 @@ impl Display for CreateFlow {
             let options = self.flow_options.kv_pairs();
             writeln!(f, "WITH ({})", format_list_comma!(options))?;
         }
-        write!(f, "AS {}", &self.query)
+        write!(f, "AS {}", self.query)
     }
 }
 
@@ -602,11 +688,11 @@ impl Display for CreateView {
         if self.if_not_exists {
             write!(f, "IF NOT EXISTS ")?;
         }
-        write!(f, "{} ", &self.name)?;
+        write!(f, "{} ", self.name)?;
         if !self.columns.is_empty() {
             write!(f, "({}) ", format_list_comma!(self.columns))?;
         }
-        write!(f, "AS {}", &self.query)
+        write!(f, "AS {}", self.query)
     }
 }
 
@@ -622,6 +708,120 @@ mod tests {
     use crate::error::Error;
     use crate::parser::{ParseOptions, ParserContext};
     use crate::statements::statement::Statement;
+
+    #[test]
+    fn test_rewritten_create_sql_budget() {
+        let parse = |sql| {
+            let mut statements = ParserContext::create_with_dialect(
+                sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
+            let Statement::CreateTable(create) = statements.remove(0) else {
+                panic!("CREATE expected")
+            };
+            create
+        };
+        let create = parse(
+            "CREATE TABLE demo (ts TIMESTAMP TIME INDEX, host STRING) ENGINE=metric WITH (on_physical_table='phy')",
+        );
+        let size = create.to_string().len();
+        let mut remaining = size;
+        assert!(create.consume_sql_size_budget(&mut remaining));
+        assert_eq!(remaining, 0);
+        assert!(!create.consume_sql_size_budget(&mut (size - 1)));
+
+        for location in ["table", "fulltext", "skipping", "inverted"] {
+            for value_type in ["secret", "array", "struct"] {
+                for length in [10, 8192] {
+                    let mut create = create.clone();
+                    let extensions = &mut create.columns[1].extensions;
+                    let map = match location {
+                        "table" => &mut create.options,
+                        "fulltext" => extensions.fulltext_index_options.get_or_insert_default(),
+                        "skipping" => extensions.skipping_index_options.get_or_insert_default(),
+                        _ => extensions.inverted_index_options.get_or_insert_default(),
+                    };
+                    let value = "private-value".repeat(length);
+                    match value_type {
+                        "secret" => map.insert("secret_access_key".into(), value.clone()),
+                        "array" => map.insert_options("payload", vec![value.as_str()].into()),
+                        _ => map.insert_options(
+                            "payload",
+                            crate::util::OptionValue::try_new(Expr::Struct {
+                                values: vec![Expr::Value(
+                                    sqlparser::ast::Value::SingleQuotedString(value.clone()).into(),
+                                )],
+                                fields: vec![],
+                            })
+                            .unwrap(),
+                        ),
+                    }
+                    assert!(!create.to_string().contains(&value));
+                    assert_eq!(
+                        create.consume_sql_size_budget(&mut 4096),
+                        length == 10,
+                        "{location}/{value_type}"
+                    );
+                }
+            }
+        }
+        let mut vector = parse("CREATE TABLE demo (ts TIMESTAMP TIME INDEX, v VECTOR(3))");
+        vector.columns[1].column_def.options.push(ColumnOptionDef {
+            name: None,
+            option: sqlparser::ast::ColumnOption::Comment("private-value".repeat(8192)),
+        });
+        assert!(vector.to_string().contains("private-value"));
+        assert!(!vector.consume_sql_size_budget(&mut 4096));
+        vector.columns[1].column_def.options.clear();
+        assert!(vector.consume_sql_size_budget(&mut 4096));
+        if let DataType::Custom(_, tokens) = &mut vector.columns[1].column_def.data_type {
+            tokens[0] = format!("{}3", "0".repeat(8192));
+        }
+        assert!(!vector.consume_sql_size_budget(&mut 4096));
+        vector.columns[1]
+            .extensions
+            .vector_options
+            .as_mut()
+            .unwrap()
+            .insert("extra".into(), "x".into());
+        assert!(!vector.consume_sql_size_budget(&mut 4096));
+
+        let mut create = create;
+        create.columns[1].extensions.json2_options = Some(Json2Options {
+            max_auto_expanded_paths: Some(1),
+            type_hints: vec![JsonTypeHint {
+                path: vec!["x".repeat(8192)],
+                data_type: DataType::Text,
+                inverted_index: true,
+            }],
+        });
+        assert!(!create.consume_sql_size_budget(&mut 4096));
+        create.columns[1].extensions.json2_options = None;
+        create.partitions = Some(Partitions {
+            column_list: vec![],
+            exprs: vec![Expr::Identifier(Ident::new("hidden"))],
+        });
+        assert!(!create.consume_sql_size_budget(&mut 4096));
+    }
+
+    #[test]
+    fn test_json2_streamed_quote_escaping() {
+        let path = "a\\\"\"b";
+        let options = Json2Options {
+            max_auto_expanded_paths: None,
+            type_hints: vec![JsonTypeHint {
+                path: vec![path.into()],
+                data_type: DataType::Text,
+                inverted_index: false,
+            }],
+        };
+        assert_eq!(
+            options.to_string(),
+            format!("(\n    \"{}\" TEXT\n  )", path.replace('"', "\"\""))
+        );
+    }
 
     #[test]
     fn test_display_create_table() {

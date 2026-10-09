@@ -732,12 +732,12 @@ impl PackedRegionFileRefs {
         }
 
         let mut refs = HashSet::new();
-        for bytes in files.chunks_exact(16) {
+        for bytes in files.as_chunks::<16>().0 {
             let mut id = [0; 16];
             id.copy_from_slice(bytes);
             refs.insert(FileRef::new(region, FileId::from_bytes(id), None));
         }
-        for bytes in indexed.chunks_exact(24) {
+        for bytes in indexed.as_chunks::<24>().0 {
             let mut id = [0; 16];
             id.copy_from_slice(&bytes[..16]);
             let mut version = [0; 8];

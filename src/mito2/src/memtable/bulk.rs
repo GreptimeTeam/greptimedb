@@ -1872,7 +1872,7 @@ mod tests {
         let total_rows: usize = ranges.ranges.values().map(|r| r.stats().num_rows()).sum();
         assert_eq!(5, total_rows);
 
-        for (_range_id, range) in ranges.ranges.iter() {
+        for range in ranges.ranges.values() {
             assert!(range.num_rows() > 0);
             assert!(range.is_record_batch());
 
@@ -2468,7 +2468,7 @@ mod tests {
         let total_rows: usize = ranges.ranges.values().map(|r| r.stats().num_rows()).sum();
         assert_eq!(10, total_rows);
 
-        for (_range_id, range) in ranges.ranges.iter() {
+        for range in ranges.ranges.values() {
             assert!(range.num_rows() > 0);
             assert!(range.is_record_batch());
 
@@ -2554,7 +2554,7 @@ mod tests {
 
         // Read all data and verify
         let mut total_rows_read = 0;
-        for (_range_id, range) in ranges.ranges.iter() {
+        for range in ranges.ranges.values() {
             assert!(range.is_record_batch());
             let record_batch_iter = range.build_record_batch_iter(None, None).unwrap();
 
@@ -2642,7 +2642,7 @@ mod tests {
         assert_eq!(13, total_rows);
 
         let mut total_rows_read = 0;
-        for (_range_id, range) in ranges.ranges.iter() {
+        for range in ranges.ranges.values() {
             let record_batch_iter = range.build_record_batch_iter(None, None).unwrap();
             for batch_result in record_batch_iter {
                 let batch = batch_result.unwrap();
@@ -3063,7 +3063,7 @@ mod tests {
 
         // Read all data
         let mut total_rows_read = 0;
-        for (_range_id, range) in ranges.ranges.iter() {
+        for range in ranges.ranges.values() {
             assert!(range.is_record_batch());
             let record_batch_iter = range.build_record_batch_iter(None, None).unwrap();
 
@@ -3120,7 +3120,7 @@ mod tests {
 
         // Should return ranges but each range should produce an empty iterator
         // instead of an error.
-        for (_range_id, range) in ranges.ranges.iter() {
+        for range in ranges.ranges.values() {
             assert!(range.is_record_batch());
             let record_batch_iter = range.build_record_batch_iter(None, None).unwrap();
             let total_rows: usize = record_batch_iter.map(|r| r.unwrap().num_rows()).sum();

@@ -48,7 +48,7 @@ use datafusion::functions_window::row_number::RowNumber;
 use datafusion::logical_expr::expr::{Alias, ScalarFunction, WindowFunction};
 use datafusion::logical_expr::expr_rewriter::normalize_cols;
 use datafusion::logical_expr::{
-    BinaryExpr, Cast, Extension, LogicalPlan, LogicalPlanBuilder, Operator,
+    BinaryExpr, Cast, EmptyRelation, Extension, LogicalPlan, LogicalPlanBuilder, Operator,
     ScalarUDF as ScalarUdfDef, WindowFrame, WindowFunctionDefinition,
 };
 use datafusion::prelude as df_prelude;
@@ -107,9 +107,10 @@ use crate::promql::error::{
     CatalogSnafu, ColumnNotFoundSnafu, DataFusionPlanningSnafu, ExpectRangeSelectorSnafu,
     FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu, InvalidRegularExpressionSnafu,
     InvalidTimeRangeSnafu, MultiFieldsNotSupportedSnafu, MultipleMetricMatchersSnafu,
-    MultipleVectorSnafu, NoMetricMatcherSnafu, Result, TableNameNotFoundSnafu,
-    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
-    UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    MultipleVectorSnafu, NoMetricMatcherSnafu, Result, SubqueryTimestampOutOfRangeSnafu,
+    TableNameNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu,
+    UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, ValueNotFoundSnafu,
+    ZeroRangeSelectorSnafu,
 };
 use crate::query_engine::QueryEngineState;
 
@@ -410,9 +411,7 @@ impl PromPlanner {
             ..
         } = subquery_expr;
 
-        // Prometheus evaluates the inner expression over `(start - offset - range, end - offset]`
-        // (`subqueryTimeRange`). Shift the inner window back here; `RangeManipulate` maps the
-        // samples forward again by the same offset.
+        // Shift the child window back; `RangeManipulate` restores the outer timeline.
         let offset_ms = match offset {
             Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
             Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
@@ -423,14 +422,42 @@ impl PromPlanner {
         if let Some(step) = step {
             self.ctx.interval = step.as_millis() as _;
         }
+        ensure!(self.ctx.interval > 0, ZeroRangeSelectorSnafu);
         let current_start = self.ctx.start;
         let current_end = self.ctx.end;
-        self.ctx.start -= offset_ms + range.as_millis() as i64 - self.ctx.interval;
-        self.ctx.end -= offset_ms;
+        // Reject an invalid parent window rather than treating it as empty.
+        ensure!(
+            current_start <= current_end,
+            InvalidTimeRangeSnafu {
+                start: current_start,
+                end: current_end,
+            }
+        );
+        // An empty child needs only its schema; plan it over the valid caller window.
+        let child_window = Self::subquery_child_window(
+            current_start,
+            current_end,
+            current_interval,
+            offset_ms,
+            range.as_millis() as Millisecond,
+            self.ctx.interval,
+        )?;
+        if let Some((child_start, child_end)) = child_window {
+            self.ctx.start = child_start;
+            self.ctx.end = child_end;
+        }
         let input = self.prom_expr_to_plan(expr, query_engine_state).await?;
         self.ctx.interval = current_interval;
         self.ctx.start = current_start;
         self.ctx.end = current_end;
+        // Return no rows with the child schema so enclosing fallbacks still work.
+        let input = match child_window {
+            Some(_) => input,
+            None => LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: input.schema().clone(),
+            }),
+        };
 
         ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
         let range_ms = range.as_millis() as _;
@@ -1656,6 +1683,47 @@ impl PromPlanner {
         }
     }
 
+    /// Returns the first absolute step multiple strictly after `start - offset - range`
+    /// through the last parent evaluation instant minus `offset`. Requires a positive step.
+    /// Returns `None` for an empty window; an unrepresentable nonempty bound is an error.
+    fn subquery_child_window(
+        start: Millisecond,
+        end: Millisecond,
+        interval: Millisecond,
+        offset: Millisecond,
+        range: Millisecond,
+        step: Millisecond,
+    ) -> Result<Option<(Millisecond, Millisecond)>> {
+        let window_start = i128::from(start) - i128::from(offset) - i128::from(range);
+        let grid_start = (window_start.div_euclid(i128::from(step)) + 1) * i128::from(step);
+        let grid_end = if interval > 0 {
+            let steps = (i128::from(end) - i128::from(start)) / i128::from(interval);
+            i128::from(start) + steps * i128::from(interval)
+        } else {
+            i128::from(end)
+        } - i128::from(offset);
+        // Check emptiness before converting bounds to i64.
+        if grid_start > grid_end {
+            return Ok(None);
+        }
+        let bound = |name: &str, value: i128| {
+            i64::try_from(value).map_err(|_| {
+                SubqueryTimestampOutOfRangeSnafu {
+                    timestamp: format!(
+                        "subquery child window {name} = {value} ms (start = {start} ms, \
+                         end = {end} ms, interval = {interval} ms, offset = {offset} ms, \
+                         range = {range} ms, step = {step} ms)"
+                    ),
+                }
+                .build()
+            })
+        };
+        Ok(Some((
+            bound("grid start", grid_start)?,
+            bound("grid end", grid_end)?,
+        )))
+    }
+
     /// The columns that identify one series, which is the series key expected by the PromQL plan
     /// nodes that hold exactly one series per input batch.
     fn series_key_columns(&self) -> Vec<String> {
@@ -2557,28 +2625,21 @@ impl PromPlanner {
             // for it, or the column exists but is NULL on that row — the latter
             // is the norm for logical metrics sharing a physical table, which
             // holds the union of their label columns.
+            let mut null_label = None;
             let col = if let Some(column_name) = column_name {
                 let column = DfExpr::Column(Column::from_name(&column_name));
                 let field = table_schema
                     .index_of_column_by_name(None, &column_name)
                     .map(|index| table_schema.field(index));
                 if accepts_empty
-                    && let Some(data_type) = field
-                        .filter(|field| {
-                            field.is_nullable()
-                                && Self::string_value_data_type(field.data_type()).is_some()
-                        })
-                        .map(|field| field.data_type())
-                {
-                    let empty = Self::string_scalar_value(data_type, Some(String::new()))
-                        .expect("nullable label has a string type");
-                    DfExpr::ScalarFunction(ScalarFunction {
-                        func: coalesce(),
-                        args: vec![column, DfExpr::Literal(empty, None)],
+                    && field.is_some_and(|field| {
+                        field.is_nullable()
+                            && Self::string_value_data_type(field.data_type()).is_some()
                     })
-                } else {
-                    column
+                {
+                    null_label = Some(column.clone().is_null());
                 }
+                column
             } else {
                 DfExpr::Literal(ScalarValue::Utf8(Some(String::new())), None)
             };
@@ -2630,6 +2691,10 @@ impl PromPlanner {
                         })
                     }
                 }
+            };
+            let expr = match null_label {
+                Some(null_label) => null_label.or(expr),
+                None => expr,
             };
             exprs.push(expr);
         }

@@ -2014,7 +2014,12 @@ impl SimpleFilterContext {
         expected_meta: Option<&RegionMetadata>,
         expr: &Expr,
     ) -> Option<Self> {
-        let filter = SimpleFilterEvaluator::try_new(expr)?;
+        let filter = SimpleFilterEvaluator::try_new_with_column_type(expr, &|name| {
+            expected_meta
+                .unwrap_or(sst_meta)
+                .column_by_name(name)
+                .map(|column| column.column_schema.data_type.as_arrow_type())
+        })?;
         let expr_str = format!("{expr:?}");
         let (column_metadata, maybe_filter) = match expected_meta {
             Some(meta) => {
@@ -3157,6 +3162,15 @@ mod tests {
             ctx.filter(),
             MaybeFilter::Matched | MaybeFilter::Pruned
         ));
+    }
+
+    #[test]
+    fn test_nullable_label_filter_uses_missing_sst_column_default() {
+        let metadata = Arc::new(sst_region_metadata());
+        let expected = expected_metadata_with_reused_tag_name(&metadata);
+        let expr = col("tag_0").is_null().or(col("tag_0").not_eq(lit("lo")));
+        let ctx = SimpleFilterContext::new_opt(&metadata, Some(&expected), &expr).unwrap();
+        assert!(matches!(ctx.filter(), MaybeFilter::Matched));
     }
 
     #[test]

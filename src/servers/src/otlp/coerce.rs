@@ -30,6 +30,9 @@ pub enum TraceCoerceError {
 // - String to Int64
 // - String to Float64
 // - String to Boolean
+// The empty string and "-" coerce to null instead of failing: instrumentations
+// fill numeric attributes from absent headers this way (PSR-7 `getHeaderLine`
+// returns ""), and rejecting the value would reject the whole span.
 //
 // Lossless signed-to-unsigned integer casts. These let the built-in data
 // models move from unsigned to signed integers while existing unsigned tables
@@ -85,6 +88,13 @@ pub fn coerce_value_data(
     let Some(v) = value else {
         return Ok(None);
     };
+
+    if let ValueData::StringValue(s) = v
+        && matches!(s.as_str(), "" | "-")
+        && is_supported_trace_coercion(request_type, target)
+    {
+        return Ok(None);
+    }
 
     let Some(value) = coerce_non_null_value(target, request_type, v) else {
         return Err(TraceCoerceError::Unsupported);
@@ -271,6 +281,24 @@ mod tests {
             ColumnDataType::String,
         );
         assert_eq!(result, Err(TraceCoerceError::Unsupported));
+    }
+
+    #[test]
+    fn test_coerce_absent_value_strings_to_null() {
+        for s in ["", "-"] {
+            for target in [
+                ColumnDataType::Int64,
+                ColumnDataType::Float64,
+                ColumnDataType::Boolean,
+            ] {
+                let result = coerce_value_data(
+                    &Some(ValueData::StringValue(s.to_string())),
+                    target,
+                    ColumnDataType::String,
+                );
+                assert_eq!(result, Ok(None), "{s:?} to {target:?}");
+            }
+        }
     }
 
     #[test]

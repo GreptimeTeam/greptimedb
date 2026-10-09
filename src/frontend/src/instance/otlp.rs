@@ -18,6 +18,7 @@ pub mod trace_types;
 
 use std::sync::Arc;
 
+use api::v1::RowInsertRequests;
 use async_trait::async_trait;
 use auth::{
     OTLP_WRITE, PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
@@ -43,6 +44,7 @@ use servers::query_handler::{
     MetricsIngestOutcome, OpenTelemetryProtocolHandler, PipelineHandlerRef, TraceIngestOutcome,
 };
 use session::context::QueryContextRef;
+use session::protocol_ctx::OtlpMetricCtx;
 use snafu::ResultExt;
 use table::requests::{
     OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM, SEMANTIC_PER_TABLE_INDEX_KEY,
@@ -166,57 +168,9 @@ impl OpenTelemetryProtocolHandler for Instance {
             Arc::new(c)
         };
 
-        let physical_table = ctx
-            .extension(PHYSICAL_TABLE_PARAM)
-            .unwrap_or(GREPTIME_PHYSICAL_TABLE)
-            .to_string();
-        // The bulk path converts each request's time index unit to the
-        // destination table's unit during batch alignment, so no pre-gate
-        // alignment is needed here.
-        let batcher = self.logical_batcher().filter(|_| {
-            ctx.logical_batching_enabled() && !metric_ctx.is_legacy && metric_ctx.with_metric_engine
-        });
-        let batcher = if batcher.is_some()
-            && self
-                .inserter
-                .can_batch_metric_rows(&requests, &ctx, &physical_table)
-                .await
-                .map_err(BoxedError::new)
-                .context(error::ExecuteGrpcQuerySnafu)?
-        {
-            batcher
-        } else {
-            None
-        };
-
-        // OTLP tables have one sample field in both the legacy and physical paths.
-        let output = if let Some(batcher) = batcher {
-            let (rows, cost) = batcher
-                .submit_with(requests, ctx.clone(), |mut requests| {
-                    let ctx = ctx.clone();
-                    async move {
-                        Inserter::meter_row_inserts(&mut requests, &ctx)
-                            .await
-                            .map_err(BoxedError::new)
-                            .context(error::ExecuteGrpcQuerySnafu)
-                    }
-                })
-                .await?;
-            Output::new(
-                OutputData::AffectedRows(rows as usize),
-                OutputMeta::new_with_cost(cost as _),
-            )
-        } else if metric_ctx.is_legacy || !metric_ctx.with_metric_engine {
-            self.handle_row_inserts(requests, ctx.clone(), false, true)
-                .await
-                .map_err(BoxedError::new)
-                .context(error::ExecuteGrpcQuerySnafu)?
-        } else {
-            self.handle_metric_row_inserts(requests, ctx.clone(), physical_table)
-                .await
-                .map_err(BoxedError::new)
-                .context(error::ExecuteGrpcQuerySnafu)?
-        };
+        let output = self
+            .handle_otlp_metric_row_inserts(requests, ctx.clone(), &metric_ctx)
+            .await?;
         outcome.write_cost = output.meta.cost;
 
         // Derived enrichment follows the accepted metric submission, which may
@@ -359,6 +313,69 @@ impl OpenTelemetryProtocolHandler for Instance {
         }
 
         Ok(outputs)
+    }
+}
+
+impl Instance {
+    /// Inserts converted OTLP metrics through the eligible batching or ordinary write path.
+    /// The caller must check table permissions and admit the complete request first.
+    pub async fn handle_otlp_metric_row_inserts(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        metric_ctx: &OtlpMetricCtx,
+    ) -> ServerResult<Output> {
+        let physical_table = ctx
+            .extension(PHYSICAL_TABLE_PARAM)
+            .unwrap_or(GREPTIME_PHYSICAL_TABLE)
+            .to_string();
+        // The bulk path converts each request's time index unit to the
+        // destination table's unit during batch alignment, so no pre-gate
+        // alignment is needed here.
+        let batcher = self.logical_batcher().filter(|_| {
+            ctx.logical_batching_enabled() && !metric_ctx.is_legacy && metric_ctx.with_metric_engine
+        });
+        let batcher = if batcher.is_some()
+            && self
+                .inserter
+                .can_batch_metric_rows(&requests, &ctx, &physical_table)
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)?
+        {
+            batcher
+        } else {
+            None
+        };
+
+        // OTLP tables have one sample field in both the legacy and physical paths.
+        if let Some(batcher) = batcher {
+            let (rows, cost) = batcher
+                .submit_with(requests, ctx.clone(), |mut requests| {
+                    let ctx = ctx.clone();
+                    async move {
+                        Inserter::meter_row_inserts(&mut requests, &ctx)
+                            .await
+                            .map_err(BoxedError::new)
+                            .context(error::ExecuteGrpcQuerySnafu)
+                    }
+                })
+                .await?;
+            Ok(Output::new(
+                OutputData::AffectedRows(rows as usize),
+                OutputMeta::new_with_cost(cost as _),
+            ))
+        } else if metric_ctx.is_legacy || !metric_ctx.with_metric_engine {
+            self.handle_row_inserts(requests, ctx.clone(), false, true)
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)
+        } else {
+            self.handle_metric_row_inserts(requests, ctx.clone(), physical_table)
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)
+        }
     }
 }
 

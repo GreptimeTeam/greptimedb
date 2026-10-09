@@ -41,8 +41,8 @@ use table::requests::{validate_database_option, validate_database_option_value};
 use crate::ast::{ColumnDef, Ident, ObjectNamePartExt};
 use crate::error::{
     self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidDatabaseOptionValueSnafu,
-    InvalidFlowQuerySnafu, InvalidIntervalSnafu, InvalidSqlSnafu, InvalidTimeIndexSnafu,
-    MissingTimeIndexSnafu, Result, SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
+    InvalidFlowQuerySnafu, InvalidIntervalSnafu, InvalidTimeIndexSnafu, MissingTimeIndexSnafu,
+    Result, SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::parser::{FLOW, ParserContext};
 use crate::parsers::tql_parser;
@@ -685,7 +685,7 @@ impl<'a> ParserContext<'a> {
         columns: &mut Vec<Column>,
         constraints: &mut Vec<TableConstraint>,
     ) -> Result<()> {
-        let mut column = self.parse_column_def()?;
+        let mut column = self.parse_column_def(false)?;
 
         let mut time_index_opt_idx = None;
         for (index, opt) in column.options().iter().enumerate() {
@@ -768,28 +768,22 @@ impl<'a> ParserContext<'a> {
         {
             return Err(ParserError::ParserError(format!(
                 "Cannot use keyword '{}' as column name. Hint: add quotes to the name.",
-                &name.value
+                name.value
             )));
         }
 
         Ok(name)
     }
 
-    pub fn parse_column_def(&mut self) -> Result<Column> {
-        let name = self.parse_column_name().context(SyntaxSnafu)?;
+    /// Parses a column definition, optionally allowing unquoted keyword names
+    /// for compatibility with ALTER TABLE ADD COLUMN.
+    pub fn parse_column_def(&mut self, allow_keyword_name: bool) -> Result<Column> {
+        let name = if allow_keyword_name {
+            self.parser.parse_identifier().context(SyntaxSnafu)?
+        } else {
+            self.parse_column_name().context(SyntaxSnafu)?
+        };
         let parser = &mut self.parser;
-
-        ensure!(
-            !(name.quote_style.is_none() &&
-            // "ALL_KEYWORDS" are sorted.
-            ALL_KEYWORDS.binary_search(&name.value.to_uppercase().as_str()).is_ok()),
-            InvalidSqlSnafu {
-                msg: format!(
-                    "Cannot use keyword '{}' as column name. Hint: add quotes to the name.",
-                    &name.value
-                ),
-            }
-        );
 
         let mut extensions = ColumnExtensions::default();
 
@@ -2924,11 +2918,16 @@ ENGINE=mito";
 
     #[test]
     fn test_invalid_column_name() {
-        let sql = "create table foo(user string, i timestamp time index)";
-        let result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
-        let err = result.unwrap_err().output_msg();
-        assert!(err.contains("Cannot use keyword 'user' as column name"));
+        for name in ["user", "at", "value", "select"] {
+            let sql = format!("create table foo({name} string, i timestamp time index)");
+            let result = ParserContext::create_with_dialect(
+                &sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            );
+            let err = result.unwrap_err().output_msg();
+            assert!(err.contains(&format!("Cannot use keyword '{name}' as column name")));
+        }
 
         // If column name is quoted, it's valid even same with keyword.
         let sql = r#"

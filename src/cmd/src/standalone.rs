@@ -48,8 +48,8 @@ use common_meta::wal_provider::{WalProvider, WalProviderRef, build_wal_provider}
 use common_options::plugin_options::StandaloneFlag;
 use common_procedure::ProcedureManagerRef;
 use common_query::prelude::set_default_prefix;
-use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
+use common_telemetry::{info, warn};
 use common_time::timezone::set_default_timezone;
 use common_version::{short_version, verbose_version};
 use common_wal::config::DatanodeWalConfig;
@@ -274,32 +274,53 @@ impl App for Instance {
         Ok(())
     }
 
+    /// Stops every component in order. A failed step does not skip the later
+    /// ones; the first error is returned and the rest are logged.
     async fn stop(&mut self) -> Result<()> {
-        self.frontend
-            .shutdown()
-            .await
-            .context(error::ShutdownFrontendSnafu)?;
+        let mut first_error = None;
+        let mut record = |result: Result<()>| {
+            if let Err(err) = result {
+                if first_error.is_none() {
+                    first_error = Some(err);
+                } else {
+                    warn!(err; "Ignored a later shutdown error");
+                }
+            }
+        };
 
-        self.leader_services_controller
-            .stop(
-                self.procedure_manager.clone(),
-                self.datanode.region_server(),
-            )
-            .await?;
+        record(
+            self.frontend
+                .shutdown()
+                .await
+                .context(error::ShutdownFrontendSnafu),
+        );
 
-        self.datanode
-            .shutdown()
-            .await
-            .context(error::ShutdownDatanodeSnafu)?;
+        record(
+            self.leader_services_controller
+                .stop(
+                    self.procedure_manager.clone(),
+                    self.datanode.region_server(),
+                )
+                .await,
+        );
 
-        self.flownode
-            .shutdown()
-            .await
-            .context(error::ShutdownFlownodeSnafu)?;
+        record(
+            self.datanode
+                .shutdown()
+                .await
+                .context(error::ShutdownDatanodeSnafu),
+        );
+
+        record(
+            self.flownode
+                .shutdown()
+                .await
+                .context(error::ShutdownFlownodeSnafu),
+        );
 
         info!("Datanode instance stopped.");
 
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 }
 
@@ -1067,9 +1088,88 @@ mod tests {
     use frontend::frontend::FrontendOptions;
     use object_store::config::{FileConfig, GcsConfig};
     use servers::grpc::GrpcOptions;
+    use servers::server::ServerHandlers;
+    use store_api::logstore::LogStore;
 
     use super::*;
     use crate::options::GlobalOptions;
+
+    struct FailingLeaderServices;
+
+    #[async_trait]
+    impl StandaloneLeaderServicesController for FailingLeaderServices {
+        async fn start(&self, _context: LeaderServicesContext) -> Result<()> {
+            Ok(())
+        }
+
+        async fn stop(
+            &self,
+            _procedure_manager: ProcedureManagerRef,
+            _region_server: RegionServer,
+        ) -> Result<()> {
+            error::IllegalConfigSnafu {
+                msg: "leader services failed to stop",
+            }
+            .fail()
+        }
+    }
+
+    struct FailingServer;
+
+    #[async_trait]
+    impl servers::server::Server for FailingServer {
+        async fn shutdown(&self) -> servers::error::Result<()> {
+            servers::error::InternalSnafu {
+                err_msg: "server failed to stop",
+            }
+            .fail()
+        }
+
+        async fn start(&mut self, _listening: SocketAddr) -> servers::error::Result<()> {
+            Ok(())
+        }
+
+        fn name(&self) -> &str {
+            "failing"
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stop_runs_every_step_and_returns_the_first_error() {
+        common_telemetry::init_default_ut_logging();
+        let data_home = create_temp_dir("standalone-stop");
+        let mut opts = StandaloneOptions {
+            wal: DatanodeWalConfig::ObjectStore(ObjectStoreWalConfig::default()),
+            ..Default::default()
+        };
+        opts.storage.data_home = data_home.path().to_str().unwrap().to_string();
+        let creator = InstanceCreator::default()
+            .with_leader_services_controller(Box::new(FailingLeaderServices));
+        let (mut instance, _) = StartCommand::build_with(opts, vec![], creator)
+            .await
+            .unwrap();
+        let log_store = instance.datanode.object_store_log_store().unwrap();
+        // The datanode fails to stop its servers after the leader services failed.
+        let mut services = ServerHandlers::default();
+        services.insert((Box::new(FailingServer), "127.0.0.1:0".parse().unwrap()));
+        services.start_all().await.unwrap();
+        instance.datanode.setup_services(services);
+
+        let err = instance.stop().await.unwrap_err();
+
+        assert!(
+            matches!(&err, error::Error::IllegalConfig { msg, .. } if msg == "leader services failed to stop"),
+            "unexpected error: {err:?}"
+        );
+        assert!(matches!(
+            log_store.append_batch(vec![]).await,
+            Err(log_store::error::Error::ObjectStoreWalStopped { .. })
+        ));
+    }
 
     #[tokio::test]
     async fn test_build_standalone_wal_provider() {

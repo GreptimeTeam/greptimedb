@@ -39,6 +39,9 @@ remote datanodes via `operator`/`client`.
 - **SQL query** (`instance.rs`): `do_query_inner` handles parsing, interceptors,
   permission checks, timeout/cancellation, and delegates planning/execution to
   `StatementExecutor`. Distributed scans enter through `region_query.rs`.
+- **Logical-table batch DDL** (`instance.rs`): dedicated SQL handler → bounded
+  parse/interception → all-member permissions → operator CREATE preparation →
+  one logical-table batch procedure. Keep pre-submission validation side-effect free.
 - **Insert** (`instance/grpc.rs`): `handle_inserts` / `handle_row_inserts` →
   `check_permission` → `operator`'s `Inserter` (schema validation, optional
   auto-create, partition routing, meter admission) → local `RegionServer`
@@ -57,7 +60,9 @@ remote datanodes via `operator`/`client`.
 
 - **Logical-table batching** (`instance/logical_batcher.rs`): `Services` initializes
   one shared batcher for opted-in HTTP Prom and nonlegacy OTLP metric-engine
-  writes. OTLP checks operator eligibility and falls back for incompatible tables.
+  writes. Downstream routers can initialize it when enabling replacement endpoints.
+  `Instance::handle_otlp_metric_row_inserts` shares OTLP eligibility and dispatch
+  between converters and falls back for incompatible tables.
   The schema adapter holds a weak instance reference to avoid an ownership cycle.
 
 - **Table batching** (`instance/builder.rs`): protocol entry points opt in through

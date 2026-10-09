@@ -48,7 +48,7 @@ pub fn region_distribution(region_routes: &[RegionRoute]) -> RegionDistribution 
                 .add_follower_region(region_number);
         }
     }
-    for (_, region_role_set) in regions_id_map.iter_mut() {
+    for region_role_set in regions_id_map.values_mut() {
         // Sort the regions in ascending order.
         region_role_set.sort()
     }

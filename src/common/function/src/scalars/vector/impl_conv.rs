@@ -53,8 +53,10 @@ pub fn binlit_as_veclit(bytes: &[u8]) -> Result<Cow<'_, [f32]>> {
         })
     } else {
         let v = bytes
-            .chunks_exact(std::mem::size_of::<f32>())
-            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .as_chunks::<{ std::mem::size_of::<f32>() }>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
             .collect::<Vec<f32>>();
         Ok(Cow::Owned(v))
     }
