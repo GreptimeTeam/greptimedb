@@ -144,3 +144,32 @@ TQL EVAL (0, 1, '5s') test{job=""};
 TQL EVAL (0, 1, '5s') test{job!=""};
 
 DROP TABLE test;
+
+-- Issue 9444 --
+-- Normalizing mixed histogram boundary representations must not be rejected while
+-- another label still tells the series apart.
+CREATE TABLE demo_bucket (
+  ts timestamp(3) time index,
+  instance STRING,
+  le STRING,
+  val DOUBLE,
+  PRIMARY KEY(instance, le),
+);
+
+INSERT INTO TABLE demo_bucket VALUES
+    (3000000, 'a', '10', 40),
+    (3000000, 'a', '100', 50),
+    (3000000, 'a', '+Inf', 50),
+    (3000000, 'b', '10.0', 40),
+    (3000000, 'b', '100.0', 50),
+    (3000000, 'b', '1000.0', 50),
+    (3000000, 'b', '+Inf', 50);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (3000, 3000, '5s') label_replace(demo_bucket, "le", "$1", "le", "([0-9]+)[.]0+");
+
+-- Aggregating `instance` away first makes the same rewrite collapse two series into
+-- one label set, which is a genuine duplicate and must still fail.
+TQL EVAL (3000, 3000, '5s') label_replace(sum by (le) (demo_bucket), "le", "$1", "le", "([0-9]+)[.]0+");
+
+DROP TABLE demo_bucket;
