@@ -129,14 +129,17 @@ impl AggregateUDFImpl for Extremum {
         &self,
         _args: AccumulatorArgs,
     ) -> DfResult<Box<dyn GroupsAccumulator>> {
-        let is_max = self.is_max;
-        Ok(Box::new(
-            PrimitiveGroupsAccumulator::<Float64Type, _>::new(&DataType::Float64, move |cur, v| {
-                fold(is_max, cur, v)
-            })
-            .with_starting_value(f64::NAN),
-        ))
+        Ok(groups_accumulator(self.is_max))
     }
+}
+
+fn groups_accumulator(is_max: bool) -> Box<dyn GroupsAccumulator> {
+    Box::new(
+        PrimitiveGroupsAccumulator::<Float64Type, _>::new(&DataType::Float64, move |cur, v| {
+            fold(is_max, cur, v)
+        })
+        .with_starting_value(f64::NAN),
+    )
 }
 
 #[derive(Debug)]
@@ -193,11 +196,7 @@ mod tests {
         groups: Vec<usize>,
     ) -> Vec<Option<f64>> {
         let num_groups = groups.iter().max().map_or(0, |g| g + 1);
-        let mut acc =
-            PrimitiveGroupsAccumulator::<Float64Type, _>::new(&DataType::Float64, move |cur, v| {
-                fold(is_max, cur, v)
-            })
-            .with_starting_value(f64::NAN);
+        let mut acc = groups_accumulator(is_max);
         let values: ArrayRef = Arc::new(Float64Array::from(values));
         acc.update_batch(&[values], &groups, None, num_groups)
             .unwrap();
