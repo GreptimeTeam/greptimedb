@@ -785,6 +785,8 @@ mod test {
             .unwrap();
         assert!(
             !snapshot
+                .query_option_snapshot()
+                .unwrap()
                 .effective_query_options()
                 .unwrap()
                 .contains_key("datafusion.optimizer.prefer_hash_join")
