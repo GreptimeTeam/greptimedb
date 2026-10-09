@@ -56,7 +56,7 @@ pub use crate::grpc::flight::stream::{
     FlightRecordBatchSource, FlightRecordBatchStream, FlightRecordBatchStreamInput,
 };
 use crate::grpc::greptime_handler::{
-    GreptimeRequestHandler, create_query_context, get_request_type,
+    GreptimeRequestHandler, create_query_context_with_internal_metadata, get_request_type,
 };
 use crate::grpc::{FlightCompression, TonicResult, context_auth};
 use crate::request_memory_limiter::ServerMemoryLimiter;
@@ -196,20 +196,35 @@ impl FlightCraft for GreptimeRequestHandler {
         &self,
         request: Request<Ticket>,
     ) -> TonicResult<Response<TonicStream<FlightData>>> {
-        let mut hints = hint_headers::extract_hints(request.metadata());
-        hints.extend(extract_flow_extensions(request.metadata())?);
-        let snapshot_seqs = extract_snapshot_seqs(request.metadata())?;
+        let hints = hint_headers::extract_hints(request.metadata());
         let channel = request
             .extensions()
             .get::<Channel>()
             .copied()
             .unwrap_or(Channel::Grpc);
+        let flow_extensions = extract_flow_extensions(request.metadata())?;
+        let snapshot_seqs = extract_snapshot_seqs(request.metadata())?;
+        validate_dedicated_metadata_channel(
+            channel,
+            !flow_extensions.is_empty(),
+            !snapshot_seqs.is_empty(),
+        )?;
+        let (internal_flow, snapshot_seqs) = if channel == Channel::Internal {
+            (flow_extensions, snapshot_seqs)
+        } else {
+            (Vec::new(), HashMap::new())
+        };
 
         let ticket = request.into_inner().ticket;
         let request =
             GreptimeRequest::decode(ticket.as_ref()).context(error::InvalidFlightTicketSnafu)?;
-        let query_ctx =
-            create_query_context(channel, request.header.as_ref(), hints, snapshot_seqs)?;
+        let query_ctx = create_query_context_with_internal_metadata(
+            channel,
+            request.header.as_ref(),
+            hints,
+            internal_flow,
+            snapshot_seqs,
+        )?;
         // Validate flow hint syntax at the transport boundary before dispatching the request.
         // This does not authorize or execute anything; `handle_request()` below still performs
         // the normal frontend handling and auth checks before query execution.
@@ -554,6 +569,19 @@ impl Stream for PutRecordBatchRequestStream {
     }
 }
 
+fn validate_dedicated_metadata_channel(
+    channel: Channel,
+    flow_metadata_present: bool,
+    snapshot_metadata_present: bool,
+) -> TonicResult<()> {
+    if channel != Channel::Internal && (flow_metadata_present || snapshot_metadata_present) {
+        return Err(Status::invalid_argument(
+            "Flow and snapshot metadata are only accepted on internal channels",
+        ));
+    }
+    Ok(())
+}
+
 fn extract_flow_extensions(
     metadata: &tonic::metadata::MetadataMap,
 ) -> TonicResult<Vec<(String, String)>> {
@@ -638,13 +666,105 @@ fn output_to_flight_record_batch_source(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use api::v1::{QueryRequest, greptime_request};
+    use common_grpc::flight::do_put::DoPutResponse;
+    use futures::stream;
     use query::options::{
         FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_RETURN_REGION_SEQ,
         FLOW_SCHEDULED_TIME_MILLIS, FLOW_SINK_TABLE_ID, FlowIncrementalMode,
     };
+    use session::context::QueryContextRef;
     use tonic::metadata::{AsciiMetadataValue, MetadataMap};
 
     use super::*;
+
+    struct FlightQueryHandler {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl crate::query_handler::grpc::GrpcQueryHandler for FlightQueryHandler {
+        async fn do_query(
+            &self,
+            _query: greptime_request::Request,
+            _ctx: QueryContextRef,
+        ) -> Result<Output> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(crate::error::InternalSnafu { err_msg: "test" }.build())
+        }
+
+        fn handle_put_record_batch_stream(
+            &self,
+            _stream: PutRecordBatchRequestStream,
+            _ctx: QueryContextRef,
+        ) -> Pin<Box<dyn Stream<Item = Result<DoPutResponse>> + Send>> {
+            Box::pin(stream::empty())
+        }
+    }
+
+    fn flight_handler(calls: Arc<AtomicUsize>) -> GreptimeRequestHandler {
+        GreptimeRequestHandler::new(
+            Arc::new(FlightQueryHandler { calls }),
+            None,
+            None,
+            FlightCompression::None,
+        )
+    }
+
+    fn sql_ticket() -> Ticket {
+        let request = GreptimeRequest {
+            header: None,
+            request: Some(greptime_request::Request::Query(QueryRequest {
+                query: Some(api::v1::query_request::Query::Sql("SELECT 1".into())),
+            })),
+        };
+        Ticket {
+            ticket: request.encode_to_vec().into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_do_get_rejects_public_dedicated_metadata_before_dispatch() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        for (key, value) in [
+            (
+                FLOW_EXTENSIONS_METADATA_KEY,
+                r#"[["flow.return_region_seq","true"]]"#,
+            ),
+            (SNAPSHOT_SEQS_METADATA_KEY, r#"{"1":10}"#),
+            (FLOW_EXTENSIONS_METADATA_KEY, "not-json"),
+        ] {
+            let mut request = Request::new(sql_ticket());
+            request.metadata_mut().insert(key, value.parse().unwrap());
+            let error = match FlightCraft::do_get(&flight_handler(calls.clone()), request).await {
+                Ok(_) => panic!("Expected dedicated external metadata to be rejected"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code(), tonic::Code::InvalidArgument);
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_do_get_internal_dedicated_flow_reaches_query_dispatch() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut request = Request::new(sql_ticket());
+        request.extensions_mut().insert(Channel::Internal);
+        request.metadata_mut().insert(
+            FLOW_EXTENSIONS_METADATA_KEY,
+            r#"[["flow.scheduled_time_millis","1700000000000"]]"#
+                .parse()
+                .unwrap(),
+        );
+        assert!(
+            FlightCraft::do_get(&flight_handler(calls.clone()), request)
+                .await
+                .is_ok()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn test_extract_flow_extensions_preserves_comma_bearing_values() {
@@ -680,8 +800,14 @@ mod tests {
         );
 
         let flow_extensions = extract_flow_extensions(&metadata).unwrap();
-        let query_ctx =
-            create_query_context(Channel::Grpc, None, flow_extensions, HashMap::new()).unwrap();
+        let query_ctx = create_query_context_with_internal_metadata(
+            Channel::Internal,
+            None,
+            Vec::new(),
+            flow_extensions,
+            HashMap::new(),
+        )
+        .unwrap();
 
         assert_eq!(
             query_ctx.extension(FLOW_SCHEDULED_TIME_MILLIS),
@@ -701,8 +827,14 @@ mod tests {
         );
 
         let flow_extensions = extract_flow_extensions(&metadata).unwrap();
-        let query_ctx =
-            create_query_context(Channel::Grpc, None, flow_extensions, HashMap::new()).unwrap();
+        let query_ctx = create_query_context_with_internal_metadata(
+            Channel::Internal,
+            None,
+            Vec::new(),
+            flow_extensions,
+            HashMap::new(),
+        )
+        .unwrap();
         let parsed =
             query::options::FlowQueryExtensions::parse_flow_extensions(&query_ctx.extensions())
                 .unwrap()
@@ -728,6 +860,22 @@ mod tests {
         );
         assert_eq!(query_ctx.extension(FLOW_RETURN_REGION_SEQ), Some("true"));
         assert_eq!(query_ctx.extension(FLOW_SINK_TABLE_ID), Some("42"));
+    }
+
+    #[test]
+    fn test_flight_external_flow_metadata_rejected() {
+        let mut metadata = MetadataMap::new();
+        metadata.insert(
+            FLOW_EXTENSIONS_METADATA_KEY,
+            AsciiMetadataValue::try_from(r#"[["flow.return_region_seq","true"]]"#).unwrap(),
+        );
+        let flow_extensions = extract_flow_extensions(&metadata).unwrap();
+        assert!(
+            validate_dedicated_metadata_channel(Channel::Grpc, !flow_extensions.is_empty(), false,)
+                .is_err()
+        );
+        assert!(validate_dedicated_metadata_channel(Channel::Grpc, false, true).is_err());
+        assert!(validate_dedicated_metadata_channel(Channel::Internal, true, true).is_ok());
     }
 
     #[test]
