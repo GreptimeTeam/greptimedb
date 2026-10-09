@@ -104,31 +104,41 @@ async fn test_trace_aux_waits_for_successful_chunk_completions() {
 #[test]
 fn test_trace_aux_cache_confirmed_writes() {
     let cache = TraceAuxCache::new(1024);
+    let (hits, misses) = trace_aux_cache_metrics();
+    let metrics = Some((&hits, &misses));
     let table = TableName::new("greptime", "public", "traces");
     let mut data = trace_aux_data("svc", "span", "server");
-    let pending = cache.filter(table.clone(), &mut data, None);
+    let pending = cache.filter(table.clone(), &mut data, metrics);
     assert_eq!(pending.len(), 2);
+    assert_eq!((hits.get(), misses.get()), (0, 2));
 
     // Preparing a write must not suppress a retry after failure or cancellation.
     let mut retry = trace_aux_data("svc", "span", "server");
     assert_eq!(cache.filter(table.clone(), &mut retry, None).len(), 2);
+    assert_eq!((hits.get(), misses.get()), (0, 2));
     cache.record(pending);
 
     let mut repeated = trace_aux_data("svc", "span", "server");
     assert!(
         cache
             .clone()
-            .filter(table.clone(), &mut repeated, None)
+            .filter(table.clone(), &mut repeated, metrics)
             .is_empty()
     );
     assert!(repeated.is_empty());
+    assert_eq!((hits.get(), misses.get()), (2, 2));
+    cache.filter(table.clone(), &mut retry, None);
+    assert_eq!((hits.get(), misses.get()), (2, 2));
 
     for (span, kind) in [("new_span", "server"), ("span", "client")] {
         let mut data = trace_aux_data("svc", span, kind);
-        assert_eq!(cache.filter(table.clone(), &mut data, None).len(), 1);
+        assert_eq!(cache.filter(table.clone(), &mut data, metrics).len(), 1);
         assert!(data.services.is_empty());
         assert_eq!(data.operations.len(), 1);
     }
+    assert_eq!((hits.get(), misses.get()), (4, 4));
+    cache.filter(table.clone(), &mut TraceAuxData::default(), metrics);
+    assert_eq!((hits.get(), misses.get()), (4, 4));
 
     let mut other_service = trace_aux_data("other", "span", "server");
     assert_eq!(cache.filter(table, &mut other_service, None).len(), 2);
@@ -174,36 +184,6 @@ fn test_trace_aux_cache_zero_size_disables_caching() {
     assert_eq!(repeated.operations.len(), 1);
     assert_eq!(hits.get(), 0);
     assert_eq!(misses.get(), 4);
-}
-
-#[test]
-fn test_trace_aux_cache_lookup_metrics() {
-    let cache = TraceAuxCache::new(1024);
-    let (hits, misses) = trace_aux_cache_metrics();
-    let table = TableName::new("greptime", "public", "traces");
-    let data = || trace_aux_data("svc", "span", "server");
-
-    let pending = cache.filter(table.clone(), &mut data(), Some((&hits, &misses)));
-    assert_eq!((hits.get(), misses.get()), (0, 2));
-    cache.filter(table.clone(), &mut data(), None);
-    assert_eq!((hits.get(), misses.get()), (0, 2));
-    cache.record(pending);
-
-    cache.filter(table.clone(), &mut data(), Some((&hits, &misses)));
-    assert_eq!((hits.get(), misses.get()), (2, 2));
-    cache.filter(table.clone(), &mut data(), None);
-    assert_eq!((hits.get(), misses.get()), (2, 2));
-
-    let mut mixed = trace_aux_data("svc", "other", "server");
-    assert_eq!(
-        cache
-            .filter(table.clone(), &mut mixed, Some((&hits, &misses)))
-            .len(),
-        1
-    );
-    assert_eq!((hits.get(), misses.get()), (3, 3));
-    cache.filter(table, &mut TraceAuxData::default(), Some((&hits, &misses)));
-    assert_eq!((hits.get(), misses.get()), (3, 3));
 }
 
 #[test]

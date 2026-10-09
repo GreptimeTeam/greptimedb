@@ -351,12 +351,23 @@ mod tests {
             )
             .await;
         assert!(cache.get_failover_cache("db", "p", None).await.is_err());
-        cache.insert_failover_cache(content_at(3), true).await;
-        assert_eq!(
-            cache.get_failover_cache("db", "p", None).await.unwrap(),
-            Some(content_at(3))
-        );
-        assert_eq!((hits.get(), misses.get()), (before.0 + 3, before.1 + 2));
+        // Global pipelines win over local entries inserted before or after them.
+        for (schema, version) in [(EMPTY_SCHEMA_NAME, 3), ("c", 4)] {
+            cache
+                .insert_failover_cache(
+                    PipelineContent {
+                        schema: schema.into(),
+                        ..content_at(version)
+                    },
+                    true,
+                )
+                .await;
+            assert_eq!(
+                cache.get_failover_cache("db", "p", None).await.unwrap(),
+                Some(content_at(3))
+            );
+        }
+        assert_eq!((hits.get(), misses.get()), (before.0 + 4, before.1 + 2));
     }
 
     #[tokio::test]
@@ -409,26 +420,5 @@ mod tests {
 
         let failover = cache.get_failover_cache("b", "p", None).await.unwrap();
         assert_eq!(failover.map(|c| c.version), Some(v2.version));
-    }
-
-    #[tokio::test]
-    async fn test_failover_serves_global_pipeline_to_unwarmed_schema() {
-        let cache = PipelineCache::new(Duration::from_secs(60));
-        let content = content_at(1);
-
-        cache.insert_failover_cache(content.clone(), true).await;
-
-        let found = cache.get_failover_cache("b", "p", None).await.unwrap();
-        assert_eq!(found, Some(content.clone()));
-
-        // A same-named pipeline under another schema must not shadow the global one.
-        let schema_local = PipelineContent {
-            schema: "x".to_string(),
-            ..content_at(2)
-        };
-        cache.insert_failover_cache(schema_local, true).await;
-
-        let found = cache.get_failover_cache("b", "p", None).await.unwrap();
-        assert_eq!(found, Some(content));
     }
 }
