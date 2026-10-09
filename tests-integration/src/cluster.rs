@@ -41,7 +41,7 @@ use common_datasource::object_store::LocalFileAccess;
 use common_event_recorder::EventRecorderOptions;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::DatanodeId;
-use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistry, LayeredCacheRegistryBuilder};
+use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
@@ -113,8 +113,6 @@ pub struct GreptimeDbCluster {
     /// The stats of the network address of every datanode, empty unless the cluster serves the
     /// datanodes at their own addresses.
     pub datanode_rpc_stats: HashMap<DatanodeId, Arc<DatanodeRpcStats>>,
-    /// Cache registries used by datanodes to apply cache invalidations.
-    pub datanode_cache_registries: HashMap<DatanodeId, Arc<LayeredCacheRegistry>>,
     pub kv_backend: KvBackendRef,
     pub metasrv: Arc<Metasrv>,
     pub frontend: Arc<Frontend>,
@@ -381,7 +379,7 @@ impl GreptimeDbClusterBuilder {
         )
         .await;
 
-        let (datanode_instances, datanode_cache_registries) = self
+        let datanode_instances = self
             .build_datanodes_with_options(&metasrv, &datanode_options)
             .await;
 
@@ -420,7 +418,6 @@ impl GreptimeDbClusterBuilder {
             guards,
             datanode_instances,
             datanode_rpc_stats,
-            datanode_cache_registries,
             kv_backend: self.kv_backend.clone(),
             metasrv: metasrv.metasrv,
             frontend: Arc::new(frontend),
@@ -503,22 +500,16 @@ impl GreptimeDbClusterBuilder {
         &self,
         metasrv: &MockInfo,
         options: &[DatanodeOptions],
-    ) -> (
-        HashMap<DatanodeId, Datanode>,
-        HashMap<DatanodeId, Arc<LayeredCacheRegistry>>,
-    ) {
+    ) -> HashMap<DatanodeId, Datanode> {
         let mut instances = HashMap::with_capacity(options.len());
-        let mut cache_registries = HashMap::with_capacity(options.len());
 
         for opts in options {
-            let (datanode, cache_registry) =
-                self.create_datanode(opts.clone(), metasrv.clone()).await;
+            let datanode = self.create_datanode(opts.clone(), metasrv.clone()).await;
             let datanode_id = opts.node_id.unwrap();
             instances.insert(datanode_id, datanode);
-            cache_registries.insert(datanode_id, cache_registry);
         }
 
-        (instances, cache_registries)
+        instances
     }
 
     async fn wait_datanodes_alive(
@@ -544,11 +535,7 @@ impl GreptimeDbClusterBuilder {
         panic!("Some Datanodes are not alive in 10 seconds!")
     }
 
-    async fn create_datanode(
-        &self,
-        opts: DatanodeOptions,
-        metasrv: MockInfo,
-    ) -> (Datanode, Arc<LayeredCacheRegistry>) {
+    async fn create_datanode(&self, opts: DatanodeOptions, metasrv: MockInfo) -> Datanode {
         let mut meta_client = MetaClientBuilder::datanode_default_options(opts.node_id.unwrap())
             .channel_manager(metasrv.channel_manager)
             .build();
@@ -568,7 +555,7 @@ impl GreptimeDbClusterBuilder {
 
         datanode.start_heartbeat().await.unwrap();
 
-        (datanode, layered_cache_registry)
+        datanode
     }
 
     async fn build_frontend(

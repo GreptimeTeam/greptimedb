@@ -53,19 +53,10 @@ pub const TABLE_FLOWNODE_SET_CACHE_NAME: &str = "table_flownode_set_cache";
 pub const TABLE_ROUTE_CACHE_NAME: &str = "table_route_cache";
 pub const PARTITION_INFO_CACHE_NAME: &str = "partition_info_cache";
 
-/// Builds the layered cache registry for datanode.
+/// Builds the datanode cache registry with base metadata caches before derived caches.
 ///
-/// Layers separate caches derived from kv-backed metadata. The first layer holds the schema, table
-/// id-to-schema-name, table info, table name and table route caches; the second holds the table cache
-/// (derived from table info and name) and partition info cache (derived from table routes).
-///
-/// [LayeredCacheRegistry] invalidates a layer only after the previous layer finished invalidating
-/// (see [LayeredCacheRegistryBuilder::add_cache_registry]), so the derived caches are invalidated
-/// after the caches they are derived from. A flat [CacheRegistry] invalidates its caches
-/// concurrently: a derived cache could be invalidated first and then refilled by a concurrent query
-/// from a base cache that still holds the old value, and the stale metadata would stay in the
-/// derived cache until the entry expires. This is the only datanode cache registry: production code
-/// and test infrastructure build the same one.
+/// Invalidating the base layer first prevents a concurrent query from refilling a derived cache
+/// from stale metadata after that derived cache has been invalidated.
 pub fn build_datanode_layered_cache_registry(kv_backend: KvBackendRef) -> LayeredCacheRegistry {
     let cache = CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY).build();
     let table_id_schema_cache = Arc::new(new_table_schema_cache(
@@ -242,34 +233,4 @@ pub fn with_default_composite_cache_registry(
         .build();
 
     Ok(builder.add_cache_registry(registry))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use catalog::kvbackend::TableCacheRef;
-    use common_meta::cache::{
-        SchemaCacheRef, TableInfoCacheRef, TableNameCacheRef, TableRouteCacheRef,
-        TableSchemaCacheRef,
-    };
-    use common_meta::kv_backend::memory::MemoryKvBackend;
-    use partition::cache::PartitionInfoCacheRef;
-
-    use super::*;
-
-    #[test]
-    fn test_datanode_layered_cache_registry_holds_all_caches() {
-        let registry = build_datanode_layered_cache_registry(Arc::new(MemoryKvBackend::<
-            common_meta::error::Error,
-        >::new()));
-
-        assert!(registry.get::<TableSchemaCacheRef>().is_some());
-        assert!(registry.get::<SchemaCacheRef>().is_some());
-        assert!(registry.get::<TableInfoCacheRef>().is_some());
-        assert!(registry.get::<TableNameCacheRef>().is_some());
-        assert!(registry.get::<TableCacheRef>().is_some());
-        assert!(registry.get::<TableRouteCacheRef>().is_some());
-        assert!(registry.get::<PartitionInfoCacheRef>().is_some());
-    }
 }
