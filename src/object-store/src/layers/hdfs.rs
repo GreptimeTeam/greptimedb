@@ -629,12 +629,7 @@ mod tests {
         // The destination keeps its previous contents...
         assert_eq!(
             b"old",
-            store
-                .read("data/target")
-                .await
-                .unwrap()
-                .to_bytes()
-                .as_ref()
+            store.read("data/target").await.unwrap().to_bytes().as_ref()
         );
         // ...and the temporary file is removed even though the writer was not
         // closed or aborted by the caller.
