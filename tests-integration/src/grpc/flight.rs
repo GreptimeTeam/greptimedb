@@ -499,11 +499,41 @@ mod test {
         query_and_expect(db.frontend().as_ref(), sql, expected).await;
 
         create_table_named(&client, "bar").await;
-        let result = client
-            .sql_with_terminal_metrics(
-                "insert into bar select ts, a, `B` from foo",
-                &[("flow.return_region_seq", "true")],
-            )
+        let runtime = common_runtime::global_runtime().clone();
+        let request_handler = GreptimeRequestHandler::new(
+            db.frontend().clone(),
+            None,
+            Some(runtime.clone()),
+            FlightCompression::default(),
+        );
+        let mut internal_server = GrpcServerBuilder::new(GrpcServerConfig::default(), runtime)
+            .database_handler(request_handler.clone())
+            .flight_handler(Arc::new(request_handler))
+            .add_layer(axum::middleware::from_fn(
+                |mut request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    request
+                        .extensions_mut()
+                        .insert(session::context::Channel::Internal);
+                    next.run(request).await
+                },
+            ))
+            .build();
+        internal_server
+            .start("127.0.0.1:0".parse::<SocketAddr>().unwrap())
+            .await
+            .unwrap();
+        let internal_client = Database::new_with_dbname(
+            "greptime-public",
+            Client::with_urls(vec![internal_server.bind_addr().unwrap().to_string()]),
+        );
+        let result = internal_client
+            .flight_request()
+            .with_flow_extensions(&[("flow.return_region_seq", "true")])
+            .query_with_terminal_metrics(QueryRequest {
+                query: Some(Query::Sql(
+                    "insert into bar select ts, a, `B` from foo".to_string(),
+                )),
+            })
             .await
             .unwrap();
         let OutputData::AffectedRows(affected_rows) = result.output.data else {
@@ -569,6 +599,14 @@ mod test {
         let mut grpc_server = GrpcServerBuilder::new(GrpcServerConfig::default(), runtime)
             .database_handler(greptime_request_handler.clone())
             .flight_handler(Arc::new(greptime_request_handler))
+            .add_layer(axum::middleware::from_fn(
+                |mut request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    request
+                        .extensions_mut()
+                        .insert(session::context::Channel::Internal);
+                    next.run(request).await
+                },
+            ))
             .build();
         grpc_server
             .start("127.0.0.1:0".parse::<SocketAddr>().unwrap())
@@ -617,7 +655,11 @@ mod test {
         assert!(metrics.region_watermarks.is_empty());
 
         let result = client
-            .sql_with_terminal_metrics(sql, &[("flow.return_region_seq", "true")])
+            .flight_request()
+            .with_flow_extensions(&[("flow.return_region_seq", "true")])
+            .query_with_terminal_metrics(QueryRequest {
+                query: Some(Query::Sql(sql.to_string())),
+            })
             .await
             .unwrap();
         let terminal_metrics = result.metrics.clone();
@@ -638,7 +680,9 @@ mod test {
         );
 
         let output = client
-            .sql_with_hint(sql, &[("flow.return_region_seq", "true")])
+            .flight_request()
+            .with_flow_extensions(&[("flow.return_region_seq", "true")])
+            .sql(sql)
             .await
             .unwrap();
         let OutputData::Stream(mut stream) = output.data else {
@@ -677,10 +721,13 @@ mod test {
         assert!(result.region_watermark_map().is_none());
 
         let err = client
-            .sql_with_terminal_metrics(
-                "insert into bar select ts, a, `B` from foo",
-                &[("flow.return_region_seq", "not-a-bool")],
-            )
+            .flight_request()
+            .with_flow_extensions(&[("flow.return_region_seq", "not-a-bool")])
+            .query_with_terminal_metrics(QueryRequest {
+                query: Some(Query::Sql(
+                    "insert into bar select ts, a, `B` from foo".to_string(),
+                )),
+            })
             .await
             .unwrap_err();
         let err_msg = format!("{err:?}");
@@ -689,10 +736,13 @@ mod test {
         client.sql("truncate table bar").await.unwrap();
 
         let result = client
-            .sql_with_terminal_metrics(
-                "insert into bar select ts, a, `B` from foo",
-                &[("flow.return_region_seq", "true")],
-            )
+            .flight_request()
+            .with_flow_extensions(&[("flow.return_region_seq", "true")])
+            .query_with_terminal_metrics(QueryRequest {
+                query: Some(Query::Sql(
+                    "insert into bar select ts, a, `B` from foo".to_string(),
+                )),
+            })
             .await
             .unwrap();
         let OutputData::AffectedRows(affected_rows) = result.output.data else {
@@ -703,6 +753,106 @@ mod test {
             result.region_watermark_map(),
             Some(std::collections::HashMap::from([previous_watermark]))
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_flight_query_options_are_applied_and_request_scoped() {
+        common_telemetry::init_default_ut_logging();
+
+        let (_db, server) = setup_grpc_server(StorageType::File, "flight_query_options").await;
+        let client = Database::new_with_dbname(
+            "greptime-public",
+            Client::with_urls(vec![server.bind_addr().unwrap().to_string()]),
+        );
+
+        let run = |hint: Option<(&'static str, &'static str)>| {
+            let client = client.clone();
+            async move {
+                let mut request = client.flight_request();
+                if let Some((key, value)) = hint {
+                    request = request.with_hints(&[(key, value)]);
+                }
+                request
+                    .sql("SHOW VARIABLES query.parallelism")
+                    .await
+                    .unwrap()
+                    .data
+                    .pretty_print()
+                    .await
+            }
+        };
+        let default_before = run(None).await;
+        let (canonical, legacy) = tokio::join!(
+            run(Some(("query.parallelism", "4"))),
+            run(Some(("query_parallelism", "7"))),
+        );
+        let has_value = |output: &str, expected: &str| {
+            output.lines().any(|line| {
+                line.trim().starts_with('|')
+                    && line.trim().ends_with('|')
+                    && line
+                        .rsplit('|')
+                        .nth(1)
+                        .is_some_and(|cell| cell.trim() == expected)
+            })
+        };
+        assert!(has_value(&canonical, "4"), "{canonical}");
+        assert!(has_value(&legacy, "7"), "{legacy}");
+        let default_after = run(None).await;
+        assert_eq!(
+            default_after, default_before,
+            "request-scoped hint changed the subsequent default result"
+        );
+        for variable in [
+            "query.allow_query_fallback",
+            "query.enable_remote_dynamic_filter_pushdown",
+            "datafusion.optimizer.enable_dynamic_filter_pushdown",
+        ] {
+            let value = client
+                .flight_request()
+                .with_hints(&[(variable, "false")])
+                .sql(format!("SHOW VARIABLES {variable}"))
+                .await
+                .unwrap()
+                .data
+                .pretty_print()
+                .await;
+            assert!(value.contains("false"), "{variable}: {value}");
+        }
+
+        for (key, value) in [
+            ("query.parallelism", "0"),
+            ("query.unknown_option", "true"),
+            ("datafusion.optimizer.repartition_joins", "invalid"),
+            ("datafusion.execution.batch_size", "12"),
+        ] {
+            let err = client
+                .flight_request()
+                .with_hints(&[(key, value)])
+                .sql("SELECT 1")
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err.status_code(),
+                StatusCode::InvalidArguments,
+                "{key}={value}: {err:?}"
+            );
+        }
+        let err = client
+            .flight_request()
+            .with_hints(&[("query.parallelism", "4"), ("query_parallelism", "7")])
+            .sql("SELECT 1")
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+
+        let err = client
+            .flight_request()
+            .with_hints(&[("flow.return_region_seq", "true")])
+            .sql("SELECT 1")
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
     }
 
     async fn wait_for_client_health(client: &Client) {
@@ -738,6 +888,14 @@ mod test {
         );
         let mut grpc_server = GrpcServerBuilder::new(GrpcServerConfig::default(), runtime)
             .flight_handler(Arc::new(greptime_request_handler))
+            .add_layer(axum::middleware::from_fn(
+                |mut request: axum::extract::Request, next: axum::middleware::Next| async move {
+                    request
+                        .extensions_mut()
+                        .insert(session::context::Channel::Internal);
+                    next.run(request).await
+                },
+            ))
             .build();
         grpc_server
             .start("127.0.0.1:0".parse::<SocketAddr>().unwrap())
