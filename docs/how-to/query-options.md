@@ -23,7 +23,8 @@ SHOW VARIABLES query.allow_query_fallback;
 SET datafusion.optimizer.repartition_joins = false;
 ```
 
-`SHOW VARIABLES <option>` shows the effective value. Boolean values must be
+`SHOW VARIABLES <option>` shows the effective value. PostgreSQL also accepts
+`SET query.parallelism TO 4` and `SHOW query.parallelism`. Boolean values must be
 `true` or `false`. Unknown, unsupported, and non-allowlisted DataFusion options
 are rejected; arbitrary DataFusion configuration is not enabled.
 
