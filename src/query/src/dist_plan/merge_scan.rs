@@ -1659,7 +1659,7 @@ mod tests {
             .build();
         let optimized =
             datafusion::physical_optimizer::ensure_requirements::EnsureRequirements::new()
-                .optimize(join, &session.config_options())
+                .optimize(join, session.config_options())
                 .unwrap();
         let mut producer_ids = Vec::new();
         for child in optimized.children() {
