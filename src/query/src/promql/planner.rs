@@ -1257,6 +1257,18 @@ impl PromPlanner {
                     }
                 } else if right_is_empty_metric && !left_is_empty_metric {
                     self.ctx = left_context.clone();
+                } else if rhs.value_type() == ValueType::Scalar
+                    && lhs.value_type() == ValueType::Vector
+                {
+                    // A computed scalar on the right (`time()`, `scalar(...)`) has no labels;
+                    // the result keeps the labels of the vector on the left.
+                    self.ctx = left_context.clone();
+                }
+                // An operand without a table name, such as a comparison filter's projection, is
+                // joined under the `""` qualifier; resolve the projected columns against it.
+                // Otherwise a time index present on both sides is ambiguous.
+                if self.ctx.table_name.is_none() {
+                    self.ctx.table_name = Some(String::new());
                 }
                 // Computed scalars reach this join path instead of the literal projection paths.
                 // Broadcast them for arithmetic in the same way as literal scalars.
