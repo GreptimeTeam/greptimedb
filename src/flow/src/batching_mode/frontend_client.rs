@@ -486,10 +486,10 @@ impl FrontendClient {
                 query, batch_opts, ..
             } => {
                 let query_parallelism = query.parallelism.to_string();
-                let hints = vec![
-                    (QUERY_PARALLELISM_HINT, query_parallelism.as_str()),
-                    (READ_PREFERENCE_HINT, batch_opts.read_preference.as_ref()),
-                ];
+                let mut hints = vec![(READ_PREFERENCE_HINT, batch_opts.read_preference.as_ref())];
+                if query.parallelism > 0 {
+                    hints.push((QUERY_PARALLELISM_HINT, query_parallelism.as_str()));
+                }
                 let db = self.get_random_active_frontend(catalog, schema).await?;
                 *peer_desc = Some(PeerDesc::Dist {
                     peer: db.peer.clone(),
@@ -510,10 +510,13 @@ impl FrontendClient {
                 query,
             } => {
                 *peer_desc = Some(PeerDesc::Standalone);
-                let mut extensions_map = HashMap::from([(
-                    QUERY_PARALLELISM_HINT.to_string(),
-                    query.parallelism.to_string(),
-                )]);
+                let mut extensions_map = HashMap::new();
+                if query.parallelism > 0 {
+                    extensions_map.insert(
+                        QUERY_PARALLELISM_HINT.to_string(),
+                        query.parallelism.to_string(),
+                    );
+                }
                 for (key, value) in extensions {
                     extensions_map.insert((*key).to_string(), (*value).to_string());
                 }
@@ -587,14 +590,18 @@ impl FrontendClient {
                 database_client,
                 query,
             } => {
+                let mut extensions = HashMap::new();
+                if query.parallelism > 0 {
+                    extensions.insert(
+                        QUERY_PARALLELISM_HINT.to_string(),
+                        query.parallelism.to_string(),
+                    );
+                }
                 let ctx = QueryContextBuilder::default()
                     .current_catalog(catalog.to_string())
                     .current_schema(schema.to_string())
                     .channel(Channel::Internal)
-                    .extensions(HashMap::from([(
-                        QUERY_PARALLELISM_HINT.to_string(),
-                        query.parallelism.to_string(),
-                    )]))
+                    .extensions(extensions)
                     .build();
                 let ctx = Arc::new(ctx);
                 let database_client = {
@@ -650,14 +657,16 @@ impl FrontendClient {
                     peer: db.peer.clone(),
                 });
 
+                let query_parallelism = query.parallelism.to_string();
+                let mut hints = vec![(READ_PREFERENCE_HINT, batch_opts.read_preference.as_ref())];
+                if query.parallelism > 0 {
+                    hints.push((QUERY_PARALLELISM_HINT, query_parallelism.as_str()));
+                }
                 db.database
                     .handle_with_retry(
                         req.clone(),
                         batch_opts.experimental_grpc_max_retries,
-                        &[
-                            (QUERY_PARALLELISM_HINT, &query.parallelism.to_string()),
-                            (READ_PREFERENCE_HINT, batch_opts.read_preference.as_ref()),
-                        ],
+                        &hints,
                     )
                     .await
                     .with_context(|_| InvalidRequestSnafu {
@@ -668,13 +677,17 @@ impl FrontendClient {
                 database_client,
                 query,
             } => {
+                let mut extensions = HashMap::new();
+                if query.parallelism > 0 {
+                    extensions.insert(
+                        QUERY_PARALLELISM_HINT.to_string(),
+                        query.parallelism.to_string(),
+                    );
+                }
                 let ctx = QueryContextBuilder::default()
                     .current_catalog(catalog.to_string())
                     .current_schema(schema.to_string())
-                    .extensions(HashMap::from([(
-                        QUERY_PARALLELISM_HINT.to_string(),
-                        query.parallelism.to_string(),
-                    )]))
+                    .extensions(extensions)
                     .build();
                 let ctx = Arc::new(ctx);
                 {
@@ -863,6 +876,11 @@ mod tests {
     struct SnapshotBindingHandler;
 
     #[derive(Debug)]
+    struct QueryParallelismHandler {
+        context: Arc<Mutex<Option<QueryContextRef>>>,
+    }
+
+    #[derive(Debug)]
     struct RejectUnauthenticatedFlight;
 
     #[derive(Debug)]
@@ -945,6 +963,19 @@ mod tests {
         ) -> std::result::Result<Output, BoxedError> {
             assert_eq!(ctx.extension("flow.return_region_seq"), Some("true"));
             assert_eq!(ctx.channel(), Channel::Internal);
+            Ok(Output::new_with_affected_rows(1))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl GrpcQueryHandlerWithBoxedError for QueryParallelismHandler {
+        async fn do_query(
+            &self,
+            _query: Request,
+            ctx: QueryContextRef,
+        ) -> std::result::Result<Output, BoxedError> {
+            ctx.query_option_snapshot().unwrap();
+            *self.context.lock().unwrap() = Some(ctx);
             Ok(Output::new_with_affected_rows(1))
         }
     }
@@ -1119,6 +1150,62 @@ mod tests {
         assert_eq!(affected_rows, 1);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(peer_desc.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_standalone_queries_only_forward_positive_parallelism() {
+        for (parallelism, expected) in [(0, None), (17, Some("17"))] {
+            let captured_context = Arc::new(Mutex::new(None));
+            let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> =
+                Arc::new(QueryParallelismHandler {
+                    context: captured_context.clone(),
+                });
+            let client = FrontendClient::from_grpc_handler(
+                Arc::downgrade(&handler),
+                QueryOptions {
+                    parallelism,
+                    ..Default::default()
+                },
+            );
+            let query = Request::Query(QueryRequest {
+                query: Some(Query::Sql("select 1".to_string())),
+            });
+            let mut peer_desc = None;
+
+            client
+                .handle(query, "greptime", "public", &mut peer_desc)
+                .await
+                .unwrap();
+            {
+                let context = captured_context.lock().unwrap().take().unwrap();
+                assert_eq!(context.extension(QUERY_PARALLELISM_HINT), expected);
+                context.query_option_snapshot().unwrap();
+            }
+
+            let flow_extension = (query::options::FLOW_RETURN_REGION_SEQ, "true");
+            let snapshot_seqs = HashMap::from([(1, 10)]);
+            let query = QueryRequest {
+                query: Some(Query::Sql("select 1".to_string())),
+            };
+            client
+                .query_with_terminal_metrics(
+                    "greptime",
+                    "public",
+                    query,
+                    &[flow_extension],
+                    &snapshot_seqs,
+                    &mut peer_desc,
+                )
+                .await
+                .unwrap();
+            {
+                let context = captured_context.lock().unwrap().take().unwrap();
+                assert_eq!(context.extension(QUERY_PARALLELISM_HINT), expected);
+                assert_eq!(context.extension(flow_extension.0), Some(flow_extension.1));
+                assert_eq!(context.get_snapshot(1), Some(10));
+                context.query_option_snapshot().unwrap();
+            }
+        }
     }
 
     #[tokio::test]
