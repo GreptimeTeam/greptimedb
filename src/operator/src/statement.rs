@@ -100,7 +100,7 @@ use crate::error::{
 };
 use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
-use crate::statement::set::set_allow_query_fallback;
+use crate::statement::set::set_query_option;
 
 /// A configurator that customizes or enhances a [`StatementExecutor`].
 #[async_trait::async_trait]
@@ -527,7 +527,8 @@ impl StatementExecutor {
     }
 
     fn set_variables(&self, set_var: SetVariables, query_ctx: QueryContextRef) -> Result<Output> {
-        let var_name = set_var.variable.to_string().to_uppercase();
+        let variable = set_var.variable.to_string();
+        let var_name = variable.to_uppercase();
 
         debug!(
             "Trying to set {}={} for session: {} ",
@@ -535,6 +536,10 @@ impl StatementExecutor {
             set_var.value.iter().map(|e| e.to_string()).join(", "),
             query_ctx.conn_info()
         );
+
+        if set_query_option(&variable, set_var.value.clone(), query_ctx.clone())? {
+            return Ok(Output::new_with_affected_rows(0));
+        }
 
         match var_name.as_str() {
             "READ_PREFERENCE" => set_read_preference(set_var.value, query_ctx)?,
@@ -551,9 +556,6 @@ impl StatementExecutor {
             // The tracked issue is https://github.com/GreptimeTeam/greptimedb/issues/3442.
             "DATESTYLE" => set_datestyle(set_var.value, query_ctx)?,
             "INTERVALSTYLE" => set_intervalstyle(set_var.value, query_ctx)?,
-
-            // Allow query to fallback when failed to push down.
-            "ALLOW_QUERY_FALLBACK" => set_allow_query_fallback(set_var.value, query_ctx)?,
 
             "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
             "@@SESSION.MAX_EXECUTION_TIME" | "MAX_EXECUTION_TIME" => match query_ctx.channel() {
