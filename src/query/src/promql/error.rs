@@ -142,6 +142,16 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "The subquery child window is outside the representable millisecond range: {}",
+        timestamp
+    ))]
+    SubqueryTimestampOutOfRange {
+        timestamp: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Cannot find column {col}"))]
     ColumnNotFound {
         col: String,
@@ -244,6 +254,7 @@ impl ErrorExt for Error {
             | ExpectRangeSelector { .. }
             | ZeroRangeSelector { .. }
             | InvalidTimeRange { .. }
+            | SubqueryTimestampOutOfRange { .. }
             | ColumnNotFound { .. }
             | FunctionInvalidArgument { .. }
             | UnsupportedVectorMatch { .. }
