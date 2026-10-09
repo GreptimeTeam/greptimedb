@@ -23,6 +23,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use api::v1::region::{QueryRequest, RegionRequestHeader};
+use client::Client;
+use client::region::RegionRequester;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
+use common_grpc::channel_manager::ChannelManager;
 use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches, SendableRecordBatchStream};
 use common_telemetry::info;
@@ -123,6 +128,125 @@ async fn test_nested_merge_scan_capability_join_across_datanodes() {
         "frontend result differs:\n{reference}"
     );
     assert_cross_datanode_region_query(&cluster, &remote_datanodes, &baseline_requests);
+}
+
+/// Internal read-preference wire metadata is rejected before nested execution on both inbound paths.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_nested_merge_scan_capability_rejects_internal_read_preference() {
+    use common_meta::node_manager::Datanode;
+    use common_query::request::QueryRequest as LogicalQueryRequest;
+    use futures::TryStreamExt;
+    use session::hints::READ_PREFERENCE_EXTENSION_KEY;
+
+    common_telemetry::init_default_ut_logging();
+
+    let cluster = build_cluster("test_nested_merge_scan_internal_read_preference").await;
+    let frontend = cluster.fe_instance().clone();
+    prepare_tables(&frontend).await;
+
+    let probe_leaders = region_leaders(&frontend, PROBE_TABLE).await;
+    let query_ctx = query_ctx();
+    let plan = nested_plan(&frontend, &query_ctx).await;
+    let (region_id, (datanode_id, address)) = probe_leaders.iter().next().unwrap();
+    let target = region_server(&cluster, *datanode_id);
+    // Confirm the same plan completes on the valid default-Leader path before asserting rejection.
+    let valid_rows = run_nested_queries(&cluster, &probe_leaders, &encode(&plan), &query_ctx).await;
+    assert_eq!(expected_join_rows(), multiset(valid_rows));
+    let mut baseline = cluster
+        .datanode_instances
+        .keys()
+        .map(|id| (*id, rpc_requests(&cluster, *id)))
+        .collect::<BTreeMap<_, _>>();
+
+    for value in ["", "invalid", "follower"] {
+        let mut header = region_request_header(&query_ctx);
+        header
+            .query_context
+            .as_mut()
+            .unwrap()
+            .extensions
+            .insert(READ_PREFERENCE_EXTENSION_KEY.to_string(), value.to_string());
+        let header = Some(header);
+        let error = target
+            .handle_read(LogicalQueryRequest {
+                header: header.clone(),
+                region_id: RegionId::from_u64(*region_id),
+                plan: plan.clone(),
+            })
+            .await
+            .err()
+            .expect("internal read preference must be rejected at logical ingress");
+        assert_eq!(
+            StatusCode::InvalidArguments,
+            error.status_code(),
+            "value={value:?}"
+        );
+        let logical_message = error.to_string().to_ascii_lowercase();
+        assert!(
+            logical_message.contains("read_preference"),
+            "expected an invalid query-context read-preference error, got: {logical_message}"
+        );
+        if !value.is_empty() {
+            assert!(
+                logical_message.contains(value),
+                "unexpected logical error: {logical_message}"
+            );
+        }
+        for id in cluster.datanode_instances.keys() {
+            assert_eq!(
+                baseline[id],
+                rpc_requests(&cluster, *id),
+                "logical invalid context caused DoGet at datanode {id}"
+            );
+        }
+
+        let client = Client::with_query_and_control_managers(
+            ChannelManager::new(),
+            ChannelManager::new(),
+            [address.as_str()],
+        );
+        let requester = RegionRequester::new(client, false, false);
+        let request = LogicalQueryRequest {
+            header,
+            region_id: RegionId::from_u64(*region_id),
+            plan: plan.clone(),
+        };
+        let flight_message = match Datanode::handle_query(&requester, request).await {
+            Err(error) => {
+                assert_eq!(StatusCode::InvalidArguments, error.status_code());
+                error.to_string().to_ascii_lowercase()
+            }
+            Ok(stream) => {
+                let error = stream
+                    .try_collect::<Vec<RecordBatch>>()
+                    .await
+                    .expect_err("Flight must reject invalid internal read preference");
+                assert_eq!(StatusCode::InvalidArguments, error.status_code());
+                error.to_string().to_ascii_lowercase()
+            }
+        };
+        assert!(
+            flight_message.contains("read_preference"),
+            "expected an invalid-parameter read-preference error, got: {flight_message}"
+        );
+        if !value.is_empty() {
+            assert!(
+                flight_message.contains(value),
+                "unexpected Flight error: {flight_message}"
+            );
+        }
+        for id in cluster.datanode_instances.keys() {
+            let expected = baseline[id] + u8::from(*id == *datanode_id) as usize;
+            assert_eq!(
+                expected,
+                rpc_requests(&cluster, *id),
+                "invalid Flight context caused nested DoGet at datanode {id}"
+            );
+        }
+        for id in cluster.datanode_instances.keys() {
+            baseline.insert(*id, rpc_requests(&cluster, *id));
+        }
+    }
 }
 
 /// A failing inner region makes the whole query fail: the datanode must not return the rows of the
