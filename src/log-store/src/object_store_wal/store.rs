@@ -6870,9 +6870,9 @@ mod tests {
     }
 
     /// Object access whose whole-object reads, or conditional creates, and
-    /// on request deletes, park until the test releases them, counting how
-    /// many are in flight. A release of false fails the operation with a
-    /// transient error before it reaches the object store.
+    /// on request deletes and range reads, park until the test releases
+    /// them, counting how many are in flight. A release of false fails the
+    /// operation with a transient error before it reaches the object store.
     struct ParkedIo {
         inner: ObjectStoreIo,
         parked: mpsc::UnboundedSender<(u64, oneshot::Sender<bool>)>,
@@ -6881,6 +6881,8 @@ mod tests {
         creates_parked: AtomicBool,
         /// Whether deletes park.
         deletes_parked: AtomicBool,
+        /// Whether range reads park.
+        range_reads_parked: AtomicBool,
         in_flight: AtomicUsize,
         max_in_flight: AtomicUsize,
     }
@@ -6919,6 +6921,7 @@ mod tests {
                     park_creates,
                     creates_parked: AtomicBool::new(false),
                     deletes_parked: AtomicBool::new(false),
+                    range_reads_parked: AtomicBool::new(false),
                     in_flight: AtomicUsize::new(0),
                     max_in_flight: AtomicUsize::new(0),
                 }),
@@ -6959,6 +6962,9 @@ mod tests {
         }
 
         async fn get_range(&self, object_seq: u64, offset: u64, len: u64) -> Result<Bytes> {
+            if self.range_reads_parked.load(Ordering::SeqCst) && !self.park(object_seq).await {
+                return injected_failure("read", self.object_path(object_seq));
+            }
             self.inner.get_range(object_seq, offset, len).await
         }
 
@@ -6983,8 +6989,9 @@ mod tests {
     /// Object access that records every range read as (sequence, offset,
     /// length) and, on request, reports the next conditional create as failed
     /// after it wrote the object, fails it with a given error before it
-    /// writes, stores the same content before it writes, or damages the bytes
-    /// the next range read returns.
+    /// writes, stores the same content before it writes, damages the bytes
+    /// the next range read returns, fails the next listing, or fails the
+    /// next range read of an object at an offset, all with transient errors.
     struct RecordingIo {
         inner: ObjectStoreIo,
         reads: RangeReads,
@@ -6992,6 +6999,8 @@ mod tests {
         fail_next_put: Mutex<Option<object_store::Error>>,
         damage_next_range_read: AtomicBool,
         duplicate_next_put: AtomicBool,
+        fail_next_list: AtomicBool,
+        fail_range_read_at: Mutex<Option<(u64, u64)>>,
     }
 
     impl RecordingIo {
@@ -7004,6 +7013,8 @@ mod tests {
                 fail_next_put: Mutex::new(None),
                 damage_next_range_read: AtomicBool::new(false),
                 duplicate_next_put: AtomicBool::new(false),
+                fail_next_list: AtomicBool::new(false),
+                fail_range_read_at: Mutex::new(None),
             };
             (Arc::new(io), reads)
         }
@@ -7053,6 +7064,15 @@ mod tests {
 
         async fn get_range(&self, object_seq: u64, offset: u64, len: u64) -> Result<Bytes> {
             self.reads.lock().unwrap().push((object_seq, offset, len));
+            if self
+                .fail_range_read_at
+                .lock()
+                .unwrap()
+                .take_if(|at| *at == (object_seq, offset))
+                .is_some()
+            {
+                return injected_failure("read", self.object_path(object_seq));
+            }
             let bytes = self.inner.get_range(object_seq, offset, len).await?;
             if self.damage_next_range_read.swap(false, Ordering::Relaxed) {
                 let mut damaged = bytes.to_vec();
@@ -7069,6 +7089,9 @@ mod tests {
         }
 
         async fn list(&self) -> Result<Vec<ListedObject>> {
+            if self.fail_next_list.swap(false, Ordering::Relaxed) {
+                return injected_failure("list", PREFIX.to_string());
+            }
             self.inner.list().await
         }
 
@@ -7077,8 +7100,9 @@ mod tests {
         }
     }
 
-    /// Drives every outcome of a conditional create through the store, one
-    /// case per fault, and checks that every row of the *Failure matrix* has one.
+    /// Drives every outcome of a conditional create and every failure of the
+    /// object store access through the store, one case per fault, and checks
+    /// that every row of the *Failure matrix* has one.
     mod fault_matrix {
         use object_store::layers::mock::{self, MockLayerBuilder, oio};
         use prometheus::Histogram;
@@ -7126,10 +7150,11 @@ mod tests {
             Row::StartFails,
         ];
 
-        /// One failure of the object store access and the row it exercises.
+        /// One failure of the object store access and the row it exercises,
+        /// when the failure is an outcome of a conditional create.
         struct Case {
             fault: &'static str,
-            row: Row,
+            row: Option<Row>,
             run: fn() -> BoxFuture<'static, ()>,
         }
 
@@ -7362,88 +7387,168 @@ mod tests {
             let cases = [
                 Case {
                     fault: "a create that succeeds",
-                    row: Row::Created,
+                    row: Some(Row::Created),
                     run: || Box::pin(create_succeeds()),
                 },
                 Case {
                     fault: "a create that finds an object with identical content",
-                    row: Row::Created,
+                    row: Some(Row::Created),
                     run: || Box::pin(create_finds_an_identical_object()),
                 },
                 Case {
                     fault: "a create whose response is lost",
-                    row: Row::Created,
+                    row: Some(Row::Created),
                     run: || Box::pin(create_response_is_lost()),
                 },
                 Case {
                     fault: "a create that fails transiently with later objects created and in flight, `durable` mode",
-                    row: Row::TransientDurable,
+                    row: Some(Row::TransientDurable),
                     run: || Box::pin(create_fails_transiently_durable()),
                 },
                 Case {
                     fault: "a create that fails transiently, `enqueued` mode",
-                    row: Row::TransientEnqueued,
+                    row: Some(Row::TransientEnqueued),
                     run: || Box::pin(create_fails_transiently_enqueued()),
                 },
                 Case {
                     fault: "a create that fails transiently after `stop` began, `enqueued` mode",
-                    row: Row::TransientEnqueuedAfterStop,
+                    row: Some(Row::TransientEnqueuedAfterStop),
                     run: || Box::pin(create_fails_transiently_after_stop_began()),
                 },
                 Case {
                     fault: "a create that finds an object of an earlier epoch, `durable` mode",
-                    row: Row::EarlierEpochDurable,
+                    row: Some(Row::EarlierEpochDurable),
                     run: || Box::pin(create_finds_an_earlier_epoch()),
                 },
                 Case {
                     fault: "a create that finds an object of an earlier epoch, `enqueued` mode",
-                    row: Row::Conflict,
+                    row: Some(Row::Conflict),
                     run: || Box::pin(create_finds_an_earlier_epoch_enqueued()),
                 },
                 Case {
                     fault: "a create that finds an object of the same or a later epoch",
-                    row: Row::Conflict,
+                    row: Some(Row::Conflict),
                     run: || Box::pin(create_finds_another_writer()),
                 },
                 Case {
                     fault: "a create that finds an object whose header cannot be read",
-                    row: Row::Conflict,
+                    row: Some(Row::Conflict),
                     run: || Box::pin(create_finds_an_unreadable_object()),
                 },
                 Case {
                     fault: "a create that completes after a conflict poisoned the store",
-                    row: Row::Conflict,
+                    row: Some(Row::Conflict),
                     run: || Box::pin(create_completes_after_the_store_was_poisoned()),
                 },
                 Case {
                     fault: "a created object the catalog rejects",
-                    row: Row::CatalogError,
+                    row: Some(Row::CatalogError),
                     run: || Box::pin(catalog_rejects_the_created_object()),
                 },
                 Case {
                     fault: "a create at the last representable object sequence",
-                    row: Row::LastSequence,
+                    row: Some(Row::LastSequence),
                     run: || Box::pin(create_takes_the_last_object_sequence()),
                 },
                 Case {
                     fault: "a start object that meets an object of an earlier epoch",
-                    row: Row::StartMovesPast,
+                    row: Some(Row::StartMovesPast),
                     run: || Box::pin(start_object_meets_an_earlier_epoch()),
                 },
                 Case {
                     fault: "a start object that meets an object of the same or a later epoch",
-                    row: Row::StartFails,
+                    row: Some(Row::StartFails),
                     run: || Box::pin(start_object_meets_another_writer()),
                 },
                 Case {
                     fault: "a start object that meets an object with identical content",
-                    row: Row::StartFails,
+                    row: Some(Row::StartFails),
                     run: || Box::pin(start_object_meets_an_identical_object()),
                 },
                 Case {
                     fault: "a start object whose create has an unknown outcome",
-                    row: Row::StartFails,
+                    row: Some(Row::StartFails),
                     run: || Box::pin(start_object_create_has_an_unknown_outcome()),
+                },
+                Case {
+                    fault: "a listing that fails at recovery",
+                    row: None,
+                    run: || Box::pin(listing_fails_at_recovery()),
+                },
+                Case {
+                    fault: "a trailer fetch that fails at recovery",
+                    row: None,
+                    run: || Box::pin(trailer_fetch_fails_at_recovery()),
+                },
+                Case {
+                    fault: "a footer fetch that fails at recovery",
+                    row: None,
+                    run: || Box::pin(footer_fetch_fails_at_recovery()),
+                },
+                Case {
+                    fault: "a recovery the catalog rejects after every footer was read",
+                    row: None,
+                    run: || Box::pin(catalog_rejects_the_recovery()),
+                },
+                Case {
+                    fault: "an object gone by the time recovery fetches it",
+                    row: None,
+                    run: || Box::pin(object_vanishes_before_its_fetch()),
+                },
+                Case {
+                    fault: "a segment fetch that fails at a read",
+                    row: None,
+                    run: || Box::pin(segment_fetch_fails_at_a_read()),
+                },
+                Case {
+                    fault: "a delete that fails at a collection",
+                    row: None,
+                    run: || Box::pin(delete_fails_at_a_collection()),
+                },
+                Case {
+                    fault: "a stop with a delete in flight",
+                    row: None,
+                    run: || Box::pin(stop_waits_for_a_delete_in_flight()),
+                },
+                Case {
+                    fault: "an append past the entry id range of its region",
+                    row: None,
+                    run: || Box::pin(region_exhausts_its_entry_ids()),
+                },
+                Case {
+                    fault: "creates that succeed after `stop` began, `durable` mode",
+                    row: None,
+                    run: || Box::pin(creates_succeed_after_stop_began()),
+                },
+                Case {
+                    fault: "a create that fails transiently after `stop` began, `durable` mode",
+                    row: None,
+                    run: || Box::pin(create_fails_transiently_after_stop_began_durable()),
+                },
+                Case {
+                    fault: "a create that conflicts after `stop` began",
+                    row: None,
+                    run: || Box::pin(create_conflicts_after_stop_began()),
+                },
+                Case {
+                    fault: "a stalled append released by admission, then one released by a stop",
+                    row: None,
+                    run: || Box::pin(stalled_appends_released_by_admission_and_by_a_stop()),
+                },
+                Case {
+                    fault: "a stalled append released by a terminal error",
+                    row: None,
+                    run: || Box::pin(stalled_append_released_by_a_terminal_error()),
+                },
+                Case {
+                    fault: "a stalled append released by the teardown of the actor",
+                    row: None,
+                    run: || Box::pin(stalled_append_released_by_the_teardown()),
+                },
+                Case {
+                    fault: "an object store that answers slowly",
+                    row: None,
+                    run: || Box::pin(object_store_answers_slowly()),
                 },
             ];
 
@@ -7454,7 +7559,7 @@ mod tests {
             }
             for row in ROWS {
                 assert!(
-                    cases.iter().any(|case| case.row == row),
+                    cases.iter().any(|case| case.row == Some(row)),
                     "no case covers the failure matrix row {row:?}"
                 );
             }
@@ -8225,6 +8330,901 @@ mod tests {
                 RetryHint::Retryable,
             )
             .await;
+        }
+
+        /// Asserts every append failed with the stopped error.
+        async fn assert_appends_stopped(
+            appends: Vec<tokio::task::JoinHandle<Result<AppendBatchResponse>>>,
+        ) {
+            for append in appends {
+                assert_stopped(&timeout(WAIT, append).await.unwrap().unwrap().unwrap_err());
+            }
+        }
+
+        /// Puts both indexed gauges at the one start object of a store opened
+        /// on an empty prefix, so a case that abandons a recovery can tell the
+        /// gauges standing still from a publication of what its prefix holds.
+        async fn settled_gauges() -> (i64, i64) {
+            let store = open(memory_store(), &eager()).await;
+            store.stop().await.unwrap();
+            let gauges = indexed_gauges();
+            assert_eq!((1, object_len(&[]) as i64), gauges);
+            gauges
+        }
+
+        /// Opens a store over `io` and asserts that the recovery was
+        /// abandoned: `open` fails with an error `recognise` accepts and
+        /// `retry_hint`, no start object is written so the prefix still holds
+        /// `present`, both gauges stand still and no metric moves.
+        async fn assert_recovery_abandoned(
+            io: Arc<dyn WalObjectIo>,
+            present: &[u64],
+            recognise: impl Fn(&Error) -> bool,
+            retry_hint: RetryHint,
+        ) {
+            let gauges = settled_gauges().await;
+            let before = Counters::sample();
+            let error = ObjectStoreLogStore::open(io.clone(), &eager(), PREFIX.to_string())
+                .await
+                .unwrap_err();
+            assert!(recognise(&error), "unexpected error: {error:?}");
+            assert_eq!(retry_hint, error.retry_hint());
+            assert_eq!(present, object_seqs(io.as_ref()).await.as_slice());
+            assert_eq!(gauges, indexed_gauges());
+            assert_eq!(Counters::default(), Counters::since(before));
+        }
+
+        /// Writes object `object_seq` holding one entry of region 1 with
+        /// `data`, chained to the object below it.
+        async fn put_entry(object_store: &ObjectStore, object_seq: u64, data: &str) {
+            let record = Record {
+                region_id: region(1),
+                entry_id: id(object_seq, 1),
+                payload: Bytes::from(data.as_bytes().to_vec()),
+            };
+            put_records(object_store, object_seq, &[record]).await;
+        }
+
+        async fn listing_fails_at_recovery() {
+            let object_store = memory_store();
+            put_entry(&object_store, 0, "a0").await;
+            put_entry(&object_store, 1, "a1").await;
+            let (io, _) = RecordingIo::over(object_store);
+            io.fail_next_list.store(true, Ordering::Relaxed);
+            assert_recovery_abandoned(
+                io.clone(),
+                &[0, 1],
+                |error| {
+                    matches!(
+                        error,
+                        Error::WalObjectStore {
+                            operation: "list",
+                            ..
+                        }
+                    )
+                },
+                RetryHint::Retryable,
+            )
+            .await;
+            assert!(!io.fail_next_list.load(Ordering::Relaxed));
+
+            let before = Counters::sample();
+            let store = open_over(io.clone(), &eager()).await;
+            assert_indexed(io.as_ref(), &[0, 1, 2]).await;
+            assert_eq!(
+                expected_entries(region(1), &[(id(0, 1), "a0"), (id(1, 1), "a1")]),
+                read_entries(&store, region(1), 1).await
+            );
+            assert_eq!(
+                Counters {
+                    created_objects: 1,
+                    recovered_objects: 2,
+                    recoveries: 1,
+                    reads: 1,
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+            store.stop().await.unwrap();
+        }
+
+        /// Writes object 0 with a footer longer than the window recovery reads
+        /// from the end of an object, so recovery fetches its header, that
+        /// window and its footer separately, and returns the offsets of the
+        /// window and of the footer.
+        async fn put_wide_object(object_store: &ObjectStore) -> (u64, u64) {
+            let regions = (RECOVERY_TAIL_WINDOW / FOOTER_ENTRY_LEN + 100) as u32;
+            let records = (1..=regions)
+                .map(|number| Record {
+                    region_id: region(number),
+                    entry_id: 1,
+                    payload: Bytes::from_static(b"wide"),
+                })
+                .collect::<Vec<_>>();
+            put_records(object_store, 0, &records).await;
+            let bytes = object_store
+                .read(&object_path(object_store, 0))
+                .await
+                .unwrap()
+                .to_vec();
+            let (trailer, _) = footer_of(&bytes);
+            let tail_start = (bytes.len() - RECOVERY_TAIL_WINDOW) as u64;
+            assert!(trailer.footer_offset < tail_start);
+            (tail_start, trailer.footer_offset)
+        }
+
+        async fn trailer_fetch_fails_at_recovery() {
+            fetch_fails_at_recovery(false).await;
+        }
+
+        async fn footer_fetch_fails_at_recovery() {
+            fetch_fails_at_recovery(true).await;
+        }
+
+        /// The range read of the tail window, or of the footer, of the one
+        /// object fails; the next open recovers it.
+        async fn fetch_fails_at_recovery(footer: bool) {
+            let object_store = memory_store();
+            let (tail_start, footer_offset) = put_wide_object(&object_store).await;
+            let (io, _) = RecordingIo::over(object_store);
+            let offset = if footer { footer_offset } else { tail_start };
+            *io.fail_range_read_at.lock().unwrap() = Some((0, offset));
+            let path = io.object_path(0);
+            assert_recovery_abandoned(
+                io.clone(),
+                &[0],
+                |error| {
+                    matches!(error, Error::WalObjectStore { operation: "read", path: actual, .. } if *actual == path)
+                },
+                RetryHint::Retryable,
+            )
+            .await;
+            assert!(io.fail_range_read_at.lock().unwrap().is_none());
+
+            let before = Counters::sample();
+            let store = open_over(io.clone(), &eager()).await;
+            assert_indexed(io.as_ref(), &[0, 1]).await;
+            assert_eq!(
+                expected_entries(region(1), &[(1, "wide")]),
+                read_entries(&store, region(1), 1).await
+            );
+            assert_eq!(
+                Counters {
+                    created_objects: 1,
+                    recovered_objects: 1,
+                    recoveries: 1,
+                    reads: 1,
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+            store.stop().await.unwrap();
+        }
+
+        /// The entry ranges of the region do not increase with the sequence,
+        /// which the catalog refuses once every footer is read.
+        async fn catalog_rejects_the_recovery() {
+            let object_store = memory_store();
+            put_object(&object_store, 0, region(1), &[id(3, 1), id(3, 2)]).await;
+            put_object(&object_store, 1, region(1), &[id(2, 1)]).await;
+            let io = Arc::new(ObjectStoreIo::new(object_store, PREFIX).unwrap());
+            let path = io.object_path(1);
+            assert_recovery_abandoned(
+                io.clone(),
+                &[0, 1],
+                |error| {
+                    matches!(error, Error::InvalidWalObject { path: actual, source, .. }
+                        if *actual == path && matches!(**source, Error::CorruptedWalObject { .. }))
+                },
+                RetryHint::NonRetryable,
+            )
+            .await;
+        }
+
+        /// Writes the chain 0 to 3 of epoch 1, one entry of region 1 each;
+        /// objects 2 and 3 carry reclaim boundary 2, so object 1 is below the
+        /// boundary of the tip and object 2 is not.
+        async fn put_bounded_chain(object_store: &ObjectStore) {
+            let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+            for object_seq in 0..=3 {
+                let header = Header {
+                    reclaim_boundary: if object_seq >= 2 { 2 } else { 0 },
+                    ..chain_header(object_seq, 1, (object_seq > 0).then(|| (object_seq - 1, 1)))
+                };
+                let record = Record {
+                    region_id: region(1),
+                    entry_id: id(object_seq, 1),
+                    payload: Bytes::from(format!("a{object_seq}")),
+                };
+                put_object_with_header(&io, header, &[record]).await;
+            }
+        }
+
+        /// Every fetch of the listed objects parks and one object is deleted
+        /// meanwhile: below the boundary of the tip the object is ignored,
+        /// at or above it the construction fails.
+        async fn object_vanishes_before_its_fetch() {
+            for (vanished, fails) in [(1, false), (2, true)] {
+                let object_store = memory_store();
+                put_bounded_chain(&object_store).await;
+                let (io, mut parked) = ParkedIo::over(object_store.clone());
+                let gauges = settled_gauges().await;
+                let before = Counters::sample();
+                let opening = {
+                    let io = io.clone();
+                    tokio::spawn(async move {
+                        ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string()).await
+                    })
+                };
+                let releases = parked_operations(&mut parked, 4).await;
+                object_store
+                    .delete(&object_path(&object_store, vanished))
+                    .await
+                    .unwrap();
+                for release in releases.into_values() {
+                    release.send(true).unwrap();
+                }
+                let opened = timeout(WAIT, opening).await.unwrap().unwrap();
+                if fails {
+                    let error = opened.unwrap_err();
+                    assert!(
+                        is_not_found(&error)
+                            && matches!(&error, Error::WalObjectStore { path, .. } if *path == io.object_path(2)),
+                        "unexpected error: {error:?}"
+                    );
+                    assert_eq!(vec![0, 1, 3], object_seqs(io.as_ref()).await);
+                    assert_eq!(gauges, indexed_gauges());
+                    assert_eq!(Counters::default(), Counters::since(before));
+                    continue;
+                }
+                let store = opened.unwrap();
+                assert_eq!(vec![0, 2, 3, 4], object_seqs(io.as_ref()).await);
+                assert_indexed(io.as_ref(), &[2, 3, 4]).await;
+                assert_eq!(
+                    expected_entries(region(1), &[(id(2, 1), "a2"), (id(3, 1), "a3")]),
+                    read_entries(&store, region(1), 1).await
+                );
+                assert_eq!(
+                    Counters {
+                        created_objects: 1,
+                        recovered_objects: 3,
+                        recoveries: 1,
+                        reads: 1,
+                        ..Counters::default()
+                    },
+                    Counters::since(before)
+                );
+                store.stop().await.unwrap();
+            }
+        }
+
+        async fn segment_fetch_fails_at_a_read() {
+            let (io, _) = RecordingIo::over(memory_store());
+            let store = open_over(io.clone(), &eager()).await;
+            let before = Counters::sample();
+            let region_id = region(1);
+            append(&store, region_id, "a1").await.unwrap();
+            append(&store, region_id, "a2").await.unwrap();
+            assert_eq!(vec![1, 2], collected_object_seqs(&store).await);
+            let (path, segment) = store
+                .segment_location(&provider(region_id), 1)
+                .unwrap()
+                .unwrap();
+            *io.fail_range_read_at.lock().unwrap() = Some((1, segment.start));
+            let error = store
+                .read(&provider(region_id), 1, None)
+                .await
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&error, Error::WalObjectStore { operation: "read", path: actual, .. } if *actual == path),
+                "unexpected error: {error:?}"
+            );
+            assert_eq!(RetryHint::Retryable, error.retry_hint());
+            assert!(io.fail_range_read_at.lock().unwrap().is_none());
+            assert!(store.wal_holes(&provider(region_id)).unwrap().is_empty());
+            assert!(terminal(&store.terminal_error).is_none());
+            assert_indexed(io.as_ref(), &[1, 2]).await;
+            let written = Counters {
+                created_objects: 2,
+                seal_to_durable: 2,
+                sealed_objects: 2,
+                object_bytes: 2 * one_entry_object(),
+                object_entries: 2,
+                acknowledged_appends: 2,
+                deleted_objects: 1,
+                ..Counters::default()
+            };
+            assert_eq!(written, Counters::since(before));
+
+            assert_eq!(
+                expected_entries(region_id, &[(id(1, 1), "a1"), (id(2, 1), "a2")]),
+                read_entries(&store, region_id, 1).await
+            );
+            assert_eq!(
+                Counters {
+                    reads: 1,
+                    ..written
+                },
+                Counters::since(before)
+            );
+            store.stop().await.unwrap();
+        }
+
+        /// The delete of the start object fails at the collection that
+        /// indexing object 1 starts; a watermark that leaves the boundary
+        /// where it is starts the next collection, which deletes it.
+        async fn delete_fails_at_a_collection() {
+            let (io, mut parked) = ParkedIo::parking_creates(memory_store());
+            let store = open_over(io.clone(), &eager()).await;
+            io.deletes_parked.store(true, Ordering::SeqCst);
+            let before = Counters::sample();
+            let region_id = region(1);
+            append(&store, region_id, "a1").await.unwrap();
+            let (object_seq, release) = next_parked_operation(&mut parked).await;
+            assert_eq!(0, object_seq);
+            release.send(false).unwrap();
+            timeout(WAIT, store.wait_for_garbage_collection())
+                .await
+                .unwrap();
+            assert!(store.catalog.read().unwrap().contains_object(0));
+            assert!(terminal(&store.terminal_error).is_none());
+            assert_eq!(vec![0, 1], object_seqs(io.as_ref()).await);
+            assert_indexed(io.as_ref(), &[0, 1]).await;
+            assert_eq!(
+                expected_entries(region_id, &[(id(1, 1), "a1")]),
+                read_entries(&store, region_id, 1).await
+            );
+            let written = Counters {
+                created_objects: 1,
+                seal_to_durable: 1,
+                sealed_objects: 1,
+                object_bytes: one_entry_object(),
+                object_entries: 1,
+                acknowledged_appends: 1,
+                reads: 1,
+                failed_deletes: 1,
+                ..Counters::default()
+            };
+            assert_eq!(written, Counters::since(before));
+
+            store
+                .obsolete(&provider(region_id), region_id, 0)
+                .await
+                .unwrap();
+            let (object_seq, release) = next_parked_operation(&mut parked).await;
+            assert_eq!(0, object_seq);
+            release.send(true).unwrap();
+            assert_eq!(vec![1], collected_object_seqs(&store).await);
+            assert!(!store.catalog.read().unwrap().contains_object(0));
+            assert_indexed(io.as_ref(), &[1]).await;
+            assert_eq!(
+                expected_entries(region_id, &[(id(1, 1), "a1")]),
+                read_entries(&store, region_id, 1).await
+            );
+            assert_eq!(
+                Counters {
+                    reads: 2,
+                    deleted_objects: 1,
+                    ..written
+                },
+                Counters::since(before)
+            );
+            store.stop().await.unwrap();
+        }
+
+        /// `stop` returns only after the delete in flight completed, and the
+        /// catalog then holds exactly what the prefix holds, whether the
+        /// delete succeeded or failed.
+        async fn stop_waits_for_a_delete_in_flight() {
+            for deleted in [true, false] {
+                let (io, mut parked) = ParkedIo::parking_creates(memory_store());
+                let store = open_over(io.clone(), &eager()).await;
+                io.deletes_parked.store(true, Ordering::SeqCst);
+                let before = Counters::sample();
+                let region_id = region(1);
+                append(&store, region_id, "a1").await.unwrap();
+                let (object_seq, release) = next_parked_operation(&mut parked).await;
+                assert_eq!(0, object_seq);
+                // The first poll queues the stop command; the delete in
+                // flight holds the answer back.
+                let mut stop = Box::pin(store.stop());
+                assert!((&mut stop).now_or_never().is_none());
+                for _ in 0..16 {
+                    tokio::task::yield_now().await;
+                }
+                assert!((&mut stop).now_or_never().is_none());
+                release.send(deleted).unwrap();
+                timeout(WAIT, stop).await.unwrap().unwrap();
+
+                let present = if deleted { vec![1] } else { vec![0, 1] };
+                assert_eq!(present, object_seqs(io.as_ref()).await);
+                let indexed = store
+                    .catalog
+                    .read()
+                    .unwrap()
+                    .objects_in_order()
+                    .map(|(object_seq, _)| object_seq)
+                    .collect::<Vec<_>>();
+                assert_eq!(present, indexed);
+                assert_indexed(io.as_ref(), &present).await;
+                assert!(terminal(&store.terminal_error).is_none());
+                assert_eq!(
+                    expected_entries(region_id, &[(id(1, 1), "a1")]),
+                    read_entries(&store, region_id, 1).await
+                );
+                assert_eq!(
+                    Counters {
+                        created_objects: 1,
+                        seal_to_durable: 1,
+                        sealed_objects: 1,
+                        object_bytes: one_entry_object(),
+                        object_entries: 1,
+                        acknowledged_appends: 1,
+                        reads: 1,
+                        deleted_objects: deleted as u64,
+                        failed_deletes: (!deleted) as u64,
+                        ..Counters::default()
+                    },
+                    Counters::since(before)
+                );
+            }
+        }
+
+        /// An append that alone runs past the position range of its region
+        /// is refused; the open batch it sealed first, which holds another
+        /// region too, is acknowledged, and the store keeps serving.
+        async fn region_exhausts_its_entry_ids() {
+            let store = open(memory_store(), &manual()).await;
+            let before = Counters::sample();
+            let (region_id, other) = (region(1), region(2));
+            let shared = spawn_append_batch(
+                &store,
+                vec![entry(&store, other, "b1"), entry(&store, region_id, "a1")],
+            );
+            store.wait_for_admitted_appends(1).await.unwrap();
+            let exhausting = (0..POSITION_LIMIT)
+                .map(|_| entry(&store, region_id, ""))
+                .collect::<Vec<_>>();
+            let error = store.append_batch(exhausting).await.unwrap_err();
+            assert!(
+                matches!(error, Error::WalEntryPositionExhausted { region_id: actual, .. } if actual == region_id),
+                "unexpected error: {error:?}"
+            );
+            let response = timeout(WAIT, shared).await.unwrap().unwrap().unwrap();
+            assert_eq!(
+                HashMap::from([(other, id(1, 1)), (region_id, id(1, 1))]),
+                response.last_entry_ids
+            );
+            assert!(terminal(&store.terminal_error).is_none());
+
+            let next = spawn_append_batch(&store, vec![entry(&store, region_id, "a2")]);
+            store.wait_for_admitted_appends(2).await.unwrap();
+            store.seal_open_batch().await.unwrap();
+            let response = timeout(WAIT, next).await.unwrap().unwrap().unwrap();
+            assert_eq!(Some(&id(2, 1)), response.last_entry_ids.get(&region_id));
+            assert_eq!(vec![1, 2], collected_object_seqs(&store).await);
+            assert_indexed(store.io.as_ref(), &[1, 2]).await;
+            assert_eq!(
+                expected_entries(region_id, &[(id(1, 1), "a1"), (id(2, 1), "a2")]),
+                read_entries(&store, region_id, 1).await
+            );
+            assert_eq!(
+                Counters {
+                    created_objects: 2,
+                    seal_to_durable: 2,
+                    sealed_objects: 2,
+                    object_bytes: object_bytes_of(&[(other, "b1"), (region_id, "a1")])
+                        + one_entry_object(),
+                    object_entries: 3,
+                    acknowledged_appends: 2,
+                    reads: 1,
+                    deleted_objects: 1,
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+            store.stop().await.unwrap();
+        }
+
+        /// Four creates are in flight and a fifth batch waits for a slot when
+        /// `stop` begins: the fifth is dropped, the four complete out of
+        /// order and are indexed and acknowledged in order.
+        async fn creates_succeed_after_stop_began() {
+            let (store, io, mut parked) = open_parking_creates(memory_store(), &eager()).await;
+            let before = Counters::sample();
+            let region_id = region(1);
+            let mut appends = spawn_appends(&store, region_id, MAX_IN_FLIGHT_CREATES + 1).await;
+            let mut releases = parked_operations(&mut parked, MAX_IN_FLIGHT_CREATES).await;
+            let dropped = appends.pop().unwrap();
+            let stop = {
+                let store = store.clone();
+                tokio::spawn(async move { store.stop().await })
+            };
+            assert_stopped(&timeout(WAIT, dropped).await.unwrap().unwrap().unwrap_err());
+            for object_seq in (1..=MAX_IN_FLIGHT_CREATES as u64).rev() {
+                releases.remove(&object_seq).unwrap().send(true).unwrap();
+            }
+            for (index, append) in appends.into_iter().enumerate() {
+                let response = timeout(WAIT, append).await.unwrap().unwrap().unwrap();
+                assert_eq!(
+                    Some(&id(index as u64 + 1, 1)),
+                    response.last_entry_ids.get(&region_id)
+                );
+            }
+            timeout(WAIT, stop).await.unwrap().unwrap().unwrap();
+
+            // Nothing is collected once stop began.
+            assert_eq!(vec![0, 1, 2, 3, 4], object_seqs(io.as_ref()).await);
+            assert_indexed(io.as_ref(), &[0, 1, 2, 3, 4]).await;
+            assert!(terminal(&store.terminal_error).is_none());
+            assert_eq!(
+                expected_entries(
+                    region_id,
+                    &[
+                        (id(1, 1), "a1"),
+                        (id(2, 1), "a2"),
+                        (id(3, 1), "a3"),
+                        (id(4, 1), "a4")
+                    ]
+                ),
+                read_entries(&store, region_id, 1).await
+            );
+            assert_eq!(
+                Counters {
+                    created_objects: 4,
+                    seal_to_durable: 4,
+                    sealed_objects: 5,
+                    object_bytes: 5 * one_entry_object(),
+                    object_entries: 5,
+                    acknowledged_appends: 4,
+                    reads: 1,
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+        }
+
+        /// Object 2 is created and object 3 in flight when object 1 fails
+        /// after `stop` began: every batch receives the stopped error, `stop`
+        /// waits for object 3, whose late create is an orphan.
+        async fn create_fails_transiently_after_stop_began_durable() {
+            let (store, io, mut parked) = open_parking_creates(memory_store(), &eager()).await;
+            let before = Counters::sample();
+            let region_id = region(1);
+            let appends = spawn_appends(&store, region_id, 3).await;
+            let mut releases = parked_operations(&mut parked, 3).await;
+            let stop = {
+                let store = store.clone();
+                tokio::spawn(async move { store.stop().await })
+            };
+            wait_until(|| store.stopped.load(Ordering::Acquire)).await;
+            releases.remove(&2).unwrap().send(true).unwrap();
+            wait_until(|| Counters::since(before).created_objects == 1).await;
+            releases.remove(&1).unwrap().send(false).unwrap();
+            assert_appends_stopped(appends).await;
+            assert!(!stop.is_finished());
+            assert_indexed(io.as_ref(), &[0]).await;
+            assert_eq!(
+                Counters {
+                    created_objects: 1,
+                    seal_to_durable: 1,
+                    create_failures: 1,
+                    sealed_objects: 3,
+                    object_bytes: 3 * one_entry_object(),
+                    object_entries: 3,
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+
+            releases.remove(&3).unwrap().send(true).unwrap();
+            timeout(WAIT, stop).await.unwrap().unwrap().unwrap();
+            assert_eq!(vec![0, 2, 3], object_seqs(io.as_ref()).await);
+            assert!(terminal(&store.terminal_error).is_none());
+            assert!(read_entries(&store, region_id, 1).await.is_empty());
+            assert_indexed(io.as_ref(), &[0]).await;
+            assert_eq!(
+                Counters {
+                    created_objects: 2,
+                    seal_to_durable: 2,
+                    create_failures: 1,
+                    sealed_objects: 3,
+                    object_bytes: 3 * one_entry_object(),
+                    object_entries: 3,
+                    reads: 1,
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+        }
+
+        /// Object 2 is created and object 3 in flight when object 1 meets
+        /// another writer after `stop` began: the store is poisoned, every
+        /// batch receives the stopped error and `stop` still returns.
+        async fn create_conflicts_after_stop_began() {
+            let object_store = memory_store();
+            let (store, io, mut parked) =
+                open_parking_creates(object_store.clone(), &eager()).await;
+            put_foreign(&object_store, 1, 1).await;
+            let before = Counters::sample();
+            let region_id = region(1);
+            let appends = spawn_appends(&store, region_id, 3).await;
+            let mut releases = parked_operations(&mut parked, 3).await;
+            let stop = {
+                let store = store.clone();
+                tokio::spawn(async move { store.stop().await })
+            };
+            wait_until(|| store.stopped.load(Ordering::Acquire)).await;
+            releases.remove(&2).unwrap().send(true).unwrap();
+            wait_until(|| Counters::since(before).created_objects == 1).await;
+            releases.remove(&1).unwrap().send(true).unwrap();
+            assert_appends_stopped(appends).await;
+            assert!(matches!(
+                terminal(&store.terminal_error).as_deref(),
+                Some(Error::WalObjectConflict { .. })
+            ));
+            assert_read_is_terminal(&store, region_id).await;
+            assert!(!stop.is_finished());
+            assert_indexed(io.as_ref(), &[0]).await;
+
+            releases.remove(&3).unwrap().send(true).unwrap();
+            timeout(WAIT, stop).await.unwrap().unwrap().unwrap();
+            assert_eq!(vec![0, 1, 2, 3], object_seqs(io.as_ref()).await);
+            assert_indexed(io.as_ref(), &[0]).await;
+            assert_eq!(
+                Counters {
+                    created_objects: 2,
+                    seal_to_durable: 2,
+                    create_conflicts: 1,
+                    poisoned: 1,
+                    sealed_objects: 3,
+                    object_bytes: 3 * one_entry_object(),
+                    object_entries: 3,
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+        }
+
+        /// The `enqueued` configuration under which the second append stalls
+        /// behind the create of the first.
+        fn stalling() -> ObjectStoreWalConfig {
+            ObjectStoreWalConfig {
+                max_unpersisted_bytes: ReadableSize(1),
+                ..enqueued(manual())
+            }
+        }
+
+        /// What `stall_second_append` leaves in the metrics.
+        fn stalled_once() -> Counters {
+            Counters {
+                created_objects: 1,
+                sealed_objects: 1,
+                object_bytes: one_entry_object(),
+                object_entries: 1,
+                recoveries: 1,
+                stalled_appends: 1,
+                ..Counters::default()
+            }
+        }
+
+        /// The first stalled append is admitted once the upload completes;
+        /// the entry it admits puts the backlog at the threshold again, so
+        /// the next append stalls behind the create it seals, and the stop
+        /// releases it with the stopped error. Both waits are timed.
+        async fn stalled_appends_released_by_admission_and_by_a_stop() {
+            const SHORT: Duration = Duration::from_millis(20);
+            let region_id = region(1);
+            let before = Counters::sample();
+            let stalled_at = Instant::now();
+            let (store, io, mut parked, stalled, release) = stall_second_append(stalling()).await;
+            assert_eq!(stalled_once(), Counters::since(before));
+
+            let timer = timer_before(&METRIC_OBJECT_STORE_WAL_STALLED_APPEND_SECONDS);
+            let holding_since = Instant::now();
+            tokio::time::sleep(SHORT).await;
+            let held = holding_since.elapsed();
+            release.send(true).unwrap();
+            let response = timeout(WAIT, stalled).await.unwrap().unwrap().unwrap();
+            assert_eq!(Some(&id(2, 1)), response.last_entry_ids.get(&region_id));
+            let admitted = Timed::since(
+                &METRIC_OBJECT_STORE_WAL_STALLED_APPEND_SECONDS,
+                timer,
+                held,
+                stalled_at.elapsed(),
+            );
+            assert_eq!(vec![1], collected_object_seqs(&store).await);
+
+            let stalled_at = Instant::now();
+            let refused = spawn_append_batch(&store, vec![entry(&store, region_id, "a3")]);
+            let (object_seq, release) = next_parked_operation(&mut parked).await;
+            assert_eq!(2, object_seq);
+            let timer = timer_before(&METRIC_OBJECT_STORE_WAL_STALLED_APPEND_SECONDS);
+            let holding_since = Instant::now();
+            tokio::time::sleep(admitted.elapsed + SHORT).await;
+            let held = holding_since.elapsed();
+            let stop = {
+                let store = store.clone();
+                tokio::spawn(async move { store.stop().await })
+            };
+            assert_stopped(&timeout(WAIT, refused).await.unwrap().unwrap().unwrap_err());
+            let refused = Timed::since(
+                &METRIC_OBJECT_STORE_WAL_STALLED_APPEND_SECONDS,
+                timer,
+                held,
+                stalled_at.elapsed(),
+            );
+            Timed::assert_pair("stalled append", admitted, refused);
+
+            release.send(true).unwrap();
+            timeout(WAIT, stop).await.unwrap().unwrap().unwrap();
+            assert_eq!(vec![1, 2], object_seqs(io.as_ref()).await);
+            assert_indexed(io.as_ref(), &[1, 2]).await;
+            assert!(terminal(&store.terminal_error).is_none());
+            assert_eq!(
+                expected_entries(region_id, &[(id(1, 1), "a1"), (id(2, 1), "a2")]),
+                read_entries(&store, region_id, 1).await
+            );
+            assert_eq!(
+                Counters {
+                    created_objects: 3,
+                    seal_to_durable: 2,
+                    sealed_objects: 2,
+                    object_bytes: 2 * one_entry_object(),
+                    object_entries: 2,
+                    recoveries: 1,
+                    reads: 1,
+                    deleted_objects: 1,
+                    stalled_appends: 2,
+                    stalled_waits: 2,
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+        }
+
+        /// The create the stalled append waits for meets another writer,
+        /// which poisons the `enqueued` store: the append is released with
+        /// the terminal error and its wait is recorded.
+        async fn stalled_append_released_by_a_terminal_error() {
+            let region_id = region(1);
+            let before = Counters::sample();
+            let (store, io, _parked, stalled, release) = stall_second_append(stalling()).await;
+            assert_eq!(stalled_once(), Counters::since(before));
+            let foreign = Header {
+                object_seq: 1,
+                epoch: 1,
+                prev: None,
+                reclaim_boundary: 0,
+            };
+            put_object_with_header(&io.inner, foreign, &[]).await;
+            release.send(true).unwrap();
+            let error = timeout(WAIT, stalled).await.unwrap().unwrap().unwrap_err();
+            assert!(
+                matches!(unwrap_shared(&error), Error::WalObjectConflict { .. }),
+                "unexpected error: {error:?}"
+            );
+            assert_read_is_terminal(&store, region_id).await;
+            let error = store.stop().await.unwrap_err();
+            assert!(
+                matches!(unwrap_shared(&error), Error::WalObjectConflict { .. }),
+                "unexpected error: {error:?}"
+            );
+            assert_eq!(vec![0, 1], object_seqs(io.as_ref()).await);
+            assert_indexed(io.as_ref(), &[0]).await;
+            assert_eq!(
+                Counters {
+                    create_conflicts: 1,
+                    poisoned: 1,
+                    stalled_waits: 1,
+                    ..stalled_once()
+                },
+                Counters::since(before)
+            );
+        }
+
+        /// The store is dropped without `stop` while the append is stalled:
+        /// the actor's teardown releases it and records its wait, and the
+        /// parked create never runs.
+        async fn stalled_append_released_by_the_teardown() {
+            let before = Counters::sample();
+            let (store, io, _parked, stalled, _release) = stall_second_append(stalling()).await;
+            assert_eq!(stalled_once(), Counters::since(before));
+
+            stalled.abort();
+            drop(store);
+            wait_until(|| LIVE_ACTORS.load(Ordering::SeqCst) == 0).await;
+            assert_eq!(vec![0], object_seqs(io.as_ref()).await);
+            assert_eq!(
+                Counters {
+                    stalled_waits: 1,
+                    ..stalled_once()
+                },
+                Counters::since(before)
+            );
+        }
+
+        /// Every fetch of recovery and of a read parks until the case releases
+        /// it, which is how the recovery and read timers are read for the
+        /// durations they recorded. Each is observed around two holds, the
+        /// second longer than anything the first observations took.
+        async fn object_store_answers_slowly() {
+            const SHORT: Duration = Duration::from_millis(20);
+            let object_store = memory_store();
+            put_entry(&object_store, 0, "a0").await;
+            let (io, mut parked) = ParkedIo::over(object_store);
+            let before = Counters::sample();
+            let region_id = region(1);
+            let mut recoveries = Vec::new();
+            let mut reads = Vec::new();
+            let mut hold = SHORT;
+            for objects in 1..=2 {
+                let timer = timer_before(&METRIC_OBJECT_STORE_WAL_RECOVERY_SECONDS);
+                let started_at = Instant::now();
+                let opening = {
+                    let io = io.clone();
+                    tokio::spawn(async move {
+                        ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string()).await
+                    })
+                };
+                // Every object is short enough to be read whole, and every
+                // such read parks.
+                let releases = parked_operations(&mut parked, objects).await;
+                let parked_at = Instant::now();
+                tokio::time::sleep(hold).await;
+                let held = parked_at.elapsed();
+                for release in releases.into_values() {
+                    release.send(true).unwrap();
+                }
+                let store = timeout(WAIT, opening).await.unwrap().unwrap().unwrap();
+                recoveries.push(Timed::since(
+                    &METRIC_OBJECT_STORE_WAL_RECOVERY_SECONDS,
+                    timer,
+                    held,
+                    started_at.elapsed(),
+                ));
+
+                io.range_reads_parked.store(true, Ordering::SeqCst);
+                let timer = timer_before(&METRIC_OBJECT_STORE_WAL_READ_SECONDS);
+                let started_at = Instant::now();
+                let reading = {
+                    let store = store.clone();
+                    tokio::spawn(async move { read_entries(&store, region_id, 1).await })
+                };
+                let (object_seq, release) = next_parked_operation(&mut parked).await;
+                assert_eq!(0, object_seq);
+                let parked_at = Instant::now();
+                tokio::time::sleep(hold).await;
+                let held = parked_at.elapsed();
+                release.send(true).unwrap();
+                let entries = timeout(WAIT, reading).await.unwrap().unwrap();
+                reads.push(Timed::since(
+                    &METRIC_OBJECT_STORE_WAL_READ_SECONDS,
+                    timer,
+                    held,
+                    started_at.elapsed(),
+                ));
+                io.range_reads_parked.store(false, Ordering::SeqCst);
+                assert_eq!(expected_entries(region_id, &[(id(0, 1), "a0")]), entries);
+                store.stop().await.unwrap();
+                hold = recoveries[0].elapsed.max(reads[0].elapsed) + SHORT;
+            }
+            Timed::assert_pair("recovery", recoveries[0], recoveries[1]);
+            Timed::assert_pair("read", reads[0], reads[1]);
+            assert_indexed(io.as_ref(), &[0, 1, 2]).await;
+            assert_eq!(
+                Counters {
+                    created_objects: 2,
+                    recovered_objects: 3,
+                    recoveries: 2,
+                    reads: 2,
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
         }
     }
 }
