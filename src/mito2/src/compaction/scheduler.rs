@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod local;
 mod planning;
 mod state;
 
@@ -322,28 +323,6 @@ impl CompactionScheduler {
             made_progress,
         )
         .await
-    }
-
-    /// Completes a cooperatively canceled execution.
-    ///
-    /// # Effects
-    ///
-    /// Resets the matching region to idle, notifies compaction waiters, and
-    /// returns DDLs that were waiting for cancellation.
-    ///
-    /// # Constraints
-    ///
-    /// The owning worker must execute every returned DDL request. A stale
-    /// cancellation is ignored.
-    pub(crate) async fn on_execution_cancelled(
-        &mut self,
-        region_id: RegionId,
-        execution: &CompactionExecution,
-    ) -> Vec<SenderDdlRequest> {
-        if !self.is_current_execution(region_id, execution) {
-            return Vec::new();
-        }
-        self.on_compaction_cancelled(region_id).await
     }
 
     /// Records failure of the installed execution.
@@ -681,6 +660,7 @@ impl CompactionScheduler {
     }
 
     /// Notifies the scheduler that the compaction job is cancelled cooperatively.
+    #[cfg(test)]
     async fn on_compaction_cancelled(&mut self, region_id: RegionId) -> Vec<SenderDdlRequest> {
         self.finish_compaction_on_cancel(region_id)
     }

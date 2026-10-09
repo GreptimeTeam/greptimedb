@@ -83,6 +83,15 @@ pub trait EventListener: Send + Sync {
     /// Notifies the listener after local compaction becomes non-cancellable and before commit.
     async fn on_compaction_commit_begin(&self, _region_id: RegionId) {}
 
+    /// Gates a particular unit before it reads or writes SSTs.
+    async fn on_compaction_unit_merge_begin(&self, _region_id: RegionId, _plan_id: u64) {}
+
+    /// Gates a persisted unit before its notification reaches the region worker.
+    async fn on_compaction_unit_committed(&self, _region_id: RegionId, _plan_id: u64) {}
+
+    /// Observes independent query visibility, before request-level completion.
+    fn on_compaction_unit_applied(&self, _region_id: RegionId, _plan_id: u64) {}
+
     /// Notifies the listener after compaction results are sent and before pending DDL dispatch.
     async fn on_compaction_result_notified(&self, _region_id: RegionId) {}
 

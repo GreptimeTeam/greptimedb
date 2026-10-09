@@ -42,6 +42,11 @@ impl CancellableTaskState {
         self.cancel_handle.is_cancelled()
     }
 
+    /// Returns whether the task has crossed the non-cancellable publication boundary.
+    pub(crate) fn commit_started(&self) -> bool {
+        *self.commit_started.lock().unwrap()
+    }
+
     /// Starts the non-cancellable commit phase.
     ///
     /// Returns false if cancellation was requested first.
