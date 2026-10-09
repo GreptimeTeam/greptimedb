@@ -3347,7 +3347,6 @@ enable = true
 [otlp]
 enable = true
 trace_ingest_chunk_size = 512
-trace_aux_cache_size = "32MiB"
 experimental_enable_resource_info = true
 
 [prom_store]
@@ -3524,6 +3523,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "disable_ec2_metadata =",
         "cache_path =",
         "cache_capacity =",
+        "trace_aux_cache_size =",
         "memory_pool_size =",
         "scan_memory_limit =",
         "sas_token =",
