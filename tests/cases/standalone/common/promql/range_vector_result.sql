@@ -41,6 +41,9 @@ tql eval (30, 30, '1s') range_vector_result[20s] as v;
 -- SQLNESS REPLACE (partitioning.*) REDACTED
 tql explain (30, 30, '1s') range_vector_result[20s];
 
-tql eval (30, 30, '0') range_vector_result[30s:];
+tql eval (30, 30, '1s') range_vector_result[30s:0s];
+
+-- A subquery without a step uses the one-minute default, not the query step.
+tql eval (300, 300, '1s') vector(time())[5m:];
 
 drop table range_vector_result;

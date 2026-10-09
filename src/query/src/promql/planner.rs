@@ -114,6 +114,9 @@ use crate::promql::error::{
 };
 use crate::query_engine::QueryEngineState;
 
+/// Step of a subquery without an explicit one (`x[5m:]`). Prometheus uses the global
+/// evaluation interval, whose default is one minute, rather than the query step.
+const DEFAULT_SUBQUERY_STEP_MS: Millisecond = 60_000;
 /// `time()` function in PromQL.
 const SPECIAL_TIME_FUNCTION: &str = "time";
 /// `scalar()` function in PromQL.
@@ -494,9 +497,10 @@ impl PromPlanner {
             Some(anchor) => anchor,
             None => Self::anchor_sub(self.ctx.end, Self::offset_millis(offset))?,
         };
-        if let Some(step) = step {
-            self.ctx.interval = step.as_millis() as _;
-        }
+        self.ctx.interval = match step {
+            Some(step) => step.as_millis() as _,
+            None => DEFAULT_SUBQUERY_STEP_MS,
+        };
         let interval = self.ctx.interval;
         ensure!(interval > 0, ZeroSubqueryStepSnafu);
         let lower = Self::anchor_sub(end, range.as_millis() as Millisecond)?;

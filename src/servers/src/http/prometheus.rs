@@ -547,6 +547,12 @@ pub async fn range_query(
         StatusCode::InvalidArguments
     );
     let promql_expr = prom_query.expr();
+    // Prometheus rejects a range-vector expression in a range query even when start == end,
+    // which the planner cannot tell apart from an instant query.
+    if promql_expr.value_type() == ValueType::Matrix {
+        let err = query::promql::error::RangeVectorInRangeQuerySnafu.build();
+        return PrometheusJsonResponse::error(err.status_code(), err.output_msg());
+    }
 
     let metric_name_discovery =
         try_call_return_response!(find_metric_name_not_equal_matchers(promql_expr));
@@ -2760,6 +2766,45 @@ mod tests {
             *handler.ordered_outputs.lock().unwrap(),
             vec![true, false, false]
         );
+    }
+
+    #[tokio::test]
+    async fn range_query_rejects_range_vector_with_equal_endpoints() {
+        let handler = Arc::new(TestPrometheusHandler {
+            catalog_manager: MemoryCatalogManager::new(),
+            deny_operation: false,
+            denied_table: None,
+            metric_names: Vec::new(),
+            label_metric_names: Vec::new(),
+            label_lookups: Mutex::new(Vec::new()),
+            queries: Mutex::new(Vec::new()),
+            ordered_outputs: Mutex::new(Vec::new()),
+        });
+        let response = range_query(
+            State(handler.clone() as PrometheusHandlerRef),
+            Query(RangeQuery {
+                query: Some("vector(1)[5m:]".to_string()),
+                start: Some("300".to_string()),
+                end: Some("300".to_string()),
+                step: Some("1".to_string()),
+                ..Default::default()
+            }),
+            Extension(QueryContext::with(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+            )),
+            Form(RangeQuery::default()),
+        )
+        .await;
+
+        assert_eq!(Some(StatusCode::InvalidArguments), response.status_code);
+        assert_eq!(
+            response.error.as_deref(),
+            Some(
+                "invalid expression type \"range vector\" for range query, must be Scalar or instant Vector"
+            )
+        );
+        assert!(handler.queries.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
