@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use catalog::RegisterTableRequest;
 use catalog::memory::{MemoryCatalogManager, new_memory_catalog_manager};
@@ -8276,10 +8276,10 @@ async fn test_count_values_groups_by_formatted_value_for_bigint_input() {
 
 #[tokio::test]
 async fn eval_times_before_epoch() {
-    let plan = |start: Duration, end: Duration| async move {
+    let plan = |start: SystemTime, end: SystemTime| async move {
         let mut eval_stmt = build_eval_stmt("some_metric");
-        eval_stmt.start = UNIX_EPOCH - start;
-        eval_stmt.end = UNIX_EPOCH - end;
+        eval_stmt.start = start;
+        eval_stmt.end = end;
         let table_provider = build_test_table_provider(
             &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
             1,
@@ -8289,10 +8289,15 @@ async fn eval_times_before_epoch() {
         PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state()).await
     };
 
-    plan(Duration::from_secs(30_000), Duration::from_secs(29_000))
-        .await
-        .unwrap();
-    // Beyond the i64 millisecond range, which must not wrap into the future.
-    let too_early = Duration::from_secs(10_000_000_000_000_000);
-    assert!(plan(too_early, too_early).await.is_err());
+    plan(
+        UNIX_EPOCH - Duration::from_secs(30_000),
+        UNIX_EPOCH - Duration::from_secs(29_000),
+    )
+    .await
+    .unwrap();
+    // Beyond the i64 millisecond range, which must not wrap into the future. Windows cannot
+    // represent this SystemTime.
+    if let Some(too_early) = UNIX_EPOCH.checked_sub(Duration::from_secs(10_000_000_000_000_000)) {
+        assert!(plan(too_early, too_early).await.is_err());
+    }
 }
