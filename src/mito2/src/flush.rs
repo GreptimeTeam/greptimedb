@@ -730,8 +730,16 @@ impl RegionFlushTask {
         )?;
         let mut tasks = Vec::with_capacity(flat_sources.encoded.len() + flat_sources.sources.len());
         let num_encoded = flat_sources.encoded.len();
+        let num_sources = flat_sources.sources.len() + num_encoded;
+        // The sequence override of #5252 is only safe when the memtable produces
+        // a single source. A multi-source flush keeps the original row sequences
+        // of uploaded encoded parts while other sources get rewritten to their
+        // own max sequence; if their sequence ranges interleave, an older row can
+        // be promoted above a newer one (#9428).
+        let override_sequence = num_sources == 1;
         for (source, max_sequence) in flat_sources.sources {
-            let write_request = self.new_write_request(version, max_sequence, source);
+            let write_request =
+                self.new_write_request(version, max_sequence, source, override_sequence);
             let access_layer = self.access_layer.clone();
             let write_opts = write_opts.clone();
             let semaphore = self.flush_semaphore.clone();
@@ -771,7 +779,6 @@ impl RegionFlushTask {
             });
             tasks.push(task);
         }
-        let num_sources = tasks.len();
         let abort_handles = tasks
             .iter()
             .map(|task| task.abort_handle())
@@ -839,6 +846,7 @@ impl RegionFlushTask {
         version: &VersionRef,
         max_sequence: u64,
         source: FlatSource,
+        override_sequence: bool,
     ) -> SstWriteRequest {
         let flat_format = version
             .options
@@ -850,7 +858,7 @@ impl RegionFlushTask {
             metadata: version.metadata.clone(),
             source,
             cache_manager: self.cache_manager.clone(),
-            max_sequence: Some(max_sequence),
+            max_sequence: override_sequence.then_some(max_sequence),
             sst_write_format: if flat_format {
                 FormatType::Flat
             } else {

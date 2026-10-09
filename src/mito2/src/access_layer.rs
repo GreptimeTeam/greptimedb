@@ -579,7 +579,9 @@ pub struct SstWriteRequest {
     pub source: FlatSource,
     pub cache_manager: CacheManagerRef,
     /// Optional uniform row sequence for writes that do not preserve sequences.
-    /// Compaction passes `None` to retain the reader's effective input sequences.
+    /// Compaction passes `None` to retain the reader's effective input sequences,
+    /// and a multi-source flush does the same to retain the memtable's row
+    /// sequences.
     pub max_sequence: Option<SequenceNumber>,
     pub sst_write_format: FormatType,
 

@@ -27,6 +27,7 @@ use common_base::readable_size::ReadableSize;
 use common_recordbatch::RecordBatches;
 use common_time::util::current_time_millis;
 use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
+use datafusion_expr::{col, lit};
 use parquet::basic::{Encoding, Type as PhysicalType};
 use rstest::rstest;
 use rstest_reuse::{self, apply};
@@ -49,9 +50,11 @@ use crate::engine::listener::{EventListener, FlushListener, StallListener};
 use crate::engine::region_hook::{RegionGcInfo, RegionHook, RegionHookRef, SstFileInfo};
 use crate::error::Error;
 use crate::manifest::action::RegionMetaActionList;
+use crate::memtable::RangesOptions;
 use crate::test_util::{
-    CreateRequestBuilder, LogStoreFactory, MockWriteBufferManager, TestEnv, build_rows,
-    build_rows_for_key, flush_region, kafka_log_store_factory, multiple_log_store_factories,
+    CreateRequestBuilder, LogStoreFactory, MockWriteBufferManager, TestEnv,
+    build_delete_rows_for_key, build_rows, build_rows_for_key, delete_rows, delete_rows_schema,
+    flush_region, kafka_log_store_factory, multiple_log_store_factories,
     prepare_test_for_kafka_log_store, put_rows, raft_engine_log_store_factory, reopen_region,
     rows_schema, single_kafka_log_store_factory,
 };
@@ -1817,4 +1820,165 @@ async fn test_region_hook() {
         sst_count,
         manifest_count,
     );
+}
+
+/// Waits until the background merge of the mutable bulk memtable installs an encoded part.
+async fn wait_for_encoded_bulk_part(engine: &MitoEngine, region_id: RegionId) {
+    for _ in 0..200 {
+        let version = engine.get_region(region_id).unwrap().version();
+        let mut memtables = Vec::new();
+        version.memtables.mutable.list_memtables(&mut memtables);
+        let merged = memtables.iter().any(|mem| {
+            mem.ranges(None, RangesOptions::default())
+                .unwrap()
+                .ranges
+                .values()
+                .any(|range| range.encoded().is_some())
+        });
+        if merged {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("bulk memtable parts were not merged into an encoded part");
+}
+
+#[tokio::test]
+async fn test_flush_bulk_memtable_keeps_newer_put() {
+    test_flush_bulk_memtable_keeps_newer_version(false).await;
+}
+
+#[tokio::test]
+async fn test_flush_bulk_memtable_keeps_newer_delete() {
+    test_flush_bulk_memtable_keeps_newer_version(true).await;
+}
+
+/// The unordered part holds an older version of key `k` and a later small write,
+/// while the newer version of `k` lives in an encoded part produced by the
+/// in-memtable merge. Flush must not let the older version win.
+async fn test_flush_bulk_memtable_keeps_newer_version(delete_newer: bool) {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: true,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("memtable.type", "bulk")
+        .insert_option("memtable.bulk.merge_threshold", "2")
+        .insert_option("memtable.bulk.encode_row_threshold", "1")
+        .build();
+    let column_schemas = rows_schema(&request);
+    let delete_schemas = delete_rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // A small write goes to the unordered part.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows_for_key("k", 1, 2, 1),
+        },
+    )
+    .await;
+
+    // Two writes of 1024 rows bypass the unordered part and trigger an in-memtable merge.
+    // The second one overwrites (or deletes) `k`.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows_for_key("a", 0, 1024, 0),
+        },
+    )
+    .await;
+    if delete_newer {
+        let mut rows = build_delete_rows_for_key("b", 0, 1023);
+        rows.extend(build_delete_rows_for_key("k", 1, 2));
+        delete_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: delete_schemas,
+                rows,
+            },
+        )
+        .await;
+    } else {
+        let mut rows = build_rows_for_key("b", 0, 1023, 0);
+        rows.extend(build_rows_for_key("k", 1, 2, 2));
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: column_schemas.clone(),
+                rows,
+            },
+        )
+        .await;
+    }
+    wait_for_encoded_bulk_part(&engine, region_id).await;
+    // Another small write raises the max sequence of the unordered part.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows_for_key("c", 0, 1, 0),
+        },
+    )
+    .await;
+
+    let scan_k = || async {
+        let request = ScanRequest {
+            filters: vec![col("tag_0").eq(lit("k"))],
+            ..Default::default()
+        };
+        let stream = engine.scan_to_stream(region_id, request).await.unwrap();
+        RecordBatches::try_collect(stream)
+            .await
+            .unwrap()
+            .pretty_print()
+            .unwrap()
+    };
+
+    let before = scan_k().await;
+    let expected = if delete_newer {
+        "\
++-------+---------+----+
+| tag_0 | field_0 | ts |
++-------+---------+----+
++-------+---------+----+"
+    } else {
+        "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| k     | 2.0     | 1970-01-01T00:00:01 |
++-------+---------+---------------------+"
+    };
+    assert_eq!(expected, before);
+
+    flush_region(&engine, region_id, None).await;
+
+    let files = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .map(|file| (file.meta_ref().num_rows, file.meta_ref().sequence))
+        .collect::<Vec<_>>();
+    let after = scan_k().await;
+    assert_eq!(before, after, "files (num_rows, sequence): {files:?}");
 }
