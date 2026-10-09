@@ -1,0 +1,526 @@
+# Fixed remote-write fixture comparing synchronous Bloom full-text index build cost.
+# This measures insert/flush/index work, not isolated tokenizer time; see README.md.
+
+[case]
+name = "bloom_fulltext_build_cost"
+description = "Compare synchronous Bloom full-text index build cost on a fixed remote-write workload"
+
+[scenario]
+kind = "prom_remote_write_then_query"
+
+[scenario.remote_write]
+database = "public"
+metric = "bloom_fulltext_build_cost"
+physical_table = "bloom_fulltext_build_cost_physical"
+series_count = 64
+samples_per_series = 512
+sample_chunk_size = 512
+flush_every_sample_chunks = 1
+start_unix_millis = 1704067200000
+step_millis = 15000
+chunk_series_count = 64
+timeout_seconds = 600
+visibility_timeout_seconds = 300
+base_setup_sql = [
+  "CREATE TABLE bloom_fulltext_build_cost_physical (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_indexed_0 (instance STRING, msg STRING FULLTEXT INDEX WITH(analyzer='English', backend='bloom', case_sensitive='false', false_positive_rate='0.01', granularity='10240'), ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_control_0 (instance STRING, msg STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_indexed_1 (instance STRING, msg STRING FULLTEXT INDEX WITH(analyzer='English', backend='bloom', case_sensitive='false', false_positive_rate='0.01', granularity='10240'), ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_control_1 (instance STRING, msg STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_indexed_2 (instance STRING, msg STRING FULLTEXT INDEX WITH(analyzer='English', backend='bloom', case_sensitive='false', false_positive_rate='0.01', granularity='10240'), ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_control_2 (instance STRING, msg STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_indexed_3 (instance STRING, msg STRING FULLTEXT INDEX WITH(analyzer='English', backend='bloom', case_sensitive='false', false_positive_rate='0.01', granularity='10240'), ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_control_3 (instance STRING, msg STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_indexed_4 (instance STRING, msg STRING FULLTEXT INDEX WITH(analyzer='English', backend='bloom', case_sensitive='false', false_positive_rate='0.01', granularity='10240'), ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_control_4 (instance STRING, msg STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_indexed_5 (instance STRING, msg STRING FULLTEXT INDEX WITH(analyzer='English', backend='bloom', case_sensitive='false', false_positive_rate='0.01', granularity='10240'), ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_control_5 (instance STRING, msg STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_indexed_6 (instance STRING, msg STRING FULLTEXT INDEX WITH(analyzer='English', backend='bloom', case_sensitive='false', false_positive_rate='0.01', granularity='10240'), ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_control_6 (instance STRING, msg STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_indexed_7 (instance STRING, msg STRING FULLTEXT INDEX WITH(analyzer='English', backend='bloom', case_sensitive='false', false_positive_rate='0.01', granularity='10240'), ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_control_7 (instance STRING, msg STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+]
+candidate_setup_sql = [
+  "CREATE TABLE bloom_fulltext_build_cost_physical (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_indexed_0 (instance STRING, msg STRING FULLTEXT INDEX WITH(analyzer='English', backend='bloom', case_sensitive='false', false_positive_rate='0.01', granularity='10240'), ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_control_0 (instance STRING, msg STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_indexed_1 (instance STRING, msg STRING FULLTEXT INDEX WITH(analyzer='English', backend='bloom', case_sensitive='false', false_positive_rate='0.01', granularity='10240'), ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_control_1 (instance STRING, msg STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_indexed_2 (instance STRING, msg STRING FULLTEXT INDEX WITH(analyzer='English', backend='bloom', case_sensitive='false', false_positive_rate='0.01', granularity='10240'), ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_control_2 (instance STRING, msg STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_indexed_3 (instance STRING, msg STRING FULLTEXT INDEX WITH(analyzer='English', backend='bloom', case_sensitive='false', false_positive_rate='0.01', granularity='10240'), ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_control_3 (instance STRING, msg STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_indexed_4 (instance STRING, msg STRING FULLTEXT INDEX WITH(analyzer='English', backend='bloom', case_sensitive='false', false_positive_rate='0.01', granularity='10240'), ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_control_4 (instance STRING, msg STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_indexed_5 (instance STRING, msg STRING FULLTEXT INDEX WITH(analyzer='English', backend='bloom', case_sensitive='false', false_positive_rate='0.01', granularity='10240'), ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_control_5 (instance STRING, msg STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_indexed_6 (instance STRING, msg STRING FULLTEXT INDEX WITH(analyzer='English', backend='bloom', case_sensitive='false', false_positive_rate='0.01', granularity='10240'), ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_control_6 (instance STRING, msg STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_indexed_7 (instance STRING, msg STRING FULLTEXT INDEX WITH(analyzer='English', backend='bloom', case_sensitive='false', false_positive_rate='0.01', granularity='10240'), ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE bloom_fulltext_build_cost_control_7 (instance STRING, msg STRING, ts TIMESTAMP TIME INDEX, PRIMARY KEY(instance)) ENGINE=mito WITH ('append_mode'='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+]
+
+[scenario.remote_write.value]
+pattern = "linear"
+base = 0
+step = 1
+
+[scenario.remote_write.prom_store]
+pending_rows_flush_interval = "1s"
+max_batch_rows = 100000
+
+[[scenario.queries]]
+name = "validate_remote_write_source"
+kind = "sql"
+query = "SELECT count(*) FROM bloom_fulltext_build_cost"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "indexed_insert_0"
+kind = "sql"
+query = "INSERT INTO bloom_fulltext_build_cost_indexed_0 SELECT instance, concat('INFO request completed service=', instance, ' request_id=', CAST(greptime_value AS STRING), ' path=/api/v1/item/', CAST(greptime_value AS STRING), ' duration_ms=', CAST(greptime_value AS STRING), ' status=OK'), greptime_timestamp FROM bloom_fulltext_build_cost"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "indexed_preflush_explain_0"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM bloom_fulltext_build_cost_indexed_0 WHERE msg IS NOT NULL"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "indexed_flush_0"
+kind = "sql"
+query = "ADMIN FLUSH_TABLE('bloom_fulltext_build_cost_indexed_0')"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "control_insert_0"
+kind = "sql"
+query = "INSERT INTO bloom_fulltext_build_cost_control_0 SELECT instance, concat('INFO request completed service=', instance, ' request_id=', CAST(greptime_value AS STRING), ' path=/api/v1/item/', CAST(greptime_value AS STRING), ' duration_ms=', CAST(greptime_value AS STRING), ' status=OK'), greptime_timestamp FROM bloom_fulltext_build_cost"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "control_preflush_explain_0"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM bloom_fulltext_build_cost_control_0 WHERE msg IS NOT NULL"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "control_flush_0"
+kind = "sql"
+query = "ADMIN FLUSH_TABLE('bloom_fulltext_build_cost_control_0')"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "indexed_insert_1"
+kind = "sql"
+query = "INSERT INTO bloom_fulltext_build_cost_indexed_1 SELECT instance, concat('INFO request completed service=', instance, ' request_id=', CAST(greptime_value AS STRING), ' path=/api/v1/item/', CAST(greptime_value AS STRING), ' duration_ms=', CAST(greptime_value AS STRING), ' status=OK'), greptime_timestamp FROM bloom_fulltext_build_cost"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "indexed_preflush_explain_1"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM bloom_fulltext_build_cost_indexed_1 WHERE msg IS NOT NULL"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "indexed_flush_1"
+kind = "sql"
+query = "ADMIN FLUSH_TABLE('bloom_fulltext_build_cost_indexed_1')"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "control_insert_1"
+kind = "sql"
+query = "INSERT INTO bloom_fulltext_build_cost_control_1 SELECT instance, concat('INFO request completed service=', instance, ' request_id=', CAST(greptime_value AS STRING), ' path=/api/v1/item/', CAST(greptime_value AS STRING), ' duration_ms=', CAST(greptime_value AS STRING), ' status=OK'), greptime_timestamp FROM bloom_fulltext_build_cost"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "control_preflush_explain_1"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM bloom_fulltext_build_cost_control_1 WHERE msg IS NOT NULL"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "control_flush_1"
+kind = "sql"
+query = "ADMIN FLUSH_TABLE('bloom_fulltext_build_cost_control_1')"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "indexed_insert_2"
+kind = "sql"
+query = "INSERT INTO bloom_fulltext_build_cost_indexed_2 SELECT instance, concat('INFO request completed service=', instance, ' request_id=', CAST(greptime_value AS STRING), ' path=/api/v1/item/', CAST(greptime_value AS STRING), ' duration_ms=', CAST(greptime_value AS STRING), ' status=OK'), greptime_timestamp FROM bloom_fulltext_build_cost"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "indexed_preflush_explain_2"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM bloom_fulltext_build_cost_indexed_2 WHERE msg IS NOT NULL"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "indexed_flush_2"
+kind = "sql"
+query = "ADMIN FLUSH_TABLE('bloom_fulltext_build_cost_indexed_2')"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "control_insert_2"
+kind = "sql"
+query = "INSERT INTO bloom_fulltext_build_cost_control_2 SELECT instance, concat('INFO request completed service=', instance, ' request_id=', CAST(greptime_value AS STRING), ' path=/api/v1/item/', CAST(greptime_value AS STRING), ' duration_ms=', CAST(greptime_value AS STRING), ' status=OK'), greptime_timestamp FROM bloom_fulltext_build_cost"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "control_preflush_explain_2"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM bloom_fulltext_build_cost_control_2 WHERE msg IS NOT NULL"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "control_flush_2"
+kind = "sql"
+query = "ADMIN FLUSH_TABLE('bloom_fulltext_build_cost_control_2')"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "indexed_insert_3"
+kind = "sql"
+query = "INSERT INTO bloom_fulltext_build_cost_indexed_3 SELECT instance, concat('INFO request completed service=', instance, ' request_id=', CAST(greptime_value AS STRING), ' path=/api/v1/item/', CAST(greptime_value AS STRING), ' duration_ms=', CAST(greptime_value AS STRING), ' status=OK'), greptime_timestamp FROM bloom_fulltext_build_cost"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "indexed_preflush_explain_3"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM bloom_fulltext_build_cost_indexed_3 WHERE msg IS NOT NULL"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "indexed_flush_3"
+kind = "sql"
+query = "ADMIN FLUSH_TABLE('bloom_fulltext_build_cost_indexed_3')"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "control_insert_3"
+kind = "sql"
+query = "INSERT INTO bloom_fulltext_build_cost_control_3 SELECT instance, concat('INFO request completed service=', instance, ' request_id=', CAST(greptime_value AS STRING), ' path=/api/v1/item/', CAST(greptime_value AS STRING), ' duration_ms=', CAST(greptime_value AS STRING), ' status=OK'), greptime_timestamp FROM bloom_fulltext_build_cost"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "control_preflush_explain_3"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM bloom_fulltext_build_cost_control_3 WHERE msg IS NOT NULL"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "control_flush_3"
+kind = "sql"
+query = "ADMIN FLUSH_TABLE('bloom_fulltext_build_cost_control_3')"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "indexed_insert_4"
+kind = "sql"
+query = "INSERT INTO bloom_fulltext_build_cost_indexed_4 SELECT instance, concat('INFO request completed service=', instance, ' request_id=', CAST(greptime_value AS STRING), ' path=/api/v1/item/', CAST(greptime_value AS STRING), ' duration_ms=', CAST(greptime_value AS STRING), ' status=OK'), greptime_timestamp FROM bloom_fulltext_build_cost"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "indexed_preflush_explain_4"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM bloom_fulltext_build_cost_indexed_4 WHERE msg IS NOT NULL"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "indexed_flush_4"
+kind = "sql"
+query = "ADMIN FLUSH_TABLE('bloom_fulltext_build_cost_indexed_4')"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "control_insert_4"
+kind = "sql"
+query = "INSERT INTO bloom_fulltext_build_cost_control_4 SELECT instance, concat('INFO request completed service=', instance, ' request_id=', CAST(greptime_value AS STRING), ' path=/api/v1/item/', CAST(greptime_value AS STRING), ' duration_ms=', CAST(greptime_value AS STRING), ' status=OK'), greptime_timestamp FROM bloom_fulltext_build_cost"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "control_preflush_explain_4"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM bloom_fulltext_build_cost_control_4 WHERE msg IS NOT NULL"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "control_flush_4"
+kind = "sql"
+query = "ADMIN FLUSH_TABLE('bloom_fulltext_build_cost_control_4')"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "indexed_insert_5"
+kind = "sql"
+query = "INSERT INTO bloom_fulltext_build_cost_indexed_5 SELECT instance, concat('INFO request completed service=', instance, ' request_id=', CAST(greptime_value AS STRING), ' path=/api/v1/item/', CAST(greptime_value AS STRING), ' duration_ms=', CAST(greptime_value AS STRING), ' status=OK'), greptime_timestamp FROM bloom_fulltext_build_cost"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "indexed_preflush_explain_5"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM bloom_fulltext_build_cost_indexed_5 WHERE msg IS NOT NULL"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "indexed_flush_5"
+kind = "sql"
+query = "ADMIN FLUSH_TABLE('bloom_fulltext_build_cost_indexed_5')"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "control_insert_5"
+kind = "sql"
+query = "INSERT INTO bloom_fulltext_build_cost_control_5 SELECT instance, concat('INFO request completed service=', instance, ' request_id=', CAST(greptime_value AS STRING), ' path=/api/v1/item/', CAST(greptime_value AS STRING), ' duration_ms=', CAST(greptime_value AS STRING), ' status=OK'), greptime_timestamp FROM bloom_fulltext_build_cost"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "control_preflush_explain_5"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM bloom_fulltext_build_cost_control_5 WHERE msg IS NOT NULL"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "control_flush_5"
+kind = "sql"
+query = "ADMIN FLUSH_TABLE('bloom_fulltext_build_cost_control_5')"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "indexed_insert_6"
+kind = "sql"
+query = "INSERT INTO bloom_fulltext_build_cost_indexed_6 SELECT instance, concat('INFO request completed service=', instance, ' request_id=', CAST(greptime_value AS STRING), ' path=/api/v1/item/', CAST(greptime_value AS STRING), ' duration_ms=', CAST(greptime_value AS STRING), ' status=OK'), greptime_timestamp FROM bloom_fulltext_build_cost"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "indexed_preflush_explain_6"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM bloom_fulltext_build_cost_indexed_6 WHERE msg IS NOT NULL"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "indexed_flush_6"
+kind = "sql"
+query = "ADMIN FLUSH_TABLE('bloom_fulltext_build_cost_indexed_6')"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "control_insert_6"
+kind = "sql"
+query = "INSERT INTO bloom_fulltext_build_cost_control_6 SELECT instance, concat('INFO request completed service=', instance, ' request_id=', CAST(greptime_value AS STRING), ' path=/api/v1/item/', CAST(greptime_value AS STRING), ' duration_ms=', CAST(greptime_value AS STRING), ' status=OK'), greptime_timestamp FROM bloom_fulltext_build_cost"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "control_preflush_explain_6"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM bloom_fulltext_build_cost_control_6 WHERE msg IS NOT NULL"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "control_flush_6"
+kind = "sql"
+query = "ADMIN FLUSH_TABLE('bloom_fulltext_build_cost_control_6')"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "indexed_insert_7"
+kind = "sql"
+query = "INSERT INTO bloom_fulltext_build_cost_indexed_7 SELECT instance, concat('INFO request completed service=', instance, ' request_id=', CAST(greptime_value AS STRING), ' path=/api/v1/item/', CAST(greptime_value AS STRING), ' duration_ms=', CAST(greptime_value AS STRING), ' status=OK'), greptime_timestamp FROM bloom_fulltext_build_cost"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "indexed_preflush_explain_7"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM bloom_fulltext_build_cost_indexed_7 WHERE msg IS NOT NULL"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "indexed_flush_7"
+kind = "sql"
+query = "ADMIN FLUSH_TABLE('bloom_fulltext_build_cost_indexed_7')"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "control_insert_7"
+kind = "sql"
+query = "INSERT INTO bloom_fulltext_build_cost_control_7 SELECT instance, concat('INFO request completed service=', instance, ' request_id=', CAST(greptime_value AS STRING), ' path=/api/v1/item/', CAST(greptime_value AS STRING), ' duration_ms=', CAST(greptime_value AS STRING), ' status=OK'), greptime_timestamp FROM bloom_fulltext_build_cost"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "control_preflush_explain_7"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM bloom_fulltext_build_cost_control_7 WHERE msg IS NOT NULL"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "control_flush_7"
+kind = "sql"
+query = "ADMIN FLUSH_TABLE('bloom_fulltext_build_cost_control_7')"
+warmup = 0
+iterations = 1
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "validate_materialized_rows"
+kind = "sql"
+query = "SELECT 'indexed_0' AS target, count(*) AS rows FROM bloom_fulltext_build_cost_indexed_0 UNION ALL SELECT 'control_0' AS target, count(*) AS rows FROM bloom_fulltext_build_cost_control_0 UNION ALL SELECT 'indexed_1' AS target, count(*) AS rows FROM bloom_fulltext_build_cost_indexed_1 UNION ALL SELECT 'control_1' AS target, count(*) AS rows FROM bloom_fulltext_build_cost_control_1 UNION ALL SELECT 'indexed_2' AS target, count(*) AS rows FROM bloom_fulltext_build_cost_indexed_2 UNION ALL SELECT 'control_2' AS target, count(*) AS rows FROM bloom_fulltext_build_cost_control_2 UNION ALL SELECT 'indexed_3' AS target, count(*) AS rows FROM bloom_fulltext_build_cost_indexed_3 UNION ALL SELECT 'control_3' AS target, count(*) AS rows FROM bloom_fulltext_build_cost_control_3 UNION ALL SELECT 'indexed_4' AS target, count(*) AS rows FROM bloom_fulltext_build_cost_indexed_4 UNION ALL SELECT 'control_4' AS target, count(*) AS rows FROM bloom_fulltext_build_cost_control_4 UNION ALL SELECT 'indexed_5' AS target, count(*) AS rows FROM bloom_fulltext_build_cost_indexed_5 UNION ALL SELECT 'control_5' AS target, count(*) AS rows FROM bloom_fulltext_build_cost_control_5 UNION ALL SELECT 'indexed_6' AS target, count(*) AS rows FROM bloom_fulltext_build_cost_indexed_6 UNION ALL SELECT 'control_6' AS target, count(*) AS rows FROM bloom_fulltext_build_cost_control_6 UNION ALL SELECT 'indexed_7' AS target, count(*) AS rows FROM bloom_fulltext_build_cost_indexed_7 UNION ALL SELECT 'control_7' AS target, count(*) AS rows FROM bloom_fulltext_build_cost_control_7"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "postflush_stats_observation"
+kind = "sql"
+query = "SELECT t.table_name, r.region_rows, r.memtable_size, r.sst_num, r.index_size FROM information_schema.tables t JOIN information_schema.region_statistics r ON t.table_id = r.table_id WHERE t.table_schema = 'public' AND (t.table_name LIKE 'bloom_fulltext_build_cost_indexed_%' OR t.table_name LIKE 'bloom_fulltext_build_cost_control_%') ORDER BY t.table_name"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "index_metadata"
+kind = "sql"
+query = "SELECT table_name, column_name, index_name, index_type, greptime_index_type FROM information_schema.statistics WHERE table_schema = 'public' AND table_name LIKE 'bloom_fulltext_build_cost_%' ORDER BY table_name, index_name, column_name"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "cold_indexed_term_explain"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT * FROM bloom_fulltext_build_cost_indexed_0 WHERE matches_term(msg, 'INFO')"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "validate_indexed_info_term_counts"
+kind = "sql"
+query = "SELECT 'indexed_0' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_0 WHERE matches_term(msg, 'INFO') UNION ALL SELECT 'indexed_1' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_1 WHERE matches_term(msg, 'INFO') UNION ALL SELECT 'indexed_2' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_2 WHERE matches_term(msg, 'INFO') UNION ALL SELECT 'indexed_3' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_3 WHERE matches_term(msg, 'INFO') UNION ALL SELECT 'indexed_4' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_4 WHERE matches_term(msg, 'INFO') UNION ALL SELECT 'indexed_5' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_5 WHERE matches_term(msg, 'INFO') UNION ALL SELECT 'indexed_6' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_6 WHERE matches_term(msg, 'INFO') UNION ALL SELECT 'indexed_7' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_7 WHERE matches_term(msg, 'INFO')"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "validate_indexed_request_term_counts"
+kind = "sql"
+query = "SELECT 'indexed_0' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_0 WHERE matches_term(msg, 'request') UNION ALL SELECT 'indexed_1' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_1 WHERE matches_term(msg, 'request') UNION ALL SELECT 'indexed_2' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_2 WHERE matches_term(msg, 'request') UNION ALL SELECT 'indexed_3' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_3 WHERE matches_term(msg, 'request') UNION ALL SELECT 'indexed_4' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_4 WHERE matches_term(msg, 'request') UNION ALL SELECT 'indexed_5' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_5 WHERE matches_term(msg, 'request') UNION ALL SELECT 'indexed_6' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_6 WHERE matches_term(msg, 'request') UNION ALL SELECT 'indexed_7' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_7 WHERE matches_term(msg, 'request')"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "validate_indexed_absent_term_counts"
+kind = "sql"
+query = "SELECT 'indexed_0' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_0 WHERE matches_term(msg, 'zqxabsenttoken') UNION ALL SELECT 'indexed_1' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_1 WHERE matches_term(msg, 'zqxabsenttoken') UNION ALL SELECT 'indexed_2' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_2 WHERE matches_term(msg, 'zqxabsenttoken') UNION ALL SELECT 'indexed_3' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_3 WHERE matches_term(msg, 'zqxabsenttoken') UNION ALL SELECT 'indexed_4' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_4 WHERE matches_term(msg, 'zqxabsenttoken') UNION ALL SELECT 'indexed_5' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_5 WHERE matches_term(msg, 'zqxabsenttoken') UNION ALL SELECT 'indexed_6' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_6 WHERE matches_term(msg, 'zqxabsenttoken') UNION ALL SELECT 'indexed_7' AS target, count(*) AS matches FROM bloom_fulltext_build_cost_indexed_7 WHERE matches_term(msg, 'zqxabsenttoken')"
+warmup = 0
+iterations = 1
