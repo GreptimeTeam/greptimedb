@@ -51,10 +51,10 @@ fn apply_hints(
             continue;
         }
         if key.eq_ignore_ascii_case(session::hints::READ_PREFERENCE_HINT) {
-            if !dedicated_read_preference {
-                if let Ok(preference) = value.parse::<session::ReadPreference>() {
-                    query_ctx.set_read_preference(preference);
-                }
+            if !dedicated_read_preference
+                && let Ok(preference) = value.parse::<session::ReadPreference>()
+            {
+                query_ctx.set_read_preference(preference);
             }
         } else {
             query_ctx.set_extension(key, value);
