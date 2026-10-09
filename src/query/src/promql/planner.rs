@@ -2129,6 +2129,7 @@ impl PromPlanner {
             input.schema(),
             query_engine_state,
             range_fold_offset,
+            args.input.is_some(),
         )?;
         func_exprs.insert(0, self.create_time_index_column_expr()?);
         func_exprs.extend_from_slice(&self.create_tag_column_exprs()?);
@@ -3363,6 +3364,7 @@ impl PromPlanner {
         input_schema: &DFSchemaRef,
         query_engine_state: &QueryEngineState,
         range_fold_offset: Option<Millisecond>,
+        has_input_arg: bool,
     ) -> Result<(Vec<DfExpr>, Vec<String>)> {
         // TODO(ruihang): check function args list
         let mut other_input_exprs: VecDeque<DfExpr> = other_input_exprs.into();
@@ -3618,81 +3620,58 @@ impl PromPlanner {
                 ));
                 ScalarFunc::GeneratedExpr
             }
-            "minute" => {
-                // date_part('minute', time_index)
-                let expr = self.date_part_on_time_index("minute")?;
-                exprs.push(expr);
-                ScalarFunc::GeneratedExpr
-            }
-            "hour" => {
-                // date_part('hour', time_index)
-                let expr = self.date_part_on_time_index("hour")?;
-                exprs.push(expr);
-                ScalarFunc::GeneratedExpr
-            }
-            "month" => {
-                // date_part('month', time_index)
-                let expr = self.date_part_on_time_index("month")?;
-                exprs.push(expr);
-                ScalarFunc::GeneratedExpr
-            }
-            "year" => {
-                // date_part('year', time_index)
-                let expr = self.date_part_on_time_index("year")?;
-                exprs.push(expr);
-                ScalarFunc::GeneratedExpr
-            }
-            "day_of_month" => {
-                // date_part('day', time_index)
-                let expr = self.date_part_on_time_index("day")?;
-                exprs.push(expr);
-                ScalarFunc::GeneratedExpr
-            }
-            "day_of_week" => {
-                // date_part('dow', time_index)
-                let expr = self.date_part_on_time_index("dow")?;
-                exprs.push(expr);
-                ScalarFunc::GeneratedExpr
-            }
-            "day_of_year" => {
-                // date_part('doy', time_index)
-                let expr = self.date_part_on_time_index("doy")?;
-                exprs.push(expr);
-                ScalarFunc::GeneratedExpr
-            }
-            "days_in_month" => {
-                // date_part(
-                //     'days',
-                //     (date_trunc('month', <TIME INDEX>::date) + interval '1 month - 1 day')
-                // );
-                let day_lit_expr = "day".lit();
-                let month_lit_expr = "month".lit();
-                let interval_1month_lit_expr =
-                    DfExpr::Literal(ScalarValue::IntervalYearMonth(Some(1)), None);
-                let interval_1day_lit_expr = DfExpr::Literal(
-                    ScalarValue::IntervalDayTime(Some(IntervalDayTime::new(1, 0))),
-                    None,
-                );
-                let the_1month_minus_1day_expr = DfExpr::BinaryExpr(BinaryExpr {
-                    left: Box::new(interval_1month_lit_expr),
-                    op: Operator::Minus,
-                    right: Box::new(interval_1day_lit_expr),
-                });
-                let date_trunc_expr = DfExpr::ScalarFunction(ScalarFunction {
-                    func: datafusion_functions::datetime::date_trunc(),
-                    args: vec![month_lit_expr, self.create_time_index_column_expr()?],
-                });
-                let date_trunc_plus_interval_expr = DfExpr::BinaryExpr(BinaryExpr {
-                    left: Box::new(date_trunc_expr),
-                    op: Operator::Plus,
-                    right: Box::new(the_1month_minus_1day_expr),
-                });
-                let date_part_expr = DfExpr::ScalarFunction(ScalarFunction {
-                    func: datafusion_functions::datetime::date_part(),
-                    args: vec![day_lit_expr, date_trunc_plus_interval_expr],
-                });
-
-                exprs.push(date_part_expr);
+            "minute" | "hour" | "month" | "year" | "day_of_month" | "day_of_week"
+            | "day_of_year" | "days_in_month" => {
+                let date_part = match func.name {
+                    "minute" => "minute",
+                    "hour" => "hour",
+                    "month" => "month",
+                    "year" => "year",
+                    "day_of_month" => "day",
+                    "day_of_week" => "dow",
+                    "day_of_year" => "doy",
+                    // days_in_month
+                    _ => "day",
+                };
+                if has_input_arg {
+                    // With an argument, Prometheus reads each sample value as a Unix
+                    // timestamp in seconds (truncated towards zero, UTC), not as the time
+                    // index of the sample.
+                    for value in &self.ctx.field_columns {
+                        if Self::field_column_is_native_histogram(input_schema, value) {
+                            // Prometheus skips native histogram samples. An alternative
+                            // float column carries the value of the same sample.
+                            if !alternative_samples {
+                                exprs.push(DfExpr::ScalarFunction(ScalarFunction {
+                                    func: native_histogram_drop_udf(func.name),
+                                    args: vec![DfExpr::Column(Column::from_name(value))],
+                                }));
+                            }
+                            continue;
+                        }
+                        let timestamp_expr = DfExpr::Cast(Cast::new(
+                            Box::new(DfExpr::Column(Column::from_name(value))),
+                            ArrowDataType::Timestamp(ArrowTimeUnit::Second, None),
+                        ));
+                        if func.name == "days_in_month" {
+                            exprs.push(Self::days_in_month_expr(timestamp_expr));
+                        } else {
+                            exprs.push(DfExpr::ScalarFunction(ScalarFunction {
+                                func: datafusion_functions::datetime::date_part(),
+                                args: vec![date_part.lit(), timestamp_expr],
+                            }));
+                        }
+                    }
+                } else {
+                    // Without an argument, they read the evaluation instant, which the
+                    // time index of the input table carries.
+                    if func.name == "days_in_month" {
+                        let timestamp_expr = self.create_time_index_column_expr()?;
+                        exprs.push(Self::days_in_month_expr(timestamp_expr));
+                    } else {
+                        exprs.push(self.date_part_on_time_index(date_part)?);
+                    }
+                }
                 ScalarFunc::GeneratedExpr
             }
 
@@ -6296,6 +6275,38 @@ impl PromPlanner {
             args: vec![date_part.lit(), input_expr],
         });
         Ok(fn_expr)
+    }
+
+    /// Generate an expr like
+    /// `date_part("day", date_trunc("month", <TIMESTAMP>) + interval '1 month - 1 day')`,
+    /// which yields the number of days in the month the timestamp falls in.
+    fn days_in_month_expr(timestamp_expr: DfExpr) -> DfExpr {
+        let day_lit_expr = "day".lit();
+        let month_lit_expr = "month".lit();
+        let interval_1month_lit_expr =
+            DfExpr::Literal(ScalarValue::IntervalYearMonth(Some(1)), None);
+        let interval_1day_lit_expr = DfExpr::Literal(
+            ScalarValue::IntervalDayTime(Some(IntervalDayTime::new(1, 0))),
+            None,
+        );
+        let the_1month_minus_1day_expr = DfExpr::BinaryExpr(BinaryExpr {
+            left: Box::new(interval_1month_lit_expr),
+            op: Operator::Minus,
+            right: Box::new(interval_1day_lit_expr),
+        });
+        let date_trunc_expr = DfExpr::ScalarFunction(ScalarFunction {
+            func: datafusion_functions::datetime::date_trunc(),
+            args: vec![month_lit_expr, timestamp_expr],
+        });
+        let date_trunc_plus_interval_expr = DfExpr::BinaryExpr(BinaryExpr {
+            left: Box::new(date_trunc_expr),
+            op: Operator::Plus,
+            right: Box::new(the_1month_minus_1day_expr),
+        });
+        DfExpr::ScalarFunction(ScalarFunction {
+            func: datafusion_functions::datetime::date_part(),
+            args: vec![day_lit_expr, date_trunc_plus_interval_expr],
+        })
     }
 
     fn strip_tsid_column(&self, plan: LogicalPlan) -> Result<LogicalPlan> {

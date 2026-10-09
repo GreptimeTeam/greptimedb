@@ -123,3 +123,30 @@ tql eval (1698821023, 1698821023, '1s') days_in_month();
 tql eval (1701413023, 1701413023, '1s') days_in_month();
 
 drop table metrics;
+
+-- A date function with an argument in Prometheus reads the sample value as a Unix
+-- timestamp in seconds (truncated towards zero, UTC), not the sample's time index.
+-- The values below are chosen so that their calendar components differ from the
+-- evaluation instants (1970-01-01T00:00:00Z .. 1970-01-01T00:00:20Z).
+
+create table date_fns (ts timestamp time index, val double);
+
+insert into date_fns values (0, 120), (5000, 180), (10000, 1234567890), (15000, 59.9), (20000, -1.5);
+
+tql eval (0, 20, '5s') minute(date_fns);
+
+tql eval (0, 20, '5s') hour(date_fns);
+
+tql eval (0, 20, '5s') month(date_fns);
+
+tql eval (0, 20, '5s') year(date_fns);
+
+tql eval (0, 20, '5s') day_of_month(date_fns);
+
+tql eval (0, 20, '5s') day_of_week(date_fns);
+
+tql eval (0, 20, '5s') day_of_year(date_fns);
+
+tql eval (0, 20, '5s') days_in_month(date_fns);
+
+drop table date_fns;
