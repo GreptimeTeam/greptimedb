@@ -97,14 +97,11 @@ pub(crate) fn changed_column_types(
 ) -> HashMap<String, ConcreteDataType> {
     let mut changed = HashMap::new();
     for new_column in new_schema.column_schemas() {
-        let Some(old_column) = old_schema.column_schema_by_name(new_column.name()) else {
+        let Some(old_column) = old_schema.column_schema_by_name(&new_column.name) else {
             continue;
         };
-        if old_column.data_type() != new_column.data_type() {
-            changed.insert(
-                new_column.name().to_string(),
-                new_column.data_type().clone(),
-            );
+        if old_column.data_type != new_column.data_type {
+            changed.insert(new_column.name.clone(), new_column.data_type.clone());
         }
     }
 
@@ -215,10 +212,11 @@ fn validate_comparison(
     if let Err(error) = scalar.cast_to(&target_arrow_type) {
         warn!(
             error;
-            "Persisted partition bound is not representable with the altered column type";
-            "region_id" => %region_id,
-            "column" => column,
-            "target_type" => target_type.to_string(),
+            "Persisted partition bound is not representable with the altered column type, \
+             region_id: {}, column: '{}', target_type: {}",
+            region_id,
+            column,
+            target_type
         );
         return PartitionExprIncompatibleSnafu {
             region_id,
