@@ -620,14 +620,37 @@ pub async fn test_http_query_options(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(invalid_read_preference.status(), StatusCode::BAD_REQUEST);
-    let error: ErrorResponse = invalid_read_preference.json().await;
-    assert_eq!(error.code(), ErrorCode::InvalidArguments as u32);
+    let error: Value = invalid_read_preference.json().await;
+    let message = error["error"].as_str().expect("error message");
+    assert!(
+        message.contains("Invalid read preference header"),
+        "unexpected error message: {message}"
+    );
 
-    for hints in ["query.parallelism=0", "query.unsupported_option=true"] {
+    for (hints, expected_message) in [
+        (
+            "query.parallelism=0",
+            "query.parallelism must be between 1 and 1024",
+        ),
+        (
+            "query.unsupported_option=true",
+            "Unknown or unsupported query option",
+        ),
+    ] {
         let response = query(&client, "SHOW VARIABLES query.parallelism", Some(hints)).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let error: ErrorResponse = response.json().await;
-        assert_eq!(error.code(), ErrorCode::InvalidArguments as u32);
+        let error: Value = response.json().await;
+        let message = error["error"].as_str().expect("error message");
+        assert!(
+            message.contains(expected_message),
+            "unexpected error message for {hints}: {message}"
+        );
+        if hints == "query.unsupported_option=true" {
+            assert!(
+                message.contains("query.unsupported_option"),
+                "error message should name the unsupported option: {message}"
+            );
+        }
     }
 
     guard.remove_all().await;

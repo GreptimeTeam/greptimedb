@@ -758,11 +758,14 @@ mod tests {
                 .parse()
                 .unwrap(),
         );
-        assert!(
-            FlightCraft::do_get(&flight_handler(calls.clone()), request)
-                .await
-                .is_ok()
-        );
+        let handler = flight_handler(calls.clone());
+        let response = FlightCraft::do_get(&handler, request).await.unwrap();
+        let first_item = response
+            .into_inner()
+            .next()
+            .await
+            .expect("Expected the query result stream to yield an item");
+        assert_eq!(first_item.unwrap_err().code(), tonic::Code::Internal);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
