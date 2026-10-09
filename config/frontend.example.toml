@@ -312,8 +312,11 @@ enable = true
 trace_ingest_chunk_size = 512
 ## Estimated memory budget for cached trace service/operation keys per frontend,
 ## shared across all catalogs, schemas, and trace tables. Set to 0 to disable caching.
+## Defaults to 1/128 of the host or pod memory limit, with a minimum of 32MiB.
+## Uses 32MiB if memory detection is unavailable.
 ## Excludes cache and allocator overhead; shared table names are charged per entry.
-trace_aux_cache_size = "32MiB"
+## @toml2docs:none-default="Auto"
+#+ trace_aux_cache_size = "32MiB"
 ## Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric
 ## resource attributes, so metrics-only services reach the semantic graph.
 experimental_enable_resource_info = false

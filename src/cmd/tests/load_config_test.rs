@@ -733,13 +733,14 @@ fn test_example_configs_document_actual_defaults() {
 
 #[test]
 fn test_load_trace_aux_cache_size() {
-    for (value, size) in [("0", ReadableSize(0)), ("\"1MiB\"", ReadableSize::mb(1))] {
+    let default = FrontendOptions::default().otlp.trace_aux_cache_size;
+    for (setting, size) in [
+        ("", default),
+        ("trace_aux_cache_size = 0", ReadableSize(0)),
+        ("trace_aux_cache_size = \"1MiB\"", ReadableSize::mb(1)),
+    ] {
         let config = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            config.path(),
-            format!("[otlp]\ntrace_aux_cache_size = {value}\n"),
-        )
-        .unwrap();
+        std::fs::write(config.path(), format!("[otlp]\n{setting}\n")).unwrap();
 
         let frontend =
             GreptimeOptions::<FrontendOptions>::load_layered_options(config.path().to_str(), "")

@@ -178,10 +178,13 @@ Accounting follows the main-table write:
 A cache shared by each frontend's `Instance` clones skips previously confirmed
 auxiliary writes for v0, v1, and v2. `otlp.trace_aux_cache_size` sets an estimated
 memory budget across all catalogs, schemas, and trace tables on each frontend.
-It defaults to `"32MiB"`; `0` disables caching. The estimate includes key structs
-and allocated string capacity, charging shared table names per entry. It excludes
-cache and allocator overhead, so it is not a strict process-memory limit. Changes
-take effect on frontend or standalone restart. There is no time-based expiry.
+By default, the budget is 1/128 of the pod's cgroup memory limit or total host
+memory, with a minimum of `32MiB`. If memory detection is unavailable, it uses
+`32MiB`. An explicit size overrides this default; `0` disables caching.
+The estimate includes key structs and allocated string capacity, charging shared
+table names per entry. It excludes cache and allocator overhead, so it is not a
+strict process-memory limit. Changes take effect on frontend or standalone
+restart. There is no time-based expiry.
 Services and operations are cached independently. Only a successful
 auxiliary write populates the cache. Auxiliary writes always bypass batching,
 including when main spans use asynchronous batching. Failures, eviction,
