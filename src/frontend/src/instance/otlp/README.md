@@ -191,6 +191,13 @@ including when main spans use asynchronous batching. Failures, eviction,
 frontend restarts, and concurrent misses can cause repeat writes. Write cost
 reflects only the writes actually performed.
 
+`greptime_frontend_otlp_trace_aux_cache_lookups_total` counts distinct service and
+operation keys at the first cache check in each request, labeled by `result`
+(`hit` or `miss`).
+Requests with auxiliary admission count before acquiring a slot; other requests
+count when preparing auxiliary writes. Admission and write rechecks do not count.
+When the cache is disabled, all checked keys count as misses.
+
 Successful auxiliary writes with `skip_wal` enabled are cached too. If a
 datanode crashes before flushing those rows while the frontend survives, the
 cache can suppress their recreation, even by later WAL-enabled requests, until

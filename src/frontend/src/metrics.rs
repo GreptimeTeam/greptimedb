@@ -68,6 +68,14 @@ lazy_static! {
     )
     .unwrap();
 
+    /// Initial trace auxiliary-cache lookups, excluding admission and write rechecks.
+    pub static ref OTLP_TRACE_AUX_CACHE_LOOKUPS: IntCounterVec = register_int_counter_vec!(
+        "greptime_frontend_otlp_trace_aux_cache_lookups_total",
+        "Initial trace service and operation cache lookups per request",
+        &["result"]
+    )
+    .unwrap();
+
     /// The number of OpenTelemetry logs send by frontend node.
     pub static ref OTLP_LOGS_ROWS: IntCounter = register_int_counter!(
         "greptime_frontend_otlp_logs_rows",
