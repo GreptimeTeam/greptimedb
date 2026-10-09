@@ -1,0 +1,119 @@
+# PromQL long-window rate benchmark for issue #9070.
+#
+# 2048 series × 1440 samples at 15-second cadence = 2,949,120 rows spanning the
+# six hours from 2024-01-01T00:00:00Z to 2024-01-01T06:00:00Z. Evaluation covers
+# the last two hours of that data (04:00:00Z–06:00:00Z at a 15-second step, 481
+# evaluations), so every evaluation holds a full 240-sample one-hour window.
+# `rate_1h` is the primary regressed shape: it drives the RangeManipulate
+# timestamp payload and the cursor scan across a long, heavily overlapping
+# window set. `rate_5m` is the small-window control, `offset 1h` exercises the
+# shifted payload path, and the bare selector controls unrelated-path variance.
+#
+# The generator derives each tag value as `series % cardinality`, so the number
+# of distinct (host, instance) series is the least common multiple of the two
+# cardinalities. `instance` declares 2048 values so the host(16) × instance tag
+# shape still yields 2048 distinct series; a 128-value instance tag would cap
+# this fixture at 128 distinct series.
+#
+# The deterministic wave is not a true monotonic counter, so the rate queries
+# measure latency on the regular rate path rather than a numeric counter-rate
+# oracle.
+
+[case]
+name = "promql_long_range_rate"
+description = "PromQL long-window rate latency regression for #9070 over six hours of 15-second samples"
+issue = "https://github.com/GreptimeTeam/greptimedb/issues/9070"
+
+[scenario]
+kind = "direct_readable_sst"
+seed = 9070
+
+[[scenario.tables]]
+database = "public"
+name = "promql_long_range_rate"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["host", "instance"]
+time_index = "ts"
+
+[[scenario.tables.columns]]
+name = "host"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 16, prefix = "host" }
+
+[[scenario.tables.columns]]
+name = "instance"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 2048, prefix = "instance" }
+
+[[scenario.tables.columns]]
+name = "value"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 1000.0 }
+
+[[scenario.tables.columns]]
+name = "ts"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+# Eight 45-minute SSTs (180 timestamps each) tile the six-hour range.
+# A (03:00:00Z, 06:00:00Z] scan prunes to four of them; the offset query scans
+# the five SSTs covering [02:00:00Z, 05:00:00Z).
+[scenario.layout]
+regions = 1
+sst_count = 8
+rows_per_sst = 368640
+row_group_size = 36864
+series_count = 2048
+start_unix_nanos = 1704067200000000000
+step_nanos = 15000000000
+time_range_layout = "non_overlapping_per_sst"
+series_layout = "timestamp_major"
+
+# 240 samples per full window: the primary regressed shape.
+[[scenario.queries]]
+name = "rate_1h"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704081600, 1704088800, '15s') rate(promql_long_range_rate{host=~'host.*'}[1h])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# Twenty samples per full window: small-window control.
+[[scenario.queries]]
+name = "rate_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704081600, 1704088800, '15s') rate(promql_long_range_rate{host=~'host.*'}[5m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# The same long window shifted back an hour: non-zero-offset payload path.
+[[scenario.queries]]
+name = "rate_1h_offset_1h"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704081600, 1704088800, '15s') rate(promql_long_range_rate{host=~'host.*'}[1h] offset 1h)"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# Bare selector over the same evaluation range: unrelated-path variance control.
+[[scenario.queries]]
+name = "plain_selector_control"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704081600, 1704088800, '15s') promql_long_range_rate{host=~'host.*'}"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
