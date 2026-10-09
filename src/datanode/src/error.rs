@@ -145,6 +145,13 @@ pub enum Error {
         source: Box<log_store::error::Error>,
     },
 
+    #[snafu(display("Invalid query context: {}", reason))]
+    InvalidQueryContext {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid SQL, error: {}", msg))]
     InvalidSql { msg: String },
 
@@ -485,7 +492,8 @@ impl ErrorExt for Error {
 
             Delete { source, .. } => source.status_code(),
 
-            InvalidSql { .. }
+            InvalidQueryContext { .. }
+            | InvalidSql { .. }
             | IllegalPrimaryKeysDef { .. }
             | MissingTimestampColumn { .. }
             | SchemaNotFound { .. }
