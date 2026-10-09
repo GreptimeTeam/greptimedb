@@ -213,19 +213,11 @@ fn fact_build(plan: &Arc<dyn ExecutionPlan>) -> bool {
 
 type Row = (Option<i64>, Option<i64>, Option<i64>, Option<i64>);
 
-async fn output(plan: Arc<dyn ExecutionPlan>) -> Result<Vec<Row>> {
+async fn output(plan: Arc<dyn ExecutionPlan>, expected_schema: &SchemaRef) -> Result<Vec<Row>> {
     let batches = collect(plan, Arc::new(TaskContext::default())).await?;
     let mut rows = Vec::new();
     for batch in batches {
-        assert_eq!(
-            batch
-                .schema()
-                .fields()
-                .iter()
-                .map(|f| f.name().as_str())
-                .collect::<Vec<_>>(),
-            ["fact_key", "fact_value", "dim_key", "dim_weight"]
-        );
+        assert_eq!(batch.schema().as_ref(), expected_schema.as_ref());
         for i in 0..batch.num_rows() {
             let value = |column: usize| -> Option<i64> {
                 let array = batch
@@ -296,7 +288,7 @@ fn source_stats(
         sources.extend(source_stats(child.as_ref(), registry)?);
     }
     if plan.downcast_ref::<DataSourceExec>().is_some() {
-        sources.push((**registry.compute(plan)?.base_arc()).clone());
+        sources.push(registry.compute_base(plan)?);
     }
     Ok(sources)
 }
@@ -308,6 +300,7 @@ async fn check_case(fact_first: bool, facts: usize, dims: usize) -> Result<()> {
     config.optimizer.hash_join_single_partition_threshold = 0;
     config.optimizer.hash_join_single_partition_threshold_rows = 0;
     let original = join(fact_first, facts, dims)?;
+    let expected_schema = original.schema();
     let expected = oracle(facts, dims);
     for stats_kind in [RowStats::Absent, RowStats::Exact] {
         let registry = StatisticsRegistry::with_providers(vec![Arc::new(FixtureStatistics {
@@ -333,6 +326,7 @@ async fn check_case(fact_first: bool, facts: usize, dims: usize) -> Result<()> {
             hash_join(plan.as_ref()).unwrap().mode,
             PartitionMode::Partitioned
         );
+        assert_eq!(plan.schema().as_ref(), expected_schema.as_ref());
         let build_is_fact = fact_build(&plan);
         assert_eq!(
             build_is_fact,
@@ -341,7 +335,7 @@ async fn check_case(fact_first: bool, facts: usize, dims: usize) -> Result<()> {
                 RowStats::Exact => facts <= dims,
             }
         );
-        let result = output(plan).await?;
+        let result = output(plan, &expected_schema).await?;
         assert_eq!(result, expected);
         println!(
             "fact={facts} dim={dims} orientation={} stats={stats_kind:?} build={} rows={}",
