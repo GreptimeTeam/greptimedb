@@ -1149,8 +1149,6 @@ mod tests {
         mock_region_server.register_engine(mock_region.clone());
 
         let kv_backend = Arc::new(MemoryKvBackend::new());
-        // Use the same layered registry as the datanode of a running instance, so the derived
-        // caches of the test are invalidated after the caches they are derived from.
         let layered_cache_registry =
             Arc::new(build_datanode_layered_cache_registry(kv_backend.clone()));
 
