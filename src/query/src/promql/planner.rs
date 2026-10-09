@@ -473,8 +473,48 @@ impl PromPlanner {
         if let Some(empty_plan) = self.setup_context().await? {
             return Ok(empty_plan);
         }
-        self.selector_to_series_normalize_plan(offset_ms, matchers, true)
-            .await
+        let plan = self
+            .selector_to_series_normalize_plan(offset_ms, matchers, true)
+            .await?;
+        self.millisecond_time_index_plan(plan)
+    }
+
+    /// Casts a microsecond or nanosecond time index to milliseconds, the precision of every
+    /// other PromQL result and the only one the Prometheus HTTP API encodes.
+    fn millisecond_time_index_plan(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
+        let time_index = self
+            .ctx
+            .time_index_column
+            .as_deref()
+            .context(TimeIndexNotFoundSnafu { table: "unknown" })?;
+        let millis = ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None);
+        let (_, field) = plan
+            .schema()
+            .qualified_field_with_unqualified_name(time_index)
+            .context(DataFusionPlanningSnafu)?;
+        if field.data_type() == &millis {
+            return Ok(plan);
+        }
+        let exprs = plan
+            .schema()
+            .iter()
+            .map(|(qualifier, field)| {
+                let column = DfExpr::Column(Column::new(qualifier.cloned(), field.name()));
+                if field.name() == time_index && field.data_type() != &millis {
+                    column
+                        .cast_to(&millis, plan.schema())
+                        .map(|cast| cast.alias_qualified(qualifier.cloned(), field.name().clone()))
+                } else {
+                    Ok(column)
+                }
+            })
+            .collect::<datafusion::error::Result<Vec<_>>>()
+            .context(DataFusionPlanningSnafu)?;
+        LogicalPlanBuilder::from(plan)
+            .project(exprs)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)
     }
 
     /// Evaluates the inner expression of `subquery` at the multiples of its step in
