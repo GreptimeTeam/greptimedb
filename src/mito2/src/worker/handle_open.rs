@@ -226,7 +226,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let config = self.config.clone();
         let opening_regions = self.opening_regions.clone();
         let worker_id = self.id;
-        let series_index_task_state = self.series_index_task_state.clone();
+        let listener = self.listener.clone();
         opening_regions.insert_sender(region_id, sender);
         common_runtime::spawn_global(async move {
             match opener.open(&config, &wal).await {
@@ -258,16 +258,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         .await
                         .is_ok();
                     let accepted = sent && receiver.await.is_ok();
-                    if !accepted {
+                    if accepted {
+                        listener.on_region_open_registered(region_id).await;
+                    } else {
                         region.stop().await;
-                    } else if let Some(state) = &series_index_task_state {
-                        state.wake();
-                    }
-                    let senders = opening_regions.remove_sender(region_id);
-                    for sender in senders {
-                        if accepted {
-                            sender.send(Ok(0));
-                        } else {
+                        let senders = opening_regions.remove_sender(region_id);
+                        for sender in senders {
                             sender.send(crate::error::RegionClosedSnafu { region_id }.fail());
                         }
                     }

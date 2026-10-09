@@ -1348,7 +1348,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             BackgroundNotify::RegionOpened { region, registered } => {
                 self.register_region(region);
                 self.region_count.inc();
+
+                // Finish this opening batch before the worker can process a close/reopen,
+                // without waiting for the background opener to resume after the ACK.
+                let senders = self.opening_regions.remove_sender(region_id);
+                if let Some(state) = &self.series_index_task_state {
+                    state.wake();
+                }
                 let _ = registered.send(());
+                for sender in senders {
+                    sender.send(Ok(0));
+                }
             }
             BackgroundNotify::CompactionDdlComplete {
                 generation,
@@ -1465,6 +1475,14 @@ impl WorkerListener {
         listener: Option<crate::engine::listener::EventListenerRef>,
     ) -> WorkerListener {
         WorkerListener { listener }
+    }
+
+    /// Notifies the background opener after the worker acknowledges region registration.
+    pub(crate) async fn on_region_open_registered(&self, _region_id: RegionId) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_region_open_registered(_region_id).await;
+        }
     }
 
     /// Flush is finished successfully.
