@@ -84,7 +84,7 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
         let query = if let Ok(statements) = &parsed_query {
             statements
                 .iter()
-                .map(|s| s.to_string())
+                .map(statement_to_query)
                 .collect::<Vec<_>>()
                 .join(";")
         } else {
@@ -117,6 +117,24 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
             Ok(results)
         }
     }
+}
+
+fn statement_to_query(statement: &SqlParserStatement) -> String {
+    if let SqlParserStatement::ShowVariable { variable } = statement
+        && variable.len() > 1
+        && (variable[0].value.eq_ignore_ascii_case("query")
+            || variable[0].value.eq_ignore_ascii_case("datafusion"))
+    {
+        return format!(
+            "SHOW {}",
+            variable
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(".")
+        );
+    }
+    statement.to_string()
 }
 
 async fn send_warning_opt<C>(client: &mut C, query_context: QueryContextRef) -> PgWireResult<()>
@@ -771,6 +789,53 @@ mod tests {
     use datafusion_pg_catalog::sql::PostgresCompatibilityParser;
 
     use super::*;
+
+    #[test]
+    fn test_dotted_show_query_options() {
+        for (sql, expected) in [
+            ("SHOW QUERY.PARALLELISM", "SHOW QUERY.PARALLELISM"),
+            (
+                "SHOW query.allow_query_fallback",
+                "SHOW query.allow_query_fallback",
+            ),
+            (
+                "SHOW datafusion.optimizer.enable_dynamic_filter_pushdown",
+                "SHOW datafusion.optimizer.enable_dynamic_filter_pushdown",
+            ),
+            (
+                "SET query.parallelism = 2; SHOW query.parallelism",
+                "SET query.parallelism = 2;SHOW query.parallelism",
+            ),
+            (
+                "/* comment */ SHOW query.parallelism",
+                "SHOW query.parallelism",
+            ),
+            (
+                "SHOW \"query\".\"allow_query_fallback\"",
+                "SHOW \"query\".\"allow_query_fallback\"",
+            ),
+        ] {
+            let actual = PostgresCompatibilityParser::new()
+                .parse(sql)
+                .unwrap()
+                .iter()
+                .map(statement_to_query)
+                .collect::<Vec<_>>()
+                .join(";");
+            assert_eq!(actual, expected, "for SQL: {sql}");
+        }
+    }
+
+    #[test]
+    fn test_other_postgres_show_serialization_is_unchanged() {
+        for sql in ["SHOW ordinary_variable", "SHOW search_path"] {
+            let statement = PostgresCompatibilityParser::new()
+                .parse(sql)
+                .unwrap()
+                .remove(0);
+            assert_eq!(statement_to_query(&statement), statement.to_string());
+        }
+    }
 
     fn parse_copy_statement(sql: &str) -> SqlParserStatement {
         let parser = PostgresCompatibilityParser::new();

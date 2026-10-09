@@ -44,7 +44,7 @@ static SHOW_LOWER_CASE_PATTERN: Lazy<Regex> = Lazy::new(|| {
 });
 static SHOW_VARIABLES_LIKE_PATTERN: Lazy<Regex> = Lazy::new(|| {
     Regex::new(&format!(
-        "(?i)^(SHOW {VARIABLES_SCOPE}VARIABLES( LIKE (.*))?)"
+        "(?i)^\\s*SHOW {VARIABLES_SCOPE}VARIABLES( LIKE (.*))?\\s*;?\\s*$"
     ))
     .unwrap()
 });
@@ -642,6 +642,44 @@ mod test {
 | 00:00:00                         |
 +----------------------------------+";
         test(query, expected);
+    }
+
+    #[test]
+    fn test_show_named_variables_reach_query_handler() {
+        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
+
+        for query in [
+            "SHOW VARIABLES query.parallelism",
+            "SHOW VARIABLES datafusion.optimizer.prefer_hash_join",
+            "SHOW VARIABLES query.allow_query_fallback",
+            "SHOW VARIABLES query.enable_remote_dynamic_filter_pushdown",
+            "SHOW GLOBAL VARIABLES datafusion.optimizer.prefer_hash_join",
+            "SHOW SESSION VARIABLES query.parallelism",
+            "SHOW LOCAL VARIABLES query.allow_query_fallback",
+            "  SHOW VARIABLES query.parallelism  ",
+            "SHOW VARIABLES query.parallelism;",
+        ] {
+            assert!(
+                check(query, QueryContext::arc(), session.clone()).is_none(),
+                "{query} should reach the query handler"
+            );
+        }
+
+        for query in [
+            "SHOW VARIABLES",
+            "SHOW VARIABLES;",
+            "SHOW GLOBAL VARIABLES",
+            "SHOW SESSION VARIABLES",
+            "SHOW LOCAL VARIABLES",
+            "SHOW GLOBAL VARIABLES LIKE 'event_scheduler'",
+            "SHOW SESSION VARIABLES LIKE 'event_scheduler'",
+            "SHOW LOCAL VARIABLES LIKE 'event_scheduler'",
+        ] {
+            assert!(
+                check(query, QueryContext::arc(), session.clone()).is_some(),
+                "{query} should retain federated compatibility handling"
+            );
+        }
     }
 
     #[test]
