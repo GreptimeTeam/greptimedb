@@ -140,8 +140,13 @@ impl<const IS_RATE: bool> IDelta<IS_RATE> {
 
             let last_offset = ts_offset + last_position;
             let prev_offset = ts_offset + prev_position;
-            let sampled_interval =
-                (ts_values[last_offset] - ts_values[prev_offset]) as f64 / 1000.0;
+            let sampled_interval_ms = ts_values[last_offset] - ts_values[prev_offset];
+            // Sub-millisecond samples round to the same ms; skip instead of dividing by zero.
+            if sampled_interval_ms == 0 {
+                result_builder.append_null();
+                continue;
+            }
+            let sampled_interval = sampled_interval_ms as f64 / 1000.0;
 
             let last_value = value_values[value_offset + last_position];
             let prev_value = value_values[value_offset + prev_position];
@@ -261,6 +266,32 @@ mod test {
             RangeArray::from_ranges(values_array, ranges).unwrap(),
             vec![],
             vec![Some(3.0), None, None],
+        );
+    }
+
+    #[test]
+    fn idelta_skips_samples_in_same_millisecond() {
+        // The last two samples of the first range share 999ms; the second range is 1ms apart.
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter_values([
+            999i64, 999, 999, 1000,
+        ]));
+        let values_array = Arc::new(Float64Array::from_iter([10.0, 13.0, 999.0, 1000.0]));
+        let ranges = [(0, 3), (2, 2)];
+
+        simple_range_udf_runner(
+            IDelta::<false>::scalar_udf(),
+            RangeArray::from_ranges(ts_array.clone(), ranges).unwrap(),
+            RangeArray::from_ranges(values_array.clone(), ranges).unwrap(),
+            vec![],
+            vec![None, Some(1.0)],
+        );
+
+        simple_range_udf_runner(
+            IDelta::<true>::scalar_udf(),
+            RangeArray::from_ranges(ts_array, ranges).unwrap(),
+            RangeArray::from_ranges(values_array, ranges).unwrap(),
+            vec![],
+            vec![None, Some(1000.0)],
         );
     }
 }
