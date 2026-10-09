@@ -39,7 +39,7 @@ pub struct VectorAvg {
 
 impl VectorAvg {
     /// Create a new `AggregateUDF` for the `vec_avg` aggregate function.
-    pub fn uadf_impl() -> AggregateUDF {
+    pub fn udf_impl() -> AggregateUDF {
         let signature = Signature::one_of(
             vec![
                 TypeSignature::Exact(vec![DataType::Utf8]),
