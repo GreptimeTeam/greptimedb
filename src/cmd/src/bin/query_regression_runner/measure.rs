@@ -355,7 +355,7 @@ fn executed_plan_preflight(sample: &mut Value, operator: &str) -> Option<String>
 }
 
 /// The `(stage, plan)` of one executed TEXT DistAnalyze row, or `Ok(None)` for the explicit
-/// null/null `Total rows:` trailer row. A row with a missing, non-null, or unparseable stage or
+/// null/null `Total rows:` trailer row. A row with a missing, non-null, or unparsable stage or
 /// node, or without non-empty plan text, is malformed.
 fn plan_row(row: &Value) -> std::result::Result<Option<(u64, &str)>, String> {
     // Only a row whose `stage` and `node` are explicitly null is the trailer; a row with missing
