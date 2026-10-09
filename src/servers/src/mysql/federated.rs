@@ -44,7 +44,7 @@ static SHOW_LOWER_CASE_PATTERN: Lazy<Regex> = Lazy::new(|| {
 });
 static SHOW_VARIABLES_LIKE_PATTERN: Lazy<Regex> = Lazy::new(|| {
     Regex::new(&format!(
-        "(?i)^\\s*SHOW {VARIABLES_SCOPE}VARIABLES( LIKE (.*))?\\s*;?\\s*$"
+        "(?i)^(SHOW {VARIABLES_SCOPE}VARIABLES( LIKE (.*))?)"
     ))
     .unwrap()
 });
@@ -280,8 +280,16 @@ fn check_show_variables(query: &str) -> Option<Output> {
         ))
     } else if SHOW_LOWER_CASE_PATTERN.is_match(query) {
         Some(show_variables("lower_case_table_names", "0"))
-    } else if SHOW_VARIABLES_LIKE_PATTERN.is_match(query) {
-        Some(show_variables("", ""))
+    } else if let Some(matched) = SHOW_VARIABLES_LIKE_PATTERN.find(query) {
+        let remainder = &query[matched.end()..];
+        let remainder = strip_leading_comments(remainder).trim_start();
+        let remainder = remainder.strip_prefix(';').unwrap_or(remainder);
+        let remainder = strip_leading_comments(remainder);
+        if remainder.is_empty() {
+            Some(show_variables("", ""))
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -658,6 +666,8 @@ mod test {
             "SHOW LOCAL VARIABLES query.allow_query_fallback",
             "  SHOW VARIABLES query.parallelism  ",
             "SHOW VARIABLES query.parallelism;",
+            "SHOW VARIABLES /* comment */ query.parallelism",
+            "SHOW VARIABLES; SELECT 1",
         ] {
             assert!(
                 check(query, QueryContext::arc(), session.clone()).is_none(),
@@ -668,6 +678,14 @@ mod test {
         for query in [
             "SHOW VARIABLES",
             "SHOW VARIABLES;",
+            "SHOW VARIABLES /* comment */",
+            "SHOW VARIABLES /* comment */;",
+            "SHOW VARIABLES # comment",
+            "SHOW VARIABLES # comment;",
+            "SHOW VARIABLES -- comment",
+            "SHOW VARIABLES -- comment;",
+            "SHOW VARIABLES; -- comment",
+            "SHOW VARIABLES; -- comment\n",
             "SHOW GLOBAL VARIABLES",
             "SHOW SESSION VARIABLES",
             "SHOW LOCAL VARIABLES",
