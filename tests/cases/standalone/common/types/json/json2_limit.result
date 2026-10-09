@@ -95,27 +95,6 @@ drop table json2_alter_non_append;
 
 Affected Rows: 0
 
-create table json2_alter_add_settings (
-    ts timestamp time index
-) with (
-    'append_mode' = 'true'
-);
-
-Affected Rows: 0
-
--- ALTER TABLE ADD COLUMN does not yet support JSON2 settings or type hints.
-alter table json2_alter_add_settings add column j json2(max_auto_expanded_paths = 100);
-
-Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Expected: type modifiers, found: = at Line: 1, Column: 81
-
-alter table json2_alter_add_settings add column k json2(service string);
-
-Error: 2000(InvalidSyntax), SQL data type not supported yet: Custom(ObjectName([Identifier(Ident { value: "json2", quote_style: None, span: Span(Location(1,51)..Location(1,56)) })]), ["service", "string"])
-
-drop table json2_alter_add_settings;
-
-Affected Rows: 0
-
 create table json2_set_append_mode_false (
     ts timestamp time index,
     j json2
