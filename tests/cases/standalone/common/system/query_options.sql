@@ -31,3 +31,40 @@ SET QUERY.PARALLELISM TO 16;
 
 -- SQLNESS PROTOCOL POSTGRES
 SHOW QUERY.PARALLELISM;
+
+-- Native DataFusion options are accepted through MySQL SET and SHOW.
+-- SQLNESS PROTOCOL MYSQL
+SET datafusion.optimizer.prefer_hash_join = false;
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES datafusion.optimizer.prefer_hash_join;
+
+-- SQLNESS PROTOCOL MYSQL
+SET query.enable_remote_dynamic_filter_pushdown = false;
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.enable_remote_dynamic_filter_pushdown;
+
+-- Invalid query parallelism is rejected at both bounds.
+-- SQLNESS PROTOCOL MYSQL
+SET query.parallelism = 0;
+
+-- SQLNESS PROTOCOL MYSQL
+SET query.parallelism = 1025;
+
+-- Native DataFusion options are accepted through PostgreSQL SET and SHOW.
+-- SQLNESS PROTOCOL POSTGRES
+SET datafusion.optimizer.enable_dynamic_filter_pushdown TO 'FALSE';
+
+-- SQLNESS PROTOCOL POSTGRES
+SHOW datafusion.optimizer.enable_dynamic_filter_pushdown;
+
+-- SQLNESS PROTOCOL POSTGRES
+SET query.allow_query_fallback TO true;
+
+-- SQLNESS PROTOCOL POSTGRES
+SHOW query.allow_query_fallback;
+
+-- PostgreSQL query-option typos are errors.
+-- SQLNESS PROTOCOL POSTGRES
+SET query.unknown_option TO true;
