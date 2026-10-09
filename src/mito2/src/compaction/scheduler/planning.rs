@@ -298,7 +298,7 @@ impl CompactionScheduler {
         // execution callback will follow, so return DDLs released by the fence.
         if !status.accept_plan(finished.plan_id) {
             return CompactionTransition::from_pending_ddls(
-                self.remove_region_on_cancel(region_id),
+                self.finish_compaction_on_cancel(region_id),
             );
         }
 
@@ -354,7 +354,7 @@ impl CompactionScheduler {
                         .await
                     }
                     Err(err) => {
-                        self.remove_region_on_failure(region_id, Arc::new(err));
+                        self.fail_compaction(region_id, Arc::new(err));
                         CompactionTransition::NoAction
                     }
                 }
@@ -400,6 +400,9 @@ impl CompactionScheduler {
             }
         }
 
+        if let Some(ddls) = self.take_ready_ddls(region_id) {
+            return CompactionTransition::DdlReady(ddls);
+        }
         if self.handle_pending_compaction_request(
             region_id,
             manifest_ctx,
@@ -412,21 +415,15 @@ impl CompactionScheduler {
             return CompactionTransition::NoAction;
         };
 
-        // A queued DDL supersedes a retained automatic follow-up, matching the
-        // execution terminal path in `on_compaction_finished`.
-        let pending_ddls = std::mem::take(&mut status.pending_ddl_requests);
-        if !pending_ddls.is_empty() {
-            self.region_status.remove(&region_id);
-            return CompactionTransition::DdlReady(pending_ddls);
-        }
-
         if status.active.reset_automatic_followup()
             && self.schedule_automatic_followup(region_id, manifest_ctx, schema_metadata_manager)
         {
             return CompactionTransition::AutomaticFollowupScheduled;
         }
 
-        self.region_status.remove(&region_id);
+        if let Some(status) = self.region_status.get_mut(&region_id) {
+            status.become_idle();
+        }
         CompactionTransition::NoAction
     }
 

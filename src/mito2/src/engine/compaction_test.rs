@@ -1098,6 +1098,61 @@ impl EventListener for CompactionPlanningGate {
 }
 
 #[tokio::test]
+async fn test_idle_region_accepts_ddl_after_create_and_reopen() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(45, 1);
+    let create = CreateRequestBuilder::new().build();
+    let table_dir = create.table_dir.clone();
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    for reopen in [false, true] {
+        if reopen {
+            engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::Close(RegionCloseRequest::default()),
+                )
+                .await
+                .unwrap();
+            engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::Open(RegionOpenRequest {
+                        engine: String::new(),
+                        table_dir: table_dir.clone(),
+                        path_type: PathType::Bare,
+                        options: Default::default(),
+                        skip_wal_replay: false,
+                        checkpoint: None,
+                        requirements: Default::default(),
+                    }),
+                )
+                .await
+                .unwrap();
+            engine
+                .set_region_role(region_id, RegionRole::Leader)
+                .unwrap();
+        }
+        for request in [
+            RegionRequest::Compact(RegionCompactRequest::default()),
+            RegionRequest::Truncate(RegionTruncateRequest::All),
+            RegionRequest::Compact(RegionCompactRequest::default()),
+        ] {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                engine.handle_request(region_id, request),
+            )
+            .await
+            .expect("idle registration must not stall DDL or the next compaction")
+            .unwrap();
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_planning_followup_updates_schedule_time() {
     assert_automatic_followup_updates_schedule_time(0).await;
 }
