@@ -28,9 +28,8 @@ pub(crate) fn extract_hints<T: ToHeaderMap>(headers: &T) -> Vec<(String, String)
             } else {
                 let key = hint.trim();
                 let key_lower = key.to_ascii_lowercase();
-                let owned_prefix = key_lower.starts_with("query.")
-                    || key_lower.starts_with("datafusion.")
-                    || key_lower.starts_with("flow.");
+                let owned_prefix =
+                    key_lower.starts_with("query.") || key_lower.starts_with("datafusion.");
                 if owned_prefix
                     || session::query_options::canonical_query_option_name(key).is_some()
                 {
@@ -59,13 +58,6 @@ pub(crate) fn validate_public_hints(hints: Vec<(String, String)>) -> Result<Vec<
     for (key, value) in hints {
         if session::hints::is_reserved_extension_key(&key) {
             continue;
-        }
-        let key_lower = key.to_ascii_lowercase();
-        if key_lower.starts_with("flow.") {
-            return InvalidParameterSnafu {
-                reason: format!("Public hint `{key}` is reserved for internal use"),
-            }
-            .fail();
         }
         match session::query_options::parse_query_option(&key, &value) {
             Ok(Some((canonical, normalized_value))) => {
