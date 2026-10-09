@@ -1115,13 +1115,41 @@ mod tests {
 
         // Assert: the inactive peer was rejected and the production Flow service handled the RPC.
         assert_eq!(
-            (vec![active_peer.addr], vec![inactive_peer.addr]),
+            (vec![active_peer.addr.clone()], vec![inactive_peer.addr]),
             client.peer_addresses_by_state()
         );
         assert_eq!(
             StatusCode::InvalidArguments,
             response.unwrap_err().status_code()
         );
+
+        for value in ["", "unknown", "follower"] {
+            let mut query_context =
+                api::v1::QueryContext::from(session::context::QueryContext::arc().as_ref());
+            query_context.extensions.insert(
+                session::hints::READ_PREFERENCE_EXTENSION_KEY.to_string(),
+                value.to_string(),
+            );
+            let error = clients
+                .flownode(&active_peer)
+                .await
+                .handle(FlowRequest {
+                    header: Some(api::v1::flow::FlowRequestHeader {
+                        tracing_context: Default::default(),
+                        query_context: Some(query_context),
+                    }),
+                    body: None,
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(StatusCode::InvalidArguments, error.status_code());
+            let message = error.output_msg();
+            assert!(message.contains("read_preference"), "{message}");
+            if !value.is_empty() {
+                assert!(message.contains(value), "{message}");
+            }
+        }
+
         flownode.shutdown().await.unwrap();
     }
 }

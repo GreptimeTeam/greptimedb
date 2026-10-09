@@ -181,7 +181,7 @@ async fn test_nested_merge_scan_capability_rejects_internal_read_preference() {
             error.status_code(),
             "value={value:?}"
         );
-        let logical_message = error.to_string().to_ascii_lowercase();
+        let logical_message = error.output_msg().to_ascii_lowercase();
         assert!(
             logical_message.contains("read_preference"),
             "expected an invalid query-context read-preference error, got: {logical_message}"
@@ -214,7 +214,7 @@ async fn test_nested_merge_scan_capability_rejects_internal_read_preference() {
         let flight_message = match Datanode::handle_query(&requester, request).await {
             Err(error) => {
                 assert_eq!(StatusCode::InvalidArguments, error.status_code());
-                error.to_string().to_ascii_lowercase()
+                error.output_msg().to_ascii_lowercase()
             }
             Ok(stream) => {
                 let error = stream
@@ -222,7 +222,7 @@ async fn test_nested_merge_scan_capability_rejects_internal_read_preference() {
                     .await
                     .expect_err("Flight must reject invalid internal read preference");
                 assert_eq!(StatusCode::InvalidArguments, error.status_code());
-                error.to_string().to_ascii_lowercase()
+                error.output_msg().to_ascii_lowercase()
             }
         };
         assert!(
