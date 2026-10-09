@@ -82,6 +82,7 @@ mod tests {
             hints,
             vec![
                 ("query.parallelism".into(), "4".into()),
+                ("query.parallelism".into(), "4".into()),
                 ("query.allow_query_fallback".into(), "true".into()),
             ]
         );
