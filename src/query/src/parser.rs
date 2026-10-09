@@ -224,19 +224,23 @@ impl QueryLanguageParser {
             // also report rfc3339 error if float parsing fails
             .map_err(|_| rfc3339_result.unwrap_err())?;
 
-        // Prometheus accepts timestamps before the Unix epoch, and rounds the fraction of a
-        // second to milliseconds, half away from zero (`parseTime` in its HTTP API).
-        let exact = Duration::try_from_secs_f64(secs.abs())
+        // Prometheus accepts timestamps before the Unix epoch. Follow the arithmetic of its
+        // `parseTime` and `timestamp.FromTime` step by step: the float fraction is rounded to
+        // milliseconds before any conversion to nanoseconds, which decides boundary values
+        // like 1.0005, whose fraction is just below 0.0005.
+        let magnitude = Duration::try_from_secs_f64(secs.abs())
             .context(TryIntoDurationSnafu { raw: timestamp })?;
-        let millis = exact
-            .as_secs()
-            .checked_mul(1000)
-            .and_then(|millis| {
-                millis.checked_add((f64::from(exact.subsec_nanos()) / 1e6).round() as u64)
-            })
-            .context(AddSystemTimeOverflowSnafu { duration: exact })?;
-        let duration = Duration::from_millis(millis);
-        if secs.is_sign_negative() {
+        let whole = secs.trunc();
+        let fraction = ((secs - whole) * 1000.0).round() / 1000.0;
+        let nanos = whole as i128 * 1_000_000_000 + (fraction * 1e9) as i128;
+        let millis = nanos.div_euclid(1_000_000);
+        let duration = u64::try_from(millis.unsigned_abs())
+            .ok()
+            .map(Duration::from_millis)
+            .context(AddSystemTimeOverflowSnafu {
+                duration: magnitude,
+            })?;
+        if millis < 0 {
             SystemTime::UNIX_EPOCH
                 .checked_sub(duration)
                 .context(AddSystemTimeOverflowSnafu { duration })
@@ -406,6 +410,9 @@ mod test {
             ("-1.2346", -1235),
             ("1.2346", 1235),
             ("0.0004", 0),
+            ("1.0005", 1000),
+            ("-1.0005", -1000),
+            ("0.0004999999", 0),
             ("1969-12-31T23:59:59.9999Z", -1),
             ("1970-01-01T00:00:00.0009Z", 0),
         ] {
