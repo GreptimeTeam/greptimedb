@@ -1189,7 +1189,7 @@ mod tests {
                 "datafusion.optimizer.prefer_hash_join",
                 if prefer_hash_join { "true" } else { "false" },
             );
-            ctx.set_extension(QUERY_PARALLELISM_HINT, "1");
+            ctx.set_extension(QUERY_PARALLELISM_HINT, "2");
             let context = Arc::new(ctx);
             let stmt = QueryLanguageParser::parse_sql(sql, &context).unwrap();
             let logical_plan = engine.planner().plan(&stmt, context.clone()).await.unwrap();
@@ -1206,9 +1206,26 @@ mod tests {
         }
         assert!(plans[0].contains("HashJoinExec"), "{}", plans[0]);
         assert!(plans[1].contains("SortMergeJoinExec"), "{}", plans[1]);
-        assert_eq!(results[0].len(), results[1].len());
-        assert_eq!(results[0][0].column(0), results[1][0].column(0));
-        assert_eq!(results[0][0].num_rows(), 4);
+        let values = results
+            .iter()
+            .map(|batches| {
+                batches
+                    .iter()
+                    .flat_map(|batch| {
+                        batch
+                            .column(0)
+                            .as_any()
+                            .downcast_ref::<datafusion::arrow::array::UInt32Array>()
+                            .unwrap()
+                            .values()
+                            .iter()
+                            .copied()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(values[0], values[1]);
+        assert_eq!(values[0], vec![0, 1, 2, 3]);
     }
 
     #[tokio::test]
