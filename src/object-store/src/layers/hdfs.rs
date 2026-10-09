@@ -169,12 +169,27 @@ impl oio::Write for HdfsWriter {
     async fn write(&mut self, buffer: Buffer) -> Result<()> {
         match &mut self.0 {
             HdfsWriterInner::Direct(writer) => writer.write(buffer).await,
-            HdfsWriterInner::Atomic { writer, .. } => {
-                writer
+            HdfsWriterInner::Atomic {
+                inner,
+                context,
+                writer,
+                temporary_path,
+                ..
+            } => {
+                let result = writer
                     .as_mut()
                     .ok_or_else(writer_unavailable)?
                     .write(buffer)
-                    .await
+                    .await;
+                if let Err(error) = result {
+                    // A failed write leaves the temporary file behind, so abort
+                    // it before returning the original error to the caller.
+                    if let Some(writer) = writer.take() {
+                        abort_and_delete(inner, context, writer, temporary_path).await;
+                    }
+                    return Err(error);
+                }
+                Ok(())
             }
         }
     }
@@ -443,6 +458,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::layers::mock::{MockLayerBuilder, MockWriterFactory};
 
     fn test_store() -> (TempDir, Operator) {
         let directory = tempfile::tempdir().unwrap();
@@ -546,6 +562,89 @@ mod tests {
                 .unwrap()
                 .to_bytes()
                 .as_ref()
+        );
+    }
+
+    /// A writer that starts failing once more than `fail_after` bytes have been
+    /// accepted, to simulate a failure in the middle of an atomic write.
+    struct FailingWriter {
+        inner: oio::Writer,
+        written: usize,
+        fail_after: usize,
+    }
+
+    impl oio::Write for FailingWriter {
+        async fn write(&mut self, buffer: Buffer) -> Result<()> {
+            if self.written + buffer.len() > self.fail_after {
+                return Err(opendal::Error::new(
+                    ErrorKind::Unexpected,
+                    "injected write failure",
+                ));
+            }
+            self.written += buffer.len();
+            self.inner.write(buffer).await
+        }
+
+        async fn close(&mut self) -> Result<Metadata> {
+            self.inner.close().await
+        }
+
+        async fn abort(&mut self) -> Result<()> {
+            self.inner.abort().await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_atomic_write_cleans_up_temporary_file_after_write_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let factory: MockWriterFactory = Arc::new(|path, _args, inner| {
+            if path.contains(".greptime-") {
+                Box::new(FailingWriter {
+                    inner,
+                    written: 0,
+                    fail_after: 4,
+                })
+            } else {
+                inner
+            }
+        });
+        let mock_layer = MockLayerBuilder::default()
+            .writer_factory(factory)
+            .build()
+            .unwrap();
+        let store = Operator::new(Fs::default().root(directory.path().to_str().unwrap()))
+            .unwrap()
+            .layer(mock_layer)
+            .layer(HdfsCompatibilityLayer::new_for_test());
+
+        store.write("data/target", "old").await.unwrap();
+
+        let mut writer: Writer = store.writer("data/target").await.unwrap();
+        writer.write("part").await.unwrap();
+
+        let error = writer.write("ial").await.unwrap_err();
+        assert_eq!(ErrorKind::Unexpected, error.kind());
+        assert!(error.to_string().contains("injected write failure"));
+
+        // The destination keeps its previous contents...
+        assert_eq!(
+            b"old",
+            store
+                .read("data/target")
+                .await
+                .unwrap()
+                .to_bytes()
+                .as_ref()
+        );
+        // ...and the temporary file is removed even though the writer was not
+        // closed or aborted by the caller.
+        assert!(
+            store
+                .list("")
+                .await
+                .unwrap()
+                .iter()
+                .all(|entry| !entry.path().contains(".greptime-"))
         );
     }
 }
