@@ -29,6 +29,7 @@ use frontend::error::Error;
 use frontend::instance::Instance;
 use operator::error::Error as OperatorError;
 use query::datafusion::QUERY_PARALLELISM_HINT;
+use query::options::QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN;
 use rstest::rstest;
 use rstest_reuse::apply;
 use servers::error as server_error;
@@ -390,6 +391,79 @@ LEFT JOIN (SELECT k, count(*) n FROM join_repro WHERE kind = 'child' AND k < 'c'
             "+-------+---------------------+----------+\n| roots | roots_with_children | children |\n+-------+---------------------+----------+\n| 8     | 8                   | 24       |\n+-------+---------------------+----------+"
         );
     }
+}
+
+#[apply(both_instances_cases)]
+async fn test_partitioned_merge_scan_semi_join_repartitions(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+    execute_sql(
+        &frontend,
+        r#"
+CREATE TABLE semi_join_repro (
+    ts TIMESTAMP TIME INDEX,
+    key_id INT,
+    is_match BOOLEAN,
+    PRIMARY KEY (key_id)
+)
+PARTITION ON COLUMNS (key_id) (
+    key_id < 10,
+    key_id >= 10 AND key_id < 20,
+    key_id >= 20 AND key_id < 30,
+    key_id >= 30
+)
+ENGINE = mito
+"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"INSERT INTO semi_join_repro VALUES
+('2026-10-09 00:00:00', 1, false),
+('2026-10-09 00:00:01', 1, true),
+('2026-10-09 00:00:00', 11, false),
+('2026-10-09 00:00:01', 11, true),
+('2026-10-09 00:00:00', 21, false),
+('2026-10-09 00:00:01', 21, true),
+('2026-10-09 00:00:00', 31, false),
+('2026-10-09 00:00:01', 31, true)"#,
+    )
+    .await;
+
+    let query = r#"SELECT t.key_id, MIN(t.ts) AS first_ts
+FROM semi_join_repro t
+WHERE t.key_id IN (
+    SELECT s.key_id FROM semi_join_repro s WHERE s.is_match = true
+)
+GROUP BY t.key_id
+ORDER BY t.key_id"#;
+    let mut query_ctx = QueryContext::with_db_name(None);
+    query_ctx.set_extension(QUERY_PARALLELISM_HINT, "2");
+    query_ctx.set_extension(QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN, "true");
+    let query_ctx = Arc::new(query_ctx);
+    let output = execute_sql_with(&frontend, query, query_ctx.clone())
+        .await
+        .data
+        .pretty_print()
+        .await;
+    assert_eq!(
+        output,
+        "+--------+---------------------+\n| key_id | first_ts            |\n+--------+---------------------+\n| 1      | 2026-10-09T00:00:00 |\n| 11     | 2026-10-09T00:00:00 |\n| 21     | 2026-10-09T00:00:00 |\n| 31     | 2026-10-09T00:00:00 |\n+--------+---------------------+"
+    );
+
+    let explain = execute_sql_with(&frontend, &format!("EXPLAIN {query}"), query_ctx)
+        .await
+        .data
+        .pretty_print()
+        .await;
+    assert!(
+        explain.contains("HashJoinExec: mode=Partitioned, join_type=LeftSemi"),
+        "parallel IN query should use a partitioned left-semi join; explain:\n{explain}"
+    );
+    assert!(
+        explain.contains("RepartitionExec: partitioning=Hash([key_id@1], 2)")
+            && explain.contains("RepartitionExec: partitioning=Hash([key_id@0], 2)"),
+        "parallel left-semi join should repartition both inputs on key_id; explain:\n{explain}"
+    );
 }
 
 #[apply(both_instances_cases)]
