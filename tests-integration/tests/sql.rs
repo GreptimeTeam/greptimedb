@@ -88,6 +88,7 @@ macro_rules! sql_tests {
                 test_postgres_regclass_bind_parameter,
                 test_postgres_uint64_parameter,
                 test_postgres_explain_bind_parameter,
+                test_postgres_show_query_options,
                 test_postgres_array_types,
                 test_mysql_prepare_stmt_insert_timestamp,
                 test_mysql_prepare_stmt_timezone,
@@ -1869,6 +1870,52 @@ pub async fn test_postgres_extended_query_row_returning_statements(store_type: S
     drop(client);
     rx.await.unwrap();
 
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_postgres_show_query_options(store_type: StorageType) {
+    let (mut guard, fe_pg_server) =
+        setup_pg_server(store_type, "test_postgres_show_query_options").await;
+    let addr = fe_pg_server.bind_addr().unwrap().to_string();
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+        tx.send(()).unwrap();
+    });
+
+    for (option, value) in [
+        ("query.parallelism", "2"),
+        ("datafusion.optimizer.prefer_hash_join", "false"),
+    ] {
+        client
+            .batch_execute(&format!("SET {option} TO {value}"))
+            .await
+            .unwrap();
+        let statement = client.prepare(&format!("SHOW {option}")).await.unwrap();
+        let rows = client.query(&statement, &[]).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].len(), 1);
+        assert_eq!(rows[0].get::<usize, String>(0), value);
+
+        if option == "query.parallelism" {
+            client
+                .batch_execute("SET query.parallelism TO 7")
+                .await
+                .unwrap();
+            let rows = client.query(&statement, &[]).await.unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].len(), 1);
+            assert_eq!(rows[0].get::<usize, String>(0), "7");
+        }
+    }
+
+    drop(client);
+    rx.await.unwrap();
     let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;
 }

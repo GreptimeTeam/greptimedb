@@ -552,30 +552,6 @@ async fn test_extended_query_regproc_response() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_extended_query_show_query_option() -> Result<()> {
-    let server_port = start_test_server(TlsOption::default()).await?;
-    let client = create_connection_with_given_db(server_port, DEFAULT_SCHEMA_NAME)
-        .await
-        .unwrap();
-    let simple_rows = client.simple_query("SHOW query.parallelism").await.unwrap();
-    let simple_value = simple_rows
-        .iter()
-        .find_map(|message| match message {
-            SimpleQueryMessage::Row(row) => row.get(0),
-            _ => None,
-        })
-        .expect("SHOW query.parallelism returns a row");
-
-    let statement = client.prepare("SHOW query.parallelism").await.unwrap();
-    let rows = client.query(&statement, &[]).await.unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].len(), 1);
-    assert_eq!(rows[0].get::<usize, String>(0), simple_value);
-
-    Ok(())
-}
-
-#[tokio::test]
 async fn test_extended_query() -> Result<()> {
     let server_port = start_test_server(TlsOption::default()).await?;
     let client = create_connection_with_given_db(server_port, DEFAULT_SCHEMA_NAME)
