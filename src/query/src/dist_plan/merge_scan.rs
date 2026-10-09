@@ -17,7 +17,7 @@ use std::cell::Cell;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ahash::{HashMap, HashSet};
+use ahash::HashMap;
 use arrow_schema::{
     ArrowError, DataType as ArrowDataType, Field, Schema as ArrowSchema,
     SchemaRef as ArrowSchemaRef, SortOptions,
@@ -44,10 +44,10 @@ use datafusion::physical_plan::{
 };
 use datafusion_common::stats::Precision;
 use datafusion_common::tree_node::TreeNodeRecursion;
-use datafusion_common::{Column as ColumnExpr, DFSchemaRef, DataFusionError, Result, Statistics};
+use datafusion_common::{DFSchemaRef, DataFusionError, Result, Statistics};
 use datafusion_expr::{Expr, Extension, FetchType, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion_physical_expr::expressions::Column;
-use datafusion_physical_expr::{Distribution, EquivalenceProperties, PhysicalSortExpr};
+use datafusion_physical_expr::{EquivalenceProperties, PhysicalSortExpr};
 use datatypes::extension::json::is_any_json_extension_type;
 use futures_util::StreamExt;
 use greptime_proto::v1::region::RegionRequestHeader;
@@ -489,7 +489,6 @@ pub struct MergeScanExec {
     remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
     captured_remote_dyn_filters: Arc<Mutex<Vec<CapturedDynFilter>>>,
     target_partition: usize,
-    partition_cols: AliasMapping,
     enable_per_region_metrics: bool,
 }
 
@@ -514,7 +513,6 @@ impl MergeScanExec {
         region_query_handler: RegionQueryHandlerRef,
         query_ctx: QueryContextRef,
         target_partition: usize,
-        partition_cols: AliasMapping,
         remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
         enable_per_region_metrics: bool,
     ) -> Result<Self> {
@@ -551,24 +549,8 @@ impl MergeScanExec {
             EquivalenceProperties::new(arrow_schema.clone())
         };
 
-        let partition_exprs = partition_cols
-            .iter()
-            .filter_map(|col| {
-                if let Some(first_alias) = col.1.first() {
-                    session_state
-                        .create_physical_expr(
-                            Expr::Column(ColumnExpr::new_unqualified(
-                                first_alias.name().to_string(),
-                            )),
-                            plan.schema(),
-                        )
-                        .ok()
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let partitioning = Partitioning::Hash(partition_exprs, output_partition_count);
+        // Region stripes are positional, not hash buckets; do not advertise a hash distribution.
+        let partitioning = Partitioning::UnknownPartitioning(output_partition_count);
 
         let properties = Arc::new(PlanProperties::new(
             eq_properties,
@@ -590,7 +572,6 @@ impl MergeScanExec {
             remote_dyn_filter_producer_id,
             captured_remote_dyn_filters: Arc::default(),
             target_partition,
-            partition_cols,
             enable_per_region_metrics,
         })
     }
@@ -910,78 +891,6 @@ impl MergeScanExec {
             self.arrow_schema.clone(),
             stream,
         )))
-    }
-
-    pub fn try_with_new_distribution(&self, distribution: Distribution) -> Option<Self> {
-        let Distribution::KeyPartitioned(hash_exprs) = distribution else {
-            // not applicable
-            return None;
-        };
-
-        if let Partitioning::Hash(curr_dist, _) = &self.properties.partitioning
-            && curr_dist == &hash_exprs
-        {
-            // No need to change the distribution
-            return None;
-        }
-
-        let hash_expr_col_names: HashSet<_> = hash_exprs
-            .iter()
-            .filter_map(|expr| {
-                expr.downcast_ref::<Column>()
-                    .map(|col_expr| col_expr.name())
-            })
-            .collect();
-
-        let covers_all_partition_cols = self.partition_cols.values().all(|aliases| {
-            aliases
-                .iter()
-                .any(|col| hash_expr_col_names.contains(col.name()))
-        });
-        if !covers_all_partition_cols {
-            return None;
-        }
-
-        let all_partition_col_aliases: HashSet<_> = self
-            .partition_cols
-            .values()
-            .flat_map(|aliases| aliases.iter().map(|c| c.name()))
-            .collect();
-        let overlaps: Vec<_> = hash_exprs
-            .iter()
-            .filter(|expr| {
-                expr.downcast_ref::<Column>()
-                    .is_some_and(|col_expr| all_partition_col_aliases.contains(col_expr.name()))
-            })
-            .cloned()
-            .collect();
-
-        if overlaps.is_empty() {
-            return None;
-        }
-
-        Some(Self {
-            table: self.table.clone(),
-            regions: self.regions.clone(),
-            plan: self.plan.clone(),
-            arrow_schema: self.arrow_schema.clone(),
-            region_query_handler: self.region_query_handler.clone(),
-            metric: self.metric.clone(),
-            properties: Arc::new(PlanProperties::new(
-                self.properties.eq_properties.clone(),
-                Partitioning::Hash(overlaps, self.partition_count()),
-                self.properties.emission_type,
-                self.properties.boundedness,
-            )),
-            sub_stage_metrics: self.sub_stage_metrics.clone(),
-            partition_metrics: self.partition_metrics.clone(),
-            query_ctx: self.query_ctx.clone(),
-            remote_dyn_filter_producer_id: self.remote_dyn_filter_producer_id,
-            captured_remote_dyn_filters: self.captured_remote_dyn_filters.clone(),
-            target_partition: self.target_partition,
-            partition_cols: self.partition_cols.clone(),
-            enable_per_region_metrics: self.enable_per_region_metrics,
-        })
     }
 
     fn captured_remote_dyn_filters(&self) -> Vec<CapturedDynFilter> {
@@ -1420,7 +1329,7 @@ impl MergeScanMetric {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeSet, HashMap as StdHashMap};
+    use std::collections::HashMap as StdHashMap;
     use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
@@ -1439,17 +1348,20 @@ mod tests {
     use common_recordbatch::{
         DfRecordBatch, EmptyRecordBatchStream, RecordBatch, RecordBatchStream,
     };
+    use datafusion::common::NullEquality;
     use datafusion::config::ConfigOptions;
-    use datafusion::execution::SessionStateBuilder;
+    use datafusion::execution::{SessionConfig, SessionStateBuilder};
+    use datafusion::physical_optimizer::PhysicalOptimizerRule;
     use datafusion::physical_plan::filter_pushdown::ChildFilterPushdownResult;
+    use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
     use datafusion::physical_plan::repartition::RepartitionExec;
+    use datafusion::physical_plan::{ExecutionPlanProperties, Partitioning};
     use datafusion::physical_plan::{StatisticsArgs, StatisticsContext};
-    use datafusion_common::TableReference;
-    use datafusion_expr::{LogicalPlanBuilder, col, lit};
+    use datafusion_expr::{JoinType, LogicalPlanBuilder, col, lit};
+    use datafusion_physical_expr::PhysicalExpr;
     use datafusion_physical_expr::expressions::{
         Column, DynamicFilterPhysicalExpr, lit as physical_lit,
     };
-    use datafusion_physical_expr::{Distribution, PhysicalExpr};
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{Int64Vector, StringVector, TimestampMillisecondVector};
@@ -1517,7 +1429,6 @@ mod tests {
             Arc::new(TestRegionQueryHandler::default()),
             QueryContext::arc(),
             target_partition,
-            AliasMapping::new(),
             None,
             false,
         )
@@ -1560,7 +1471,6 @@ mod tests {
             handler,
             query_ctx,
             1,
-            AliasMapping::new(),
             Some(RemoteDynFilterProducerId::new(42)),
             false,
         )
@@ -1661,7 +1571,163 @@ mod tests {
                 exec.properties().output_partitioning().partition_count(),
                 expected
             );
+            assert!(matches!(
+                exec.properties().output_partitioning(),
+                Partitioning::UnknownPartitioning(count) if *count == expected
+            ));
         }
+    }
+
+    #[tokio::test]
+    async fn merge_scan_left_join_shuffles_unknown_partitioning_before_hash_join() {
+        use arrow::array::Array;
+        let schema = int64_schema(&["k", "n"]);
+        let region = |id| RegionId::new(2048, id);
+        let make_batch = |rows: &[(i64, i64)]| {
+            record_batch(
+                schema.clone(),
+                vec![
+                    Arc::new(Int64Vector::from_slice(
+                        rows.iter().map(|row| row.0).collect::<Vec<_>>(),
+                    )) as _,
+                    Arc::new(Int64Vector::from_slice(
+                        rows.iter().map(|row| row.1).collect::<Vec<_>>(),
+                    )) as _,
+                ],
+            )
+        };
+
+        // The peer vectors are intentionally differently ordered. Left rows include
+        // key 99, which has no right-side match and must survive the LEFT JOIN.
+        let left_regions = vec![region(3), region(1), region(2)];
+        let right_regions = vec![region(2), region(3), region(1)];
+        let left_responses = vec![
+            (region(1), make_batch(&[(1, 10), (2, 20)])),
+            (region(2), make_batch(&[(3, 30)])),
+            (region(3), make_batch(&[(99, 90)])),
+        ];
+        let right_responses = vec![
+            (region(1), make_batch(&[(1, 2)])),
+            (region(2), make_batch(&[(2, 3)])),
+            (region(3), make_batch(&[(3, 4)])),
+        ];
+        let mut left_scan = merge_scan_exec_with_handler(
+            left_regions,
+            schema.arrow_schema().as_ref().clone(),
+            Arc::new(TestRegionQueryHandler::new(left_responses)),
+            2,
+        );
+        left_scan.remote_dyn_filter_producer_id = Some(RemoteDynFilterProducerId::new(42));
+        let left = Arc::new(left_scan) as Arc<dyn ExecutionPlan>;
+        let mut right_scan = merge_scan_exec_with_handler(
+            right_regions,
+            schema.arrow_schema().as_ref().clone(),
+            Arc::new(TestRegionQueryHandler::new(right_responses)),
+            2,
+        );
+        right_scan.remote_dyn_filter_producer_id = Some(RemoteDynFilterProducerId::new(43));
+        let right = Arc::new(right_scan) as Arc<dyn ExecutionPlan>;
+        assert!(matches!(
+            left.output_partitioning(),
+            Partitioning::UnknownPartitioning(2)
+        ));
+        assert!(matches!(
+            right.output_partitioning(),
+            Partitioning::UnknownPartitioning(2)
+        ));
+
+        let join = Arc::new(
+            HashJoinExec::try_new(
+                left,
+                right,
+                vec![(
+                    Arc::new(Column::new("k", 0)) as _,
+                    Arc::new(Column::new("k", 0)) as _,
+                )],
+                None,
+                &JoinType::Left,
+                None,
+                PartitionMode::Partitioned,
+                NullEquality::NullEqualsNothing,
+                false,
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>;
+        let session = SessionStateBuilder::new()
+            .with_config(SessionConfig::new().with_target_partitions(2))
+            .with_default_features()
+            .build();
+        let optimized =
+            datafusion::physical_optimizer::ensure_requirements::EnsureRequirements::new()
+                .optimize(join, &session.config_options())
+                .unwrap();
+        let repartition_count = optimized
+            .children()
+            .iter()
+            .filter(|child| child.as_any().is::<RepartitionExec>())
+            .count();
+        assert!(
+            repartition_count > 0,
+            "EnsureRequirements must insert actual shuffles"
+        );
+        let mut producer_ids = Vec::new();
+        for child in optimized.children() {
+            let repartition = child
+                .as_any()
+                .downcast_ref::<RepartitionExec>()
+                .expect("EnsureRequirements must wrap both join inputs in a shuffle");
+            let scan = repartition
+                .input()
+                .downcast_ref::<MergeScanExec>()
+                .expect("actual shuffle must retain the MergeScan child");
+            producer_ids.push(scan.remote_dyn_filter_producer_id().unwrap());
+        }
+        producer_ids.sort_unstable();
+        assert_eq!(
+            producer_ids,
+            vec![
+                RemoteDynFilterProducerId::new(42),
+                RemoteDynFilterProducerId::new(43)
+            ]
+        );
+        let batches = datafusion::physical_plan::collect(optimized, session.task_ctx())
+            .await
+            .unwrap();
+        let mut actual = Vec::new();
+        for batch in batches {
+            let lk = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            let ln = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            let rn = batch
+                .column(3)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                actual.push((
+                    lk.value(row),
+                    ln.value(row),
+                    (!rn.is_null(row)).then(|| rn.value(row)),
+                ));
+            }
+        }
+        actual.sort_unstable();
+        assert_eq!(
+            actual,
+            vec![
+                (1, 10, Some(2)),
+                (2, 20, Some(3)),
+                (3, 30, Some(4)),
+                (99, 90, None)
+            ]
+        );
     }
 
     #[test]
@@ -1874,7 +1940,6 @@ mod tests {
             handler.clone(),
             query_ctx,
             1,
-            AliasMapping::new(),
             Some(RemoteDynFilterProducerId::new(42)),
             false,
         )
@@ -2682,7 +2747,6 @@ mod tests {
             handler,
             QueryContext::arc(),
             target_partition,
-            AliasMapping::new(),
             None,
             false,
         )
@@ -3289,73 +3353,6 @@ mod tests {
     }
 
     #[test]
-    fn try_with_new_distribution_preserves_remote_dyn_filter_producer_id() {
-        let remote_dyn_filter_producer_id = RemoteDynFilterProducerId::new(42);
-
-        // Build a plan whose schema contains "col1"
-        let plan = LogicalPlanBuilder::empty(true)
-            .project(vec![lit(1i32).alias("col1")])
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let schema = plan.schema().as_arrow().clone();
-        let table = TableName::new("catalog", "schema", "table");
-        let regions = vec![RegionId::new(1024, 1)];
-        let query_ctx = QueryContext::arc();
-
-        // Non-empty partition_cols so try_with_new_distribution can detect an overlap
-        let mut partition_cols = AliasMapping::new();
-        partition_cols.insert(
-            "col1".to_string(),
-            BTreeSet::from([ColumnExpr::new(Some(TableReference::bare("table")), "col1")]),
-        );
-
-        let session_state = SessionStateBuilder::new().build();
-
-        let handler = Arc::new(TestRegionQueryHandler::default());
-        let target_partition = 2;
-
-        let exec = MergeScanExec::new(
-            &session_state,
-            table,
-            regions,
-            plan,
-            &schema,
-            handler,
-            query_ctx,
-            target_partition,
-            partition_cols,
-            Some(remote_dyn_filter_producer_id),
-            false,
-        )
-        .unwrap();
-
-        assert_eq!(
-            exec.remote_dyn_filter_producer_id(),
-            Some(remote_dyn_filter_producer_id)
-        );
-
-        // A distribution that differs from the current partitioning but shares a
-        // column name present in partition_cols, so try_with_new_distribution
-        // produces a clone instead of returning None.
-        let new_dist = Distribution::KeyPartitioned(vec![
-            Arc::new(Column::new("col1", 0)),
-            Arc::new(Column::new("col2", 1)),
-        ]);
-
-        let cloned = exec
-            .try_with_new_distribution(new_dist)
-            .expect("expected a cloned exec with overlapping partition col");
-
-        assert_eq!(
-            cloned.remote_dyn_filter_producer_id(),
-            Some(remote_dyn_filter_producer_id),
-            "try_with_new_distribution must preserve remote dynamic filter producer id"
-        );
-    }
-
-    #[test]
     fn merge_scan_apply_expressions_exposes_remote_dyn_filter_id() {
         let query_ctx = QueryContext::arc();
         let exec =
@@ -3397,7 +3394,6 @@ mod tests {
             handler,
             query_ctx,
             1,
-            AliasMapping::new(),
             Some(remote_dyn_filter_producer_id),
             false,
         )
@@ -3503,7 +3499,6 @@ mod tests {
             Arc::new(TestRegionQueryHandler::default()),
             QueryContext::arc(),
             1,
-            AliasMapping::new(),
             None,
             true,
         )
@@ -3572,7 +3567,6 @@ mod tests {
             Arc::new(TestRegionQueryHandler::default()),
             QueryContext::arc(),
             1,
-            AliasMapping::new(),
             None,
             true,
         )

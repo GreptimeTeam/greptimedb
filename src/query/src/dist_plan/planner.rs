@@ -228,7 +228,6 @@ impl ExtensionPlanner for DistExtensionPlanner {
             self.region_query_handler.clone(),
             query_ctx,
             session.config().target_partitions(),
-            merge_scan.partition_cols().clone(),
             merge_scan.remote_dyn_filter_producer_id(),
             self.enable_per_region_metrics,
         )?;
