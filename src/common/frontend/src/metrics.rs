@@ -22,25 +22,47 @@
 //! loaders count successful coalesced waiters as hits and failed loads as misses.
 //! Failover counts one outcome after resolving all candidate schemas; an ambiguous
 //! result is a miss. Table and prepared-statement caches count each lookup.
+//! Both outcomes for all known caches are exported from the first metric update.
 
 use lazy_static::lazy_static;
 use prometheus::{IntCounterVec, register_int_counter_vec};
 
+const CACHE_TYPES: [&str; 7] = [
+    "otlp_trace_aux",
+    "otlp_metrics_legacy",
+    "pipeline_table",
+    "pipeline",
+    "pipeline_original",
+    "pipeline_failover",
+    "mysql_prepared_stmt",
+];
+
 lazy_static! {
+    static ref CACHE_COUNTERS: (IntCounterVec, IntCounterVec) = {
+        let hits = register_int_counter_vec!(
+            "greptime_frontend_cache_hit",
+            "frontend cache hit",
+            &["type"]
+        )
+        .unwrap();
+        let misses = register_int_counter_vec!(
+            "greptime_frontend_cache_miss",
+            "frontend cache miss",
+            &["type"]
+        )
+        .unwrap();
+        // Register both outcomes together so an all-hit or all-miss cache has both series.
+        for cache_type in CACHE_TYPES {
+            hits.with_label_values(&[cache_type]);
+            misses.with_label_values(&[cache_type]);
+        }
+        (hits, misses)
+    };
+
     /// Frontend cache hits by cache type.
-    pub static ref CACHE_HIT: IntCounterVec = register_int_counter_vec!(
-        "greptime_frontend_cache_hit",
-        "frontend cache hit",
-        &["type"]
-    )
-    .unwrap();
+    pub static ref CACHE_HIT: IntCounterVec = CACHE_COUNTERS.0.clone();
     /// Frontend cache misses by cache type.
-    pub static ref CACHE_MISS: IntCounterVec = register_int_counter_vec!(
-        "greptime_frontend_cache_miss",
-        "frontend cache miss",
-        &["type"]
-    )
-    .unwrap();
+    pub static ref CACHE_MISS: IntCounterVec = CACHE_COUNTERS.1.clone();
 }
 
 /// Records one completed cache lookup.
@@ -54,23 +76,42 @@ pub fn record_cache_lookup(cache_type: &str, hit: bool) {
 
 #[cfg(test)]
 mod tests {
-    use prometheus::core::Collector;
-
     use super::*;
 
     #[test]
     fn test_cache_lookup_counters() {
-        record_cache_lookup("test", true);
-        record_cache_lookup("test", false);
-        record_cache_lookup("test", false);
-        for (counter, name, expected) in [
-            (&*CACHE_HIT, "greptime_frontend_cache_hit", 1),
-            (&*CACHE_MISS, "greptime_frontend_cache_miss", 2),
+        record_cache_lookup("pipeline", false);
+        // Scrape before accessing CACHE_HIT, which would initialize it and hide a missing series.
+        let families = prometheus::gather();
+        for (name, expected) in [
+            ("greptime_frontend_cache_hit", 0.0),
+            ("greptime_frontend_cache_miss", 1.0),
         ] {
-            assert_eq!(counter.with_label_values(&["test"]).get(), expected);
-            let families = counter.collect();
-            assert_eq!(families[0].name(), name);
-            assert_eq!(families[0].get_metric()[0].get_label()[0].name(), "type");
+            let family = families
+                .iter()
+                .find(|family| family.name() == name)
+                .unwrap();
+            assert_eq!(family.get_metric().len(), CACHE_TYPES.len());
+            for cache_type in CACHE_TYPES {
+                let metric = family
+                    .get_metric()
+                    .iter()
+                    .find(|metric| metric.get_label()[0].value() == cache_type)
+                    .unwrap();
+                assert_eq!(metric.get_label()[0].name(), "type");
+                assert_eq!(
+                    metric.get_counter().value(),
+                    if cache_type == "pipeline" {
+                        expected
+                    } else {
+                        0.0
+                    }
+                );
+            }
         }
+        record_cache_lookup("pipeline", true);
+        record_cache_lookup("pipeline", false);
+        assert_eq!(CACHE_HIT.with_label_values(&["pipeline"]).get(), 1);
+        assert_eq!(CACHE_MISS.with_label_values(&["pipeline"]).get(), 2);
     }
 }
