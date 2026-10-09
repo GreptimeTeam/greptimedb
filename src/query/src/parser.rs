@@ -224,9 +224,18 @@ impl QueryLanguageParser {
             // also report rfc3339 error if float parsing fails
             .map_err(|_| rfc3339_result.unwrap_err())?;
 
-        // Prometheus accepts timestamps before the Unix epoch.
-        let duration = Duration::try_from_secs_f64(secs.abs())
+        // Prometheus accepts timestamps before the Unix epoch, and rounds the fraction of a
+        // second to milliseconds, half away from zero (`parseTime` in its HTTP API).
+        let exact = Duration::try_from_secs_f64(secs.abs())
             .context(TryIntoDurationSnafu { raw: timestamp })?;
+        let millis = exact
+            .as_secs()
+            .checked_mul(1000)
+            .and_then(|millis| {
+                millis.checked_add((f64::from(exact.subsec_nanos()) / 1e6).round() as u64)
+            })
+            .context(AddSystemTimeOverflowSnafu { duration: exact })?;
+        let duration = Duration::from_millis(millis);
         if secs.is_sign_negative() {
             SystemTime::UNIX_EPOCH
                 .checked_sub(duration)
@@ -388,12 +397,22 @@ mod test {
     }
 
     #[test]
-    fn parse_promql_timestamp_before_epoch() {
-        for (input, millis) in [("-30000.5", 30_000_500), ("-0.001", 1)] {
+    fn parse_promql_timestamp_matches_prometheus_millis() {
+        // Expected values are Prometheus' `timestamp.FromTime(parseTime(input))`.
+        for (input, millis) in [
+            ("-30000.5", -30_000_500),
+            ("-0.001", -1),
+            ("-0.0006", -1),
+            ("-1.2346", -1235),
+            ("1.2346", 1235),
+            ("0.0004", 0),
+            ("1969-12-31T23:59:59.9999Z", -1),
+            ("1970-01-01T00:00:00.0009Z", 0),
+        ] {
             let result = QueryLanguageParser::parse_promql_timestamp(input).unwrap();
             assert_eq!(
-                SystemTime::UNIX_EPOCH.duration_since(result).unwrap(),
-                Duration::from_millis(millis),
+                crate::promql::label_values::signed_millis_since_epoch(result).unwrap(),
+                millis,
                 "{input}"
             );
         }

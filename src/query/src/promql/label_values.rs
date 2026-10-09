@@ -38,10 +38,13 @@ fn millis_since_epoch(time: SystemTime) -> Result<Timestamp> {
 
 /// Converts a [`SystemTime`] to signed milliseconds since the Unix epoch, rejecting instants
 /// outside the `i64` millisecond range.
+///
+/// Sub-millisecond parts round down, also before the epoch, like Prometheus'
+/// `timestamp.FromTime`.
 pub(crate) fn signed_millis_since_epoch(time: SystemTime) -> Result<i64> {
     let (millis, before_epoch) = match time.duration_since(UNIX_EPOCH) {
         Ok(duration) => (duration.as_millis(), false),
-        Err(earlier) => (earlier.duration().as_millis(), true),
+        Err(earlier) => (earlier.duration().as_nanos().div_ceil(1_000_000), true),
     };
     signed_millis(millis, before_epoch).with_context(|| SystemTimeOutOfRangeSnafu { time })
 }
