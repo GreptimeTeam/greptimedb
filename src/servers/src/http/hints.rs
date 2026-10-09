@@ -24,13 +24,13 @@ use crate::hint_headers;
 
 pub async fn extract_hints(mut request: Request<Body>, next: Next) -> Response {
     let hints = hint_headers::extract_hints(request.headers());
+    let dedicated_read_preference = request
+        .headers()
+        .contains_key(&crate::http::header::GREPTIME_DB_HEADER_READ_PREFERENCE);
     let hints = match hint_headers::validate_public_hints(hints) {
         Ok(hints) => hints,
         Err(error) => return error.into_response(),
     };
-    let dedicated_read_preference = request
-        .headers()
-        .contains_key(&crate::http::header::GREPTIME_DB_HEADER_READ_PREFERENCE);
     if let Some(query_ctx) = request.extensions_mut().get_mut::<QueryContext>() {
         apply_hints(query_ctx, hints, dedicated_read_preference);
     }
@@ -65,6 +65,7 @@ fn apply_hints(
 #[cfg(test)]
 mod tests {
     use common_query::request::INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY as COMMON_INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY;
+    use query::options::FLOW_SCHEDULED_TIME_MILLIS;
     use session::context::{QueryContextBuilder, generate_remote_query_id};
     use session::hints::{
         INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY,
@@ -93,7 +94,10 @@ mod tests {
                     INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY.to_string(),
                     "spoofed-regs".to_string(),
                 ),
-                ("custom.extension".to_string(), "value".to_string()),
+                (
+                    FLOW_SCHEDULED_TIME_MILLIS.to_string(),
+                    "1700000000000".to_string(),
+                ),
                 ("ttl".to_string(), "7d".to_string()),
             ],
             false,
@@ -108,7 +112,10 @@ mod tests {
                 .extension(INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY)
                 .is_none()
         );
-        assert_eq!(query_ctx.extension("custom.extension"), Some("value"));
+        assert_eq!(
+            query_ctx.extension(FLOW_SCHEDULED_TIME_MILLIS),
+            Some("1700000000000")
+        );
         assert_eq!(query_ctx.extension("ttl"), Some("7d"));
     }
 

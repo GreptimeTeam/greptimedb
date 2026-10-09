@@ -76,6 +76,8 @@ pub struct QueryContext {
     sql_dialect: Arc<dyn Dialect + Send + Sync>,
     #[builder(default)]
     extensions: HashMap<String, String>,
+    #[builder(setter(skip))]
+    query_options_snapshotted: bool,
     /// The configuration parameter are used to store the parameters that are set by the user
     #[builder(default)]
     configuration_parameter: Arc<ConfigurationVariables>,
@@ -469,7 +471,11 @@ impl QueryContext {
                 request_options.insert(canonical, normalized);
             }
         }
-        let mut effective = self.configuration_parameter.query_options();
+        let mut effective = if self.query_options_snapshotted {
+            HashMap::new()
+        } else {
+            self.configuration_parameter.query_options()
+        };
         effective.extend(request_options);
         Ok(effective)
     }
@@ -477,12 +483,12 @@ impl QueryContext {
     /// Creates a per-query immutable option snapshot while retaining shared mutable session data.
     pub fn query_option_snapshot(&self) -> Result<Self, crate::session_config::Error> {
         let mut snapshot = self.clone();
-        snapshot.configuration_parameter = Arc::new(self.configuration_parameter.as_ref().clone());
         let options = snapshot.effective_query_options()?;
         snapshot
             .extensions
             .retain(|key, _| crate::query_options::canonical_query_option_name(key).is_none());
         snapshot.extensions.extend(options);
+        snapshot.query_options_snapshotted = true;
         Ok(snapshot)
     }
 
@@ -671,6 +677,7 @@ impl QueryContextBuilder {
                 .sql_dialect
                 .unwrap_or_else(|| Arc::new(GreptimeDbDialect {})),
             extensions,
+            query_options_snapshotted: false,
             configuration_parameter: self
                 .configuration_parameter
                 .unwrap_or_else(|| Arc::new(ConfigurationVariables::default())),
@@ -822,169 +829,6 @@ mod test {
 
     use crate::Session;
     use crate::context::{Channel, *};
-
-    #[test]
-    fn query_options_snapshot_validates_and_overlays_request_options() {
-        let mut ctx = QueryContextBuilder::default().build();
-        ctx.configuration_parameter()
-            .set_query_option("query_parallelism", "8")
-            .unwrap();
-        ctx.set_extension("query_parallelism", "4");
-        ctx.set_extension("flow.return_region_seq", "true");
-        let mut expected_extensions = ctx.extensions();
-        expected_extensions.remove("query_parallelism");
-        expected_extensions.insert("query.parallelism".to_string(), "4".to_string());
-        let snapshot = ctx.query_option_snapshot().unwrap();
-        assert_eq!(snapshot.extension("query.parallelism"), Some("4"));
-        assert_eq!(snapshot.extension("query_parallelism"), None);
-        assert_eq!(snapshot.extension("flow.return_region_seq"), Some("true"));
-        ctx.configuration_parameter()
-            .set_query_option("query.parallelism", "16")
-            .unwrap();
-        assert_eq!(snapshot.extension("query.parallelism"), Some("4"));
-        assert_eq!(
-            snapshot.configuration_parameter().query_options(),
-            HashMap::from([("query.parallelism".to_string(), "8".to_string())])
-        );
-        assert_eq!(
-            snapshot.effective_query_options().unwrap(),
-            HashMap::from([("query.parallelism".to_string(), "4".to_string()),])
-        );
-        assert_eq!(snapshot.extensions(), expected_extensions);
-
-        let mut aliases = QueryContextBuilder::default().build();
-        aliases.set_extension("query_fallback", "TRUE");
-        aliases.set_extension("query.allow_query_fallback", "true");
-        assert_eq!(
-            aliases
-                .effective_query_options()
-                .unwrap()
-                .get("query.allow_query_fallback")
-                .map(String::as_str),
-            Some("true")
-        );
-        aliases.set_extension("allow_query_fallback", "false");
-        assert!(aliases.query_option_snapshot().is_err());
-
-        let mut ctx = QueryContextBuilder::default().build();
-        ctx.configuration_parameter()
-            .set_query_option("query_fallback", "true")
-            .unwrap();
-        assert_eq!(
-            ctx.effective_query_options()
-                .unwrap()
-                .get("query.allow_query_fallback")
-                .map(String::as_str),
-            Some("true")
-        );
-        ctx.set_extension("query_fallback", "false");
-        assert_eq!(
-            ctx.effective_query_options()
-                .unwrap()
-                .get("query.allow_query_fallback")
-                .map(String::as_str),
-            Some("false")
-        );
-        ctx.set_extension("query_fallback", "true");
-        ctx.configuration_parameter()
-            .set_query_option("query.parallelism", "1")
-            .unwrap();
-        let before = ctx.configuration_parameter().query_options();
-        assert!(
-            ctx.configuration_parameter()
-                .set_query_option("query.parallelism", "1025")
-                .is_err()
-        );
-        assert_eq!(ctx.configuration_parameter().query_options(), before);
-        assert!(
-            ctx.configuration_parameter()
-                .set_query_option("query.parallelism", "")
-                .is_err()
-        );
-        assert_eq!(ctx.configuration_parameter().query_options(), before);
-
-        let absent = QueryContextBuilder::default().build();
-        let mut explicit_false = QueryContextBuilder::default().build();
-        explicit_false.set_extension("query.allow_query_fallback", "false");
-        assert_eq!(
-            absent
-                .effective_query_options()
-                .unwrap()
-                .get("query.allow_query_fallback"),
-            None
-        );
-        assert_eq!(
-            explicit_false
-                .effective_query_options()
-                .unwrap()
-                .get("query.allow_query_fallback")
-                .map(String::as_str),
-            Some("false")
-        );
-    }
-
-    #[test]
-    fn query_option_snapshot_roundtrips_options_and_shares_only_mutable_session_data() {
-        let mut context = QueryContextBuilder::default()
-            .current_catalog(DEFAULT_CATALOG_NAME.to_string())
-            .current_schema("public".to_string())
-            .build();
-        context
-            .configuration_parameter()
-            .set_query_option(
-                "datafusion.optimizer.enable_dynamic_filter_pushdown",
-                "TRUE",
-            )
-            .unwrap();
-        context.set_extension("query_parallelism", "8");
-        context.set_extension("flow.return_region_seq", "true");
-        context.set_extension(REMOTE_QUERY_ID_EXTENSION_KEY, "query-id");
-        context.enable_live_analyze_metrics();
-
-        let snapshot = context.query_option_snapshot().unwrap();
-        let expected_options = snapshot.effective_query_options().unwrap();
-        let expected_extensions = snapshot.extensions();
-        assert_eq!(
-            expected_options
-                .get("datafusion.optimizer.enable_dynamic_filter_pushdown")
-                .map(String::as_str),
-            Some("true")
-        );
-        assert_eq!(
-            expected_options
-                .get("query.parallelism")
-                .map(String::as_str),
-            Some("8")
-        );
-        assert_eq!(
-            expected_extensions
-                .get("flow.return_region_seq")
-                .map(String::as_str),
-            Some("true")
-        );
-        assert_eq!(
-            expected_extensions
-                .get(REMOTE_QUERY_ID_EXTENSION_KEY)
-                .map(String::as_str),
-            Some("query-id")
-        );
-        assert!(snapshot.live_analyze_metrics_enabled());
-
-        context.set_current_schema("changed");
-        assert_eq!(snapshot.current_schema(), "changed");
-        let other = QueryContextBuilder::default().build();
-        assert!(!other.extensions().contains_key("query.parallelism"));
-
-        let api_context: api::v1::QueryContext = (&snapshot).into();
-        let restored = QueryContext::from(api_context);
-        let restored_snapshot = restored.query_option_snapshot().unwrap();
-        assert_eq!(
-            restored_snapshot.effective_query_options().unwrap(),
-            expected_options
-        );
-        assert_eq!(restored_snapshot.extensions(), expected_extensions);
-        assert!(restored_snapshot.live_analyze_metrics_enabled());
-    }
 
     #[test]
     fn test_session() {

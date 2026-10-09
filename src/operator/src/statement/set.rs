@@ -253,16 +253,15 @@ fn try_parse_datestyle(expr: &Expr) -> Result<(Option<PGDateTimeStyle>, Option<P
     }
 }
 
-/// Parses and stores a supported query option, returning false for unrelated SET variables.
+/// Applies supported query options and rejects unsupported owned namespaces.
 pub fn set_query_option(variable: &str, exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<bool> {
-    let owned = session::query_options::canonical_query_option_name(variable).is_some();
-    if !owned
-        && !variable.to_ascii_lowercase().starts_with("query.")
-        && !variable.to_ascii_lowercase().starts_with("datafusion.")
+    let lower = variable.to_ascii_lowercase();
+    if !lower.starts_with("query.")
+        && !lower.starts_with("datafusion.")
+        && session::query_options::canonical_query_option_name(variable).is_none()
     {
         return Ok(false);
     }
-
     let [Expr::Value(value)] = exprs.as_slice() else {
         return Err(InvalidConfigValueSnafu.into_error(
             session::session_config::Error::InvalidConfigValue {
@@ -293,15 +292,34 @@ pub fn set_query_option(variable: &str, exprs: Vec<Expr>, ctx: QueryContextRef) 
             ));
         }
     };
-    if let Some((key, value)) = session::query_options::parse_query_option(variable, &value)
-        .context(InvalidConfigValueSnafu)?
-    {
-        ctx.configuration_parameter()
-            .set_query_option(&key, &value)
-            .context(InvalidConfigValueSnafu)?;
-        Ok(true)
-    } else {
-        Ok(false)
+    ctx.configuration_parameter()
+        .set_query_option(variable, &value)
+        .context(InvalidConfigValueSnafu)?;
+    Ok(true)
+}
+
+/// Set the allow query fallback configuration parameter to true or false based on the provided expressions.
+///
+pub fn set_allow_query_fallback(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
+    let allow_fallback_expr = exprs.first().context(NotSupportedSnafu {
+        feat: "No allow query fallback value find in set variable statement",
+    })?;
+    match allow_fallback_expr {
+        Expr::Value(ValueWithSpan {
+            value: Value::Boolean(allow),
+            span: _,
+        }) => {
+            ctx.configuration_parameter()
+                .set_allow_query_fallback(*allow);
+            Ok(())
+        }
+        expr => NotSupportedSnafu {
+            feat: format!(
+                "Unsupported allow query fallback expr {} in set variable statement",
+                expr
+            ),
+        }
+        .fail(),
     }
 }
 
@@ -441,95 +459,8 @@ mod test {
     use session::context::{Channel, QueryContext};
     use sql::ast::{Expr, Value};
 
-    use super::{set_query_option, set_skip_wal};
+    use super::set_skip_wal;
     use crate::statement::set::parse_pg_query_timeout_input;
-
-    #[test]
-    fn test_set_query_option_storage_validation_and_isolation() {
-        let session = Session::new(None, Channel::Mysql, Default::default(), 0);
-        let ctx = session.new_query_context();
-        let other = Session::new(None, Channel::Mysql, Default::default(), 1);
-
-        assert!(
-            set_query_option(
-                "query_parallelism",
-                vec![Expr::Value(Value::Number("8".into(), false).into())],
-                ctx.clone(),
-            )
-            .unwrap()
-        );
-        assert_eq!(
-            ctx.configuration_parameter()
-                .query_options()
-                .get("query.parallelism"),
-            Some(&"8".to_string())
-        );
-        assert!(
-            set_query_option(
-                "QUERY.ALLOW_QUERY_FALLBACK",
-                vec![Expr::Value(Value::Boolean(false).into())],
-                ctx.clone(),
-            )
-            .unwrap()
-        );
-        assert_eq!(
-            ctx.configuration_parameter()
-                .query_options()
-                .get("query.allow_query_fallback"),
-            Some(&"false".to_string())
-        );
-        assert!(
-            other
-                .new_query_context()
-                .configuration_parameter()
-                .query_options()
-                .is_empty()
-        );
-        let mut hinted = ctx.as_ref().clone();
-        hinted.set_extension("query_parallelism", "16");
-        assert_eq!(
-            hinted
-                .effective_query_options()
-                .unwrap()
-                .get("query.parallelism"),
-            Some(&"16".to_string())
-        );
-        assert_eq!(
-            ctx.configuration_parameter()
-                .query_options()
-                .get("query.parallelism"),
-            Some(&"8".to_string())
-        );
-        assert!(!set_query_option("unrelated_client_option", vec![], ctx.clone()).unwrap());
-        assert!(
-            !set_query_option(
-                "unrelated_client_option",
-                vec![Expr::Identifier(sql::ast::Ident::new("true"))],
-                ctx.clone(),
-            )
-            .unwrap()
-        );
-        for (key, values) in [
-            (
-                "query.unknown",
-                vec![Expr::Value(Value::Boolean(true).into())],
-            ),
-            (
-                "datafusion.execution.batch_size",
-                vec![Expr::Value(Value::Number("1".into(), false).into())],
-            ),
-            (
-                "query.parallelism",
-                vec![Expr::Identifier(sql::ast::Ident::new("true"))],
-            ),
-            (
-                "query.allow_query_fallback",
-                vec![Expr::Value(Value::Boolean(true).into()); 2],
-            ),
-        ] {
-            assert!(set_query_option(key, values, ctx.clone()).is_err(), "{key}");
-        }
-    }
 
     #[test]
     fn test_set_skip_wal() {

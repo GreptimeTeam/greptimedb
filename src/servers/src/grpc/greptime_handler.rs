@@ -81,6 +81,7 @@ impl GreptimeRequestHandler {
         channel: Channel,
     ) -> Result<Output> {
         let header = request.header.as_ref();
+        let hints = crate::hint_headers::validate_public_hints(hints)?;
         let query_ctx = create_query_context(channel, header, hints, HashMap::new())?;
         let query = request.request.context(InvalidQuerySnafu {
             reason: "Expecting non-empty GreptimeRequest.",
@@ -206,22 +207,6 @@ pub(crate) fn create_query_context(
     extensions: Vec<(String, String)>,
     snapshot_seqs: HashMap<u64, u64>,
 ) -> Result<QueryContextRef> {
-    create_query_context_with_internal_metadata(
-        channel,
-        header,
-        extensions,
-        Vec::new(),
-        snapshot_seqs,
-    )
-}
-
-pub(crate) fn create_query_context_with_internal_metadata(
-    channel: Channel,
-    header: Option<&RequestHeader>,
-    public_hints: Vec<(String, String)>,
-    internal_flow: Vec<(String, String)>,
-    snapshot_seqs: HashMap<u64, u64>,
-) -> Result<QueryContextRef> {
     let (catalog, schema) = header
         .map(|header| {
             // We provide dbname field in newer versions of protos/sdks
@@ -250,33 +235,6 @@ pub(crate) fn create_query_context_with_internal_metadata(
             )
         });
     let timezone = parse_timezone(header.map(|h| h.timezone.as_str()));
-    if channel != Channel::Internal && !internal_flow.is_empty() {
-        return crate::error::InvalidParameterSnafu {
-            reason: "Flow metadata is only accepted on internal channels".to_string(),
-        }
-        .fail();
-    }
-    let extensions = crate::hint_headers::validate_public_hints(public_hints)?;
-    let mut validated_internal = Vec::with_capacity(internal_flow.len());
-    for (key, value) in internal_flow {
-        let known_flow = matches!(
-            key.as_str(),
-            query::options::FLOW_INCREMENTAL_AFTER_SEQS
-                | query::options::FLOW_INCREMENTAL_MODE
-                | query::options::FLOW_RETURN_REGION_SEQ
-                | query::options::FLOW_SINK_TABLE_ID
-                | query::options::FLOW_SCHEDULED_TIME_MILLIS
-        );
-        if !known_flow && !is_reserved_extension_key(&key) {
-            return crate::error::InvalidParameterSnafu {
-                reason: format!("Unsupported internal metadata key `{key}`"),
-            }
-            .fail();
-        }
-        validated_internal.push((key, value));
-    }
-    validated_internal.extend(extensions);
-    let extensions = validated_internal;
     let mut ctx_builder = QueryContextBuilder::default()
         .current_catalog(catalog)
         .current_schema(schema)
@@ -304,7 +262,7 @@ pub(crate) fn create_query_context_with_internal_metadata(
                 })?;
                 ctx_builder = ctx_builder.skip_wal(skip_wal);
             }
-            _ if is_reserved_extension_key(&key) && channel != Channel::Internal => {
+            _ if is_reserved_extension_key(&key) => {
                 debug!(
                     key = key.as_str(),
                     "Ignoring reserved external query context extension key"
@@ -455,8 +413,8 @@ mod tests {
             timezone: "+01:00".to_string(),
             ..Default::default()
         };
-        let query_context = create_query_context_with_internal_metadata(
-            Channel::Internal,
+        let query_context = create_query_context(
+            Channel::Unknown,
             Some(&header),
             vec![
                 ("auto_create_table".to_string(), "true".to_string()),
@@ -469,11 +427,11 @@ mod tests {
                     INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY.to_string(),
                     "spoofed-regs".to_string(),
                 ),
+                (
+                    FLOW_SCHEDULED_TIME_MILLIS.to_string(),
+                    "1700000000000".to_string(),
+                ),
             ],
-            vec![(
-                FLOW_SCHEDULED_TIME_MILLIS.to_string(),
-                "1700000000000".to_string(),
-            )],
             HashMap::from([(7, 88)]),
         )
         .unwrap();

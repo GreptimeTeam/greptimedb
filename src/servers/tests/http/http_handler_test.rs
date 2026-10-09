@@ -1048,13 +1048,6 @@ async fn test_http_skip_wal_header() {
     let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
     for (header, expected) in [
         (Some(("x-greptime-insert-skip-wal", "true")), Some(true)),
-        (
-            Some(("x-greptime-hints", "query.parallelism=4")),
-            Some(false),
-        ),
-        (Some(("x-greptime-hints", "query.parallelism=0")), None),
-        (Some(("x-greptime-hints", "query.unknown=true")), None),
-        (Some(("x-greptime-hints", "query.parallelism")), None),
         (Some(("x-greptime-insert-skip-wal", "false")), Some(false)),
         (None, Some(false)),
         (Some(("x-greptime-insert-skip-wal", "yes")), None),

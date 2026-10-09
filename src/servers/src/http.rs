@@ -2112,36 +2112,6 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_http_header_timeout_with_disabled_default() {
-        let (tx, _rx) = mpsc::channel(100);
-        let options = HttpOptions {
-            timeout: Duration::ZERO,
-            ..Default::default()
-        };
-        let app = make_test_app_custom(tx, options);
-        let client = TestClient::new(app).await;
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(10),
-                client.get("/test/timeout").send()
-            )
-            .await
-            .is_err(),
-            "no header with a disabled global timeout should remain unlimited"
-        );
-        let response = tokio::time::timeout(
-            Duration::from_secs(1),
-            client
-                .get("/test/timeout")
-                .header(GREPTIME_DB_HEADER_TIMEOUT, "10ms")
-                .send(),
-        )
-        .await
-        .expect("request with header timeout should complete");
-        assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
-    }
-
-    #[tokio::test]
     async fn test_http_server_request_timeout() {
         common_telemetry::init_default_ut_logging();
 

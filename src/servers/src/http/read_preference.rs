@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::str::FromStr;
+
 use axum::body::Body;
 use axum::http::Request;
 use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use session::ReadPreference;
 use session::context::QueryContext;
 
@@ -23,22 +25,15 @@ use crate::http::header::GREPTIME_DB_HEADER_READ_PREFERENCE;
 
 /// Extract read preference from the request headers.
 pub async fn extract_read_preference(mut request: Request<Body>, next: Next) -> Response {
-    if let Some(header) = request.headers().get(&GREPTIME_DB_HEADER_READ_PREFERENCE) {
-        let read_preference = header
-            .to_str()
-            .ok()
-            .and_then(|s| s.parse::<ReadPreference>().ok());
-        let Some(read_preference) = read_preference else {
-            return crate::error::InvalidParameterSnafu {
-                reason: "Invalid read preference header".to_string(),
-            }
-            .build()
-            .into_response();
-        };
-        if let Some(query_ctx) = request.extensions_mut().get_mut::<QueryContext>() {
-            common_telemetry::debug!("Setting read preference to {}", read_preference);
-            query_ctx.set_read_preference(read_preference);
-        }
+    if let Some(read_preference) = request
+        .headers()
+        .get(&GREPTIME_DB_HEADER_READ_PREFERENCE)
+        .and_then(|header| header.to_str().ok())
+        .and_then(|s| ReadPreference::from_str(s).ok())
+        && let Some(query_ctx) = request.extensions_mut().get_mut::<QueryContext>()
+    {
+        common_telemetry::debug!("Setting read preference to {}", read_preference);
+        query_ctx.set_read_preference(read_preference);
     }
     next.run(request).await
 }

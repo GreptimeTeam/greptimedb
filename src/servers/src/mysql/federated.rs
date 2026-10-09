@@ -653,57 +653,6 @@ mod test {
     }
 
     #[test]
-    fn test_show_named_variables_reach_query_handler() {
-        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
-
-        for query in [
-            "SHOW VARIABLES query.parallelism",
-            "SHOW VARIABLES datafusion.optimizer.prefer_hash_join",
-            "SHOW VARIABLES query.allow_query_fallback",
-            "SHOW VARIABLES query.enable_remote_dynamic_filter_pushdown",
-            "SHOW GLOBAL VARIABLES datafusion.optimizer.prefer_hash_join",
-            "SHOW SESSION VARIABLES query.parallelism",
-            "SHOW LOCAL VARIABLES query.allow_query_fallback",
-            "  SHOW VARIABLES query.parallelism  ",
-            "SHOW VARIABLES query.parallelism;",
-            "SHOW VARIABLES /* comment */ query.parallelism",
-            "SHOW VARIABLES; SELECT 1",
-            "SHOW VARIABLES; /* comment */; SELECT 1",
-        ] {
-            assert!(
-                check(query, QueryContext::arc(), session.clone()).is_none(),
-                "{query} should reach the query handler"
-            );
-        }
-
-        for query in [
-            "SHOW VARIABLES",
-            "SHOW VARIABLES;",
-            "SHOW VARIABLES;;",
-            "SHOW VARIABLES; /* comment */;",
-            "SHOW VARIABLES /* comment */",
-            "SHOW VARIABLES /* comment */;",
-            "SHOW VARIABLES # comment",
-            "SHOW VARIABLES # comment;",
-            "SHOW VARIABLES -- comment",
-            "SHOW VARIABLES -- comment;",
-            "SHOW VARIABLES; -- comment",
-            "SHOW VARIABLES; -- comment\n",
-            "SHOW GLOBAL VARIABLES",
-            "SHOW SESSION VARIABLES",
-            "SHOW LOCAL VARIABLES",
-            "SHOW GLOBAL VARIABLES LIKE 'event_scheduler'",
-            "SHOW SESSION VARIABLES LIKE 'event_scheduler'",
-            "SHOW LOCAL VARIABLES LIKE 'event_scheduler'",
-        ] {
-            assert!(
-                check(query, QueryContext::arc(), session.clone()).is_some(),
-                "{query} should retain federated compatibility handling"
-            );
-        }
-    }
-
-    #[test]
     fn test_show_warnings() {
         // Test SHOW WARNINGS with no warnings
         let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));

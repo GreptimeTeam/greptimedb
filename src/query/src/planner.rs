@@ -26,6 +26,7 @@ use common_error::ext::BoxedError;
 use common_query::promql_annotations::promql_annotation_collector;
 use common_telemetry::tracing;
 use datafusion::common::{DFSchema, plan_err};
+use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::SessionState;
 use datafusion::sql::planner::PlannerContext;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
@@ -54,6 +55,7 @@ use crate::error::{
     UnimplementedSnafu,
 };
 use crate::log_query::planner::LogQueryPlanner;
+use crate::options::ScheduledTimeExtension;
 use crate::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryLanguageParser, QueryStatement};
 use crate::promql::planner::PromPlanner;
 use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
@@ -87,6 +89,47 @@ impl DfLogicalPlanner {
             engine_state,
             session_state,
         }
+    }
+
+    /// Derive a [`SessionState`] whose [`ExecutionProps`] includes
+    /// `query_execution_start_time` if a scheduled time extension is present
+    /// in the query context.
+    fn derive_session_state_with_scheduled_time(
+        &self,
+        query_ctx: QueryContextRef,
+    ) -> Result<QueryEngineContext> {
+        let extensions = query_ctx.extensions();
+        let mut state = match crate::options::parse_scheduled_time_datetime(&extensions)? {
+            Some(dt) => {
+                let execution_props = self
+                    .session_state
+                    .execution_props()
+                    .clone()
+                    .with_query_execution_start_time(dt);
+                SessionStateBuilder::new_from_existing(self.session_state.clone())
+                    .with_execution_props(execution_props)
+                    .build()
+            }
+            None => self.session_state.clone(),
+        };
+        let query_ctx = self
+            .engine_state
+            .apply_query_options(&mut state, query_ctx)?;
+        state.config_mut().set_extension(query_ctx.clone());
+        state.config_mut().set_extension(self.engine_state.clone());
+        state
+            .config_mut()
+            .options_mut()
+            .extensions
+            .insert(ScheduledTimeExtension {
+                scheduled_time: crate::options::scheduled_time_from_ctx(&query_ctx),
+            });
+        let config_options = state.config_options().clone();
+        let _ = state
+            .execution_props_mut()
+            .config_options
+            .insert(config_options);
+        Ok(QueryEngineContext::new(state, query_ctx))
     }
 
     /// Basically the same with `explain_to_plan` in DataFusion, but adapted to Greptime's
@@ -192,9 +235,9 @@ impl DfLogicalPlanner {
             .fail()?;
         }
 
-        let engine_context = self.engine_state.query_engine_context(query_ctx)?;
-        let query_ctx = engine_context.query_ctx();
+        let engine_context = self.derive_session_state_with_scheduled_time(query_ctx)?;
         let scheduled_state = engine_context.state().clone();
+        let query_ctx = engine_context.query_ctx();
         let table_provider = DfTableSourceProvider::new(
             self.engine_state.catalog_manager().clone(),
             self.engine_state.disallow_cross_catalog_query(),
@@ -247,10 +290,9 @@ impl DfLogicalPlanner {
             .await?;
 
         // Optimize logical plan by extension rules
-        let context = QueryEngineContext::new(scheduled_state, query_ctx);
         let plan = self
             .engine_state
-            .optimize_by_extension_rules(plan, &context)?;
+            .optimize_by_extension_rules(plan, &engine_context)?;
         common_telemetry::debug!("Logical planner, optimize result: {plan}");
 
         Ok(plan)
@@ -265,7 +307,7 @@ impl DfLogicalPlanner {
         normalize_ident: bool,
         query_ctx: QueryContextRef,
     ) -> Result<DfExpr> {
-        let engine_context = self.engine_state.query_engine_context(query_ctx)?;
+        let engine_context = self.derive_session_state_with_scheduled_time(query_ctx)?;
         let query_ctx = engine_context.query_ctx();
         let context_provider = DfContextProviderAdapter::try_new(
             self.engine_state.clone(),
@@ -290,7 +332,7 @@ impl DfLogicalPlanner {
 
     #[tracing::instrument(skip_all)]
     async fn plan_pql(&self, stmt: &EvalStmt, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
-        let engine_context = self.engine_state.query_engine_context(query_ctx)?;
+        let engine_context = self.derive_session_state_with_scheduled_time(query_ctx)?;
         let query_ctx = engine_context.query_ctx();
         let mut scheduled_state = engine_context.state().clone();
         let promql_annotations = query_ctx.remote_query_id().map(promql_annotation_collector);
@@ -683,7 +725,7 @@ impl LogicalPlanner for DfLogicalPlanner {
         query: LogQuery,
         query_ctx: QueryContextRef,
     ) -> Result<LogicalPlan> {
-        let engine_context = self.engine_state.query_engine_context(query_ctx)?;
+        let engine_context = self.derive_session_state_with_scheduled_time(query_ctx)?;
         let query_ctx = engine_context.query_ctx();
         let state = engine_context.state().clone();
         let plan_decoder = Arc::new(DefaultPlanDecoder::new(state.clone(), &query_ctx)?);
