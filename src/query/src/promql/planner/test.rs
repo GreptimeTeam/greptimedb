@@ -8471,6 +8471,172 @@ async fn test_set_operator_distinct_time_index_names() {
 }
 
 #[tokio::test]
+async fn test_set_operator_preserves_literal_time_index_names() {
+    fn table_plan(table_name: &'static str, time_index: &str, left: bool) -> LogicalPlan {
+        let mut fields = vec![Field::new(
+            time_index,
+            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+            false,
+        )];
+        fields.extend([
+            Field::new("service.name", ArrowDataType::Utf8, true),
+            Field::new("Host", ArrowDataType::Utf8, true),
+            Field::new("host", ArrowDataType::Utf8, true),
+            Field::new("v.val", ArrowDataType::Float64, true),
+        ]);
+        let schema = Arc::new(ArrowSchema::new(fields));
+        let (times, services, hosts, lowercase_hosts, values) = if left {
+            (
+                vec![1, 2],
+                vec!["api", "api"],
+                vec!["H1", "H2"],
+                vec!["x", "y"],
+                vec![10.0, 20.0],
+            )
+        } else {
+            (vec![1], vec!["api"], vec!["H1"], vec!["x"], vec![100.0])
+        };
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(times)) as ArrayRef,
+                Arc::new(StringArray::from(services)) as ArrayRef,
+                Arc::new(StringArray::from(hosts)) as ArrayRef,
+                Arc::new(StringArray::from(lowercase_hosts)) as ArrayRef,
+                Arc::new(Float64Array::from(values)) as ArrayRef,
+            ],
+        )
+        .unwrap();
+        let provider = Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap());
+        LogicalPlanBuilder::scan(
+            TableReference::bare(table_name),
+            provider_as_source(provider),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+    }
+
+    for right_time_index in ["ts.time", "event.ts", "EventTs"] {
+        for (expression, expected_values) in
+            [("lhs and rhs", vec![10.0]), ("lhs unless rhs", vec![20.0])]
+        {
+            let left = table_plan("otel.m", "ts.time", true);
+            let left_schema = left.schema().clone();
+            let right = table_plan("otel.r", right_time_index, false);
+            let PromExpr::Binary(binary) = parser::parse(expression).unwrap() else {
+                unreachable!()
+            };
+            let mut planner = PromPlanner {
+                table_provider: build_test_table_provider_with_fields(
+                    &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+                    &[],
+                )
+                .await,
+                ctx: PromPlannerContext::default(),
+                promql_annotations: None,
+            };
+            let mut left_context =
+                direct_or_context("otel.m", &["service.name", "Host", "host"], "v.val");
+            left_context.time_index_column = Some("ts.time".to_string());
+            let mut right_context =
+                direct_or_context("otel.r", &["service.name", "Host", "host"], "v.val");
+            right_context.time_index_column = Some(right_time_index.to_string());
+            let plan = planner
+                .set_op_on_non_field_columns(
+                    left,
+                    right,
+                    left_context.clone(),
+                    right_context,
+                    binary.op,
+                    &binary.modifier,
+                )
+                .unwrap();
+
+            assert_eq!(plan.schema(), &left_schema);
+            assert_eq!(
+                planner.ctx.time_index_column,
+                left_context.time_index_column
+            );
+            assert_eq!(planner.ctx.tag_columns, left_context.tag_columns);
+            assert_eq!(planner.ctx.table_name, left_context.table_name);
+            assert_eq!(planner.ctx.field_columns, left_context.field_columns);
+            let (_, batches) = execute(plan, &build_query_engine_state()).await;
+            let times = batches
+                .iter()
+                .flat_map(|batch| {
+                    batch
+                        .column_by_name("ts.time")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<TimestampMillisecondArray>()
+                        .unwrap()
+                        .values()
+                        .iter()
+                        .copied()
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                times,
+                if expression.contains("unless") {
+                    vec![2]
+                } else {
+                    vec![1]
+                }
+            );
+            assert!(batches.iter().all(|batch| {
+                batch
+                    .column_by_name("service.name")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .iter()
+                    .all(|service| service == Some("api"))
+            }));
+            assert_eq!(
+                values(&batches, "v.val"),
+                expected_values,
+                "{expression}, {right_time_index}"
+            );
+            let tags = batches
+                .iter()
+                .flat_map(|batch| {
+                    let hosts = batch
+                        .column_by_name("Host")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .unwrap();
+                    let lowercase_hosts = batch
+                        .column_by_name("host")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .unwrap();
+                    (0..batch.num_rows()).map(|row| {
+                        (
+                            hosts.value(row).to_string(),
+                            lowercase_hosts.value(row).to_string(),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                tags,
+                if expression.contains("unless") {
+                    vec![("H2".to_string(), "y".to_string())]
+                } else {
+                    vec![("H1".to_string(), "x".to_string())]
+                }
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_mixed_left_and_unless_preserve_sample_lanes() {
     for (expression, expected_sample_kind) in [
         ("lhs and on(k) mask", (false, true)),

@@ -816,6 +816,7 @@ impl PromPlanner {
         let right_join_keys = join_keys
             .into_iter()
             .chain([right_time_index])
+            .map(Column::from_name)
             .collect::<Vec<_>>();
         left = LogicalPlanBuilder::from(left)
             .project(left_projection)
