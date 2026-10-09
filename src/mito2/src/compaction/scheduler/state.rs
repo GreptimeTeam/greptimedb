@@ -105,7 +105,7 @@ pub(super) struct ActiveCompaction {
 
 impl ActiveCompaction {
     /// Creates an empty cycle while retaining the region's scheduling record.
-    pub(super) fn idle() -> Self {
+    fn idle() -> Self {
         Self {
             phase: CompactionPhase::Idle,
             trigger: CompactionTrigger::Automatic,
@@ -266,14 +266,14 @@ impl Drop for CompactingFilesInner {
 
 /// A handed-off DDL batch, retained until each reply has been observed once.
 #[derive(Debug)]
-pub(super) struct DdlExecution {
+pub(crate) struct DdlExecution {
     generation: u64,
     pending_replies: HashSet<usize>,
 }
 
 impl DdlExecution {
     /// Tracks a batch's individual replies so duplicate notifications are harmless.
-    pub(super) fn new(generation: u64, count: usize) -> Self {
+    pub(crate) fn new(generation: u64, count: usize) -> Self {
         Self {
             generation,
             pending_replies: (0..count).collect(),
@@ -281,7 +281,7 @@ impl DdlExecution {
     }
 
     /// Returns true only for the last distinct reply of this batch.
-    pub(super) fn complete(&mut self, generation: u64, request_id: usize) -> bool {
+    pub(crate) fn complete(&mut self, generation: u64, request_id: usize) -> bool {
         self.generation == generation
             && self.pending_replies.remove(&request_id)
             && self.pending_replies.is_empty()
@@ -310,7 +310,7 @@ pub(super) struct CompactionStatus {
     /// compaction so they observe the version after compaction terminates.
     pub(super) pending_ddl_requests: Vec<SenderDdlRequest>,
     /// DDLs already handed to the worker keep new compaction paused until their replies.
-    pub(super) executing_ddl: Option<DdlExecution>,
+    pub(crate) executing_ddl: Option<DdlExecution>,
 }
 
 impl CompactionStatus {
@@ -343,17 +343,17 @@ impl CompactionStatus {
     }
 
     /// Registration alone does not indicate active work.
-    pub(super) fn is_compacting(&self) -> bool {
+    pub(crate) fn is_compacting(&self) -> bool {
         !matches!(self.active.phase, CompactionPhase::Idle)
     }
 
     /// Both queued and handed-off DDLs prevent new compaction admission.
-    pub(super) fn has_ddl(&self) -> bool {
+    pub(crate) fn has_ddl(&self) -> bool {
         !self.pending_ddl_requests.is_empty() || self.executing_ddl.is_some()
     }
 
     /// Ends the current cycle without losing region or DDL execution state.
-    pub(super) fn become_idle(&mut self) {
+    pub(crate) fn become_idle(&mut self) {
         self.active = ActiveCompaction::idle();
     }
 

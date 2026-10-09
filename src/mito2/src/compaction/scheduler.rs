@@ -625,9 +625,6 @@ impl CompactionScheduler {
             waiter.send(Ok(0));
         }
 
-        // A queued DDL was waiting for the current task to terminate; chaining
-        // another compaction ahead of it would delay the DDL by a whole extra
-        // plan/execution cycle, so dispatch the DDLs first.
         // Keep draining when the cycle latched an automatic trigger, or when the
         // execution produced output or reduced the file count. An empty edit stops
         // here; the next flush trigger resumes.
