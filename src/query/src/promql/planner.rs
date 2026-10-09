@@ -482,25 +482,30 @@ impl PromPlanner {
     /// Casts a microsecond or nanosecond time index to milliseconds, the precision of every
     /// other PromQL result and the only one the Prometheus HTTP API encodes.
     fn millisecond_time_index_plan(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
-        let time_index = self
-            .ctx
-            .time_index_column
-            .as_deref()
-            .context(TimeIndexNotFoundSnafu { table: "unknown" })?;
-        let millis = ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None);
+        let time_index =
+            self.ctx
+                .time_index_column
+                .as_deref()
+                .with_context(|| TimeIndexNotFoundSnafu {
+                    table: self.ctx.table_name.clone().unwrap_or_default(),
+                })?;
         let (_, field) = plan
             .schema()
             .qualified_field_with_unqualified_name(time_index)
             .context(DataFusionPlanningSnafu)?;
-        if field.data_type() == &millis {
-            return Ok(plan);
-        }
+        let millis = match field.data_type() {
+            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, _) => return Ok(plan),
+            ArrowDataType::Timestamp(_, timezone) => {
+                ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, timezone.clone())
+            }
+            other => unreachable!("time index is a timestamp, got {other}"),
+        };
         let exprs = plan
             .schema()
             .iter()
             .map(|(qualifier, field)| {
                 let column = DfExpr::Column(Column::new(qualifier.cloned(), field.name()));
-                if field.name() == time_index && field.data_type() != &millis {
+                if field.name() == time_index {
                     column
                         .cast_to(&millis, plan.schema())
                         .map(|cast| cast.alias_qualified(qualifier.cloned(), field.name().clone()))
