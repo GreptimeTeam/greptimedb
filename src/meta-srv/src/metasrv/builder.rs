@@ -400,6 +400,7 @@ impl MetasrvBuilder {
         let region_failover_handler = if options.enable_region_failover {
             let region_supervisor = RegionSupervisor::new(
                 rx,
+                tx.clone(),
                 options.failure_detector,
                 selector_ctx.clone(),
                 supervisor_selector,

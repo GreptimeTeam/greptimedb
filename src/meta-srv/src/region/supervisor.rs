@@ -32,9 +32,11 @@ use common_meta::rpc::store::RangeRequest;
 use common_runtime::JoinHandle;
 use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
+use futures::stream::BoxStream;
 use futures::{StreamExt, TryStreamExt};
 use snafu::{ResultExt, ensure};
 use store_api::storage::RegionId;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
 use tokio::time::{MissedTickBehavior, interval, interval_at};
@@ -43,6 +45,7 @@ use crate::discovery::utils::accept_ingest_workload;
 use crate::error::{self, Result};
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::metasrv::{RegionStatAwareSelectorRef, SelectTarget, SelectorContext, SelectorRef};
+use crate::metrics::METRIC_META_HEARTBEAT_DROPPED;
 use crate::procedure::region_migration::manager::{
     RegionMigrationManagerRef, RegionMigrationTriggerReason, SubmitRegionMigrationTaskResult,
 };
@@ -82,6 +85,8 @@ impl From<&Stat> for DatanodeHeartbeat {
 /// Variants:
 /// - `Tick`: This event is used to trigger region failure detection periodically.
 /// - `InitializeAllRegions`: This event is used to initialize all region failure detectors.
+/// - `ContinueInitializeAllRegions`: This event is used to continue an initialization scan
+///   that was split into batches, and is enqueued by the supervisor itself.
 /// - `RegisterFailureDetectors`: This event is used to register failure detectors for regions.
 /// - `ResetFailureDetectors`: This event is used to reset failure detectors for regions.
 /// - `DeregisterFailureDetectors`: This event is used to deregister failure detectors for regions.
@@ -94,6 +99,7 @@ impl From<&Stat> for DatanodeHeartbeat {
 pub(crate) enum Event {
     Tick,
     InitializeAllRegions(tokio::sync::oneshot::Sender<()>),
+    ContinueInitializeAllRegions,
     RegisterFailureDetectors(Vec<DetectingRegion>),
     DeregisterFailureDetectors(Vec<DetectingRegion>),
     ResetFailureDetectors(Vec<DetectingRegion>),
@@ -110,6 +116,7 @@ impl Debug for Event {
             Self::HeartbeatArrived(arg0) => f.debug_tuple("HeartbeatArrived").field(arg0).finish(),
             Self::Clear => write!(f, "Clear"),
             Self::InitializeAllRegions(_) => write!(f, "InspectAndRegisterRegions"),
+            Self::ContinueInitializeAllRegions => write!(f, "ContinueInitializeAllRegions"),
             Self::RegisterFailureDetectors(arg0) => f
                 .debug_tuple("RegisterFailureDetectors")
                 .field(arg0)
@@ -269,6 +276,60 @@ pub const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(1);
 /// The default initialization retry period.
 pub const DEFAULT_INITIALIZATION_RETRY_PERIOD: Duration = Duration::from_secs(60);
 
+/// The number of table routes the initialization scan processes per event.
+///
+/// Bounds how long a single [`Event::InitializeAllRegions`] can occupy the supervisor loop, so
+/// events queued behind it (heartbeats in particular) are handled between batches rather than
+/// after the whole scan.
+const DEFAULT_INITIALIZE_ALL_BATCH_SIZE: usize = 256;
+
+/// An in-flight [`Event::InitializeAllRegions`] scan, kept alive across events.
+///
+/// The scan is split into batches: an event processes at most
+/// [`RegionSupervisor::initialize_batch_size`] routes and then hands the rest back through
+/// [`Event::ContinueInitializeAllRegions`]. The route stream is stored rather than rebuilt,
+/// because that is the only way to keep the pagination position —
+/// [`PaginationStream`] consumes itself and does not expose its cursor.
+struct InitializeAllScan {
+    /// The table route stream, resumed across batches.
+    routes: BoxStream<'static, Result<TableRouteValue>>,
+    /// Regions already known to the failure detector when the scan started.
+    ///
+    /// Sampled once, matching the single-pass scan this replaced: a region registered after
+    /// the scan started is not re-registered. That is safe because registration is idempotent.
+    known_regions: HashSet<RegionId>,
+    /// Signalled once the scan is exhausted.
+    ///
+    /// Dropped without firing when the scan errors out or is abandoned, which is what makes
+    /// the ticker that requested the scan retry.
+    sender: oneshot::Sender<()>,
+    /// Number of detectors registered so far, for the completion log.
+    registered: usize,
+    /// When the scan started, for the completion log.
+    started_at: Instant,
+}
+
+/// How one batch of an initialization scan ended.
+enum BatchOutcome {
+    /// The scan is finished, or was abandoned: no further batch is run.
+    Completed,
+    /// The continuation is queued: the loop returns to `recv()`.
+    Suspended,
+    /// The continuation could not be queued: the batch did not yield, and the rest of the scan
+    /// runs inline.
+    NotYielded,
+}
+
+/// Why one batch stopped pulling routes from the scan's stream.
+enum PullEnd {
+    /// The batch limit was reached; the stream may have more routes.
+    BatchLimit,
+    /// The route stream is exhausted.
+    Exhausted,
+    /// Pulling a route failed.
+    Failed,
+}
+
 /// Selector for region supervisor.
 pub enum RegionSupervisorSelector {
     NaiveSelector(SelectorRef),
@@ -296,6 +357,14 @@ pub struct RegionSupervisor {
     peer_resolver: PeerResolverRef,
     /// The kv backend.
     kv_backend: KvBackendRef,
+    /// Sends [`Event`]s to this supervisor's own queue, used to hand the rest of a batched
+    /// initialization scan back to the loop. The hand-back must use `try_send`, since the loop
+    /// owns the [`Receiver`] and awaiting capacity here would deadlock.
+    self_sender: Sender<Event>,
+    /// Number of table routes the initialization scan processes per event.
+    initialize_batch_size: usize,
+    /// Page size used to scan table routes during initialization.
+    initialize_page_size: usize,
     /// The meta state, used to check if the current metasrv is the leader.
     state: Option<StateRef>,
 }
@@ -357,9 +426,33 @@ impl HeartbeatAcceptor {
     }
 
     /// Accepts heartbeats from datanodes.
-    pub(crate) async fn accept(&self, heartbeat: DatanodeHeartbeat) {
-        if let Err(err) = self.sender.send(Event::HeartbeatArrived(heartbeat)).await {
-            error!(err; "RegionSupervisor has stop receiving heartbeat.");
+    ///
+    /// Never waits for queue capacity: the region lease has already been decided
+    /// earlier in the heartbeat handler chain, so a full supervisor queue drops the
+    /// heartbeat (counted in [`METRIC_META_HEARTBEAT_DROPPED`]) instead of parking
+    /// the response path. Dropping is only unsafe if the queue stays full long enough
+    /// for the failure detector to age out every datanode: with the default phi
+    /// threshold that takes ~13.5s of continuous drops.
+    pub(crate) fn accept(&self, heartbeat: DatanodeHeartbeat) {
+        let datanode_id = heartbeat.datanode_id;
+        match self.sender.try_send(Event::HeartbeatArrived(heartbeat)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                METRIC_META_HEARTBEAT_DROPPED
+                    .with_label_values(&["full"])
+                    .inc();
+                warn!(
+                    "Dropping heartbeat because the region supervisor event queue is full, datanode_id: {}, queue_capacity: {}",
+                    datanode_id,
+                    self.sender.max_capacity()
+                );
+            }
+            Err(TrySendError::Closed(err)) => {
+                METRIC_META_HEARTBEAT_DROPPED
+                    .with_label_values(&["closed"])
+                    .inc();
+                error!(err; "RegionSupervisor has stop receiving heartbeat.");
+            }
         }
     }
 }
@@ -373,6 +466,7 @@ impl RegionSupervisor {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         event_receiver: Receiver<Event>,
+        self_sender: Sender<Event>,
         options: PhiAccrualFailureDetectorOptions,
         selector_context: SelectorContext,
         selector: RegionSupervisorSelector,
@@ -385,6 +479,9 @@ impl RegionSupervisor {
             failure_detector: RegionFailureDetector::new(options),
             failover_counts: HashMap::new(),
             receiver: event_receiver,
+            self_sender,
+            initialize_batch_size: DEFAULT_INITIALIZE_ALL_BATCH_SIZE,
+            initialize_page_size: DEFAULT_PAGE_SIZE,
             selector_context,
             selector,
             region_migration_manager,
@@ -401,8 +498,32 @@ impl RegionSupervisor {
         self
     }
 
+    /// Overrides the number of table routes processed per initialization event.
+    ///
+    /// A zero batch size is clamped to one where the batch runs.
+    #[cfg(test)]
+    pub(crate) fn with_initialize_batch_size(mut self, batch_size: usize) -> Self {
+        self.initialize_batch_size = batch_size;
+        self
+    }
+
+    /// Overrides the page size of the initialization scan.
+    ///
+    /// A zero page size needs no clamp here: [`PaginationStream`] falls back to its own
+    /// default.
+    #[cfg(test)]
+    pub(crate) fn with_initialize_page_size(mut self, page_size: usize) -> Self {
+        self.initialize_page_size = page_size;
+        self
+    }
+
     /// Runs the main loop.
     pub(crate) async fn run(&mut self) {
+        // The in-flight initialization scan, kept across events so its pagination position
+        // survives. It lives here rather than on `self` because the underlying route stream is
+        // not `Sync`, which a struct field would force.
+        let mut init_scan = None;
+
         while let Some(event) = self.receiver.recv().await {
             if let Some(state) = self.state.as_ref()
                 && !state.read().unwrap().is_leader()
@@ -411,6 +532,9 @@ impl RegionSupervisor {
                     "The current metasrv is not the leader, ignore {:?} event",
                     event
                 );
+                // Dropping the in-flight scan also drops its completion signal, which is what
+                // the ticker waits on to decide whether to retry.
+                init_scan = None;
                 continue;
             }
 
@@ -430,12 +554,11 @@ impl RegionSupervisor {
                         }
                     }
 
-                    if let Err(err) = self.initialize_all().await {
-                        error!(err; "Failed to initialize all regions.");
-                    } else {
-                        // Ignore the error.
-                        let _ = sender.send(());
-                    }
+                    init_scan = Some(self.begin_initialize_all(sender));
+                    self.drain_initialize_all(&mut init_scan).await;
+                }
+                Event::ContinueInitializeAllRegions => {
+                    self.drain_initialize_all(&mut init_scan).await
                 }
                 Event::Tick => {
                     let regions = self.detect_region_failure();
@@ -452,6 +575,7 @@ impl RegionSupervisor {
                 }
                 Event::HeartbeatArrived(heartbeat) => self.on_heartbeat_arrived(heartbeat),
                 Event::Clear => {
+                    init_scan = None;
                     self.clear();
                     info!("Region supervisor is initialized.");
                 }
@@ -464,57 +588,122 @@ impl RegionSupervisor {
         info!("RegionSupervisor is stopped!");
     }
 
-    async fn initialize_all(&self) -> Result<()> {
-        let now = Instant::now();
-        let regions = self.regions();
+    /// Starts an initialization scan.
+    ///
+    /// The caller replaces any scan already in flight with the returned one, which drops the
+    /// superseded scan's `sender` without firing it. That is deliberate: the ticker that
+    /// requested the superseded scan then retries, and its route snapshot is re-sampled here
+    /// anyway.
+    fn begin_initialize_all(&self, sender: oneshot::Sender<()>) -> InitializeAllScan {
         let req = RangeRequest::new().with_prefix(TableRouteKey::range_prefix());
-        let stream = PaginationStream::new(self.kv_backend.clone(), req, DEFAULT_PAGE_SIZE, |kv| {
-            TableRouteKey::from_bytes(&kv.key).map(|v| (v.table_id, kv.value))
+        let routes: BoxStream<'static, Result<TableRouteValue>> = PaginationStream::new(
+            self.kv_backend.clone(),
+            req,
+            self.initialize_page_size,
+            |kv| TableRouteKey::from_bytes(&kv.key).map(|v| (v.table_id, kv.value)),
+        )
+        .into_stream()
+        // Flattened here rather than by `try_next` + `?` in the loop, because the scan
+        // keeps the stream in a struct field and so has to fix its item type up front.
+        .map(|res| {
+            let (_, value) = res.context(error::TableMetadataManagerSnafu)?;
+            TableRouteValue::try_from_raw_value(&value).context(error::TableMetadataManagerSnafu)
         })
-        .into_stream();
+        .boxed();
 
-        let mut stream = stream
-            .map_ok(|(_, value)| {
-                TableRouteValue::try_from_raw_value(&value)
-                    .context(error::TableMetadataManagerSnafu)
-            })
-            .boxed();
+        InitializeAllScan {
+            routes,
+            known_regions: self.regions(),
+            sender,
+            registered: 0,
+            started_at: Instant::now(),
+        }
+    }
+
+    /// Processes one batch of the in-flight initialization scan.
+    async fn step_initialize_all(&self, init_scan: &mut Option<InitializeAllScan>) -> BatchOutcome {
+        // Taken out of the slot so the `&self` calls below do not overlap a borrow of it.
+        let Some(mut scan) = init_scan.take() else {
+            // A continuation for a scan that is already gone, e.g. one that was queued when a
+            // newer scan replaced it.
+            return BatchOutcome::Completed;
+        };
+
         let mut detecting_regions = Vec::new();
-        while let Some(route) = stream
-            .try_next()
-            .await
-            .context(error::TableMetadataManagerSnafu)?
-        {
-            let route = route?;
-            if !route.is_physical() {
-                continue;
-            }
-
-            let physical_table_route = route.into_physical_table_route();
-            physical_table_route
-                .region_routes
-                .iter()
-                .for_each(|region_route| {
-                    if !regions.contains(&region_route.region.id)
-                        && let Some(leader_peer) = &region_route.leader_peer
-                    {
-                        detecting_regions.push((leader_peer.id, region_route.region.id));
+        let mut pull_end = PullEnd::BatchLimit;
+        // A zero batch never polls the route stream, so the scan would re-enqueue itself
+        // forever without making progress.
+        for _ in 0..self.initialize_batch_size.max(1) {
+            match scan.routes.try_next().await {
+                Ok(Some(route)) => {
+                    if !route.is_physical() {
+                        continue;
                     }
-                });
+
+                    let physical_table_route = route.into_physical_table_route();
+                    physical_table_route
+                        .region_routes
+                        .iter()
+                        .for_each(|region_route| {
+                            if !scan.known_regions.contains(&region_route.region.id)
+                                && let Some(leader_peer) = &region_route.leader_peer
+                            {
+                                detecting_regions.push((leader_peer.id, region_route.region.id));
+                            }
+                        });
+                }
+                Ok(None) => {
+                    pull_end = PullEnd::Exhausted;
+                    break;
+                }
+                Err(err) => {
+                    error!(err; "Failed to scan table routes during initialize all regions.");
+                    pull_end = PullEnd::Failed;
+                    break;
+                }
+            }
         }
 
-        let num_detecting_regions = detecting_regions.len();
+        scan.registered += detecting_regions.len();
         if !detecting_regions.is_empty() {
             self.register_failure_detectors(detecting_regions).await;
         }
 
-        info!(
-            "Initialize {} region failure detectors, elapsed: {:?}",
-            num_detecting_regions,
-            now.elapsed()
-        );
+        match pull_end {
+            PullEnd::Exhausted => {
+                info!(
+                    "Initialize {} region failure detectors, elapsed: {:?}",
+                    scan.registered,
+                    scan.started_at.elapsed()
+                );
+                // Ignore the error.
+                let _ = scan.sender.send(());
+                BatchOutcome::Completed
+            }
+            // Dropping `scan` here drops `sender` without firing it, so the ticker retries.
+            PullEnd::Failed => BatchOutcome::Completed,
+            PullEnd::BatchLimit => {
+                let outcome = match self
+                    .self_sender
+                    .try_send(Event::ContinueInitializeAllRegions)
+                {
+                    Ok(()) => BatchOutcome::Suspended,
+                    // The queue is full, so the continuation cannot be queued: the batch does
+                    // not yield and the scan keeps running inline rather than dropping the
+                    // routes it has left. That is the pre-batching behaviour, and it holds
+                    // only while the queue stays full.
+                    Err(TrySendError::Full(_)) => BatchOutcome::NotYielded,
+                    Err(TrySendError::Closed(_)) => BatchOutcome::Completed,
+                };
+                *init_scan = Some(scan);
+                outcome
+            }
+        }
+    }
 
-        Ok(())
+    /// Runs batches until the scan completes, suspends itself, or cannot be re-queued.
+    async fn drain_initialize_all(&self, init_scan: &mut Option<InitializeAllScan>) {
+        while let BatchOutcome::NotYielded = self.step_initialize_all(init_scan).await {}
     }
 
     async fn register_failure_detectors(&self, detecting_regions: Vec<DetectingRegion>) {
@@ -874,9 +1063,10 @@ impl RegionSupervisor {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::any::Any;
     use std::assert_matches;
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, RwLock};
     use std::time::Duration;
 
     use common_meta::ddl::RegionFailureDetectorController;
@@ -884,31 +1074,40 @@ pub(crate) mod tests {
         test_create_logical_table_task, test_create_physical_table_task,
     };
     use common_meta::key::table_route::{
-        LogicalTableRouteValue, PhysicalTableRouteValue, TableRouteValue,
+        LogicalTableRouteValue, PhysicalTableRouteValue, TableRouteKey, TableRouteValue,
     };
     use common_meta::key::{TableMetadataManager, runtime_switch};
+    use common_meta::kv_backend::txn::{Txn, TxnResponse};
+    use common_meta::kv_backend::{KvBackend, KvBackendRef, TxnService};
     use common_meta::peer::Peer;
     use common_meta::rpc::router::{Region, RegionRoute};
+    use common_meta::rpc::store::{
+        BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse,
+        BatchPutRequest, BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest,
+        PutResponse, RangeRequest, RangeResponse,
+    };
     use common_meta::test_util::NoopPeerResolver;
     use common_telemetry::info;
     use common_time::util::current_time_millis;
     use rand::Rng;
     use store_api::storage::RegionId;
     use tokio::sync::mpsc::Sender;
-    use tokio::sync::oneshot;
+    use tokio::sync::{Notify, Semaphore, oneshot};
     use tokio::time::sleep;
 
     use super::RegionSupervisorSelector;
+    use crate::metrics::METRIC_META_HEARTBEAT_DROPPED;
     use crate::procedure::region_migration::RegionMigrationTriggerReason;
     use crate::procedure::region_migration::manager::{
         RegionMigrationManager, SubmitRegionMigrationTaskResult,
     };
     use crate::procedure::region_migration::test_util::TestingEnv;
     use crate::region::supervisor::{
-        DatanodeHeartbeat, Event, RegionFailureDetectorControl, RegionSupervisor,
-        RegionSupervisorTicker,
+        DatanodeHeartbeat, Event, HeartbeatAcceptor, RegionFailureDetectorControl,
+        RegionSupervisor, RegionSupervisorTicker,
     };
     use crate::selector::test_utils::{RandomNodeSelector, new_test_selector_context};
+    use crate::state::{State, StateRef, become_follower, become_leader};
 
     pub(crate) fn new_test_supervisor() -> (RegionSupervisor, Sender<Event>) {
         let env = TestingEnv::new();
@@ -928,6 +1127,7 @@ pub(crate) mod tests {
         (
             RegionSupervisor::new(
                 rx,
+                tx.clone(),
                 Default::default(),
                 selector_context,
                 RegionSupervisorSelector::NaiveSelector(selector),
@@ -1142,6 +1342,351 @@ pub(crate) mod tests {
         sender.send(Event::InitializeAllRegions(tx)).await.unwrap();
         // The sender is dropped, so the receiver will receive an error.
         assert!(rx.await.is_err());
+    }
+
+    /// Creates `count` physical tables from `first_table_id`, each holding a single region led
+    /// by `Peer::empty(1)`.
+    async fn create_physical_tables(
+        table_metadata_manager: &TableMetadataManager,
+        first_table_id: u32,
+        count: u32,
+    ) {
+        for table_id in first_table_id..first_table_id + count {
+            let mut task = test_create_physical_table_task(&format!("physical_{table_id}"));
+            task.set_table_id(table_id);
+            let table_route = PhysicalTableRouteValue::new(vec![RegionRoute {
+                region: Region {
+                    id: RegionId::new(table_id, 0),
+                    ..Default::default()
+                },
+                leader_peer: Some(Peer::empty(1)),
+                ..Default::default()
+            }]);
+            table_metadata_manager
+                .create_table_metadata(
+                    task.table_info,
+                    TableRouteValue::Physical(table_route),
+                    HashMap::new(),
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    /// KV backend that blocks reads of table routes until the test hands out a pass.
+    struct ScanGateBackend {
+        inner: KvBackendRef,
+        passes: Arc<Semaphore>,
+        entered: Arc<Notify>,
+    }
+
+    impl ScanGateBackend {
+        fn new(inner: KvBackendRef) -> (Self, Arc<Semaphore>, Arc<Notify>) {
+            let passes = Arc::new(Semaphore::new(0));
+            let entered = Arc::new(Notify::new());
+            let backend = Self {
+                inner,
+                passes: passes.clone(),
+                entered: entered.clone(),
+            };
+            (backend, passes, entered)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TxnService for ScanGateBackend {
+        type Error = common_meta::error::Error;
+
+        async fn txn(&self, txn: Txn) -> Result<TxnResponse, Self::Error> {
+            self.inner.txn(txn).await
+        }
+
+        fn max_txn_ops(&self) -> usize {
+            self.inner.max_txn_ops()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl KvBackend for ScanGateBackend {
+        fn name(&self) -> &str {
+            "test_scan_gate"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        async fn range(&self, req: RangeRequest) -> Result<RangeResponse, Self::Error> {
+            if !req.key.starts_with(&TableRouteKey::range_prefix()) {
+                return self.inner.range(req).await;
+            }
+
+            self.entered.notify_one();
+            // Forgetting the permit consumes it for good, so one `add_permits(1)` lets exactly
+            // one more table-route read through.
+            self.passes.clone().acquire_owned().await.unwrap().forget();
+            self.inner.range(req).await
+        }
+
+        async fn put(&self, req: PutRequest) -> Result<PutResponse, Self::Error> {
+            self.inner.put(req).await
+        }
+
+        async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse, Self::Error> {
+            self.inner.batch_put(req).await
+        }
+
+        async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse, Self::Error> {
+            self.inner.batch_get(req).await
+        }
+
+        async fn delete_range(
+            &self,
+            req: DeleteRangeRequest,
+        ) -> Result<DeleteRangeResponse, Self::Error> {
+            self.inner.delete_range(req).await
+        }
+
+        async fn batch_delete(
+            &self,
+            req: BatchDeleteRequest,
+        ) -> Result<BatchDeleteResponse, Self::Error> {
+            self.inner.batch_delete(req).await
+        }
+    }
+
+    /// Builds a supervisor whose table-route reads are gated by [`ScanGateBackend`].
+    ///
+    /// The tables are created through the ungated backend first, so setup cannot block on the
+    /// gate. Returns the supervisor, the event sender, and the two pacing handles.
+    async fn new_gated_test_supervisor(
+        first_table_id: u32,
+        table_count: u32,
+    ) -> (RegionSupervisor, Sender<Event>, Arc<Semaphore>, Arc<Notify>) {
+        let env = TestingEnv::new();
+        let raw = env.kv_backend();
+        create_physical_tables(
+            &TableMetadataManager::new(raw.clone()),
+            first_table_id,
+            table_count,
+        )
+        .await;
+
+        let (gated, passes, entered) = ScanGateBackend::new(raw);
+        let gated: KvBackendRef = Arc::new(gated);
+
+        let selector_context = new_test_selector_context();
+        let selector = Arc::new(RandomNodeSelector::new(vec![Peer::empty(1)]));
+        let region_migration_manager = Arc::new(RegionMigrationManager::new(
+            env.procedure_manager().clone(),
+            env.context_factory(),
+        ));
+        let runtime_switch_manager =
+            Arc::new(runtime_switch::RuntimeSwitchManager::new(gated.clone()));
+        let peer_resolver = Arc::new(NoopPeerResolver);
+        let (tx, rx) = RegionSupervisor::channel();
+        let supervisor = RegionSupervisor::new(
+            rx,
+            tx.clone(),
+            Default::default(),
+            selector_context,
+            RegionSupervisorSelector::NaiveSelector(selector),
+            region_migration_manager,
+            runtime_switch_manager,
+            peer_resolver,
+            gated,
+        );
+
+        (supervisor, tx, passes, entered)
+    }
+
+    fn filler_heartbeat() -> DatanodeHeartbeat {
+        DatanodeHeartbeat {
+            datanode_id: 1,
+            regions: vec![],
+            timestamp: 0,
+        }
+    }
+
+    // Regression test for the batching added for issue #9419: the initialization scan must
+    // cover every table route across batches without restarting or silently truncating.
+    #[tokio::test]
+    async fn test_initialize_all_regions_spans_batches() {
+        common_telemetry::init_default_ut_logging();
+        let (supervisor, sender) = new_test_supervisor();
+        create_physical_tables(
+            &TableMetadataManager::new(supervisor.kv_backend.clone()),
+            1024,
+            5,
+        )
+        .await;
+
+        // Five routes and a batch of two: finishing takes three batches. A scan that ran only
+        // its first batch would register two detectors and stop.
+        let mut supervisor = supervisor.with_initialize_batch_size(2);
+        tokio::spawn(async move { supervisor.run().await });
+
+        let (tx, rx) = oneshot::channel();
+        sender.send(Event::InitializeAllRegions(tx)).await.unwrap();
+        assert!(rx.await.is_ok());
+
+        let (tx, rx) = oneshot::channel();
+        sender.send(Event::Dump(tx)).await.unwrap();
+        let detector = rx.await.unwrap();
+        assert_eq!(detector.len(), 5);
+        for i in 0..5 {
+            assert!(detector.contains(&(1, RegionId::new(1024 + i, 0))));
+        }
+    }
+
+    // Regression test for the batching added for issue #9419: an event queued behind the scan
+    // must be handled between batches, not after the whole scan.
+    //
+    // The scan is gated so the assertion cannot race it: while the scan is parked in a read,
+    // it cannot have completed, so observing an answered dump is proof that the loop got back
+    // to the queue.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_initialize_all_regions_yields_to_queued_events_between_batches() {
+        common_telemetry::init_default_ut_logging();
+        let (supervisor, sender, passes, entered) = new_gated_test_supervisor(1024, 3).await;
+        let mut supervisor = supervisor
+            .with_initialize_batch_size(1)
+            .with_initialize_page_size(1);
+        tokio::spawn(async move { supervisor.run().await });
+
+        let (init_tx, mut init_rx) = oneshot::channel();
+        sender
+            .send(Event::InitializeAllRegions(init_tx))
+            .await
+            .unwrap();
+
+        // Run the first batch, then let the scan park inside the second batch's read.
+        entered.notified().await;
+        passes.add_permits(1);
+        entered.notified().await;
+
+        // Queue a heartbeat and a dump behind the parked scan.
+        sender
+            .send(Event::HeartbeatArrived(filler_heartbeat()))
+            .await
+            .unwrap();
+        let (dump_tx, dump_rx) = oneshot::channel();
+        sender.send(Event::Dump(dump_tx)).await.unwrap();
+
+        // Finish the second batch. The rest of the scan is handed back through the back of the
+        // queue, so the heartbeat and the dump -- queued earlier -- are handled first.
+        passes.add_permits(1);
+        let detector = dump_rx.await.unwrap();
+        assert!(init_rx.try_recv().is_err());
+        assert_eq!(detector.len(), 2);
+        assert!(detector.contains(&(1, RegionId::new(1024, 0))));
+        assert!(detector.contains(&(1, RegionId::new(1025, 0))));
+
+        // Let the rest of the scan finish.
+        passes.add_permits(64);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(30), init_rx)
+                .await
+                .unwrap()
+                .is_ok()
+        );
+    }
+
+    // Regression test for the batching added for issue #9419: when the continuation cannot be
+    // queued, the scan must continue inline instead of losing the remaining routes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_initialize_all_regions_survives_a_full_queue() {
+        common_telemetry::init_default_ut_logging();
+        let (supervisor, sender, passes, entered) = new_gated_test_supervisor(1024, 5).await;
+        let mut supervisor = supervisor
+            .with_initialize_batch_size(2)
+            .with_initialize_page_size(1);
+        tokio::spawn(async move { supervisor.run().await });
+
+        let (init_tx, init_rx) = oneshot::channel();
+        sender
+            .send(Event::InitializeAllRegions(init_tx))
+            .await
+            .unwrap();
+        entered.notified().await;
+
+        // Fill the queue so the continuation has nowhere to go.
+        let mut queued = 0;
+        while sender
+            .try_send(Event::HeartbeatArrived(filler_heartbeat()))
+            .is_ok()
+        {
+            queued += 1;
+        }
+        assert_eq!(queued, sender.max_capacity());
+
+        // The scan must run to completion inline rather than dropping the routes it has left.
+        passes.add_permits(64);
+        tokio::time::timeout(Duration::from_secs(30), init_rx)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Wait for the queued events to drain, then confirm every region was registered.
+        let (dump_tx, dump_rx) = oneshot::channel();
+        tokio::time::timeout(Duration::from_secs(30), sender.send(Event::Dump(dump_tx)))
+            .await
+            .unwrap()
+            .unwrap();
+        let detector = tokio::time::timeout(Duration::from_secs(30), dump_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(detector.len(), 5);
+    }
+
+    // Regression test for the batching added for issue #9419: losing leadership mid-scan must
+    // abandon the scan and drop its completion signal. A signal that is merely parked would
+    // leave the ticker waiting on it forever, with no retry.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_initialize_all_regions_aborts_on_leadership_loss() {
+        common_telemetry::init_default_ut_logging();
+        let (supervisor, sender, passes, entered) = new_gated_test_supervisor(1024, 3).await;
+        let state: StateRef = Arc::new(RwLock::new(State::leader("test".into(), false)));
+        let mut supervisor = supervisor
+            .with_state(state.clone())
+            .with_initialize_batch_size(1)
+            .with_initialize_page_size(1);
+        tokio::spawn(async move { supervisor.run().await });
+
+        let (init_tx, init_rx) = oneshot::channel();
+        sender
+            .send(Event::InitializeAllRegions(init_tx))
+            .await
+            .unwrap();
+
+        // Lose leadership while the scan is suspended, then let it finish its batch. Its
+        // continuation is queued, and the loop drops it along with the scan.
+        entered.notified().await;
+        state.write().unwrap().next_state(become_follower());
+        passes.add_permits(1);
+
+        assert!(
+            tokio::time::timeout(Duration::from_secs(30), init_rx)
+                .await
+                .unwrap()
+                .is_err()
+        );
+
+        // Starting over as leader must work.
+        state.write().unwrap().next_state(become_leader(false));
+        passes.add_permits(64);
+        let (init_tx, init_rx) = oneshot::channel();
+        sender
+            .send(Event::InitializeAllRegions(init_tx))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(30), init_rx)
+                .await
+                .unwrap()
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -1371,5 +1916,73 @@ pub(crate) mod tests {
             .unwrap();
         assert!(supervisor.failure_detector.contains(&detecting_region));
         assert!(supervisor.failover_counts.contains_key(&detecting_region));
+    }
+
+    // Regression test for issue #9419: a busy region supervisor used to park the heartbeat
+    // response path, withholding region lease grants from every datanode.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_heartbeat_accept_does_not_block_on_full_queue() {
+        let (mut supervisor, sender, passes, entered) = new_gated_test_supervisor(1024, 1).await;
+        tokio::spawn(async move { supervisor.run().await });
+
+        // Busy the supervisor: the initialization scan blocks inside its first table-route read.
+        let (init_done_tx, init_done_rx) = oneshot::channel();
+        sender
+            .send(Event::InitializeAllRegions(init_done_tx))
+            .await
+            .unwrap();
+        entered.notified().await;
+
+        // Fill the bounded event queue while the supervisor is blocked.
+        let capacity = sender.max_capacity();
+        let mut queued = 0;
+        while sender
+            .try_send(Event::HeartbeatArrived(filler_heartbeat()))
+            .is_ok()
+        {
+            queued += 1;
+        }
+        assert_eq!(queued, capacity);
+        assert_eq!(sender.capacity(), 0);
+
+        // The heartbeat must be dropped instead of blocking, and counted as such.
+        let acceptor = HeartbeatAcceptor::new(sender.clone());
+        let dropped_before = METRIC_META_HEARTBEAT_DROPPED
+            .with_label_values(&["full"])
+            .get();
+        acceptor.accept(filler_heartbeat());
+        assert_eq!(
+            METRIC_META_HEARTBEAT_DROPPED
+                .with_label_values(&["full"])
+                .get(),
+            dropped_before + 1
+        );
+        assert_eq!(sender.capacity(), 0);
+
+        // Release the scan and let the supervisor drain the queue.
+        passes.add_permits(1);
+        let _ = init_done_rx.await;
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while sender.capacity() < capacity {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        // Once there is room again, heartbeats go through instead of being dropped.
+        // That an accepted heartbeat reaches the detector is covered by
+        // `failure_handler::tests::test_handle_heartbeat`.
+        let dropped_before = METRIC_META_HEARTBEAT_DROPPED
+            .with_label_values(&["full"])
+            .get();
+        acceptor.accept(filler_heartbeat());
+        assert_eq!(
+            METRIC_META_HEARTBEAT_DROPPED
+                .with_label_values(&["full"])
+                .get(),
+            dropped_before,
+            "a heartbeat accepted with queue room must not be counted as dropped"
+        );
     }
 }
