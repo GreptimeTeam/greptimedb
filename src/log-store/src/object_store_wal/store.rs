@@ -6881,7 +6881,6 @@ mod tests {
         creates_parked: AtomicBool,
         /// Whether deletes park.
         deletes_parked: AtomicBool,
-        /// Whether range reads park.
         range_reads_parked: AtomicBool,
         in_flight: AtomicUsize,
         max_in_flight: AtomicUsize,
@@ -6989,9 +6988,9 @@ mod tests {
     /// Object access that records every range read as (sequence, offset,
     /// length) and, on request, reports the next conditional create as failed
     /// after it wrote the object, fails it with a given error before it
-    /// writes, stores the same content before it writes, damages the bytes
-    /// the next range read returns, fails the next listing, or fails the
-    /// next range read of an object at an offset, all with transient errors.
+    /// writes, stores the same content before it writes, or damages the bytes
+    /// the next range read returns; it also fails the next listing, or the
+    /// next range read of an object at an offset, with a transient error.
     struct RecordingIo {
         inner: ObjectStoreIo,
         reads: RangeReads,
@@ -8332,7 +8331,6 @@ mod tests {
             .await;
         }
 
-        /// Asserts every append failed with the stopped error.
         async fn assert_appends_stopped(
             appends: Vec<tokio::task::JoinHandle<Result<AppendBatchResponse>>>,
         ) {
@@ -8428,13 +8426,15 @@ mod tests {
             store.stop().await.unwrap();
         }
 
-        /// Writes object 0 with a footer longer than the window recovery reads
-        /// from the end of an object, so recovery fetches its header, that
-        /// window and its footer separately, and returns the offsets of the
-        /// window and of the footer.
+        /// Regions enough for a footer longer than the window recovery reads
+        /// from the end of an object, so that recovery fetches the header,
+        /// that window and the footer of such an object separately.
+        const WIDE_REGIONS: u32 = (RECOVERY_TAIL_WINDOW / FOOTER_ENTRY_LEN + 100) as u32;
+
+        /// Writes object 0 with a footer longer than the tail window and
+        /// returns the offsets of the window and of the footer.
         async fn put_wide_object(object_store: &ObjectStore) -> (u64, u64) {
-            let regions = (RECOVERY_TAIL_WINDOW / FOOTER_ENTRY_LEN + 100) as u32;
-            let records = (1..=regions)
+            let records = (1..=WIDE_REGIONS)
                 .map(|number| Record {
                     region_id: region(number),
                     entry_id: 1,
@@ -8521,81 +8521,135 @@ mod tests {
             .await;
         }
 
-        /// Writes the chain 0 to 3 of epoch 1, one entry of region 1 each;
-        /// objects 2 and 3 carry reclaim boundary 2, so object 1 is below the
-        /// boundary of the tip and object 2 is not.
-        async fn put_bounded_chain(object_store: &ObjectStore) {
+        /// Writes the chain 0 to 3 of epoch 1, one entry of region 1 each,
+        /// and `WIDE_REGIONS` more regions per object when `wide`; objects 2
+        /// and 3 carry reclaim boundary 2, so object 1 is below the boundary
+        /// of the tip and object 2 is not.
+        async fn put_bounded_chain(object_store: &ObjectStore, wide: bool) {
             let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
             for object_seq in 0..=3 {
                 let header = Header {
                     reclaim_boundary: if object_seq >= 2 { 2 } else { 0 },
                     ..chain_header(object_seq, 1, (object_seq > 0).then(|| (object_seq - 1, 1)))
                 };
-                let record = Record {
+                let mut records = vec![Record {
                     region_id: region(1),
                     entry_id: id(object_seq, 1),
                     payload: Bytes::from(format!("a{object_seq}")),
-                };
-                put_object_with_header(&io, header, &[record]).await;
+                }];
+                if wide {
+                    records.extend((2..=WIDE_REGIONS).map(|number| Record {
+                        region_id: region(number),
+                        entry_id: id(object_seq, 1),
+                        payload: Bytes::from_static(b"wide"),
+                    }));
+                }
+                put_object_with_header(&io, header, &records).await;
             }
         }
 
+        /// The fetch of recovery that finds an object gone.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Gone {
+            /// The read of a short object as a whole.
+            Whole,
+            /// The reads of the header and of the tail window of a wide object.
+            Header,
+            /// The separate read of the footer of a wide object.
+            Footer,
+        }
+
+        /// Waits for `count` parked operations and returns their releases.
+        async fn parked_releases(
+            parked: &mut mpsc::UnboundedReceiver<(u64, oneshot::Sender<bool>)>,
+            count: usize,
+        ) -> Vec<oneshot::Sender<bool>> {
+            let mut releases = Vec::with_capacity(count);
+            for _ in 0..count {
+                releases.push(next_parked_operation(parked).await.1);
+            }
+            releases
+        }
+
         /// Every fetch of the listed objects parks and one object is deleted
-        /// meanwhile: below the boundary of the tip the object is ignored,
-        /// at or above it the construction fails.
+        /// before one of its reads: below the boundary of the tip the object
+        /// is ignored, at or above it the construction fails.
         async fn object_vanishes_before_its_fetch() {
             for (vanished, fails) in [(1, false), (2, true)] {
-                let object_store = memory_store();
-                put_bounded_chain(&object_store).await;
-                let (io, mut parked) = ParkedIo::over(object_store.clone());
-                let gauges = settled_gauges().await;
-                let before = Counters::sample();
-                let opening = {
-                    let io = io.clone();
-                    tokio::spawn(async move {
-                        ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string()).await
-                    })
-                };
-                let releases = parked_operations(&mut parked, 4).await;
-                object_store
-                    .delete(&object_path(&object_store, vanished))
-                    .await
-                    .unwrap();
-                for release in releases.into_values() {
+                for gone in [Gone::Whole, Gone::Header, Gone::Footer] {
+                    object_vanishes_at(vanished, fails, gone).await;
+                }
+            }
+        }
+
+        async fn object_vanishes_at(vanished: u64, fails: bool, gone: Gone) {
+            let object_store = memory_store();
+            put_bounded_chain(&object_store, gone != Gone::Whole).await;
+            let (io, mut parked) = ParkedIo::over(object_store.clone());
+            io.range_reads_parked.store(true, Ordering::SeqCst);
+            let gauges = settled_gauges().await;
+            let before = Counters::sample();
+            let opening = {
+                let io = io.clone();
+                tokio::spawn(async move {
+                    ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string()).await
+                })
+            };
+            let path = object_path(&object_store, vanished);
+            let delete = || object_store.delete(&path);
+            let release_all = |releases: Vec<oneshot::Sender<bool>>| {
+                for release in releases {
                     release.send(true).unwrap();
                 }
-                let opened = timeout(WAIT, opening).await.unwrap().unwrap();
-                if fails {
-                    let error = opened.unwrap_err();
-                    assert!(
-                        is_not_found(&error)
-                            && matches!(&error, Error::WalObjectStore { path, .. } if *path == io.object_path(2)),
-                        "unexpected error: {error:?}"
-                    );
-                    assert_eq!(vec![0, 1, 3], object_seqs(io.as_ref()).await);
-                    assert_eq!(gauges, indexed_gauges());
-                    assert_eq!(Counters::default(), Counters::since(before));
-                    continue;
-                }
-                let store = opened.unwrap();
-                assert_eq!(vec![0, 2, 3, 4], object_seqs(io.as_ref()).await);
-                assert_indexed(io.as_ref(), &[2, 3, 4]).await;
-                assert_eq!(
-                    expected_entries(region(1), &[(id(2, 1), "a2"), (id(3, 1), "a3")]),
-                    read_entries(&store, region(1), 1).await
-                );
-                assert_eq!(
-                    Counters {
-                        created_objects: 1,
-                        recovered_objects: 3,
-                        recoveries: 1,
-                        reads: 1,
-                        ..Counters::default()
-                    },
-                    Counters::since(before)
-                );
-                store.stop().await.unwrap();
+            };
+            // A short object parks once, a wide one twice, at its header and
+            // at its tail window, and then once more at its footer.
+            let first = parked_releases(&mut parked, if gone == Gone::Whole { 4 } else { 8 }).await;
+            if gone != Gone::Footer {
+                delete().await.unwrap();
             }
+            release_all(first);
+            match gone {
+                Gone::Whole => {}
+                Gone::Header => release_all(parked_releases(&mut parked, 3).await),
+                Gone::Footer => {
+                    let footers = parked_releases(&mut parked, 4).await;
+                    delete().await.unwrap();
+                    release_all(footers);
+                }
+            }
+            let opened = timeout(WAIT, opening).await.unwrap().unwrap();
+            io.range_reads_parked.store(false, Ordering::SeqCst);
+            if fails {
+                let error = opened.unwrap_err();
+                assert!(
+                    is_not_found(&error)
+                        && matches!(&error, Error::WalObjectStore { path, .. } if *path == io.object_path(2)),
+                    "unexpected error: {error:?}"
+                );
+                assert_eq!(vec![0, 1, 3], object_seqs(io.as_ref()).await);
+                assert_eq!(gauges, indexed_gauges());
+                assert_eq!(Counters::default(), Counters::since(before));
+                return;
+            }
+            let store = opened.unwrap();
+            assert_eq!(vec![0, 2, 3, 4], object_seqs(io.as_ref()).await);
+            assert_indexed(io.as_ref(), &[2, 3, 4]).await;
+            assert_eq!(
+                expected_entries(region(1), &[(id(2, 1), "a2"), (id(3, 1), "a3")]),
+                read_entries(&store, region(1), 1).await
+            );
+            assert_eq!(
+                Counters {
+                    created_objects: 1,
+                    recovered_objects: 3,
+                    recoveries: 1,
+                    reads: 1,
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+            store.stop().await.unwrap();
         }
 
         async fn segment_fetch_fails_at_a_read() {
@@ -8812,6 +8866,10 @@ mod tests {
                 read_entries(&store, region_id, 1).await
             );
             assert_eq!(
+                expected_entries(other, &[(id(1, 1), "b1")]),
+                read_entries(&store, other, 1).await
+            );
+            assert_eq!(
                 Counters {
                     created_objects: 2,
                     seal_to_durable: 2,
@@ -8820,7 +8878,7 @@ mod tests {
                         + one_entry_object(),
                     object_entries: 3,
                     acknowledged_appends: 2,
-                    reads: 1,
+                    reads: 2,
                     deleted_objects: 1,
                     ..Counters::default()
                 },
@@ -9133,11 +9191,13 @@ mod tests {
             let before = Counters::sample();
             let (store, io, _parked, stalled, _release) = stall_second_append(stalling()).await;
             assert_eq!(stalled_once(), Counters::since(before));
+            assert_indexed(io.as_ref(), &[0]).await;
 
             stalled.abort();
             drop(store);
             wait_until(|| LIVE_ACTORS.load(Ordering::SeqCst) == 0).await;
             assert_eq!(vec![0], object_seqs(io.as_ref()).await);
+            assert_indexed(io.as_ref(), &[0]).await;
             assert_eq!(
                 Counters {
                     stalled_waits: 1,
