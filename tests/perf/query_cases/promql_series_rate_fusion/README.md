@@ -9,7 +9,14 @@ instances × 512 samples = 2,097,152 rows, 16 `dc` values, 4 devices, and two fl
 non-overlapping SSTs of 1,048,576 rows each, 8,192-row groups, 15-second
 millisecond timestamps, primary key `(instance, dc, device)`, and deterministic
 wave values from 0 through 100. It uses the same data generator, not the
-original 127-slope counter or an archived original input.
+original 127-slope counter or an archived original input. In this fixed generator,
+`wave_value` uses the global row ordinal modulo 1,024. Timestamp-major generation
+with 4,096 series advances each series by 4,096 ordinals per sample, so each
+series is constant over time and all rate results are zero. This preserves the
+qualified input and still exercises range construction, but it is not sufficient
+numeric-equivalence evidence; nonzero rates, resets, nulls and special values
+must also pass the separate unit and SQLness cases. Do not replace this input
+with a favorable distribution after seeing performance results.
 
 The range window is 1704069900–1704071715 seconds at 15-second steps (122
 evaluations), fully covered by fixture timestamps from 1704067200 through

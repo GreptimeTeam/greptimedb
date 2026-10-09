@@ -1,0 +1,98 @@
+CREATE TABLE rate_fusion (
+    ts TIMESTAMP(3) TIME INDEX,
+    val DOUBLE,
+    dc STRING,
+    instance STRING,
+    PRIMARY KEY (dc, instance),
+) WITH ('append_mode' = 'true');
+
+Affected Rows: 0
+
+INSERT INTO rate_fusion VALUES
+    (0, 0.0, 'shared', 'a'),
+    (60000, 60.0, 'shared', 'a'),
+    (120000, 120.0, 'shared', 'a'),
+    (180000, 180.0, 'shared', 'a'),
+    (240000, 240.0, 'shared', 'a'),
+    (300000, 300.0, 'shared', 'a'),
+    (0, 0.0, 'shared', 'b'),
+    (60000, 30.0, 'shared', 'b'),
+    (120000, 60.0, 'shared', 'b'),
+    (180000, 90.0, 'shared', 'b'),
+    (240000, 120.0, 'shared', 'b'),
+    (300000, 150.0, 'shared', 'b'),
+    (0, 10.0, 'other', 'c'),
+    (60000, 70.0, 'other', 'c'),
+    (120000, NULL, 'other', 'c'),
+    (180000, 100.0, 'other', 'c'),
+    (240000, 5.0, 'other', 'c'),
+    (300000, 65.0, 'other', 'c'),
+    (0, NULL, 'other', 'd'),
+    (60000, NULL, 'other', 'd'),
+    (120000, NULL, 'other', 'd'),
+    (180000, NULL, 'other', 'd'),
+    (240000, 42.0, 'other', 'd'),
+    (300000, NULL, 'other', 'd');
+
+Affected Rows: 24
+
+-- Two nonzero linear rates share one dc; the reset counter and sparse/all-NULL series
+-- exercise reset handling, missing windows, and label aggregation in the other dc.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (120, 300, '60s') sum by (dc) (rate(rate_fusion[2m]));
+
++--------+---------------------+-----------------------------------------------+
+| dc     | ts                  | sum(prom_rate(ts_range,val,ts,Int64(120000))) |
++--------+---------------------+-----------------------------------------------+
+| other  | 1970-01-01T00:04:00 | 0.08333333333333333                           |
+| other  | 1970-01-01T00:05:00 | 0.5416666666666666                            |
+| shared | 1970-01-01T00:02:00 | 1.5                                           |
+| shared | 1970-01-01T00:03:00 | 1.5                                           |
+| shared | 1970-01-01T00:04:00 | 1.5                                           |
+| shared | 1970-01-01T00:05:00 | 1.5                                           |
++--------+---------------------+-----------------------------------------------+
+
+-- Instant form of the same grouped aggregation at the final range step.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (300, 300, '60s') sum by (dc) (rate(rate_fusion[2m]));
+
++--------+---------------------+-----------------------------------------------+
+| dc     | ts                  | sum(prom_rate(ts_range,val,ts,Int64(120000))) |
++--------+---------------------+-----------------------------------------------+
+| other  | 1970-01-01T00:05:00 | 0.5416666666666666                            |
+| shared | 1970-01-01T00:05:00 | 1.5                                           |
++--------+---------------------+-----------------------------------------------+
+
+-- Offset and a different aggregator must not take the narrow fused path.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (120, 300, '60s') sum by (dc) (rate(rate_fusion[2m] offset 1m));
+
++--------+---------------------+-----------------------------------------------+
+| dc     | ts                  | sum(prom_rate(ts_range,val,ts,Int64(120000))) |
++--------+---------------------+-----------------------------------------------+
+| other  | 1970-01-01T00:02:00 | 0.5833333333333334                            |
+| other  | 1970-01-01T00:05:00 | 0.08333333333333333                           |
+| shared | 1970-01-01T00:02:00 | 0.75                                          |
+| shared | 1970-01-01T00:03:00 | 1.5                                           |
+| shared | 1970-01-01T00:04:00 | 1.5                                           |
+| shared | 1970-01-01T00:05:00 | 1.5                                           |
++--------+---------------------+-----------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (120, 300, '60s') min by (dc) (rate(rate_fusion[2m]));
+
++--------+---------------------+-----------------------------------------------+
+| dc     | ts                  | min(prom_rate(ts_range,val,ts,Int64(120000))) |
++--------+---------------------+-----------------------------------------------+
+| other  | 1970-01-01T00:04:00 | 0.08333333333333333                           |
+| other  | 1970-01-01T00:05:00 | 0.5416666666666666                            |
+| shared | 1970-01-01T00:02:00 | 0.5                                           |
+| shared | 1970-01-01T00:03:00 | 0.5                                           |
+| shared | 1970-01-01T00:04:00 | 0.5                                           |
+| shared | 1970-01-01T00:05:00 | 0.5                                           |
++--------+---------------------+-----------------------------------------------+
+
+DROP TABLE rate_fusion;
+
+Affected Rows: 0
+
