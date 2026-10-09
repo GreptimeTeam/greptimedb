@@ -552,6 +552,24 @@ async fn test_extended_query_regproc_response() -> Result<()> {
 }
 
 #[tokio::test]
+async fn test_extended_query_show_query_option() -> Result<()> {
+    let server_port = start_test_server(TlsOption::default()).await?;
+    let client = create_connection_with_given_db(server_port, DEFAULT_SCHEMA_NAME)
+        .await
+        .unwrap();
+    client
+        .batch_execute("SET query.parallelism = 2")
+        .await
+        .unwrap();
+    let statement = client.prepare("SHOW query.parallelism").await.unwrap();
+    let rows = client.query(&statement, &[]).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<usize, String>(0), "2");
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_extended_query() -> Result<()> {
     let server_port = start_test_server(TlsOption::default()).await?;
     let client = create_connection_with_given_db(server_port, DEFAULT_SCHEMA_NAME)

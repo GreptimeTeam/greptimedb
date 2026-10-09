@@ -281,10 +281,10 @@ fn check_show_variables(query: &str) -> Option<Output> {
     } else if SHOW_LOWER_CASE_PATTERN.is_match(query) {
         Some(show_variables("lower_case_table_names", "0"))
     } else if let Some(matched) = SHOW_VARIABLES_LIKE_PATTERN.find(query) {
-        let remainder = &query[matched.end()..];
-        let remainder = strip_leading_comments(remainder).trim_start();
-        let remainder = remainder.strip_prefix(';').unwrap_or(remainder);
-        let remainder = strip_leading_comments(remainder);
+        let mut remainder = strip_leading_comments(&query[matched.end()..]);
+        while let Some(rest) = remainder.strip_prefix(';') {
+            remainder = strip_leading_comments(rest);
+        }
         if remainder.is_empty() {
             Some(show_variables("", ""))
         } else {
@@ -668,6 +668,7 @@ mod test {
             "SHOW VARIABLES query.parallelism;",
             "SHOW VARIABLES /* comment */ query.parallelism",
             "SHOW VARIABLES; SELECT 1",
+            "SHOW VARIABLES; /* comment */; SELECT 1",
         ] {
             assert!(
                 check(query, QueryContext::arc(), session.clone()).is_none(),
@@ -678,6 +679,8 @@ mod test {
         for query in [
             "SHOW VARIABLES",
             "SHOW VARIABLES;",
+            "SHOW VARIABLES;;",
+            "SHOW VARIABLES; /* comment */;",
             "SHOW VARIABLES /* comment */",
             "SHOW VARIABLES /* comment */;",
             "SHOW VARIABLES # comment",

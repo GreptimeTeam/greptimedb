@@ -355,7 +355,7 @@ impl QueryParser for DefaultQueryParser {
         let (sql, copy_to_stdout_format) = if let Ok(mut statements) = parsed_statements {
             let first_stmt = statements.remove(0);
             let format = check_copy_to_stdout(&first_stmt);
-            (first_stmt.to_string(), format)
+            (statement_to_query(&first_stmt), format)
         } else {
             // bypass the error: it can run into error because of different
             // versions of sqlparser
