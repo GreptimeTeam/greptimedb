@@ -39,9 +39,11 @@ use datafusion::datasource::source::DataSourceExec;
 use datafusion::datasource::{MemTable, provider_as_source};
 use datafusion::execution::context::SessionContext;
 use datafusion::logical_expr::{Extension, col};
+use datafusion_common::config::ConfigOptions;
+use datafusion_optimizer::analyzer::AnalyzerRule;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
-use promql::extension_plan::HistogramFold;
+use promql::extension_plan::{HistogramFold, RangeManipulate};
 use promql_parser::label::Labels;
 use promql_parser::parser;
 use session::context::QueryContext;
@@ -9147,6 +9149,121 @@ async fn dynamic_scalar_param_nan_clamp_drops_nullable_input_samples() {
         .unwrap();
         let (_, batches) = execute(plan, &state).await;
         assert_dynamic_scalar_rows(&batches, &[("a", None)]);
+    }
+}
+
+#[tokio::test]
+async fn dynamic_scalar_param_quantile_distributed_range_boundary() {
+    let state = build_function_registry_query_engine_state();
+    for (query, expect_remote_range) in [
+        (
+            "quantile_over_time(scalar(dyn_scalar_metric), dyn_scalar_metric[2s])",
+            false,
+        ),
+        (
+            "quantile_over_time(scalar(dyn_scalar_metric), dyn_scalar_metric[2s] offset 1s)",
+            false,
+        ),
+        (
+            "quantile_over_time(scalar(dyn_scalar_metric), dyn_scalar_metric[2s] @ 1)",
+            false,
+        ),
+        (
+            "quantile_over_time(scalar(dyn_scalar_metric), dyn_scalar_metric[2s] @ 0)",
+            false,
+        ),
+        ("quantile_over_time(0.5, dyn_scalar_metric[2s])", true),
+        ("avg_over_time(dyn_scalar_metric[2s])", true),
+        (
+            "clamp_min(avg_over_time(dyn_scalar_metric[2s]), scalar(vector(2)))",
+            true,
+        ),
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            build_dynamic_scalar_table_provider_with_series(&[
+                ("a", &[Some(1.0), Some(3.0)]),
+                ("b", &[Some(5.0), Some(7.0)]),
+            ])
+            .await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap();
+        let plan = crate::dist_plan::DistPlannerAnalyzer
+            .analyze(plan, &ConfigOptions::default())
+            .unwrap();
+        let mut remote_has_range = false;
+        let mut local_has_range = false;
+        let mut remote_has_consumer = false;
+        let mut remote_has_scan = false;
+        plan.apply(|node| {
+            if let LogicalPlan::Extension(ext) = node
+                && ext
+                    .node
+                    .as_any()
+                    .downcast_ref::<RangeManipulate>()
+                    .is_some()
+            {
+                local_has_range = true;
+            }
+            if let LogicalPlan::Extension(ext) = node
+                && let Some(merge) = ext
+                    .node
+                    .as_any()
+                    .downcast_ref::<crate::dist_plan::MergeScanLogicalPlan>()
+            {
+                for field in node.schema().fields() {
+                    assert!(
+                        !matches!(field.data_type(), ArrowDataType::Dictionary(_, _)),
+                        "unexpected dictionary merge output for query {query}: {field}; plan: {plan}"
+                    );
+                }
+                merge.input().apply(|remote| {
+                    for expr in remote.expressions() {
+                        expr.apply(|expr| {
+                            if let DfExpr::ScalarFunction(func) = expr {
+                                remote_has_consumer |= matches!(
+                                    func.func.name(),
+                                    "prom_quantile_over_time" | "prom_avg_over_time"
+                                );
+                            }
+                            Ok(TreeNodeRecursion::Continue)
+                        })?;
+                    }
+                    if let LogicalPlan::Extension(ext) = remote
+                        && ext
+                            .node
+                            .as_any()
+                            .downcast_ref::<RangeManipulate>()
+                            .is_some()
+                    {
+                        remote_has_range = true;
+                    }
+                    if matches!(remote, LogicalPlan::TableScan(_)) {
+                        remote_has_scan = true;
+                    }
+                    Ok(TreeNodeRecursion::Continue)
+                })?;
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+        assert_eq!(
+            remote_has_range, expect_remote_range,
+            "query: {query}; plan: {plan}"
+        );
+        assert_eq!(
+            local_has_range, !expect_remote_range,
+            "query: {query}; plan: {plan}"
+        );
+        if expect_remote_range {
+            assert!(
+                remote_has_consumer,
+                "missing remote range consumer for query: {query}; plan: {plan}"
+            );
+        }
+        assert!(remote_has_scan, "query: {query}; plan: {plan}");
     }
 }
 
