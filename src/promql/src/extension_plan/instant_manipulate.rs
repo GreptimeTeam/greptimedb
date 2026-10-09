@@ -692,6 +692,7 @@ impl InstantManipulateStream {
         let (timestamps, _) = timestamp_array_to_primitive(ts_column).ok_or_else(|| {
             DataFusionError::Execution("Time index column is not a timestamp".into())
         })?;
+        let timestamp_null_count = timestamps.null_count();
         let timestamps = timestamps.values();
         let len = timestamps.len();
         // Shift the native-tick timeline in i128 before comparing samples. Doing
@@ -737,14 +738,18 @@ impl InstantManipulateStream {
         let aligned_start = aligned_start as i64;
         let aligned_end = aligned_end as i64;
         // Narrow `i64` nanoseconds whenever the batch fits them, exact `i128` otherwise.
-        let narrow = narrow_scan(
-            self.time_unit,
-            self.offset,
-            self.lookback_delta,
-            timestamps,
-            aligned_start,
-            aligned_end,
-        );
+        let narrow = (timestamp_null_count == 0)
+            .then(|| {
+                narrow_scan(
+                    self.time_unit,
+                    self.offset,
+                    self.lookback_delta,
+                    timestamps,
+                    aligned_start,
+                    aligned_end,
+                )
+            })
+            .flatten();
         if let Some(scan) = &narrow {
             debug_assert_eq!(i64::try_from(first_ns), Ok(scan.shift(timestamps[0])));
             debug_assert_eq!(i64::try_from(last_ns), Ok(scan.shift(timestamps[len - 1])));
@@ -1819,6 +1824,81 @@ mod test {
             true,
         )
         .await;
+    }
+
+    #[test]
+    fn nullable_interior_timestamp_matches_wide_scan() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIME_INDEX_COLUMN,
+                DataType::Timestamp(TimeUnit::Second, None),
+                true,
+            ),
+            Field::new("value", DataType::Float64, false),
+        ]));
+        let timestamps = [0, i64::MAX, 1];
+        let array = TimestampSecondArray::new(
+            timestamps.to_vec().into(),
+            Some(NullBuffer::from(vec![false, false, true])),
+        );
+        let input = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(array),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+        let stream = InstantManipulateStream {
+            offset: 0,
+            start: 0,
+            end: 1_000,
+            lookback_delta: 1_000,
+            interval: 1_000,
+            time_index: 0,
+            time_unit: TimeUnit::Second,
+            field_indices: [Some(1), None],
+            tsid_index: None,
+            reuse_tsid_column: false,
+            schema: Arc::new(Schema::new(vec![
+                Field::new(
+                    TIME_INDEX_COLUMN,
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                ),
+                Field::new("value", DataType::Float64, false),
+            ])),
+            input: Box::pin(
+                datafusion::physical_plan::memory::MemoryStream::try_new(vec![], schema, None)
+                    .unwrap(),
+            ),
+            metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+            num_series: Count::new(),
+        };
+
+        let output = stream.manipulate(input).unwrap();
+        let output_timestamps = output
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        let output_values = output
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let wide = stream.scan_instants::<i128>(
+            &timestamps,
+            0,
+            1_000,
+            &ScanNanoseconds::<i128>::wide(TimeUnit::Second, 0, 1_000),
+            2,
+            |_| false,
+        );
+        assert_eq!(output_timestamps.values(), &[0]);
+        assert_eq!(output_values.values(), &[1.0]);
+        assert_eq!(wide, (vec![0], vec![0]));
+        assert_eq!(wide.1, output_timestamps.values().to_vec());
     }
 
     #[test]

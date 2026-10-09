@@ -806,6 +806,7 @@ impl RangeManipulateStream {
         let (timestamps, _) = timestamp_array_to_primitive(ts_column).ok_or_else(|| {
             DataFusionError::Execution("Time index column is not a timestamp".into())
         })?;
+        let timestamp_null_count = timestamps.null_count();
         let timestamps = timestamps.values();
         let timestamp =
             |index| (timestamps[index] as i128) * scale + (self.offset as i128) * 1_000_000;
@@ -844,14 +845,18 @@ impl RangeManipulateStream {
         // Calculate for every aligned timestamp (`curr_ts`), assuming ordered
         // timestamps: the scan compares shifted samples in `i64` nanoseconds
         // whenever they fit the batch, and in exact `i128` nanoseconds otherwise.
-        let narrow = narrow_scan(
-            self.time_unit,
-            self.offset,
-            self.range,
-            timestamps,
-            start,
-            end,
-        );
+        let narrow = (timestamp_null_count == 0)
+            .then(|| {
+                narrow_scan(
+                    self.time_unit,
+                    self.offset,
+                    self.range,
+                    timestamps,
+                    start,
+                    end,
+                )
+            })
+            .flatten();
         let ranges = match narrow {
             Some(scan) => scan_ranges::<i64>(self.interval, timestamps, start, end, &scan),
             None => {
@@ -1901,6 +1906,36 @@ mod test {
         .unwrap();
 
         stream.calculate_range(&batch).unwrap()
+    }
+
+    #[test]
+    fn calculate_range_nullable_interior_timestamp_matches_wide_scan() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            TIME_INDEX_COLUMN,
+            DataType::Timestamp(TimeUnit::Second, None),
+            true,
+        )]));
+        let stream = scan_stream_for_test(TimeUnit::Second, 0, 0, 1_000, 1_000, 1_000);
+        let timestamps = [0, i64::MAX, 1];
+        let array = TimestampSecondArray::new(
+            timestamps.to_vec().into(),
+            Some(NullBuffer::from(vec![false, false, true])),
+        );
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(array)]).unwrap();
+
+        let (ranges, bounds) = stream.calculate_range(&batch).unwrap();
+        let wide = RangeManipulateStream::bench_scan_wide(
+            TimeUnit::Second,
+            0,
+            1_000,
+            1_000,
+            &timestamps,
+            bounds.0,
+            bounds.1,
+        );
+        assert_eq!(bounds, (0, 1_000));
+        assert_eq!(ranges, vec![(0, 1), (0, 0)]);
+        assert_eq!(ranges, wide);
     }
 
     #[test]
