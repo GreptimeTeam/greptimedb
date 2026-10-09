@@ -9966,7 +9966,7 @@ dependencies = [
 [[package]]
 name = "opensrv-mysql"
 version = "0.8.0"
-source = "git+https://github.com/GreptimeTeam/opensrv?rev=f3135e5f00401e06075cf241c0cc26489e45b20a#f3135e5f00401e06075cf241c0cc26489e45b20a"
+source = "git+https://github.com/GreptimeTeam/opensrv?rev=1f3d88ccaafb5721be6cfcc3ccbca48642426119#1f3d88ccaafb5721be6cfcc3ccbca48642426119"
 dependencies = [
  "async-trait",
  "byteorder",
@@ -17340,9 +17340,9 @@ dependencies = [
 
 [[package]]
 name = "xxhash-rust"
-version = "0.8.15"
+version = "0.8.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdd20c5420375476fbd4394763288da7eb0cc0b8c11deed431a91562af7335d3"
+checksum = "550a2b930b62486a393c52d5c3b84bff264b28aa437ed64694d31e93b1757af7"
 
 [[package]]
 name = "yaml-rust"

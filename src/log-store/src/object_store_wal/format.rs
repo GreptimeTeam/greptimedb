@@ -43,7 +43,6 @@ const SEGMENT_HEADER_LEN: usize = 8 + 4;
 /// offset, segment length and segment CRC32.
 pub(crate) const FOOTER_ENTRY_LEN: usize = 8 + 8 + 8 + 4 + 8 + 8 + 4;
 /// Length of the entry count the footer starts with.
-#[cfg(test)]
 const FOOTER_COUNT_LEN: usize = 4;
 
 /// Header of a WAL object.
@@ -191,7 +190,6 @@ pub(crate) fn encode_object(header: Header, records: &[Record]) -> Result<Encode
 /// Returns the length of the object whose footer is `footer`, derived from the
 /// layout: the segments tile the body after the header, and the footer, which
 /// holds an entry count and one entry per segment, and the trailer follow them.
-#[cfg(test)]
 pub(crate) fn object_len(footer: &[FooterEntry]) -> u64 {
     let segments = footer.iter().map(|entry| entry.segment_len).sum::<u64>();
     let framing = HEADER_LEN + FOOTER_COUNT_LEN + footer.len() * FOOTER_ENTRY_LEN + TRAILER_LEN;
