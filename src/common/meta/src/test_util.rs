@@ -322,8 +322,8 @@ macro_rules! maybe_skip_etcd_tls_integration_test {
 
 /// Returns the directory of the etcd TLS certs.
 pub fn etcd_certs_dir() -> PathBuf {
-    let project_path = env!("CARGO_MANIFEST_DIR");
-    let project_path = PathBuf::from(project_path);
+    let project_path =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"));
     let base = project_path.ancestors().nth(3).unwrap();
     base.join("tests-integration")
         .join("fixtures")
@@ -332,8 +332,8 @@ pub fn etcd_certs_dir() -> PathBuf {
 
 /// Returns the directory of the test certs.
 pub fn test_certs_dir() -> PathBuf {
-    let project_path = env!("CARGO_MANIFEST_DIR");
-    let project_path = PathBuf::from(project_path);
+    let project_path =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"));
     let base = project_path.ancestors().nth(3).unwrap();
     base.join("tests-integration")
         .join("fixtures")

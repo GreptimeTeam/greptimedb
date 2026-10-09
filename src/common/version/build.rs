@@ -30,12 +30,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("cargo:rerun-if-env-changed=RUSTC");
     println!("cargo:rerun-if-env-changed=GREPTIME_PRODUCT_NAME");
+    println!("cargo:rerun-if-env-changed=CARGO_WORKSPACE_DIR");
 
-    // The "CARGO_WORKSPACE_DIR" is set manually (not by Rust itself) in Cargo config file, to
-    // solve the problem where the "CARGO_MANIFEST_DIR" is not what we want when this repo is
-    // made as a submodule in another repo.
-    let workspace_dir =
-        env::var("CARGO_WORKSPACE_DIR").or_else(|_| env::var("CARGO_MANIFEST_DIR"))?;
+    // Resolve the workspace root from CARGO_MANIFEST_DIR (this crate is
+    // src/common/version, three levels below the root). The path remains absolute
+    // and is used at build time. CARGO_WORKSPACE_DIR remains an explicit override
+    // for submodule builds; see https://github.com/rust-lang/cargo/issues/3946.
+    let workspace_dir = match env::var("CARGO_WORKSPACE_DIR") {
+        Ok(dir) if !dir.is_empty() => dir,
+        _ => env::var("CARGO_MANIFEST_DIR").map(|dir| {
+            PathBuf::from(dir)
+                .join("../../..")
+                .to_string_lossy()
+                .into_owned()
+        })?,
+    };
     let workspace_root = PathBuf::from(&workspace_dir);
     println!(
         "cargo:rerun-if-changed={}",

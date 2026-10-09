@@ -448,7 +448,9 @@ mod tests {
 
     #[test]
     fn test_decode_write_request() {
-        let mut d = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mut d = std::path::PathBuf::from(
+            std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"),
+        );
         d.push("benches");
         d.push("write_request.pb.data");
         let data = std::fs::read(d).unwrap();

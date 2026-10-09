@@ -41,3 +41,13 @@ cargo nextest run -p servers
 ```
 
 Keep protocol translation here and permissions/database behavior in frontend.
+
+`prom_remote_write/decode.rs` and `benches/prom_decode.rs` resolve
+`benches/write_request.pb.data` using `CARGO_MANIFEST_DIR` at **run time**
+(`std::env::var`, not `env!`). `cargo nextest run` and `cargo bench` set it;
+direct test/benchmark-binary execution requires setting it to the crate directory.
+Run this example from the repository root:
+
+```bash
+CARGO_MANIFEST_DIR="$PWD/src/servers" ./target/debug/deps/<test_or_bench_binary>
+```
