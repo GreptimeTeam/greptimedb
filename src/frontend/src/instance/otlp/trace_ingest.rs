@@ -33,7 +33,7 @@ use datatypes::prelude::ConcreteDataType;
 use moka::sync::Cache;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use pipeline::PipelineWay;
-use prometheus::IntCounterVec;
+use prometheus::IntCounter;
 use servers::error::{self, Result as ServerResult};
 use servers::otlp;
 use servers::otlp::coerce::{coerce_value_data, is_supported_trace_coercion, trace_value_datatype};
@@ -59,7 +59,10 @@ use crate::instance::otlp::trace_types::{
     is_trace_reconcile_candidate_type, prepare_trace_column_rewrites, push_observed_trace_type,
     truncate_for_diagnostics,
 };
-use crate::metrics::{OTLP_TRACE_AUX_CACHE_LOOKUPS, OTLP_TRACES_FAILURE_COUNT, OTLP_TRACES_ROWS};
+use crate::metrics::{
+    OTLP_TRACE_AUX_CACHE_HIT, OTLP_TRACE_AUX_CACHE_MISS, OTLP_TRACES_FAILURE_COUNT,
+    OTLP_TRACES_ROWS,
+};
 
 /// Confirmed auxiliary writes, shared across requests and instance clones.
 ///
@@ -120,7 +123,7 @@ impl TraceAuxCache {
         &self,
         table: TableName,
         aux_data: &mut TraceAuxData,
-        metrics: Option<&IntCounterVec>,
+        metrics: Option<(&IntCounter, &IntCounter)>,
     ) -> Vec<TraceAuxCacheKey> {
         let lookups = aux_data.services.len() + aux_data.operations.len();
         let table = Arc::new(table);
@@ -147,13 +150,9 @@ impl TraceAuxCache {
                 kind.clone(),
             ))
         });
-        if let Some(metrics) = metrics {
-            metrics
-                .with_label_values(&["hit"])
-                .inc_by((lookups - pending.len()) as u64);
-            metrics
-                .with_label_values(&["miss"])
-                .inc_by(pending.len() as u64);
+        if let Some((hits, misses)) = metrics {
+            hits.inc_by((lookups - pending.len()) as u64);
+            misses.inc_by(pending.len() as u64);
         }
         pending
     }
@@ -170,7 +169,7 @@ impl TraceAuxCache {
         limiter: &RequestLimiter,
         table: TableName,
         mut aux_data: TraceAuxData,
-        metrics: &IntCounterVec,
+        metrics: (&IntCounter, &IntCounter),
     ) -> ServerResult<Option<Arc<OwnedSemaphorePermit>>> {
         self.filter(table.clone(), &mut aux_data, Some(metrics));
         if aux_data.is_empty() {
@@ -1065,7 +1064,7 @@ impl Instance {
                     limiter,
                     TableName::new(ctx.current_catalog(), ctx.current_schema(), &table_name),
                     aux_data,
-                    &OTLP_TRACE_AUX_CACHE_LOOKUPS,
+                    (&OTLP_TRACE_AUX_CACHE_HIT, &OTLP_TRACE_AUX_CACHE_MISS),
                 )
                 .await?
         } else {
@@ -1074,7 +1073,7 @@ impl Instance {
         // Requests without auxiliary admission first check the cache when preparing writes.
         let aux_cache_metrics = aux_limiter
             .is_none()
-            .then_some(&*OTLP_TRACE_AUX_CACHE_LOOKUPS);
+            .then_some((&*OTLP_TRACE_AUX_CACHE_HIT, &*OTLP_TRACE_AUX_CACHE_MISS));
         let is_trace_v1_model = matches!(pipeline, PipelineWay::OtlpTraceDirectV1);
         let data_model = match pipeline {
             PipelineWay::OtlpTraceDirectV1 => Some(TABLE_DATA_MODEL_TRACE_V1),
@@ -1329,7 +1328,7 @@ impl Instance {
         pipeline: &PipelineWay,
         table_name: &str,
         ctx: &QueryContextRef,
-        metrics: Option<&IntCounterVec>,
+        metrics: Option<(&IntCounter, &IntCounter)>,
     ) -> ServerResult<(RowInsertRequests, Vec<TraceAuxCacheKey>)> {
         let keys = self.trace_aux_cache.filter(
             TableName::new(ctx.current_catalog(), ctx.current_schema(), table_name),

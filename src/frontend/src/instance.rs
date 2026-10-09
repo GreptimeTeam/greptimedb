@@ -51,6 +51,7 @@ use common_base::cancellation::CancellableFuture;
 use common_batcher::request_limiter::RequestLimiter;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_event_recorder::EventRecorderRef;
+use common_frontend::metrics::{CACHE_HIT, CACHE_MISS};
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::key::TableMetadataManagerRef;
@@ -573,6 +574,12 @@ fn fast_legacy_check(
         .iter()
         .filter_map(|name| cache.get(name))
         .collect::<Vec<_>>();
+    CACHE_HIT
+        .with_label_values(&["otlp_metrics_legacy"])
+        .inc_by(hit_cache.len() as u64);
+    CACHE_MISS
+        .with_label_values(&["otlp_metrics_legacy"])
+        .inc_by((names.len() - hit_cache.len()) as u64);
     if !hit_cache.is_empty() {
         let hit_legacy = hit_cache.iter().any(|en| *en.value());
         let hit_prom = hit_cache.iter().any(|en| !*en.value());
@@ -3561,11 +3568,20 @@ mod tests {
             })?;
         let ctx = test_query_ctx(1);
         let handler: PipelineHandlerRef = Arc::new(instance.clone());
+        let hits = CACHE_HIT.with_label_values(&["pipeline_table"]);
+        let misses = CACHE_MISS.with_label_values(&["pipeline_table"]);
+        let before = (hits.get(), misses.get());
 
         handler
             .get_pipeline("pipeline", None, ctx.clone())
             .await
             .unwrap();
+        assert_eq!((hits.get(), misses.get()), (before.0 + 1, before.1 + 1));
+        handler
+            .get_pipeline("pipeline", None, ctx.clone())
+            .await
+            .unwrap();
+        assert_eq!((hits.get(), misses.get()), (before.0 + 3, before.1 + 1));
         assert_permission_denied(
             PipelineHandler::get_pipeline_str(&instance, "pipeline", None, ctx.clone()).await,
         );
@@ -3884,11 +3900,15 @@ mod tests {
 
     #[test]
     fn test_fast_legacy_check_is_read_only() {
+        let hits = CACHE_HIT.with_label_values(&["otlp_metrics_legacy"]);
+        let misses = CACHE_MISS.with_label_values(&["otlp_metrics_legacy"]);
+        let before = (hits.get(), misses.get());
         let cache = DashMap::new();
         cache.insert("metric1".to_string(), true);
 
         let names = vec!["metric1".to_string(), "metric2".to_string()];
         assert_eq!(Some(true), fast_legacy_check(&cache, &names).unwrap());
+        assert_eq!((hits.get(), misses.get()), (before.0 + 1, before.1 + 1));
         assert!(!cache.contains_key("metric2"));
 
         cache_legacy_mode(&cache, &names, true).unwrap();
@@ -3900,6 +3920,9 @@ mod tests {
         cache_incompatible.insert("metric1".to_string(), true);
         cache_incompatible.insert("metric2".to_string(), false);
         assert!(fast_legacy_check(&cache_incompatible, &names).is_err());
+        assert_eq!((hits.get(), misses.get()), (before.0 + 3, before.1 + 1));
+        assert_eq!(None, fast_legacy_check(&cache, &[]).unwrap());
+        assert_eq!((hits.get(), misses.get()), (before.0 + 3, before.1 + 1));
     }
 
     #[test]

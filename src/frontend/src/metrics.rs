@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_frontend::metrics::{CACHE_HIT, CACHE_MISS};
 use lazy_static::lazy_static;
 use prometheus::*;
 
@@ -69,12 +70,10 @@ lazy_static! {
     .unwrap();
 
     /// Initial trace auxiliary-cache lookups, excluding admission and write rechecks.
-    pub static ref OTLP_TRACE_AUX_CACHE_LOOKUPS: IntCounterVec = register_int_counter_vec!(
-        "greptime_frontend_otlp_trace_aux_cache_lookups_total",
-        "Initial trace service and operation cache lookups per request",
-        &["result"]
-    )
-    .unwrap();
+    pub static ref OTLP_TRACE_AUX_CACHE_HIT: IntCounter =
+        CACHE_HIT.with_label_values(&["otlp_trace_aux"]);
+    pub static ref OTLP_TRACE_AUX_CACHE_MISS: IntCounter =
+        CACHE_MISS.with_label_values(&["otlp_trace_aux"]);
 
     /// The number of OpenTelemetry logs send by frontend node.
     pub static ref OTLP_LOGS_ROWS: IntCounter = register_int_counter!(

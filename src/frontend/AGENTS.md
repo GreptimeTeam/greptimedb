@@ -34,6 +34,9 @@ remote datanodes via `operator`/`client`.
 | `heartbeat` | `src/frontend/src/heartbeat.rs` | Heartbeat to metasrv; handles suspend / cache invalidation |
 | `service_config` | `src/frontend/src/service_config/` | Per-protocol option structs |
 
+Shared frontend cache counters live in `src/common/frontend/src/metrics.rs`,
+including caches owned by pipeline and protocol handlers.
+
 ## Request lifecycles
 
 - **SQL query** (`instance.rs`): `do_query_inner` handles parsing, interceptors,

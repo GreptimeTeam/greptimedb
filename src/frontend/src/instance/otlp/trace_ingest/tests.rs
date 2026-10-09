@@ -31,7 +31,7 @@ use datatypes::schema::{
 };
 use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
 use opentelemetry_proto::tonic::common::v1::{AnyValue, ArrayValue, KeyValue};
-use prometheus::{IntCounterVec, Opts};
+use prometheus::IntCounter;
 use servers::otlp::trace::attributes::Attributes;
 use servers::otlp::trace::span::{SpanEvents, SpanLinks, TraceSpan};
 use servers::otlp::trace::v1::{TraceBinaryType, TraceRetryColumn};
@@ -53,12 +53,11 @@ fn trace_aux_data(service: &str, span: &str, kind: &str) -> TraceAuxData {
     }
 }
 
-fn trace_aux_cache_metrics() -> IntCounterVec {
-    IntCounterVec::new(
-        Opts::new("test_trace_aux_cache_lookups", "Cache lookups"),
-        &["result"],
+fn trace_aux_cache_metrics() -> (IntCounter, IntCounter) {
+    (
+        IntCounter::new("test_trace_aux_cache_hit", "Cache hits").unwrap(),
+        IntCounter::new("test_trace_aux_cache_miss", "Cache misses").unwrap(),
     )
-    .unwrap()
 }
 
 #[tokio::test]
@@ -159,35 +158,38 @@ fn test_trace_aux_cache_confirmed_writes() {
 #[test]
 fn test_trace_aux_cache_zero_size_disables_caching() {
     let cache = TraceAuxCache::new(0);
-    let metrics = trace_aux_cache_metrics();
+    let (hits, misses) = trace_aux_cache_metrics();
     let table = TableName::new("greptime", "public", "traces");
     let mut data = trace_aux_data("svc", "span", "server");
-    cache.record(cache.filter(table.clone(), &mut data, Some(&metrics)));
+    cache.record(cache.filter(table.clone(), &mut data, Some((&hits, &misses))));
 
     let mut repeated = trace_aux_data("svc", "span", "server");
-    assert_eq!(cache.filter(table, &mut repeated, Some(&metrics)).len(), 2);
+    assert_eq!(
+        cache
+            .filter(table, &mut repeated, Some((&hits, &misses)))
+            .len(),
+        2
+    );
     assert_eq!(repeated.services.len(), 1);
     assert_eq!(repeated.operations.len(), 1);
-    assert_eq!(metrics.with_label_values(&["hit"]).get(), 0);
-    assert_eq!(metrics.with_label_values(&["miss"]).get(), 4);
+    assert_eq!(hits.get(), 0);
+    assert_eq!(misses.get(), 4);
 }
 
 #[test]
 fn test_trace_aux_cache_lookup_metrics() {
     let cache = TraceAuxCache::new(1024);
-    let metrics = trace_aux_cache_metrics();
-    let hits = metrics.with_label_values(&["hit"]);
-    let misses = metrics.with_label_values(&["miss"]);
+    let (hits, misses) = trace_aux_cache_metrics();
     let table = TableName::new("greptime", "public", "traces");
     let data = || trace_aux_data("svc", "span", "server");
 
-    let pending = cache.filter(table.clone(), &mut data(), Some(&metrics));
+    let pending = cache.filter(table.clone(), &mut data(), Some((&hits, &misses)));
     assert_eq!((hits.get(), misses.get()), (0, 2));
     cache.filter(table.clone(), &mut data(), None);
     assert_eq!((hits.get(), misses.get()), (0, 2));
     cache.record(pending);
 
-    cache.filter(table.clone(), &mut data(), Some(&metrics));
+    cache.filter(table.clone(), &mut data(), Some((&hits, &misses)));
     assert_eq!((hits.get(), misses.get()), (2, 2));
     cache.filter(table.clone(), &mut data(), None);
     assert_eq!((hits.get(), misses.get()), (2, 2));
@@ -195,12 +197,12 @@ fn test_trace_aux_cache_lookup_metrics() {
     let mut mixed = trace_aux_data("svc", "other", "server");
     assert_eq!(
         cache
-            .filter(table.clone(), &mut mixed, Some(&metrics))
+            .filter(table.clone(), &mut mixed, Some((&hits, &misses)))
             .len(),
         1
     );
     assert_eq!((hits.get(), misses.get()), (3, 3));
-    cache.filter(table, &mut TraceAuxData::default(), Some(&metrics));
+    cache.filter(table, &mut TraceAuxData::default(), Some((&hits, &misses)));
     assert_eq!((hits.get(), misses.get()), (3, 3));
 }
 
@@ -258,21 +260,23 @@ fn test_trace_aux_cache_accounts_for_key_memory() {
 #[tokio::test]
 async fn test_trace_aux_admission_rechecks_cache() {
     let cache = TraceAuxCache::new(1024);
-    let metrics = trace_aux_cache_metrics();
-    let hits = metrics.with_label_values(&["hit"]);
-    let misses = metrics.with_label_values(&["miss"]);
+    let (hits, misses) = trace_aux_cache_metrics();
     let limiter = RequestLimiter::try_new(1).unwrap();
     let table = TableName::new("greptime", "public", "traces");
     let data = || trace_aux_data("svc", "span", "server");
     let permit = cache
-        .acquire_for_misses(&limiter, table.clone(), data(), &metrics)
+        .acquire_for_misses(&limiter, table.clone(), data(), (&hits, &misses))
         .await
         .unwrap()
         .unwrap();
     let cloned_cache = cache.clone();
     let cloned_limiter = limiter.clone();
-    let mut waiting =
-        Box::pin(cloned_cache.acquire_for_misses(&cloned_limiter, table.clone(), data(), &metrics));
+    let mut waiting = Box::pin(cloned_cache.acquire_for_misses(
+        &cloned_limiter,
+        table.clone(),
+        data(),
+        (&hits, &misses),
+    ));
     assert!(futures::poll!(waiting.as_mut()).is_pending());
     assert_eq!((hits.get(), misses.get()), (0, 4));
 
@@ -280,7 +284,7 @@ async fn test_trace_aux_admission_rechecks_cache() {
     cache.record(cache.filter(table.clone(), &mut data(), None));
     assert!(
         cloned_cache
-            .acquire_for_misses(&cloned_limiter, table.clone(), data(), &metrics)
+            .acquire_for_misses(&cloned_limiter, table.clone(), data(), (&hits, &misses))
             .await
             .unwrap()
             .is_none()
@@ -294,7 +298,7 @@ async fn test_trace_aux_admission_rechecks_cache() {
         &limiter,
         table,
         trace_aux_data("svc", "other", "server"),
-        &metrics,
+        (&hits, &misses),
     );
     assert!(futures::poll!(Box::pin(other).as_mut()).is_ready());
     assert_eq!((hits.get(), misses.get()), (3, 5));
