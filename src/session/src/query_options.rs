@@ -87,8 +87,9 @@ pub fn parse_query_option(key: &str, value: &str) -> Result<Option<(String, Stri
             }
         }
     } else {
+        let normalized = value.to_ascii_lowercase();
         let mut options = datafusion_common::config::ConfigOptions::default();
-        if let Err(error) = options.set(canonical, value) {
+        if let Err(error) = options.set(canonical, &normalized) {
             return InvalidConfigValueSnafu {
                 name: key,
                 value,
@@ -96,7 +97,7 @@ pub fn parse_query_option(key: &str, value: &str) -> Result<Option<(String, Stri
             }
             .fail();
         }
-        value.to_ascii_lowercase()
+        normalized
     };
     Ok(Some((canonical.to_string(), normalized)))
 }
@@ -111,15 +112,39 @@ mod tests {
             parse_query_option("QUERY_PARALLELISM", "1024").unwrap(),
             Some(("query.parallelism".into(), "1024".into()))
         );
-        assert!(parse_query_option("query.parallelism", "0").is_err());
-        assert!(parse_query_option("query.parallelism", "1025").is_err());
+        assert_eq!(
+            parse_query_option("query.parallelism", "1").unwrap(),
+            Some(("query.parallelism".into(), "1".into()))
+        );
+        for value in ["", "-1", "0", "1025", "65536", "18446744073709551615"] {
+            assert!(parse_query_option("query.parallelism", value).is_err());
+        }
+        assert!(parse_query_option("query.unknown", "true").is_err());
         assert_eq!(
             parse_query_option("query_fallback", "TRUE").unwrap(),
             Some(("query.allow_query_fallback".into(), "true".into()))
         );
         assert!(parse_query_option("query.allow_query_fallback", "yes").is_err());
-        assert!(parse_query_option("datafusion.optimizer.repartition_joins", "nope").is_err());
+        for key in DATAFUSION_OPTIONS {
+            assert_eq!(
+                parse_query_option(key, "TRUE").unwrap(),
+                Some((key.to_string(), "true".to_string())),
+                "{key} should accept uppercase true"
+            );
+            assert_eq!(
+                parse_query_option(key, "FALSE").unwrap(),
+                Some((key.to_string(), "false".to_string())),
+                "{key} should accept uppercase false"
+            );
+            assert!(parse_query_option(key, "yes").is_err(), "{key}");
+        }
         assert!(parse_query_option("datafusion.execution.batch_size", "12").is_err());
+        assert!(parse_query_option("datafusion.optimizer.skip_failed_rules", "true").is_err());
+        assert!(parse_query_option("datafusion.optimizer.filter_null_join_keys", "true").is_err());
+        assert_eq!(
+            parse_query_option("custom.extension", "value").unwrap(),
+            None
+        );
         assert_eq!(
             parse_query_option("flow.return_region_seq", "true").unwrap(),
             None

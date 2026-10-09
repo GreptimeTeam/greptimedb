@@ -831,6 +831,9 @@ mod test {
             .unwrap();
         ctx.set_extension("query_parallelism", "4");
         ctx.set_extension("flow.return_region_seq", "true");
+        let mut expected_extensions = ctx.extensions();
+        expected_extensions.remove("query_parallelism");
+        expected_extensions.insert("query.parallelism".to_string(), "4".to_string());
         let snapshot = ctx.query_option_snapshot().unwrap();
         assert_eq!(snapshot.extension("query.parallelism"), Some("4"));
         assert_eq!(snapshot.extension("query_parallelism"), None);
@@ -839,6 +842,15 @@ mod test {
             .set_query_option("query.parallelism", "16")
             .unwrap();
         assert_eq!(snapshot.extension("query.parallelism"), Some("4"));
+        assert_eq!(
+            snapshot.configuration_parameter().query_options(),
+            HashMap::from([("query.parallelism".to_string(), "8".to_string())])
+        );
+        assert_eq!(
+            snapshot.effective_query_options().unwrap(),
+            HashMap::from([("query.parallelism".to_string(), "4".to_string()),])
+        );
+        assert_eq!(snapshot.extensions(), expected_extensions);
 
         let mut aliases = QueryContextBuilder::default().build();
         aliases.set_extension("query_fallback", "TRUE");
@@ -853,6 +865,125 @@ mod test {
         );
         aliases.set_extension("allow_query_fallback", "false");
         assert!(aliases.query_option_snapshot().is_err());
+
+        let mut ctx = QueryContextBuilder::default().build();
+        ctx.configuration_parameter()
+            .set_query_option("query_fallback", "true")
+            .unwrap();
+        assert_eq!(
+            ctx.effective_query_options()
+                .unwrap()
+                .get("query.allow_query_fallback")
+                .map(String::as_str),
+            Some("true")
+        );
+        ctx.set_extension("query_fallback", "false");
+        assert_eq!(
+            ctx.effective_query_options()
+                .unwrap()
+                .get("query.allow_query_fallback")
+                .map(String::as_str),
+            Some("false")
+        );
+        ctx.set_extension("query_fallback", "true");
+        ctx.configuration_parameter()
+            .set_query_option("query.parallelism", "1")
+            .unwrap();
+        let before = ctx.configuration_parameter().query_options();
+        assert!(
+            ctx.configuration_parameter()
+                .set_query_option("query.parallelism", "1025")
+                .is_err()
+        );
+        assert_eq!(ctx.configuration_parameter().query_options(), before);
+        assert!(
+            ctx.configuration_parameter()
+                .set_query_option("query.parallelism", "")
+                .is_err()
+        );
+        assert_eq!(ctx.configuration_parameter().query_options(), before);
+
+        let absent = QueryContextBuilder::default().build();
+        let mut explicit_false = QueryContextBuilder::default().build();
+        explicit_false.set_extension("query.allow_query_fallback", "false");
+        assert_eq!(
+            absent
+                .effective_query_options()
+                .unwrap()
+                .get("query.allow_query_fallback"),
+            None
+        );
+        assert_eq!(
+            explicit_false
+                .effective_query_options()
+                .unwrap()
+                .get("query.allow_query_fallback")
+                .map(String::as_str),
+            Some("false")
+        );
+    }
+
+    #[test]
+    fn query_option_snapshot_roundtrips_options_and_shares_only_mutable_session_data() {
+        let mut context = QueryContextBuilder::default()
+            .current_catalog(DEFAULT_CATALOG_NAME.to_string())
+            .current_schema("public".to_string())
+            .build();
+        context
+            .configuration_parameter()
+            .set_query_option(
+                "datafusion.optimizer.enable_dynamic_filter_pushdown",
+                "TRUE",
+            )
+            .unwrap();
+        context.set_extension("query_parallelism", "8");
+        context.set_extension("flow.return_region_seq", "true");
+        context.set_extension(REMOTE_QUERY_ID_EXTENSION_KEY, "query-id");
+        context.enable_live_analyze_metrics();
+
+        let snapshot = context.query_option_snapshot().unwrap();
+        let expected_options = snapshot.effective_query_options().unwrap();
+        let expected_extensions = snapshot.extensions();
+        assert_eq!(
+            expected_options
+                .get("datafusion.optimizer.enable_dynamic_filter_pushdown")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            expected_options
+                .get("query.parallelism")
+                .map(String::as_str),
+            Some("8")
+        );
+        assert_eq!(
+            expected_extensions
+                .get("flow.return_region_seq")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            expected_extensions
+                .get(REMOTE_QUERY_ID_EXTENSION_KEY)
+                .map(String::as_str),
+            Some("query-id")
+        );
+        assert!(snapshot.live_analyze_metrics_enabled());
+
+        context.set_current_schema("changed");
+        assert_eq!(snapshot.current_schema(), "changed");
+        let other = QueryContextBuilder::default().build();
+        assert!(!other.extensions().contains_key("query.parallelism"));
+
+        let api_context: api::v1::QueryContext = (&snapshot).into();
+        let restored = QueryContext::from(api_context);
+        let restored_snapshot = restored.query_option_snapshot().unwrap();
+        assert_eq!(
+            restored_snapshot.effective_query_options().unwrap(),
+            expected_options
+        );
+        assert_eq!(restored_snapshot.extensions(), expected_extensions);
+        assert!(restored_snapshot.live_analyze_metrics_enabled());
     }
 
     #[test]
