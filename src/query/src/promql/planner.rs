@@ -21,7 +21,6 @@ mod set_operator;
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
 
 use arrow::datatypes::IntervalDayTime;
 use async_recursion::async_recursion;
