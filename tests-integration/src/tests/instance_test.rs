@@ -354,7 +354,27 @@ ORDER BY r.k"#;
             .await;
         assert_eq!(
             ordered,
-            "+---+------+\n| k | n    |\n+---+------+\n| 0 | 3    |\n| 1 | 3    |\n| 2 | 3    |\n| 3 | 3    |\n| 4 | 3    |\n| 5 | 3    |\n| 6 | 3    |\n| 7 | 3    |\n| 8 | 3    |\n| 9 | 3    |\n| a | 3    |\n| b | 3    |\n| c | 3    |\n| d | 3    |\n| e | 3    |\n| f | 3    |\n| z | NULL |\n+---+------+"
+            r#"+---+---+
+| k | n |
++---+---+
+| 0 | 3 |
+| 1 | 3 |
+| 2 | 3 |
+| 3 | 3 |
+| 4 | 3 |
+| 5 | 3 |
+| 6 | 3 |
+| 7 | 3 |
+| 8 | 3 |
+| 9 | 3 |
+| a | 3 |
+| b | 3 |
+| c | 3 |
+| d | 3 |
+| e | 3 |
+| f | 3 |
+| z |   |
++---+---+"#
         );
 
         let pruned_sql = r#"SELECT count(*) roots, count(c.n) roots_with_children, sum(c.n) children
