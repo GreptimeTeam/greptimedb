@@ -1416,6 +1416,59 @@ async fn export_http(instance: Arc<Instance>) -> (String, tokio::task::JoinHandl
     (addr, task)
 }
 
+#[derive(Default)]
+struct ImportRequests {
+    batches: std::sync::atomic::AtomicUsize,
+    fail_batch: std::sync::atomic::AtomicBool,
+    capabilities: std::sync::atomic::AtomicUsize,
+}
+
+async fn import_http(
+    instance: Arc<Instance>,
+    older: bool,
+) -> (String, tokio::task::JoinHandle<()>, Arc<ImportRequests>) {
+    use axum::response::IntoResponse;
+    use std::sync::atomic::Ordering;
+    let requests = Arc::new(ImportRequests::default());
+    requests.fail_batch.store(!older, Ordering::SeqCst);
+    let observed = requests.clone();
+    let server = servers::http::HttpServerBuilder::new(Default::default())
+        .with_sql_handler(instance)
+        .build();
+    let app = server
+        .build(server.make_app())
+        .unwrap()
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let observed = observed.clone();
+                async move {
+                    let batch = request.uri().path() == "/v1/ddl/logical-tables";
+                    if request.uri().path() == "/v1/capabilities" {
+                        observed.capabilities.fetch_add(1, Ordering::SeqCst);
+                        if older {
+                            return axum::http::StatusCode::NOT_FOUND.into_response();
+                        }
+                    }
+                    if batch {
+                        observed.batches.fetch_add(1, Ordering::SeqCst);
+                    }
+                    let response = next.run(request).await;
+                    if batch && observed.fail_batch.swap(false, Ordering::SeqCst) {
+                        assert!(response.status().is_success());
+                        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    }
+                    response
+                }
+            },
+        ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (addr, task, requests)
+}
+
 struct FailSecondChunk {
     fail: std::sync::atomic::AtomicBool,
     copies: std::sync::atomic::AtomicUsize,
@@ -1451,7 +1504,12 @@ impl servers::interceptor::SqlQueryInterceptor for FailSecondChunk {
 
 #[tokio::test]
 async fn metric_export_v2_cli_resume_roundtrip() {
-    metric_export_v2_cli_roundtrip(false, false).await;
+    metric_export_v2_cli_roundtrip(false, false, false).await;
+}
+
+#[tokio::test]
+async fn metric_import_v2_older_target_roundtrip() {
+    metric_export_v2_cli_roundtrip(false, false, true).await;
 }
 
 #[tokio::test]
@@ -1461,13 +1519,13 @@ async fn metric_export_v2_cli_s3_resume_roundtrip() {
     if std::env::var("GT_S3_ENDPOINT_URL").is_ok_and(|e| !e.is_empty())
         && std::env::var("GT_S3_BUCKET").is_ok_and(|b| !b.is_empty())
     {
-        metric_export_v2_cli_roundtrip(true, false).await;
+        metric_export_v2_cli_roundtrip(true, false, false).await;
     }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn packed_export_v2_cli_local_roundtrip() {
-    metric_export_v2_cli_roundtrip(false, true).await;
+    metric_export_v2_cli_roundtrip(false, true, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1475,7 +1533,7 @@ async fn packed_export_v2_cli_s3_roundtrip() {
     if std::env::var("GT_S3_ENDPOINT_URL").is_ok_and(|e| !e.is_empty())
         && std::env::var("GT_S3_BUCKET").is_ok_and(|b| !b.is_empty())
     {
-        metric_export_v2_cli_roundtrip(true, true).await;
+        metric_export_v2_cli_roundtrip(true, true, false).await;
     }
 }
 
@@ -1508,7 +1566,7 @@ async fn exported_table_path(
     )
 }
 
-async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool) {
+async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
     use servers::interceptor::SqlQueryInterceptorRef;
     let plugins = common_base::Plugins::new();
     let faults = Arc::new(FailSecondChunk {
@@ -1541,6 +1599,20 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool) {
     .await;
     sql(instance, "INSERT INTO audit VALUES ('a',1,1),('z',NULL,3)").await;
     sql(instance, "CREATE VIEW dashboard AS SELECT * FROM audit").await;
+    let special_name = "audit.dashboard";
+    let quoted_special = special_name.replace('"', "\"\"");
+    sql(
+        instance,
+        &format!("CREATE VIEW \"{quoted_special}\" AS SELECT * FROM audit"),
+    )
+    .await;
+    if packed && !s3 {
+        for id in 0..128 {
+            let name = format!("batch_{id:03}");
+            sql(instance, &format!("CREATE TABLE {name} (host STRING PRIMARY KEY, val DOUBLE, ts TIMESTAMP TIME INDEX) ENGINE=metric WITH (on_physical_table='v2_a')")).await;
+            names.push(name);
+        }
+    }
     sql(instance, "CREATE DATABASE z_later").await;
     if packed {
         sql(instance, "CREATE DATABASE empty_schema").await;
@@ -1573,6 +1645,21 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool) {
         names.push("bulk".into());
     }
     let (addr, server) = export_http(instance.clone()).await;
+    if packed && !s3 {
+        let client = cli::DatabaseClient::new(
+            addr.clone(),
+            "greptime".into(),
+            None,
+            std::time::Duration::from_secs(60),
+            None,
+            true,
+        );
+        let error = client.sql_in_public(
+            "SHOW CREATE TABLE audit; SHOW CREATE TABLE missing_middle; SHOW CREATE VIEW dashboard"
+        ).await.unwrap_err();
+        assert!(error.to_string().contains("SQL request failed"), "{error}");
+    }
+
     let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
     for experimental in [false, true] {
         for layout in ["packed", "invalid"] {
@@ -1835,7 +1922,8 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool) {
         )
         .await;
     }
-    let (target_addr, target_server) = export_http(target.fe_instance().clone()).await;
+    let (target_addr, target_server, requests) =
+        import_http(target.fe_instance().clone(), older).await;
     let state = destination.path().join("restore-state.json");
     let mut import = vec![
         "import-v2",
@@ -1850,7 +1938,29 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool) {
         "never",
     ];
     import.extend(storage_args.iter().map(String::as_str));
+    use std::sync::atomic::Ordering;
+    if !older {
+        assert!(run_data_cli(&import).await.is_err());
+        assert_eq!(requests.batches.load(Ordering::SeqCst), 1);
+        assert_eq!(requests.capabilities.load(Ordering::SeqCst), 1);
+        let failed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+        assert_eq!(failed["ddl_completed"], false);
+        assert!(
+            failed["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|t| t["status"] == "pending")
+        );
+    }
     run_data_cli(&import).await.unwrap();
+    assert_eq!(
+        requests.capabilities.load(Ordering::SeqCst),
+        if older { 1 } else { 2 }
+    );
+    assert_eq!(requests.batches.load(Ordering::SeqCst) > 1, !older);
+    assert!(!state.exists());
     for name in names {
         let source_table = table(instance, &name).await;
         let target_table = table(target.fe_instance(), &name).await;
@@ -1876,6 +1986,23 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool) {
         )
         .await
     );
+    for view in ["dashboard", special_name] {
+        let query = format!(
+            "SELECT * FROM \"{}\" ORDER BY ts,host",
+            view.replace('"', "\"\"")
+        );
+        assert_eq!(
+            values(instance, &query).await,
+            values(target.fe_instance(), &query).await
+        );
+        assert_eq!(
+            table(instance, view).await.schema().column_schemas(),
+            table(target.fe_instance(), view)
+                .await
+                .schema()
+                .column_schemas()
+        );
+    }
     if packed {
         let schema_uri = format!("{uri}/schema-only");
         let mut schema_args = vec![
@@ -1908,6 +2035,42 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool) {
         assert!(schema_manifest.schema_only && schema_manifest.chunks.is_empty());
         assert_eq!(schema_manifest.version, 1);
         assert!(schema_manifest.data_layout.is_none());
+        let schema_target = GreptimeDbStandaloneBuilder::new("schema_only_target")
+            .build()
+            .await;
+        let (schema_addr, schema_server, schema_requests) =
+            import_http(schema_target.fe_instance().clone(), false).await;
+        schema_requests.fail_batch.store(false, Ordering::SeqCst);
+        let schema_state = destination.path().join("schema-only-state.json");
+        let mut schema_import = vec![
+            "import-v2",
+            "--addr",
+            &schema_addr,
+            "--from",
+            &schema_uri,
+            "--state-path",
+            schema_state.to_str().unwrap(),
+            "--no-proxy",
+            "--progress",
+            "never",
+        ];
+        schema_import.extend(storage_args.iter().map(String::as_str));
+        let probes = schema_requests.capabilities.load(Ordering::SeqCst);
+        schema_import.push("--dry-run");
+        run_data_cli(&schema_import).await.unwrap();
+        assert_eq!(schema_requests.capabilities.load(Ordering::SeqCst), probes);
+        schema_import.pop();
+        let batches = schema_requests.batches.load(Ordering::SeqCst);
+        run_data_cli(&schema_import).await.unwrap();
+        assert!(schema_requests.batches.load(Ordering::SeqCst) > batches);
+        assert!(!schema_state.exists());
+        assert!(
+            values(schema_target.fe_instance(), "SELECT * FROM dashboard")
+                .await
+                .is_empty()
+        );
+        schema_server.abort();
+        let _ = schema_server.await;
     }
     server.abort();
     target_server.abort();

@@ -38,7 +38,7 @@ use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::datasource::{MemTable, provider_as_source};
 use datafusion::execution::context::SessionContext;
-use datafusion::logical_expr::Extension;
+use datafusion::logical_expr::{Extension, col};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use promql::extension_plan::HistogramFold;
@@ -1212,8 +1212,10 @@ fn classic_and_native_histogram_table_provider(
     let table_name = "mixed_histogram";
     let catalog = MemoryCatalogManager::with_default_setup();
     let schema = Arc::new(Schema::new(vec![
+        // A dotted tag name guards the mixed histogram_quantile projection
+        // against qualified-name parsing (#9390).
         ColumnSchema::new(
-            "tag".to_string(),
+            "service.name".to_string(),
             ConcreteDataType::string_datatype(),
             false,
         ),
@@ -1699,12 +1701,13 @@ async fn single_timestamp_plan_preserves_source_value() {
         "Filter: value IS NOT NULL [timestamp:Timestamp(ms), value:Float64, tag_0:Utf8]\
             \n  Projection: some_metric.timestamp, value AS value, some_metric.tag_0 [timestamp:Timestamp(ms), value:Float64, tag_0:Utf8]\
             \n    Projection: some_metric.timestamp, __promql_timestamp_value_ AS value, some_metric.tag_0 [timestamp:Timestamp(ms), value:Float64, tag_0:Utf8]\
-            \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_timestamp_value_:Float64]\
-            \n        Projection: some_metric.tag_0, some_metric.timestamp, some_metric.field_0, CAST(CAST(CAST(CAST(some_metric.timestamp AS Int64) AS Decimal128(19, 0)) * Decimal128(1,1,0) + Decimal128(0,19,0) AS Int64) AS Float64) / Float64(1000) AS __promql_timestamp_value_ [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_timestamp_value_:Float64]\
-            \n          PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
-            \n            Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
-            \n              Filter: some_metric.tag_0 != Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
-            \n                TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]",
+            \n      Filter: some_metric.field_0 IS NOT NULL [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_timestamp_value_:Float64]\
+            \n        PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_timestamp_value_:Float64]\
+            \n          Projection: some_metric.tag_0, some_metric.timestamp, some_metric.field_0, CAST(CAST(some_metric.timestamp AS Int64) AS Float64) / Float64(1000) AS __promql_timestamp_value_ [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_timestamp_value_:Float64]\
+            \n            PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n              Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n                Filter: some_metric.tag_0 != Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n                  TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]",
     );
 
     assert_eq!(plan.display_indent_schema().to_string(), expected);
@@ -2413,9 +2416,9 @@ async fn at_modifier_keeps_multi_series_roots_out_of_promoted_subtree() {
 async fn at_modifier_does_not_promote_label_join() {
     for query in [
         // Directly above the anchored instant selector...
-        "label_join(some_metric @ 300, \"tag_0\", \"-\", \"\")",
+        "label_join(some_metric @ 300, \"tag_0\", \"-\", \"tag_0\", \"tag_0\")",
         // ... and below another call, which is planned as usual over the join.
-        "abs(label_join(some_metric @ 300, \"tag_0\", \"-\", \"\"))",
+        "abs(label_join(some_metric @ 300, \"tag_0\", \"-\", \"tag_0\", \"tag_0\"))",
     ] {
         let plan = build_at_modifier_plan(query, 0, 1000).await;
         let plan_str = plan.display_indent_schema().to_string();
@@ -2448,7 +2451,7 @@ async fn at_modifier_does_not_promote_label_join() {
     // A range call below the join is still promoted on its own: the anchored window is folded
     // once per series, and the join above it is evaluated at every step over that replay.
     let plan = build_at_modifier_plan(
-        "label_join(rate(some_metric[5m] @ 300), \"tag_0\", \"-\", \"\")",
+        "label_join(rate(some_metric[5m] @ 300), \"tag_0\", \"-\", \"tag_0\", \"tag_0\")",
         0,
         1000,
     )
@@ -4388,7 +4391,7 @@ async fn mixed_histogram_helpers_execute_classic_and_native_samples() {
             .iter()
             .flat_map(|batch| {
                 let tags = batch
-                    .column_by_name("tag")
+                    .column_by_name("service.name")
                     .unwrap()
                     .as_any()
                     .downcast_ref::<StringArray>()
@@ -5131,6 +5134,605 @@ async fn count_over_time_subquery_with_offset() {
         \n                    TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]",
     );
     indie_query_plan_compare(query, expected).await;
+}
+
+/// Time-varying samples on and off the subquery step grid expose incorrect window folding.
+async fn build_subquery_offset_probe_provider() -> DfTableSourceProvider {
+    let catalog_list = MemoryCatalogManager::with_default_setup();
+    let probe_rows = (0..=6_i64)
+        .map(|step| (step * 10_000, (step + 1) as f64))
+        .collect::<Vec<_>>();
+    let offgrid_rows = (0..6_i64)
+        .map(|step| (step * 10_000 + 5_000, (step + 1) as f64))
+        .collect::<Vec<_>>();
+
+    for (table_id, name, rows) in [
+        (7_001_u32, "subquery_offset_probe", &probe_rows),
+        (7_002_u32, "subquery_offset_offgrid", &offgrid_rows),
+    ] {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "host".to_string(),
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                "timestamp".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new(
+                "val".to_string(),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.arrow_schema().clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["a"; rows.len()])),
+                Arc::new(TimestampMillisecondArray::from_iter_values(
+                    rows.iter().map(|(ts, _)| *ts),
+                )),
+                Arc::new(Float64Array::from_iter_values(
+                    rows.iter().map(|(_, value)| *value),
+                )),
+            ],
+        )
+        .unwrap();
+        let backing = GreptimeMemTable::new_with_catalog(
+            name,
+            GreptimeRecordBatch::from_df_record_batch(schema.clone(), batch),
+            table_id,
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+        );
+        let table_meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .value_indices(vec![2])
+            .next_column_id(3)
+            .build()
+            .unwrap();
+        let table_info = Arc::new(
+            TableInfoBuilder::default()
+                .table_id(table_id)
+                .name(name)
+                .meta(table_meta)
+                .build()
+                .unwrap(),
+        );
+        let table = Arc::new(Table::new(
+            table_info,
+            FilterPushDownType::Unsupported,
+            backing.data_source(),
+        ));
+        assert!(
+            catalog_list
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: name.to_string(),
+                    table_id,
+                    table,
+                })
+                .is_ok()
+        );
+    }
+
+    DfTableSourceProvider::new(
+        catalog_list,
+        false,
+        QueryContext::arc(),
+        DummyDecoder::arc(),
+        false,
+    )
+}
+
+/// Plans on a seconds-based evaluation grid.
+async fn plan_subquery_offset_probe(
+    query: &str,
+    start: u64,
+    end: u64,
+    step: u64,
+) -> Result<LogicalPlan> {
+    let eval_stmt = EvalStmt {
+        expr: parser::parse(query).unwrap(),
+        start: UNIX_EPOCH + Duration::from_secs(start),
+        end: UNIX_EPOCH + Duration::from_secs(end),
+        interval: Duration::from_secs(step),
+        lookback_delta: Duration::from_secs(300),
+    };
+    PromPlanner::stmt_to_plan(
+        build_subquery_offset_probe_provider().await,
+        &eval_stmt,
+        &build_query_engine_state(),
+    )
+    .await
+}
+
+/// Evaluates seconds-based bounds and returns sorted `(timestamp_ms, value)` rows.
+async fn run_subquery_offset_probe(
+    query: &str,
+    start: u64,
+    end: u64,
+    step: u64,
+) -> Vec<(i64, f64)> {
+    let state = build_query_engine_state();
+    let plan = plan_subquery_offset_probe(query, start, end, step)
+        .await
+        .unwrap();
+
+    let (_, batches) = execute(plan, &state).await;
+    let mut rows = Vec::new();
+    for batch in &batches {
+        let timestamp_index = batch
+            .schema()
+            .fields()
+            .iter()
+            .position(|field| matches!(field.data_type(), ArrowDataType::Timestamp(..)))
+            .expect("no timestamp column");
+        let value_index = batch
+            .schema()
+            .fields()
+            .iter()
+            .position(|field| field.data_type() == &ArrowDataType::Float64)
+            .expect("no Float64 value column");
+        let timestamps = batch
+            .column(timestamp_index)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("timestamp column is not a millisecond timestamp");
+        let values = batch
+            .column(value_index)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("value column is not Float64");
+        rows.extend(
+            timestamps
+                .iter()
+                .zip(values.iter())
+                .map(|(timestamp, value)| (timestamp.unwrap(), value.unwrap())),
+        );
+    }
+    rows.sort_by_key(|(timestamp, _)| *timestamp);
+    rows
+}
+
+#[tokio::test]
+async fn subquery_own_offset_shifts_the_inner_window_but_keeps_evaluation_timestamps() {
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_probe[20s:10s] offset 30s)",
+            45,
+            45,
+            1
+        )
+        .await,
+        vec![(45_000, 3.0)],
+    );
+    assert_eq!(
+        run_subquery_offset_probe("sum_over_time(subquery_offset_probe[20s:10s])", 15, 15, 1).await,
+        vec![(15_000, 3.0)],
+    );
+
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_probe[20s:10s] offset 30s)",
+            30,
+            60,
+            30
+        )
+        .await,
+        vec![(30_000, 1.0), (60_000, 7.0)],
+    );
+    assert_eq!(
+        run_subquery_offset_probe("sum_over_time(subquery_offset_probe[20s:10s])", 0, 30, 30).await,
+        vec![(0, 1.0), (30_000, 7.0)],
+    );
+
+    // Negative offsets look ahead while retaining outer timestamps.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_probe[20s:10s] offset -30s)",
+            0,
+            30,
+            30
+        )
+        .await,
+        vec![(0, 7.0), (30_000, 13.0)],
+    );
+    assert_eq!(
+        run_subquery_offset_probe("sum_over_time(subquery_offset_probe[20s:10s])", 30, 60, 30)
+            .await,
+        vec![(30_000, 7.0), (60_000, 13.0)],
+    );
+}
+
+/// Expectations match Prometheus v3.14.0.
+#[tokio::test]
+async fn subquery_inner_points_are_anchored_on_absolute_step_multiples() {
+    assert_eq!(
+        run_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[20s:10s])", 45, 45, 1)
+            .await,
+        vec![(45_000, 7.0)],
+    );
+
+    // An off-grid offset distinguishes absolute anchoring from re-phasing.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s] offset 5s)",
+            30,
+            30,
+            1
+        )
+        .await,
+        vec![(30_000, 3.0)],
+    );
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s] offset 5s)",
+            45,
+            45,
+            1
+        )
+        .await,
+        vec![(45_000, 7.0)],
+    );
+
+    // The window starts before the first sample.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s] offset 15s)",
+            30,
+            30,
+            1
+        )
+        .await,
+        vec![(30_000, 1.0)],
+    );
+
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s] offset -5s)",
+            15,
+            15,
+            1
+        )
+        .await,
+        vec![(15_000, 3.0)],
+    );
+
+    // The negative grid start exercises Euclidean alignment.
+    assert_eq!(
+        run_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[40s:10s])", 15, 15, 1)
+            .await,
+        vec![(15_000, 1.0)],
+    );
+
+    // Multi-step evaluation starts off the subquery grid.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s])",
+            35,
+            65,
+            30
+        )
+        .await,
+        vec![(35_000, 5.0), (65_000, 11.0)],
+    );
+
+    // Child points reach no sample at the first evaluation.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s] offset 30s)",
+            30,
+            60,
+            30
+        )
+        .await,
+        vec![(60_000, 5.0)],
+    );
+}
+
+#[test]
+fn subquery_child_window_is_the_child_grid_window() {
+    let child_window = PromPlanner::subquery_child_window;
+    // Exclusive lower bound; upper bound is the last parent evaluation step.
+    assert_eq!(
+        child_window(30_000, 60_000, 10_000, 0, 20_000, 10_000).unwrap(),
+        Some((20_000, 60_000))
+    );
+    assert_eq!(
+        child_window(45_000, 60_000, 10_000, 0, 20_000, 10_000).unwrap(),
+        Some((30_000, 55_000))
+    );
+    assert_eq!(
+        child_window(25_000, 60_000, 10_000, 0, 20_000, 10_000).unwrap(),
+        Some((10_000, 55_000))
+    );
+    assert_eq!(
+        child_window(35_000, 65_000, 30_000, 0, 20_000, 10_000).unwrap(),
+        Some((20_000, 65_000))
+    );
+    assert_eq!(
+        child_window(0, 55_000, 30_000, 0, 20_000, 10_000).unwrap(),
+        Some((-10_000, 30_000))
+    );
+    // A nonempty child window can contribute no parent rows.
+    assert_eq!(
+        child_window(35_000, 65_000, 10_000, 0, 5_000, 10_000).unwrap(),
+        Some((40_000, 65_000))
+    );
+    // The first child point is past the parent’s last evaluation.
+    assert_eq!(
+        child_window(35_000, 44_000, 10_000, 0, 5_000, 10_000).unwrap(),
+        None
+    );
+    assert_eq!(
+        child_window(30_000, 30_000, 1_000, 5_000, 20_000, 10_000).unwrap(),
+        Some((10_000, 25_000))
+    );
+    assert_eq!(
+        child_window(15_000, 15_000, 1_000, -5_000, 20_000, 10_000).unwrap(),
+        Some((10_000, 20_000))
+    );
+    // Boundaries before the epoch floor towards minus infinity.
+    assert_eq!(
+        child_window(-15_000, -15_000, 1_000, 0, 20_000, 10_000).unwrap(),
+        Some((-30_000, -15_000))
+    );
+    assert_eq!(
+        child_window(-45_000, -45_000, 1_000, -10_000, 20_000, 10_000).unwrap(),
+        Some((-50_000, -35_000))
+    );
+    // A grid start before the first sample is not clamped to it.
+    assert_eq!(
+        child_window(0, 0, 1_000, 0, 20_000, 10_000).unwrap(),
+        Some((-10_000, 0))
+    );
+    // A zero parent interval leaves the upper bound unaligned.
+    assert_eq!(
+        child_window(0, 55_000, 0, 0, 20_000, 10_000).unwrap(),
+        Some((-10_000, 55_000))
+    );
+
+    // Only the derived start overflows.
+    let err = child_window(i64::MIN + 1_000, i64::MIN + 1_000, 1_000, 0, 2_000, 10).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::promql::error::Error::SubqueryTimestampOutOfRange { timestamp, .. }
+                if timestamp.contains("grid start") && timestamp.contains("-9223372036854776800")
+        ),
+        "{err}"
+    );
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err}");
+    // Only the derived end overflows.
+    let err = child_window(i64::MAX - 1_000, i64::MAX - 1_000, 1, -2_000, 3_000, 10).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::promql::error::Error::SubqueryTimestampOutOfRange { timestamp, .. }
+                if timestamp.contains("grid end") && timestamp.contains("9223372036854776807")
+        ),
+        "{err}"
+    );
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err}");
+    // The wide window is nonempty even though its start overflows.
+    let err = child_window(i64::MIN, i64::MAX, 10_000, i64::MAX, i64::MAX, 1_000).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::promql::error::Error::SubqueryTimestampOutOfRange { timestamp, .. }
+                if timestamp.contains("grid start")
+        ),
+        "{err}"
+    );
+    // Both derived bounds overflow; report the exact start without clipping.
+    let err = child_window(i64::MAX - 1_000, i64::MAX - 1_000, 1, i64::MIN, 10, 1).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::promql::error::Error::SubqueryTimestampOutOfRange { timestamp, .. }
+                if timestamp.contains("grid start")
+                    && timestamp.contains("18446744073709550606")
+        ),
+        "{err}"
+    );
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err}");
+    // Check emptiness before converting overflowing bounds.
+    assert_eq!(
+        child_window(i64::MAX, i64::MAX, 1_000, i64::MIN, 0, 1_000).unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn subquery_child_window_without_a_step_reports_no_row() {
+    // The first child point is after the parent’s only evaluation.
+    assert_eq!(
+        run_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[5s:10s])", 35, 44, 10)
+            .await,
+        vec![],
+    );
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[5s:10s]) or vector(1)",
+            35,
+            44,
+            10
+        )
+        .await,
+        vec![(35_000, 1.0)],
+    );
+    // Multi-step: every step of the grid reports no child point and falls back.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[5s:10s]) or vector(1)",
+            35,
+            65,
+            10
+        )
+        .await,
+        vec![(35_000, 1.0), (45_000, 1.0), (55_000, 1.0), (65_000, 1.0)],
+    );
+    // A nonempty child grid can yield no parent rows; a longer range does.
+    assert_eq!(
+        run_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[5s:10s])", 35, 65, 10)
+            .await,
+        vec![],
+    );
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s])",
+            35,
+            65,
+            10
+        )
+        .await,
+        vec![(35_000, 5.0), (45_000, 7.0), (55_000, 9.0), (65_000, 11.0)],
+    );
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s] offset 5s)",
+            35,
+            65,
+            10
+        )
+        .await,
+        vec![(35_000, 5.0), (45_000, 7.0), (55_000, 9.0), (65_000, 11.0)],
+    );
+    // A negative offset makes the short window reach a child point.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[5s:10s] offset -5s)",
+            35,
+            44,
+            10
+        )
+        .await,
+        vec![(35_000, 4.0)],
+    );
+
+    // An empty outer window suppresses inner results, but not an outer fallback.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time((sum_over_time(subquery_offset_offgrid[5s:10s]))[5s:10s])",
+            35,
+            44,
+            10
+        )
+        .await,
+        vec![],
+    );
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time((sum_over_time(subquery_offset_offgrid[5s:10s]))[5s:10s]) or vector(1)",
+            35,
+            44,
+            10
+        )
+        .await,
+        vec![(35_000, 1.0)],
+    );
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time((sum_over_time(subquery_offset_offgrid[5s:10s]) or vector(1))[5s:10s])",
+            35,
+            44,
+            10
+        )
+        .await,
+        vec![],
+    );
+}
+
+#[tokio::test]
+async fn subquery_rejects_invalid_range_and_zero_step() {
+    let err =
+        plan_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[5s:10s])", 44, 35, 10)
+            .await
+            .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::promql::error::Error::InvalidTimeRange {
+                start: 44_000,
+                end: 35_000,
+                ..
+            }
+        ),
+        "{err}"
+    );
+    let err = plan_subquery_offset_probe(
+        "sum_over_time((sum_over_time(subquery_offset_offgrid[5s:10s]))[5s:10s])",
+        44,
+        35,
+        10,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err}");
+
+    // `[5s:0]` parses to zero; planning rejects it.
+    let err = plan_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[5s:0])", 60, 60, 1)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, crate::promql::error::Error::ZeroRangeSelector { .. }),
+        "{err}"
+    );
+    // An omitted child step inherits the zero parent step.
+    let err = plan_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[5s:])", 60, 60, 0)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, crate::promql::error::Error::ZeroRangeSelector { .. }),
+        "{err}"
+    );
+}
+
+/// Rejects nonempty child windows whose derived millisecond bounds are unrepresentable.
+#[tokio::test]
+async fn subquery_rejects_a_child_window_out_of_the_representable_range() {
+    // Offset is i64::MAX milliseconds; only the derived start overflows.
+    let err = plan_subquery_offset_probe(
+        "sum_over_time(subquery_offset_offgrid[21366776s:10s] offset 292471208y21366775s807ms)",
+        0,
+        60,
+        10,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::promql::error::Error::SubqueryTimestampOutOfRange { timestamp, .. }
+                if timestamp.contains("grid start = -9223372058221550000")
+        ),
+        "{err}"
+    );
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err}");
+    // Offset is -i64::MAX milliseconds; only the derived end overflows.
+    let err = plan_subquery_offset_probe(
+        "sum_over_time(subquery_offset_offgrid[20s:10s] offset -292471208y21366775s807ms)",
+        0,
+        60,
+        10,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::promql::error::Error::SubqueryTimestampOutOfRange { timestamp, .. }
+                if timestamp.contains("grid end = 9223372036854835807")
+        ),
+        "{err}"
+    );
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err}");
 }
 
 #[tokio::test]
@@ -5902,7 +6504,7 @@ async fn test_label_join() {
 
     let expected = r#"
 Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8]
-  Projection: up.timestamp, up.field_0, concat_ws(Utf8(","), up.tag_1, up.tag_2, up.tag_3) AS foo, up.tag_0, up.tag_1, up.tag_2, up.tag_3 [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8]
+  Projection: up.timestamp, up.field_0, nullif(concat_ws(Utf8(","), coalesce(up.tag_1, Utf8("")), coalesce(up.tag_2, Utf8("")), coalesce(up.tag_3, Utf8(""))), Utf8("")) AS foo, up.tag_0, up.tag_1, up.tag_2, up.tag_3 [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8]
     PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
       PromSeriesDivide: tags=["tag_0", "tag_1", "tag_2", "tag_3"] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
         Sort: up.tag_0 ASC NULLS FIRST, up.tag_1 ASC NULLS FIRST, up.tag_2 ASC NULLS FIRST, up.tag_3 ASC NULLS FIRST, up.timestamp ASC NULLS FIRST [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
@@ -5937,7 +6539,7 @@ async fn test_label_replace() {
 
     let expected = r#"
 Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8]
-  Projection: up.timestamp, up.field_0, regexp_replace(up.tag_0, Utf8("^(?s:(.*):.*)$"), Utf8("$1")) AS foo, up.tag_0 [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8]
+  Projection: up.timestamp, up.field_0, CASE WHEN regexp_like(coalesce(up.tag_0, Utf8("")), Utf8("^(?s:(.*):.*)$")) THEN nullif(regexp_replace(coalesce(up.tag_0, Utf8("")), Utf8("^(?s:(.*):.*)$"), Utf8("$1")), Utf8("")) ELSE Utf8(NULL) END AS foo, up.tag_0 [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8]
     PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
       PromSeriesDivide: tags=["tag_0"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
         Sort: up.tag_0 ASC NULLS FIRST, up.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]

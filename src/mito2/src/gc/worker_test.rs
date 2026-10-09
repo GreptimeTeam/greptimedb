@@ -518,13 +518,9 @@ async fn write_and_list_entry(store: &ObjectStore, path: &str) -> Entry {
         .await
         .unwrap();
     // List the parent directory to get the entry.
-    let parent = std::path::Path::new(path).parent().and_then(|p| {
-        if p.as_os_str().is_empty() {
-            None
-        } else {
-            Some(p)
-        }
-    });
+    let parent = std::path::Path::new(path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty());
     let prefix = match parent {
         Some(p) => format!("{}/", p.to_str().unwrap()),
         None => String::new(), // root

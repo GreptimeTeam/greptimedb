@@ -48,7 +48,7 @@ use datafusion::functions_window::row_number::RowNumber;
 use datafusion::logical_expr::expr::{Alias, ScalarFunction, WindowFunction};
 use datafusion::logical_expr::expr_rewriter::normalize_cols;
 use datafusion::logical_expr::{
-    BinaryExpr, Cast, Extension, LogicalPlan, LogicalPlanBuilder, Operator,
+    BinaryExpr, Cast, EmptyRelation, Extension, LogicalPlan, LogicalPlanBuilder, Operator,
     ScalarUDF as ScalarUdfDef, WindowFrame, WindowFunctionDefinition, scalar_subquery,
 };
 use datafusion::prelude as df_prelude;
@@ -58,7 +58,7 @@ use datafusion_common::{DFSchema, NullEquality, TableReference};
 use datafusion_expr::expr::WindowFunctionParams;
 use datafusion_expr::expr_fn::when;
 use datafusion_expr::utils::{conjunction, disjunction};
-use datafusion_expr::{ExprSchemable, Literal, SortExpr, TableSource, col, lit};
+use datafusion_expr::{ExprSchemable, Literal, SortExpr, TableSource, ident, lit};
 use datafusion_functions::core::coalesce;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
 use datatypes::data_type::{ConcreteDataType, DataType as GreptimeDataType};
@@ -107,9 +107,10 @@ use crate::promql::error::{
     CatalogSnafu, ColumnNotFoundSnafu, DataFusionPlanningSnafu, ExpectRangeSelectorSnafu,
     FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu, InvalidRegularExpressionSnafu,
     InvalidTimeRangeSnafu, MultiFieldsNotSupportedSnafu, MultipleMetricMatchersSnafu,
-    MultipleVectorSnafu, NoMetricMatcherSnafu, Result, SameLabelSetSnafu, TableNameNotFoundSnafu,
-    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
-    UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    MultipleVectorSnafu, NoMetricMatcherSnafu, Result, SubqueryTimestampOutOfRangeSnafu,
+    TableNameNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu,
+    UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, ValueNotFoundSnafu,
+    ZeroRangeSelectorSnafu,
 };
 use crate::query_engine::QueryEngineState;
 
@@ -427,9 +428,7 @@ impl PromPlanner {
             ..
         } = subquery_expr;
 
-        // Prometheus evaluates the inner expression over `(start - offset - range, end - offset]`
-        // (`subqueryTimeRange`). Shift the inner window back here; `RangeManipulate` maps the
-        // samples forward again by the same offset.
+        // Shift the child window back; `RangeManipulate` restores the outer timeline.
         let offset_ms = match offset {
             Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
             Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
@@ -440,14 +439,42 @@ impl PromPlanner {
         if let Some(step) = step {
             self.ctx.interval = step.as_millis() as _;
         }
+        ensure!(self.ctx.interval > 0, ZeroRangeSelectorSnafu);
         let current_start = self.ctx.start;
         let current_end = self.ctx.end;
-        self.ctx.start -= offset_ms + range.as_millis() as i64 - self.ctx.interval;
-        self.ctx.end -= offset_ms;
+        // Reject an invalid parent window rather than treating it as empty.
+        ensure!(
+            current_start <= current_end,
+            InvalidTimeRangeSnafu {
+                start: current_start,
+                end: current_end,
+            }
+        );
+        // An empty child needs only its schema; plan it over the valid caller window.
+        let child_window = Self::subquery_child_window(
+            current_start,
+            current_end,
+            current_interval,
+            offset_ms,
+            range.as_millis() as Millisecond,
+            self.ctx.interval,
+        )?;
+        if let Some((child_start, child_end)) = child_window {
+            self.ctx.start = child_start;
+            self.ctx.end = child_end;
+        }
         let input = self.prom_expr_to_plan(expr, query_engine_state).await?;
         self.ctx.interval = current_interval;
         self.ctx.start = current_start;
         self.ctx.end = current_end;
+        // Return no rows with the child schema so enclosing fallbacks still work.
+        let input = match child_window {
+            Some(_) => input,
+            None => LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: input.schema().clone(),
+            }),
+        };
 
         ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
         let range_ms = range.as_millis() as _;
@@ -695,7 +722,7 @@ impl PromPlanner {
                         .cloned()
                         .chain(prev_field_exprs.clone())
                         .collect::<Vec<_>>();
-                    group_exprs.push(col(label));
+                    group_exprs.push(ident(label));
                     let project_fields = self
                         .create_field_column_exprs()?
                         .into_iter()
@@ -815,10 +842,10 @@ impl PromPlanner {
                     ),
                     self.promql_annotations.clone(),
                 )),
-                args: vec![col(&histogram_column)],
+                args: vec![ident(&histogram_column)],
             });
-            let keep_float = when(col(&histogram_column).is_not_null(), drop_histogram)
-                .otherwise(col(&float_column).is_not_null())
+            let keep_float = when(ident(&histogram_column).is_not_null(), drop_histogram)
+                .otherwise(ident(&float_column).is_not_null())
                 .context(DataFusionPlanningSnafu)?;
             input = LogicalPlanBuilder::from(input)
                 .filter(keep_float)
@@ -869,7 +896,7 @@ impl PromPlanner {
             .iter()
             .fold(None, |expr, rank| {
                 let predicate = DfExpr::BinaryExpr(BinaryExpr {
-                    left: Box::new(col(rank)),
+                    left: Box::new(ident(rank)),
                     op: Operator::LtEq,
                     right: Box::new(val.clone()),
                 });
@@ -885,7 +912,7 @@ impl PromPlanner {
             })
             .unwrap();
 
-        let rank_columns: Vec<_> = rank_columns.into_iter().map(col).collect();
+        let rank_columns: Vec<_> = rank_columns.into_iter().map(ident).collect();
 
         let mut new_group_exprs = group_exprs.clone();
         // Order by ranks
@@ -938,10 +965,12 @@ impl PromPlanner {
             if Self::field_column_is_native_histogram(&input_schema, col) {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
                     func: Arc::new(NativeHistogramNeg::scalar_udf()),
-                    args: vec![DfExpr::Column(col.into())],
+                    args: vec![DfExpr::Column(Column::from_name(col))],
                 }))
             } else {
-                Ok(DfExpr::Negative(Box::new(DfExpr::Column(col.into()))))
+                Ok(DfExpr::Negative(Box::new(DfExpr::Column(
+                    Column::from_name(col),
+                ))))
             }
         })
     }
@@ -1051,7 +1080,7 @@ impl PromPlanner {
                     let binary_expr_builder = Self::prom_token_to_binary_expr_builder(*op)?;
                     let rhs_is_histogram =
                         Self::field_column_is_native_histogram(&input_schema, col);
-                    let rhs = DfExpr::Column(col.into());
+                    let rhs = DfExpr::Column(Column::from_name(col));
                     let mut binary_expr = match Self::native_histogram_binary_expr(
                         *op,
                         expr.clone(),
@@ -1118,7 +1147,7 @@ impl PromPlanner {
                     let binary_expr_builder = Self::prom_token_to_binary_expr_builder(*op)?;
                     let lhs_is_histogram =
                         Self::field_column_is_native_histogram(&input_schema, col);
-                    let lhs = DfExpr::Column(col.into());
+                    let lhs = DfExpr::Column(Column::from_name(col));
                     let mut binary_expr = match Self::native_histogram_binary_expr(
                         *op,
                         lhs.clone(),
@@ -1671,6 +1700,47 @@ impl PromPlanner {
         }
     }
 
+    /// Returns the first absolute step multiple strictly after `start - offset - range`
+    /// through the last parent evaluation instant minus `offset`. Requires a positive step.
+    /// Returns `None` for an empty window; an unrepresentable nonempty bound is an error.
+    fn subquery_child_window(
+        start: Millisecond,
+        end: Millisecond,
+        interval: Millisecond,
+        offset: Millisecond,
+        range: Millisecond,
+        step: Millisecond,
+    ) -> Result<Option<(Millisecond, Millisecond)>> {
+        let window_start = i128::from(start) - i128::from(offset) - i128::from(range);
+        let grid_start = (window_start.div_euclid(i128::from(step)) + 1) * i128::from(step);
+        let grid_end = if interval > 0 {
+            let steps = (i128::from(end) - i128::from(start)) / i128::from(interval);
+            i128::from(start) + steps * i128::from(interval)
+        } else {
+            i128::from(end)
+        } - i128::from(offset);
+        // Check emptiness before converting bounds to i64.
+        if grid_start > grid_end {
+            return Ok(None);
+        }
+        let bound = |name: &str, value: i128| {
+            i64::try_from(value).map_err(|_| {
+                SubqueryTimestampOutOfRangeSnafu {
+                    timestamp: format!(
+                        "subquery child window {name} = {value} ms (start = {start} ms, \
+                         end = {end} ms, interval = {interval} ms, offset = {offset} ms, \
+                         range = {range} ms, step = {step} ms)"
+                    ),
+                }
+                .build()
+            })
+        };
+        Ok(Some((
+            bound("grid start", grid_start)?,
+            bound("grid end", grid_end)?,
+        )))
+    }
+
     /// The columns that identify one series, which is the series key expected by the PromQL plan
     /// nodes that hold exactly one series per input batch.
     fn series_key_columns(&self) -> Vec<String> {
@@ -1767,47 +1837,9 @@ impl PromPlanner {
                     DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
                 })
                 .collect::<Vec<_>>();
-            // `timestamp()` preserves the shifted selector timeline even though
-            // SeriesNormalize now retains raw native timestamp storage. Decimal
-            // arithmetic shifts before truncating to milliseconds.
-            let unit_factor = match col(&time_index_column)
-                .get_type(normalize.schema())
-                .context(DataFusionPlanningSnafu)?
-            {
-                ArrowDataType::Timestamp(ArrowTimeUnit::Second, _) => (1_000_i128, 4, 0),
-                ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, _) => (1, 1, 0),
-                ArrowDataType::Timestamp(ArrowTimeUnit::Microsecond, _) => (1, 4, 3),
-                ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, _) => (1, 7, 6),
-                _ => unreachable!("time index is a timestamp"),
-            };
-            let sample_time = col(&time_index_column)
-                .cast_to(&ArrowDataType::Int64, normalize.schema())
-                .context(DataFusionPlanningSnafu)?
-                .cast_to(&ArrowDataType::Decimal128(19, 0), normalize.schema())
-                .context(DataFusionPlanningSnafu)?;
-            let sample_time = DfExpr::BinaryExpr(BinaryExpr {
-                left: Box::new(sample_time),
-                op: Operator::Multiply,
-                right: Box::new(lit(ScalarValue::Decimal128(
-                    Some(unit_factor.0),
-                    unit_factor.1,
-                    unit_factor.2,
-                ))),
-            });
-            let sample_time = DfExpr::BinaryExpr(BinaryExpr {
-                left: Box::new(sample_time),
-                op: Operator::Plus,
-                right: Box::new(lit(ScalarValue::Decimal128(Some(offset_ms as i128), 19, 0))),
-            })
-            .cast_to(&ArrowDataType::Int64, normalize.schema())
-            .context(DataFusionPlanningSnafu)?
-            .cast_to(&ArrowDataType::Float64, normalize.schema())
-            .context(DataFusionPlanningSnafu)?;
-            let sample_time = DfExpr::BinaryExpr(BinaryExpr {
-                left: Box::new(sample_time),
-                op: Operator::Divide,
-                right: Box::new(lit(1000.0)),
-            });
+            // The time index still holds the raw sample timestamp here, which is what
+            // `timestamp()` reports regardless of `offset` and `@`.
+            let sample_time = Self::timestamp_seconds_expr(&time_index_column, normalize.schema())?;
             project_exprs.push(sample_time.alias(&timestamp_value_column));
             let normalize = LogicalPlanBuilder::from(normalize)
                 .project(project_exprs)
@@ -1861,40 +1893,51 @@ impl PromPlanner {
             }),
         };
         if let Some(timestamp_value_column) = timestamp_value_column {
-            self.create_timestamp_func_plan(manipulate, &timestamp_value_column)
+            self.create_timestamp_func_plan(manipulate, ident(timestamp_value_column))
         } else {
             Ok(manipulate)
         }
     }
 
-    /// Builds a projection plan for the PromQL `timestamp()` function.
-    /// Projects the time index column as the value column for each row.
+    /// Converts the timestamp column `column` into PromQL seconds, truncated to milliseconds.
+    fn timestamp_seconds_expr(column: &str, schema: &DFSchema) -> Result<DfExpr> {
+        let column = DfExpr::Column(Column::from_name(column));
+        let ArrowDataType::Timestamp(_, timezone) =
+            column.get_type(schema).context(DataFusionPlanningSnafu)?
+        else {
+            unreachable!("time index is a timestamp")
+        };
+        let millis = column
+            .cast_to(
+                &ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, timezone),
+                schema,
+            )
+            .context(DataFusionPlanningSnafu)?
+            .cast_to(&ArrowDataType::Int64, schema)
+            .context(DataFusionPlanningSnafu)?
+            .cast_to(&ArrowDataType::Float64, schema)
+            .context(DataFusionPlanningSnafu)?;
+        Ok(DfExpr::BinaryExpr(BinaryExpr {
+            left: Box::new(millis),
+            op: Operator::Divide,
+            right: Box::new(lit(1000.0)),
+        }))
+    }
+
+    /// Builds a projection plan for the PromQL `timestamp()` function, which reports
+    /// `timestamp_value` as the value of each row, along with the original tag and time index
+    /// columns.
     ///
-    /// # Arguments
-    /// * `input` - Input [`LogicalPlan`] after instant-vector selection.
-    /// * `timestamp_value_column` - Private column containing each selected sample's timestamp.
-    ///
-    /// # Returns
-    /// Returns a [`Result<LogicalPlan>`] where the resulting logical plan projects the timestamp
-    /// column as the value column, along with the original tag and time index columns.
-    ///
-    /// # Timestamp vs. Time Function
-    ///
-    /// - **Timestamp Function (`timestamp()`)**: In PromQL, the `timestamp()` function returns the
-    ///   timestamp (time index) of each sample as the value column.
-    ///
-    /// - **Time Function (`time()`)**: The `time()` function returns the evaluation time of the query
-    ///   as a scalar value.
-    ///
-    /// # Side Effects
     /// Updates the planner context's field columns to the timestamp column name.
-    ///
     fn create_timestamp_func_plan(
         &mut self,
         input: LogicalPlan,
-        timestamp_value_column: &str,
+        timestamp_value: DfExpr,
     ) -> Result<LogicalPlan> {
-        let time_expr = col(timestamp_value_column).alias(DEFAULT_FIELD_COLUMN);
+        // A row whose fields are all NULL holds no sample, so it must not get a timestamp. The
+        // check reads the input fields, which the projection below replaces.
+        let has_sample = self.create_empty_values_filter_expr(true)?;
+        let time_expr = timestamp_value.alias(DEFAULT_FIELD_COLUMN);
         self.ctx.field_columns = vec![time_expr.schema_name().to_string()];
         let mut project_exprs = Vec::with_capacity(self.ctx.tag_columns.len() + 2);
         project_exprs.push(self.create_time_index_column_expr()?);
@@ -1902,6 +1945,8 @@ impl PromPlanner {
         project_exprs.extend(self.create_tag_column_exprs()?);
 
         LogicalPlanBuilder::from(input)
+            .filter(has_sample)
+            .context(DataFusionPlanningSnafu)?
             .project(project_exprs)
             .context(DataFusionPlanningSnafu)?
             .build()
@@ -2057,9 +2102,31 @@ impl PromPlanner {
         let literals = self
             .build_scalar_params(func.name, &args.literals, query_engine_state)
             .await?;
+        // Only a vector selector keeps the timestamps of its samples. Any other expression
+        // produces samples at the evaluation time, which is what `timestamp()` reports for it.
+        let mut timestamp_arg = args.input.as_ref();
+        while let Some(PromExpr::Paren(ParenExpr { expr })) = timestamp_arg {
+            timestamp_arg = Some(expr);
+        }
+        let timestamp_of_selector =
+            func.name == "timestamp" && matches!(timestamp_arg, Some(PromExpr::VectorSelector(_)));
         let input = if let Some(prom_expr) = &args.input {
-            self.prom_expr_to_plan_inner(prom_expr, func.name == "timestamp", query_engine_state)
-                .await?
+            let input = self
+                .prom_expr_to_plan_inner(prom_expr, timestamp_of_selector, query_engine_state)
+                .await?;
+            if func.name == "timestamp" && !timestamp_of_selector {
+                let time_index_column =
+                    self.ctx
+                        .time_index_column
+                        .clone()
+                        .with_context(|| TimeIndexNotFoundSnafu {
+                            table: self.ctx.table_name.clone().unwrap_or_default(),
+                        })?;
+                let eval_time = Self::timestamp_seconds_expr(&time_index_column, input.schema())?;
+                self.create_timestamp_func_plan(input, eval_time)?
+            } else {
+                input
+            }
         } else {
             self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
             self.ctx.reset_table_name_and_schema();
@@ -2085,6 +2152,7 @@ impl PromPlanner {
         // `create_function_expr`: the function that reads it (`predict_linear`) then depends on an
         // argument instead of on planner state written by the selector below it.
         let range_fold_offset = self.ctx.range_fold_offset.take();
+        let input_tag_columns = self.ctx.tag_columns.clone();
         let (mut func_exprs, new_tags) = self.create_function_expr(
             func,
             literals.clone(),
@@ -2128,13 +2196,31 @@ impl PromPlanner {
             _ => builder,
         };
 
+        // Rewriting a label the input series already have can map several of them onto the same
+        // label set, which PromQL rejects. A new label keeps the series distinct.
+        let may_duplicate_label_sets = matches!(func.name, "label_join" | "label_replace")
+            && new_tags.iter().any(|tag| input_tag_columns.contains(tag));
+
         // Update context tags after building plan
         // We can't push them before planning, because they won't exist until projection.
         for tag in new_tags {
             self.ctx.tag_columns.push(tag);
         }
 
-        let plan = builder.build().context(DataFusionPlanningSnafu)?;
+        let mut plan = builder.build().context(DataFusionPlanningSnafu)?;
+        if may_duplicate_label_sets {
+            let labels = self.ctx.tag_columns.clone();
+            plan = Self::assert_unique_match_group(
+                plan,
+                labels
+                    .iter()
+                    .map(|label| DfExpr::Column(Column::from_name(label)))
+                    .collect(),
+                labels,
+                self.create_time_index_column_expr()?,
+                MatchGroupViolation::DuplicateLabelSet,
+            )?;
+        }
         common_telemetry::debug!("Created PromQL function plan: {plan:?} for {call_expr:?}");
 
         Ok(plan)
@@ -2529,7 +2615,7 @@ impl PromPlanner {
                 // collect remaining fields and convert to col expr
                 let mut exprs = all_fields
                     .into_iter()
-                    .map(|c| DfExpr::Column(Column::from(c)))
+                    .map(|c| DfExpr::Column(Column::from_name(c)))
                     .collect::<Vec<_>>();
 
                 // add timestamp column
@@ -2561,28 +2647,21 @@ impl PromPlanner {
             // for it, or the column exists but is NULL on that row — the latter
             // is the norm for logical metrics sharing a physical table, which
             // holds the union of their label columns.
+            let mut null_label = None;
             let col = if let Some(column_name) = column_name {
                 let column = DfExpr::Column(Column::from_name(&column_name));
                 let field = table_schema
                     .index_of_column_by_name(None, &column_name)
                     .map(|index| table_schema.field(index));
                 if accepts_empty
-                    && let Some(data_type) = field
-                        .filter(|field| {
-                            field.is_nullable()
-                                && Self::string_value_data_type(field.data_type()).is_some()
-                        })
-                        .map(|field| field.data_type())
-                {
-                    let empty = Self::string_scalar_value(data_type, Some(String::new()))
-                        .expect("nullable label has a string type");
-                    DfExpr::ScalarFunction(ScalarFunction {
-                        func: coalesce(),
-                        args: vec![column, DfExpr::Literal(empty, None)],
+                    && field.is_some_and(|field| {
+                        field.is_nullable()
+                            && Self::string_value_data_type(field.data_type()).is_some()
                     })
-                } else {
-                    column
+                {
+                    null_label = Some(column.clone().is_null());
                 }
+                column
             } else {
                 DfExpr::Literal(ScalarValue::Utf8(Some(String::new())), None)
             };
@@ -2634,6 +2713,10 @@ impl PromPlanner {
                         })
                     }
                 }
+            };
+            let expr = match null_label {
+                Some(null_label) => null_label.or(expr),
+                None => expr,
             };
             exprs.push(expr);
         }
@@ -3751,6 +3834,7 @@ impl PromPlanner {
                 let (concat_expr, dst_label) = Self::build_concat_labels_expr(
                     &mut other_input_exprs,
                     &self.ctx,
+                    input_schema,
                     query_engine_state,
                 )?;
 
@@ -3772,8 +3856,8 @@ impl PromPlanner {
             }
             "label_replace" => {
                 self.ctx.use_tsid = false;
-                if let Some((replace_expr, dst_label)) = self
-                    .build_regexp_replace_label_expr(&mut other_input_exprs, query_engine_state)?
+                if let Some((replace_expr, dst_label)) =
+                    self.build_regexp_replace_label_expr(&mut other_input_exprs, input_schema)?
                 {
                     // Reserve the current field columns except the `dst_label`.
                     for value in &self.ctx.field_columns {
@@ -3783,10 +3867,8 @@ impl PromPlanner {
                         }
                     }
 
-                    ensure!(
-                        !self.ctx.tag_columns.contains(&dst_label),
-                        SameLabelSetSnafu
-                    );
+                    // Remove it from tag columns if exists to avoid duplicated column names
+                    self.ctx.tag_columns.retain(|tag| *tag != dst_label);
                     new_tags.push(dst_label);
                     // Add the new label expr to evaluate
                     exprs.push(replace_expr);
@@ -4095,7 +4177,7 @@ impl PromPlanner {
     fn build_regexp_replace_label_expr(
         &self,
         other_input_exprs: &mut VecDeque<DfExpr>,
-        query_engine_state: &QueryEngineState,
+        input_schema: &DFSchemaRef,
     ) -> Result<Option<(DfExpr, String)>> {
         // label_replace(vector, dst_label, replacement, src_label, regex)
         let dst_label = match other_input_exprs.pop_front() {
@@ -4131,72 +4213,64 @@ impl PromPlanner {
             .fail()?,
         };
 
-        // Validate the regex before using it
+        // Like Prometheus, match the whole source value. A series whose source value matches gets
+        // `dst_label` set to the expanded replacement; any other series is left unchanged.
         // doc: https://prometheus.io/docs/prometheus/latest/querying/functions/#label_replace
-        regex::Regex::new(&regex).map_err(|_| {
-            InvalidRegularExpressionSnafu {
-                regex: regex.clone(),
-            }
-            .build()
-        })?;
+        let anchored = format!("^(?s:{regex})$");
+        let compiled = regex::Regex::new(&anchored)
+            .map_err(|_| InvalidRegularExpressionSnafu { regex }.build())?;
+        let dst_exists = self.ctx.tag_columns.contains(&dst_label);
 
-        // If the src_label exists and regex is empty, keep everything unchanged.
-        if self.ctx.tag_columns.contains(&src_label) && regex.is_empty() {
-            return Ok(None);
-        }
-
-        // If the src_label doesn't exists, and
+        // A missing source label reads as the empty string for every series, so the result is
+        // the same for all of them and is decided here.
         if !self.ctx.tag_columns.contains(&src_label) {
-            if replacement.is_empty() {
-                // the replacement is empty, keep everything unchanged.
+            let Some(captures) = compiled.captures("") else {
                 return Ok(None);
-            } else {
-                // the replacement is not empty, always adds dst_label with replacement value.
+            };
+            let mut value = String::new();
+            captures.expand(&replacement, &mut value);
+            if value.is_empty() {
+                // Setting a label to the empty string removes it, which is a no-op for a new
+                // label.
+                if !dst_exists {
+                    return Ok(None);
+                }
                 return Ok(Some((
-                    // alias literal `replacement` as dst_label
-                    lit(replacement).alias(&dst_label),
+                    lit(ScalarValue::Utf8(None)).alias(&dst_label),
                     dst_label,
                 )));
             }
+            return Ok(Some((lit(value).alias(&dst_label), dst_label)));
         }
 
-        // Preprocess the regex:
-        // https://github.com/prometheus/prometheus/blob/d902abc50d6652ba8fe9a81ff8e5cce936114eba/promql/functions.go#L1575C32-L1575C37
-        let regex = format!("^(?s:{regex})$");
+        let src = Self::label_value_expr(&src_label, input_schema)?;
+        let matched = DfExpr::ScalarFunction(ScalarFunction {
+            func: datafusion_functions::regex::regexp_like(),
+            args: vec![src.clone(), lit(anchored.clone())],
+        });
+        let replaced = Self::empty_label_to_null(DfExpr::ScalarFunction(ScalarFunction {
+            func: datafusion_functions::regex::regexp_replace(),
+            args: vec![src, lit(anchored), lit(replacement)],
+        }));
+        let unchanged = if dst_exists {
+            DfExpr::Column(Column::from_name(&dst_label))
+                .cast_to(&ArrowDataType::Utf8, input_schema)
+                .context(DataFusionPlanningSnafu)?
+        } else {
+            lit(ScalarValue::Utf8(None))
+        };
+        let replace_expr = when(matched, replaced)
+            .otherwise(unchanged)
+            .context(DataFusionPlanningSnafu)?;
 
-        let session_state = query_engine_state.session_state();
-        let func = session_state
-            .scalar_functions()
-            .get("regexp_replace")
-            .context(UnsupportedExprSnafu {
-                name: "regexp_replace",
-            })?;
-
-        // regexp_replace(src_label, regex, replacement)
-        let args = vec![
-            if src_label.is_empty() {
-                DfExpr::Literal(ScalarValue::Utf8(Some(String::new())), None)
-            } else {
-                DfExpr::Column(Column::from_name(src_label))
-            },
-            DfExpr::Literal(ScalarValue::Utf8(Some(regex)), None),
-            DfExpr::Literal(ScalarValue::Utf8(Some(replacement)), None),
-        ];
-
-        Ok(Some((
-            DfExpr::ScalarFunction(ScalarFunction {
-                func: func.clone(),
-                args,
-            })
-            .alias(&dst_label),
-            dst_label,
-        )))
+        Ok(Some((replace_expr.alias(&dst_label), dst_label)))
     }
 
     /// Build expr for `label_join` function
     fn build_concat_labels_expr(
         other_input_exprs: &mut VecDeque<DfExpr>,
         ctx: &PromPlannerContext,
+        input_schema: &DFSchemaRef,
         query_engine_state: &QueryEngineState,
     ) -> Result<(DfExpr, String)> {
         // label_join(vector, dst_label, separator, src_label_1, src_label_2, ...)
@@ -4228,17 +4302,19 @@ impl PromPlanner {
         let src_labels = other_input_exprs
             .iter()
             .map(|expr| {
-                // Cast source label into column or null literal
+                // `concat_ws` skips NULL arguments together with their separator, while an
+                // absent label joins as the empty string.
                 match expr {
                     DfExpr::Literal(ScalarValue::Utf8(Some(label)), None) => {
                         if label.is_empty() {
-                            Ok(DfExpr::Literal(ScalarValue::Null, None))
+                            FunctionInvalidArgumentSnafu {
+                                fn_name: "label_join",
+                            }
+                            .fail()
                         } else if available_columns.contains(label.as_str()) {
-                            // Label exists in the table schema
-                            Ok(DfExpr::Column(Column::from_name(label)))
+                            Self::label_value_expr(label, input_schema)
                         } else {
-                            // Label doesn't exist, treat as empty string (null)
-                            Ok(DfExpr::Literal(ScalarValue::Null, None))
+                            Ok(lit(""))
                         }
                     }
                     other => UnexpectedPlanExprSnafu {
@@ -4251,12 +4327,10 @@ impl PromPlanner {
                 }
             })
             .collect::<Result<Vec<_>>>()?;
-        ensure!(
-            !src_labels.is_empty(),
-            FunctionInvalidArgumentSnafu {
-                fn_name: "label_join"
-            }
-        );
+        // Joining no labels yields the empty string, i.e. removes `dst_label`.
+        if src_labels.is_empty() {
+            return Ok((lit(ScalarValue::Utf8(None)).alias(&dst_label), dst_label));
+        }
 
         let session_state = query_engine_state.session_state();
         let func = session_state
@@ -4270,13 +4344,35 @@ impl PromPlanner {
         args.extend(src_labels);
 
         Ok((
-            DfExpr::ScalarFunction(ScalarFunction {
+            Self::empty_label_to_null(DfExpr::ScalarFunction(ScalarFunction {
                 func: func.clone(),
                 args,
-            })
+            }))
             .alias(&dst_label),
             dst_label,
         ))
+    }
+
+    /// The value of `label` as a string, where NULL (the series has no such label) reads as the
+    /// empty string, as in PromQL.
+    fn label_value_expr(label: &str, input_schema: &DFSchemaRef) -> Result<DfExpr> {
+        let value = DfExpr::Column(Column::from_name(label))
+            .cast_to(&ArrowDataType::Utf8, input_schema)
+            .context(DataFusionPlanningSnafu)?;
+        Ok(DfExpr::ScalarFunction(ScalarFunction {
+            func: coalesce(),
+            args: vec![value, lit("")],
+        }))
+    }
+
+    /// An empty label value means the label is absent in PromQL. Label functions represent it
+    /// as NULL, like a series that never had the label, so that both compare equal when label
+    /// sets are matched and neither is reported as a label.
+    fn empty_label_to_null(value: DfExpr) -> DfExpr {
+        DfExpr::ScalarFunction(ScalarFunction {
+            func: datafusion_functions::core::nullif(),
+            args: vec![value, lit("")],
+        })
     }
 
     fn create_time_index_column_expr(&self) -> Result<DfExpr> {
@@ -4930,7 +5026,7 @@ impl PromPlanner {
             .map(|col| {
                 let mut sort_exprs = Vec::with_capacity(self.ctx.tag_columns.len() + 1);
                 // Order by value in the specific order
-                sort_exprs.push(DfExpr::Column(Column::from(col)).sort(asc, true));
+                sort_exprs.push(DfExpr::Column(Column::from_name(col)).sort(asc, true));
                 // Then tags if the values are equal,
                 // Try to ensure the relative stability of the output results.
                 sort_exprs.extend(tag_sort_exprs.clone());
@@ -5703,7 +5799,7 @@ impl PromPlanner {
             .collect::<Vec<_>>();
         let assert_expr = DfExpr::ScalarFunction(ScalarFunction {
             func: Arc::new(UniqueMatchGroup::scalar_udf(group_labels, violation)),
-            args: std::iter::once(col(count_column.as_str()))
+            args: std::iter::once(ident(count_column.as_str()))
                 .chain(group_exprs)
                 .collect(),
         });
@@ -6342,7 +6438,7 @@ impl PromPlanner {
     /// Generate an expr like `date_part("hour", <TIME_INDEX>)`. Caller should ensure the
     /// time index column in context is set
     fn date_part_on_time_index(&self, date_part: &str) -> Result<DfExpr> {
-        let input_expr = datafusion::logical_expr::col(
+        let input_expr = datafusion::logical_expr::ident(
             self.ctx
                 .time_index_column
                 .as_ref()

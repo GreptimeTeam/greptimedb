@@ -89,8 +89,10 @@ use table::table_name::TableName;
 use tests_integration::test_util::{
     MockInstanceImpl, StorageType, TestGuard, assert_wal_delta, build_test_prom_server,
     setup_test_http_app, setup_test_http_app_with_frontend,
+    setup_test_http_app_with_frontend_and_custom_options,
     setup_test_http_app_with_frontend_and_slow_query_threshold,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
+    setup_test_prom_app_with_frontend_and_memory_limiter,
     setup_test_prom_app_with_frontend_batched,
 };
 use urlencoding::encode;
@@ -166,6 +168,9 @@ macro_rules! http_tests {
                 test_promql_over_non_millisecond_physical_tables,
                 test_prometheus_label_replace_response,
                 test_prom_http_api,
+                test_prom_remote_compression_bomb_rejected,
+                test_prom_remote_write_decoded_body_charged,
+                test_influxdb_write_decoded_body_charged,
                 test_config_api,
                 test_dashboard_api,
                 test_prometheus_remote_write,
@@ -510,6 +515,459 @@ async fn test_sql_skip_wal(distributed: bool) {
         case.expected_written_nodes = distributed.then_some(2);
     }
     check_http_skip_wal("sql", &cases, distributed).await;
+}
+
+fn logical_ddl(name: &str) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {name} (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val DOUBLE) ENGINE=metric WITH (on_physical_table='phy.dot')"
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_ddl_http_standalone() {
+    check_logical_ddl_http(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_ddl_http_distributed() {
+    check_logical_ddl_http(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "manual logical DDL throughput measurement"]
+async fn logical_ddl_http_benchmark() {
+    common_telemetry::init_default_ut_logging();
+    let count: usize = std::env::var("GT_LOGICAL_DDL_BENCH_TABLES")
+        .unwrap_or_else(|_| "1000".to_string())
+        .parse()
+        .unwrap();
+    for (name, endpoint, batch_size) in [
+        ("single", "/v1/sql", 1),
+        ("multi_sql", "/v1/sql", 128),
+        ("batch", "/v1/ddl/logical-tables", 128),
+    ] {
+        let mut instance =
+            MockInstanceImpl::Standalone(
+                tests_integration::standalone::GreptimeDbStandaloneBuilder::new(&format!(
+                    "logical_ddl_bench_{name}"
+                ))
+                .with_event_recorder_options(
+                    tests_integration::test_util::test_event_recorder_options(),
+                )
+                .build()
+                .await,
+            );
+        let server = HttpServerBuilder::new(HttpOptions::default())
+            .with_sql_handler(instance.frontend())
+            .build();
+        let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+        let response = execute_sql(&client, "CREATE TABLE \"phy.dot\" (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val DOUBLE) ENGINE=metric WITH (physical_metric_table='')").await;
+        assert!(response.status().is_success(), "{}", response.text().await);
+        let statements = (0..count)
+            .map(|i| logical_ddl(&format!("bench_{i}")))
+            .collect::<Vec<_>>();
+        let start = std::time::Instant::now();
+        for chunk in statements.chunks(batch_size) {
+            let response = client
+                .post(endpoint)
+                .form(&[("sql", chunk.join(";"))])
+                .send()
+                .await;
+            assert!(response.status().is_success(), "{}", response.text().await);
+            assert_eq!(
+                response.json::<Value>().await["output"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                chunk.len()
+            );
+        }
+        let elapsed = start.elapsed();
+        let requests = count.div_ceil(batch_size);
+        let procedures = if name == "batch" { requests } else { count };
+        wait_for_event_data(&client,
+            "SELECT count(DISTINCT procedure_id), count(DISTINCT table_name) FROM greptime_private.events WHERE type='create_logical_tables' AND json_get_string(procedure_trigger, 'type')='Submitted' AND table_name LIKE 'bench_%'",
+            &format!("[[{procedures},{count}]]")).await;
+        common_telemetry::info!(
+            "Logical DDL: mode={name}, tables={count}, concurrency=1, HTTP requests={requests}, procedures={procedures}, elapsed={elapsed:?}"
+        );
+        instance.shutdown().await;
+    }
+}
+
+async fn check_logical_ddl_http(distributed: bool) {
+    common_telemetry::init_default_ut_logging();
+    let events = tests_integration::test_util::test_event_recorder_options();
+    let mut instance = if distributed {
+        MockInstanceImpl::Distributed(
+            tests_integration::cluster::GreptimeDbClusterBuilder::new("batch_logical_ddl")
+                .await
+                .with_event_recorder_options(events)
+                .with_datanodes(3)
+                .build(true)
+                .await,
+        )
+    } else {
+        MockInstanceImpl::Standalone(
+            tests_integration::standalone::GreptimeDbStandaloneBuilder::new("batch_logical_ddl")
+                .with_event_recorder_options(events)
+                .build()
+                .await,
+        )
+    };
+    let frontend = instance.frontend();
+    let server = HttpServerBuilder::new(HttpOptions::default())
+        .with_sql_handler(frontend.clone())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+    assert_eq!(
+        client
+            .get("/v1/capabilities")
+            .send()
+            .await
+            .json::<Value>()
+            .await["metric_batch_ddl"],
+        1
+    );
+    let response = execute_sql(&client, "CREATE TABLE \"phy.dot\" (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val DOUBLE) ENGINE=metric WITH (physical_metric_table='')").await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+
+    for sql in [
+        String::new(),
+        format!("{}; SELECT 1", logical_ddl("rejected")),
+        format!("{}; CREATE VIEW v AS SELECT 1", logical_ddl("rejected")),
+        format!(
+            "{}; CREATE TABLE copy LIKE batch_0",
+            logical_ddl("rejected")
+        ),
+        format!("{}; CREATE TABLE copy AS SELECT 1", logical_ddl("rejected")),
+        logical_ddl("rejected").replace("WITH (", "WITH (physical_metric_table='', "),
+        format!(
+            "{}; CREATE TABLE ordinary (ts TIMESTAMP TIME INDEX)",
+            logical_ddl("rejected")
+        ),
+        format!(
+            "{};{}",
+            logical_ddl("rejected"),
+            logical_ddl("public.rejected")
+        ),
+        format!("{};{}", logical_ddl("rejected"), logical_ddl("other.t")),
+        format!(
+            "{};{}",
+            logical_ddl("rejected"),
+            logical_ddl("other_physical").replace("phy.dot", "other")
+        ),
+        (0..129)
+            .map(|i| logical_ddl(&format!("rejected_{i}")))
+            .collect::<Vec<_>>()
+            .join(";"),
+    ] {
+        let response = client
+            .post("/v1/ddl/logical-tables")
+            .form(&[("sql", sql)])
+            .send()
+            .await;
+        assert!(!response.status().is_success(), "{}", response.text().await);
+    }
+    validate_data(
+        "batch_rejected",
+        &client,
+        "SELECT count(*) FROM information_schema.tables WHERE table_name LIKE 'rejected%'",
+        "[[0]]",
+    )
+    .await;
+
+    let sql = (0..128)
+        .map(|i| logical_ddl(&format!("batch_{i}")))
+        .collect::<Vec<_>>()
+        .join(";");
+    let response = client
+        .post("/v1/ddl/logical-tables")
+        .form(&[("sql", sql)])
+        .send()
+        .await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+    assert_eq!(
+        response.json::<Value>().await["output"],
+        json!(vec![json!({"affectedrows": 0}); 128])
+    );
+    wait_for_event_data(&client,
+        "SELECT count(DISTINCT procedure_id), count(DISTINCT table_name) FROM greptime_private.events WHERE type='create_logical_tables' AND json_get_string(procedure_trigger, 'type')='Submitted' AND table_name LIKE 'batch_%'",
+        "[[1,128]]").await;
+
+    let physical_id = frontend
+        .catalog_manager()
+        .table("greptime", "public", "phy.dot", None)
+        .await
+        .unwrap()
+        .unwrap()
+        .table_info()
+        .table_id();
+    let mut ids = std::collections::HashSet::new();
+    for i in 0..128 {
+        let table = frontend
+            .catalog_manager()
+            .table("greptime", "public", &format!("batch_{i}"), None)
+            .await
+            .unwrap()
+            .unwrap();
+        let id = table.table_info().table_id();
+        assert!(ids.insert(id));
+        assert_ne!(id, physical_id);
+        let bound_physical_id = frontend
+            .table_metadata_manager()
+            .table_route_manager()
+            .get_physical_table_id(id)
+            .await
+            .unwrap();
+        assert_eq!(bound_physical_id, physical_id);
+        assert_eq!(
+            table
+                .table_info()
+                .meta
+                .options
+                .extra_options
+                .get("on_physical_table")
+                .map(String::as_str),
+            Some("phy.dot")
+        );
+        assert_eq!(table.schema().column_schemas().len(), 3);
+    }
+    let sql = logical_ddl("one_at_byte_limit");
+    let padded = format!("{sql}{}", " ".repeat(1024 * 1024 - sql.len()));
+    let response = client
+        .post("/v1/ddl/logical-tables")
+        .form(&[("sql", padded)])
+        .send()
+        .await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+
+    let response = execute_sql(&client, "CREATE DATABASE inherited WITH ('skip_wal'='true', ttl='1h', 'compaction.type'='twcs'); CREATE TABLE inherited.phy (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val DOUBLE) ENGINE=metric WITH (physical_metric_table='')").await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+    let inherited = logical_ddl("inherited.ordinary").replace("phy.dot", "phy");
+    let response = execute_sql(&client, &inherited).await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+    let sql = format!(
+        "{};{}",
+        logical_ddl("batched").replace("phy.dot", "phy"),
+        logical_ddl("explicit")
+            .replace("phy.dot", "phy")
+            .replace("WITH (", "WITH (skip_wal='false', ")
+    );
+    let response = client
+        .post("/v1/ddl/logical-tables")
+        .form(&[("sql", sql.as_str()), ("db", "greptime-inherited")])
+        .send()
+        .await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+    let catalog = frontend.catalog_manager();
+    let ordinary = catalog
+        .table("greptime", "inherited", "ordinary", None)
+        .await
+        .unwrap()
+        .unwrap();
+    let batched = catalog
+        .table("greptime", "inherited", "batched", None)
+        .await
+        .unwrap()
+        .unwrap();
+    let explicit = catalog
+        .table("greptime", "inherited", "explicit", None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ordinary.table_info().meta.options,
+        batched.table_info().meta.options
+    );
+    assert!(batched.table_info().meta.options.skip_wal);
+    assert!(!explicit.table_info().meta.options.skip_wal);
+    assert!(
+        !batched
+            .table_info()
+            .meta
+            .options
+            .extra_options
+            .contains_key("compaction.type")
+    );
+
+    let response = execute_sql(&client, "CREATE TABLE partitioned (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val DOUBLE) PARTITION ON COLUMNS (host) (host < 'm', host >= 'm') ENGINE=metric WITH (physical_metric_table='')").await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+    let partitioned = logical_ddl("bad_partition")
+        .replace("phy.dot", "partitioned")
+        .replace(
+            "ENGINE=",
+            "PARTITION ON COLUMNS (host) (host < 'n', host >= 'n') ENGINE=",
+        );
+    let response = execute_sql(&client, &partitioned).await;
+    assert!(!response.status().is_success());
+    let sql = format!(
+        "{};{partitioned}",
+        logical_ddl("before_bad_partition").replace("phy.dot", "partitioned")
+    );
+    let response = client
+        .post("/v1/ddl/logical-tables")
+        .form(&[("sql", sql)])
+        .send()
+        .await;
+    assert!(!response.status().is_success());
+    assert!(
+        catalog
+            .table("greptime", "public", "before_bad_partition", None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let matching = partitioned
+        .replace("bad_partition", "matching_partition")
+        .replace("'n'", "'m'");
+    let response = execute_sql(&client, &matching).await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+    let sql = format!(
+        "{};{}",
+        matching.replace("matching_partition", "batch_matching_partition"),
+        logical_ddl("batch_inherited_partition").replace("phy.dot", "partitioned")
+    );
+    let response = client
+        .post("/v1/ddl/logical-tables")
+        .form(&[("sql", sql)])
+        .send()
+        .await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+
+    let original_id = frontend
+        .catalog_manager()
+        .table("greptime", "public", "batch_0", None)
+        .await
+        .unwrap()
+        .unwrap()
+        .table_info()
+        .table_id();
+    let sql = format!("{};{}", logical_ddl("batch_0"), logical_ddl("batch_new"));
+    for _ in 0..2 {
+        let response = client
+            .post("/v1/ddl/logical-tables")
+            .form(&[("sql", &sql)])
+            .send()
+            .await;
+        assert!(response.status().is_success(), "{}", response.text().await);
+    }
+    let old = frontend
+        .catalog_manager()
+        .table("greptime", "public", "batch_0", None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(original_id, old.table_info().table_id());
+    let response = execute_sql(
+        &client,
+        "INSERT INTO batch_0 (ts, host, val) VALUES (1, 'a', 2.0); INSERT INTO batch_new (ts, host, val) VALUES (2, 'b', 3.0)",
+    )
+    .await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+    validate_data(
+        "batch_values",
+        &client,
+        "SELECT val FROM batch_0 UNION ALL SELECT val FROM batch_new ORDER BY val",
+        "[[2.0],[3.0]]",
+    )
+    .await;
+    let ctx = session::context::QueryContext::arc();
+    let provider =
+        auth::static_user_provider_from_option("static_user_provider:cmd:readonly:ro=password")
+            .unwrap();
+    let user = auth::UserProvider::authenticate(
+        &provider,
+        auth::Identity::UserId("readonly", None),
+        auth::Password::PlainText("password".to_string().into()),
+    )
+    .await
+    .unwrap();
+    ctx.set_current_user(user);
+    frontend
+        .plugins()
+        .get_or_insert::<auth::PermissionCheckerRef, _>(auth::DefaultPermissionChecker::arc);
+    let result = servers::query_handler::sql::SqlQueryHandler::create_logical_tables(
+        frontend.as_ref(),
+        &logical_ddl("read_only_denied"),
+        ctx,
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(
+        frontend
+            .catalog_manager()
+            .table("greptime", "public", "read_only_denied", None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    struct FailAfterExecution(&'static str);
+    impl servers::interceptor::SqlQueryInterceptor for FailAfterExecution {
+        type Error = frontend::error::Error;
+        fn post_execute(
+            &self,
+            _: common_query::Output,
+            _: QueryContextRef,
+        ) -> frontend::error::Result<common_query::Output> {
+            use common_query::Output;
+            match self.0 {
+                "rows" => Ok(Output::new_with_affected_rows(1)),
+                "records" => Ok(Output::new_with_record_batches(
+                    common_recordbatch::RecordBatches::empty(),
+                )),
+                "stream" => Ok(Output::new_with_stream(Box::pin(
+                    common_recordbatch::RecordBatchStreamWrapper::new(
+                        Arc::new(datatypes::schema::Schema::new(vec![])),
+                        futures::stream::iter([Err::<common_recordbatch::RecordBatch, _>(
+                            common_recordbatch::error::CreateRecordBatchesSnafu {
+                                reason: "sensitive-option-value",
+                            }
+                            .build(),
+                        )]),
+                    ),
+                ))),
+                _ => frontend::error::InvalidSqlSnafu {
+                    err_msg: "sensitive-option-value",
+                }
+                .fail(),
+            }
+        }
+    }
+    frontend
+        .plugins()
+        .insert::<servers::interceptor::SqlQueryInterceptorRef<frontend::error::Error>>(Arc::new(
+            FailAfterExecution("error"),
+        ));
+    for mode in ["error", "rows", "records", "stream"] {
+        frontend
+            .plugins()
+            .map_mut::<servers::interceptor::SqlQueryInterceptorRef<frontend::error::Error>, _, _>(
+                |plugin| *plugin.unwrap() = Arc::new(FailAfterExecution(mode)),
+            );
+        let name = format!("created_before_error_{mode}");
+        let response = client
+            .post("/v1/ddl/logical-tables")
+            .form(&[("sql", logical_ddl(&name))])
+            .send()
+            .await;
+        assert!(!response.status().is_success(), "{mode}");
+        assert!(!format!("{:?}", response.headers()).contains("sensitive-option-value"));
+        let body = response.json::<Value>().await;
+        assert!(body.get("output").is_none());
+        assert_eq!(body["error"], "logical-table batch failed");
+        assert!(
+            frontend
+                .catalog_manager()
+                .table("greptime", "public", &name, None)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    instance.shutdown().await;
 }
 
 pub async fn test_sql_api(store_type: StorageType) {
@@ -1010,6 +1468,31 @@ pub async fn test_prometheus_label_replace_response(store_type: StorageType) {
                     "__name__": "demo",
                     "host": "host1",
                     "host_copy": "host1"
+                },
+                "value": [0.0, "1.1"]
+            }]
+        }))
+        .unwrap()
+    );
+
+    // A series whose source value does not match keeps its labels, without `host_copy`.
+    let query = encode(r#"label_replace(demo, "host_copy", "$1", "host", "other(.*)")"#);
+    let res = client
+        .get(&format!("/v1/prometheus/api/v1/query?query={query}&time=0"))
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!({
+            "resultType": "vector",
+            "result": [{
+                "metric": {
+                    "__name__": "demo",
+                    "host": "host1"
                 },
                 "value": [0.0, "1.1"]
             }]
@@ -1720,6 +2203,185 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert!(
         data.contains("{\"__name__\":\"demo_metrics\"}")
             && !data.contains("{\"__name__\":\"demo\"}")
+    );
+
+    guard.remove_all().await;
+}
+
+/// A tiny compressed body must not be able to demand an unbounded decoded
+/// allocation on the Prometheus remote-storage endpoints. The five-byte raw
+/// Snappy varint (`ff ff ff ff 0f`) declares a ~4 GiB decoded length and must
+/// be rejected by the decoded-size cap.
+pub async fn test_prom_remote_compression_bomb_rejected(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_prom_app_with_frontend(store_type, "prom_remote_bomb").await;
+    let client = TestClient::new(app).await;
+
+    // Remote read with the five-byte varint bomb.
+    let res = client
+        .post("/v1/prometheus/read")
+        .body(Vec::from([0xffu8, 0xff, 0xff, 0xff, 0x0f]))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // Remote write v1 with the same bomb, via both codecs (exercising the
+    // fallback: the zstd attempt fails on malformed input and the snappy
+    // fallback must reject the declared size).
+    for encoding in ["snappy", "zstd"] {
+        let res = client
+            .post("/v1/prometheus/write")
+            .header("Content-Encoding", encoding)
+            .body(Vec::from([0xffu8, 0xff, 0xff, 0xff, 0x0f]))
+            .send()
+            .await;
+        assert_eq!(
+            res.status(),
+            StatusCode::BAD_REQUEST,
+            "bomb with Content-Encoding {encoding} must be rejected"
+        );
+    }
+
+    // The server must still serve valid requests afterwards.
+    let write_request = WriteRequest {
+        timeseries: prom_store::mock_timeseries(),
+        ..Default::default()
+    };
+    let compressed = prom_store::snappy_compress(&write_request.encode_to_vec()).unwrap();
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(compressed)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    guard.remove_all().await;
+}
+
+/// The decoded (not encoded) size of a Prometheus remote write body must be
+/// charged against the aggregate request-memory quota.
+pub async fn test_prom_remote_write_decoded_body_charged(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    // 4 KiB aggregate quota with fail-fast policy.
+    let memory_limiter = ServerMemoryLimiter::new(4096, OnExhaustedPolicy::Fail);
+    let (app, mut guard) = setup_test_prom_app_with_frontend_and_memory_limiter(
+        store_type,
+        "prom_remote_write_quota",
+        Some(memory_limiter),
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    // A valid write request whose decoded protobuf clearly exceeds the quota
+    // while its Snappy wire body stays far below it.
+    let write_request = WriteRequest {
+        timeseries: vec![TimeSeries {
+            labels: vec![
+                Label {
+                    name: "__name__".to_string(),
+                    value: "quota_metric".to_string(),
+                },
+                Label {
+                    name: "payload".to_string(),
+                    // ~8 KiB decoded; compresses to a few hundred bytes.
+                    value: "p".repeat(8 * 1024),
+                },
+            ],
+            samples: vec![Sample {
+                value: 1.0,
+                timestamp: 1000,
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let compressed = prom_store::snappy_compress(&write_request.encode_to_vec()).unwrap();
+    assert!(
+        compressed.len() < 2048,
+        "wire body must stay under the quota"
+    );
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(compressed)
+        .send()
+        .await;
+    let status = res.status();
+    let body = res.text().await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "decoded body larger than the aggregate quota must be rejected, got body: {body}"
+    );
+
+    guard.remove_all().await;
+}
+
+/// Decompressed ingestion bodies (routes using `RequestDecompressionLayer`)
+/// must be charged against the aggregate request-memory quota as they are
+/// decoded, not only their compressed wire size.
+pub async fn test_influxdb_write_decoded_body_charged(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    // 4 KiB aggregate quota with fail-fast policy.
+    let memory_limiter = ServerMemoryLimiter::new(4096, OnExhaustedPolicy::Fail);
+    let http_opts = servers::http::HttpOptions {
+        addr: format!("127.0.0.1:{}", common_test_util::ports::get_port()),
+        ..Default::default()
+    };
+    let (app, mut guard) = setup_test_http_app_with_frontend_and_custom_options(
+        store_type,
+        "test_influxdb_decoded_quota",
+        None,
+        Some(http_opts),
+        Some(memory_limiter),
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    // A gzip member expanding to ~8 KiB of line protocol from a tiny wire body.
+    let lines: Vec<String> = (0..200)
+        .map(|i| format!("decoded_quota,host=h{} v=1.0,ts={}", i % 20, 1700000000 + i))
+        .collect();
+    let decoded = lines.join("\n");
+    assert!(decoded.len() > 4096);
+    let compressed = zstd::stream::encode_all(decoded.as_bytes(), 3).unwrap();
+    assert!(
+        compressed.len() < 2048,
+        "wire body must stay under the quota"
+    );
+
+    // Compressed write whose decoded body exceeds the quota: rejected while
+    // streaming (the extractor surfaces the aborted body as 400).
+    let res = client
+        .post("/v1/influxdb/write?db=public")
+        .header("Content-Type", "text/plain")
+        .header("Content-Encoding", "zstd")
+        .body(compressed)
+        .send()
+        .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "decoded body larger than the aggregate quota must be rejected with 429"
+    );
+
+    // The server still serves a small compressed write within the quota.
+    let small = "decoded_quota,host=ok v=1.0,ts=1700000000";
+    let compressed_small = zstd::stream::encode_all(small.as_bytes(), 3).unwrap();
+    let res = client
+        .post("/v1/influxdb/write?db=public")
+        .header("Content-Type", "text/plain")
+        .header("Content-Encoding", "zstd")
+        .body(compressed_small)
+        .send()
+        .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::NO_CONTENT,
+        "small compressed write must succeed, got: {}",
+        res.text().await
     );
 
     guard.remove_all().await;
@@ -2626,6 +3288,8 @@ flight_compression = "arrow_ipc"
 runtime_size = 8
 http2_keep_alive_interval = "10s"
 http2_keep_alive_timeout = "3s"
+enable_cors = false
+cors_allowed_origins = []
 
 [grpc.tls]
 mode = "disable"
@@ -2773,7 +3437,7 @@ scan_memory_on_exhausted = "fail"
 min_compaction_interval = "0s"
 schedule_compaction_after_edit = true
 default_flat_format = true
-experimental_series_scan_v2 = true
+experimental_series_scan_v2 = false
 
 [region_engine.mito.index]
 aux_path = ""
@@ -3722,7 +4386,7 @@ async fn check_prometheus_remote_write_batched_skip_wal(distributed: bool, v2: b
     common_telemetry::init_default_ut_logging();
     let mut instance =
         MockInstanceImpl::new(&format!("prom_bulk_skip_wal_v2_{v2}"), distributed).await;
-    let server = build_test_prom_server(instance.frontend(), true).build();
+    let server = build_test_prom_server(instance.frontend(), true, None).build();
     let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
 
     write_prometheus_skip_wal_sample(&client, v2, 1000, None).await;
@@ -3902,7 +4566,7 @@ async fn setup_redirecting_batched_prom_app(
         .with_plugin(plugins)
         .build()
         .await;
-    let server = build_test_prom_server(standalone.fe_instance().clone(), true)
+    let server = build_test_prom_server(standalone.fe_instance().clone(), true, None)
         .with_greptime_config_options(standalone.opts.datanode_options().to_toml().unwrap())
         .build();
     let client = TestClient::new(server.build(server.make_app()).unwrap()).await;

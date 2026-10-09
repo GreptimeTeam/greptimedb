@@ -535,6 +535,7 @@ async fn matchers_read_absent_labels_as_empty() {
         schema.clone(),
         vec![Arc::new(StringArray::from(vec![
             None,
+            Some(""),
             Some(GREPTIME_TEMPORALITY_DELTA),
         ]))],
     )
@@ -542,10 +543,19 @@ async fn matchers_read_absent_labels_as_empty() {
     let table = Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap());
 
     for (matcher, expected) in [
-        (r#"="""#, vec![None]),
-        (r#"!="delta""#, vec![None]),
-        (r#"=~".*""#, vec![None, Some(GREPTIME_TEMPORALITY_DELTA)]),
-        (r#"!~"delta""#, vec![None]),
+        (r#"="""#, vec![None, Some("")]),
+        (r#"!="delta""#, vec![None, Some("")]),
+        (
+            r#"=~".*""#,
+            vec![None, Some(""), Some(GREPTIME_TEMPORALITY_DELTA)],
+        ),
+        (r#"!~"delta""#, vec![None, Some("")]),
+        (r#"!="""#, vec![Some(GREPTIME_TEMPORALITY_DELTA)]),
+        (
+            r#"=~"delta|""#,
+            vec![None, Some(""), Some(GREPTIME_TEMPORALITY_DELTA)],
+        ),
+        (r#"!~"delta|""#, vec![]),
         (r#"="delta""#, vec![Some(GREPTIME_TEMPORALITY_DELTA)]),
     ] {
         let query = format!(r#"metric{{{marker}{matcher}}}"#);
@@ -558,10 +568,10 @@ async fn matchers_read_absent_labels_as_empty() {
         };
         let expressions = PromPlanner::matchers_to_expr(selector.matchers, scan.schema()).unwrap();
         let display = expressions.iter().map(ToString::to_string).join(" AND ");
-        if matcher == r#"="delta""# {
-            assert!(!display.contains("coalesce"), "{display}");
+        if [r#"="delta""#, r#"!="""#, r#"!~"delta|""#].contains(&matcher) {
+            assert!(!display.contains("IS NULL"), "{display}");
         } else if !expressions.is_empty() {
-            assert!(display.contains("coalesce"), "{display}");
+            assert!(display.contains("IS NULL"), "{display}");
         }
         let plan = if let Some(filter) = conjunction(expressions) {
             LogicalPlanBuilder::from(scan)
@@ -599,7 +609,7 @@ async fn matchers_read_absent_labels_as_empty() {
     // The rule is about NULL, not about the marker: any nullable label column
     // can be NULL where the series does not carry the label. A non-nullable one
     // has nothing to normalize.
-    for (nullable, wants_coalesce) in [(true, true), (false, false)] {
+    for (nullable, wants_null_filter) in [(true, true), (false, false)] {
         let ordinary_schema = Arc::new(ArrowSchema::new(vec![Field::new(
             "label",
             ArrowDataType::Utf8,
@@ -626,8 +636,8 @@ async fn matchers_read_absent_labels_as_empty() {
             .map(ToString::to_string)
             .join(" AND ");
         assert_eq!(
-            wants_coalesce,
-            expressions.contains("coalesce"),
+            wants_null_filter,
+            expressions.contains("IS NULL"),
             "nullable={nullable}: {expressions}"
         );
     }
@@ -1102,12 +1112,12 @@ async fn delta_offsets_survive_optimized_plan_serialization() {
         (
             "timestamp positive offset",
             r#"timestamp(delta_metric{series="cumulative"} offset 60s)"#,
-            120.0,
+            60.0,
         ),
         (
             "timestamp negative offset",
             r#"timestamp(delta_metric{series="cumulative"} offset -60s)"#,
-            120.0,
+            180.0,
         ),
         (
             "range positive offset",

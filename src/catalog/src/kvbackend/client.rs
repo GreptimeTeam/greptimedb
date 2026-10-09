@@ -192,6 +192,10 @@ impl KvBackend for CachedKvBackend {
             }
         }
 
+        if miss_keys.is_empty() {
+            return Ok(BatchGetResponse { kvs });
+        }
+
         let batch_get_req = BatchGetRequest::new().with_keys(miss_keys.clone());
 
         let pre_version = self.version();
@@ -503,6 +507,7 @@ mod tests {
     pub struct SimpleKvBackend {
         inner_map: DashMap<Vec<u8>, Vec<u8>>,
         get_execute_times: Arc<AtomicU32>,
+        batch_get_execute_times: Arc<AtomicU32>,
     }
 
     impl TxnService for SimpleKvBackend {
@@ -520,6 +525,7 @@ mod tests {
         }
 
         async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse, Self::Error> {
+            self.batch_get_execute_times.fetch_add(1, Ordering::SeqCst);
             let mut kvs = Vec::with_capacity(req.keys.len());
             for key in req.keys.iter() {
                 if let Some(kv) = self.get(key).await? {
@@ -571,6 +577,7 @@ mod tests {
     async fn test_cached_kv_backend() {
         let simple_kv = Arc::new(SimpleKvBackend::default());
         let get_execute_times = simple_kv.get_execute_times.clone();
+        let batch_get_execute_times = simple_kv.batch_get_execute_times.clone();
         let cached_kv = CachedKvBackend::wrap(simple_kv);
 
         add_some_vals(&cached_kv).await;
@@ -582,9 +589,11 @@ mod tests {
         assert_eq!(get_execute_times.load(Ordering::SeqCst), 0);
 
         for _ in 0..10 {
-            let _batch_get_resp = cached_kv.batch_get(batch_get_req.clone()).await.unwrap();
+            let batch_get_resp = cached_kv.batch_get(batch_get_req.clone()).await.unwrap();
 
+            assert_eq!(batch_get_resp.kvs.len(), 2);
             assert_eq!(get_execute_times.load(Ordering::SeqCst), 2);
+            assert_eq!(batch_get_execute_times.load(Ordering::SeqCst), 1);
         }
 
         let batch_get_req = BatchGetRequest {
@@ -594,12 +603,27 @@ mod tests {
         let _batch_get_resp = cached_kv.batch_get(batch_get_req.clone()).await.unwrap();
 
         assert_eq!(get_execute_times.load(Ordering::SeqCst), 3);
+        assert_eq!(batch_get_execute_times.load(Ordering::SeqCst), 2);
 
         for _ in 0..10 {
-            let _batch_get_resp = cached_kv.batch_get(batch_get_req.clone()).await.unwrap();
+            let batch_get_resp = cached_kv.batch_get(batch_get_req.clone()).await.unwrap();
 
+            assert_eq!(batch_get_resp.kvs.len(), 3);
             assert_eq!(get_execute_times.load(Ordering::SeqCst), 3);
+            assert_eq!(batch_get_execute_times.load(Ordering::SeqCst), 2);
         }
+    }
+
+    #[tokio::test]
+    async fn test_cached_kv_backend_empty_batch_get() {
+        let simple_kv = Arc::new(SimpleKvBackend::default());
+        let cached_kv = CachedKvBackend::wrap(simple_kv.clone());
+
+        let response = cached_kv.batch_get(BatchGetRequest::new()).await.unwrap();
+
+        assert!(response.kvs.is_empty());
+        assert_eq!(simple_kv.batch_get_execute_times.load(Ordering::SeqCst), 0);
+        assert_eq!(simple_kv.get_execute_times.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
