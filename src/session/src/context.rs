@@ -751,6 +751,7 @@ mod test {
 
     use crate::Session;
     use crate::context::{Channel, *};
+    use crate::query_options::{canonical_query_option_name, parse_query_option};
 
     #[test]
     fn query_options_snapshot_validates_and_overlays_request_options() {
