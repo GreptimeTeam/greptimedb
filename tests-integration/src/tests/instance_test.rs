@@ -258,6 +258,121 @@ WHERE greptime_timestamp = (
 }
 
 #[apply(both_instances_cases)]
+async fn test_partitioned_merge_scan_left_join_repartitions(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+    execute_sql(
+        &frontend,
+        r#"
+CREATE TABLE join_repro (
+    k STRING,
+    kind STRING,
+    v DOUBLE,
+    ts TIMESTAMP NOT NULL,
+    TIME INDEX (ts)
+)
+PARTITION ON COLUMNS (k) (
+    k < '1',
+    k >= '1' AND k < '2',
+    k >= '2' AND k < '3',
+    k >= '3' AND k < '4',
+    k >= '4' AND k < '5',
+    k >= '5' AND k < '6',
+    k >= '6' AND k < '7',
+    k >= '7' AND k < '8',
+    k >= '8' AND k < '9',
+    k >= '9' AND k < 'a',
+    k >= 'a' AND k < 'b',
+    k >= 'b' AND k < 'c',
+    k >= 'c' AND k < 'd',
+    k >= 'd' AND k < 'e',
+    k >= 'e' AND k < 'f',
+    k >= 'f'
+)
+ENGINE = mito
+WITH (append_mode = 'true')
+"#,
+    )
+    .await;
+
+    let mut rows = Vec::new();
+    for key in [
+        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'z',
+    ] {
+        rows.push(format!("('{key}', 'root', 1.0, '2024-01-01 00:00:00')"));
+        if key != 'z' {
+            for _ in 0..3 {
+                rows.push(format!("('{key}', 'child', 1.0, '2024-01-01 00:00:00')"));
+            }
+        }
+    }
+    execute_sql(
+        &frontend,
+        &format!("INSERT INTO join_repro VALUES {}", rows.join(",")),
+    )
+    .await;
+
+    let aggregate_sql = r#"SELECT count(*) roots, count(c.n) roots_with_children, sum(c.n) children
+FROM (SELECT k FROM join_repro WHERE kind = 'root') r
+LEFT JOIN (SELECT k, count(*) n FROM join_repro WHERE kind = 'child' GROUP BY k) c ON c.k = r.k"#;
+    for parallelism in [16, 8] {
+        let output = execute_sql_with_query_parallelism(&frontend, aggregate_sql, parallelism)
+            .await
+            .data
+            .pretty_print()
+            .await;
+        assert_eq!(
+            output,
+            "+-------+---------------------+----------+\n| roots | roots_with_children | children |\n+-------+---------------------+----------+\n| 17    | 16                  | 48       |\n+-------+---------------------+----------+"
+        );
+
+        let explain = execute_sql_with_query_parallelism(
+            &frontend,
+            &format!("EXPLAIN {aggregate_sql}"),
+            parallelism,
+        )
+        .await
+        .data
+        .pretty_print()
+        .await;
+        assert!(
+            explain.contains("HashJoinExec: mode=Partitioned"),
+            "query_parallelism={parallelism} should use a partitioned hash join; explain:\n{explain}"
+        );
+        assert!(
+            explain.contains("RepartitionExec: partitioning=Hash([k@0]"),
+            "query_parallelism={parallelism} should repartition on the join key; explain:\n{explain}"
+        );
+
+        let ordered_sql = r#"SELECT r.k, c.n
+FROM (SELECT k FROM join_repro WHERE kind = 'root') r
+LEFT JOIN (SELECT k, count(*) n FROM join_repro WHERE kind = 'child' GROUP BY k) c ON c.k = r.k
+ORDER BY r.k"#;
+        let ordered = execute_sql_with_query_parallelism(&frontend, ordered_sql, parallelism)
+            .await
+            .data
+            .pretty_print()
+            .await;
+        assert_eq!(
+            ordered,
+            "+---+------+\n| k | n    |\n+---+------+\n| 0 | 3    |\n| 1 | 3    |\n| 2 | 3    |\n| 3 | 3    |\n| 4 | 3    |\n| 5 | 3    |\n| 6 | 3    |\n| 7 | 3    |\n| 8 | 3    |\n| 9 | 3    |\n| a | 3    |\n| b | 3    |\n| c | 3    |\n| d | 3    |\n| e | 3    |\n| f | 3    |\n| z | NULL |\n+---+------+"
+        );
+
+        let pruned_sql = r#"SELECT count(*) roots, count(c.n) roots_with_children, sum(c.n) children
+FROM (SELECT k FROM join_repro WHERE kind = 'root' AND k < '8') r
+LEFT JOIN (SELECT k, count(*) n FROM join_repro WHERE kind = 'child' AND k < 'c' GROUP BY k) c ON c.k = r.k"#;
+        let pruned = execute_sql_with_query_parallelism(&frontend, pruned_sql, parallelism)
+            .await
+            .data
+            .pretty_print()
+            .await;
+        assert_eq!(
+            pruned,
+            "+-------+---------------------+----------+\n| roots | roots_with_children | children |\n+-------+---------------------+----------+\n| 8     | 8                   | 24       |\n+-------+---------------------+----------+"
+        );
+    }
+}
+
+#[apply(both_instances_cases)]
 async fn test_show_create_table(instance: Arc<dyn MockInstance>) {
     let frontend = instance.frontend();
     let sql = if instance.is_distributed_mode() {
