@@ -15,18 +15,20 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
 use api::greptime_proto::io::prometheus::write::v2::metadata::MetricType as RemoteWriteV2MetricType;
 use api::greptime_proto::io::prometheus::write::v2::{
-    BucketSpan, Histogram, Metadata as RemoteWriteV2Metadata, Sample as RemoteWriteV2Sample,
-    TimeSeries as RemoteWriteV2TimeSeries,
+    BucketSpan, Histogram, Metadata as RemoteWriteV2Metadata, Request as RemoteWriteV2Request,
+    Sample as RemoteWriteV2Sample, TimeSeries as RemoteWriteV2TimeSeries,
 };
 use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{
     Label, LabelMatcher, Query, ReadRequest, ReadResponse, Sample, TimeSeries, WriteRequest,
 };
+use api::v1::RowInsertRequests;
 use auth::{UserProviderRef, user_provider_from_option};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use base64::prelude::{BASE64_STANDARD, Engine as _};
@@ -69,7 +71,9 @@ use servers::http::header::constants::{
 };
 use servers::http::header::{GREPTIME_DB_HEADER_NAME, GREPTIME_TIMEZONE_HEADER_NAME};
 use servers::http::otlp::GoogleRpcStatus;
-use servers::http::prometheus::{Column, PrometheusJsonResponse, PrometheusResponse};
+use servers::http::prometheus::{
+    Column, PromQueryResult, PrometheusJsonResponse, PrometheusResponse,
+};
 use servers::http::result::error_result::ErrorResponse;
 use servers::http::result::greptime_result_v1::GreptimedbV1Response;
 use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
@@ -79,19 +83,48 @@ use servers::prom_remote_write::v2::test_util as remote_write_v2;
 use servers::prom_remote_write::validation::PromValidationMode;
 use servers::prom_store::{self, mock_timeseries_new_label};
 use servers::request_memory_limiter::ServerMemoryLimiter;
+use session::context::QueryContextRef;
 use standalone::options::StandaloneOptions;
 use table::table_name::TableName;
 use tests_integration::test_util::{
-    MockInstanceImpl, StorageType, assert_wal_delta, build_test_prom_server, setup_test_http_app,
-    setup_test_http_app_with_frontend, setup_test_http_app_with_frontend_and_slow_query_threshold,
+    MockInstanceImpl, StorageType, TestGuard, assert_wal_delta, build_test_prom_server,
+    setup_test_http_app, setup_test_http_app_with_frontend,
+    setup_test_http_app_with_frontend_and_custom_options,
+    setup_test_http_app_with_frontend_and_slow_query_threshold,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
-    setup_test_prom_app_with_frontend_batched, setup_test_prom_app_with_frontend_native_histogram,
+    setup_test_prom_app_with_frontend_and_memory_limiter,
+    setup_test_prom_app_with_frontend_batched,
 };
 use urlencoding::encode;
 use yaml_rust::YamlLoader;
 
 use crate::both_deployment_cases;
 use crate::event_recorder_test_util::assert_procedure_actor_by_table;
+
+/// Registers tests that exercise nothing below the HTTP layer, so running them
+/// against a remote object store only pays bucket setup and teardown.
+#[macro_export]
+macro_rules! http_local_tests {
+    ($($(#[$meta:meta])* $test:ident),*,) => {
+        mod integration_http_local_test {
+            $(
+                #[tokio::test(flavor = "multi_thread")]
+                $(
+                    #[$meta]
+                )*
+                async fn $test() {
+                    let store_type = tests_integration::test_util::StorageType::File;
+                    // Support both unit tests and fallible tests without discarding errors.
+                    let result = $crate::http::$test(store_type).await;
+                    assert_eq!(
+                        std::process::Termination::report(result),
+                        std::process::ExitCode::SUCCESS,
+                    );
+                }
+            )*
+        }
+    };
+}
 
 #[macro_export]
 macro_rules! http_test {
@@ -132,26 +165,29 @@ macro_rules! http_tests {
                 test_http_analyze_stream_tql,
                 test_http_sql_slow_query,
                 test_prometheus_promql_api,
+                test_promql_over_non_millisecond_physical_tables,
                 test_prometheus_label_replace_response,
                 test_prom_http_api,
-                test_metrics_api,
-                test_health_api,
-                test_status_api,
+                test_prom_remote_compression_bomb_rejected,
+                test_prom_remote_write_decoded_body_charged,
+                test_influxdb_write_decoded_body_charged,
                 test_config_api,
-                test_dynamic_tracer_toggle,
-                test_dashboard_path,
                 test_dashboard_api,
                 test_prometheus_remote_write,
                 test_prometheus_remote_write_v2,
                 test_prometheus_remote_write_v2_native_histogram,
                 test_prometheus_remote_write_batched,
+                test_prometheus_remote_write_batched_mixed_time_index_units,
+                test_prometheus_remote_write_batched_interceptor_time_index_units,
+                test_prometheus_remote_write_v2_batched_interceptor_time_index_units,
+                test_prometheus_remote_write_batched_microsecond_physical_table,
+                test_prometheus_remote_write_batched_conflicting_physical_selections,
                 test_prometheus_remote_special_labels,
                 test_prometheus_remote_schema_labels,
                 test_prometheus_remote_write_with_pipeline,
                 test_vm_proto_remote_write,
 
                 test_pipeline_api,
-                test_test_pipeline_api,
                 test_pipeline_name_in_header,
                 test_plain_text_ingestion,
                 test_pipeline_auto_transform,
@@ -187,8 +223,6 @@ macro_rules! http_tests {
                 test_loki_json_logs_with_pipeline,
                 test_elasticsearch_logs,
                 test_elasticsearch_logs_with_index,
-                test_splunk_health,
-                test_splunk_health_is_public,
                 test_splunk_logs,
                 test_splunk_raw,
                 test_log_query,
@@ -481,6 +515,459 @@ async fn test_sql_skip_wal(distributed: bool) {
         case.expected_written_nodes = distributed.then_some(2);
     }
     check_http_skip_wal("sql", &cases, distributed).await;
+}
+
+fn logical_ddl(name: &str) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {name} (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val DOUBLE) ENGINE=metric WITH (on_physical_table='phy.dot')"
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_ddl_http_standalone() {
+    check_logical_ddl_http(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_ddl_http_distributed() {
+    check_logical_ddl_http(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "manual logical DDL throughput measurement"]
+async fn logical_ddl_http_benchmark() {
+    common_telemetry::init_default_ut_logging();
+    let count: usize = std::env::var("GT_LOGICAL_DDL_BENCH_TABLES")
+        .unwrap_or_else(|_| "1000".to_string())
+        .parse()
+        .unwrap();
+    for (name, endpoint, batch_size) in [
+        ("single", "/v1/sql", 1),
+        ("multi_sql", "/v1/sql", 128),
+        ("batch", "/v1/ddl/logical-tables", 128),
+    ] {
+        let mut instance =
+            MockInstanceImpl::Standalone(
+                tests_integration::standalone::GreptimeDbStandaloneBuilder::new(&format!(
+                    "logical_ddl_bench_{name}"
+                ))
+                .with_event_recorder_options(
+                    tests_integration::test_util::test_event_recorder_options(),
+                )
+                .build()
+                .await,
+            );
+        let server = HttpServerBuilder::new(HttpOptions::default())
+            .with_sql_handler(instance.frontend())
+            .build();
+        let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+        let response = execute_sql(&client, "CREATE TABLE \"phy.dot\" (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val DOUBLE) ENGINE=metric WITH (physical_metric_table='')").await;
+        assert!(response.status().is_success(), "{}", response.text().await);
+        let statements = (0..count)
+            .map(|i| logical_ddl(&format!("bench_{i}")))
+            .collect::<Vec<_>>();
+        let start = std::time::Instant::now();
+        for chunk in statements.chunks(batch_size) {
+            let response = client
+                .post(endpoint)
+                .form(&[("sql", chunk.join(";"))])
+                .send()
+                .await;
+            assert!(response.status().is_success(), "{}", response.text().await);
+            assert_eq!(
+                response.json::<Value>().await["output"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                chunk.len()
+            );
+        }
+        let elapsed = start.elapsed();
+        let requests = count.div_ceil(batch_size);
+        let procedures = if name == "batch" { requests } else { count };
+        wait_for_event_data(&client,
+            "SELECT count(DISTINCT procedure_id), count(DISTINCT table_name) FROM greptime_private.events WHERE type='create_logical_tables' AND json_get_string(procedure_trigger, 'type')='Submitted' AND table_name LIKE 'bench_%'",
+            &format!("[[{procedures},{count}]]")).await;
+        common_telemetry::info!(
+            "Logical DDL: mode={name}, tables={count}, concurrency=1, HTTP requests={requests}, procedures={procedures}, elapsed={elapsed:?}"
+        );
+        instance.shutdown().await;
+    }
+}
+
+async fn check_logical_ddl_http(distributed: bool) {
+    common_telemetry::init_default_ut_logging();
+    let events = tests_integration::test_util::test_event_recorder_options();
+    let mut instance = if distributed {
+        MockInstanceImpl::Distributed(
+            tests_integration::cluster::GreptimeDbClusterBuilder::new("batch_logical_ddl")
+                .await
+                .with_event_recorder_options(events)
+                .with_datanodes(3)
+                .build(true)
+                .await,
+        )
+    } else {
+        MockInstanceImpl::Standalone(
+            tests_integration::standalone::GreptimeDbStandaloneBuilder::new("batch_logical_ddl")
+                .with_event_recorder_options(events)
+                .build()
+                .await,
+        )
+    };
+    let frontend = instance.frontend();
+    let server = HttpServerBuilder::new(HttpOptions::default())
+        .with_sql_handler(frontend.clone())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+    assert_eq!(
+        client
+            .get("/v1/capabilities")
+            .send()
+            .await
+            .json::<Value>()
+            .await["metric_batch_ddl"],
+        1
+    );
+    let response = execute_sql(&client, "CREATE TABLE \"phy.dot\" (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val DOUBLE) ENGINE=metric WITH (physical_metric_table='')").await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+
+    for sql in [
+        String::new(),
+        format!("{}; SELECT 1", logical_ddl("rejected")),
+        format!("{}; CREATE VIEW v AS SELECT 1", logical_ddl("rejected")),
+        format!(
+            "{}; CREATE TABLE copy LIKE batch_0",
+            logical_ddl("rejected")
+        ),
+        format!("{}; CREATE TABLE copy AS SELECT 1", logical_ddl("rejected")),
+        logical_ddl("rejected").replace("WITH (", "WITH (physical_metric_table='', "),
+        format!(
+            "{}; CREATE TABLE ordinary (ts TIMESTAMP TIME INDEX)",
+            logical_ddl("rejected")
+        ),
+        format!(
+            "{};{}",
+            logical_ddl("rejected"),
+            logical_ddl("public.rejected")
+        ),
+        format!("{};{}", logical_ddl("rejected"), logical_ddl("other.t")),
+        format!(
+            "{};{}",
+            logical_ddl("rejected"),
+            logical_ddl("other_physical").replace("phy.dot", "other")
+        ),
+        (0..129)
+            .map(|i| logical_ddl(&format!("rejected_{i}")))
+            .collect::<Vec<_>>()
+            .join(";"),
+    ] {
+        let response = client
+            .post("/v1/ddl/logical-tables")
+            .form(&[("sql", sql)])
+            .send()
+            .await;
+        assert!(!response.status().is_success(), "{}", response.text().await);
+    }
+    validate_data(
+        "batch_rejected",
+        &client,
+        "SELECT count(*) FROM information_schema.tables WHERE table_name LIKE 'rejected%'",
+        "[[0]]",
+    )
+    .await;
+
+    let sql = (0..128)
+        .map(|i| logical_ddl(&format!("batch_{i}")))
+        .collect::<Vec<_>>()
+        .join(";");
+    let response = client
+        .post("/v1/ddl/logical-tables")
+        .form(&[("sql", sql)])
+        .send()
+        .await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+    assert_eq!(
+        response.json::<Value>().await["output"],
+        json!(vec![json!({"affectedrows": 0}); 128])
+    );
+    wait_for_event_data(&client,
+        "SELECT count(DISTINCT procedure_id), count(DISTINCT table_name) FROM greptime_private.events WHERE type='create_logical_tables' AND json_get_string(procedure_trigger, 'type')='Submitted' AND table_name LIKE 'batch_%'",
+        "[[1,128]]").await;
+
+    let physical_id = frontend
+        .catalog_manager()
+        .table("greptime", "public", "phy.dot", None)
+        .await
+        .unwrap()
+        .unwrap()
+        .table_info()
+        .table_id();
+    let mut ids = std::collections::HashSet::new();
+    for i in 0..128 {
+        let table = frontend
+            .catalog_manager()
+            .table("greptime", "public", &format!("batch_{i}"), None)
+            .await
+            .unwrap()
+            .unwrap();
+        let id = table.table_info().table_id();
+        assert!(ids.insert(id));
+        assert_ne!(id, physical_id);
+        let bound_physical_id = frontend
+            .table_metadata_manager()
+            .table_route_manager()
+            .get_physical_table_id(id)
+            .await
+            .unwrap();
+        assert_eq!(bound_physical_id, physical_id);
+        assert_eq!(
+            table
+                .table_info()
+                .meta
+                .options
+                .extra_options
+                .get("on_physical_table")
+                .map(String::as_str),
+            Some("phy.dot")
+        );
+        assert_eq!(table.schema().column_schemas().len(), 3);
+    }
+    let sql = logical_ddl("one_at_byte_limit");
+    let padded = format!("{sql}{}", " ".repeat(1024 * 1024 - sql.len()));
+    let response = client
+        .post("/v1/ddl/logical-tables")
+        .form(&[("sql", padded)])
+        .send()
+        .await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+
+    let response = execute_sql(&client, "CREATE DATABASE inherited WITH ('skip_wal'='true', ttl='1h', 'compaction.type'='twcs'); CREATE TABLE inherited.phy (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val DOUBLE) ENGINE=metric WITH (physical_metric_table='')").await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+    let inherited = logical_ddl("inherited.ordinary").replace("phy.dot", "phy");
+    let response = execute_sql(&client, &inherited).await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+    let sql = format!(
+        "{};{}",
+        logical_ddl("batched").replace("phy.dot", "phy"),
+        logical_ddl("explicit")
+            .replace("phy.dot", "phy")
+            .replace("WITH (", "WITH (skip_wal='false', ")
+    );
+    let response = client
+        .post("/v1/ddl/logical-tables")
+        .form(&[("sql", sql.as_str()), ("db", "greptime-inherited")])
+        .send()
+        .await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+    let catalog = frontend.catalog_manager();
+    let ordinary = catalog
+        .table("greptime", "inherited", "ordinary", None)
+        .await
+        .unwrap()
+        .unwrap();
+    let batched = catalog
+        .table("greptime", "inherited", "batched", None)
+        .await
+        .unwrap()
+        .unwrap();
+    let explicit = catalog
+        .table("greptime", "inherited", "explicit", None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ordinary.table_info().meta.options,
+        batched.table_info().meta.options
+    );
+    assert!(batched.table_info().meta.options.skip_wal);
+    assert!(!explicit.table_info().meta.options.skip_wal);
+    assert!(
+        !batched
+            .table_info()
+            .meta
+            .options
+            .extra_options
+            .contains_key("compaction.type")
+    );
+
+    let response = execute_sql(&client, "CREATE TABLE partitioned (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val DOUBLE) PARTITION ON COLUMNS (host) (host < 'm', host >= 'm') ENGINE=metric WITH (physical_metric_table='')").await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+    let partitioned = logical_ddl("bad_partition")
+        .replace("phy.dot", "partitioned")
+        .replace(
+            "ENGINE=",
+            "PARTITION ON COLUMNS (host) (host < 'n', host >= 'n') ENGINE=",
+        );
+    let response = execute_sql(&client, &partitioned).await;
+    assert!(!response.status().is_success());
+    let sql = format!(
+        "{};{partitioned}",
+        logical_ddl("before_bad_partition").replace("phy.dot", "partitioned")
+    );
+    let response = client
+        .post("/v1/ddl/logical-tables")
+        .form(&[("sql", sql)])
+        .send()
+        .await;
+    assert!(!response.status().is_success());
+    assert!(
+        catalog
+            .table("greptime", "public", "before_bad_partition", None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let matching = partitioned
+        .replace("bad_partition", "matching_partition")
+        .replace("'n'", "'m'");
+    let response = execute_sql(&client, &matching).await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+    let sql = format!(
+        "{};{}",
+        matching.replace("matching_partition", "batch_matching_partition"),
+        logical_ddl("batch_inherited_partition").replace("phy.dot", "partitioned")
+    );
+    let response = client
+        .post("/v1/ddl/logical-tables")
+        .form(&[("sql", sql)])
+        .send()
+        .await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+
+    let original_id = frontend
+        .catalog_manager()
+        .table("greptime", "public", "batch_0", None)
+        .await
+        .unwrap()
+        .unwrap()
+        .table_info()
+        .table_id();
+    let sql = format!("{};{}", logical_ddl("batch_0"), logical_ddl("batch_new"));
+    for _ in 0..2 {
+        let response = client
+            .post("/v1/ddl/logical-tables")
+            .form(&[("sql", &sql)])
+            .send()
+            .await;
+        assert!(response.status().is_success(), "{}", response.text().await);
+    }
+    let old = frontend
+        .catalog_manager()
+        .table("greptime", "public", "batch_0", None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(original_id, old.table_info().table_id());
+    let response = execute_sql(
+        &client,
+        "INSERT INTO batch_0 (ts, host, val) VALUES (1, 'a', 2.0); INSERT INTO batch_new (ts, host, val) VALUES (2, 'b', 3.0)",
+    )
+    .await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+    validate_data(
+        "batch_values",
+        &client,
+        "SELECT val FROM batch_0 UNION ALL SELECT val FROM batch_new ORDER BY val",
+        "[[2.0],[3.0]]",
+    )
+    .await;
+    let ctx = session::context::QueryContext::arc();
+    let provider =
+        auth::static_user_provider_from_option("static_user_provider:cmd:readonly:ro=password")
+            .unwrap();
+    let user = auth::UserProvider::authenticate(
+        &provider,
+        auth::Identity::UserId("readonly", None),
+        auth::Password::PlainText("password".to_string().into()),
+    )
+    .await
+    .unwrap();
+    ctx.set_current_user(user);
+    frontend
+        .plugins()
+        .get_or_insert::<auth::PermissionCheckerRef, _>(auth::DefaultPermissionChecker::arc);
+    let result = servers::query_handler::sql::SqlQueryHandler::create_logical_tables(
+        frontend.as_ref(),
+        &logical_ddl("read_only_denied"),
+        ctx,
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(
+        frontend
+            .catalog_manager()
+            .table("greptime", "public", "read_only_denied", None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    struct FailAfterExecution(&'static str);
+    impl servers::interceptor::SqlQueryInterceptor for FailAfterExecution {
+        type Error = frontend::error::Error;
+        fn post_execute(
+            &self,
+            _: common_query::Output,
+            _: QueryContextRef,
+        ) -> frontend::error::Result<common_query::Output> {
+            use common_query::Output;
+            match self.0 {
+                "rows" => Ok(Output::new_with_affected_rows(1)),
+                "records" => Ok(Output::new_with_record_batches(
+                    common_recordbatch::RecordBatches::empty(),
+                )),
+                "stream" => Ok(Output::new_with_stream(Box::pin(
+                    common_recordbatch::RecordBatchStreamWrapper::new(
+                        Arc::new(datatypes::schema::Schema::new(vec![])),
+                        futures::stream::iter([Err::<common_recordbatch::RecordBatch, _>(
+                            common_recordbatch::error::CreateRecordBatchesSnafu {
+                                reason: "sensitive-option-value",
+                            }
+                            .build(),
+                        )]),
+                    ),
+                ))),
+                _ => frontend::error::InvalidSqlSnafu {
+                    err_msg: "sensitive-option-value",
+                }
+                .fail(),
+            }
+        }
+    }
+    frontend
+        .plugins()
+        .insert::<servers::interceptor::SqlQueryInterceptorRef<frontend::error::Error>>(Arc::new(
+            FailAfterExecution("error"),
+        ));
+    for mode in ["error", "rows", "records", "stream"] {
+        frontend
+            .plugins()
+            .map_mut::<servers::interceptor::SqlQueryInterceptorRef<frontend::error::Error>, _, _>(
+                |plugin| *plugin.unwrap() = Arc::new(FailAfterExecution(mode)),
+            );
+        let name = format!("created_before_error_{mode}");
+        let response = client
+            .post("/v1/ddl/logical-tables")
+            .form(&[("sql", logical_ddl(&name))])
+            .send()
+            .await;
+        assert!(!response.status().is_success(), "{mode}");
+        assert!(!format!("{:?}", response.headers()).contains("sensitive-option-value"));
+        let body = response.json::<Value>().await;
+        assert!(body.get("output").is_none());
+        assert_eq!(body["error"], "logical-table batch failed");
+        assert!(
+            frontend
+                .catalog_manager()
+                .table("greptime", "public", &name, None)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    instance.shutdown().await;
 }
 
 pub async fn test_sql_api(store_type: StorageType) {
@@ -981,6 +1468,31 @@ pub async fn test_prometheus_label_replace_response(store_type: StorageType) {
                     "__name__": "demo",
                     "host": "host1",
                     "host_copy": "host1"
+                },
+                "value": [0.0, "1.1"]
+            }]
+        }))
+        .unwrap()
+    );
+
+    // A series whose source value does not match keeps its labels, without `host_copy`.
+    let query = encode(r#"label_replace(demo, "host_copy", "$1", "host", "other(.*)")"#);
+    let res = client
+        .get(&format!("/v1/prometheus/api/v1/query?query={query}&time=0"))
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!({
+            "resultType": "vector",
+            "result": [{
+                "metric": {
+                    "__name__": "demo",
+                    "host": "host1"
                 },
                 "value": [0.0, "1.1"]
             }]
@@ -1696,6 +2208,376 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+/// A tiny compressed body must not be able to demand an unbounded decoded
+/// allocation on the Prometheus remote-storage endpoints. The five-byte raw
+/// Snappy varint (`ff ff ff ff 0f`) declares a ~4 GiB decoded length and must
+/// be rejected by the decoded-size cap.
+pub async fn test_prom_remote_compression_bomb_rejected(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_prom_app_with_frontend(store_type, "prom_remote_bomb").await;
+    let client = TestClient::new(app).await;
+
+    // Remote read with the five-byte varint bomb.
+    let res = client
+        .post("/v1/prometheus/read")
+        .body(Vec::from([0xffu8, 0xff, 0xff, 0xff, 0x0f]))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // Remote write v1 with the same bomb, via both codecs (exercising the
+    // fallback: the zstd attempt fails on malformed input and the snappy
+    // fallback must reject the declared size).
+    for encoding in ["snappy", "zstd"] {
+        let res = client
+            .post("/v1/prometheus/write")
+            .header("Content-Encoding", encoding)
+            .body(Vec::from([0xffu8, 0xff, 0xff, 0xff, 0x0f]))
+            .send()
+            .await;
+        assert_eq!(
+            res.status(),
+            StatusCode::BAD_REQUEST,
+            "bomb with Content-Encoding {encoding} must be rejected"
+        );
+    }
+
+    // The server must still serve valid requests afterwards.
+    let write_request = WriteRequest {
+        timeseries: prom_store::mock_timeseries(),
+        ..Default::default()
+    };
+    let compressed = prom_store::snappy_compress(&write_request.encode_to_vec()).unwrap();
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(compressed)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    guard.remove_all().await;
+}
+
+/// The decoded (not encoded) size of a Prometheus remote write body must be
+/// charged against the aggregate request-memory quota.
+pub async fn test_prom_remote_write_decoded_body_charged(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    // 4 KiB aggregate quota with fail-fast policy.
+    let memory_limiter = ServerMemoryLimiter::new(4096, OnExhaustedPolicy::Fail);
+    let (app, mut guard) = setup_test_prom_app_with_frontend_and_memory_limiter(
+        store_type,
+        "prom_remote_write_quota",
+        Some(memory_limiter),
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    // A valid write request whose decoded protobuf clearly exceeds the quota
+    // while its Snappy wire body stays far below it.
+    let write_request = WriteRequest {
+        timeseries: vec![TimeSeries {
+            labels: vec![
+                Label {
+                    name: "__name__".to_string(),
+                    value: "quota_metric".to_string(),
+                },
+                Label {
+                    name: "payload".to_string(),
+                    // ~8 KiB decoded; compresses to a few hundred bytes.
+                    value: "p".repeat(8 * 1024),
+                },
+            ],
+            samples: vec![Sample {
+                value: 1.0,
+                timestamp: 1000,
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let compressed = prom_store::snappy_compress(&write_request.encode_to_vec()).unwrap();
+    assert!(
+        compressed.len() < 2048,
+        "wire body must stay under the quota"
+    );
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(compressed)
+        .send()
+        .await;
+    let status = res.status();
+    let body = res.text().await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "decoded body larger than the aggregate quota must be rejected, got body: {body}"
+    );
+
+    guard.remove_all().await;
+}
+
+/// Decompressed ingestion bodies (routes using `RequestDecompressionLayer`)
+/// must be charged against the aggregate request-memory quota as they are
+/// decoded, not only their compressed wire size.
+pub async fn test_influxdb_write_decoded_body_charged(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    // 4 KiB aggregate quota with fail-fast policy.
+    let memory_limiter = ServerMemoryLimiter::new(4096, OnExhaustedPolicy::Fail);
+    let http_opts = servers::http::HttpOptions {
+        addr: format!("127.0.0.1:{}", common_test_util::ports::get_port()),
+        ..Default::default()
+    };
+    let (app, mut guard) = setup_test_http_app_with_frontend_and_custom_options(
+        store_type,
+        "test_influxdb_decoded_quota",
+        None,
+        Some(http_opts),
+        Some(memory_limiter),
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    // A gzip member expanding to ~8 KiB of line protocol from a tiny wire body.
+    let lines: Vec<String> = (0..200)
+        .map(|i| format!("decoded_quota,host=h{} v=1.0,ts={}", i % 20, 1700000000 + i))
+        .collect();
+    let decoded = lines.join("\n");
+    assert!(decoded.len() > 4096);
+    let compressed = zstd::stream::encode_all(decoded.as_bytes(), 3).unwrap();
+    assert!(
+        compressed.len() < 2048,
+        "wire body must stay under the quota"
+    );
+
+    // Compressed write whose decoded body exceeds the quota: rejected while
+    // streaming (the extractor surfaces the aborted body as 400).
+    let res = client
+        .post("/v1/influxdb/write?db=public")
+        .header("Content-Type", "text/plain")
+        .header("Content-Encoding", "zstd")
+        .body(compressed)
+        .send()
+        .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "decoded body larger than the aggregate quota must be rejected with 429"
+    );
+
+    // The server still serves a small compressed write within the quota.
+    let small = "decoded_quota,host=ok v=1.0,ts=1700000000";
+    let compressed_small = zstd::stream::encode_all(small.as_bytes(), 3).unwrap();
+    let res = client
+        .post("/v1/influxdb/write?db=public")
+        .header("Content-Type", "text/plain")
+        .header("Content-Encoding", "zstd")
+        .body(compressed_small)
+        .send()
+        .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::NO_CONTENT,
+        "small compressed write must succeed, got: {}",
+        res.text().await
+    );
+
+    guard.remove_all().await;
+}
+
+/// PromQL must behave identically regardless of the physical metric table's
+/// time index unit: the same samples are remote-written into physical tables
+/// pre-created with second/micro/nano time indexes (plus a millisecond
+/// baseline), and every PromQL response must match the baseline exactly.
+/// Regression test for <https://github.com/GreptimeTeam/greptimedb/issues/9231>.
+pub async fn test_promql_over_non_millisecond_physical_tables(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend(store_type, "promql_non_ms_units").await;
+    let client = TestClient::new(app).await;
+
+    let units = [
+        ("ms", "timestamp(3)"),
+        ("second", "timestamp(0)"),
+        ("micro", "timestamp(6)"),
+        ("nano", "timestamp(9)"),
+    ];
+
+    for (suffix, ts_type) in units {
+        let db = format!("promql_units_{suffix}");
+        let res = client
+            .get(&format!("/v1/sql?db=public&sql=create database {db}"))
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK, "create database {db}");
+
+        let res = client
+            .get(&format!(
+                "/v1/sql?db={db}&sql=CREATE TABLE greptime_physical_table \
+                 (greptime_timestamp {ts_type} NOT NULL, greptime_value DOUBLE NULL, \
+                 TIME INDEX (greptime_timestamp)) \
+                 ENGINE = metric WITH ('physical_metric_table' = 'true')"
+            ))
+            .send()
+            .await;
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "create physical table with {ts_type} in {db}"
+        );
+
+        // unit_gauge{job="demo"} = 1.0 @ 1000ms, 2.0 @ 2000ms
+        let write_request = WriteRequest {
+            timeseries: vec![TimeSeries {
+                labels: vec![
+                    Label {
+                        name: prom_store::METRIC_NAME_LABEL.to_string(),
+                        value: "unit_gauge".to_string(),
+                    },
+                    Label {
+                        name: "job".to_string(),
+                        value: "demo".to_string(),
+                    },
+                ],
+                samples: vec![
+                    Sample {
+                        value: 1.0,
+                        timestamp: 1000,
+                    },
+                    Sample {
+                        value: 2.0,
+                        timestamp: 2000,
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let compressed = prom_store::snappy_compress(&write_request.encode_to_vec()).unwrap();
+        let write_url = format!("/v1/prometheus/write?db={db}");
+        let res = client
+            .post(write_url.as_str())
+            .header("Content-Encoding", "snappy")
+            .body(compressed)
+            .send()
+            .await;
+        assert_eq!(
+            res.status(),
+            StatusCode::NO_CONTENT,
+            "remote write into {db}"
+        );
+    }
+
+    let query_paths = [
+        "query?query=unit_gauge&time=2",
+        "query_range?query=unit_gauge&start=0&end=5&step=1",
+        "query?query=avg_over_time(unit_gauge[1m])&time=2",
+        "query?query=rate(unit_gauge[1m])&time=2",
+    ];
+    for path in query_paths {
+        let mut baseline: Option<(String, PrometheusResponse)> = None;
+        for (suffix, _) in units {
+            let db = format!("promql_units_{suffix}");
+            let res = client
+                .get(&format!("/v1/prometheus/api/v1/{path}&db={db}"))
+                .send()
+                .await;
+            assert_eq!(res.status(), StatusCode::OK, "promql `{path}` on {db}");
+            let body = res.json::<PrometheusJsonResponse>().await;
+            assert_eq!(body.status, "success", "promql `{path}` on {db}");
+            match &baseline {
+                None => baseline = Some((suffix.to_string(), body.data)),
+                Some((baseline_suffix, baseline_data)) => {
+                    assert_eq!(
+                        &body.data, baseline_data,
+                        "promql `{path}` on {db} differs from the {baseline_suffix} baseline"
+                    );
+                }
+            }
+        }
+    }
+
+    // Pin the baseline responses so the cross-unit equality above cannot pass
+    // vacuously on wrong data: the samples are 1.0@1s and 2.0@2s, and
+    // `rate(unit_gauge[1m])@2s` follows Prometheus's extrapolated rate:
+    // Δv=1 over a 1s sampled interval extrapolated to 1.5s, divided by the
+    // 60s window -> 1.5/60 = 0.025 per second.
+    let res = client
+        .get("/v1/prometheus/api/v1/query?db=promql_units_ms&query=unit_gauge&time=2")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!({
+            "resultType": "vector",
+            "result": [{
+                "metric": {"__name__": "unit_gauge", "job": "demo"},
+                "value": [2.0, "2.0"]
+            }]
+        }))
+        .unwrap()
+    );
+
+    let res = client
+        .get("/v1/prometheus/api/v1/query_range?db=promql_units_ms&query=unit_gauge&start=0&end=5&step=1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!({
+            "resultType": "matrix",
+            "result": [{
+                "metric": {"__name__": "unit_gauge", "job": "demo"},
+                "values": [
+                    [1.0, "1.0"], [2.0, "2.0"], [3.0, "2.0"], [4.0, "2.0"], [5.0, "2.0"]
+                ]
+            }]
+        }))
+        .unwrap()
+    );
+
+    let res = client
+        .get("/v1/prometheus/api/v1/query?db=promql_units_ms&query=avg_over_time(unit_gauge[1m])&time=2")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!({
+            "resultType": "vector",
+            "result": [{
+                "metric": {"__name__": "unit_gauge", "job": "demo"},
+                "value": [2.0, "1.5"]
+            }]
+        }))
+        .unwrap()
+    );
+
+    let res = client
+        .get("/v1/prometheus/api/v1/query?db=promql_units_ms&query=rate(unit_gauge[1m])&time=2")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    let rate = match body.data {
+        PrometheusResponse::PromData(data) => match data.result {
+            PromQueryResult::Vector(v) => v[0].value.as_ref().unwrap().1.clone(),
+            other => panic!("expected vector, got {other:?}"),
+        },
+        other => panic!("expected prom data, got {other:?}"),
+    };
+    assert_eq!(rate, "0.025");
+
+    guard.remove_all().await;
+}
+
 pub async fn test_metrics_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) = setup_test_http_app(store_type, "metrics_api").await;
@@ -1810,15 +2692,21 @@ pub async fn test_splunk_logs(store_type: StorageType) {
     .await;
     let client = TestClient::new(app).await;
 
-    // Authenticated SQL query (the user-provider harness requires auth on /v1/sql).
+    // Authenticated SQL statement (the user-provider harness requires auth on
+    // /v1/sql). Posted as a form so quotes and parentheses survive.
     async fn query(client: &TestClient, sql: &str) -> String {
         let res = client
-            .get(format!("/v1/sql?sql={sql}").as_str())
+            .post("/v1/sql")
             .header("Authorization", basic_auth("greptime_user", "greptime_pwd"))
+            .form(&[("sql", sql)])
             .send()
             .await;
-        assert_eq!(res.status(), StatusCode::OK, "query failed: {sql}");
-        res.text().await
+        let status = res.status();
+        let body = res.text().await;
+        assert_eq!(status, StatusCode::OK, "query failed: {sql}: {body}");
+        // A failing statement still comes back as 200 with an `error` envelope.
+        assert!(!body.contains("\"error\""), "query failed: {sql}: {body}");
+        body
     }
 
     // HEC `Authorization: Splunk <user:pass>` + JSON content type.
@@ -1968,6 +2856,34 @@ transform:
         !create.contains("sourcetype"),
         "custom pipeline should have dropped sourcetype (identity would keep it): {create}"
     );
+
+    // 6b. Ingest into a pre-created table with a fulltext index, then flush: the
+    // index file is only written on flush, so this is the one path that reads it
+    // back. `matches_term` is the predicate the index applier recognises.
+    query(
+        &client,
+        "create table splunk_indexed (greptime_timestamp timestamp(9) time index, \
+         \"event\" string fulltext index with(backend='bloom'))",
+    )
+    .await;
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        "/v1/splunk/services/collector/event?table=splunk_indexed",
+        br#"{"event":"disk pressure on web-01","time":1700000020}"#.to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    query(&client, "ADMIN FLUSH_TABLE('splunk_indexed')").await;
+    let rows = get_rows_from_output(
+        &query(
+            &client,
+            "select \"event\" from splunk_indexed where matches_term(\"event\", 'pressure')",
+        )
+        .await,
+    );
+    assert_eq!(rows, r#"[["disk pressure on web-01"]]"#);
 
     // 7. Auth failures return HEC codes: missing token -> 2 (401), bad token -> 4 (403).
     let res = send_req(
@@ -2343,23 +3259,11 @@ providers = []"#,
         )
     };
 
-    let vector_index_config = if cfg!(feature = "vector_index") {
-        r#"
-[region_engine.mito.vector_index]
-create_on_flush = "auto"
-create_on_compaction = "auto"
-apply_on_query = "auto"
-mem_threshold_on_create = "auto"
-
-"#
-    } else {
-        "\n"
-    };
-
     let expected_toml_str = format!(
         r#"
 enable_telemetry = true
 auto_create_table = true
+experimental_metric_export = false
 max_in_flight_write_bytes = "0KiB"
 write_bytes_exhausted_policy = "wait"
 init_regions_in_background = false
@@ -2384,6 +3288,8 @@ flight_compression = "arrow_ipc"
 runtime_size = 8
 http2_keep_alive_interval = "10s"
 http2_keep_alive_timeout = "3s"
+enable_cors = false
+cors_allowed_origins = []
 
 [grpc.tls]
 mode = "disable"
@@ -2431,7 +3337,7 @@ protocols = []
 pending_rows_flush_interval = "0s"
 max_batch_rows = 100000
 max_concurrent_flushes = 256
-worker_channel_capacity = 65526
+worker_channel_capacity = 65536
 max_inflight_requests = 3000
 flow_notification_queue_capacity = 1024
 
@@ -2440,7 +3346,6 @@ enable = true
 
 [otlp]
 enable = true
-experimental_enable_exponential_histogram = false
 trace_ingest_chunk_size = 512
 experimental_enable_resource_info = true
 
@@ -2448,11 +3353,10 @@ experimental_enable_resource_info = true
 enable = true
 with_metric_engine = true
 prom_validation_mode = "strict"
-experimental_enable_prometheus_native_histogram = false
 pending_rows_flush_interval = "0s"
 max_batch_rows = 100000
 max_concurrent_flushes = 256
-worker_channel_capacity = 65526
+worker_channel_capacity = 65536
 max_inflight_requests = 3000
 flow_notification_queue_capacity = 1024
 
@@ -2511,6 +3415,7 @@ experimental_manifest_keep_removed_file_count = 256
 experimental_manifest_keep_removed_file_ttl = "1h"
 compress_manifest = false
 experimental_enable_series_index = false
+experimental_series_index_max_size = "5GiB"
 experimental_enable_range_index = false
 experimental_series_index_maintenance_interval = "5m"
 experimental_series_index_bucket_width = "5days"
@@ -2532,7 +3437,7 @@ scan_memory_on_exhausted = "fail"
 min_compaction_interval = "0s"
 schedule_compaction_after_edit = true
 default_flat_format = true
-experimental_series_scan_v2 = true
+experimental_series_scan_v2 = false
 
 [region_engine.mito.index]
 aux_path = ""
@@ -2560,7 +3465,8 @@ create_on_flush = "auto"
 create_on_compaction = "auto"
 apply_on_query = "auto"
 mem_threshold_on_create = "auto"
-{vector_index_config}[region_engine.mito.gc]
+
+[region_engine.mito.gc]
 enable = false
 lingering_time = "1h"
 unknown_file_lingering_time = "1day"
@@ -2910,6 +3816,18 @@ pub async fn test_prometheus_remote_write(store_type: StorageType) {
     )
     .await;
 
+    // A metric-engine logical table stores its rows in the shared physical
+    // table, so reading them back from SST files goes through a different
+    // column mapping than the memtable read does.
+    flush_table(&client, "metric2").await;
+    validate_data(
+        "prometheus_remote_write_after_flush",
+        &client,
+        "select * from metric2",
+        table_val,
+    )
+    .await;
+
     // Prom RW tables carry the metric identity; type is inferred from naming.
     validate_data(
         "prometheus_remote_write_semantic_identity",
@@ -3088,7 +4006,7 @@ pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
 
 pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    let (app, mut guard) = setup_test_prom_app_with_frontend_native_histogram(
+    let (app, mut guard) = setup_test_prom_app_with_frontend(
         store_type,
         "prometheus_remote_write_v2_native_histogram",
     )
@@ -3216,11 +4134,24 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
     )
     .await;
 
+    let histogram_sql = "select greptime_timestamp, greptime_native_histogram, job, instance from remote_write_v2_latency_seconds order by greptime_timestamp;";
+    let histogram_rows = "[[3000,{\"count_f64\":null,\"count_i64\":8,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[1],\"negative_span_lengths\":[1],\"negative_span_offsets\":[-2],\"positive_buckets_f64\":[],\"positive_buckets_i64\":[1,3,2],\"positive_span_lengths\":[3],\"positive_span_offsets\":[0],\"reset_hint\":2,\"schema\":1,\"start_timestamp\":1500,\"sum\":10.0,\"zero_count_f64\":null,\"zero_count_i64\":1,\"zero_threshold\":0.001},\"api\",\"localhost:9090\"],[4000,{\"count_f64\":6.0,\"count_i64\":null,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[],\"negative_span_lengths\":[],\"negative_span_offsets\":[],\"positive_buckets_f64\":[2.0,3.5],\"positive_buckets_i64\":[],\"positive_span_lengths\":[2],\"positive_span_offsets\":[3],\"reset_hint\":3,\"schema\":2,\"start_timestamp\":2500,\"sum\":20.0,\"zero_count_f64\":0.5,\"zero_count_i64\":null,\"zero_threshold\":0.002},\"api\",\"localhost:9090\"]]";
     validate_data(
         "prometheus_remote_write_v2_native_histogram_rows",
         &client,
-        "select greptime_timestamp, greptime_native_histogram, job, instance from remote_write_v2_latency_seconds order by greptime_timestamp;",
-        "[[3000,{\"count_f64\":null,\"count_i64\":8,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[1],\"negative_span_lengths\":[1],\"negative_span_offsets\":[-2],\"positive_buckets_f64\":[],\"positive_buckets_i64\":[1,3,2],\"positive_span_lengths\":[3],\"positive_span_offsets\":[0],\"reset_hint\":2,\"schema\":1,\"start_timestamp\":1500,\"sum\":10.0,\"zero_count_f64\":null,\"zero_count_i64\":1,\"zero_threshold\":0.001},\"api\",\"localhost:9090\"],[4000,{\"count_f64\":6.0,\"count_i64\":null,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[],\"negative_span_lengths\":[],\"negative_span_offsets\":[],\"positive_buckets_f64\":[2.0,3.5],\"positive_buckets_i64\":[],\"positive_span_lengths\":[2],\"positive_span_offsets\":[3],\"reset_hint\":3,\"schema\":2,\"start_timestamp\":2500,\"sum\":20.0,\"zero_count_f64\":0.5,\"zero_count_i64\":null,\"zero_threshold\":0.002},\"api\",\"localhost:9090\"]]",
+        histogram_sql,
+        histogram_rows,
+    )
+    .await;
+
+    // The native histogram column is a struct of nested lists, so its SST
+    // encoding differs from its memtable representation.
+    flush_table(&client, "remote_write_v2_latency_seconds").await;
+    validate_data(
+        "prometheus_remote_write_v2_native_histogram_rows_after_flush",
+        &client,
+        histogram_sql,
+        histogram_rows,
     )
     .await;
 
@@ -3455,7 +4386,7 @@ async fn check_prometheus_remote_write_batched_skip_wal(distributed: bool, v2: b
     common_telemetry::init_default_ut_logging();
     let mut instance =
         MockInstanceImpl::new(&format!("prom_bulk_skip_wal_v2_{v2}"), distributed).await;
-    let server = build_test_prom_server(instance.frontend(), true, false).build();
+    let server = build_test_prom_server(instance.frontend(), true, None).build();
     let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
 
     write_prometheus_skip_wal_sample(&client, v2, 1000, None).await;
@@ -3529,10 +4460,501 @@ async fn write_prometheus_skip_wal_sample(
     assert_eq!(request.send().await.status(), StatusCode::NO_CONTENT);
 }
 
+/// Batched remote write against a logical table bound to a non-millisecond
+/// physical table: the bulk guard must reject the destination (the bulk
+/// encode only produces millisecond batches) and fall back to the ordinary
+/// insert path, which converts the requests to the table's unit.
+pub async fn test_prometheus_remote_write_batched_mixed_time_index_units(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend_batched(store_type, "prom_rw_batched_mixed_units").await;
+    let client = TestClient::new(app).await;
+
+    let res = client
+        .get("/v1/sql?db=public&sql=CREATE TABLE phy_us (greptime_timestamp TIMESTAMP(6) NOT NULL, greptime_value DOUBLE NULL, TIME INDEX (greptime_timestamp)) ENGINE = metric WITH ('physical_metric_table' = 'true')")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let write = |metric: &str, value: f64, timestamp: i64| {
+        let write_request = WriteRequest {
+            timeseries: vec![TimeSeries {
+                labels: vec![
+                    Label {
+                        name: prom_store::METRIC_NAME_LABEL.to_string(),
+                        value: metric.to_string(),
+                    },
+                    Label {
+                        name: "job".to_string(),
+                        value: "demo".to_string(),
+                    },
+                ],
+                samples: vec![Sample { value, timestamp }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        prom_store::snappy_compress(&write_request.encode_to_vec()).unwrap()
+    };
+
+    // Create the logical table on the microsecond physical table. The bulk
+    // path handles the microsecond selected physical table: the new table
+    // is created on it and the samples are widened to its unit during
+    // batch alignment.
+    let res = client
+        .post("/v1/prometheus/write?physical_table=phy_us")
+        .header("Content-Encoding", "snappy")
+        .body(write("us_metric", 2.5, 1500))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // Write the same existing table again while selecting the default
+    // (millisecond) physical table: the destination is bound to another
+    // physical table, so the bulk eligibility check must reject it and fall
+    // back to the ordinary insert path — without the destination binding
+    // check the bulk flush would write the rows through the selected
+    // physical's regions, silently misplacing them.
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(write("us_metric", 3.5, 2000))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // Both samples are stored on the microsecond time index.
+    validate_data(
+        "prom_rw_batched_mixed_units",
+        &client,
+        "SELECT COUNT(*), MAX(greptime_value) FROM us_metric",
+        "[[2,3.5]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+/// A Prometheus write interceptor that redirects every remote write to the
+/// `tenant_redirect` schema, like a per-tenant redirection: the incoming
+/// context targets `public` while the destination tables live elsewhere.
+struct PromSchemaRedirectInterceptor;
+
+impl servers::interceptor::PromStoreProtocolInterceptor for PromSchemaRedirectInterceptor {
+    type Error = servers::error::Error;
+
+    fn pre_write(
+        &self,
+        _write_req: &RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> servers::error::Result<()> {
+        ctx.set_current_schema("tenant_redirect");
+        Ok(())
+    }
+}
+
+async fn setup_redirecting_batched_prom_app(
+    store_type: StorageType,
+    name: &str,
+) -> (TestClient, TestGuard) {
+    let plugins = Plugins::default();
+    plugins.insert::<servers::interceptor::PromStoreProtocolInterceptorRef<servers::error::Error>>(
+        Arc::new(PromSchemaRedirectInterceptor),
+    );
+    let standalone = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(name)
+        .with_default_store_type(store_type)
+        .with_plugin(plugins)
+        .build()
+        .await;
+    let server = build_test_prom_server(standalone.fe_instance().clone(), true, None)
+        .with_greptime_config_options(standalone.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+    (client, standalone.guard)
+}
+
+async fn create_redirect_schema_with_microsecond_table(client: &TestClient, table: &str) {
+    for sql in [
+        "create database if not exists tenant_redirect",
+        "CREATE TABLE tenant_redirect.phy_us \
+         (ts timestamp(6) time index, val double, host string primary key) \
+         engine=metric with ('physical_metric_table' = 'true')",
+        &format!(
+            "CREATE TABLE tenant_redirect.{table} \
+             (ts timestamp(6) time index, val double, host string primary key) \
+             engine=metric with ('on_physical_table' = 'phy_us')"
+        ),
+    ] {
+        let res = client
+            .get(format!("/v1/sql?sql={sql}").as_str())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK, "setup: {sql}");
+    }
+}
+
+/// Regression test: with batching enabled and a pre_write interceptor that
+/// redirects the context to a schema holding same-named non-millisecond
+/// tables, the bulk eligibility must be evaluated against the redirected
+/// destinations (after preflight) and fall back to the ordinary insert path
+/// instead of failing in the bulk encode.
+pub async fn test_prometheus_remote_write_batched_interceptor_time_index_units(
+    store_type: StorageType,
+) {
+    common_telemetry::init_default_ut_logging();
+    let (client, mut guard) =
+        setup_redirecting_batched_prom_app(store_type, "prom_rw_batched_interceptor_units").await;
+    create_redirect_schema_with_microsecond_table(&client, "intercept_metric").await;
+
+    let write_request = WriteRequest {
+        timeseries: vec![TimeSeries {
+            labels: vec![
+                Label {
+                    name: prom_store::METRIC_NAME_LABEL.to_string(),
+                    value: "intercept_metric".to_string(),
+                },
+                Label {
+                    name: "job".to_string(),
+                    value: "demo".to_string(),
+                },
+            ],
+            samples: vec![Sample {
+                value: 1.0,
+                timestamp: 1000,
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let compressed = prom_store::snappy_compress(&write_request.encode_to_vec()).unwrap();
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(compressed)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    validate_data(
+        "prom_rw_batched_interceptor_units",
+        &client,
+        "SELECT COUNT(*) FROM tenant_redirect.intercept_metric",
+        "[[1]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+/// The v2 variant of the interceptor regression test: a mixed samples-plus-
+/// histograms request whose existing sample destination lives in the
+/// redirected schema with a microsecond time index must fall back to the
+/// ordinary insert path (both series land), not fail in the bulk encode.
+pub async fn test_prometheus_remote_write_v2_batched_interceptor_time_index_units(
+    store_type: StorageType,
+) {
+    common_telemetry::init_default_ut_logging();
+    let (client, mut guard) =
+        setup_redirecting_batched_prom_app(store_type, "prom_rw_v2_batched_interceptor_units")
+            .await;
+    create_redirect_schema_with_microsecond_table(&client, "v2_mixed_sample").await;
+
+    // One sample series targeting the existing microsecond table, plus one
+    // histogram series for a new (millisecond) table.
+    let mut symbols = vec![String::new()];
+    let mut symbol = |value: &str| {
+        symbols.push(value.to_string());
+        (symbols.len() - 1) as u32
+    };
+    let name_ref = symbol("__name__");
+    let sample_ref = symbol("v2_mixed_sample");
+    let job_ref = symbol("job");
+    let demo_ref = symbol("demo");
+    let name_ref2 = symbol("__name__");
+    let histo_ref = symbol("v2_mixed_histo");
+    let request = RemoteWriteV2Request {
+        symbols,
+        timeseries: vec![
+            RemoteWriteV2TimeSeries {
+                labels_refs: vec![name_ref, sample_ref, job_ref, demo_ref],
+                samples: vec![RemoteWriteV2Sample {
+                    value: 1.0,
+                    timestamp: 1000,
+                    start_timestamp: 0,
+                }],
+                ..Default::default()
+            },
+            RemoteWriteV2TimeSeries {
+                labels_refs: vec![name_ref2, histo_ref, job_ref, demo_ref],
+                histograms: vec![Histogram {
+                    count: Some(Count::CountInt(1)),
+                    sum: 1.0,
+                    positive_spans: vec![BucketSpan {
+                        offset: 0,
+                        length: 1,
+                    }],
+                    positive_deltas: vec![1],
+                    timestamp: 1000,
+                    start_timestamp: 1000,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ],
+    };
+    let compressed = prom_store::snappy_compress(&request.encode_to_vec()).unwrap();
+    let res = client
+        .post("/v1/prometheus/write")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .header("Content-Encoding", "snappy")
+        .body(compressed)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    validate_data(
+        "prom_rw_v2_batched_interceptor_units",
+        &client,
+        "SELECT COUNT(*) FROM tenant_redirect.v2_mixed_sample",
+        "[[1]]",
+    )
+    .await;
+    validate_data(
+        "prom_rw_v2_batched_interceptor_units",
+        &client,
+        "SELECT COUNT(*) FROM tenant_redirect.v2_mixed_histo",
+        "[[1]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
 /// Covers the batched (pending-rows-batcher) Prometheus remote write path, which
 /// bypasses `PromStoreProtocolHandler::write`. Verifies the metric table is created
 /// asynchronously and still carries the Prometheus semantic identity stamped on the
 /// shared request context.
+/// Regression test for <https://github.com/GreptimeTeam/greptimedb/issues/9342>:
+/// prometheus remote write uses the logical batcher against a physical
+/// metric table pre-created with a microsecond time index; the millisecond
+/// samples are widened to the physical table's unit during batch alignment.
+pub async fn test_prometheus_remote_write_batched_microsecond_physical_table(
+    store_type: StorageType,
+) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_prom_app_with_frontend_batched(
+        store_type,
+        "prometheus_remote_write_batched_us_physical",
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    // Pre-create the default physical metric table with a microsecond time
+    // index before any remote write, so the batched bulk path must handle it.
+    let res = client
+        .get(
+            "/v1/sql?db=public&sql=CREATE TABLE greptime_physical_table \
+             (greptime_timestamp TIMESTAMP(6) NOT NULL, greptime_value DOUBLE NULL, \
+             TIME INDEX (greptime_timestamp)) \
+             ENGINE = metric WITH ('physical_metric_table' = 'true')",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let write_request = WriteRequest {
+        timeseries: vec![prom_store::mock_timeseries()[0].clone()],
+        ..Default::default()
+    };
+    let serialized_request = write_request.encode_to_vec();
+    let compressed_request =
+        prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
+
+    // submit_build_and_align counts every batcher submission in both
+    // acknowledgement modes, so the stored-value assertions below cannot be
+    // satisfied by a silent fallback to ordinary insertion.
+    let submissions = servers::metrics::PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+        .with_label_values(&["submit_build_and_align"]);
+    let before = submissions.get_sample_count();
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        submissions.get_sample_count() - before,
+        1,
+        "non-millisecond physical tables must use the logical batcher"
+    );
+
+    // metric1 samples are 1.0@1000ms and 2.0@2000ms; on the microsecond
+    // physical table they must be stored as 1_000_000us and 2_000_000us.
+    wait_for_data(
+        &client,
+        "select greptime_timestamp, greptime_value from metric1 order by greptime_timestamp",
+        "[[1000000,1.0],[2000000,2.0]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+/// Regression test for the per-series physical-table selection conflict:
+/// one remote-write request containing the same metric under two different
+/// physical-table selections must fall back to the ordinary insert path —
+/// both when the destination table already exists (bound to one of the two
+/// physicals) and when it is missing (conflicting creations). A consistent
+/// selection must still use the batcher.
+pub async fn test_prometheus_remote_write_batched_conflicting_physical_selections(
+    store_type: StorageType,
+) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_prom_app_with_frontend_batched(
+        store_type,
+        "prom_rw_batched_conflicting_physicals",
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    let res = client
+        .get(
+            "/v1/sql?db=public&sql=CREATE TABLE p1              (greptime_timestamp TIMESTAMP(6) NOT NULL, greptime_value DOUBLE NULL,              TIME INDEX (greptime_timestamp))              ENGINE = metric WITH ('physical_metric_table' = 'true')",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    // An existing logical table bound to p1.
+    let res = client
+        .get(
+            "/v1/sql?db=public&sql=CREATE TABLE conflict_existing              (greptime_timestamp TIMESTAMP(6) NOT NULL, greptime_value DOUBLE NULL,              \"job\" STRING NULL, TIME INDEX (greptime_timestamp), PRIMARY KEY (\"job\"))              ENGINE = metric WITH ('on_physical_table' = 'p1')",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let write = |metric: &str, job: &str, physical: Option<&str>, value: f64| {
+        let mut labels = vec![
+            Label {
+                name: prom_store::METRIC_NAME_LABEL.to_string(),
+                value: metric.to_string(),
+            },
+            Label {
+                name: "job".to_string(),
+                value: job.to_string(),
+            },
+        ];
+        if let Some(physical) = physical {
+            labels.push(Label {
+                name: "x_greptime_physical_table".to_string(),
+                value: physical.to_string(),
+            });
+        }
+        TimeSeries {
+            labels,
+            samples: vec![Sample {
+                value,
+                timestamp: 1000,
+            }],
+            ..Default::default()
+        }
+    };
+    let send = |timeseries: Vec<TimeSeries>| {
+        let write_request = WriteRequest {
+            timeseries,
+            ..Default::default()
+        };
+        prom_store::snappy_compress(&write_request.encode_to_vec()).unwrap()
+    };
+
+    let submissions = servers::metrics::PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+        .with_label_values(&["submit_build_and_align"]);
+
+    // Existing destination under two different selections: the batch must
+    // fall back (the batch for the unbound selection would otherwise write
+    // through the default physical's regions), and both series land on the
+    // bound physical.
+    let before = submissions.get_sample_count();
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(send(vec![
+            write("conflict_existing", "a", Some("p1"), 1.0),
+            write("conflict_existing", "b", None, 2.0),
+        ]))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        submissions.get_sample_count() - before,
+        0,
+        "conflicting selections for an existing table must fall back"
+    );
+    wait_for_data(
+        &client,
+        "select count(*), sum(greptime_value) from conflict_existing",
+        "[[2,3.0]]",
+    )
+    .await;
+
+    // Missing destination under two different selections: conflicting
+    // creations must also fall back, and both series must be visible
+    // through the created table.
+    let before = submissions.get_sample_count();
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(send(vec![
+            write("conflict_fresh", "a", Some("p1"), 1.0),
+            write("conflict_fresh", "b", None, 2.0),
+        ]))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        submissions.get_sample_count() - before,
+        0,
+        "conflicting selections for a missing table must fall back"
+    );
+    wait_for_data(
+        &client,
+        "select count(*), sum(greptime_value) from conflict_fresh",
+        "[[2,3.0]]",
+    )
+    .await;
+
+    // A consistent selection still uses the batcher.
+    let before = submissions.get_sample_count();
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(send(vec![
+            write("consistent_fresh", "a", Some("p1"), 1.0),
+            write("consistent_fresh", "b", Some("p1"), 2.0),
+        ]))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        submissions.get_sample_count() - before,
+        1,
+        "a consistent selection must use the logical batcher"
+    );
+    wait_for_data(
+        &client,
+        "select count(*), sum(greptime_value) from consistent_fresh",
+        "[[2,3.0]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
 pub async fn test_prometheus_remote_write_batched(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
@@ -4279,6 +5701,31 @@ transform:
         &client,
         "select * from test_db.logs1",
         "[[2436,2528,\"INTERACT.MANAGER\",\"I\",\"ClusterAdapter:enter sendTextDataToCluster\\\\n\",1716668197217000000]]",
+    )
+    .await;
+
+    // The inverted, skipping and fulltext index files are only written on flush,
+    // so the queries below are the first thing that reads them back.
+    flush_table(&client, "test_db.logs1").await;
+    validate_data(
+        "pipeline_db_inverted_index",
+        &client,
+        "select id2 from test_db.logs1 where id1 = 2436",
+        "[[2528]]",
+    )
+    .await;
+    validate_data(
+        "pipeline_db_skipping_index",
+        &client,
+        "select id1 from test_db.logs1 where type = 'I'",
+        "[[2436]]",
+    )
+    .await;
+    validate_data(
+        "pipeline_db_fulltext_index",
+        &client,
+        "select id1 from test_db.logs1 where matches(log, 'ClusterAdapter')",
+        "[[2436]]",
     )
     .await;
 
@@ -5075,6 +6522,24 @@ transform:
         &client,
         "show create table pipeline_index_options",
         expected_schema,
+    )
+    .await;
+
+    // The fulltext and skipping index files are only written on flush, so the
+    // queries below are the first thing that reads them back.
+    flush_table(&client, "pipeline_index_options").await;
+    validate_data(
+        "pipeline_index_options_fulltext",
+        &client,
+        "select trace_id from pipeline_index_options where matches(message, 'greptime')",
+        "[[42]]",
+    )
+    .await;
+    validate_data(
+        "pipeline_index_options_skipping",
+        &client,
+        "select message from pipeline_index_options where trace_id = 42",
+        r#"[["hello greptime"]]"#,
     )
     .await;
 
@@ -6994,6 +8459,18 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     )
     .await;
 
+    // A metric-engine logical table stores its rows in the shared physical
+    // table, so reading them back from SST files goes through a different
+    // column mapping than the memtable read does.
+    flush_table(&client, "claude_code_cost_usage_USD_total").await;
+    validate_data(
+        "otlp_metrics_all_select_after_flush",
+        &client,
+        "select * from `claude_code_cost_usage_USD_total` order by model desc;",
+        expected,
+    )
+    .await;
+
     // The synthesized resource descriptor: a plain mito info table keyed by
     // the raw OTel attribute keys (service.name is the only allowlisted
     // resource attribute in this payload), independent of the promote/ignore
@@ -7332,7 +8809,6 @@ pub async fn test_otlp_exponential_histogram(store_type: StorageType) {
         AggregationTemporality, ExponentialHistogram, ExponentialHistogramDataPoint, Metric,
         ResourceMetrics, ScopeMetrics, exponential_histogram_data_point, metric,
     };
-    use tests_integration::test_util::setup_test_http_app_with_otlp_exponential_histogram;
 
     common_telemetry::init_default_ut_logging();
     let req = ExportMetricsServiceRequest {
@@ -7379,44 +8855,8 @@ pub async fn test_otlp_exponential_histogram(store_type: StorageType) {
         )]
     };
 
-    let (app, mut guard) = setup_test_http_app_with_otlp_exponential_histogram(
-        store_type,
-        "test_otlp_exponential_histogram_disabled",
-        false,
-    )
-    .await;
-    let client = TestClient::new(app).await;
-    let res = send_req(
-        &client,
-        headers(),
-        "/v1/otlp/v1/metrics",
-        body.clone(),
-        false,
-    )
-    .await;
-    assert_eq!(StatusCode::BAD_REQUEST, res.status());
-    let status = GoogleRpcStatus::decode(res.bytes().await.as_ref()).unwrap();
-    assert_eq!(3, status.code);
-    assert!(
-        status
-            .message
-            .contains("otlp.experimental_enable_exponential_histogram")
-    );
-    validate_data(
-        "otlp_exponential_histogram_disabled_no_table",
-        &client,
-        "select count(*) from information_schema.tables where table_name = 'otlp_exponential_latency';",
-        "[[0]]",
-    )
-    .await;
-    guard.remove_all().await;
-
-    let (app, mut guard) = setup_test_http_app_with_otlp_exponential_histogram(
-        store_type,
-        "test_otlp_exponential_histogram_enabled",
-        true,
-    )
-    .await;
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_otlp_exponential_histogram").await;
     let client = TestClient::new(app).await;
     let res = send_req(&client, headers(), "/v1/otlp/v1/metrics", body, false).await;
     assert_eq!(StatusCode::OK, res.status());
@@ -7845,6 +9285,17 @@ pub async fn test_otlp_traces_v0(store_type: StorageType) {
     )
     .await;
 
+    // The attribute columns are JSON and the event/link columns are lists, whose
+    // SST encodings differ from their memtable representations.
+    flush_table(&client, "opentelemetry_traces").await;
+    validate_data(
+        "otlp_traces_after_flush",
+        &client,
+        "select * from opentelemetry_traces;",
+        expected,
+    )
+    .await;
+
     guard.remove_all().await;
 }
 
@@ -7968,6 +9419,30 @@ pub(crate) async fn test_otlp_traces_v2(
          and create_options like '%table_data_model=greptime_trace_v2%' \
          and create_options like '%greptime.semantic.pipeline=greptime_trace_v2%';",
         "[[1]]",
+    )
+    .await;
+
+    // JSON2 path extraction has to resolve the same way against SST files as it
+    // does against the memtable.
+    flush_table(&client, "trace_v2_spans").await;
+    validate_data(
+        "otlp_traces_v2_json2_after_flush",
+        &client,
+        "select service_name, span_attributes.\"http.status_code\"::BIGINT, \
+         resource_attributes.\"deployment.environment\"::STRING, \
+         scope_attributes.enabled::BOOLEAN from trace_v2_spans;",
+        r#"[["frontend",200,"production",true]]"#,
+    )
+    .await;
+    validate_data(
+        "otlp_traces_v2_events_links_after_flush",
+        &client,
+        r#"select json_get_string(span_events, '$[0].name'),
+                  json_get_int(span_events, '$[0].attributes."event.code"'),
+                  json_get_string(span_links, '$[0].trace_id'),
+                  json_get_string(span_links, '$[0].attributes."link.type"')
+           from trace_v2_spans;"#,
+        r#"[["cache.hit",7,"cc9e0991a2e63d274984bd44ee669203","follows_from"]]"#,
     )
     .await;
 
@@ -8123,6 +9598,17 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     // select traces data
     let expected = r#"[[1736480942444376000,1736480942444499000,123000,null,"c05d7a4ec8e1f231f02ed6e8da8655b4","d24f921c75f68e23","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-server",[],[]],[1736480942444376000,1736480942444499000,123000,"d24f921c75f68e23","c05d7a4ec8e1f231f02ed6e8da8655b4","9630f2916e2f7909","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-client",[],[]],[1736480942444589000,1736480942444712000,123000,null,"cc9e0991a2e63d274984bd44ee669203","eba7be77e3558179","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-server",[],[]],[1736480942444589000,1736480942444712000,123000,"eba7be77e3558179","cc9e0991a2e63d274984bd44ee669203","8f847259b0f6e1ab","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-client",[],[]]]"#;
     validate_data("otlp_traces", &client, "select * from mytable;", expected).await;
+
+    // `span_events` / `span_links` are JSON columns and the table is partitioned
+    // on `trace_id`, so the read back has to reassemble SST files across regions.
+    flush_table(&client, "mytable").await;
+    validate_data(
+        "otlp_traces_after_flush",
+        &client,
+        "select * from mytable;",
+        expected,
+    )
+    .await;
 
     // The trace v1 main table carries the trace identity (events/links preserved as
     // JSON columns by the v1 model).
@@ -8960,6 +10446,17 @@ pub async fn test_otlp_logs(store_type: StorageType) {
         )
         .await;
 
+        // The attribute columns are JSON, whose SST encoding differs from their
+        // memtable representation.
+        flush_table(&client, "opentelemetry_logs").await;
+        validate_data(
+            "otlp_logs_after_flush",
+            &client,
+            "select * from opentelemetry_logs;",
+            expected,
+        )
+        .await;
+
         // The auto-created log table carries the log identity.
         validate_data(
             "otlp_logs_semantic_identity",
@@ -9342,6 +10839,17 @@ pub async fn test_loki_pb_logs(store_type: StorageType) {
     )
     .await;
 
+    // `structured_metadata` is a JSON column, whose SST encoding differs from its
+    // memtable representation.
+    flush_table(&client, "loki_table_name").await;
+    validate_data(
+        "loki_pb_content_after_flush",
+        &client,
+        "select * from loki_table_name;",
+        expected,
+    )
+    .await;
+
     guard.remove_all().await;
 }
 
@@ -9541,6 +11049,17 @@ pub async fn test_loki_json_logs(store_type: StorageType) {
     let expected = "[[1735901380059465984,\"this is line one\",{\"key1\":\"value1\",\"key2\":\"value2\"},\"integration\",\"test\"],[1735901398478897920,\"this is line two\",{\"key3\":\"value3\"},\"integration\",\"test\"],[1735901398478897921,\"this is line two updated\",{},\"integration\",\"test\"]]";
     validate_data(
         "loki_json_content",
+        &client,
+        "select * from loki_table_name;",
+        expected,
+    )
+    .await;
+
+    // `structured_metadata` is a JSON column, whose SST encoding differs from its
+    // memtable representation.
+    flush_table(&client, "loki_table_name").await;
+    validate_data(
+        "loki_json_content_after_flush",
         &client,
         "select * from loki_table_name;",
         expected,
@@ -9766,7 +11285,7 @@ pub async fn test_log_query(store_type: StorageType) {
 
     // prepare data with SQL API
     let res = client
-        .get("/v1/sql?sql=create table logs (`ts` timestamp time index, `message` string);")
+        .get("/v1/sql?sql=create table logs (`ts` timestamp time index, `message` string fulltext index with(backend='bloom'));")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
@@ -9840,6 +11359,35 @@ pub async fn test_log_query(store_type: StorageType) {
             "before-explicit-end",
         ]
     );
+
+    // The fulltext index file is only written on flush. Replay the log query to
+    // cover the SST read path, and add a `matches_term` query, which is the
+    // predicate the index applier actually recognises.
+    flush_table(&client, "logs").await;
+    let res = client
+        .post("/v1/logs")
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&log_query).unwrap())
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+    let resp = res.text().await;
+    let output = serde_json::from_str::<Value>(&resp).unwrap();
+    let rows = output["output"][0]["records"]["rows"].as_array().unwrap();
+    let mut flushed_messages = rows
+        .iter()
+        .map(|row| row[1].as_str().unwrap())
+        .collect::<Vec<_>>();
+    flushed_messages.sort_unstable();
+    assert_eq!(flushed_messages, messages);
+
+    validate_data(
+        "log_query_fulltext_index",
+        &client,
+        "select message from logs where matches_term(message, 'at-explicit-end')",
+        r#"[["at-explicit-end"]]"#,
+    )
+    .await;
 
     let res = client
         .get("/v1/sql?sql=create table logs_limit (`ts` timestamp time index, `message` string);")
@@ -10864,11 +12412,20 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     "#;
 
     let mut req: ExportTraceServiceRequest = serde_json::from_str(content).unwrap();
-    // Modify timestamp fields
+    // The fixture is written against a fixed base instant. Move it next to now:
+    // this table is created with `ttl=7d`, and stale spans would be dropped as
+    // expired the moment they are flushed into SST files.
     let now = Utc::now().timestamp_nanos_opt().unwrap() as u64;
+    let delta_micros = (now / 1_000) as i64 - 60_000_000 - JAEGER_V1_FIXTURE_BASE_MICROS as i64;
+    let delta_nanos = delta_micros * 1_000;
     for span in req.resource_spans.iter_mut() {
         for scope_span in span.scope_spans.iter_mut() {
-            // Only modify the timestamp fields for the span with the name "test-jaeger-get-operations" to current time.
+            for span in scope_span.spans.iter_mut() {
+                span.start_time_unix_nano = (span.start_time_unix_nano as i64 + delta_nanos) as u64;
+                span.end_time_unix_nano = (span.end_time_unix_nano as i64 + delta_nanos) as u64;
+            }
+            // `/api/operations` is queried without a time range, so these spans
+            // stay pinned to the last few seconds.
             if scope_span.scope.as_ref().unwrap().name == "test-jaeger-get-operations" {
                 for span in scope_span.spans.iter_mut() {
                     span.start_time_unix_nano = now - 5_000_000_000; // 5 seconds ago
@@ -10945,7 +12502,8 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     }
     "#;
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
-    let expected: Value = serde_json::from_str(expected).unwrap();
+    let expected: Value =
+        serde_json::from_str(&shift_fixture_micros(expected, delta_micros)).unwrap();
     assert_eq!(resp, expected);
 
     // Test `/api/operations` API.
@@ -10994,12 +12552,13 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     }
     "#;
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
-    let expected: Value = serde_json::from_str(expected).unwrap();
+    let expected: Value =
+        serde_json::from_str(&shift_fixture_micros(expected, delta_micros)).unwrap();
     assert_eq!(resp, expected);
 
     // Test `/api/services/{service_name}/operations` API.
     let res = client
-        .get("/v1/jaeger/api/services/test-jaeger-query-api/operations?start=1738726754492421&end=1738726754642422")
+        .get(&shift_fixture_micros("/v1/jaeger/api/services/test-jaeger-query-api/operations?start=1738726754492421&end=1738726754642422", delta_micros))
         .header("x-greptime-trace-table-name", trace_table_name)
         .send()
         .await;
@@ -11022,7 +12581,8 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     }
     "#;
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
-    let expected: Value = serde_json::from_str(expected).unwrap();
+    let expected: Value =
+        serde_json::from_str(&shift_fixture_micros(expected, delta_micros)).unwrap();
     assert_eq!(resp, expected);
 
     // Test `/api/traces/{trace_id}` API without start and end.
@@ -11148,12 +12708,26 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
 "#;
 
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
-    let expected: Value = serde_json::from_str(expected).unwrap();
+    let expected: Value =
+        serde_json::from_str(&shift_fixture_micros(expected, delta_micros)).unwrap();
+    assert_eq!(resp, expected);
+
+    // Replay the same lookup against SST files: `trace_id` and `service_name`
+    // carry BLOOM skipping indexes whose puffin files only exist after a flush,
+    // and `span_events` / `span_links` are JSON columns.
+    flush_table(&client, trace_table_name).await;
+    let res = client
+        .get("/v1/jaeger/api/traces/5611dce1bc9ebed65352d99a027b08ea")
+        .header("x-greptime-trace-table-name", trace_table_name)
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
     assert_eq!(resp, expected);
 
     // Test `/api/traces/{trace_id}` API with start and end in microseconds.
     let res = client
-        .get("/v1/jaeger/api/traces/5611dce1bc9ebed65352d99a027b08ea?start=1738726754492421&end=1738726754642422")
+        .get(&shift_fixture_micros("/v1/jaeger/api/traces/5611dce1bc9ebed65352d99a027b08ea?start=1738726754492421&end=1738726754642422", delta_micros))
         .header("x-greptime-trace-table-name", trace_table_name)
         .send()
         .await;
@@ -11274,12 +12848,16 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
 "#;
 
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
-    let expected: Value = serde_json::from_str(expected).unwrap();
+    let expected: Value =
+        serde_json::from_str(&shift_fixture_micros(expected, delta_micros)).unwrap();
     assert_eq!(resp, expected);
 
     // Test `/api/traces/{trace_id}` API for non-existent trace.
     let res = client
-        .get("/v1/jaeger/api/traces/0000000000000000000000000000dead")
+        .get(&shift_fixture_micros(
+            "/v1/jaeger/api/traces/0000000000000000000000000000dead",
+            delta_micros,
+        ))
         .header("x-greptime-trace-table-name", trace_table_name)
         .send()
         .await;
@@ -11298,12 +12876,13 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
 }
 "#;
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
-    let expected: Value = serde_json::from_str(expected).unwrap();
+    let expected: Value =
+        serde_json::from_str(&shift_fixture_micros(expected, delta_micros)).unwrap();
     assert_eq!(resp, expected);
 
     // Test `/api/traces` API.
     let res = client
-        .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&operation=access-mysql&start=1738726754492421&end=1738726754642422&tags=%7B%22operation.type%22%3A%22access-mysql%22%7D")
+        .get(&shift_fixture_micros("/v1/jaeger/api/traces?service=test-jaeger-query-api&operation=access-mysql&start=1738726754492421&end=1738726754642422&tags=%7B%22operation.type%22%3A%22access-mysql%22%7D", delta_micros))
         .header("x-greptime-trace-table-name", trace_table_name)
         .send()
         .await;
@@ -11425,13 +13004,14 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     "#;
 
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
-    let expected: Value = serde_json::from_str(expected).unwrap();
+    let expected: Value =
+        serde_json::from_str(&shift_fixture_micros(expected, delta_micros)).unwrap();
     assert_eq!(resp, expected);
 
     // Test `/api/traces` API with tags.
     // 1. first query without tags, get 2 results
     let res = client
-            .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754492422&end=1738726754592422")
+            .get(&shift_fixture_micros("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754492422&end=1738726754592422", delta_micros))
             .header("x-greptime-trace-table-name", trace_table_name)
             .send()
             .await;
@@ -11442,12 +13022,13 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     "#;
 
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
-    let expected: Value = serde_json::from_str(expected).unwrap();
+    let expected: Value =
+        serde_json::from_str(&shift_fixture_micros(expected, delta_micros)).unwrap();
     assert_eq!(resp, expected);
 
     // 2. second query with tags, get 1 result
     let res = client
-.get("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754492422&end=1738726754592422&tags=%7B%22operation.type%22%3A%22access-pg%22%7D")
+.get(&shift_fixture_micros("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754492422&end=1738726754592422&tags=%7B%22operation.type%22%3A%22access-pg%22%7D", delta_micros))
 .header("x-greptime-trace-table-name", trace_table_name)
 .send()
 .await;
@@ -11458,14 +13039,15 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
 "#;
 
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
-    let expected: Value = serde_json::from_str(expected).unwrap();
+    let expected: Value =
+        serde_json::from_str(&shift_fixture_micros(expected, delta_micros)).unwrap();
     assert_eq!(resp, expected);
 
     // Test `/api/traces` API with Grafana User-Agent.
     // When user agent is Grafana, only return at most 3 spans per trace (earliest by timestamp).
     // Trace `5611dce1bc9ebed65352d99a027b08fb` has 4 spans, so only 3 should be returned.
     let res = client
-        .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754600000&end=1738726754700004")
+        .get(&shift_fixture_micros("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754600000&end=1738726754700004", delta_micros))
         .header("x-greptime-trace-table-name", trace_table_name)
         .header("User-Agent", "Grafana/8.0.0")
         .send()
@@ -11513,7 +13095,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     // Test `/api/traces` API without User-Agent (default behavior).
     // All 4 spans should be returned for the trace.
     let res = client
-        .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754600000&end=1738726754700004")
+        .get(&shift_fixture_micros("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754600000&end=1738726754700004", delta_micros))
         .header("x-greptime-trace-table-name", trace_table_name)
         .send()
         .await;
@@ -11533,7 +13115,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
 
     // Test `/api/traces` API with Jaeger User-Agent (should return all spans like default).
     let res = client
-        .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754600000&end=1738726754700004")
+        .get(&shift_fixture_micros("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754600000&end=1738726754700004", delta_micros))
         .header("x-greptime-trace-table-name", trace_table_name)
         .header("User-Agent", "Jaeger-Query/1.0.0")
         .send()
@@ -11610,6 +13192,59 @@ pub async fn test_influxdb_write(store_type: StorageType) {
     .await;
 
     guard.remove_all().await;
+}
+
+/// Flushes `table` so the rows written so far move from the memtable into SST
+/// files. Replaying a query afterwards covers the encode/decode round trip and,
+/// for indexed columns, the puffin files that only exist after a flush.
+/// Base microsecond instant the `test_jaeger_query_api_for_trace_v1` fixture and
+/// its expected responses are written against.
+const JAEGER_V1_FIXTURE_BASE_MICROS: u64 = 1_738_726_754_492_421;
+
+/// Shifts every fixture timestamp in `text` by `delta` microseconds, so expected
+/// responses and query bounds follow the payload after it is moved next to now.
+///
+/// Only integer literals within a day of [`JAEGER_V1_FIXTURE_BASE_MICROS`] are
+/// rewritten; durations, counts and ids are left alone.
+fn shift_fixture_micros(text: &str, delta: i64) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(|c: char| c.is_ascii_digit()) {
+        out.push_str(&rest[..start]);
+        let digits_end = rest[start..]
+            .find(|c: char| !c.is_ascii_digit())
+            .map_or(rest.len(), |offset| start + offset);
+        let digits = &rest[start..digits_end];
+        match digits.parse::<i64>() {
+            Ok(value) if (value - JAEGER_V1_FIXTURE_BASE_MICROS as i64).abs() < 86_400_000_000 => {
+                out.push_str(&(value + delta).to_string())
+            }
+            _ => out.push_str(digits),
+        }
+        rest = &rest[digits_end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+async fn flush_table(client: &TestClient, table: &str) {
+    // The argument is parsed as a SQL table name, so an unquoted identifier is
+    // lower-cased and will not resolve a mixed-case table.
+    let quoted = table
+        .split('.')
+        .map(|part| format!("\"{part}\""))
+        .collect::<Vec<_>>()
+        .join(".");
+    let res = client
+        .post("/v1/sql")
+        .form(&[("sql", format!("ADMIN FLUSH_TABLE('{quoted}')"))])
+        .send()
+        .await;
+    let status = res.status();
+    let body = res.text().await;
+    assert_eq!(status, StatusCode::OK, "flush {table} fail: {body}");
+    // A failing statement still comes back as 200 with an `error` envelope.
+    assert!(!body.contains("\"error\""), "flush {table} fail: {body}");
 }
 
 async fn validate_data(test_name: &str, client: &TestClient, sql: &str, expected: &str) {
@@ -11714,16 +13349,9 @@ async fn check_http_skip_wal(name: &str, cases: &[HttpWalCase], distributed: boo
         .with_influxdb_handler(fe.clone())
         .with_opentsdb_handler(fe.clone())
         .with_log_ingest_handler(fe.clone(), None, None)
-        .with_otlp_handler(fe.clone(), true, false)
+        .with_otlp_handler(fe.clone(), true)
         // The pending batcher uses BulkInsert, deliberately outside this PR.
-        .with_prom_handler(
-            fe.clone(),
-            Some(fe),
-            true,
-            PromValidationMode::Strict,
-            false,
-            None,
-        )
+        .with_prom_handler(fe.clone(), Some(fe), true, PromValidationMode::Strict, None)
         .build();
     let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
     for case in cases {
@@ -12068,7 +13696,6 @@ pub async fn test_http_memory_limit(store_type: StorageType) {
         None,
         Some(http_opts),
         Some(memory_limiter),
-        false,
     )
     .await;
 

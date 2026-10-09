@@ -34,7 +34,7 @@ use query::options::{FlowQueryExtensions, QueryOptions};
 use rand::rng;
 use rand::seq::SliceRandom;
 use servers::query_handler::grpc::GrpcQueryHandler;
-use session::context::{QueryContextBuilder, QueryContextRef};
+use session::context::{Channel, QueryContextBuilder, QueryContextRef};
 use session::hints::READ_PREFERENCE_HINT;
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::SetOnce;
@@ -91,7 +91,8 @@ impl HandlerMutable {
 pub enum FrontendClient {
     Distributed {
         meta_client: Arc<MetaClient>,
-        chnl_mgr: ChannelManager,
+        query_channel_manager: ChannelManager,
+        control_channel_manager: ChannelManager,
         query: QueryOptions,
         batch_opts: BatchingModeOptions,
     },
@@ -136,17 +137,19 @@ impl FrontendClient {
         batch_opts: BatchingModeOptions,
     ) -> Result<Self, Error> {
         common_telemetry::info!("Frontend client build without auth");
+        let cfg = ChannelConfig::new()
+            .connect_timeout(batch_opts.grpc_conn_timeout)
+            .timeout(Some(batch_opts.query_timeout));
+        let tls_config = load_client_tls_config(batch_opts.frontend_tls.clone())
+            .context(InvalidClientConfigSnafu)?;
+        // Keep separate TLS config handles and pools for query and control traffic.
+        let query_channel_manager = ChannelManager::with_config(cfg.clone(), tls_config.clone());
+        let control_channel_manager = ChannelManager::with_config(cfg, tls_config);
+
         Ok(Self::Distributed {
             meta_client,
-            chnl_mgr: {
-                let cfg = ChannelConfig::new()
-                    .connect_timeout(batch_opts.grpc_conn_timeout)
-                    .timeout(Some(batch_opts.query_timeout));
-
-                let tls_config = load_client_tls_config(batch_opts.frontend_tls.clone())
-                    .context(InvalidClientConfigSnafu)?;
-                ChannelManager::with_config(cfg, tls_config)
-            },
+            query_channel_manager,
+            control_channel_manager,
             query,
             batch_opts,
         })
@@ -227,7 +230,8 @@ impl FrontendClient {
         frontends: &[Peer],
     ) -> Result<Vec<String>, Error> {
         let Self::Distributed {
-            chnl_mgr,
+            query_channel_manager,
+            control_channel_manager,
             batch_opts,
             ..
         } = self
@@ -240,10 +244,15 @@ impl FrontendClient {
             .iter()
             .map(|peer| {
                 let addr = peer.addr.clone();
-                let chnl_mgr = chnl_mgr.clone();
+                let query_channel_manager = query_channel_manager.clone();
+                let control_channel_manager = control_channel_manager.clone();
 
                 async move {
-                    let client = Client::with_manager_and_urls(chnl_mgr, vec![addr.clone()]);
+                    let client = Client::with_query_and_control_managers(
+                        query_channel_manager,
+                        control_channel_manager,
+                        vec![addr.clone()],
+                    );
                     let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
 
                     match tokio::time::timeout(probe_timeout, database.sql("SELECT 1")).await {
@@ -282,7 +291,8 @@ impl FrontendClient {
     ) -> Result<DatabaseWithPeer, Error> {
         let Self::Distributed {
             meta_client: _,
-            chnl_mgr,
+            query_channel_manager,
+            control_channel_manager,
             query: _,
             batch_opts,
         } = self
@@ -302,7 +312,11 @@ impl FrontendClient {
 
             for peer in frontends {
                 let addr = peer.addr.clone();
-                let client = Client::with_manager_and_urls(chnl_mgr.clone(), vec![addr.clone()]);
+                let client = Client::with_query_and_control_managers(
+                    query_channel_manager.clone(),
+                    control_channel_manager.clone(),
+                    vec![addr.clone()],
+                );
                 let database = Database::new(catalog, schema, client);
                 let db = DatabaseWithPeer::new(database, peer);
                 match db.try_select_one().await {
@@ -521,6 +535,7 @@ impl FrontendClient {
                     .current_catalog(catalog.to_string())
                     .current_schema(schema.to_string())
                     .extensions(extensions_map)
+                    .channel(Channel::Internal)
                     .snapshot_seqs(Arc::new(RwLock::new(snapshot_seqs.clone())))
                     .build();
                 let ctx = Arc::new(ctx);
@@ -589,6 +604,7 @@ impl FrontendClient {
                 let ctx = QueryContextBuilder::default()
                     .current_catalog(catalog.to_string())
                     .current_schema(schema.to_string())
+                    .channel(Channel::Internal)
                     .extensions(HashMap::from([(
                         QUERY_PARALLELISM_HINT.to_string(),
                         query.parallelism.to_string(),
@@ -894,8 +910,9 @@ mod tests {
         async fn do_query(
             &self,
             _query: Request,
-            _ctx: QueryContextRef,
+            ctx: QueryContextRef,
         ) -> std::result::Result<Output, BoxedError> {
+            assert_eq!(ctx.channel(), Channel::Internal);
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(Output::new_with_affected_rows(1))
         }
@@ -941,6 +958,7 @@ mod tests {
             ctx: QueryContextRef,
         ) -> std::result::Result<Output, BoxedError> {
             assert_eq!(ctx.extension("flow.return_region_seq"), Some("true"));
+            assert_eq!(ctx.channel(), Channel::Internal);
             Ok(Output::new_with_affected_rows(1))
         }
     }
@@ -1243,7 +1261,11 @@ mod tests {
         let database = Database::new(
             DEFAULT_CATALOG_NAME,
             DEFAULT_SCHEMA_NAME,
-            Client::with_urls([addr.as_str()]),
+            Client::with_query_and_control_managers(
+                ChannelManager::new(),
+                ChannelManager::new(),
+                [addr.as_str()],
+            ),
         );
         let db = DatabaseWithPeer::new(
             database,
@@ -1280,7 +1302,11 @@ mod tests {
         let database = Database::new(
             DEFAULT_CATALOG_NAME,
             DEFAULT_SCHEMA_NAME,
-            Client::with_urls([addr.as_str()]),
+            Client::with_query_and_control_managers(
+                ChannelManager::new(),
+                ChannelManager::new(),
+                [addr.as_str()],
+            ),
         );
         let db = DatabaseWithPeer::new(
             database,

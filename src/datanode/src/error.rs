@@ -299,6 +299,17 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Duplicate region engine config '{engine}' at region_engine[{first_index}] and region_engine[{duplicate_index}] (indices are zero-based); each engine type may be configured only once"
+    ))]
+    DuplicateRegionEngineConfig {
+        engine: &'static str,
+        first_index: usize,
+        duplicate_index: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid object store WAL config, {} = {:?}: {}", field, value, reason))]
     InvalidObjectStoreWalConfig {
         field: &'static str,
@@ -308,8 +319,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Object store WAL is not supported yet"))]
-    ObjectStoreWalNotSupported {
+    #[snafu(display("Object store WAL is only supported in standalone mode"))]
+    ObjectStoreWalNotStandalone {
         #[snafu(implicit)]
         location: Location,
     },
@@ -486,7 +497,9 @@ impl ErrorExt for Error {
             | GcConfigMismatch { .. }
             | ParseAddr { .. }
             | TomlFormat { .. }
+            | DuplicateRegionEngineConfig { .. }
             | InvalidObjectStoreWalConfig { .. }
+            | ObjectStoreWalNotStandalone { .. }
             | BuildDatanode { .. } => StatusCode::InvalidArguments,
 
             PayloadNotExist { .. }
@@ -511,9 +524,7 @@ impl ErrorExt for Error {
 
             OpenLogStore { source, .. } => source.status_code(),
             MetaClientInit { source, .. } => source.status_code(),
-            UnsupportedOutput { .. }
-            | NotYetImplemented { .. }
-            | ObjectStoreWalNotSupported { .. } => StatusCode::Unsupported,
+            UnsupportedOutput { .. } | NotYetImplemented { .. } => StatusCode::Unsupported,
             HandleRegionRequest { source, .. }
             | GetRegionMetadata { source, .. }
             | HandleBatchOpenRequest { source, .. }

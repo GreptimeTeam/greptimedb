@@ -38,7 +38,7 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, InputDistributionRequirements,
     PhysicalExpr, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
-use datafusion_expr::col;
+use datafusion_expr::ident;
 use datatypes::arrow::compute;
 use datatypes::arrow_array::string_array_value_at_index;
 use datatypes::compute::SortOptions;
@@ -186,8 +186,8 @@ impl UserDefinedLogicalNodeCore for SeriesDivide {
 
         self.tag_columns
             .iter()
-            .map(col)
-            .chain(std::iter::once(col(&self.time_index_column)))
+            .map(ident)
+            .chain(std::iter::once(ident(&self.time_index_column)))
             .collect()
     }
 

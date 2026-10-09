@@ -36,6 +36,7 @@ use client::client_manager::NodeClients;
 use cmd::frontend::create_heartbeat_task;
 use common_base::Plugins;
 use common_datasource::object_store::LocalFileAccess;
+use common_event_recorder::EventRecorderOptions;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::DatanodeId;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
@@ -173,7 +174,9 @@ pub struct GreptimeDbClusterBuilder {
     frontend_auto_create_table: bool,
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
+    plugins: Plugins,
     local_file_access: LocalFileAccess,
+    event_recorder_options: EventRecorderOptions,
 }
 
 impl GreptimeDbClusterBuilder {
@@ -208,7 +211,9 @@ impl GreptimeDbClusterBuilder {
             frontend_auto_create_table: true,
             shared_home_dir: None,
             meta_selector: None,
+            plugins: Plugins::default(),
             local_file_access: LocalFileAccess::default(),
+            event_recorder_options: EventRecorderOptions::default(),
         }
     }
 
@@ -253,6 +258,15 @@ impl GreptimeDbClusterBuilder {
         self
     }
 
+    #[must_use]
+    pub fn with_event_recorder_options(
+        mut self,
+        event_recorder_options: EventRecorderOptions,
+    ) -> Self {
+        self.event_recorder_options = event_recorder_options;
+        self
+    }
+
     /// Sets whether the test frontend automatically creates tables on write.
     #[must_use]
     pub fn with_frontend_auto_create_table(mut self, auto_create_table: bool) -> Self {
@@ -272,6 +286,13 @@ impl GreptimeDbClusterBuilder {
         self
     }
 
+    /// Sets the [Plugins] used by the metasrv.
+    #[must_use]
+    pub fn with_plugins(mut self, plugins: Plugins) -> Self {
+        self.plugins = plugins;
+        self
+    }
+
     /// Configure the frontend COPY sandbox for filesystem integration tests.
     pub fn with_local_file_access(mut self, access: LocalFileAccess) -> Self {
         self.local_file_access = access;
@@ -285,6 +306,7 @@ impl GreptimeDbClusterBuilder {
         guards: Vec<TestGuard>,
     ) -> GreptimeDbCluster {
         let datanodes = datanode_options.len();
+
         let channel_config = ChannelConfig::new().timeout(Some(Duration::from_secs(20)));
         let datanode_clients = Arc::new(NodeClients::new(channel_config));
 
@@ -303,18 +325,20 @@ impl GreptimeDbClusterBuilder {
                 ..Default::default()
             },
             gc: self.metasrv_gc_config.clone(),
+            event_recorder: self.event_recorder_options.clone(),
             ..Default::default()
         };
 
         test_util::prepare_another_catalog_and_schema_with_kv_backend(self.kv_backend.clone())
             .await;
 
-        let metasrv = meta_srv::mocks::mock(
+        let metasrv = meta_srv::mocks::mock_with_plugins(
             opt,
             self.kv_backend.clone(),
             self.meta_selector.clone(),
             Some(datanode_clients.clone()),
             None,
+            self.plugins.clone(),
         )
         .await;
 
@@ -367,7 +391,7 @@ impl GreptimeDbClusterBuilder {
                 let home_dir = if let Some(home_dir) = &self.shared_home_dir {
                     home_dir.path().to_str().unwrap().to_string()
                 } else {
-                    let home_tmp_dir = create_temp_dir(&format!("gt_home_{}", &self.cluster_name));
+                    let home_tmp_dir = create_temp_dir(&format!("gt_home_{}", self.cluster_name));
                     let home_dir = home_tmp_dir.path().to_str().unwrap().to_string();
                     guards.push(TestGuard {
                         home_guard: FileDirGuard::new(home_tmp_dir),
@@ -550,6 +574,7 @@ impl GreptimeDbClusterBuilder {
     fn build_frontend_options(&self) -> FrontendOptions {
         let mut fe_opts = FrontendOptions {
             auto_create_table: self.frontend_auto_create_table,
+            event_recorder: self.event_recorder_options.clone(),
             ..Default::default()
         };
 
@@ -668,12 +693,18 @@ async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
 
     (
         addr.to_string(),
-        Client::with_manager_and_urls(channel_manager, [addr]),
+        // The mock connector pool lives on this single manager, so both lanes
+        // intentionally share it (same semantics as the legacy constructor).
+        Client::with_query_and_control_managers(channel_manager.clone(), channel_manager, [addr]),
     )
 }
 
+// Mock connectors are registered on a shared channel manager.
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use api::v1::flow::FlowRequest;
     use api::v1::region::{
         ListMetadataRequest, RegionRequest, RegionRequestHeader, region_request,
@@ -682,12 +713,14 @@ mod tests {
     use client::Client;
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
+    use common_meta::ddl_manager::{DdlManager, DdlManagerConfigurator, DdlManagerConfiguratorRef};
     use common_meta::key::TableMetadataManager;
     use common_meta::key::flow::FlowMetadataManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::node_manager::{DatanodeManager, FlownodeManager};
     use common_meta::peer::Peer;
     use flow::{FlownodeBuilder, FlownodeOptions, FlownodeServiceBuilder, FrontendClient};
+    use meta_srv::metasrv::builder::DdlManagerConfigureContext;
 
     use super::*;
 
@@ -862,6 +895,38 @@ mod tests {
         flownode.setup_services(services);
         flownode.start().await.unwrap();
         flownode
+    }
+
+    struct TestDdlManagerConfigurator(Arc<AtomicBool>);
+
+    #[async_trait::async_trait]
+    impl DdlManagerConfigurator<DdlManagerConfigureContext> for TestDdlManagerConfigurator {
+        async fn configure(
+            &self,
+            ddl_manager: DdlManager,
+            _ctx: DdlManagerConfigureContext,
+        ) -> std::result::Result<DdlManager, common_error::ext::BoxedError> {
+            self.0.store(true, Ordering::SeqCst);
+            Ok(ddl_manager)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_build_cluster_with_plugins() {
+        let configured = Arc::new(AtomicBool::new(false));
+        let plugins = Plugins::default();
+        plugins.insert::<DdlManagerConfiguratorRef<DdlManagerConfigureContext>>(Arc::new(
+            TestDdlManagerConfigurator(configured.clone()),
+        ));
+
+        let _cluster = GreptimeDbClusterBuilder::new("test_cluster_with_plugins")
+            .await
+            .with_datanodes(1)
+            .with_plugins(plugins)
+            .build(false)
+            .await;
+
+        assert!(configured.load(Ordering::SeqCst));
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -50,12 +50,13 @@ use table::requests::{
 use crate::error::{self, Result};
 use crate::prom_remote_write::row_builder::PromCtx;
 use crate::prom_remote_write::validation::validate_label_name;
-use crate::prom_remote_write::{REMOTE_WRITE_V2_VERSION, try_decompress};
+use crate::prom_remote_write::{REMOTE_WRITE_V2_VERSION, decompress_remote_write_body};
 #[allow(deprecated)]
 use crate::prom_store::{
     DATABASE_LABEL, DATABASE_LABEL_ALT, METRIC_NAME_LABEL, PHYSICAL_TABLE_LABEL,
     PHYSICAL_TABLE_LABEL_ALT, SCHEMA_LABEL,
 };
+use crate::request_memory_limiter::ServerMemoryLimiter;
 use crate::row_writer::{self, TableData};
 use crate::semantic::{
     METRIC_TYPE_COUNTER, METRIC_TYPE_GAUGE, METRIC_TYPE_GAUGE_HISTOGRAM, METRIC_TYPE_HISTOGRAM,
@@ -127,22 +128,18 @@ pub(crate) struct RemoteWriteV2WriteRequests {
     pub semantic_index: SemanticIndexes,
 }
 
-pub(crate) fn decode_remote_write_v2(
+pub(crate) async fn decode_remote_write_v2(
     is_zstd: bool,
     body: Bytes,
-    native_histograms_enabled: bool,
+    limiter: &ServerMemoryLimiter,
 ) -> Result<RemoteWriteV2WriteRequests> {
     let decode_timer = crate::metrics::METRIC_HTTP_PROM_STORE_CODEC_ELAPSED
         .with_label_values(&["decode", REMOTE_WRITE_V2_VERSION])
         .start_timer();
 
-    // Match the v1 decoder's VictoriaMetrics fallback: some clients may send a
-    // mismatched content-encoding header, so try the other compression on failure.
-    let buf = if let Ok(buf) = try_decompress(is_zstd, &body[..]) {
-        buf
-    } else {
-        try_decompress(!is_zstd, &body[..])?
-    };
+    // Holds the memory permits for the decompressed bytes until the protobuf
+    // decoding and conversion below are finished.
+    let buf = decompress_remote_write_body(is_zstd, &body[..], limiter).await?;
     // Decompression copied the payload out, so the compressed body is no longer needed.
     drop(body);
     let request = BorrowedRequest::decode(&buf).context(error::DecodePromRemoteRequestSnafu)?;
@@ -151,13 +148,10 @@ pub(crate) fn decode_remote_write_v2(
     let _convert_timer = crate::metrics::METRIC_HTTP_PROM_STORE_CODEC_ELAPSED
         .with_label_values(&["convert", REMOTE_WRITE_V2_VERSION])
         .start_timer();
-    convert_remote_write_v2(request, native_histograms_enabled)
+    convert_remote_write_v2(request)
 }
 
-fn convert_remote_write_v2(
-    request: BorrowedRequest<'_>,
-    native_histograms_enabled: bool,
-) -> Result<RemoteWriteV2WriteRequests> {
+fn convert_remote_write_v2(request: BorrowedRequest<'_>) -> Result<RemoteWriteV2WriteRequests> {
     ensure!(
         request.symbols.first().copied() == Some(""),
         error::InvalidPromRemoteRequestSnafu {
@@ -178,14 +172,6 @@ fn convert_remote_write_v2(
     for series in request.timeseries {
         let counts = scan_series(series, &mut labels_refs, &mut metadata)
             .context(error::DecodePromRemoteRequestSnafu)?;
-
-        ensure!(
-            native_histograms_enabled || counts.histograms == 0,
-            error::InvalidPromRemoteRequestSnafu {
-                msg: "prometheus remote write v2 native histogram ingestion is experimental; set prom_store.experimental_enable_prometheus_native_histogram = true to enable it"
-                    .to_string(),
-            }
-        );
 
         if counts.samples == 0 && counts.histograms == 0 {
             decode_series_leaves(series, None, Vec::new(), 0, &mut scratch)?;
@@ -672,7 +658,7 @@ fn resolve_series_labels<'a>(
     let mut tags = Vec::with_capacity(labels_refs.len() / 2);
     label_names.clear();
 
-    for pair in labels_refs.chunks_exact(2) {
+    for pair in labels_refs.as_chunks::<2>().0 {
         let name = symbol_ref(symbols, pair[0], "label name")?;
         let value = symbol_ref(symbols, pair[1], "label value")?;
         validate_label(name)?;
@@ -801,8 +787,9 @@ pub mod test_util {
     use snafu::ResultExt;
 
     use crate::error::{self, Result};
-    use crate::prom_remote_write::try_decompress;
+    use crate::prom_remote_write::decompress_remote_write_body;
     use crate::prom_store::snappy_compress;
+    use crate::request_memory_limiter::ServerMemoryLimiter;
 
     pub fn request_with_labels_and_samples(
         labels: Vec<(&str, &str)>,
@@ -819,27 +806,44 @@ pub mod test_util {
     }
 
     pub fn decode_request(is_zstd: bool, body: Bytes) -> Result<Request> {
-        let buf = if let Ok(buf) = try_decompress(is_zstd, &body[..]) {
-            buf
-        } else {
-            try_decompress(!is_zstd, &body[..])?
-        };
+        let buf = block_on_decode(is_zstd, body)?;
         Request::decode(&buf[..]).context(error::DecodePromRemoteRequestSnafu)
+    }
+
+    /// Runs the charged decompression on a throwaway runtime so plain `#[test]`
+    /// callers can stay synchronous.
+    fn block_on_decode(is_zstd: bool, body: Bytes) -> Result<Vec<u8>> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                decompress_remote_write_body(is_zstd, &body[..], &ServerMemoryLimiter::default())
+                    .await
+                    .map(|buf| buf.to_vec())
+            })
     }
 
     pub fn write_requests(
         request: Request,
     ) -> Result<(Vec<RowInsertRequest>, Vec<RowInsertRequest>, u64, u64)> {
         let body = Bytes::from(snappy_compress(&request.encode_to_vec())?);
-        decode_write_requests(false, body, true)
+        decode_write_requests(false, body)
     }
 
     pub fn decode_write_requests(
         is_zstd: bool,
         body: Bytes,
-        native_histograms_enabled: bool,
     ) -> Result<(Vec<RowInsertRequest>, Vec<RowInsertRequest>, u64, u64)> {
-        let requests = super::decode_remote_write_v2(is_zstd, body, native_histograms_enabled)?;
+        let requests = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(super::decode_remote_write_v2(
+                is_zstd,
+                body,
+                &ServerMemoryLimiter::default(),
+            ))?;
         Ok((
             requests.samples.all_req().collect(),
             requests.histograms.all_req().collect(),
@@ -850,11 +854,10 @@ pub mod test_util {
 
     pub fn decode_uncompressed_write_requests(
         body: &[u8],
-        native_histograms_enabled: bool,
     ) -> Result<(Vec<RowInsertRequest>, Vec<RowInsertRequest>, u64, u64)> {
         let request =
             super::BorrowedRequest::decode(body).context(error::DecodePromRemoteRequestSnafu)?;
-        let requests = super::convert_remote_write_v2(request, native_histograms_enabled)?;
+        let requests = super::convert_remote_write_v2(request)?;
         Ok((
             requests.samples.all_req().collect(),
             requests.histograms.all_req().collect(),
@@ -954,9 +957,7 @@ mod tests {
         assert_eq!(decoded.timeseries[0].samples[0].value, 42.0);
         assert_eq!(decoded.timeseries[0].metadata.as_ref().unwrap().r#type, 1);
         assert_eq!(
-            decode_remote_write_v2(true, body, true)
-                .unwrap()
-                .sample_count,
+            decode_v2_on_test_runtime(true, body).unwrap().sample_count,
             1
         );
     }
@@ -990,7 +991,7 @@ mod tests {
         wire.extend(encoded_message_field(5, &packed_u32_field(1, &[99])));
         wire.extend(string_field(4, b"http_requests_total"));
 
-        let requests = decode_wire(&wire, true).unwrap();
+        let requests = decode_wire(&wire).unwrap();
         assert_eq!(requests.sample_count, 2);
         assert_eq!(requests.histogram_count, 0);
         let rows = requests.samples.all_req().next().unwrap().rows.unwrap();
@@ -1028,7 +1029,7 @@ mod tests {
         series.extend(packed_u32_field(1, &[1, 2]));
         let wire = request_wire(&["", METRIC_NAME_LABEL, "metric"], &[series]);
 
-        let requests = decode_wire(&wire, true).unwrap();
+        let requests = decode_wire(&wire).unwrap();
         assert_eq!(requests.histogram_count, 1);
         let rows = requests.histograms.all_req().next().unwrap().rows.unwrap();
         assert_eq!(
@@ -1093,7 +1094,7 @@ mod tests {
             ("invalid sample", invalid_sample),
             ("invalid histogram", invalid_histogram),
         ] {
-            let error = decode_wire_error(&wire, true, name);
+            let error = decode_wire_error(&wire, name);
             assert!(
                 matches!(error, error::Error::DecodePromRemoteRequest { .. }),
                 "{name}: {error}"
@@ -1108,7 +1109,7 @@ mod tests {
             series.extend(encoded_message_field(tag, &[0x08]));
             let wire = request_wire(&["", METRIC_NAME_LABEL, "metric"], &[series]);
 
-            let error = decode_wire_error(&wire, true, "malformed ignored message");
+            let error = decode_wire_error(&wire, "malformed ignored message");
             assert!(matches!(
                 error,
                 error::Error::DecodePromRemoteRequest { .. }
@@ -1174,8 +1175,8 @@ mod tests {
         })
         .unwrap();
         assert_eq!(requests.sample_count, 0);
-        assert!(decode_wire(&[], true).is_err());
-        assert!(decode_wire(&[0x0a, 0x00], true).is_err());
+        assert!(decode_wire(&[]).is_err());
+        assert!(decode_wire(&[0x0a, 0x00]).is_err());
     }
 
     #[test]
@@ -1205,22 +1206,34 @@ mod tests {
     }
 
     #[test]
-    fn test_fused_decoder_pins_experimental_error_precedence() {
-        let histogram = series_wire(&[1, 2], 3, &Histogram::default().encode_to_vec());
-        let malformed_sample = series_wire(&[1, 2], 2, &[0x08]);
+    fn test_fused_decoder_rejects_malformed_series_with_histograms() {
+        let histogram = series_wire(
+            &[1, 2],
+            3,
+            &Histogram {
+                count: Some(Count::CountInt(0)),
+                zero_count: Some(ZeroCount::ZeroCountInt(0)),
+                ..Default::default()
+            }
+            .encode_to_vec(),
+        );
+        let malformed_sample = series_wire(&[1, 3], 2, &[0x08]);
 
         let wire = request_wire(
-            &["", METRIC_NAME_LABEL, "metric"],
+            &["", METRIC_NAME_LABEL, "histogram", "sample"],
             &[histogram.clone(), malformed_sample.clone()],
         );
-        let error = decode_wire_error(&wire, false, "histogram before malformed series");
-        assert!(error.to_string().contains("ingestion is experimental"));
+        let error = decode_wire_error(&wire, "histogram before malformed series");
+        assert!(matches!(
+            error,
+            error::Error::DecodePromRemoteRequest { .. }
+        ));
 
         let wire = request_wire(
-            &["", METRIC_NAME_LABEL, "metric"],
+            &["", METRIC_NAME_LABEL, "histogram", "sample"],
             &[malformed_sample, histogram.clone()],
         );
-        let error = decode_wire_error(&wire, false, "malformed series before histogram");
+        let error = decode_wire_error(&wire, "malformed series before histogram");
         assert!(matches!(
             error,
             error::Error::DecodePromRemoteRequest { .. }
@@ -1231,7 +1244,7 @@ mod tests {
             &["", METRIC_NAME_LABEL, "metric", "job", "api"],
             &[missing_name, histogram],
         );
-        let error = decode_wire_error(&wire, false, "conversion error before histogram");
+        let error = decode_wire_error(&wire, "conversion error before histogram");
         assert!(error.to_string().contains("missing '__name__'"));
     }
 
@@ -2026,16 +2039,27 @@ mod tests {
         ));
     }
 
-    fn decode_wire(
-        wire: &[u8],
-        native_histograms_enabled: bool,
-    ) -> Result<RemoteWriteV2WriteRequests> {
+    fn decode_wire(wire: &[u8]) -> Result<RemoteWriteV2WriteRequests> {
         let body = Bytes::from(crate::prom_store::snappy_compress(wire).unwrap());
-        decode_remote_write_v2(false, body, native_histograms_enabled)
+        decode_v2_on_test_runtime(false, body)
     }
 
-    fn decode_wire_error(wire: &[u8], native_histograms_enabled: bool, name: &str) -> error::Error {
-        match decode_wire(wire, native_histograms_enabled) {
+    /// Runs the async (charged) v2 decoder on a throwaway runtime so plain
+    /// `#[test]` callers can stay synchronous.
+    fn decode_v2_on_test_runtime(is_zstd: bool, body: Bytes) -> Result<RemoteWriteV2WriteRequests> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(decode_remote_write_v2(
+                is_zstd,
+                body,
+                &ServerMemoryLimiter::default(),
+            ))
+    }
+
+    fn decode_wire_error(wire: &[u8], name: &str) -> error::Error {
+        match decode_wire(wire) {
             Ok(_) => panic!("{name}: expected decoder error"),
             Err(error) => error,
         }
@@ -2104,16 +2128,9 @@ mod tests {
     }
 
     fn decode_test_request(request: Request) -> Result<RemoteWriteV2WriteRequests> {
-        decode_test_request_with_histograms(request, true)
-    }
-
-    fn decode_test_request_with_histograms(
-        request: Request,
-        native_histograms_enabled: bool,
-    ) -> Result<RemoteWriteV2WriteRequests> {
         let body =
             Bytes::from(crate::prom_store::snappy_compress(&request.encode_to_vec()).unwrap());
-        decode_remote_write_v2(false, body, native_histograms_enabled)
+        decode_v2_on_test_runtime(false, body)
     }
 
     fn assert_invalid(name: &str, request: Request, expected: &str) {

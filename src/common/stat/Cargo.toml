@@ -8,7 +8,6 @@ license.workspace = true
 common-base.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
-lazy_static.workspace = true
 num_cpus.workspace = true
 prometheus.workspace = true
 sysinfo.workspace = true

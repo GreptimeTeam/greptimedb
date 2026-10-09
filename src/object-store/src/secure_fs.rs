@@ -24,8 +24,8 @@ use cap_std::fs::{Dir, DirEntry, OpenOptions, ReadDir};
 use opendal::layers::SimulateLayer;
 use opendal::raw::*;
 use opendal::{
-    Buffer, BytesRange, Capability, EntryMode, Error, ErrorKind, Metadata, OperationContext,
-    Operator, Result,
+    Buffer, BytesRange, Capability, EntryMode, Error, ErrorKind, Metadata, MetadataBuilder,
+    OperationContext, Operator, Result,
 };
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
@@ -165,19 +165,18 @@ fn parse_write_error(error: io::Error, if_not_exists: bool) -> Error {
 }
 
 fn metadata_from_fs(metadata: cap_std::fs::Metadata) -> Result<Metadata> {
-    let mode = if metadata.is_dir() {
-        EntryMode::DIR
+    let mut builder = if metadata.is_dir() {
+        MetadataBuilder::dir()
     } else if metadata.is_file() {
-        EntryMode::FILE
+        MetadataBuilder::file(metadata.len())
     } else {
-        EntryMode::Unknown
+        MetadataBuilder::unknown()
     };
 
-    Ok(Metadata::new(mode)
-        .with_content_length(metadata.len())
-        .with_last_modified(Timestamp::try_from(
-            metadata.modified().map_err(new_std_io_error)?.into_std(),
-        )?))
+    builder.last_modified(Timestamp::try_from(
+        metadata.modified().map_err(new_std_io_error)?.into_std(),
+    )?);
+    Ok(builder.build())
 }
 
 #[derive(Clone, Debug)]
@@ -219,6 +218,7 @@ impl Service for SecureFsBackend {
     type Lister = SecureFsLister;
     type Deleter = oio::OneShotDeleter<SecureFsDeleter>;
     type Copier = ();
+    type Composer = ();
 
     fn info(&self) -> ServiceInfo {
         self.info.clone()
@@ -274,6 +274,7 @@ impl Service for SecureFsBackend {
             path,
             args,
             file: None,
+            synced: false,
         })
     }
 
@@ -301,14 +302,7 @@ impl Service for SecureFsBackend {
         })
     }
 
-    fn copy(
-        &self,
-        _: &OperationContext,
-        _: &str,
-        _: &str,
-        _: OpCopy,
-        _: OpCopier,
-    ) -> Result<Self::Copier> {
+    fn copy(&self, _: &OperationContext, _: &str, _: &str, _: OpCopy) -> Result<Self::Copier> {
         Err(Error::new(
             ErrorKind::Unsupported,
             "operation is not supported",
@@ -394,6 +388,29 @@ struct SecureFsWriter {
     path: PathBuf,
     args: OpWrite,
     file: Option<tokio::fs::File>,
+    synced: bool,
+}
+
+#[derive(Debug)]
+struct UnsyncedOverwrite {
+    flush_error: Option<Error>,
+}
+
+impl fmt::Display for UnsyncedOverwrite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "overwrite file was not synced")
+    }
+}
+
+impl std::error::Error for UnsyncedOverwrite {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.flush_error.as_ref().map(|error| error as _)
+    }
+}
+
+/// Whether an abort error proves an opened overwrite has not been synced.
+pub fn is_unsynced_overwrite_abort(error: &Error) -> bool {
+    std::error::Error::source(error).is_some_and(|source| source.is::<UnsyncedOverwrite>())
 }
 
 impl SecureFsWriter {
@@ -445,22 +462,63 @@ impl oio::Write for SecureFsWriter {
     }
 
     async fn close(&mut self) -> Result<Metadata> {
-        let file = self.ensure_file().await?;
-        file.flush().await.map_err(new_std_io_error)?;
-        file.sync_all().await.map_err(new_std_io_error)?;
-        let metadata = file.metadata().await.map_err(new_std_io_error)?;
-        Ok(Metadata::new(EntryMode::FILE)
-            .with_content_length(metadata.len())
-            .with_last_modified(Timestamp::try_from(
-                metadata.modified().map_err(new_std_io_error)?,
-            )?))
+        {
+            let file = self.ensure_file().await?;
+            file.flush().await.map_err(new_std_io_error)?;
+            file.sync_all().await.map_err(new_std_io_error)?;
+        }
+        self.synced = true;
+        let metadata = self
+            .ensure_file()
+            .await?
+            .metadata()
+            .await
+            .map_err(new_std_io_error)?;
+        let mut builder = MetadataBuilder::file(metadata.len());
+        builder.last_modified(Timestamp::try_from(
+            metadata.modified().map_err(new_std_io_error)?,
+        )?);
+        Ok(builder.build())
     }
 
     async fn abort(&mut self) -> Result<()> {
-        Err(Error::new(
+        // Tokio writes may finish in the blocking pool after write_all returns.
+        let flush = match self.file.as_mut() {
+            Some(file) => file.flush().await.map_err(new_std_io_error),
+            None => Ok(()),
+        };
+        if self.args.if_not_exists() {
+            // A failed exclusive create owns no file. Once data is synced, preserve
+            // potentially committed output for the caller's deliberate retry.
+            if let Some(file) = self.file.take() {
+                drop(file);
+                if !self.synced {
+                    let root = self.root.clone();
+                    let path = self.path.clone();
+                    let cleanup =
+                        common_runtime::spawn_blocking_global(move || root.dir.remove_file(path))
+                            .await
+                            .map_err(new_task_join_error)
+                            .and_then(|result| result.map_err(new_std_io_error));
+                    return flush.and(cleanup);
+                }
+            }
+            return flush;
+        }
+        if self.file.is_none() {
+            return flush;
+        }
+        let error = Error::new(
             ErrorKind::Unsupported,
             "filesystem writes cannot be aborted without atomic writes",
-        ))
+        );
+        if !self.synced {
+            return Err(error.set_source(UnsyncedOverwrite {
+                flush_error: flush.err(),
+            }));
+        }
+        flush?;
+        Err(error)
     }
 }
 
@@ -519,7 +577,7 @@ impl oio::List for SecureFsLister {
                 } else {
                     &display_prefix
                 },
-                Metadata::new(EntryMode::DIR),
+                MetadataBuilder::dir().build(),
             );
             self.entries = vec![current_path].into_iter();
         }
@@ -589,7 +647,7 @@ fn read_list_entry(entry: DirEntry, display_prefix: &str) -> io::Result<Option<o
         (format!("{display_prefix}{name}"), EntryMode::Unknown)
     };
     let metadata = if mode == EntryMode::Unknown {
-        Metadata::new(mode)
+        MetadataBuilder::unknown().build()
     } else {
         match entry.metadata() {
             Ok(metadata) => match metadata_from_fs(metadata) {
@@ -807,16 +865,181 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_writer_abort_is_unsupported_without_atomic_write() {
-        let temp_dir = create_temp_dir("secure_fs_writer_abort");
+    async fn test_conditional_abort_only_removes_owned_partial_file() {
+        let temp_dir = create_temp_dir("secure_fs_conditional_abort");
         let operator = SecureFsRoot::open(temp_dir.path())
             .unwrap()
             .build_operator();
-        let mut writer = operator.writer("partial").await.unwrap();
-        writer.write(Bytes::from_static(b"partial")).await.unwrap();
+        for started in [false, true] {
+            let mut writer = operator
+                .writer_with("partial")
+                .if_not_exists(true)
+                .await
+                .unwrap();
+            if started {
+                writer.write(Bytes::from_static(b"partial")).await.unwrap();
+            }
+            writer.abort().await.unwrap();
+            assert!(!operator.exists("partial").await.unwrap());
+        }
+    }
 
-        let error = writer.abort().await.unwrap_err();
+    #[tokio::test]
+    async fn test_overwrite_abort_preserves_unopened_destination() {
+        use std::path::PathBuf;
 
-        assert_eq!(ErrorKind::Unsupported, error.kind());
+        use opendal::raw::OpWrite;
+        use opendal::raw::oio::Write;
+
+        let temp_dir = create_temp_dir("secure_fs_unopened_abort");
+        std::fs::write(temp_dir.path().join("existing"), b"original").unwrap();
+        let mut writer = super::SecureFsWriter {
+            root: SecureFsRoot::open(temp_dir.path()).unwrap(),
+            path: PathBuf::from("existing"),
+            args: OpWrite::default(),
+            file: None,
+            synced: false,
+        };
+
+        writer.abort().await.unwrap();
+        assert_eq!(
+            std::fs::read(temp_dir.path().join("existing")).unwrap(),
+            b"original"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_abort_after_background_write_error() {
+        use std::path::PathBuf;
+
+        use opendal::options::WriteOptions;
+        use opendal::raw::OpWrite;
+        use opendal::raw::oio::Write;
+        use tokio::io::AsyncWriteExt;
+
+        for if_not_exists in [true, false] {
+            let temp_dir = create_temp_dir("secure_fs_flush_error_abort");
+            let root = SecureFsRoot::open(temp_dir.path()).unwrap();
+            let (args, _) = OpWrite::from_options(
+                &root.build_operator().info().capability(),
+                WriteOptions {
+                    if_not_exists,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut writer = super::SecureFsWriter {
+                root,
+                path: PathBuf::from("partial"),
+                args,
+                file: None,
+                synced: false,
+            };
+            writer.ensure_file().await.unwrap();
+            let mut failing_file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .await
+                .unwrap();
+            failing_file.write_all(b"partial").await.unwrap();
+            writer.file = Some(failing_file);
+
+            let error = writer.abort().await.unwrap_err();
+            if if_not_exists {
+                assert!(!temp_dir.path().join("partial").exists());
+            } else {
+                assert_eq!(error.kind(), opendal::ErrorKind::Unsupported);
+                assert!(std::error::Error::source(&error).is_some());
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_conditional_abort_after_close_flush_error() {
+        use std::path::PathBuf;
+
+        use opendal::options::WriteOptions;
+        use opendal::raw::OpWrite;
+        use opendal::raw::oio::Write;
+        use tokio::io::AsyncWriteExt;
+
+        let temp_dir = create_temp_dir("secure_fs_close_flush_error");
+        let root = SecureFsRoot::open(temp_dir.path()).unwrap();
+        let (args, _) = OpWrite::from_options(
+            &root.build_operator().info().capability(),
+            WriteOptions {
+                if_not_exists: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut writer = super::SecureFsWriter {
+            root,
+            path: PathBuf::from("partial"),
+            args,
+            file: None,
+            synced: false,
+        };
+        writer.ensure_file().await.unwrap();
+        let mut failing_file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .await
+            .unwrap();
+        failing_file.write_all(b"partial").await.unwrap();
+        writer.file = Some(failing_file);
+
+        assert!(writer.close().await.is_err());
+        writer.abort().await.unwrap();
+        assert!(!temp_dir.path().join("partial").exists());
+    }
+
+    #[test]
+    fn test_writer_abort_drains_before_reporting_unsupported() {
+        use std::path::PathBuf;
+
+        use opendal::Buffer;
+        use opendal::raw::OpWrite;
+        use opendal::raw::oio::Write;
+
+        use super::SecureFsWriter;
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap()
+            .block_on(async {
+                let temp_dir = create_temp_dir("secure_fs_writer_abort");
+                let mut writer = SecureFsWriter {
+                    root: SecureFsRoot::open(temp_dir.path()).unwrap(),
+                    path: PathBuf::from("partial"),
+                    args: OpWrite::default(),
+                    file: None,
+                    synced: false,
+                };
+                writer.ensure_file().await.unwrap();
+                let (started, ready) = tokio::sync::oneshot::channel();
+                let (release, blocked) = std::sync::mpsc::channel();
+                let blocking = tokio::task::spawn_blocking(move || {
+                    started.send(()).unwrap();
+                    blocked.recv().unwrap();
+                });
+                ready.await.unwrap();
+                writer.write(Buffer::from("partial")).await.unwrap();
+                let abort = writer.abort();
+                tokio::pin!(abort);
+                let pending = futures::poll!(&mut abort).is_pending();
+                release.send(()).unwrap();
+                assert!(pending);
+                assert_eq!(ErrorKind::Unsupported, abort.await.unwrap_err().kind());
+                blocking.await.unwrap();
+                assert_eq!(
+                    std::fs::read(temp_dir.path().join("partial")).unwrap(),
+                    b"partial"
+                );
+            });
     }
 }

@@ -221,18 +221,24 @@ impl DfAccumulator for JsonEncodePathAccumulator {
             )));
         }
 
-        for state in states {
-            let state = as_struct_array(state)?;
-            let lat_list = as_list_array(state.column(0))?.value(0);
-            let lat_array = as_primitive_array::<Float64Type>(&lat_list)?;
-            let lng_list = as_list_array(state.column(1))?.value(0);
-            let lng_array = as_primitive_array::<Float64Type>(&lng_list)?;
-            let ts_list = as_list_array(state.column(2))?.value(0);
-            let ts_array = as_primitive_array::<Int64Type>(&ts_list)?;
+        let state = as_struct_array(&states[0])?;
+        let lat_lists = as_list_array(state.column(0))?;
+        let lng_lists = as_list_array(state.column(1))?;
+        let ts_lists = as_list_array(state.column(2))?;
+        for row in 0..state.len() {
+            if state.is_null(row) {
+                continue;
+            }
+            let lat_list = lat_lists.value(row);
+            let lng_list = lng_lists.value(row);
+            let ts_list = ts_lists.value(row);
 
-            self.lat.extend(lat_array);
-            self.lng.extend(lng_array);
-            self.timestamp.extend(ts_array);
+            self.lat
+                .extend(as_primitive_array::<Float64Type>(&lat_list)?);
+            self.lng
+                .extend(as_primitive_array::<Float64Type>(&lng_list)?);
+            self.timestamp
+                .extend(as_primitive_array::<Int64Type>(&ts_list)?);
         }
 
         Ok(())
@@ -331,9 +337,9 @@ mod tests {
             _ => panic!("Expected Struct scalar value"),
         };
 
-        // Merge state arrays
-        merged.merge_batch(&[state_array1]).unwrap();
-        merged.merge_batch(&[state_array2]).unwrap();
+        // States from different partitions arrive as rows of one batch
+        let states = compute::concat(&[state_array1.as_ref(), state_array2.as_ref()]).unwrap();
+        merged.merge_batch(&[states]).unwrap();
 
         // Evaluate merged result
         let result = merged.evaluate().unwrap();

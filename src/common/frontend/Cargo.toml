@@ -12,14 +12,9 @@ common-event-recorder.workspace = true
 common-grpc.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
-common-time.workspace = true
 greptime-proto.workspace = true
-humantime.workspace = true
 meta-client.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu.workspace = true
 tonic.workspace = true
-
-[dev-dependencies]
-tokio.workspace = true

@@ -969,6 +969,7 @@ struct Window {
     start: Timestamp,
     end: Timestamp,
     files: Vec<FileHandle>,
+    /// Start of the half-open window, in seconds.
     time_window: i64,
     primary_key_range: Option<(bytes::Bytes, bytes::Bytes)>,
 }
@@ -1022,12 +1023,7 @@ fn assign_to_windows<'a>(
             continue;
         }
         let (_, end) = f.time_range();
-        let time_window = end
-            .convert_to(TimeUnit::Second)
-            .unwrap()
-            .value()
-            .align_to_ceil_by_bucket(time_window_size)
-            .unwrap_or(i64::MIN);
+        let time_window = time_window_start(end, time_window_size);
 
         match windows.entry(time_window) {
             Entry::Occupied(mut e) => {
@@ -1043,37 +1039,41 @@ fn assign_to_windows<'a>(
     windows.into_iter().collect()
 }
 
+/// Uses the same half-open windows as memtables, including timestamps in the first
+/// second after a boundary. An unrepresentable window start is clamped to `i64::MIN`.
+fn time_window_start(timestamp: Timestamp, time_window_size: i64) -> i64 {
+    // Conversion to seconds cannot overflow.
+    timestamp
+        .convert_to(TimeUnit::Second)
+        .and_then(|ts| ts.value().align_by_bucket(time_window_size))
+        .unwrap_or(i64::MIN)
+}
+
 fn time_window_intersects_range(
-    window_end: i64,
+    window_start: i64,
     time_window_size: i64,
     time_range: &TimestampRange,
 ) -> bool {
-    let first_window = match time_range.start() {
-        None => i64::MIN,
-        Some(start) => {
-            let Some(first_window) = start
-                .convert_to(TimeUnit::Second)
-                .and_then(|timestamp| timestamp.value().align_to_ceil_by_bucket(time_window_size))
-            else {
-                return false;
-            };
-            first_window
-        }
-    };
+    if time_range.is_empty() {
+        return false;
+    }
+    let first_window = time_range
+        .start()
+        .map_or(i64::MIN, |start| time_window_start(start, time_window_size));
     let last_window = match time_range.end() {
         None => i64::MAX,
         Some(end) => {
-            let Some(last_window) = end
+            // The range end is exclusive; keep the last second that intersects it.
+            let Some(last_second) = end
                 .convert_to_ceil(TimeUnit::Second)
                 .and_then(|timestamp| timestamp.value().checked_sub(1))
-                .and_then(|timestamp| timestamp.align_to_ceil_by_bucket(time_window_size))
             else {
                 return false;
             };
-            last_window
+            time_window_start(Timestamp::new_second(last_second), time_window_size)
         }
     };
-    (first_window..=last_window).contains(&window_end)
+    (first_window..=last_window).contains(&window_start)
 }
 
 fn window_has_overlap(this: &Window, windows: &BTreeMap<i64, Window>) -> bool {
@@ -1091,7 +1091,7 @@ fn window_has_overlap(this: &Window, windows: &BTreeMap<i64, Window>) -> bool {
 }
 
 /// Finds the latest active writing window among all files.
-/// Returns `None` when there are no files or all files are corrupted.
+/// Returns `None` when there are no files.
 fn find_latest_window_in_seconds<'a>(
     files: impl Iterator<Item = &'a FileHandle>,
     time_window_size: i64,
@@ -1107,9 +1107,7 @@ fn find_latest_window_in_seconds<'a>(
             latest_timestamp = Some(end);
         }
     }
-    latest_timestamp
-        .and_then(|ts| ts.convert_to_ceil(TimeUnit::Second))
-        .and_then(|ts| ts.value().align_to_ceil_by_bucket(time_window_size))
+    latest_timestamp.map(|ts| time_window_start(ts, time_window_size))
 }
 
 /// Finds the active window from the file with the highest sequence number.
@@ -1119,9 +1117,7 @@ fn find_latest_window_in_seconds<'a>(
 /// survives the transient state where level 0 is empty right after its files
 /// were compacted away. Returns `None` when no file carries a sequence.
 ///
-/// The window key follows the same convention as [`assign_to_windows`]
-/// (truncate to seconds, then align up), since it is compared against the
-/// window keys produced there.
+/// The window key is its inclusive start, as in [`assign_to_windows`].
 fn find_active_window_by_sequence<'a>(
     files: impl Iterator<Item = &'a FileHandle>,
     time_window_size: i64,
@@ -1129,12 +1125,7 @@ fn find_active_window_by_sequence<'a>(
     files
         .filter(|f| f.meta_ref().sequence.is_some())
         .max_by_key(|f| f.meta_ref().sequence)
-        .and_then(|f| {
-            f.time_range()
-                .1
-                .convert_to(TimeUnit::Second)
-                .and_then(|ts| ts.value().align_to_ceil_by_bucket(time_window_size))
-        })
+        .map(|f| time_window_start(f.time_range().1, time_window_size))
 }
 
 #[cfg(test)]
@@ -1533,7 +1524,7 @@ mod tests {
             new_file_handle_with_sequence(FileId::random(), 0, 999, 1, 0),
             new_file_handle_with_sequence(FileId::random(), 2000, 2999, 0, 0),
         ];
-        assert_eq!(Some(3), active_window_of(&files));
+        assert_eq!(Some(2), active_window_of(&files));
 
         // No sequence and no L0: None, exactly as before.
         let files = [new_file_handle_with_sequence(
@@ -1549,7 +1540,7 @@ mod tests {
     #[test]
     fn test_get_latest_window_in_seconds() {
         assert_eq!(
-            Some(1),
+            Some(0),
             find_latest_window_in_seconds([new_file_handle(FileId::random(), 0, 999, 0)].iter(), 1)
         );
         assert_eq!(
@@ -1561,7 +1552,7 @@ mod tests {
         );
 
         assert_eq!(
-            Some(-9223372036854000),
+            Some(-9223372036857600),
             find_latest_window_in_seconds(
                 [new_file_handle(FileId::random(), i64::MIN, i64::MIN + 1, 0)].iter(),
                 3600,
@@ -1569,7 +1560,7 @@ mod tests {
         );
 
         assert_eq!(
-            (i64::MAX / 10000000 + 1) * 10000,
+            (i64::MAX / 10000000) * 10000,
             find_latest_window_in_seconds(
                 [new_file_handle(FileId::random(), i64::MIN, i64::MAX, 0)].iter(),
                 10000,
@@ -1578,7 +1569,7 @@ mod tests {
         );
 
         assert_eq!(
-            Some((i64::MAX / 3600000 + 1) * 3600),
+            Some((i64::MAX / 3600000) * 3600),
             find_latest_window_in_seconds(
                 [
                     new_file_handle(FileId::random(), i64::MIN, i64::MAX, 0),
@@ -1588,6 +1579,114 @@ mod tests {
                 3600
             )
         );
+    }
+
+    #[test]
+    fn test_window_assignment_and_activity_at_boundaries() {
+        // Before, at, and after positive/negative boundaries, including the first
+        // fractional second: all picker paths must agree with half-open partitions.
+        for (unit, ticks_per_second) in [
+            (TimeUnit::Second, 1),
+            (TimeUnit::Millisecond, 1_000),
+            (TimeUnit::Microsecond, 1_000_000),
+            (TimeUnit::Nanosecond, 1_000_000_000),
+        ] {
+            for window_size in [1, 3, 86_400] {
+                for boundary in [-window_size, 0, window_size] {
+                    for (offset, expected_window) in [
+                        (-1, boundary - window_size),
+                        (0, boundary),
+                        (ticks_per_second - 1, boundary),
+                        (ticks_per_second, boundary + i64::from(window_size == 1)),
+                    ] {
+                        let timestamp = Timestamp::new(boundary * ticks_per_second + offset, unit);
+                        let file = FileHandle::new(
+                            FileMeta {
+                                time_range: (timestamp, timestamp),
+                                sequence: NonZeroU64::new(1),
+                                ..Default::default()
+                            },
+                            crate::test_util::new_noop_file_purger(),
+                        );
+                        let files = [file];
+                        let windows = assign_to_windows(files.iter(), window_size);
+                        assert_eq!(
+                            vec![expected_window],
+                            windows.keys().copied().collect::<Vec<_>>(),
+                            "{timestamp:?}, window size {window_size}"
+                        );
+                        assert_eq!(
+                            Some(expected_window),
+                            find_active_window_by_sequence(files.iter(), window_size)
+                        );
+                        assert_eq!(
+                            Some(expected_window),
+                            find_latest_window_in_seconds(files.iter(), window_size)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_window_assignment_at_timestamp_limits() {
+        for (seconds, expected_window) in [(i64::MIN, i64::MIN), (i64::MAX, i64::MAX - 1)] {
+            let timestamp = Timestamp::new_second(seconds);
+            let files = [FileHandle::new(
+                FileMeta {
+                    time_range: (timestamp, timestamp),
+                    sequence: NonZeroU64::new(1),
+                    ..Default::default()
+                },
+                crate::test_util::new_noop_file_purger(),
+            )];
+            let windows = assign_to_windows(files.iter(), 3);
+            assert_eq!(
+                vec![expected_window],
+                windows.keys().copied().collect::<Vec<_>>()
+            );
+            assert_eq!(
+                Some(expected_window),
+                find_active_window_by_sequence(files.iter(), 3)
+            );
+            assert_eq!(
+                Some(expected_window),
+                find_latest_window_in_seconds(files.iter(), 3)
+            );
+            assert!(time_window_intersects_range(
+                expected_window,
+                3,
+                &TimestampRange::single(timestamp)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_midnight_file_is_not_compacted_with_previous_day() {
+        // Regression for #9441: flush already separates the midnight-only SST.
+        let midnight = 86_400_000;
+        CompactionPickerTestCase {
+            window_size: 86_400,
+            input_files: [
+                (midnight - 240_000, midnight - 180_000),
+                (midnight - 180_000, midnight - 90_000),
+                (midnight - 90_000, midnight - 30_000),
+                (midnight, midnight),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (start, end))| {
+                new_file_handle_with_sequence(FileId::random(), start, end, 0, index as u64 + 1)
+            })
+            .collect(),
+            expected_outputs: vec![ExpectedOutput {
+                input_files: vec![0, 1, 2],
+                output_level: 1,
+            }],
+        }
+        .check()
+        .await;
     }
 
     #[test]
@@ -1619,7 +1718,7 @@ mod tests {
         assert_eq!(
             files[0],
             windows
-                .get(&0)
+                .get(&-3)
                 .unwrap()
                 .files()
                 .next()
@@ -1630,7 +1729,7 @@ mod tests {
         assert_eq!(
             files[1],
             windows
-                .get(&3)
+                .get(&0)
                 .unwrap()
                 .files()
                 .next()
@@ -1641,7 +1740,7 @@ mod tests {
         assert_eq!(
             files[2],
             windows
-                .get(&12)
+                .get(&9)
                 .unwrap()
                 .files()
                 .next()
@@ -1732,6 +1831,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         let windows = assign_to_windows(file_handles.iter(), time_window);
+        assert_eq!(expected_files.len(), windows.len());
 
         for (expected_window, overlapping, window_files) in expected_files {
             let actual_window = windows.get(expected_window).unwrap();
@@ -1756,8 +1856,8 @@ mod tests {
             &[(0, 999), (1000, 1999), (2000, 2999)],
             2,
             &[
-                (0, false, vec![(0, 999)]),
-                (2, false, vec![(1000, 1999), (2000, 2999)]),
+                (0, false, vec![(0, 999), (1000, 1999)]),
+                (2, false, vec![(2000, 2999)]),
             ],
         );
 
@@ -1774,9 +1874,8 @@ mod tests {
             &[(0, 999), (1000, 1999), (2000, 2999), (3000, 3999)],
             2,
             &[
-                (0, false, vec![(0, 999)]),
-                (2, false, vec![(1000, 1999), (2000, 2999)]),
-                (4, false, vec![(3000, 3999)]),
+                (0, false, vec![(0, 999), (1000, 1999)]),
+                (2, false, vec![(2000, 2999), (3000, 3999)]),
             ],
         );
 
@@ -1790,9 +1889,8 @@ mod tests {
             ],
             2,
             &[
-                (0, true, vec![(0, 999)]),
-                (2, true, vec![(1000, 1999), (2000, 2999)]),
-                (4, true, vec![(0, 3999), (3000, 3999)]),
+                (0, true, vec![(0, 999), (1000, 1999)]),
+                (2, true, vec![(0, 3999), (2000, 2999), (3000, 3999)]),
             ],
         );
 
@@ -1806,43 +1904,39 @@ mod tests {
             ],
             2,
             &[
-                (0, false, vec![(0, 999)]),
-                (2, true, vec![(1000, 1999), (2000, 2999)]),
-                (4, true, vec![(1999, 3999), (3000, 3999)]),
+                (0, true, vec![(0, 999), (1000, 1999)]),
+                (2, true, vec![(1999, 3999), (2000, 2999), (3000, 3999)]),
             ],
         );
 
         check_assign_to_windows_with_overlapping(
             &[
                 (0, 999),     // window 0
-                (1000, 1999), // window 2
+                (1000, 1999), // window 0
                 (2000, 2999), // window 2
-                (3000, 3999), // window 4
-                (2999, 3999), // window 4
+                (3000, 3999), // window 2
+                (2999, 3999), // window 2
             ],
             2,
             &[
-                // window 2 overlaps with window 4
-                (0, false, vec![(0, 999)]),
-                (2, true, vec![(1000, 1999), (2000, 2999)]),
-                (4, true, vec![(2999, 3999), (3000, 3999)]),
+                // Overlap within a window does not imply cross-window overlap.
+                (0, false, vec![(0, 999), (1000, 1999)]),
+                (2, false, vec![(2000, 2999), (2999, 3999), (3000, 3999)]),
             ],
         );
 
         check_assign_to_windows_with_overlapping(
             &[
                 (0, 999),     // window 0
-                (1000, 1999), // window 2
+                (1000, 1999), // window 0
                 (2000, 2999), // window 2
-                (3000, 3999), // window 4
-                (0, 1000),    // // window 2
+                (3000, 3999), // window 2
+                (0, 2000),    // window 2
             ],
             2,
             &[
-                // only window 0 overlaps with window 2.
-                (0, true, vec![(0, 999)]),
-                (2, true, vec![(0, 1000), (1000, 1999), (2000, 2999)]),
-                (4, false, vec![(3000, 3999)]),
+                (0, true, vec![(0, 999), (1000, 1999)]),
+                (2, true, vec![(0, 2000), (2000, 2999), (3000, 3999)]),
             ],
         );
     }
@@ -1862,7 +1956,7 @@ mod tests {
             new_file_handle_with_size_sequence_and_primary_key_range(
                 FileId::random(),
                 500,
-                1999,
+                2999,
                 0,
                 2,
                 10,
@@ -1872,7 +1966,8 @@ mod tests {
 
         let windows = assign_to_windows(files.iter(), 2);
 
-        let overlapping = window_has_overlap(windows.get(&2).unwrap(), &windows);
+        assert_eq!(2, windows.len());
+        let overlapping = window_has_overlap(windows.get(&0).unwrap(), &windows);
         assert!(!overlapping);
     }
 
@@ -2592,7 +2687,7 @@ mod tests {
         };
 
         let output = picker
-            .build_output_with_time_range(RegionId::from_u64(123), windows, Some(9), None)
+            .build_output_with_time_range(RegionId::from_u64(123), windows, Some(6), None)
             .await
             .unwrap();
 
@@ -2609,27 +2704,60 @@ mod tests {
 
     #[test]
     fn test_filter_time_windows_by_time_range() {
-        let time_range = TimestampRange::new(
-            Timestamp::new_millisecond(1_200),
-            Timestamp::new_millisecond(1_800),
-        )
-        .unwrap();
+        // Interior, exclusive boundary ends, fractional boundary ends, negative
+        // timestamps, and empty ranges must all use the same half-open windows.
+        for (start, end, expected_windows) in [
+            (1_200, 1_800, vec![0]),
+            (0, 3_000, vec![0]),
+            (3_000, 6_000, vec![3]),
+            (2_999, 3_000, vec![0]),
+            (2_999, 3_001, vec![0, 3]),
+            (3_000, 3_001, vec![3]),
+            (3_001, 3_002, vec![3]),
+            (-3_000, 0, vec![-3]),
+            (-3_001, -2_999, vec![-6, -3]),
+            (0, 0, vec![]),
+            (1_500, 1_500, vec![]),
+        ] {
+            let time_range = TimestampRange::with_unit(start, end, TimeUnit::Millisecond).unwrap();
+            let selected = [-6, -3, 0, 3, 6]
+                .into_iter()
+                .filter(|window| time_window_intersects_range(*window, 3, &time_range))
+                .collect::<Vec<_>>();
+            assert_eq!(expected_windows, selected, "{time_range}");
+        }
+    }
 
-        assert!(time_window_intersects_range(3, 3, &time_range));
-        assert!(!time_window_intersects_range(9, 3, &time_range));
+    #[test]
+    fn test_filter_time_windows_with_unbounded_and_extreme_ranges() {
+        for (range, expected_windows) in [
+            (TimestampRange::min_to_max(), vec![-3, 0, 3]),
+            (
+                TimestampRange::from_start(Timestamp::new_second(0)),
+                vec![0, 3],
+            ),
+            (
+                TimestampRange::until_end(Timestamp::new_second(0), false),
+                vec![-3],
+            ),
+        ] {
+            let selected = [-3, 0, 3]
+                .into_iter()
+                .filter(|window| time_window_intersects_range(*window, 3, &range))
+                .collect::<Vec<_>>();
+            assert_eq!(expected_windows, selected, "{range}");
+        }
 
-        let boundary_range =
-            TimestampRange::new(Timestamp::new_second(0), Timestamp::new_second(3)).unwrap();
-        assert!(time_window_intersects_range(0, 3, &boundary_range));
-        assert!(time_window_intersects_range(3, 3, &boundary_range));
-        assert!(!time_window_intersects_range(6, 3, &boundary_range));
-
-        let overflowing_range = TimestampRange::new(
+        let upper_range = TimestampRange::new(
             Timestamp::new_second(i64::MAX - 1),
             Timestamp::new_second(i64::MAX),
         )
         .unwrap();
-        assert!(!time_window_intersects_range(0, 4, &overflowing_range));
+        assert!(!time_window_intersects_range(0, 4, &upper_range));
+        assert!(time_window_intersects_range(i64::MAX - 3, 4, &upper_range));
+
+        let lower_range = TimestampRange::until_end(Timestamp::new_second(i64::MIN), false);
+        assert!(!time_window_intersects_range(i64::MIN, 3, &lower_range));
     }
 
     #[tokio::test]
@@ -2659,7 +2787,7 @@ mod tests {
         };
 
         let output = picker
-            .build_output_with_time_range(RegionId::from_u64(123), windows, Some(9), Some(3))
+            .build_output_with_time_range(RegionId::from_u64(123), windows, Some(6), Some(3))
             .await
             .unwrap();
 

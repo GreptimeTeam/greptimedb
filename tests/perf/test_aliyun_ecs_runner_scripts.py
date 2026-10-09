@@ -30,6 +30,9 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 SCRIPTS_DIR = Path(__file__).parents[2] / ".github/scripts"
+sys.path.insert(0, str(SCRIPTS_DIR))
+
+import runner_utils
 
 
 def load_module(name: str, filename: str):
@@ -58,7 +61,7 @@ class GitHubApiResponseTest(unittest.TestCase):
                 response.read.return_value = body
                 response.__enter__ = Mock(return_value=response)
                 response.__exit__ = Mock(return_value=False)
-                with patch.object(provision.urllib.request, "urlopen", return_value=response):
+                with patch.object(runner_utils.urllib.request, "urlopen", return_value=response):
                     self.assertEqual(provision.github_api("token", "DELETE", "/test"), expected)
 
     def test_invalid_json_still_fails(self):
@@ -66,9 +69,25 @@ class GitHubApiResponseTest(unittest.TestCase):
         response.read.return_value = b"not json"
         response.__enter__ = Mock(return_value=response)
         response.__exit__ = Mock(return_value=False)
-        with patch.object(provision.urllib.request, "urlopen", return_value=response):
+        with patch.object(runner_utils.urllib.request, "urlopen", return_value=response):
             with self.assertRaises(ValueError):
                 provision.github_api("token", "GET", "/test")
+
+    def test_http_errors_still_exit_instead_of_becoming_recoverable(self):
+        error = runner_utils.urllib.error.HTTPError(
+            "https://api.github.com/test", 403, "Forbidden", {}, io.BytesIO(b"denied")
+        )
+        with patch.object(runner_utils.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaisesRegex(SystemExit, "HTTP 403: denied"):
+                provision.github_api("token", "GET", "/test")
+
+    def test_unregister_preserves_legacy_failure_semantics(self):
+        with patch.object(runner_utils, "find_runner_by_name", return_value={"id": 42}):
+            with patch.object(runner_utils, "github_api", side_effect=SystemExit("HTTP 403")):
+                with self.assertRaisesRegex(SystemExit, "HTTP 403"):
+                    runner_utils.deregister_runner("token", "owner/repo", "runner")
+            with patch.object(runner_utils, "github_api", side_effect=RuntimeError("connection lost")):
+                self.assertFalse(runner_utils.deregister_runner("token", "owner/repo", "runner"))
 
 
 class ProvisionNamingTest(unittest.TestCase):

@@ -23,16 +23,11 @@ use arrow::array::{StringArray, TimestampMillisecondArray};
 use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
-use common_meta::cache::{TableFlownodeSetCacheRef, new_table_flownode_set_cache};
 use common_meta::error::Result as MetaResult;
-use common_meta::instruction::{CacheIdent, CreateFlow};
-use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::node_manager::{
     DatanodeManager, DatanodeRef, Flownode, FlownodeManager, FlownodeRef,
 };
-use moka::future::CacheBuilder;
 use snafu::ResultExt;
-use table::metadata::TableId;
 use tokio::sync::mpsc;
 
 use crate::batcher::logical_table::batch_convert::RecordBatchWithTsIdx;
@@ -153,26 +148,6 @@ impl FlownodeManager for FlowNotificationMockNodeManager {
     async fn flownode(&self, _node: &Peer) -> FlownodeRef {
         self.flownode.clone()
     }
-}
-
-pub(in crate::batcher::logical_table) async fn mock_table_flownode_cache(
-    table_id: TableId,
-    peer: Peer,
-) -> TableFlownodeSetCacheRef {
-    let cache = Arc::new(new_table_flownode_set_cache(
-        "test".to_string(),
-        CacheBuilder::new(1).build(),
-        Arc::new(MemoryKvBackend::default()),
-    ));
-    cache
-        .invalidate(&[CacheIdent::CreateFlow(CreateFlow {
-            flow_id: 1,
-            source_table_ids: vec![table_id],
-            partition_to_peer_mapping: vec![(0, peer.clone()), (1, peer)],
-        })])
-        .await
-        .unwrap();
-    cache
 }
 
 #[async_trait]

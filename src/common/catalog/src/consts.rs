@@ -202,6 +202,12 @@ pub fn is_ddl_reserved_table(schema: &str, table: &str) -> bool {
 pub const TRACE_ID_COLUMN: &str = "trace_id";
 pub const SPAN_ID_COLUMN: &str = "span_id";
 pub const SPAN_NAME_COLUMN: &str = "span_name";
+/// Column containing span attributes as JSON/JSON2.
+pub const SPAN_ATTRIBUTES_COLUMN: &str = "span_attributes";
+/// Column containing instrumentation scope attributes as JSON2.
+pub const SCOPE_ATTRIBUTES_COLUMN: &str = "scope_attributes";
+/// Column containing resource attributes as JSON2.
+pub const RESOURCE_ATTRIBUTES_COLUMN: &str = "resource_attributes";
 pub const SERVICE_NAME_COLUMN: &str = "service_name";
 pub const PARENT_SPAN_ID_COLUMN: &str = "parent_span_id";
 // More fixed columns/values of the `greptime_trace_v1` data model, shared by

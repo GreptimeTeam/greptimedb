@@ -37,6 +37,17 @@
 //!   --start-time 2025-01-01T00:00:00Z \
 //!   --end-time 2025-01-31T23:59:59Z
 //! ```
+//!
+//! `--experimental-metric-export` enables shared Metric physical scans for Parquet.
+//! Enable `experimental_metric_export = true` on the frontend or standalone server
+//! and use an endpoint whose frontends all support and enable this option.
+//! Add `--metric-data-layout packed` to write version-2 packed snapshots.
+//! This requires the server packed-export capability; schema-only exports remain version 1.
+//! The command checks the server capability before modifying the snapshot.
+//! Each snapshot path belongs to one export task. Resume requires stable source
+//! schemas/data and confirmation that the previous export and storage writes ended;
+//! an HTTP timeout does not establish that. Only unfinished chunks are cleaned and
+//! rerun. Resume retains the snapshot version/layout and completed chunks.
 
 mod chunker;
 mod command;

@@ -86,8 +86,10 @@ pub fn vector_type_value_to_string(val: &[u8], dim: u32) -> Result<String> {
     }
 
     let elements = val
-        .chunks_exact(std::mem::size_of::<f32>())
-        .map(|e| f32::from_le_bytes(e.try_into().unwrap()));
+        .as_chunks::<{ std::mem::size_of::<f32>() }>()
+        .0
+        .iter()
+        .map(|e| f32::from_le_bytes(*e));
 
     let mut s = String::from("[");
     for (i, e) in elements.enumerate() {

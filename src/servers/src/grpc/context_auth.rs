@@ -34,9 +34,10 @@ use crate::http::AUTHORIZATION_HEADER;
 use crate::http::header::constants::GREPTIME_DB_HEADER_NAME;
 use crate::metrics::METRIC_AUTH_FAILURE;
 
-/// Create a query context from the grpc metadata.
+/// Create a query context from gRPC metadata and server-owned request extensions.
 pub fn create_query_context_from_grpc_metadata(
     headers: &MetadataMap,
+    extensions: &http::Extensions,
 ) -> TonicResult<QueryContextRef> {
     let (catalog, schema) = if let Some(db) = extract_header(headers, &[GREPTIME_DB_HEADER_NAME])? {
         parse_catalog_and_schema_from_db_string(db)
@@ -50,7 +51,12 @@ pub fn create_query_context_from_grpc_metadata(
     let ctx = QueryContextBuilder::default()
         .current_catalog(catalog)
         .current_schema(schema)
-        .channel(Channel::Grpc)
+        .channel(
+            extensions
+                .get::<Channel>()
+                .copied()
+                .unwrap_or(Channel::Grpc),
+        )
         .build();
     // OTEL Arrow uses ordinary inserts. Accept only its request-level WAL hint,
     // leaving unrelated hints and reserved internal extensions unchanged.
@@ -184,10 +190,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_channel_comes_from_server_extensions() {
+        let mut headers = MetadataMap::new();
+        headers.insert(
+            "x-greptime-flow-extensions",
+            r#"[["flow.return_region_seq","true"]]"#.parse().unwrap(),
+        );
+        headers.insert(HINTS_KEY, "channel=internal".parse().unwrap());
+        let mut extensions = http::Extensions::new();
+        let ctx = create_query_context_from_grpc_metadata(&headers, &extensions).unwrap();
+        assert_eq!(ctx.channel(), Channel::Grpc);
+
+        extensions.insert(Channel::Internal);
+        let ctx = create_query_context_from_grpc_metadata(&headers, &extensions).unwrap();
+        assert_eq!(ctx.channel(), Channel::Internal);
+    }
+
+    #[test]
     fn test_arrow_insert_hint_does_not_accept_reserved_extensions() {
         let mut headers = MetadataMap::new();
         assert_eq!(
-            create_query_context_from_grpc_metadata(&headers)
+            create_query_context_from_grpc_metadata(&headers, &Default::default())
                 .unwrap()
                 .extension(INSERT_SKIP_WAL_HINT),
             None
@@ -198,7 +221,8 @@ mod tests {
                 hints.push_str(&format!(",{key}=external"));
             }
             headers.insert(HINTS_KEY, hints.parse().unwrap());
-            let ctx = create_query_context_from_grpc_metadata(&headers).unwrap();
+            let ctx =
+                create_query_context_from_grpc_metadata(&headers, &Default::default()).unwrap();
             assert_eq!(ctx.skip_wal(), expected);
             assert_eq!(ctx.extension(INSERT_SKIP_WAL_HINT), None);
             assert_eq!(ctx.extension("ttl"), None);
@@ -219,7 +243,8 @@ mod tests {
             ("insert_skip_wal=true,insert_skip_wal=invalid", true),
         ] {
             headers.insert(HINTS_KEY, hints.parse().unwrap());
-            let ctx = create_query_context_from_grpc_metadata(&headers).unwrap();
+            let ctx =
+                create_query_context_from_grpc_metadata(&headers, &Default::default()).unwrap();
             assert_eq!(ctx.skip_wal(), expected);
         }
         for value in ["", "TRUE", "1", "invalid"] {
@@ -227,7 +252,9 @@ mod tests {
                 HINTS_KEY,
                 format!("insert_skip_wal={value}").parse().unwrap(),
             );
-            assert!(create_query_context_from_grpc_metadata(&headers).is_err());
+            assert!(
+                create_query_context_from_grpc_metadata(&headers, &Default::default()).is_err()
+            );
         }
     }
 }

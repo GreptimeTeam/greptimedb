@@ -40,6 +40,7 @@ use crate::data::export_v2::manifest::{MANIFEST_FILE, Manifest};
 #[cfg(test)]
 use crate::data::export_v2::schema::SchemaDefinition;
 use crate::data::export_v2::schema::{SCHEMA_DIR, SCHEMAS_FILE, SchemaSnapshot};
+use crate::data::path::data_dir_for_schema_chunk;
 
 struct RemoteLocation {
     bucket_or_container: String,
@@ -267,6 +268,9 @@ pub trait SnapshotStorage: Send + Sync {
     /// Reads the manifest file.
     async fn read_manifest(&self) -> Result<Manifest>;
 
+    /// Returns file length, or None for a missing path or directory.
+    async fn file_size(&self, path: &str) -> Result<Option<u64>>;
+
     /// Writes the manifest file.
     async fn write_manifest(&self, manifest: &Manifest) -> Result<()>;
 
@@ -284,6 +288,22 @@ pub trait SnapshotStorage: Send + Sync {
 
     /// Lists files recursively under a relative prefix.
     async fn list_files_recursive(&self, prefix: &str) -> Result<Vec<String>>;
+
+    /// Checks fresh output directories or removes a terminated, unfinished chunk's files.
+    async fn prepare_export_chunk(
+        &self,
+        schemas: &[String],
+        chunk_id: u32,
+        resume: bool,
+        packed: bool,
+    ) -> Result<()> {
+        let _ = (schemas, chunk_id, resume, packed);
+        InvalidUriSnafu {
+            uri: "snapshot",
+            reason: "storage does not support preparing export chunks",
+        }
+        .fail()
+    }
 
     /// Deletes the entire snapshot (for --force).
     async fn delete_snapshot(&self) -> Result<()>;
@@ -653,7 +673,17 @@ impl SnapshotStorage for OpenDalStorage {
         ensure_snapshot_exists(self).await?;
 
         let data = self.read_file(MANIFEST_FILE).await?;
-        serde_json::from_slice(&data).context(ManifestParseSnafu)
+        Manifest::from_json(&data).context(ManifestParseSnafu)
+    }
+
+    async fn file_size(&self, path: &str) -> Result<Option<u64>> {
+        match self.object_store.stat(path).await {
+            Ok(metadata) => Ok(metadata.is_file().then(|| metadata.content_length())),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).with_context(|_| StorageOperationSnafu {
+                operation: format!("stat {path}"),
+            }),
+        }
     }
 
     async fn write_manifest(&self, manifest: &Manifest) -> Result<()> {
@@ -696,6 +726,64 @@ impl SnapshotStorage for OpenDalStorage {
         Ok(files)
     }
 
+    async fn prepare_export_chunk(
+        &self,
+        schemas: &[String],
+        chunk_id: u32,
+        resume: bool,
+        packed: bool,
+    ) -> Result<()> {
+        let mut files = Vec::new();
+        for schema in schemas {
+            let prefix = data_dir_for_schema_chunk(schema, chunk_id);
+            let mut entries = match self.object_store.lister_with(&prefix).recursive(true).await {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error).context(StorageOperationSnafu {
+                        operation: format!("list {prefix}"),
+                    });
+                }
+            };
+            while let Some(entry) = entries.try_next().await.context(StorageOperationSnafu {
+                operation: format!("list {prefix}"),
+            })? {
+                let path = entry.path();
+                if path == prefix && entry.metadata().is_dir() {
+                    continue;
+                }
+                let name = path.strip_prefix(&prefix).unwrap_or("");
+                if !resume
+                    || entry.metadata().is_dir()
+                    || !(if packed {
+                        valid_packed_chunk_filename(name)
+                    } else {
+                        valid_chunk_filename(name)
+                    })
+                {
+                    return InvalidUriSnafu {
+                        uri: path,
+                        reason: "expected an empty new chunk or recognized files in an owned unfinished chunk",
+                    }.fail();
+                }
+                files.push(path.to_string());
+            }
+        }
+        // Validate every schema before deleting any files; COPY starts only after this returns.
+        for path in files {
+            match self.object_store.delete(&path).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).context(StorageOperationSnafu {
+                        operation: format!("delete unfinished chunk file {path}"),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn delete_snapshot(&self) -> Result<()> {
         self.object_store
             .delete_with("/")
@@ -707,17 +795,37 @@ impl SnapshotStorage for OpenDalStorage {
     }
 }
 
+fn valid_packed_chunk_filename(name: &str) -> bool {
+    name == common_datasource::packed_snapshot::PACK_INDEX_FILE
+        || [("pack-", ".bin"), ("table-", ".parquet")]
+            .iter()
+            .any(|(prefix, suffix)| {
+                name.strip_prefix(prefix)
+                    .and_then(|n| n.strip_suffix(suffix))
+                    .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+            })
+}
+
+fn valid_chunk_filename(name: &str) -> bool {
+    name.strip_suffix(".parquet")
+        .is_some_and(|stem| !stem.is_empty())
+        && !name.contains(['/', '\\', '\0'])
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::path::Path;
+    use std::sync::Arc;
 
     use object_store::ObjectStore;
+    use object_store::layers::mock::MockLayerBuilder;
     use object_store::services::Fs;
     use tempfile::tempdir;
     use url::Url;
 
     use super::*;
+    use crate::data::export_v2::error::Error;
     use crate::data::export_v2::manifest::{DataFormat, TimeRange};
     use crate::data::export_v2::schema::SchemaDefinition;
 
@@ -969,6 +1077,212 @@ mod tests {
             .unwrap();
 
         assert!(storage.exists().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_prepare_export_chunk_preserves_other_chunks_and_schema_artifacts() {
+        let dir = tempdir().unwrap();
+        let storage = make_storage_with_rooted_fs(dir.path());
+        for path in [
+            "data/public/1/keep.parquet",
+            "data/public/2/cpu.v1.parquet",
+            "data/other/2/a.parquet",
+            "schema/ddl/public.sql",
+        ] {
+            storage.write_text(path, "original").await.unwrap();
+        }
+        let schemas = vec!["public".to_string(), "other".to_string()];
+        assert!(
+            storage
+                .prepare_export_chunk(&schemas, 2, false, false)
+                .await
+                .is_err()
+        );
+        assert!(
+            storage
+                .file_exists("data/public/2/cpu.v1.parquet")
+                .await
+                .unwrap()
+        );
+        storage
+            .prepare_export_chunk(&schemas, 2, true, false)
+            .await
+            .unwrap();
+        storage
+            .prepare_export_chunk(&schemas, 2, true, false)
+            .await
+            .unwrap();
+        assert!(
+            !storage
+                .file_exists("data/public/2/cpu.v1.parquet")
+                .await
+                .unwrap()
+        );
+        assert!(!storage.file_exists("data/other/2/a.parquet").await.unwrap());
+        assert_eq!(
+            storage
+                .read_text("data/public/1/keep.parquet")
+                .await
+                .unwrap(),
+            "original"
+        );
+        assert_eq!(
+            storage.read_text("schema/ddl/public.sql").await.unwrap(),
+            "original"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prepare_export_chunk_rejects_foreign_or_nested_entries_before_deletion() {
+        for foreign in ["notes.txt", "nested/a.parquet", "empty/"] {
+            let dir = tempdir().unwrap();
+            let storage = make_storage_with_rooted_fs(dir.path());
+            storage
+                .write_text("data/public/2/cpu.parquet", "keep")
+                .await
+                .unwrap();
+            let path = format!("data/other/2/{foreign}");
+            if foreign.ends_with('/') {
+                storage.create_dir_all(&path).await.unwrap();
+            } else {
+                storage.write_text(&path, "foreign").await.unwrap();
+            }
+            assert!(
+                storage
+                    .prepare_export_chunk(&["public".into(), "other".into()], 2, true, false)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                storage
+                    .read_text("data/public/2/cpu.parquet")
+                    .await
+                    .unwrap(),
+                "keep"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn packed_retry_preserves_foreign_files_and_completed_chunks() {
+        let dir = tempdir().unwrap();
+        let storage = make_storage_with_rooted_fs(dir.path());
+        let owned = ["pack-000000.bin", "table-42.parquet", "pack-index.json"];
+        for name in owned {
+            storage
+                .write_text(&format!("data/public/2/{name}"), "partial")
+                .await
+                .unwrap();
+        }
+        for path in [
+            "data/public/1/pack-000000.bin",
+            "data/public/2/foreign.parquet",
+        ] {
+            storage.write_text(path, "keep").await.unwrap();
+        }
+        let schemas = ["public".into()];
+        assert!(
+            storage
+                .prepare_export_chunk(&schemas, 2, true, true)
+                .await
+                .is_err()
+        );
+        for name in owned {
+            assert!(
+                storage
+                    .file_exists(&format!("data/public/2/{name}"))
+                    .await
+                    .unwrap()
+            );
+        }
+        assert_eq!(
+            storage
+                .read_text("data/public/2/foreign.parquet")
+                .await
+                .unwrap(),
+            "keep"
+        );
+        storage
+            .object_store
+            .delete("data/public/2/foreign.parquet")
+            .await
+            .unwrap();
+        storage
+            .prepare_export_chunk(&schemas, 2, true, true)
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .list_files_recursive("data/public/2/")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            storage
+                .read_text("data/public/1/pack-000000.bin")
+                .await
+                .unwrap(),
+            "keep"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prepare_export_chunk_reports_delete_failure() {
+        let dir = tempdir().unwrap();
+        let mut storage = make_storage_with_rooted_fs(dir.path());
+        storage.object_store = storage.object_store.layer(
+            MockLayerBuilder::default()
+                // OpenDAL's unit deleter returns Unsupported for every deletion.
+                .deleter_factory(Arc::new(|_| Box::new(())))
+                .build()
+                .unwrap(),
+        );
+        storage
+            .write_text("data/public/2/a.parquet", "keep")
+            .await
+            .unwrap();
+        let error = storage
+            .prepare_export_chunk(&["public".into()], 2, true, false)
+            .await
+            .unwrap_err();
+        let Error::StorageOperation {
+            operation, error, ..
+        } = error
+        else {
+            panic!("expected storage operation error, got {error:?}");
+        };
+        assert_eq!(
+            operation,
+            "delete unfinished chunk file data/public/2/a.parquet"
+        );
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
+        assert_eq!(
+            storage.read_text("data/public/2/a.parquet").await.unwrap(),
+            "keep"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prepare_export_chunk_encodes_schema_boundary() {
+        let dir = tempdir().unwrap();
+        let storage = make_storage_with_rooted_fs(dir.path());
+        let schema = "../other".to_string();
+        let owned = format!("{}a.parquet", data_dir_for_schema_chunk(&schema, 2));
+        storage.write_text(&owned, "remove").await.unwrap();
+        storage
+            .write_text("data/other/2/a.parquet", "keep")
+            .await
+            .unwrap();
+        storage
+            .prepare_export_chunk(&[schema], 2, true, false)
+            .await
+            .unwrap();
+        assert!(!storage.file_exists(&owned).await.unwrap());
+        assert_eq!(
+            storage.read_text("data/other/2/a.parquet").await.unwrap(),
+            "keep"
+        );
     }
 
     #[tokio::test]

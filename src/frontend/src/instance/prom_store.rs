@@ -527,11 +527,16 @@ impl PromStoreProtocolHandler for Instance {
     ) -> ServerResult<Vec<ServerResult<Output>>> {
         let mut prepared = Vec::with_capacity(requests.len());
         for (ctx, request) in requests {
-            prepared.push(self.prepare_prom_store_write(request, ctx).await?);
+            let (request, ctx) = self.prepare_prom_store_write(request, ctx).await?;
+            prepared.push((ctx, request));
         }
+        operator::insert::admit_row_insert_batches(&mut prepared)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
 
         let mut outputs = Vec::with_capacity(prepared.len());
-        for (request, ctx) in prepared {
+        for (ctx, request) in prepared {
             let output = self.write_prepared(request, ctx, with_metric_engine).await;
             let failed = output.is_err();
             outputs.push(output);
@@ -765,9 +770,13 @@ impl PromStoreProtocolHandler for ExportMetricHandler {
 
     async fn write_all(
         &self,
-        requests: Vec<(QueryContextRef, RowInsertRequests)>,
+        mut requests: Vec<(QueryContextRef, RowInsertRequests)>,
         with_metric_engine: bool,
     ) -> ServerResult<Vec<ServerResult<Output>>> {
+        operator::insert::admit_row_insert_batches(&mut requests)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
         let mut outputs = Vec::with_capacity(requests.len());
         for (ctx, request) in requests {
             let output = self.write_prepared(request, ctx, with_metric_engine).await;

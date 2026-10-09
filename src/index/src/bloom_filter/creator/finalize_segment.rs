@@ -22,8 +22,7 @@ use futures::stream::StreamExt;
 use futures::{AsyncWriteExt, Stream, stream};
 use snafu::ResultExt;
 
-use crate::Bytes;
-use crate::bloom_filter::creator::SEED;
+use crate::bloom_filter::PrehashedBuildHasher;
 use crate::bloom_filter::creator::intermediate_codec::IntermediateBloomFilterCodecV1;
 use crate::bloom_filter::error::{IntermediateSnafu, IoSnafu, Result};
 use crate::external_provider::ExternalTempFileProvider;
@@ -98,14 +97,14 @@ impl FinalizedBloomFilterStorage {
     /// If the memory usage exceeds the threshold, flushes the in-memory Bloom filters to disk.
     pub async fn add(
         &mut self,
-        elems: impl IntoIterator<Item = Bytes>,
+        elem_hashes: impl IntoIterator<Item = u64>,
         element_count: usize,
     ) -> Result<()> {
         let mut bf = BloomFilter::with_false_pos(self.false_positive_rate)
-            .seed(&SEED)
+            .hasher(PrehashedBuildHasher::default())
             .expected_items(element_count);
-        for elem in elems.into_iter() {
-            bf.insert(&elem);
+        for hash in elem_hashes.into_iter() {
+            bf.insert(&hash);
         }
 
         let fbf = FinalizedBloomFilterSegment::from(bf, element_count);
@@ -231,7 +230,7 @@ pub struct FinalizedBloomFilterSegment {
 }
 
 impl FinalizedBloomFilterSegment {
-    fn from(bf: BloomFilter, elem_count: usize) -> Self {
+    fn from<S: std::hash::BuildHasher>(bf: BloomFilter<512, S>, elem_count: usize) -> Self {
         let bf_slice = bf.as_slice();
         let mut bloom_filter_bytes = Vec::with_capacity(std::mem::size_of_val(bf_slice));
         for &x in bf_slice {
@@ -256,6 +255,7 @@ mod tests {
 
     use super::*;
     use crate::bloom_filter::creator::tests::u64_vec_from_bytes;
+    use crate::bloom_filter::{SEED, element_hash};
     use crate::external_provider::MockExternalTempFileProvider;
 
     #[tokio::test]
@@ -300,11 +300,12 @@ mod tests {
         let dup_batch = 200;
 
         for i in 0..(batch - dup_batch) {
-            let elems = (elem_count * i..elem_count * (i + 1)).map(|x| x.to_string().into_bytes());
+            let elems = (elem_count * i..elem_count * (i + 1))
+                .map(|x| element_hash(x.to_string().as_bytes()));
             storage.add(elems, elem_count).await.unwrap();
         }
         for _ in 0..dup_batch {
-            storage.add(Some(vec![]), 1).await.unwrap();
+            storage.add(Some(element_hash(&[])), 1).await.unwrap();
         }
 
         // Flush happens.
@@ -356,7 +357,7 @@ mod tests {
 
         let batch = 1000;
         for _ in 0..batch {
-            storage.add(Some(vec![]), 1).await.unwrap();
+            storage.add(Some(element_hash(&[])), 1).await.unwrap();
         }
 
         // Drain the storage.

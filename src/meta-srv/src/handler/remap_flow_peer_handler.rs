@@ -12,22 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use api::v1::meta::{HeartbeatRequest, Peer, Role};
+use api::v1::meta::{HeartbeatRequest, Role};
 use common_meta::instruction::CacheIdent;
-use common_meta::key::node_address::{NodeAddressKey, NodeAddressValue};
-use common_meta::key::{MetadataKey, MetadataValue};
-use common_meta::rpc::store::PutRequest;
-use common_telemetry::{error, info, warn};
-use dashmap::DashMap;
+use common_meta::key::MetadataKey;
+use common_meta::key::node_address::NodeAddressKey;
+use common_telemetry::error;
 
 use crate::Result;
+use crate::handler::utils::{self, NodeAddressUpdater};
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
 #[derive(Debug, Default)]
 pub struct RemapFlowPeerHandler {
-    /// flow_node_id -> epoch
-    epoch_cache: DashMap<u64, u64>,
+    address_updater: NodeAddressUpdater,
 }
 
 #[async_trait::async_trait]
@@ -45,61 +43,83 @@ impl HeartbeatHandler for RemapFlowPeerHandler {
         let Some(peer) = req.peer.as_ref() else {
             return Ok(HandleControl::Continue);
         };
-
-        let current_epoch = req.node_epoch;
-        let flow_node_id = peer.id;
-
-        let refresh = if let Some(mut epoch) = self.epoch_cache.get_mut(&flow_node_id) {
-            if current_epoch > *epoch.value() {
-                *epoch.value_mut() = current_epoch;
-                true
-            } else {
-                false
-            }
-        } else {
-            self.epoch_cache.insert(flow_node_id, current_epoch);
-            true
-        };
-
-        if refresh {
-            rewrite_node_address(ctx, peer).await;
+        let updated = self
+            .address_updater
+            .update_if_needed((Role::Flownode, peer.id), req.node_epoch, || {
+                let key = NodeAddressKey::with_flownode(peer.id).to_bytes();
+                utils::save_node_address(ctx, key, peer.clone())
+            })
+            .await
+            .inspect_err(|e| {
+                // Address errors must not prevent later heartbeat handlers from running.
+                error!(e; "Failed to update flownode address, peer: {:?}", peer);
+            });
+        if let Ok(true) = updated {
+            let cache_idents = [CacheIdent::FlowNodeAddressChange(peer.id)];
+            utils::invalidate_address_caches(ctx, peer.id, &cache_idents).await;
         }
-
         Ok(HandleControl::Continue)
     }
 }
 
-async fn rewrite_node_address(ctx: &mut Context, peer: &Peer) {
-    let key = NodeAddressKey::with_flownode(peer.id).to_bytes();
-    if let Ok(value) = NodeAddressValue::new(peer.clone()).try_as_raw_value() {
-        let put = PutRequest {
-            key,
-            value,
-            prev_kv: false,
-        };
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handler::test_utils::TestEnv;
+    use api::v1::meta::Peer;
+    use std::sync::Arc;
+    #[tokio::test]
+    async fn test_notification_failure_keeps_persisted_epoch() {
+        use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
+        use api::v1::meta::HeartbeatRequest;
 
-        match ctx.leader_cached_kv_backend.put(put).await {
-            Ok(_) => {
-                info!("Successfully updated flow `NodeAddressValue`: {:?}", peer);
-                // broadcast invalidating cache to all frontends
-                let cache_idents = vec![CacheIdent::FlowNodeAddressChange(peer.id)];
-                info!(
-                    "Invalidate flow node cache for new address with cache idents: {:?}",
-                    cache_idents
-                );
-                if let Err(e) = ctx
-                    .cache_invalidator
-                    .invalidate(&Default::default(), &cache_idents)
-                    .await
-                {
-                    error!(e; "Failed to invalidate {} `NodeAddressKey` cache, peer: {:?}", cache_idents.len(), peer);
-                }
-            }
-            Err(e) => {
-                error!(e; "Failed to update flow `NodeAddressValue`: {:?}", peer);
-            }
-        }
-    } else {
-        warn!("Failed to serialize flow `NodeAddressValue`: {:?}", peer);
+        use crate::handler::test_utils::FailingCacheInvalidator;
+        use common_meta::key::MetadataValue;
+        use common_meta::key::node_address::NodeAddressValue;
+        let mut ctx = TestEnv::new().ctx();
+        let invalidator = Arc::new(FailingCacheInvalidator::default());
+        ctx.cache_invalidator = invalidator.clone();
+        let handler = RemapFlowPeerHandler::default();
+        let mut req = HeartbeatRequest {
+            peer: Some(Peer {
+                id: 1,
+                addr: "first".into(),
+            }),
+            node_epoch: 1,
+            ..Default::default()
+        };
+        let key = NodeAddressKey::with_flownode(1).to_bytes();
+        handler
+            .handle(&req, &mut ctx, &mut HeartbeatAccumulator::default())
+            .await
+            .unwrap();
+        req.peer.as_mut().unwrap().addr = "same-epoch".into();
+        handler
+            .handle(&req, &mut ctx, &mut HeartbeatAccumulator::default())
+            .await
+            .unwrap();
+        assert_eq!(invalidator.attempts(), 1);
+        let kv = ctx.kv_backend.get(&key).await.unwrap().unwrap();
+        assert_eq!(
+            NodeAddressValue::try_from_raw_value(&kv.value)
+                .unwrap()
+                .peer
+                .addr,
+            "first"
+        );
+        req.node_epoch = 2;
+        handler
+            .handle(&req, &mut ctx, &mut HeartbeatAccumulator::default())
+            .await
+            .unwrap();
+        assert_eq!(invalidator.attempts(), 2);
+        let kv = ctx.kv_backend.get(&key).await.unwrap().unwrap();
+        assert_eq!(
+            NodeAddressValue::try_from_raw_value(&kv.value)
+                .unwrap()
+                .peer
+                .addr,
+            "same-epoch"
+        );
     }
 }

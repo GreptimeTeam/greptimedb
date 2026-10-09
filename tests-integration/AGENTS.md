@@ -20,6 +20,10 @@ COPY locations.
   paths to file URIs with `Url::from_file_path`; do not hard-code `/tmp` or
   concatenate `file://` with native paths. Close file handles before rename or
   cleanup, including import-state writes.
+- Linux [Nightly Build](../.github/workflows/nightly-build.yml) runs tests as root in
+  `dev-builder`; `chmod`/read-only permissions cannot reliably force I/O failures.
+  For storage error propagation tests, reuse `object_store::layers::mock` to inject
+  deterministic failures rather than relying on execution-user permissions.
 
 ## Validation
 

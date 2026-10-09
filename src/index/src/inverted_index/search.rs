@@ -16,3 +16,13 @@ pub mod fst_apply;
 pub mod fst_values_mapper;
 pub mod index_apply;
 pub mod predicate;
+
+/// Partitions `slice` in place so that elements matching `pred` come first,
+/// preserving the original relative order within each group. Returns the
+/// number of matching elements.
+///
+/// Stable replacement for the unstable `Iterator::partition_in_place`.
+pub(crate) fn partition_in_place<T>(slice: &mut [T], mut pred: impl FnMut(&T) -> bool) -> usize {
+    slice.sort_by_key(|x| !pred(x));
+    slice.iter().filter(|x| pred(x)).count()
+}

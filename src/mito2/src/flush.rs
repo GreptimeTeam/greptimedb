@@ -63,12 +63,13 @@ use crate::request::{
 };
 use crate::schedule::CancellableTaskState;
 use crate::schedule::scheduler::{Job, SchedulerRef};
-use crate::sst::file::{FileMeta, UncommittedSsts};
+use crate::sst::file::{FileMeta, RegionFileId, UncommittedSsts};
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::{
     DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE, SstInfo, WriteOptions, flat_format,
 };
 use crate::sst::{FlatSchemaOptions, FormatType, to_flat_sst_arrow_schema};
+use crate::wal::DurabilityBarrier;
 use crate::worker::WorkerListener;
 
 /// Global write buffer (memtable) manager.
@@ -282,6 +283,8 @@ pub(crate) struct RegionFlushTask {
     ///
     /// This is used to generate the file meta.
     pub(crate) partition_expr: Option<String>,
+    /// Waits until the WAL is durable through the entry id the flush records.
+    pub(crate) durability_barrier: DurabilityBarrier,
 }
 
 struct FlushTaskWaiters {
@@ -507,6 +510,17 @@ impl RegionFlushTask {
                 .collect();
             hook.on_sst_files_written(self.region_id, &version.metadata, &files)
                 .await;
+        }
+
+        // The manifest may name only a durable entry as flushed. A log store
+        // that acknowledges appends before their entries are durable can have
+        // handed out `last_entry_id` for an entry that is still in its backlog.
+        // A DDL that cancels the flush must not wait behind that upload.
+        let durable = self.durability_barrier.wait(version_data.last_entry_id);
+        tokio::pin!(durable);
+        match CancellableFuture::new(durable.as_mut(), state.cancel_handle()).await {
+            Ok(result) => result?,
+            Err(_) => return FlushCancelledSnafu.fail(),
         }
 
         let edit = RegionEdit {
@@ -738,12 +752,18 @@ impl RegionFlushTask {
             let access_layer = self.access_layer.clone();
             let cache_manager = self.cache_manager.clone();
             let region_id = version.metadata.region_id;
+            let write_buffer_size = write_opts.write_buffer_size;
             let semaphore = self.flush_semaphore.clone();
             let uncommitted = uncommitted.clone();
             let task = common_runtime::spawn_global(async move {
                 let _permit = semaphore.acquire().await.unwrap();
                 let metrics = access_layer
-                    .put_sst(&encoded.data, region_id, &encoded.sst_info, &cache_manager)
+                    .put_sst(
+                        &encoded.data,
+                        RegionFileId::new(region_id, encoded.sst_info.file_id),
+                        &cache_manager,
+                        write_buffer_size,
+                    )
                     .await?;
                 uncommitted.track(std::slice::from_ref(&encoded.sst_info));
                 FLUSH_FILE_TOTAL.inc();
@@ -830,7 +850,6 @@ impl RegionFlushTask {
             metadata: version.metadata.clone(),
             source,
             cache_manager: self.cache_manager.clone(),
-            storage: version.options.storage.clone(),
             max_sequence: Some(max_sequence),
             sst_write_format: if flat_format {
                 FormatType::Flat
@@ -843,8 +862,6 @@ impl RegionFlushTask {
             inverted_index_config: self.engine_config.inverted_index.clone(),
             fulltext_index_config: self.engine_config.fulltext_index.clone(),
             bloom_filter_index_config: self.engine_config.bloom_filter_index.clone(),
-            #[cfg(feature = "vector_index")]
-            vector_index_config: self.engine_config.vector_index.clone(),
         }
     }
 
@@ -1700,6 +1717,7 @@ mod tests {
             flush_semaphore: Arc::new(Semaphore::new(2)),
             is_staging: false,
             partition_expr: None,
+            durability_barrier: DurabilityBarrier::noop(),
         }
     }
 
@@ -1850,6 +1868,7 @@ mod tests {
             flush_semaphore: Arc::new(Semaphore::new(2)),
             is_staging: false,
             partition_expr: None,
+            durability_barrier: DurabilityBarrier::noop(),
         };
         task.push_sender(OptionOutputTx::from(output_tx));
         scheduler
@@ -2140,6 +2159,7 @@ mod tests {
                 flush_semaphore: Arc::new(Semaphore::new(2)),
                 is_staging: false,
                 partition_expr: None,
+                durability_barrier: DurabilityBarrier::noop(),
             })
             .collect();
         // Schedule first task.
@@ -2444,6 +2464,7 @@ mod tests {
                 flush_semaphore: Arc::new(Semaphore::new(2)),
                 is_staging: false,
                 partition_expr: None,
+                durability_barrier: DurabilityBarrier::noop(),
             })
             .collect();
         // Schedule first task.

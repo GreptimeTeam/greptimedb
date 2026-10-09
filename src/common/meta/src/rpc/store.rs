@@ -199,7 +199,7 @@ impl RangeResponse {
     }
 
     pub fn take_kvs(&mut self) -> Vec<KeyValue> {
-        self.kvs.drain(..).collect()
+        std::mem::take(&mut self.kvs)
     }
 }
 
@@ -451,7 +451,7 @@ impl BatchPutResponse {
     }
 
     pub fn take_prev_kvs(&mut self) -> Vec<KeyValue> {
-        self.prev_kvs.drain(..).collect()
+        std::mem::take(&mut self.prev_kvs)
     }
 }
 
@@ -780,7 +780,7 @@ impl DeleteRangeResponse {
     }
 
     pub fn take_prev_kvs(&mut self) -> Vec<KeyValue> {
-        self.prev_kvs.drain(..).collect()
+        std::mem::take(&mut self.prev_kvs)
     }
 }
 

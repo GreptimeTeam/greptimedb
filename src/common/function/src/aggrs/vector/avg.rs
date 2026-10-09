@@ -62,14 +62,14 @@ impl VectorAvg {
     }
 
     fn accumulator(args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
-        if args.schema.fields().len() != 1 {
+        if args.exprs.len() != 1 {
             return Err(datafusion_common::DataFusionError::Internal(format!(
                 "expect creating `VEC_AVG` with only one input field, actual {}",
-                args.schema.fields().len()
+                args.exprs.len()
             )));
         }
 
-        let t = args.schema.field(0).data_type();
+        let t = args.expr_fields[0].data_type();
         if !matches!(t, DataType::Utf8 | DataType::LargeUtf8 | DataType::Binary) {
             return Err(datafusion_common::DataFusionError::Internal(format!(
                 "unexpected input datatype {t} when creating `VEC_AVG`"

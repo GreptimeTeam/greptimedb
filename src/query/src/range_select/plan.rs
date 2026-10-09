@@ -967,7 +967,9 @@ fn produce_align_time(
     // make modify_map for range_fn[i]
     for (row, hash) in by_columns_hash.iter().enumerate() {
         let ts = ts_column.value(row);
-        let ith_slot = (ts - align_to).div_floor(align);
+        let diff = ts - align_to;
+        // `div_euclid` equals `div_floor` for positive divisors (`align`).
+        let ith_slot = diff.div_euclid(align);
         let mut align_ts = ith_slot * align + align_to;
         while align_ts <= ts && ts < align_ts + range {
             modify_map

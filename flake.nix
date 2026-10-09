@@ -22,7 +22,7 @@
         lib = nixpkgs.lib;
         rustToolchain = fenix.packages.${system}.fromToolchainName {
           name = (lib.importTOML ./rust-toolchain.toml).toolchain.channel;
-          sha256 = "sha256-rboGKQLH4eDuiY01SINOqmXUFUNr9F4awoFZGzib17o=";
+          sha256 = "sha256-p8h3Sl/YRByZfZTAKXdsvF6xEenXKrXSVvpphmZENH4=";
         };
       in
       {
@@ -35,6 +35,7 @@
             protobuf
             gnumake
             mold
+            wild
             (rustToolchain.withComponents [
               "cargo"
               "clippy"
@@ -46,7 +47,7 @@
             ])
             cargo-nextest
             cargo-llvm-cov
-            cargo-udeps
+            cargo-shear
             taplo
             curl
             gnuplot ## for cargo bench

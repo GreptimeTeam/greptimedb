@@ -93,14 +93,16 @@ use sql::statements::create::{
 };
 use sql::statements::statement::Statement;
 use sqlparser::ast::{Expr, Ident, UnaryOperator, Value as ParserValue};
-use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
+use store_api::metric_engine_consts::{
+    LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
+};
 use store_api::mito_engine_options::APPEND_MODE_KEY;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::TableRef;
 use table::dist_table::DistTable;
 use table::metadata::{self, TableId, TableInfo, TableMeta, TableType};
 use table::requests::{
-    AlterKind, AlterTableRequest, AnnotationContext, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT,
+    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, INGEST_ROWS_RATE_LIMIT_KEY,
     TableOptions, validate_and_normalize_annotation_options,
 };
 use table::table_name::TableName;
@@ -341,7 +343,22 @@ impl StatementExecutor {
 
     #[tracing::instrument(skip_all)]
     pub async fn create_table(&self, stmt: CreateTable, ctx: QueryContextRef) -> Result<TableRef> {
-        let (catalog, schema, _table) = table_idents_to_full_name(&stmt.name, &ctx)
+        let mut create_expr = self.prepare_create_table(&stmt, &ctx).await?;
+        self.create_table_inner(
+            &mut create_expr,
+            stmt.partitions,
+            ctx,
+            TriggerReason::Manual,
+        )
+        .await
+    }
+
+    async fn prepare_create_table(
+        &self,
+        stmt: &CreateTable,
+        ctx: &QueryContextRef,
+    ) -> Result<CreateTableExpr> {
+        let (catalog, schema, _table) = table_idents_to_full_name(&stmt.name, ctx)
             .map_err(BoxedError::new)
             .context(error::ExternalSnafu)?;
 
@@ -356,12 +373,11 @@ impl StatementExecutor {
             .context(TableMetadataManagerSnafu)?
             .map(|v| v.into_inner());
 
-        let create_expr = &mut expr_helper::create_to_expr(&stmt, &ctx)?;
-        // Don't inherit schema-level TTL/compaction options into table options:
-        // TTL is applied during compaction, and `compaction.*` is handled separately.
+        let mut create_expr = expr_helper::create_to_expr(stmt, ctx)?;
+        // TTL and compaction options are handled separately; ingestion quota is database-only.
         if let Some(schema_options) = schema_options {
             for (key, value) in schema_options.extra_options.iter() {
-                if key.starts_with("compaction.") {
+                if key == INGEST_ROWS_RATE_LIMIT_KEY || key.starts_with("compaction.") {
                     continue;
                 }
                 create_expr
@@ -371,8 +387,72 @@ impl StatementExecutor {
             }
         }
 
-        self.create_table_inner(create_expr, stmt.partitions, ctx, TriggerReason::Manual)
-            .await
+        Ok(create_expr)
+    }
+
+    /// Prepares every explicit logical CREATE before submitting one batch procedure.
+    pub async fn batch_create_logical_tables(
+        &self,
+        statements: Vec<CreateTable>,
+        ctx: QueryContextRef,
+    ) -> Result<()> {
+        let mut expressions = Vec::with_capacity(statements.len());
+        let mut targets = std::collections::HashSet::new();
+        let mut group = None;
+        for statement in statements {
+            ensure!(
+                statement.engine == METRIC_ENGINE_NAME
+                    && statement.options.get(LOGICAL_TABLE_METADATA_KEY).is_some()
+                    && statement
+                        .options
+                        .value(PHYSICAL_TABLE_METADATA_KEY)
+                        .is_none(),
+                InvalidSqlSnafu {
+                    err_msg: "batch requires explicit Metric logical CREATE TABLE statements"
+                }
+            );
+            let expr = self.prepare_create_table(&statement, &ctx).await?;
+            let key = (
+                expr.catalog_name.clone(),
+                expr.schema_name.clone(),
+                expr.table_options.get(LOGICAL_TABLE_METADATA_KEY).cloned(),
+            );
+            ensure!(
+                group.as_ref().is_none_or(|group| group == &key),
+                InvalidSqlSnafu {
+                    err_msg: "batch must share catalog, schema and literal on_physical_table"
+                }
+            );
+            group = Some(key);
+            ensure!(
+                targets.insert(expr.table_name.clone()),
+                InvalidSqlSnafu {
+                    err_msg: "duplicate target in logical-table batch"
+                }
+            );
+            self.validate_logical_create(&expr, statement.partitions.as_ref(), &ctx)
+                .await?;
+            expressions.push(expr);
+        }
+        self.create_logical_tables(&expressions, ctx, TriggerReason::Manual)
+            .await?;
+        Ok(())
+    }
+
+    async fn validate_logical_create(
+        &self,
+        expr: &CreateTableExpr,
+        partitions: Option<&Partitions>,
+        ctx: &QueryContextRef,
+    ) -> Result<()> {
+        ensure_table_definition_writable(&expr.schema_name, &expr.table_name)?;
+        if let Some(partitions) = partitions
+            && !partitions.exprs.is_empty()
+        {
+            self.validate_logical_table_partition_rule(expr, partitions, ctx)
+                .await?;
+        }
+        Ok(())
     }
 
     #[tracing::instrument(skip_all)]
@@ -473,12 +553,8 @@ impl StatementExecutor {
                 .table_options
                 .contains_key(LOGICAL_TABLE_METADATA_KEY)
         {
-            if let Some(partitions) = partitions.as_ref()
-                && !partitions.exprs.is_empty()
-            {
-                self.validate_logical_table_partition_rule(create_table, partitions, &query_ctx)
-                    .await?;
-            }
+            self.validate_logical_create(create_table, partitions.as_ref(), &query_ctx)
+                .await?;
             // Create logical tables
             self.create_logical_tables(
                 std::slice::from_ref(create_table),
@@ -2658,11 +2734,7 @@ fn validate_and_normalize_annotations(
     partition_key_indices: &[usize],
 ) -> Result<()> {
     use table::requests::AnnotationValidationError as CheckError;
-    let cx = AnnotationContext {
-        schema,
-        partition_key_indices,
-    };
-    validate_and_normalize_annotation_options(options, &cx).map_err(|e| match e {
+    let handle_error = |e: CheckError| match e {
         CheckError::ColumnNotFound { column } => ColumnNotFoundSnafu { msg: column }.build(),
         e @ (CheckError::UnknownKey { .. }
         | CheckError::InvalidValue { .. }
@@ -2677,7 +2749,9 @@ fn validate_and_normalize_annotations(
             reason: e.to_string(),
         }
         .build(),
-    })
+    };
+    validate_and_normalize_annotation_options(options, schema, partition_key_indices)
+        .map_err(handle_error)
 }
 
 fn find_partition_columns(partitions: &Option<Partitions>) -> Result<Vec<String>> {
@@ -2973,7 +3047,7 @@ mod test {
     use datafusion::functions_aggregate::expr_fn::count;
     use datafusion::logical_expr::builder::LogicalTableSource;
     use datafusion::logical_expr::{LogicalPlanBuilder, col};
-    use session::context::{QueryContext, QueryContextBuilder};
+    use session::context::QueryContext;
     use sql::dialect::GreptimeDbDialect;
     use sql::parser::{ParseOptions, ParserContext};
     use sql::statements::statement::Statement;
@@ -3969,55 +4043,5 @@ WITH ('repartition.column.hint' = 'host')",
             err.to_string()
                 .contains("cannot set repartition.column.hint on a table with partition metadata")
         );
-    }
-
-    #[tokio::test]
-    #[ignore = "TODO(ruihang): WIP new partition rule"]
-    async fn test_parse_partitions() {
-        common_telemetry::init_default_ut_logging();
-        let cases = [
-            (
-                r"
-CREATE TABLE rcx ( a INT, b STRING, c TIMESTAMP, TIME INDEX (c) )
-PARTITION ON COLUMNS (b) (
-  b < 'hz',
-  b >= 'hz' AND b < 'sh',
-  b >= 'sh'
-)
-ENGINE=mito",
-                r#"[{"column_list":["b"],"value_list":["{\"Value\":{\"String\":\"hz\"}}"]},{"column_list":["b"],"value_list":["{\"Value\":{\"String\":\"sh\"}}"]},{"column_list":["b"],"value_list":["\"MaxValue\""]}]"#,
-            ),
-            (
-                r"
-CREATE TABLE rcx ( a INT, b STRING, c TIMESTAMP, TIME INDEX (c) )
-PARTITION BY RANGE COLUMNS (b, a) (
-  PARTITION r0 VALUES LESS THAN ('hz', 10),
-  b < 'hz' AND a < 10,
-  b >= 'hz' AND b < 'sh' AND a >= 10 AND a < 20,
-  b >= 'sh' AND a >= 20
-)
-ENGINE=mito",
-                r#"[{"column_list":["b","a"],"value_list":["{\"Value\":{\"String\":\"hz\"}}","{\"Value\":{\"Int32\":10}}"]},{"column_list":["b","a"],"value_list":["{\"Value\":{\"String\":\"sh\"}}","{\"Value\":{\"Int32\":20}}"]},{"column_list":["b","a"],"value_list":["\"MaxValue\"","\"MaxValue\""]}]"#,
-            ),
-        ];
-        let ctx = QueryContextBuilder::default().build().into();
-        for (sql, expected) in cases {
-            let result = ParserContext::create_with_dialect(
-                sql,
-                &GreptimeDbDialect {},
-                ParseOptions::default(),
-            )
-            .unwrap();
-            match &result[0] {
-                Statement::CreateTable(c) => {
-                    let expr = expr_helper::create_to_expr(c, &QueryContext::arc()).unwrap();
-                    let (partitions, _) =
-                        parse_partitions(&expr, c.partitions.clone(), &ctx).unwrap();
-                    let json = serde_json::to_string(&partitions).unwrap();
-                    assert_eq!(json, expected);
-                }
-                _ => unreachable!(),
-            }
-        }
     }
 }

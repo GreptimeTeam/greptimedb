@@ -24,9 +24,7 @@ use common_base::Plugins;
 use common_config::Configurable;
 use common_telemetry::{info, warn};
 use meta_client::MetaClientOptions;
-use servers::batcher::logical_table::{
-    LogicalTablePendingRowsBatcher, pending_rows_batch_sync_enabled,
-};
+use servers::batcher::{BatchingProtocol, pending_rows_batch_sync_enabled};
 use servers::error::Error as ServerError;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::flight::FlightCraftRef;
@@ -36,7 +34,7 @@ use servers::grpc::{GrpcOptions, GrpcServer};
 use servers::http::event::LogValidatorRef;
 use servers::http::result::error_result::ErrorResponse;
 use servers::http::utils::router::RouterConfigurator;
-use servers::http::{BatchingProtocol, HttpOptions, HttpServer, HttpServerBuilder};
+use servers::http::{HttpOptions, HttpServer, HttpServerBuilder};
 use servers::interceptor::LogIngestInterceptorRef;
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
@@ -45,6 +43,7 @@ use servers::postgres::PostgresServer;
 use servers::request_memory_limiter::ServerMemoryLimiter;
 use servers::server::{Server, ServerHandlers};
 use servers::tls::{ReloadableTlsServerConfig, maybe_watch_server_tls_config};
+use session::context::Channel;
 use snafu::ResultExt;
 use tonic::Status;
 
@@ -73,6 +72,7 @@ where
 {
     pub fn new(opts: T, instance: Arc<Instance>, plugins: Plugins) -> Self {
         let feopts = opts.clone().into();
+        instance.init_logical_batcher(&feopts);
         // Create server request memory limiter for all server protocols
         let server_memory_limiter = ServerMemoryLimiter::new(
             feopts.max_in_flight_write_bytes.as_bytes(),
@@ -109,7 +109,8 @@ where
         request_memory_limiter: ServerMemoryLimiter,
     ) -> HttpServerBuilder {
         let mut builder = HttpServerBuilder::new(effective_http_options(opts))
-            .with_batching_protocols(opts.pending_rows_batcher.protocols.clone())
+            .with_batching_protocols(opts.table_batcher_options().protocols.clone())
+            .with_logical_batching_protocols(opts.logical_batcher_options().protocols)
             .with_memory_limiter(request_memory_limiter)
             .with_sql_handler(self.instance.clone());
 
@@ -133,43 +134,26 @@ where
 
         let prom_store = effective_prom_store_options(opts);
         if prom_store.enable {
-            let pending_rows_batcher = if prom_store.with_metric_engine {
-                LogicalTablePendingRowsBatcher::try_new(
-                    self.instance.partition_manager().clone(),
-                    self.instance.node_manager().clone(),
-                    self.instance.catalog_manager().clone(),
-                    self.instance.table_flownode_set_cache().clone(),
-                    prom_store.with_metric_engine,
-                    self.instance.clone(),
-                    prom_store.pending_rows_flush_interval,
-                    prom_store.max_batch_rows,
-                    prom_store.max_concurrent_flushes,
-                    prom_store.worker_channel_capacity,
-                    prom_store.max_inflight_requests,
-                    prom_store.flow_notification_queue_capacity,
-                )
-            } else {
-                None
-            };
+            let pending_rows_batcher = opts
+                .logical_batcher_options()
+                .protocols
+                .contains(&BatchingProtocol::Prom)
+                .then(|| self.instance.logical_batcher().cloned())
+                .flatten();
             builder = builder
                 .with_prom_handler(
                     self.instance.clone(),
                     Some(self.instance.clone()),
                     opts.prom_store.with_metric_engine,
                     opts.prom_store.prom_validation_mode,
-                    opts.prom_store
-                        .experimental_enable_prometheus_native_histogram,
                     pending_rows_batcher,
                 )
                 .with_prometheus_handler(self.instance.clone());
         }
 
         if opts.otlp.enable {
-            builder = builder.with_otlp_handler(
-                self.instance.clone(),
-                opts.prom_store.with_metric_engine,
-                opts.otlp.experimental_enable_exponential_histogram,
-            );
+            builder = builder
+                .with_otlp_handler(self.instance.clone(), opts.prom_store.with_metric_engine);
         }
 
         if opts.jaeger.enable {
@@ -231,11 +215,15 @@ where
         external: bool,
         request_memory_limiter: ServerMemoryLimiter,
     ) -> Result<GrpcServer> {
-        let builder = if let Some(builder) = self.grpc_server_builder.take() {
+        let mut builder = if let Some(builder) = self.grpc_server_builder.take() {
             builder
         } else {
             self.grpc_server_builder(grpc, request_memory_limiter)?
         };
+        // Browsers never talk to the internal server.
+        if external && grpc.enable_cors {
+            builder = builder.with_cors(grpc.cors_allowed_origins.clone());
+        }
 
         let user_provider = if external {
             self.plugins.get::<UserProviderRef>()
@@ -280,10 +268,14 @@ where
             .flight_handler(flight_handler)
             .add_layer(axum::middleware::from_fn_with_state(
                 self.instance.clone(),
-                async move |State(state): State<Arc<Instance>>, request: Request, next: Next| {
+                move |State(state): State<Arc<Instance>>, mut request: Request, next: Next| async move {
                     if state.is_suspended() {
                         let status = Status::from(servers::error::SuspendedSnafu.build());
                         return status.into_http();
+                    }
+                    // The listener owns this marker; clients cannot set request extensions.
+                    if !external {
+                        request.extensions_mut().insert(Channel::Internal);
                     }
                     next.run(request).await
                 },
@@ -376,6 +368,15 @@ where
             }
         }
 
+        let table_batcher = opts.table_batcher_options();
+        let batching_enabled = table_batcher.pending_rows_batching_enabled();
+        let mysql_batching =
+            batching_enabled && table_batcher.protocols.contains(&BatchingProtocol::Mysql);
+        let postgres_batching = batching_enabled
+            && table_batcher
+                .protocols
+                .contains(&BatchingProtocol::Postgres);
+
         if opts.mysql.enable {
             // Init MySQL server
             let opts = &opts.mysql;
@@ -391,13 +392,16 @@ where
             let mysql_server = MysqlServer::create_server(
                 common_runtime::global_runtime(),
                 Arc::new(MysqlSpawnRef::new(instance.clone(), user_provider.clone())),
-                Arc::new(MysqlSpawnConfig::new(
-                    opts.tls.should_force_tls(),
-                    tls_server_config,
-                    opts.keep_alive.as_secs(),
-                    opts.reject_no_database.unwrap_or(false),
-                    opts.prepared_stmt_cache_size,
-                )),
+                Arc::new(
+                    MysqlSpawnConfig::new(
+                        opts.tls.should_force_tls(),
+                        tls_server_config,
+                        opts.keep_alive.as_secs(),
+                        opts.reject_no_database.unwrap_or(false),
+                        opts.prepared_stmt_cache_size,
+                    )
+                    .with_batching_enabled(mysql_batching),
+                ),
                 Some(instance.process_manager().clone()),
             );
             handlers.insert((mysql_server, mysql_addr));
@@ -414,15 +418,18 @@ where
 
             maybe_watch_server_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
 
-            let pg_server = Box::new(PostgresServer::new(
-                instance.clone(),
-                opts.tls.should_force_tls(),
-                tls_server_config,
-                opts.keep_alive.as_secs(),
-                common_runtime::global_runtime(),
-                user_provider.clone(),
-                Some(self.instance.process_manager().clone()),
-            )) as Box<dyn Server>;
+            let pg_server = Box::new(
+                PostgresServer::new(
+                    instance.clone(),
+                    opts.tls.should_force_tls(),
+                    tls_server_config,
+                    opts.keep_alive.as_secs(),
+                    common_runtime::global_runtime(),
+                    user_provider.clone(),
+                    Some(self.instance.process_manager().clone()),
+                )
+                .with_batching_enabled(postgres_batching),
+            ) as Box<dyn Server>;
 
             handlers.insert((pg_server, pg_addr));
         }
@@ -434,38 +441,54 @@ where
 /// Selected shared controls override legacy Prom batching knobs, not protocol behavior.
 fn effective_prom_store_options(opts: &FrontendOptions) -> PromStoreOptions {
     let mut prom_store = opts.prom_store.clone();
-    let shared = &opts.pending_rows_batcher;
-    if shared.protocols.contains(&BatchingProtocol::Prom) && shared.pending_rows_batching_enabled()
-    {
+    let shared = opts.logical_batcher_options();
+    if shared.protocols.contains(&BatchingProtocol::Prom) {
         prom_store.pending_rows_flush_interval = shared.pending_rows_flush_interval;
         prom_store.max_batch_rows = shared.max_batch_rows;
         prom_store.max_concurrent_flushes = shared.max_concurrent_flushes;
         prom_store.worker_channel_capacity = shared.worker_channel_capacity;
         prom_store.max_inflight_requests = shared.max_inflight_requests;
         prom_store.flow_notification_queue_capacity = shared.flow_notification_queue_capacity;
+    } else {
+        prom_store.pending_rows_flush_interval = Duration::ZERO;
     }
     prom_store
 }
 
-fn effective_http_options(opts: &FrontendOptions) -> HttpOptions {
+/// Resolves HTTP options, allowing synchronous batches enough time to flush.
+pub fn effective_http_options(opts: &FrontendOptions) -> HttpOptions {
     effective_http_options_with_sync(opts, pending_rows_batch_sync_enabled())
 }
 
 fn effective_http_options_with_sync(opts: &FrontendOptions, batch_sync: bool) -> HttpOptions {
     let mut http = opts.http.clone();
     let prom_store = effective_prom_store_options(opts);
-    let shared = &opts.pending_rows_batcher;
-    // Ordinary-table batching always waits for its flush, independently of the
-    // dedicated Prom batcher's asynchronous acknowledgement mode.
-    let common_enabled = shared.pending_rows_batching_enabled()
+    let shared = opts.table_batcher_options();
+    let common_enabled = batch_sync
+        && shared.pending_rows_batching_enabled()
         && shared.protocols.iter().any(|protocol| {
-            *protocol != BatchingProtocol::Prom
-                || (prom_store.enable && !prom_store.with_metric_engine)
+            !matches!(
+                protocol,
+                BatchingProtocol::Mysql | BatchingProtocol::Postgres
+            ) && (*protocol != BatchingProtocol::Prom
+                || (prom_store.enable && !prom_store.with_metric_engine))
         });
     let common_interval = common_enabled.then_some(shared.pending_rows_flush_interval);
     let prom_interval = (prom_store.pending_rows_batching_enabled() && batch_sync)
         .then_some(prom_store.pending_rows_flush_interval);
-    let Some(flush_interval) = common_interval.into_iter().chain(prom_interval).max() else {
+    let logical = opts.logical_batcher_options();
+    let otlp_interval = (batch_sync
+        && opts.otlp.enable
+        && opts.prom_store.with_metric_engine
+        && logical.protocols.contains(&BatchingProtocol::Otlp)
+        && logical.pending_rows_batching_enabled())
+    .then_some(logical.pending_rows_flush_interval);
+    let Some(flush_interval) = common_interval
+        .into_iter()
+        .chain(prom_interval)
+        .chain(otlp_interval)
+        .max()
+    else {
         return http;
     };
     let fallback_timeout = flush_interval.saturating_add(Duration::from_secs(1));
@@ -502,13 +525,95 @@ mod tests {
     use async_trait::async_trait;
     use auth::{UserProviderRef, static_user_provider_from_option};
     use client::{Client, Database};
+    use common_grpc::channel_manager::ChannelManager;
     use meta_client::client::MetaClientBuilder;
+    use reqwest::header::{ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_REQUEST_METHOD, ORIGIN};
     use servers::grpc::GRPC_SERVER;
     use servers::grpc::flight::{FlightCraft, FlightCraftRef, TonicStream};
     use tonic::{Code, Request, Response, Status, Streaming};
 
     use crate::instance::builder::FrontendBuilder;
     use crate::server::*;
+
+    #[tokio::test]
+    async fn test_logical_batcher_shared_without_prom_endpoint() {
+        use crate::service_config::BatcherOptions;
+        let mut options = FrontendOptions::default();
+        options.prom_store.enable = false;
+        options.pending_rows_batcher.logical_table = Some(BatcherOptions {
+            protocols: vec![BatchingProtocol::Otlp],
+            pending_rows_flush_interval: Duration::from_millis(5),
+            ..Default::default()
+        });
+        let meta_client = Arc::new(
+            MetaClientBuilder::new(0, Role::Frontend)
+                .enable_procedure()
+                .build(),
+        );
+        let instance = Arc::new(
+            FrontendBuilder::new_test(&options, meta_client)
+                .try_build()
+                .await
+                .unwrap(),
+        );
+        let mut disabled_options = options.clone();
+        disabled_options.otlp.enable = false;
+        instance.init_logical_batcher(&disabled_options);
+        assert!(instance.logical_batcher().is_none());
+
+        let services = Services::new(options.clone(), instance.clone(), Plugins::default());
+        let batcher = instance.logical_batcher().unwrap().clone();
+        instance.init_logical_batcher(&options);
+        assert!(Arc::ptr_eq(&batcher, instance.logical_batcher().unwrap()));
+        let weak = Arc::downgrade(&instance);
+        drop(services);
+        drop(instance);
+        assert!(
+            weak.upgrade().is_none(),
+            "batcher must not retain its schema owner"
+        );
+    }
+
+    #[test]
+    fn test_logical_batcher_http_timeout_and_prom_disable() {
+        use crate::service_config::pending_rows_batcher::BatcherOptions;
+        let mut opts = FrontendOptions::default();
+        opts.http.timeout = Duration::from_secs(1);
+        opts.prom_store.pending_rows_flush_interval = Duration::from_secs(2);
+        opts.pending_rows_batcher.logical_table = Some(BatcherOptions {
+            protocols: vec![BatchingProtocol::Otlp],
+            pending_rows_flush_interval: Duration::from_secs(5),
+            ..Default::default()
+        });
+        assert!(!effective_prom_store_options(&opts).pending_rows_batching_enabled());
+        // Both logical protocols follow the global acknowledgement policy,
+        // independently of enabling the Prom HTTP endpoint.
+        opts.prom_store.enable = false;
+        assert_eq!(
+            effective_http_options_with_sync(&opts, true).timeout,
+            Duration::from_secs(6)
+        );
+        assert_eq!(
+            effective_http_options_with_sync(&opts, false).timeout,
+            opts.http.timeout
+        );
+        opts.prom_store.with_metric_engine = false;
+        assert_eq!(
+            effective_http_options_with_sync(&opts, false).timeout,
+            opts.http.timeout
+        );
+        opts.prom_store.with_metric_engine = true;
+        opts.pending_rows_batcher
+            .logical_table
+            .as_mut()
+            .unwrap()
+            .protocols
+            .clear();
+        assert_eq!(
+            effective_http_options_with_sync(&opts, true).timeout,
+            opts.http.timeout
+        );
+    }
 
     #[test]
     fn test_effective_prom_batching_controls() {
@@ -525,9 +630,7 @@ mod tests {
             opts.prom_store.pending_rows_flush_interval = Duration::from_secs(2);
             opts.prom_store.with_metric_engine = metric_engine;
             opts.prom_store.enable = prom_enabled;
-            opts.prom_store
-                .experimental_enable_prometheus_native_histogram = true;
-            let shared = &mut opts.pending_rows_batcher;
+            let shared = &mut opts.pending_rows_batcher.table;
             shared.protocols = vec![if selected {
                 BatchingProtocol::Prom
             } else {
@@ -564,7 +667,7 @@ mod tests {
 
     #[test]
     fn test_http_timeout_covers_synchronous_batchers() {
-        // Shared ordinary writes remain synchronous even when Prom is asynchronous.
+        // Only synchronous batchers extend the HTTP timeout.
         for (
             protocols,
             metric_engine,
@@ -574,10 +677,14 @@ mod tests {
             timeout_secs,
             expected_secs,
         ) in [
-            (vec![BatchingProtocol::Prom], false, false, 5, 2, 1, 6),
+            (vec![BatchingProtocol::Prom], false, false, 5, 2, 1, 1),
+            (vec![BatchingProtocol::Mysql], false, false, 5, 0, 1, 1),
+            (vec![BatchingProtocol::Postgres], false, false, 5, 0, 1, 1),
+            (vec![BatchingProtocol::Mysql], false, true, 5, 0, 1, 1),
+            (vec![BatchingProtocol::Postgres], false, true, 5, 0, 1, 1),
             (vec![BatchingProtocol::Prom], true, false, 5, 2, 1, 1),
             (vec![BatchingProtocol::Prom], true, true, 5, 2, 1, 6),
-            (vec![BatchingProtocol::Influxdb], true, false, 5, 2, 1, 6),
+            (vec![BatchingProtocol::Influxdb], true, false, 5, 2, 1, 1),
             (vec![BatchingProtocol::Influxdb], true, true, 5, 8, 1, 9),
             (vec![BatchingProtocol::Influxdb], true, true, 8, 5, 1, 9),
             (vec![BatchingProtocol::Influxdb], true, false, 5, 2, 0, 0),
@@ -590,8 +697,8 @@ mod tests {
             opts.http.timeout = Duration::from_secs(timeout_secs);
             opts.prom_store.with_metric_engine = metric_engine;
             opts.prom_store.pending_rows_flush_interval = Duration::from_secs(legacy_secs);
-            opts.pending_rows_batcher.protocols = protocols;
-            opts.pending_rows_batcher.pending_rows_flush_interval =
+            opts.pending_rows_batcher.table.protocols = protocols;
+            opts.pending_rows_batcher.table.pending_rows_flush_interval =
                 Duration::from_secs(shared_secs);
             assert_eq!(
                 effective_http_options_with_sync(&opts, batch_sync).timeout,
@@ -612,6 +719,10 @@ mod tests {
             &self,
             request: Request<Ticket>,
         ) -> std::result::Result<Response<TonicStream<FlightData>>, Status> {
+            assert_eq!(
+                request.extensions().get::<Channel>(),
+                Some(&Channel::Internal)
+            );
             self.do_get_calls.fetch_add(1, Ordering::SeqCst);
             self.inner.do_get(request).await
         }
@@ -620,6 +731,10 @@ mod tests {
             &self,
             request: Request<Streaming<FlightData>>,
         ) -> std::result::Result<Response<TonicStream<PutResult>>, Status> {
+            assert_eq!(
+                request.extensions().get::<Channel>(),
+                Some(&Channel::Internal)
+            );
             self.do_put_calls.fetch_add(1, Ordering::SeqCst);
             self.inner.do_put(request).await
         }
@@ -684,24 +799,30 @@ mod tests {
     fn test_invalid_shared_batching_preserves_prom_store_options() {
         type KnobMutator = fn(&mut FrontendOptions);
         let cases: [KnobMutator; 5] = [
-            |opts| opts.pending_rows_batcher.max_concurrent_flushes = usize::MAX,
-            |opts| opts.pending_rows_batcher.worker_channel_capacity = usize::MAX,
-            |opts| opts.pending_rows_batcher.max_inflight_requests = usize::MAX,
+            |opts| opts.pending_rows_batcher.table.max_concurrent_flushes = usize::MAX,
+            |opts| opts.pending_rows_batcher.table.worker_channel_capacity = usize::MAX,
+            |opts| opts.pending_rows_batcher.table.max_inflight_requests = usize::MAX,
             |opts| {
-                opts.pending_rows_batcher.flow_notification_queue_capacity =
-                    NonZeroUsize::new(usize::MAX).unwrap()
+                opts.pending_rows_batcher
+                    .table
+                    .flow_notification_queue_capacity = NonZeroUsize::new(usize::MAX).unwrap()
             },
-            |opts| opts.pending_rows_batcher.pending_rows_flush_interval = Duration::MAX,
+            |opts| opts.pending_rows_batcher.table.pending_rows_flush_interval = Duration::MAX,
         ];
         for invalidate in cases {
             let mut opts = FrontendOptions::default();
             opts.http.timeout = Duration::from_secs(1);
             opts.prom_store.pending_rows_flush_interval = Duration::from_secs(5);
-            opts.pending_rows_batcher.protocols =
+            opts.pending_rows_batcher.table.protocols =
                 vec![BatchingProtocol::Prom, BatchingProtocol::Influxdb];
-            opts.pending_rows_batcher.pending_rows_flush_interval = Duration::from_secs(10);
+            opts.pending_rows_batcher.table.pending_rows_flush_interval = Duration::from_secs(10);
             invalidate(&mut opts);
-            assert!(!opts.pending_rows_batcher.pending_rows_batching_enabled());
+            assert!(
+                !opts
+                    .pending_rows_batcher
+                    .table
+                    .pending_rows_batching_enabled()
+            );
             assert_eq!(opts.prom_store, effective_prom_store_options(&opts));
             assert_eq!(
                 Duration::from_secs(6),
@@ -829,12 +950,20 @@ mod tests {
         let public_database = Database::new(
             "greptime",
             "public",
-            Client::with_urls([public_addr.to_string()]),
+            Client::with_query_and_control_managers(
+                ChannelManager::new(),
+                ChannelManager::new(),
+                [public_addr.to_string()],
+            ),
         );
         let internal_database = Database::new(
             "greptime",
             "public",
-            Client::with_urls([internal_addr.to_string()]),
+            Client::with_query_and_control_managers(
+                ChannelManager::new(),
+                ChannelManager::new(),
+                [internal_addr.to_string()],
+            ),
         );
 
         let internal_result = internal_database.sql("SELECT 1").await;
@@ -910,5 +1039,69 @@ mod tests {
 
         // Assert
         assert!(health_check.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_internal_grpc_server_never_serves_cors() {
+        let options = FrontendOptions {
+            http: HttpOptions {
+                addr: "127.0.0.1:0".to_string(),
+                ..Default::default()
+            },
+            grpc: GrpcOptions {
+                enable_cors: true,
+                ..GrpcOptions::default().with_bind_addr("127.0.0.1:0")
+            },
+            internal_grpc: Some(GrpcOptions {
+                enable_cors: true,
+                ..GrpcOptions::default().with_bind_addr("127.0.0.1:0")
+            }),
+            mysql: crate::service_config::MysqlOptions {
+                enable: false,
+                ..Default::default()
+            },
+            postgres: crate::service_config::PostgresOptions {
+                enable: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let meta_client = Arc::new(
+            MetaClientBuilder::new(0, Role::Frontend)
+                .enable_procedure()
+                .build(),
+        );
+        let instance = Arc::new(
+            FrontendBuilder::new_test(&options, meta_client)
+                .try_build()
+                .await
+                .unwrap(),
+        );
+        let mut services = Services::new(options, instance, Default::default())
+            .build()
+            .unwrap();
+
+        services.start_all().await.unwrap();
+        let public_addr = services.addr(GRPC_SERVER).unwrap();
+        let internal_addr = services.addr("INTERNAL_GRPC_SERVER").unwrap();
+        let public = send_cors_preflight(public_addr).await;
+        let internal = send_cors_preflight(internal_addr).await;
+        services.shutdown_all().await.unwrap();
+
+        assert!(public.headers().contains_key(ACCESS_CONTROL_ALLOW_ORIGIN));
+        assert!(!internal.headers().contains_key(ACCESS_CONTROL_ALLOW_ORIGIN));
+    }
+
+    async fn send_cors_preflight(addr: std::net::SocketAddr) -> reqwest::Response {
+        reqwest::Client::new()
+            .request(
+                reqwest::Method::OPTIONS,
+                format!("http://{addr}/greptime.v1.HealthCheck/Check"),
+            )
+            .header(ORIGIN, "https://example.com")
+            .header(ACCESS_CONTROL_REQUEST_METHOD, "POST")
+            .send()
+            .await
+            .unwrap()
     }
 }

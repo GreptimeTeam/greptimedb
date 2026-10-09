@@ -39,3 +39,8 @@ common-base.workspace = true
 futures-util.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+
+[package.metadata.cargo-shear]
+# `sqlparser` is required by `sqlparser_derive`: the generated code references
+# `::sqlparser` paths, so it must stay a direct dependency.
+ignored = ["sqlparser"]

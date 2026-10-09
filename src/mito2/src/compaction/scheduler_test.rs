@@ -751,7 +751,7 @@ async fn test_planning_panic_notifies_and_returns_region_to_idle() {
 
     let finished = recv_compaction_pick_finished(&mut rx).await;
     let CompactionPlanningResult::Error(err) = &finished.result else {
-        panic!("expected planning error, got {:?}", &finished.result);
+        panic!("expected planning error, got {:?}", finished.result);
     };
     assert!(err.to_string().contains("planning boom"));
     let pending_ddls = scheduler

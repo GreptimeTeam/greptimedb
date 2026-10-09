@@ -74,6 +74,215 @@ use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_wit
 use crate::test_util::{CreateRequestBuilder, TestEnv, reopen_region};
 
 #[tokio::test]
+async fn test_nullable_label_filters_in_memtables_and_ssts() {
+    use datafusion_expr::{BinaryExpr as LogicalBinaryExpr, Cast, Expr};
+
+    for (flat, memtable) in [(false, "time_series"), (true, "bulk")] {
+        let mut env = TestEnv::new().await;
+        let engine = env
+            .create_engine(MitoConfig {
+                default_flat_format: flat,
+                ..Default::default()
+            })
+            .await;
+        let region_id = RegionId::new(1, 1);
+        let request = CreateRequestBuilder::new()
+            .insert_option("memtable.type", memtable)
+            .build();
+        let schema = test_util::rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        let rows = [None, Some(""), Some("tmpfs"), Some("ext4")]
+            .into_iter()
+            .enumerate()
+            .map(|(i, label)| {
+                let mut row = row(vec![
+                    ValueData::StringValue(String::new()),
+                    ValueData::F64Value(i as f64),
+                    ValueData::TimestampMillisecondValue(i as i64),
+                ]);
+                row.values[0].value_data = label.map(|v| ValueData::StringValue(v.into()));
+                row
+            })
+            .collect();
+        test_util::put_rows(&engine, region_id, Rows { schema, rows }).await;
+        for flushed in [false, true] {
+            if flushed {
+                test_util::flush_region(&engine, region_id, None).await;
+            }
+            let mut cases = Vec::new();
+            for (op, literal, include_null, expected) in [
+                (Operator::NotEq, "tmpfs", true, vec![0, 1, 3]),
+                (
+                    Operator::RegexNotMatch,
+                    "^(?:tmpfs|vfat)$",
+                    true,
+                    vec![0, 1, 3],
+                ),
+                (Operator::Eq, "", true, vec![0, 1]),
+                (Operator::NotEq, "", false, vec![2, 3]),
+                (Operator::RegexMatch, "^(?:ext4)$", false, vec![3]),
+            ] {
+                for cast in [false, true] {
+                    let column = if cast {
+                        Expr::Cast(Cast::new(Box::new(col("tag_0")), DataType::Utf8))
+                    } else {
+                        col("tag_0")
+                    };
+                    let comparison = Expr::BinaryExpr(LogicalBinaryExpr::new(
+                        Box::new(column),
+                        op,
+                        Box::new(lit(literal)),
+                    ));
+                    let filter = if include_null {
+                        col("tag_0").is_null().or(comparison)
+                    } else {
+                        comparison
+                    };
+                    cases.push((filter, expected.clone()));
+                }
+            }
+            let column = col("tag_0");
+            cases.extend([
+                (column.clone().is_null(), vec![0]),
+                (column.clone().is_not_null(), vec![1, 2, 3]),
+                (
+                    column
+                        .clone()
+                        .is_null()
+                        .or(column.clone().not_eq(lit("tmpfs")))
+                        .and(column.clone().is_null().or(column.clone().not_eq(lit("")))),
+                    vec![0, 3],
+                ),
+                (
+                    column.clone().eq(lit("ext4")).or(column.eq(lit("tmpfs"))),
+                    vec![2, 3],
+                ),
+            ]);
+            for (filter, expected) in cases {
+                let stream = engine
+                    .scan_to_stream(
+                        region_id,
+                        ScanRequest {
+                            filters: vec![filter.clone()],
+                            distribution: flat.then_some(TimeSeriesDistribution::PerSeries),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let batches = RecordBatches::try_collect(stream).await.unwrap();
+                let mut actual = Vec::new();
+                for batch in batches.iter() {
+                    let ts = batch
+                        .column_by_name("ts")
+                        .unwrap()
+                        .as_primitive::<TimestampMillisecondType>();
+                    actual.extend(ts.values().iter().copied());
+                }
+                actual.sort_unstable();
+                assert_eq!(actual, expected, "flat={flat}, flushed={flushed}, {filter}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_compound_time_filters_before_last_row() {
+    for (flat, memtable) in [
+        (false, "time_series"),
+        (true, "time_series"),
+        (true, "bulk"),
+    ] {
+        let mut env = TestEnv::new().await;
+        let engine = env
+            .create_engine(MitoConfig {
+                default_flat_format: flat,
+                ..Default::default()
+            })
+            .await;
+        let region_id = RegionId::new(1, 1);
+        let request = CreateRequestBuilder::new()
+            .insert_option("memtable.type", memtable)
+            .build();
+        let schema = test_util::rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        let rows = (0..5)
+            .map(|i| {
+                row(vec![
+                    ValueData::StringValue("series".into()),
+                    ValueData::F64Value(i as f64),
+                    ValueData::TimestampMillisecondValue(i),
+                ])
+            })
+            .collect();
+        test_util::put_rows(&engine, region_id, Rows { schema, rows }).await;
+        let ts = |value| lit(ScalarValue::TimestampMillisecond(Some(value), None));
+        let cases = [
+            (col("ts").eq(ts(1)).or(col("ts").eq(ts(3))), vec![1, 3]),
+            (col("ts").gt_eq(ts(1)).and(col("ts").lt(ts(3))), vec![1, 2]),
+            (col("ts").is_null().or(col("ts").lt(ts(2))), vec![0, 1]),
+        ];
+        for flushed in [false, true] {
+            if flushed {
+                test_util::flush_region(&engine, region_id, None).await;
+            }
+            for (filter, expected) in &cases {
+                for selector in [
+                    None,
+                    Some(TimeSeriesRowSelector::LastRow { after_merge: false }),
+                    Some(TimeSeriesRowSelector::LastRow { after_merge: true }),
+                ] {
+                    let stream = engine
+                        .scan_to_stream(
+                            region_id,
+                            ScanRequest {
+                                filters: vec![
+                                    col("tag_0").is_null().or(col("tag_0").eq(lit("series"))),
+                                    filter.clone(),
+                                ],
+                                distribution: flat.then_some(TimeSeriesDistribution::PerSeries),
+                                series_row_selector: selector,
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    let batches = RecordBatches::try_collect(stream).await.unwrap();
+                    let mut actual = Vec::new();
+                    for batch in batches.iter() {
+                        actual.extend(
+                            batch
+                                .column_by_name("ts")
+                                .unwrap()
+                                .as_primitive::<TimestampMillisecondType>()
+                                .values()
+                                .iter()
+                                .copied(),
+                        );
+                    }
+                    actual.sort_unstable();
+                    let expected = if selector.is_some() {
+                        expected.last().copied().into_iter().collect::<Vec<_>>()
+                    } else {
+                        expected.clone()
+                    };
+                    assert_eq!(
+                        actual, expected,
+                        "flat={flat}, memtable={memtable}, flushed={flushed}, selector={selector:?}, {filter}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResult<()> {
     // Create a region with a JSON2 field whose physical Parquet representation is a nested struct.
     // The scan below will only ask for field_0.a.x.
@@ -1340,6 +1549,7 @@ async fn check_two_phase_series_scan(
         let store = region.series_index_store.clone().unwrap();
         let sequence = region.flushed_sequence();
         let entry = SeriesIndexEntry {
+            file_size: 0,
             index_uuid: FileId::random(),
             bucket_start: Timestamp::new_millisecond(0),
             bucket_end: Timestamp::new_millisecond(2001),
@@ -1412,7 +1622,13 @@ async fn check_two_phase_series_scan(
             .unwrap();
             writer.write(0, &batch).await.unwrap();
             writer.finish().await.unwrap();
-            index_version.range_indexes.insert(file_id);
+            index_version.range_indexes.insert(
+                file_id,
+                crate::series_index::RangeIndexEntry {
+                    file_id,
+                    file_size: 0,
+                },
+            );
         }
         region
             .series_index_version_control
@@ -1607,7 +1823,7 @@ async fn check_two_phase_series_scan(
         // succeed even when that file is unavailable.
         let region = engine.find_region(region_id).unwrap();
         let version = region.series_index_version_control.current();
-        let file_id = *version.range_indexes.iter().next().unwrap();
+        let file_id = *version.range_indexes.keys().next().unwrap();
         region
             .series_index_store
             .as_ref()

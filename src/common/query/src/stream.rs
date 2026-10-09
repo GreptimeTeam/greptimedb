@@ -95,7 +95,7 @@ impl DisplayAs for StreamScanAdapter {
             f,
             "StreamScanAdapter: [<SendableRecordBatchStream>], schema: ["
         )?;
-        write!(f, "{:?}", &self.arrow_schema)?;
+        write!(f, "{:?}", self.arrow_schema)?;
         write!(f, "]")
     }
 }

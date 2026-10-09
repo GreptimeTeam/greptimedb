@@ -370,12 +370,7 @@ async fn query_trace_table(
         })?;
 
     let table_info = table.table_info();
-    let data_model = table_info
-        .meta
-        .options
-        .extra_options
-        .get(table::requests::TABLE_DATA_MODEL)
-        .map(String::as_str);
+    let data_model = table_info.meta.options.data_model();
 
     // collect to set
     let col_names = table_info
