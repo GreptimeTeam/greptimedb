@@ -297,6 +297,7 @@ mod tests {
 
         let plan_decoder = engine
             .engine_context(QueryContext::arc())
+            .unwrap()
             .new_plan_decoder()
             .unwrap();
         let catalog_list = Arc::new(DummyCatalogList::with_table_provider(table_provider));
@@ -389,6 +390,7 @@ mod tests {
         let table_provider = Arc::new(MemTable::try_new(schema, vec![vec![]]).unwrap());
         let plan_decoder = engine
             .engine_context(QueryContext::arc())
+            .unwrap()
             .new_plan_decoder()
             .unwrap();
 

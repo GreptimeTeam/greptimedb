@@ -26,7 +26,6 @@ use common_error::ext::BoxedError;
 use common_query::promql_annotations::promql_annotation_collector;
 use common_telemetry::tracing;
 use datafusion::common::{DFSchema, plan_err};
-use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::SessionState;
 use datafusion::sql::planner::PlannerContext;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
@@ -87,31 +86,6 @@ impl DfLogicalPlanner {
         Self {
             engine_state,
             session_state,
-        }
-    }
-
-    /// Derive a [`SessionState`] whose [`ExecutionProps`] includes
-    /// `query_execution_start_time` if a scheduled time extension is present
-    /// in the query context.
-    fn derive_session_state_with_scheduled_time(
-        &self,
-        query_ctx: &QueryContextRef,
-    ) -> Result<SessionState> {
-        let extensions = query_ctx.extensions();
-        match crate::options::parse_scheduled_time_datetime(&extensions)? {
-            Some(dt) => {
-                let execution_props = self
-                    .session_state
-                    .execution_props()
-                    .clone()
-                    .with_query_execution_start_time(dt);
-                Ok(
-                    SessionStateBuilder::new_from_existing(self.session_state.clone())
-                        .with_execution_props(execution_props)
-                        .build(),
-                )
-            }
-            None => Ok(self.session_state.clone()),
         }
     }
 
@@ -218,7 +192,9 @@ impl DfLogicalPlanner {
             .fail()?;
         }
 
-        let scheduled_state = self.derive_session_state_with_scheduled_time(&query_ctx)?;
+        let engine_context = self.engine_state.query_engine_context(query_ctx)?;
+        let query_ctx = engine_context.query_ctx();
+        let scheduled_state = engine_context.state().clone();
         let table_provider = DfTableSourceProvider::new(
             self.engine_state.catalog_manager().clone(),
             self.engine_state.disallow_cross_catalog_query(),
@@ -241,7 +217,7 @@ impl DfLogicalPlanner {
         )
         .await?;
 
-        let config_options = self.session_state.config().options();
+        let config_options = scheduled_state.config().options();
         let parser_options = &config_options.sql_parser;
         let parser_options = ParserOptions {
             map_string_types_to_utf8view: false,
@@ -289,16 +265,17 @@ impl DfLogicalPlanner {
         normalize_ident: bool,
         query_ctx: QueryContextRef,
     ) -> Result<DfExpr> {
-        let scheduled_state = self.derive_session_state_with_scheduled_time(&query_ctx)?;
+        let engine_context = self.engine_state.query_engine_context(query_ctx)?;
+        let query_ctx = engine_context.query_ctx();
         let context_provider = DfContextProviderAdapter::try_new(
             self.engine_state.clone(),
-            scheduled_state,
+            engine_context.state().clone(),
             None,
             query_ctx,
         )
         .await?;
 
-        let config_options = self.session_state.config().options();
+        let config_options = engine_context.state().config().options();
         let parser_options = &config_options.sql_parser;
         let parser_options: ParserOptions = ParserOptions {
             map_string_types_to_utf8view: false,
@@ -313,7 +290,9 @@ impl DfLogicalPlanner {
 
     #[tracing::instrument(skip_all)]
     async fn plan_pql(&self, stmt: &EvalStmt, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
-        let mut scheduled_state = self.derive_session_state_with_scheduled_time(&query_ctx)?;
+        let engine_context = self.engine_state.query_engine_context(query_ctx)?;
+        let query_ctx = engine_context.query_ctx();
+        let mut scheduled_state = engine_context.state().clone();
         let promql_annotations = query_ctx.remote_query_id().map(promql_annotation_collector);
         if let Some(collector) = &promql_annotations {
             scheduled_state
@@ -704,22 +683,19 @@ impl LogicalPlanner for DfLogicalPlanner {
         query: LogQuery,
         query_ctx: QueryContextRef,
     ) -> Result<LogicalPlan> {
-        let plan_decoder = Arc::new(DefaultPlanDecoder::new(
-            self.session_state.clone(),
-            &query_ctx,
-        )?);
+        let engine_context = self.engine_state.query_engine_context(query_ctx)?;
+        let query_ctx = engine_context.query_ctx();
+        let state = engine_context.state().clone();
+        let plan_decoder = Arc::new(DefaultPlanDecoder::new(state.clone(), &query_ctx)?);
         let table_provider = DfTableSourceProvider::new(
             self.engine_state.catalog_manager().clone(),
             self.engine_state.disallow_cross_catalog_query(),
             query_ctx,
             plan_decoder,
-            self.session_state
-                .config_options()
-                .sql_parser
-                .enable_ident_normalization,
+            state.config_options().sql_parser.enable_ident_normalization,
         );
 
-        let mut planner = LogQueryPlanner::new(table_provider, self.session_state.clone());
+        let mut planner = LogQueryPlanner::new(table_provider, state);
         planner
             .query_to_plan(query)
             .await
@@ -960,7 +936,7 @@ mod tests {
             .plan(&stmt, query_ctx.clone())
             .await
             .unwrap();
-        let context = engine.engine_context(query_ctx.clone());
+        let context = engine.engine_context(query_ctx.clone()).unwrap();
         let state = context.state();
         state
             .analyzer()

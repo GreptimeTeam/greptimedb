@@ -90,7 +90,10 @@ impl QueryEngine for MockQueryEngine {
         unimplemented!()
     }
 
-    fn engine_context(&self, _query_ctx: QueryContextRef) -> QueryEngineContext {
+    fn engine_context(
+        &self,
+        _query_ctx: QueryContextRef,
+    ) -> query::error::Result<QueryEngineContext> {
         unimplemented!()
     }
     fn engine_state(&self) -> &QueryEngineState {

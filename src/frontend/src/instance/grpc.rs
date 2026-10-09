@@ -127,9 +127,12 @@ impl GrpcQueryHandler for Instance {
                             let timer = GRPC_HANDLE_PLAN_ELAPSED.start_timer();
 
                             // use dummy catalog to provide table
-                            let plan_decoder = self
+                            let engine_ctx = self
                                 .query_engine()
                                 .engine_context(ctx.clone())
+                                .context(PlanStatementSnafu)?;
+                            let ctx = engine_ctx.query_ctx();
+                            let plan_decoder = engine_ctx
                                 .new_plan_decoder()
                                 .context(PlanStatementSnafu)?;
 
@@ -475,11 +478,12 @@ impl Instance {
         })?;
 
         // use dummy catalog to provide table
-        let plan_decoder = self
+        let engine_ctx = self
             .query_engine()
             .engine_context(ctx.clone())
-            .new_plan_decoder()
             .context(PlanStatementSnafu)?;
+        let ctx = engine_ctx.query_ctx();
+        let plan_decoder = engine_ctx.new_plan_decoder().context(PlanStatementSnafu)?;
 
         let dummy_catalog_list = Arc::new(
             catalog::table_source::dummy_catalog::DummyCatalogList::new_with_query_ctx(
@@ -522,7 +526,11 @@ impl Instance {
         let insert_into = add_insert_to_logical_plan(table_name, table_source, logical_plan)
             .context(SubstraitDecodeLogicalPlanSnafu)?;
 
-        let engine_ctx = self.query_engine().engine_context(ctx.clone());
+        let engine_ctx = self
+            .query_engine()
+            .engine_context(ctx.clone())
+            .context(PlanStatementSnafu)?;
+        let ctx = engine_ctx.query_ctx();
         let state = engine_ctx.state();
         // Analyze the plan
         let analyzed_plan = state

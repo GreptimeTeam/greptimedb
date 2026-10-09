@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
 use common_function::aggrs::aggr_wrapper::fix_order::FixStateUdafOrderingAnalyzer;
+use common_function::function::FunctionContext;
 use common_function::function_factory::ScalarFunctionFactory;
 use common_function::function_registry::FUNCTION_REGISTRY;
 use common_function::handlers::{
@@ -59,6 +60,7 @@ use crate::dist_plan::{
     MergeSortExtensionPlanner, RemoteDynFilterReceiverExtensionPlanner,
     RemoteDynFilterRegistryLease,
 };
+use crate::error::InvalidQueryContextExtensionSnafu;
 use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_BYTES};
 use crate::optimizer::ExtensionAnalyzerRule;
 use crate::optimizer::const_normalization::ConstNormalizationRule;
@@ -78,7 +80,9 @@ use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::transcribe_atat::TranscribeAtatRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::optimizer::windowed_sort::WindowedSortPhysicalRule;
-use crate::options::{QueryMemoryPoolPolicy, QueryOptions as QueryOptionsNew};
+use crate::options::{
+    QueryMemoryPoolPolicy, QueryOptions as QueryOptionsNew, ScheduledTimeExtension,
+};
 use crate::query_engine::DefaultSerializer;
 use crate::query_engine::options::QueryOptions;
 use crate::query_engine::runtime::{
@@ -310,7 +314,84 @@ impl QueryEngineState {
         rules.retain(|rule| rule.name() != name);
     }
 
-    /// Optimize the logical plan by the extension analyzer rules.
+    /// Builds a per-query DataFusion context with validated option overrides.
+    pub fn query_engine_context(
+        self: &Arc<Self>,
+        query_ctx: QueryContextRef,
+    ) -> crate::error::Result<QueryEngineContext> {
+        let query_ctx = Arc::new(query_ctx.query_option_snapshot().map_err(|error| {
+            InvalidQueryContextExtensionSnafu {
+                reason: error.to_string(),
+            }
+            .build()
+        })?);
+        let mut state = self.session_state();
+        state.config_mut().set_extension(query_ctx.clone());
+        state.config_mut().set_extension(self.clone());
+        let options = query_ctx.extensions();
+        for (key, value) in &options {
+            if key.starts_with("datafusion.") {
+                state
+                    .config_mut()
+                    .options_mut()
+                    .set(key, value)
+                    .map_err(|error| {
+                        InvalidQueryContextExtensionSnafu {
+                            reason: error.to_string(),
+                        }
+                        .build()
+                    })?;
+            }
+        }
+        if let Some(partitions) = options.get("query.parallelism") {
+            let partitions = partitions.parse::<usize>().map_err(|error| {
+                InvalidQueryContextExtensionSnafu {
+                    reason: error.to_string(),
+                }
+                .build()
+            })?;
+            *state.config_mut() = state.config().clone().with_target_partitions(partitions);
+        }
+        if let Some(fallback) = options.get("query.allow_query_fallback") {
+            state
+                .config_mut()
+                .options_mut()
+                .extensions
+                .insert(DistPlannerOptions {
+                    allow_query_fallback: fallback == "true",
+                });
+        }
+        state.config_mut().options_mut().execution.time_zone =
+            Some(query_ctx.timezone().to_string());
+        state
+            .config_mut()
+            .options_mut()
+            .extensions
+            .insert(FunctionContext {
+                query_ctx: query_ctx.clone(),
+                state: self.function_state(),
+            });
+        state
+            .config_mut()
+            .options_mut()
+            .extensions
+            .insert(ScheduledTimeExtension {
+                scheduled_time: crate::options::scheduled_time_from_ctx(&query_ctx),
+            });
+        let config_options = state.config_options().clone();
+        let _ = state
+            .execution_props_mut()
+            .config_options
+            .insert(config_options);
+        if let Some(scheduled_rt) =
+            crate::options::parse_scheduled_time_datetime(&query_ctx.extensions())?
+        {
+            state.execution_props_mut().query_execution_start_time = Some(scheduled_rt);
+        }
+        Ok(QueryEngineContext::new(state, query_ctx))
+    }
+
+    /// Optimize the logical plan using registered extension analyzer rules.
     pub fn optimize_by_extension_rules(
         &self,
         plan: DfLogicalPlan,
@@ -319,7 +400,7 @@ impl QueryEngineState {
         self.extension_rules
             .iter()
             .try_fold(plan, |acc_plan, rule| {
-                rule.analyze(acc_plan, context, self.session_state().config_options())
+                rule.analyze(acc_plan, context, context.state().config_options())
             })
     }
 
@@ -695,10 +776,11 @@ mod tests {
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryLimit as DfMemoryLimit};
     use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
     use datafusion_common::config::SpillCompression;
-    use session::context::QueryContext;
+    use session::context::{QueryContext, QueryContextBuilder};
 
     use super::*;
     use crate::options::{QueryOptions, QuerySpillCompression, QuerySpillMode};
+    use crate::planner::LogicalPlanner;
     use crate::query_engine::runtime::{
         DefaultQueryRuntimeProvider, QueryRuntimeContext, QueryRuntimeProvider,
         QueryRuntimeProviderRef,
@@ -720,6 +802,53 @@ mod tests {
             plugins,
             options,
         )
+    }
+
+    struct RecordingAnalyzer(Arc<std::sync::Mutex<Option<(bool, usize)>>>);
+
+    impl ExtensionAnalyzerRule for RecordingAnalyzer {
+        fn analyze(
+            &self,
+            plan: DfLogicalPlan,
+            _ctx: &QueryEngineContext,
+            config: &datafusion_common::config::ConfigOptions,
+        ) -> DfResult<DfLogicalPlan> {
+            *self.0.lock().unwrap() = Some((
+                config.optimizer.prefer_hash_join,
+                config.execution.target_partitions,
+            ));
+            Ok(plan)
+        }
+    }
+
+    #[tokio::test]
+    async fn extension_analyzer_receives_query_specific_options() {
+        let observed = Arc::new(std::sync::Mutex::new(None));
+        let mut state = new_query_engine_state();
+        state
+            .extension_rules
+            .push(Arc::new(RecordingAnalyzer(observed.clone())));
+        let state = Arc::new(state);
+
+        let query_ctx = QueryContextBuilder::default().build();
+        query_ctx
+            .configuration_parameter()
+            .set_query_option("datafusion.optimizer.prefer_hash_join", "false")
+            .unwrap();
+        query_ctx
+            .configuration_parameter()
+            .set_query_option("query.parallelism", "2")
+            .unwrap();
+        let query_ctx = Arc::new(query_ctx);
+        let statement =
+            crate::parser::QueryLanguageParser::parse_sql("SELECT 1", &query_ctx).unwrap();
+
+        crate::planner::DfLogicalPlanner::new(state)
+            .plan(&statement, query_ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(*observed.lock().unwrap(), Some((false, 2)));
     }
 
     struct TestRuntimeProvider {

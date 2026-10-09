@@ -22,7 +22,7 @@ use session::ReadPreference;
 use session::context::Channel::Postgres;
 use session::context::QueryContextRef;
 use session::session_config::{PGByteaOutputValue, PGDateOrder, PGDateTimeStyle, PGIntervalStyle};
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use sql::ast::{Expr, Ident, Value};
 use sql::statements::set_variables::SetVariables;
 use sqlparser::ast::ValueWithSpan;
@@ -264,8 +264,8 @@ pub fn set_query_option(variable: &str, exprs: Vec<Expr>, ctx: QueryContextRef) 
     }
 
     let [Expr::Value(value)] = exprs.as_slice() else {
-        return InvalidConfigValueSnafu {
-            source: session::session_config::Error::InvalidConfigValue {
+        return Err(InvalidConfigValueSnafu.into_error(
+            session::session_config::Error::InvalidConfigValue {
                 name: variable.to_string(),
                 value: exprs
                     .iter()
@@ -275,8 +275,7 @@ pub fn set_query_option(variable: &str, exprs: Vec<Expr>, ctx: QueryContextRef) 
                 hint: "Expected exactly one literal value".to_string(),
                 location: snafu::Location::new(file!(), line!(), column!()),
             },
-        }
-        .fail();
+        ));
     };
     let value = match &value.value {
         Value::Boolean(value) => value.to_string(),
@@ -284,15 +283,14 @@ pub fn set_query_option(variable: &str, exprs: Vec<Expr>, ctx: QueryContextRef) 
         | Value::SingleQuotedString(value)
         | Value::DoubleQuotedString(value) => value.clone(),
         _ => {
-            return InvalidConfigValueSnafu {
-                source: session::session_config::Error::InvalidConfigValue {
+            return Err(InvalidConfigValueSnafu.into_error(
+                session::session_config::Error::InvalidConfigValue {
                     name: variable.to_string(),
                     value: value.value.to_string(),
                     hint: "Expected a boolean, number, or quoted string literal".to_string(),
                     location: snafu::Location::new(file!(), line!(), column!()),
                 },
-            }
-            .fail();
+            ));
         }
     };
     if let Some((key, value)) = session::query_options::parse_query_option(variable, &value)
