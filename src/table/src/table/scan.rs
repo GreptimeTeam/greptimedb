@@ -876,7 +876,7 @@ mod test {
             schema.clone(),
             vec![
                 Arc::new(datatypes::vectors::UInt64Vector::from_slice([1])) as _,
-                Arc::new(datatypes::vectors::StringVector::from_slice(["host"])) as _,
+                Arc::new(datatypes::vectors::StringVector::from_slice(&["host"])) as _,
                 Arc::new(TimestampMillisecondVector::from_slice([1])) as _,
             ],
         )
