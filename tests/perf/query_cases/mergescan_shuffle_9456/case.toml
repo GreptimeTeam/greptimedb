@@ -1,0 +1,152 @@
+# Opt-in comparison of Hash RepartitionExec cost on a multi-region PromQL join.
+# ANALYZE records plans and metrics; EVAL preserves complete results for comparison.
+
+[case]
+name = "mergescan_shuffle_9456"
+description = "Opt-in multi-region Partitioned PromQL shuffle cost measurement"
+issue = "https://github.com/GreptimeTeam/greptimedb/issues/9456"
+
+[scenario]
+kind = "prom_remote_write_then_query"
+
+[scenario.remote_write]
+database = "public"
+metric = "mergescan_shuffle_9456"
+physical_table = "mergescan_shuffle_phys"
+series_count = 4096
+samples_per_series = 120
+start_unix_millis = 1704067200000
+step_millis = 60000
+chunk_series_count = 128
+timeout_seconds = 300
+visibility_timeout_seconds = 300
+
+base_setup_sql = [
+  """
+CREATE TABLE mergescan_shuffle_phys (
+    greptime_timestamp TIMESTAMP(3) TIME INDEX,
+    host STRING,
+    instance STRING,
+    greptime_value DOUBLE,
+    PRIMARY KEY (host, instance)
+)
+PARTITION ON COLUMNS (instance) (
+    instance < 'instance000128',
+    instance >= 'instance000128' AND instance < 'instance000256',
+    instance >= 'instance000256' AND instance < 'instance000384',
+    instance >= 'instance000384' AND instance < 'instance000512',
+    instance >= 'instance000512' AND instance < 'instance000640',
+    instance >= 'instance000640' AND instance < 'instance000768',
+    instance >= 'instance000768' AND instance < 'instance000896',
+    instance >= 'instance000896' AND instance < 'instance001024',
+    instance >= 'instance001024' AND instance < 'instance001152',
+    instance >= 'instance001152' AND instance < 'instance001280',
+    instance >= 'instance001280' AND instance < 'instance001408',
+    instance >= 'instance001408' AND instance < 'instance001536',
+    instance >= 'instance001536' AND instance < 'instance001664',
+    instance >= 'instance001664' AND instance < 'instance001792',
+    instance >= 'instance001792' AND instance < 'instance001920',
+    instance >= 'instance001920' AND instance < 'instance002048',
+    instance >= 'instance002048' AND instance < 'instance002176',
+    instance >= 'instance002176' AND instance < 'instance002304',
+    instance >= 'instance002304' AND instance < 'instance002432',
+    instance >= 'instance002432' AND instance < 'instance002560',
+    instance >= 'instance002560' AND instance < 'instance002688',
+    instance >= 'instance002688' AND instance < 'instance002816',
+    instance >= 'instance002816' AND instance < 'instance002944',
+    instance >= 'instance002944' AND instance < 'instance003072',
+    instance >= 'instance003072' AND instance < 'instance003200',
+    instance >= 'instance003200' AND instance < 'instance003328',
+    instance >= 'instance003328' AND instance < 'instance003456',
+    instance >= 'instance003456' AND instance < 'instance003584',
+    instance >= 'instance003584' AND instance < 'instance003712',
+    instance >= 'instance003712' AND instance < 'instance003840',
+    instance >= 'instance003840' AND instance < 'instance003968',
+    instance >= 'instance003968'
+) ENGINE=metric WITH ('physical_metric_table'='true')
+""",
+  """
+CREATE TABLE mergescan_shuffle_9456 (
+    greptime_timestamp TIMESTAMP(3) TIME INDEX,
+    host STRING,
+    instance STRING,
+    greptime_value DOUBLE,
+    PRIMARY KEY (host, instance)
+) ENGINE=metric WITH ('on_physical_table'='mergescan_shuffle_phys')
+""",
+]
+candidate_setup_sql = [
+  """
+CREATE TABLE mergescan_shuffle_phys (
+    greptime_timestamp TIMESTAMP(3) TIME INDEX,
+    host STRING,
+    instance STRING,
+    greptime_value DOUBLE,
+    PRIMARY KEY (host, instance)
+)
+PARTITION ON COLUMNS (instance) (
+    instance < 'instance000128',
+    instance >= 'instance000128' AND instance < 'instance000256',
+    instance >= 'instance000256' AND instance < 'instance000384',
+    instance >= 'instance000384' AND instance < 'instance000512',
+    instance >= 'instance000512' AND instance < 'instance000640',
+    instance >= 'instance000640' AND instance < 'instance000768',
+    instance >= 'instance000768' AND instance < 'instance000896',
+    instance >= 'instance000896' AND instance < 'instance001024',
+    instance >= 'instance001024' AND instance < 'instance001152',
+    instance >= 'instance001152' AND instance < 'instance001280',
+    instance >= 'instance001280' AND instance < 'instance001408',
+    instance >= 'instance001408' AND instance < 'instance001536',
+    instance >= 'instance001536' AND instance < 'instance001664',
+    instance >= 'instance001664' AND instance < 'instance001792',
+    instance >= 'instance001792' AND instance < 'instance001920',
+    instance >= 'instance001920' AND instance < 'instance002048',
+    instance >= 'instance002048' AND instance < 'instance002176',
+    instance >= 'instance002176' AND instance < 'instance002304',
+    instance >= 'instance002304' AND instance < 'instance002432',
+    instance >= 'instance002432' AND instance < 'instance002560',
+    instance >= 'instance002560' AND instance < 'instance002688',
+    instance >= 'instance002688' AND instance < 'instance002816',
+    instance >= 'instance002816' AND instance < 'instance002944',
+    instance >= 'instance002944' AND instance < 'instance003072',
+    instance >= 'instance003072' AND instance < 'instance003200',
+    instance >= 'instance003200' AND instance < 'instance003328',
+    instance >= 'instance003328' AND instance < 'instance003456',
+    instance >= 'instance003456' AND instance < 'instance003584',
+    instance >= 'instance003584' AND instance < 'instance003712',
+    instance >= 'instance003712' AND instance < 'instance003840',
+    instance >= 'instance003840' AND instance < 'instance003968',
+    instance >= 'instance003968'
+) ENGINE=metric WITH ('physical_metric_table'='true')
+""",
+  """
+CREATE TABLE mergescan_shuffle_9456 (
+    greptime_timestamp TIMESTAMP(3) TIME INDEX,
+    host STRING,
+    instance STRING,
+    greptime_value DOUBLE,
+    PRIMARY KEY (host, instance)
+) ENGINE=metric WITH ('on_physical_table'='mergescan_shuffle_phys')
+""",
+]
+
+[[scenario.queries]]
+name = "partitioned_shuffle_cost"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704067200, 1704074340, '1m') rate(mergescan_shuffle_9456[5m]) / ignoring(host) rate(mergescan_shuffle_9456[5m])"
+warmup = 1
+iterations = 7
+
+[[scenario.queries]]
+name = "collect_left_control"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704067200, 1704074340, '1m') rate(mergescan_shuffle_9456[5m]) / rate(mergescan_shuffle_9456[5m])"
+warmup = 1
+iterations = 7
+
+[[scenario.queries]]
+name = "partitioned_complete_results"
+kind = "tql"
+query = "TQL EVAL (1704067200, 1704074340, '1m') rate(mergescan_shuffle_9456[5m]) / ignoring(host) rate(mergescan_shuffle_9456[5m])"
+warmup = 0
+iterations = 1

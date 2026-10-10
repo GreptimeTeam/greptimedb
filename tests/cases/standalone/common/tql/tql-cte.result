@@ -596,7 +596,7 @@ SELECT 'host2' as source, ts, cpu FROM host2_data;
 |               |           Filter: labels.host = Utf8("host2") AND labels.ts >= TimestampMillisecond(-299999, None) AND labels.ts <= TimestampMillisecond(40000, None)                          |
 |               |             TableScan: labels, partial_filters=[labels.host = Utf8("host2"), labels.ts >= TimestampMillisecond(-299999, None), labels.ts <= TimestampMillisecond(40000, None)] |
 |               | ]]                                                                                                                                                                             |
-| physical_plan | InterleaveExec                                                                                                                                                                 |
+| physical_plan | UnionExec                                                                                                                                                                      |
 |               |   CooperativeExec                                                                                                                                                              |
 |               |     MergeScanExec: REDACTED
 |               |   CooperativeExec                                                                                                                                                              |
