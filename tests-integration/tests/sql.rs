@@ -1891,6 +1891,7 @@ pub async fn test_postgres_show_query_options(store_type: StorageType) {
     for (option, value) in [
         ("query.parallelism", "2"),
         ("datafusion.optimizer.prefer_hash_join", "false"),
+        ("datafusion.optimizer.max_passes", "5"),
     ] {
         client
             .batch_execute(&format!("SET {option} TO {value}"))

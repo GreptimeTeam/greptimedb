@@ -1035,21 +1035,31 @@ mod test {
             default_after, default_before,
             "request-scoped hint changed the subsequent default result"
         );
-        for variable in [
-            "query.allow_query_fallback",
-            "query.enable_remote_dynamic_filter_pushdown",
-            "datafusion.optimizer.enable_dynamic_filter_pushdown",
+        for (variable, hint_value, expected) in [
+            ("query.allow_query_fallback", "false", "false"),
+            (
+                "query.enable_remote_dynamic_filter_pushdown",
+                "false",
+                "false",
+            ),
+            (
+                "datafusion.optimizer.enable_dynamic_filter_pushdown",
+                "false",
+                "false",
+            ),
+            ("datafusion.optimizer.filter_null_join_keys", "true", "true"),
+            ("datafusion.optimizer.max_passes", "5", "5"),
         ] {
             let value = client
                 .flight_request()
-                .with_hints(&[(variable, "false")])
+                .with_hints(&[(variable, hint_value)])
                 .sql(format!("SHOW VARIABLES {variable}"))
                 .await
                 .unwrap()
                 .data
                 .pretty_print()
                 .await;
-            assert!(value.contains("false"), "{variable}: {value}");
+            assert!(has_value(&value, expected), "{variable}: {value}");
         }
 
         for (key, value) in [

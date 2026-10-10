@@ -1156,6 +1156,21 @@ mod tests {
             .set_query_option("datafusion.optimizer.repartition_joins", "true")
             .unwrap();
         ctx.configuration_parameter()
+            .set_query_option("datafusion.optimizer.max_passes", "5")
+            .unwrap();
+        ctx.configuration_parameter()
+            .set_query_option(
+                "datafusion.optimizer.enable_dynamic_filter_pushdown",
+                "FALSE",
+            )
+            .unwrap();
+        ctx.configuration_parameter()
+            .set_query_option(
+                "datafusion.optimizer.enable_topk_dynamic_filter_pushdown",
+                "true",
+            )
+            .unwrap();
+        ctx.configuration_parameter()
             .set_query_option("query.parallelism", "7")
             .unwrap();
         ctx.configuration_parameter()
@@ -1175,6 +1190,30 @@ mod tests {
         let remote = engine.engine_context(Arc::new(remote_ctx)).unwrap();
         let config = remote.state().config_options();
         assert!(config.optimizer.repartition_joins);
+        for context in [&first, &remote] {
+            let config = context.state().config_options();
+            assert_eq!(config.optimizer.max_passes, 5);
+            assert!(!config.optimizer.enable_dynamic_filter_pushdown);
+            assert!(config.optimizer.enable_topk_dynamic_filter_pushdown);
+            assert_eq!(
+                context
+                    .query_ctx()
+                    .extension("datafusion.optimizer.max_passes"),
+                Some("5")
+            );
+            assert_eq!(
+                context
+                    .query_ctx()
+                    .extension("datafusion.optimizer.enable_dynamic_filter_pushdown"),
+                Some("false")
+            );
+            assert_eq!(
+                context
+                    .query_ctx()
+                    .extension("datafusion.optimizer.enable_topk_dynamic_filter_pushdown"),
+                Some("true")
+            );
+        }
         assert_eq!(remote.state().config().target_partitions(), 7);
         assert!(
             !config

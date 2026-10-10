@@ -551,6 +551,21 @@ pub async fn test_http_query_options(store_type: StorageType) {
             "true",
             "datafusion.optimizer.join_reordering=true",
         ),
+        (
+            "datafusion.optimizer.filter_null_join_keys",
+            "true",
+            "datafusion.optimizer.filter_null_join_keys=true",
+        ),
+        (
+            "datafusion.optimizer.max_passes",
+            "5",
+            "datafusion.optimizer.max_passes=5",
+        ),
+        (
+            "datafusion.optimizer.default_filter_selectivity",
+            "25",
+            "datafusion.optimizer.default_filter_selectivity=25",
+        ),
     ] {
         assert_variable(&client, name, expected, Some(hints)).await;
     }

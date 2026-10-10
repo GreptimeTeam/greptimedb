@@ -1218,7 +1218,7 @@ mod test {
         assert!(parse_query_option("query.allow_query_fallback", "yes").is_err());
         assert_eq!(
             canonical_query_option_name("datafusion.optimizer.prefer_hash_join"),
-            Some("datafusion.optimizer.prefer_hash_join")
+            Some("datafusion.optimizer.prefer_hash_join".to_string())
         );
         for key in [
             "datafusion.optimizer.repartition_joins",
@@ -1231,6 +1231,11 @@ mod test {
             "datafusion.optimizer.join_reordering",
             "datafusion.optimizer.enable_topk_aggregation",
             "datafusion.optimizer.enable_dynamic_filter_pushdown",
+            "datafusion.optimizer.skip_failed_rules",
+            "datafusion.optimizer.filter_null_join_keys",
+            "datafusion.optimizer.enable_join_dynamic_filter_pushdown",
+            "datafusion.optimizer.enable_aggregate_dynamic_filter_pushdown",
+            "datafusion.optimizer.enable_topk_dynamic_filter_pushdown",
         ] {
             assert_eq!(
                 parse_query_option(key, "TRUE").unwrap(),
@@ -1244,9 +1249,33 @@ mod test {
             );
             assert!(parse_query_option(key, "yes").is_err(), "{key}");
         }
+        for (key, input, expected) in [
+            ("datafusion.optimizer.max_passes", "05", "5"),
+            (
+                "datafusion.optimizer.default_filter_selectivity",
+                "25",
+                "25",
+            ),
+            (
+                "datafusion.optimizer.hash_join_single_partition_threshold",
+                "4096",
+                "4096",
+            ),
+        ] {
+            assert_eq!(
+                parse_query_option(key, input).unwrap(),
+                Some((key.to_string(), expected.to_string()))
+            );
+        }
+        for (key, value) in [
+            ("datafusion.optimizer.max_passes", "invalid"),
+            ("datafusion.optimizer.default_filter_selectivity", "256"),
+            ("datafusion.optimizer.unknown", "true"),
+            ("datafusion.optimizer.max_passes.extra", "5"),
+        ] {
+            assert!(parse_query_option(key, value).is_err(), "{key}={value}");
+        }
         assert!(parse_query_option("datafusion.execution.batch_size", "12").is_err());
-        assert!(parse_query_option("datafusion.optimizer.skip_failed_rules", "true").is_err());
-        assert!(parse_query_option("datafusion.optimizer.filter_null_join_keys", "true").is_err());
         assert_eq!(
             parse_query_option("custom.extension", "value").unwrap(),
             None
