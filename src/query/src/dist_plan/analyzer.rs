@@ -253,7 +253,7 @@ impl DistPlannerAnalyzer {
         // overflow the worker thread stack. Use the fallback plan rewriter for
         // such plans: it only wraps every table scan in a `MergeScan`, which keeps
         // each recursive rewrite step shallow and every remote sub-plan small.
-        let depth = crate::plan_depth(&plan);
+        let depth = crate::plan_depth(&plan)?;
         if depth > crate::MAX_SAFE_PLAN_DEPTH {
             common_telemetry::warn!(
                 "Logical plan depth {} exceeds the maximum safe depth {}, using fallback plan rewriter",
@@ -276,7 +276,10 @@ impl DistPlannerAnalyzer {
     /// Use fallback plan rewriter to rewrite the plan and only push down table scan nodes
     fn use_fallback(&self, plan: LogicalPlan) -> DfResult<LogicalPlan> {
         let mut rewriter = fallback::FallbackPlanRewriter;
-        let result = plan.rewrite(&mut rewriter)?.data;
+        // Use the subquery-aware rewrite so that table scans inside expression
+        // subqueries are wrapped in `MergeScan` too, as the distributed planner
+        // does not expect bare `TableScan`s in subqueries.
+        let result = plan.rewrite_with_subqueries(&mut rewriter)?.data;
         Self::assign_merge_scan_remote_dyn_filter_producer_ids(result)
     }
 
