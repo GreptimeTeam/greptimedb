@@ -45,8 +45,8 @@ impl<S> RegionWorkerLoop<S> {
         let Some(region) = self.regions.get_region(region_id) else {
             return;
         };
-        // A terminal pick (canceled, no plan, or failed) may remove the
-        // compaction status and release DDLs fenced behind its picking phase.
+        // A terminal pick (canceled, no plan, or failed) may return the region
+        // to idle and release DDLs fenced behind its picking phase.
         // Such a pick never produces an execution callback, so the worker must
         // execute the returned DDLs from this notification.
         let transition = self
@@ -242,9 +242,9 @@ impl<S> RegionWorkerLoop<S> {
 
     /// Schedule compaction for the region if necessary.
     pub(crate) async fn schedule_compaction(&mut self, region: &MitoRegionRef) {
-        if region.is_staging() || region.is_enter_staging() {
+        if region.is_staging() || region.is_enter_staging() || region.is_truncating() {
             info!(
-                "Region {} is staging or entering staging, skip compaction",
+                "Region {} is staging, entering staging, or truncating, skip compaction",
                 region.region_id
             );
             return;
