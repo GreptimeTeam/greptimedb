@@ -2,22 +2,30 @@
 
 ## Native production-path validation
 
-The current release CLI and server were tested on native macOS with the PR13
-scan and metadata-write fixes. Release acceptance remains incomplete, and the
-experimental gate remains enabled.
+The wide, multi-SST query-memory failure is fixed and its full round trip now
+passes at query parallelism 4 with a 2 GiB query pool. Large-table export
+overhead changes are implemented and pass correctness checks, but their
+performance benefit remains unverified under paging-free conditions. Scale
+acceptance is also incomplete: host paging affected measured comparisons, and
+new host swap-out stopped the first 10,000-table +50 ms round. The experimental
+gate remains enabled.
 
-The host was an Apple M2 Pro with 10 CPUs and 16 GiB RAM. MinIO ran in Docker
-with 2 CPUs and 1 GiB RAM; the Docker VM had about 9.7 GiB available. The native
-query pool was 2 GiB with query parallelism 4. Export parallelism was 4, client
-chunk/task parallelism was 1, and restore used the server's existing COPY
-concurrency. These settings were held constant across controls.
+The host was an Apple M2 Pro with 10 CPUs and 16 GiB RAM, running macOS 27.0.1.
+MinIO ran in Docker with 2 CPUs and 1 GiB RAM. The final campaign used a
+10-vCPU, 2 GiB Docker VM with both VM and container swap disabled. The native
+query pool was 2 GiB with query parallelism 4; this pool is not a limit on total
+process memory. Export parallelism was 4 and client chunk/task parallelism was
+1. Ordinary COPY uses upload concurrency 8; experimental export uses 1. These
+settings were fixed across the final campaign, and earlier configurations are
+excluded from its comparisons.
 
 A is the current per-table path, including explicit-file COPY and batched schema
 export. B adds shared physical scans with standalone files, C adds packed
-objects, and D adds batch DDL on restore. Timings cover the complete CLI command.
-Each primary fixture has 10,000 or 100,000 populated logical tables with 32 rows
-per table. Values, schemas and remapped target table IDs are checked outside
-timing, with fresh restore destinations and unchanged source SSTs.
+objects, and D adds batch DDL on restore. Timings cover the complete CLI
+command. Each scale fixture has 10,000 or 100,000 populated logical tables with
+32 rows per table. Full typed values, schemas, remapped target table IDs and
+completed procedures are checked outside timing, using fresh restore
+destinations and unchanged source SSTs.
 
 Added latency applies once per object-store HTTP request, including multipart
 operations and range reads. CLI and server use the same endpoint; SQL is not
@@ -26,68 +34,126 @@ profile.
 
 ### Results and acceptance status
 
-For 10,000 tables, three alternating A/B/C/D rounds produced the following
-complete-command medians. Seconds in parentheses show the minimum and maximum.
+The following comparisons passed full correctness checks without new host
+swap-out, but some timed phases still recorded host swap-in. Their timing is
+observational evidence, not paging-free performance acceptance. Three-round
+entries use alternating ABCD, DCBA and BCDA orders and report complete-command
+medians. The 100,000-table zero-delay entry is one control round.
 
-| Added MinIO delay | A export | D export | A restore | D restore |
+| Tables | Added MinIO delay | Rounds | A export (s) | D export (s) | A restore (s) | D restore (s) |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10,000 | 0 ms | 3 | 16.685 | 1.470 | 17.134 | 1.814 |
+| 10,000 | 100 ms | 3 | 303.145 | 3.524 | 659.288 | 3.314 |
+| 100,000 | 0 ms | 1 | 168.291 | 20.657 | 174.317 | 23.854 |
+
+For 10,000 tables at +100 ms, D was 86.0x faster on export and 199.0x faster on
+restore in the observed medians. This exceeds the numeric 3x target but does not
+establish acceptance: timed phases recorded up to 34.48 MiB of host swap-in,
+whose process attribution and timing impact were not isolated. A export ranged
+from 302.481–309.267 seconds and restore from 658.866–661.615 seconds; D export
+ranged from 3.482–3.589 seconds and restore from 3.145–3.316 seconds. The
+zero-delay controls observed 11.3x/9.4x export/restore speedups at 10,000 tables
+and 8.1x/7.3x at 100,000 tables.
+
+The 10,000-table local-file and +5 ms controls also completed with matching full
+data and schemas. In the three zero-delay S3 rounds, B restore was 5.7% slower
+than A. The same restore commands read identical request counts and byte totals,
+and the local-file A/B exports were byte-identical, including all 10,000 Parquet
+files and DDL. The difference did not recur in the local-file, +5 ms or
+100,000-table zero-delay controls. The exact cause of the waiting difference was
+not isolated; this remains a condition-specific observation, not evidence of
+universal restore parity.
+
+The first 10,000-table +50 ms round recorded 358.9 MiB of new macOS swap-out
+during A export despite passing the resource preflight. VM and MinIO swap and
+OOM counters remained zero. The same sampling interval saw about 1.04 GiB of
+additional transient host-process RSS; this is evidence of concurrent host
+activity, not proof of a unique swap trigger. The entire comparison is excluded
+from performance acceptance. The campaign stopped after retaining that round's
+correctness evidence, with no automatic retry. All four controls in that round
+passed the full correctness checks.
+
+Nine comparisons completed before the swap-out event. The runner rejected new
+swap-out but did not reject swap-in; the final evidence audit also excludes
+measured swap-in from acceptance. No primary case has three paging-free rounds.
+The remaining 10,000-table +50 ms rounds, both 100,000-table high-latency cases,
+and the 100,000-table local-file and +5 ms controls remain unrun in this
+campaign. Completing the matrix requires a host that sustains the workload
+without swap or concurrent resource interference. Earlier swap-affected runs are
+also excluded.
+
+### Observed work and resource usage
+
+For the 10,000-table +100 ms observations, server CPU is the three-round median;
+RSS is the highest 0.5-second sample across those rounds. Both remain
+observations from runs with host swap-in. Export/restore values are separated by
+`/`.
+
+| Control | Server CPU (s) | Server peak RSS (MiB) | Export objects | Object HTTP requests |
 | --- | ---: | ---: | ---: | ---: |
-| 0 ms | 19.101 (16.550–19.629) | 1.466 (1.454–1.531) | 18.233 (17.063–18.494) | 1.875 (1.779–1.894) |
-| 100 ms, affected by host interference | 306.331 (304.389–310.290) | 3.475 (3.196–3.520) | 656.619 (654.838–669.252) | 3.445 (3.134–3.480) |
+| A | 79.80 / 27.45 | 516.1 / 346.8 | 10,003 | 10,017 / 60,024 |
+| B | 10.40 / 27.55 | 346.4 / 343.8 | 10,003 | 10,019 / 60,024 |
+| C | 2.80 / 8.41 | 377.2 / 381.3 | 5 | 16 / 13 |
+| D | 2.90 / 3.01 | 370.5 / 378.6 | 5 | 16 / 13 |
 
-The zero-delay control showed about 13.0x faster export and 9.7x faster restore,
-with no recorded new host swap-out or compiler overlap. MinIO cgroup swap was
-not sampled during these rounds, so backend interference was not fully excluded.
+A/B uploaded 20.72 MB of request payload and downloaded 37.28 MB on restore; C/D
+uploaded 21.29 MB and downloaded 24.75 MB. CLI peak RSS stayed below 63 MiB in
+these rounds. Maximum observed simultaneous object requests were 4/10 for A/B
+export/restore and 1/1 for C/D. These counts distinguish reduced object work
+from concurrency changes. Moving from A to B, B to C and C to D gave observed
+speedups of 1.06x, 84.08x and 0.96x on export, and 1.00x, 81.24x and 2.45x on
+restore.
 
-All three 100 ms rounds passed correctness checks, but every round recorded
-host swap-out during at least one baseline phase; one also overlapped compilation.
-The entire comparisons are excluded from performance acceptance. The raw timings
-show a large observed difference, but do not establish an accepted speedup.
-The completed 10,000-table +50 ms comparisons were also excluded. The 100,000-table
-high-latency matrix is unfinished. No primary high-latency case is accepted yet.
-A fresh-MinIO diagnostic removed observed container memory pressure but still
-recorded host swap-out. Valid high-latency measurements need a stable host.
+Each control used a fresh database process, but host and backend caches were not
+globally evicted. MinIO was limited to 1 GiB with no recorded OOM or container
+swap; host pressure and paging were recorded separately. Sampling can miss short
+peaks, and process RSS is not query-pool accounting.
 
-### Scan repair and remaining wide-schema limit
+### Scan, memory and large-table fixes
 
 A single-source scan unnecessarily split about 320,000 rows into 131,485 batches
 for a merge that it bypassed. The PR13 guard reduced that to 41 batches and the
 same ordered query from about 22.57 to 0.062 seconds. Multi-source scan behavior
-is unchanged.
+is unchanged by that guard.
 
-Two product limitations remain:
+Wide, multi-SST scans retained unused dictionary values through sliced batches
+before the ordered merge. Compacting that backing storage removes the observed
+query-memory exhaustion. The wide-schema fixture with 4 KiB labels now completes
+export and restore with matching typed data and schemas at the original 2 GiB
+query pool and query parallelism 4.
 
-- **Wide, multi-SST exports can exceed query memory.** Combining a wide physical
-  schema with 4 KiB labels exhausted the 2 GiB SortPreservingMerge reservation
-  at query parallelism 4, while the per-table path completed. Changing only server
-  query parallelism to 1 completed the same export/restore with matching data and
-  schemas. This is a tested workaround, not a fix for the parallelism-4 failure.
-- **Large-table-only export can regress.** A 3,145,728-row logical table exported
-  18.3%–24.4% slower across local-file and low-latency MinIO controls. The original
-  writer produced three large row groups and about 20.83 MB; the shared writer
-  produced 384 smaller groups and about 24.61 MB, both using ZSTD. Its upload
-  concurrency is also lower. Shared standalone and packed export took about
-  0.538/0.548 seconds in a separate comparison, locating most overhead before
-  packing. The individual causes still need controlled measurement. The 8 MiB
-  write limit does not require such small Parquet row groups.
+Large-table export now avoids needless routing work for a single logical table,
+preserves compatible string dictionaries, skips no-op conversion handoffs and
+uses larger Parquet row groups while retaining the 8 MiB write limit. Six
+balanced control permutations on a 3,145,728-row fixture produced export medians
+of 383.769 ms for A, 487.063 ms for the earlier D writer and 384.020 ms for the
+updated D writer. These observed medians suggest a 21.2% improvement over the
+earlier writer and a 0.07% difference from A, but the timed phases recorded up
+to 8.19 MiB of host swap-in. They do not establish that the performance
+regression is fixed. Full export/restore correctness checks passed. A separate
+local-file validation with MinIO stopped aborted before measurement: the host
+swapped in 256 KiB during its resource preflight. No retry was made.
 
 ### Correctness and resource checks
 
-438 selected tests, workspace/all-target/all-feature release Clippy, eight real
-CLI tests and six native two-datanode round trips passed. Distributed checks
-covered standalone and packed layouts at query parallelism 1, 2 and 4. Packed
-restore also passed against a target without batch-DDL capability. A real
-v1.2.1 Linux/arm64 importer rejected a version-2 snapshot before target DDL;
-this is compatibility evidence, not full Linux or Windows acceptance.
+The original scan and metadata-write changes passed 438 selected tests,
+workspace/all-target/all-feature release Clippy, eight real CLI tests and six
+native two-datanode round trips. The subsequent memory and export fixes passed
+42 targeted release tests plus the focused wide-schema and large-table round
+trips above. The broader checks were not rerun for the subsequent fixes.
 
-Mixed-schema, empty-table, large-label and long-series controls passed 54 complete
-A/D round trips. These controls do not replace the unfinished high-latency matrix.
-The failing wide-schema export left a failed snapshot with no open multipart
-uploads and unchanged source data.
+Distributed checks covered standalone and packed layouts at query parallelism 1,
+2 and 4. Packed restore also passed against a target without batch-DDL
+capability. A real v1.2.1 Linux/arm64 importer rejected a version-2 snapshot
+before target DDL; this is compatibility evidence, not full Linux or Windows
+acceptance. Earlier mixed-schema, empty-table, large-label and long-series
+controls passed 54 complete A/D round trips.
 
-Metadata writes now obey the same 8 MiB per-write bound as packed uploads and
-abort on write/close failure. The complete metadata buffer is still allocated
-before writing. Packed reads retain at most two 8 MiB windows per COPY request;
-neither limit bounds total process memory.
+Metadata writes obey the same 8 MiB per-write bound as packed uploads and abort
+on write/close failure. The complete metadata buffer is still allocated before
+writing. Packed reads retain at most two 8 MiB windows per COPY request; neither
+limit bounds total process memory. Resource observations distinguish host, VM
+and container swap; container swap being zero does not establish host validity.
 
 ## Historical prototype conclusions
 
