@@ -22,6 +22,7 @@ use mito2::gc::GcConfig;
 use tests_integration::cluster::GreptimeDbClusterBuilder;
 use tests_integration::test_util::{
     StorageType, get_test_store_config, setup_authenticated_grpc_database,
+    test_event_recorder_options,
 };
 
 use crate::event_recorder_test_util::{
@@ -44,6 +45,7 @@ async fn test_repartition_event() {
     let home_dir = create_temp_dir("test_repartition_event_data_home");
     let cluster = GreptimeDbClusterBuilder::new("test_repartition_event")
         .await
+        .with_event_recorder_options(test_event_recorder_options())
         .with_datanodes(1)
         .with_store_config(store_config)
         .with_shared_home_dir(Arc::new(home_dir))

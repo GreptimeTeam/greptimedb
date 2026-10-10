@@ -355,13 +355,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Corrupted table route data, err: {}", err_msg))]
-    RouteInfoCorrupted {
-        err_msg: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Illegal state from server, code: {}, error: {}", code, err_msg))]
     IllegalServerState {
         code: i32,
@@ -517,6 +510,13 @@ pub enum Error {
 
     #[snafu(display("Invalid view info, err: {}", err_msg))]
     InvalidViewInfo {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid SQL, error: {err_msg}"))]
+    InvalidFlowOption {
         err_msg: String,
         #[snafu(implicit)]
         location: Location,
@@ -1213,7 +1213,6 @@ impl ErrorExt for Error {
 
             SerdeJson { .. }
             | ParseOption { .. }
-            | RouteInfoCorrupted { .. }
             | InvalidProtoMsg { .. }
             | InvalidMetadata { .. }
             | Unexpected { .. }
@@ -1255,6 +1254,7 @@ impl ErrorExt for Error {
 
             ProcedureNotFound { .. }
             | InvalidViewInfo { .. }
+            | InvalidFlowOption { .. }
             | PrimaryKeyNotFound { .. }
             | EmptyKey { .. }
             | AlterLogicalTablesInvalidArguments { .. }

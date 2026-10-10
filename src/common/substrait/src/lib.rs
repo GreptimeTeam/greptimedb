@@ -20,6 +20,7 @@ use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use datafusion::execution::context::SessionState;
 pub use datafusion::execution::registry::SerializerRegistry;
+pub use datafusion_substrait::extensions::Extensions;
 /// Re-export the Substrait module of datafusion,
 pub use datafusion_substrait::substrait as substrait_proto_df;
 pub use datafusion_substrait::{logical_plan as df_logical_plan, variation_const};

@@ -14,10 +14,11 @@
 
 //! In-memory index over the footers of the objects of one WAL prefix.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Bound::{Excluded, Unbounded};
 
 use snafu::{OptionExt, ensure};
+use store_api::logstore::EntryId;
 use store_api::storage::RegionId;
 
 use crate::error::{
@@ -32,25 +33,22 @@ use crate::object_store_wal::format::FooterEntry;
 pub(crate) struct ObjectCatalog {
     objects: BTreeMap<u64, Vec<FooterEntry>>,
     regions: BTreeMap<RegionId, BTreeMap<u64, FooterEntry>>,
+    /// Largest entry id ever indexed per region, kept after the object that
+    /// held it was removed.
+    max_entry_ids: HashMap<RegionId, EntryId>,
 }
 
 impl ObjectCatalog {
     /// Indexes the footer of the object `object_seq`. Objects may be inserted
     /// in any order, which lets recovery index them as it discovers them.
     /// Inserting a sequence that is already indexed is rejected, whether or not
-    /// the footer matches the indexed one.
+    /// the footer matches the indexed one. An object without segments holds no
+    /// entries but still takes its sequence.
     pub(crate) fn insert_object(
         &mut self,
         object_seq: u64,
         mut footer: Vec<FooterEntry>,
     ) -> Result<()> {
-        ensure!(
-            !footer.is_empty(),
-            CorruptedWalObjectSnafu {
-                reason: format!("object {object_seq} has an empty footer"),
-            }
-        );
-
         footer.sort_unstable_by_key(|entry| entry.region_id);
         for entries in footer.windows(2) {
             ensure!(
@@ -129,9 +127,69 @@ impl ObjectCatalog {
                 .entry(entry.region_id)
                 .or_default()
                 .insert(object_seq, entry.clone());
+            self.max_entry_ids
+                .entry(entry.region_id)
+                .and_modify(|max| *max = (*max).max(entry.max_entry_id))
+                .or_insert(entry.max_entry_id);
         }
         self.objects.insert(object_seq, footer);
         Ok(())
+    }
+
+    /// Removes the object `object_seq` from the index once it was deleted and
+    /// returns the footer it held, or `None` if it was not indexed. The
+    /// largest entry id of every region it held is kept.
+    pub(crate) fn remove_object(&mut self, object_seq: u64) -> Option<Vec<FooterEntry>> {
+        let footer = self.objects.remove(&object_seq)?;
+        for entry in &footer {
+            if let Some(objects) = self.regions.get_mut(&entry.region_id) {
+                objects.remove(&object_seq);
+                if objects.is_empty() {
+                    self.regions.remove(&entry.region_id);
+                }
+            }
+        }
+        Some(footer)
+    }
+
+    /// Returns true while the object `object_seq` is indexed.
+    pub(crate) fn contains_object(&self, object_seq: u64) -> bool {
+        self.objects.contains_key(&object_seq)
+    }
+
+    /// Returns the reclaim boundary the indexed objects and the obsolete
+    /// watermarks allow, given that every object below `from` holds no live
+    /// segment: the first indexed object at or above `from` that holds a
+    /// live segment, or the sequence after the last indexed object when none
+    /// does, and never less than `from`.
+    ///
+    /// A segment is live when its maximum entry id is above the watermark of
+    /// its region, or its region has no watermark; a region whose watermark
+    /// is [`EntryId::MAX`] holds no live segment. Watermarks never move down
+    /// and a region first appears in an object above the boundary, so the
+    /// scan starts at the previous boundary and never reads an object twice
+    /// once the boundary has passed it.
+    pub(crate) fn reclaim_boundary(
+        &self,
+        from: u64,
+        obsolete_entry_ids: &HashMap<RegionId, EntryId>,
+    ) -> u64 {
+        let live = self.objects.range(from..).find(|(_, footer)| {
+            footer.iter().any(|entry| {
+                obsolete_entry_ids
+                    .get(&entry.region_id)
+                    .is_none_or(|obsolete| entry.max_entry_id > *obsolete)
+            })
+        });
+        match live {
+            Some((&object_seq, _)) => object_seq,
+            None => self
+                .objects
+                .last_key_value()
+                .map_or(from, |(&object_seq, _)| {
+                    object_seq.saturating_add(1).max(from)
+                }),
+        }
     }
 
     /// Returns the objects that hold entries of `region_id` overlapping
@@ -163,12 +221,10 @@ impl ObjectCatalog {
             .collect())
     }
 
-    /// Returns the largest entry id indexed for `region_id`.
+    /// Returns the largest entry id ever indexed for `region_id`, which is
+    /// kept after the object holding it was removed.
     pub(crate) fn region_max_entry_id(&self, region_id: RegionId) -> Option<u64> {
-        self.regions
-            .get(&region_id)?
-            .last_key_value()
-            .map(|(_, entry)| entry.max_entry_id)
+        self.max_entry_ids.get(&region_id).copied()
     }
 
     /// Returns the sequence to assign to the next object written after recovery.
@@ -189,9 +245,9 @@ impl ObjectCatalog {
                 .context(WalObjectSequenceExhaustedSnafu { last_object_seq })?,
         };
         let floor = self
-            .regions
-            .keys()
-            .filter_map(|region_id| self.region_max_entry_id(*region_id))
+            .max_entry_ids
+            .values()
+            .copied()
             .map(sequence_floor)
             .max()
             .unwrap_or(0);
@@ -310,6 +366,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(5, catalog.next_object_seq().unwrap());
+
+        // An object without segments takes its sequence all the same.
+        catalog.insert_object(7, Vec::new()).unwrap();
+        assert_eq!(8, catalog.next_object_seq().unwrap());
+        assert_eq!(Some(12), catalog.region_max_entry_id(region_id));
     }
 
     #[test]
@@ -416,11 +477,6 @@ mod tests {
             ),
             "duplicate footer entries",
         );
-        assert_corrupted(
-            catalog.insert_object(1, vec![]),
-            "object 1 has an empty footer",
-        );
-
         let mut invalid = footer_entry(region_id, 2, 1);
         invalid.entry_count = 0;
         assert_corrupted(
@@ -435,6 +491,98 @@ mod tests {
             matches!(error, Error::InvalidWalEntryRange { start_entry_id, end_entry_id, .. } if start_entry_id == 2 && end_entry_id == 1),
             "unexpected error: {error:?}"
         );
+    }
+
+    #[test]
+    fn test_catalog_reclaim_boundary_follows_the_watermarks() {
+        let region_one = RegionId::new(1, 1);
+        let region_two = RegionId::new(2, 1);
+        let mut catalog = ObjectCatalog::default();
+        catalog.insert_object(0, Vec::new()).unwrap();
+        catalog
+            .insert_object(
+                1,
+                vec![
+                    footer_entry(region_one, entry_id(1, 1), entry_id(1, 2)),
+                    footer_entry(region_two, entry_id(1, 1), entry_id(1, 1)),
+                ],
+            )
+            .unwrap();
+        catalog
+            .insert_object(
+                2,
+                vec![footer_entry(region_one, entry_id(2, 1), entry_id(2, 1))],
+            )
+            .unwrap();
+        catalog
+            .insert_object(
+                3,
+                vec![footer_entry(region_two, entry_id(3, 1), entry_id(3, 1))],
+            )
+            .unwrap();
+        let boundary = |catalog: &ObjectCatalog, obsolete: &[(RegionId, EntryId)]| {
+            catalog.reclaim_boundary(0, &obsolete.iter().copied().collect())
+        };
+
+        // A region without a watermark holds the boundary at its first object.
+        assert_eq!(1, boundary(&catalog, &[]));
+        assert_eq!(1, boundary(&catalog, &[(region_one, entry_id(2, 1))]));
+        // A watermark inside an object keeps that object.
+        assert_eq!(
+            1,
+            boundary(
+                &catalog,
+                &[(region_one, entry_id(1, 1)), (region_two, EntryId::MAX)]
+            )
+        );
+        assert_eq!(
+            2,
+            boundary(
+                &catalog,
+                &[(region_one, entry_id(1, 2)), (region_two, entry_id(1, 1))]
+            )
+        );
+        assert_eq!(
+            3,
+            boundary(
+                &catalog,
+                &[(region_one, entry_id(2, 1)), (region_two, entry_id(1, 1))]
+            )
+        );
+        // A region of `obsolete_all` contributes nothing, and when no region
+        // does, the boundary is past the last object.
+        assert_eq!(
+            4,
+            boundary(
+                &catalog,
+                &[(region_one, entry_id(2, 1)), (region_two, EntryId::MAX)]
+            )
+        );
+
+        // Objects below the previous boundary are not scanned again.
+        assert_eq!(3, catalog.reclaim_boundary(3, &HashMap::new()));
+        assert_eq!(5, catalog.reclaim_boundary(5, &HashMap::new()));
+
+        // Removing objects keeps the largest entry id of every region, and a
+        // region without indexed objects contributes nothing.
+        for object_seq in [0, 1, 2] {
+            assert!(catalog.remove_object(object_seq).is_some());
+        }
+        assert!(catalog.remove_object(2).is_none());
+        assert!(!catalog.contains_object(2));
+        assert!(catalog.contains_object(3));
+        assert_eq!(
+            Some(entry_id(2, 1)),
+            catalog.region_max_entry_id(region_one)
+        );
+        assert!(
+            catalog
+                .objects_for_entry_range(region_one, 0, EntryId::MAX)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(3, boundary(&catalog, &[]));
+        assert_eq!(4, catalog.next_object_seq().unwrap());
     }
 
     fn footer_entry(region_id: RegionId, min_entry_id: u64, max_entry_id: u64) -> FooterEntry {

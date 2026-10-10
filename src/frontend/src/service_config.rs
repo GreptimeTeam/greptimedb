@@ -26,6 +26,6 @@ pub use jaeger::JaegerOptions;
 pub use mysql::MysqlOptions;
 pub use opentsdb::OpentsdbOptions;
 pub use otlp::OtlpOptions;
-pub use pending_rows_batcher::PendingRowsBatcherOptions;
+pub use pending_rows_batcher::{BatcherOptions, PendingRowsBatcherOptions};
 pub use postgres::PostgresOptions;
 pub use prom_store::PromStoreOptions;

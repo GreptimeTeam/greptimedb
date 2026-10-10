@@ -17,6 +17,7 @@ use std::time::Instant;
 
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
+use common_telemetry::error;
 use operator::error::{ComputeArrowSnafu, Result, UnexpectedSnafu};
 use operator::insert::Inserter;
 use operator::metrics::DIST_INGEST_ROW_COUNT;
@@ -55,6 +56,7 @@ pub(in crate::batcher::table) async fn flush_batch(
             notifier.notify(table, &combined);
         }
         Err(error) => {
+            error!(error; "Failed to flush table batch, rows: {}", batch.total_rows);
             FLUSH_FAILURES.inc();
             FLUSH_DROPPED_ROWS.inc_by(batch.total_rows as u64);
             notify_batches(batch.submissions, Err(Arc::new(error)));

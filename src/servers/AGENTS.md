@@ -41,3 +41,5 @@ cargo nextest run -p servers
 ```
 
 Keep protocol translation here and permissions/database behavior in frontend.
+Async table batching returns storage-completion futures with its early
+acknowledgements. Keep completion reporting independent of the caller's lifetime.

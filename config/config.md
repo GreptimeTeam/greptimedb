@@ -16,17 +16,16 @@
 | `default_column_prefix` | String | Unset | The default column prefix for auto-created time index, value, and native histogram columns.<br/>Legacy OTLP summary columns keep their historical `greptime_` prefix. |
 | `auto_create_table` | Bool | `true` | Server-side global switch for auto table creation on write.<br/>When `false`, a missing table is never auto-created even if the request sets the `auto_create_table` hint to `true`. Default: `true`. |
 | `experimental_metric_export` | Bool | `false` | Enables experimental Parquet COPY DATABASE using shared Metric physical scans.<br/>Resume requires the previous export and storage writes to have ended; HTTP timeout is not confirmation. |
-| `user_provider` | String | Unset | The user provider for authentication.<br/>Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"<br/>Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",<br/>"mysql_native_password:<hex_sha1_sha1_password>",<br/>"pg_scram_sha256:<iterations>:<hex_salt>:<hex_stored_key>:<hex_server_key>"<br/>"pbkdf2_sha256" and "pg_scram_sha256" protect passwords at rest, but cannot authenticate over MySQL's<br/>native password handshake; a MySQL client must send the password in cleartext for such users.<br/>"mysql_native_password" is MySQL-specific and cannot authenticate over PostgreSQL at all.<br/>PostgreSQL SCRAM only covers "plain" and "pg_scram_sha256" users; if any user is "pbkdf2_sha256" or<br/>"mysql_native_password", PostgreSQL falls back to cleartext password auth for every user.<br/>For "pg_scram_sha256" users, keep the default iteration count (4096) and salt length (16): both are<br/>observable in the SCRAM server-first message, and non-default values weaken resistance to username<br/>enumeration. |
-| `max_in_flight_write_bytes` | String | Unset | Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).<br/>Set to 0 to disable the limit. Default: "0" (unlimited) |
-| `write_bytes_exhausted_policy` | String | Unset | Policy when write bytes quota is exhausted.<br/>Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail" |
+| `user_provider` | String | Unset | The user provider for authentication.<br/>Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"<br/>Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",<br/>"mysql_native_password:<hex_sha1_sha1_password>",<br/>"pg_scram_sha256:<iterations>:<hex_salt>:<hex_stored_key>:<hex_server_key>"<br/>"pbkdf2_sha256" and "pg_scram_sha256" protect passwords at rest, but such users cannot log in over MySQL:<br/>`static_user_provider` and `watch_file_user_provider` only negotiate `mysql_native_password`, which cannot verify these formats.<br/>"mysql_native_password" is MySQL-specific and cannot authenticate over PostgreSQL at all.<br/>PostgreSQL SCRAM only covers "plain" and "pg_scram_sha256" users; if any user is "pbkdf2_sha256" or<br/>"mysql_native_password", PostgreSQL falls back to cleartext password auth for every user.<br/>For "pg_scram_sha256" users, keep the default iteration count (4096) and salt length (16): both are<br/>observable in the SCRAM server-first message, and non-default values weaken resistance to username<br/>enumeration. |
+| `max_in_flight_write_bytes` | String | 0 | Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).<br/>Set to 0 to disable the limit. Default: "0" (unlimited) |
+| `write_bytes_exhausted_policy` | String | `wait` | Policy when write bytes quota is exhausted.<br/>Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail" |
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
 | `init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |
-| `max_concurrent_queries` | Integer | `0` | The maximum concurrent queries allowed to be executed. Zero means unlimited. |
 | `enable_telemetry` | Bool | `true` | Enable telemetry to collect anonymous usage data. Enabled by default. |
 | `runtime` | -- | -- | The runtime options. |
-| `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
-| `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute compact operations. |
-| `runtime.compact_rt_max_blocking_threads` | Integer | `4` | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
+| `runtime.global_rt_size` | Integer | Auto | The number of threads to execute the runtime for global read operations.<br/>Defaults to max(num_cpus, 2). |
+| `runtime.compact_rt_size` | Integer | Auto | The number of threads to execute compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
+| `runtime.compact_rt_max_blocking_threads` | Integer | Auto | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
 | `runtime.experimental_workload_scheduler` | -- | -- | Experimental weighted, work-conserving query/write task scheduler. |
 | `runtime.experimental_workload_scheduler.enable` | Bool | `false` | Enable when concurrent queries and writes interfere with each other—for example, when long-running queries increase ingestion latency.<br/>The weights set their relative runtime shares while both are backlogged. Disabled by default. |
 | `runtime.experimental_workload_scheduler.query_weight` | Integer | `2` | Relative query share while both query and write workloads are backlogged. |
@@ -34,7 +33,7 @@
 | `runtime.experimental_workload_scheduler.sample_every_polls` | Integer | `16` | Number of polls between scheduler fairness samples. Must be greater than zero. |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
-| `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout.<br/>When synchronous Prometheus or shared table batching is enabled, a nonzero timeout is<br/>raised to at least the largest active flush interval plus 1 second. The intervals come from<br/>`prom_store.pending_rows_flush_interval` and `pending_rows_batcher.pending_rows_flush_interval`. |
+| `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout.<br/>When synchronous Prometheus, OTLP metrics, or ordinary-table batching is enabled, a nonzero timeout is<br/>raised to at least the largest active flush interval plus 1 second. The intervals come from<br/>`pending_rows_batcher.logical_table.pending_rows_flush_interval` and `pending_rows_batcher.pending_rows_flush_interval`. |
 | `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `http.enable_cors` | Bool | `true` | HTTP CORS support, it's turned on by default<br/>This allows browser to access http APIs without CORS restrictions |
 | `http.cors_allowed_origins` | Array | Unset | Customize allowed origins for HTTP CORS. |
@@ -43,6 +42,8 @@
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.bind_addr` | String | `127.0.0.1:4001` | The address to bind the gRPC server. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
+| `grpc.enable_cors` | Bool | `false` | Enable CORS for gRPC-Web clients in browsers. Disabled by default. |
+| `grpc.cors_allowed_origins` | Array | Unset | Origins allowed by gRPC CORS. An empty list allows any origin. |
 | `grpc.max_connection_age` | String | Unset | The maximum connection age for gRPC connection.<br/>The value can be a human-readable time string. For example: `10m` for ten minutes or `1h` for one hour.<br/>Refer to https://grpc.io/docs/guides/keepalive/ for more details. |
 | `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
 | `grpc.tls.mode` | String | `disable` | TLS mode. |
@@ -75,33 +76,33 @@
 | `influxdb` | -- | -- | InfluxDB protocol options. |
 | `influxdb.enable` | Bool | `true` | Whether to enable InfluxDB protocol in HTTP API. |
 | `influxdb.default_merge_mode` | String | `last_non_null` | Default merge mode for tables automatically created by InfluxDB protocol.<br/>Available values: "last_non_null", "last_row". |
-| `pending_rows_batcher` | -- | -- | Shared experimental ordinary-table batching for opted-in ingestion protocols.<br/>Legacy Prometheus batching settings under prom_store remain supported.<br/>HTTP write protocols sharing this batcher. Omitted or empty disables all entrances.<br/>Supported: influxdb, opentsdb, otlp, logs, loki, splunk, elasticsearch, http_sql, prom.<br/>Prom uses ordinary-table batching without metric engine, otherwise its dedicated batcher.<br/>Effective shared Prom settings take precedence; existing prom_store settings remain compatible. |
+| `pending_rows_batcher` | -- | -- | Ordinary-table batching for opted-in ingestion protocols.<br/>PENDING_ROWS_BATCH_SYNC defaults to true for both batchers. Set it to false to acknowledge<br/>queue admission without waiting for storage; later failures cannot be returned to the client.<br/>Omitted or empty protocols disables batching. Prom without metric engine uses this batcher.<br/>OTLP logs, traces and ordinary metrics use this batcher.<br/>MySQL and PostgreSQL use the same acknowledgement policy. Protocol timeouts are unchanged.<br/>Single-connection writes and INSERT SELECT may incur additional flush waits. |
 | `pending_rows_batcher.pending_rows_flush_interval` | String | `0s` | Flush interval measured from the first pending submission. Zero disables batching. |
 | `pending_rows_batcher.max_batch_rows` | Integer | `100000` | Flush after a complete submission reaches this row threshold. |
 | `pending_rows_batcher.max_concurrent_flushes` | Integer | `256` | Maximum concurrent flushes shared by the frontend batcher. |
-| `pending_rows_batcher.worker_channel_capacity` | Integer | `65526` | Maximum queued submissions per table worker. |
+| `pending_rows_batcher.worker_channel_capacity` | Integer | `65536` | Maximum queued submissions per table worker. |
 | `pending_rows_batcher.max_inflight_requests` | Integer | `3000` | Maximum admitted original requests awaiting completion. |
 | `pending_rows_batcher.flow_notification_queue_capacity` | Integer | `1024` | Maximum number of queued table Flow notifications. |
+| `pending_rows_batcher.logical_table` | -- | -- | Metric-engine logical-table batching for Prom remote write and non-legacy OTLP metrics.<br/>Requires prom_store.with_metric_engine. Logs, traces and legacy metrics are not eligible.<br/>Enable independently with protocols and a nonzero flush interval.<br/>Omitted fields use independent defaults, not parent settings.<br/>Empty protocols or a zero interval disables logical batching without fallback.<br/>Omitting this entire section preserves legacy Prom batching; it does not enable OTLP batching. |
+| `pending_rows_batcher.logical_table.pending_rows_flush_interval` | String | `0s` | Flush interval measured from the first pending submission. Zero disables batching. |
+| `pending_rows_batcher.logical_table.max_batch_rows` | Integer | `100000` | Flush after a complete submission reaches this row threshold. |
+| `pending_rows_batcher.logical_table.max_concurrent_flushes` | Integer | `256` | Maximum concurrent flushes shared by Prom and OTLP metrics. |
+| `pending_rows_batcher.logical_table.worker_channel_capacity` | Integer | `65536` | Maximum queued submissions per physical-table worker. |
+| `pending_rows_batcher.logical_table.max_inflight_requests` | Integer | `3000` | Maximum admitted original requests awaiting completion. |
+| `pending_rows_batcher.logical_table.flow_notification_queue_capacity` | Integer | `1024` | Maximum number of queued logical-table Flow notifications. |
 | `jaeger` | -- | -- | Jaeger protocol options. |
 | `jaeger.enable` | Bool | `true` | Whether to enable Jaeger protocol in HTTP API. |
 | `otlp` | -- | -- | OpenTelemetry protocol options. |
 | `otlp.enable` | Bool | `true` | Whether to enable OpenTelemetry protocol in HTTP API. |
-| `otlp.experimental_enable_exponential_histogram` | Bool | `false` | Experimental: enable cumulative OTLP exponential histogram ingestion. |
 | `otlp.trace_ingest_chunk_size` | Integer | `512` | Maximum spans per trace ingest chunk. Set to 0 to disable splitting. |
+| `otlp.trace_aux_cache_size` | String | Auto | Estimated memory budget for cached trace service/operation keys per frontend,<br/>shared across all catalogs, schemas, and trace tables. Set to 0 to disable caching.<br/>Defaults to 1/128 of the host or pod memory limit, with a minimum of 32MiB.<br/>Uses 32MiB if memory detection is unavailable.<br/>Excludes cache and allocator overhead; shared table names are charged per entry. |
 | `otlp.experimental_enable_resource_info` | Bool | `false` | Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric<br/>resource attributes, so metrics-only services reach the semantic graph. |
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
 | `prom_store.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: do not valid strings. |
-| `prom_store.experimental_enable_prometheus_native_histogram` | Bool | `false` | Experimental: enable Prometheus remote write v2 native histogram ingestion. |
-| `prom_store.pending_rows_flush_interval` | String | `0s` | Interval to flush pending rows batcher.<br/>Set to "0s" to disable batching mode in Prometheus Remote Write endpoint |
-| `prom_store.max_batch_rows` | Integer | `100000` | Max rows per pending batch before triggering a flush. |
-| `prom_store.max_concurrent_flushes` | Integer | `256` | Max number of concurrent batch flushes. |
-| `prom_store.worker_channel_capacity` | Integer | `65526` | Capacity of the pending batch worker channel. |
-| `prom_store.max_inflight_requests` | Integer | `3000` | Max inflight write requests before backpressure. |
-| `prom_store.flow_notification_queue_capacity` | Integer | `1024` | Maximum number of logical-table flow notifications waiting in the shared queue. |
 | `wal` | -- | -- | The WAL options. |
-| `wal.provider` | String | `raft_engine` | The provider of the WAL.<br/>- `raft_engine`: the wal is stored in the local file system by raft-engine.<br/>- `kafka`: it's remote wal that data is stored in Kafka.<br/>- `experimental_object_store`: the wal is stored as objects in an object store.<br/>**Notes: experimental and not supported yet.** |
+| `wal.provider` | String | `raft_engine` | The provider of the WAL.<br/>- `raft_engine`: the wal is stored in the local file system by raft-engine.<br/>- `kafka`: it's remote wal that data is stored in Kafka.<br/>- `experimental_object_store`: the wal is stored as objects in an object store.<br/>**Notes: experimental.** |
 | `wal.dir` | String | Unset | The directory to store the WAL files.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.file_size` | String | `128MB` | The size of the WAL segment file.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.purge_threshold` | String | `1GB` | The threshold of the WAL size to trigger a purge.<br/>**It's only used when the provider is `raft_engine`**. |
@@ -111,7 +112,7 @@
 | `wal.enable_log_recycle` | Bool | `true` | Whether to reuse logically truncated log files.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.prefill_log_files` | Bool | `false` | Whether to pre-create log files on start up.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.sync_period` | String | `5s` | Duration for fsyncing log files.<br/>**It's only used when the provider is `raft_engine`**. |
-| `wal.recovery_parallelism` | Integer | `2` | Parallelism during WAL recovery. |
+| `wal.recovery_parallelism` | Integer | Auto | Parallelism during WAL recovery. Defaults to the number of CPU cores; this example sets it to 2. |
 | `wal.broker_endpoints` | Array | -- | The Kafka broker endpoints.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.connect_timeout` | String | `3s` | The connect timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.timeout` | String | `5s` | The total request timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
@@ -126,7 +127,10 @@
 | `wal.overwrite_entry_start_id` | Bool | `false` | Ignore missing entries during read WAL.<br/>**It's only used when the provider is `kafka`**.<br/><br/>This option ensures that when Kafka messages are deleted, the system<br/>can still successfully replay memtable data without throwing an<br/>out-of-range error.<br/>However, enabling this option might lead to unexpected data loss,<br/>as the system will skip over missing entries instead of treating<br/>them as critical errors. |
 | `wal.storage_provider` | String | `""` | The name of the storage provider that holds the WAL objects, an empty name selects the default object store.<br/>**It's only used when the provider is `experimental_object_store`**. |
 | `wal.prefix` | String | `wal` | The path prefix of the WAL objects inside the storage provider.<br/>The objects are written under `<prefix>/datanodes/<node_id>/epochs/<generation>`, which is derived from this prefix.<br/>**It's only used when the provider is `experimental_object_store`**. |
-| `wal.flush_interval` | String | `100ms` | The interval of flushing buffered entries to the object store, at least `10ms`, defaults to `100ms`.<br/>Each non-empty timer-triggered flush creates one object, and a batch that reaches `max_batch_bytes` is flushed immediately, so under sustained load the batch seals on size and the interval no longer matters.<br/>When writes are sparse, a shorter interval lowers the acknowledgement latency of appends and raises the number of object requests: timer-triggered sealing creates at most one object per interval per node.<br/>**It's only used when the provider is `experimental_object_store`**. |
+| `wal.flush_interval` | String | `100ms` | The interval of flushing buffered entries to the object store, at least `10ms`, defaults to `100ms`.<br/>Each non-empty timer-triggered flush creates one object, and a batch that reaches `max_batch_bytes` is flushed immediately, so under sustained load the batch seals on size and the interval no longer matters.<br/>When writes are sparse, a shorter interval lowers the acknowledgement latency of `durable` appends and raises the number of object requests: timer-triggered sealing creates at most one object per interval per node, and in `enqueued` mode the backlog thresholds can seal earlier. An `enqueued` append does not wait for its batch to seal once it is admitted, but the backlog thresholds can delay admission.<br/>**It's only used when the provider is `experimental_object_store`**. |
+| `wal.ack_mode` | String | `durable` | When an append to the object store WAL returns.<br/>- `durable`: an append returns after the object holding its entries is durable (the default).<br/>- `enqueued`: an append returns once its entries are admitted and their ids are assigned, and the object is created in the background. A crash loses the unpersisted backlog.<br/>**It's only used when the provider is `experimental_object_store`**. |
+| `wal.max_unpersisted_bytes` | String | `64MB` | The size of the unpersisted backlog at which new appends stall until an upload completes, in `enqueued` mode.<br/>Nothing is dropped and nothing is rejected; the threshold does not bound what a crash during an outage can lose.<br/>**It's only used when the provider is `experimental_object_store` and `ack_mode` is `enqueued`**. |
+| `wal.max_unpersisted_age` | String | `8s` | The age of the oldest unpersisted entry at which new appends stall until an upload completes, in `enqueued` mode.<br/>**It's only used when the provider is `experimental_object_store` and `ack_mode` is `enqueued`**. |
 | `wal.on_corrupted_segment` | String | `skip` | What a read does with a segment that still does not decode after a second fetch, because its checksum does not match or its content disagrees with its footer entry.<br/>- `skip`: the segment is skipped and recorded as a WAL hole of its region, a metric is incremented and a warning is logged; the other regions of the object are unaffected (the default).<br/>- `fail`: the read fails, so the region does not open.<br/>**It's only used when the provider is `experimental_object_store`**. |
 | `metadata_store` | -- | -- | Metadata storage options. |
 | `metadata_store.file_size` | String | `64MB` | The size of the metadata store log file. |
@@ -136,11 +140,9 @@
 | `procedure.max_retry_times` | Integer | `3` | Procedure max retry time. |
 | `procedure.retry_delay` | String | `500ms` | Initial retry delay of procedures, increases exponentially |
 | `procedure.max_running_procedures` | Integer | `128` | Max running procedures.<br/>The maximum number of procedures that can be running at the same time.<br/>If the number of running procedures exceeds this limit, the procedure will be rejected. |
-| `flow` | -- | -- | flow engine options. |
-| `flow.num_workers` | Integer | `0` | The number of flow worker in flownode.<br/>Not setting(or set to 0) this value will use the number of CPU cores divided by 2. |
 | `query` | -- | -- | The query engine options. |
 | `query.parallelism` | Integer | `0` | Parallelism of the query engine.<br/>Default to 0, which means the number of CPU cores. |
-| `query.memory_pool_size` | String | `50%` | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit (unbounded, default behavior).<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans. |
+| `query.memory_pool_size` | String | 0 | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit. Defaults to 0 (unlimited); this example sets it to `50%`.<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans. |
 | `query.experimental_memory_pool_policy` | String | `greedy` | Experimental memory pool allocation policy:<br/>- "greedy" (default): first-come-first-served allocation; preserves current behavior.<br/>- "fair": divides available memory among spillable operators and may spill earlier.<br/>Only effective when `memory_pool_size` is bounded (>0). |
 | `query.experimental_spill_mode` | String | `default` | Spill mode:<br/>- "default": preserve DataFusion built-in OS temp directory (default).<br/>- "custom": explicitly configure spill path, quota, and compression.<br/>- "disabled": explicitly disable disk spilling.<br/>Set this to "custom" before using the path/quota/compression keys below. |
 | `query.experimental_spill_path` | String | Unset | Spill directory path. Ignored unless mode is "custom". |
@@ -149,9 +151,11 @@
 | `storage` | -- | -- | The data storage options. |
 | `storage.data_home` | String | `./greptimedb_data` | The working home directory. |
 | `storage.copy_root` | String | `./greptimedb_data/copy` | Root directory for standalone SQL access to local files.<br/>Relative SQL paths are resolved below this directory. Absolute paths are accepted only when<br/>they are inside this directory. Defaults to `<data_home>/copy`.<br/>Distributed deployments always reject SQL access to local files.<br/>Upgrade note: COPY commands and existing external tables that reference paths outside this<br/>directory will fail. Move those files below the copy root, set this option to a dedicated<br/>directory containing them, or migrate the files to object storage before upgrading. |
-| `storage.type` | String | `File` | The storage type used to store the data.<br/>- `File`: the data is stored in the local file system.<br/>- `S3`: the data is stored in the S3 object storage.<br/>- `Gcs`: the data is stored in the Google Cloud Storage.<br/>- `Azblob`: the data is stored in the Azure Blob Storage.<br/>- `Oss`: the data is stored in the Aliyun OSS. |
+| `storage.type` | String | `File` | The storage type used to store the data.<br/>- `File`: the data is stored in the local file system.<br/>- `S3`: the data is stored in the S3 object storage.<br/>- `Gcs`: the data is stored in the Google Cloud Storage.<br/>- `Azblob`: the data is stored in the Azure Blob Storage.<br/>- `Oss`: the data is stored in the Aliyun OSS.<br/>- `Hdfs`: the data is stored in the Hadoop Distributed File System. |
 | `storage.bucket` | String | Unset | The S3 bucket name.<br/>**It's only used when the storage type is `S3`, `Oss` and `Gcs`**. |
-| `storage.root` | String | Unset | The S3 data will be stored in the specified prefix, for example, `s3://${bucket}/${root}`.<br/>**It's only used when the storage type is `S3`, `Oss` and `Azblob`**. |
+| `storage.root` | String | Unset | The directory or object prefix under which data is stored.<br/>**It's only used when the storage type is `S3`, `Oss`, `Gcs`, `Azblob` and `Hdfs`**. |
+| `storage.name_node` | String | Unset | The HDFS NameNode URI, for example, `hdfs://127.0.0.1:9000`.<br/>**It's only used when the storage type is `Hdfs`**. |
+| `storage.options` | InlineTable | Unset | Additional options passed to the native HDFS client.<br/>**It's only used when the storage type is `Hdfs`**. |
 | `storage.access_key_id` | String | Unset | The access key id of the aws account.<br/>It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.<br/>**It's only used when the storage type is `S3` and `Oss`**. |
 | `storage.secret_access_key` | String | Unset | The secret access key of the aws account.<br/>It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.<br/>**It's only used when the storage type is `S3`**. |
 | `storage.access_key_secret` | String | Unset | The secret access key of the aliyun account.<br/>**It's only used when the storage type is `Oss`**. |
@@ -172,12 +176,13 @@
 | `storage.http_client.skip_ssl_validation` | Bool | `false` | To skip the ssl verification<br/>**Security Notice**: Setting `skip_ssl_validation = true` disables certificate verification, making connections vulnerable to man-in-the-middle attacks. Only use this in development or trusted private networks. |
 | `[[region_engine]]` | -- | -- | The region engine options. You can configure multiple region engines.<br/>Each engine type (mito, file, metric) may appear only once; duplicates cause startup to fail. |
 | `region_engine.mito` | -- | -- | The Mito engine options. |
-| `region_engine.mito.num_workers` | Integer | `8` | Number of region workers. |
+| `region_engine.mito.num_workers` | Integer | Auto | Number of region workers. Defaults to half of the available CPU cores, rounded up. |
 | `region_engine.mito.worker_channel_size` | Integer | `128` | Request channel size of each worker. |
 | `region_engine.mito.worker_request_batch_size` | Integer | `64` | Max batch size for a worker to handle requests. |
 | `region_engine.mito.manifest_checkpoint_distance` | Integer | `10` | Number of meta action updated to trigger a new checkpoint for the manifest. |
 | `region_engine.mito.compress_manifest` | Bool | `false` | Whether to compress manifest and checkpoint file by gzip (default false). |
 | `region_engine.mito.experimental_enable_series_index` | Bool | `false` | Under development; do not enable. Whether to enable series indexes.<br/>Indexes are stored on the local filesystem under `{data_home}/series_index`. |
+| `region_engine.mito.experimental_series_index_max_size` | String | `5GiB` | Approximate series and range index size limit in open regions, shared across workers.<br/>Workers periodically refresh usage and skip maintenance when full. In-flight reconciliation<br/>can exceed the limit. Closed-region files, temporary output, catalogs, and old snapshots<br/>retained by readers are not counted.<br/>Minimum: 1KiB. Takes effect on restart. |
 | `region_engine.mito.experimental_enable_range_index` | Bool | `false` | Whether to build and query range indexes when series indexes are enabled.<br/>Obsolete range-index metadata and files are still cleaned up when disabled. |
 | `region_engine.mito.experimental_series_index_maintenance_interval` | String | `5m` | Interval between series-index maintenance runs. Zero uses the default of 5 min. |
 | `region_engine.mito.experimental_series_index_bucket_width` | String | `5days` | Requested minimum series-index bucket width (default: 5 days), rounded up to<br/>an exact multiple of each region's compaction time window. |
@@ -212,7 +217,7 @@
 | `region_engine.mito.min_compaction_interval` | String | `0m` | Minimum time interval between two compactions.<br/>To align with the old behavior, the default value is 0 (no restrictions). |
 | `region_engine.mito.schedule_compaction_after_edit` | Bool | `true` | Whether to allow to schedule a compaction after a successful region edit.<br/><br/>Setting this to "true" is a necessary but not sufficient condition for scheduling compaction after a region edit.<br/>Other constraints, such as "min_compaction_interval", may still prevent compaction from being scheduled.<br/>Setting this to "false", however, guarantees that compaction will not be scheduled after a region edit. |
 | `region_engine.mito.default_flat_format` | Bool | `true` | Whether to enable flat format as the default SST format. |
-| `region_engine.mito.experimental_series_scan_v2` | Bool | `true` | Whether to enable the experimental two-phase mode for eligible metric series scans. |
+| `region_engine.mito.experimental_series_scan_v2` | Bool | `false` | Whether to enable the experimental two-phase mode for eligible metric series scans. |
 | `region_engine.mito.index` | -- | -- | The options for index in Mito engine. |
 | `region_engine.mito.index.aux_path` | String | `""` | Auxiliary directory path for the index in filesystem, used to store intermediate files for<br/>creating the index and staging files for searching the index, defaults to `{data_home}/index_intermediate`.<br/>The default name for this directory is `index_intermediate` for backward compatibility.<br/><br/>This path contains two subdirectories:<br/>- `__intm`: for storing intermediate files used during creating index.<br/>- `staging`: for storing staging files used during searching index. |
 | `region_engine.mito.index.staging_size` | String | `2GB` | The max capacity of the staging directory. |
@@ -255,17 +260,18 @@
 | `logging.tracing_sample_ratio` | -- | Unset | The percentage of tracing will be sampled and exported.<br/>Valid range `[0, 1]`, 1 means all traces are sampled, 0 means all traces are not sampled, the default value is 1.<br/>ratio > 1 are treated as 1. Fractions < 0 are treated as 0 |
 | `logging.tracing_sample_ratio.default_ratio` | Float | `1.0` | -- |
 | `slow_query` | -- | -- | The slow query log options. |
-| `slow_query.enable` | Bool | `false` | Whether to enable slow query log. |
-| `slow_query.record_type` | String | Unset | The record type of slow queries. It can be `system_table` or `log`. |
-| `slow_query.threshold` | String | Unset | The threshold of slow query. |
-| `slow_query.sample_ratio` | Float | Unset | The sampling ratio of slow query log. The value should be in the range of (0, 1]. |
+| `slow_query.enable` | Bool | `true` | Whether to enable slow query log. |
+| `slow_query.record_type` | String | `system_table` | The record type of slow queries. It can be `system_table` or `log`.<br/>If `system_table` is selected, the slow queries will be recorded in a system table `greptime_private.slow_queries`.<br/>If `log` is selected, the slow queries will be logged in a log file `greptimedb-slow-queries.*`. |
+| `slow_query.threshold` | String | `30s` | The threshold of slow query. It can be human readable time string, for example: `10s`, `100ms`, `1s`. |
+| `slow_query.sample_ratio` | Float | `1.0` | The sampling ratio of slow query log. The value should be in the range of (0, 1]. For example, `0.1` means 10% of the slow queries will be logged and `1.0` means all slow queries will be logged. |
+| `slow_query.ttl` | String | `90d` | The TTL of the `slow_queries` system table. Default is `90d` when `record_type` is `system_table`. |
 | `tracing` | -- | -- | The tracing options. Only effect when compiled with `tokio-console` feature. |
 | `tracing.tokio_console_addr` | String | Unset | The tokio console address. |
 | `pipeline` | -- | -- | The pipeline options. |
 | `pipeline.cache_ttl` | String | `10s` | Time to live of the local pipeline cache. Default is `10s`. |
 | `event_recorder` | -- | -- | Configuration options for the event recorder. |
 | `event_recorder.ttl` | String | `90d` | TTL for the events table that will be used to store the events. Default is `90d`. |
-| `event_recorder.event_types` | Array | -- | Event types to record. Current available event types: `create_database`,<br/>`alter_database`, `drop_database`, `create_flow`, `drop_flow`,<br/>`create_table`, `create_logical_tables`, `alter_table`, `alter_logical_tables`,<br/>`drop_table`, `undrop_table`, `purge_dropped_table`, `truncate_table`,<br/>`create_view`, `drop_view`, `admin_function`, `reconcile_catalog`,<br/>`reconcile_database`, `reconcile_table`, `reconcile_logical_tables`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
+| `event_recorder.event_types` | Array | All | Event types to record. Current available event types: `create_database`,<br/>`alter_database`, `drop_database`, `create_flow`, `drop_flow`,<br/>`create_table`, `create_logical_tables`, `alter_table`, `alter_logical_tables`,<br/>`drop_table`, `undrop_table`, `purge_dropped_table`, `truncate_table`,<br/>`create_view`, `drop_view`, `admin_function`, `reconcile_catalog`,<br/>`reconcile_database`, `reconcile_table`, `reconcile_logical_tables`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
 | `memory` | -- | -- | The memory options. |
 | `memory.enable_heap_profiling` | Bool | `true` | Whether to enable heap profiling activation during startup.<br/>When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable<br/>is set to "prof:true,prof_active:false". The official image adds this env variable.<br/>Default is true. |
 
@@ -280,16 +286,16 @@
 | `default_column_prefix` | String | Unset | The default column prefix for auto-created time index, value, and native histogram columns.<br/>Legacy OTLP summary columns keep their historical `greptime_` prefix. |
 | `auto_create_table` | Bool | `true` | Server-side global switch for auto table creation on write.<br/>When `false`, a missing table is never auto-created even if the request sets the `auto_create_table` hint to `true`. Default: `true`. |
 | `experimental_metric_export` | Bool | `false` | Enables experimental Parquet COPY DATABASE using shared Metric physical scans.<br/>Resume requires the previous export and storage writes to have ended; HTTP timeout is not confirmation. |
-| `user_provider` | String | Unset | The user provider for authentication.<br/>Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"<br/>Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",<br/>"mysql_native_password:<hex_sha1_sha1_password>",<br/>"pg_scram_sha256:<iterations>:<hex_salt>:<hex_stored_key>:<hex_server_key>"<br/>"pbkdf2_sha256" and "pg_scram_sha256" protect passwords at rest, but cannot authenticate over MySQL's<br/>native password handshake; a MySQL client must send the password in cleartext for such users.<br/>"mysql_native_password" is MySQL-specific and cannot authenticate over PostgreSQL at all.<br/>PostgreSQL SCRAM only covers "plain" and "pg_scram_sha256" users; if any user is "pbkdf2_sha256" or<br/>"mysql_native_password", PostgreSQL falls back to cleartext password auth for every user.<br/>For "pg_scram_sha256" users, keep the default iteration count (4096) and salt length (16): both are<br/>observable in the SCRAM server-first message, and non-default values weaken resistance to username<br/>enumeration. |
-| `max_in_flight_write_bytes` | String | Unset | Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).<br/>Set to 0 to disable the limit. Default: "0" (unlimited) |
-| `write_bytes_exhausted_policy` | String | Unset | Policy when write bytes quota is exhausted.<br/>Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail" |
+| `user_provider` | String | Unset | The user provider for authentication.<br/>Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"<br/>Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",<br/>"mysql_native_password:<hex_sha1_sha1_password>",<br/>"pg_scram_sha256:<iterations>:<hex_salt>:<hex_stored_key>:<hex_server_key>"<br/>"pbkdf2_sha256" and "pg_scram_sha256" protect passwords at rest, but such users cannot log in over MySQL:<br/>`static_user_provider` and `watch_file_user_provider` only negotiate `mysql_native_password`, which cannot verify these formats.<br/>"mysql_native_password" is MySQL-specific and cannot authenticate over PostgreSQL at all.<br/>PostgreSQL SCRAM only covers "plain" and "pg_scram_sha256" users; if any user is "pbkdf2_sha256" or<br/>"mysql_native_password", PostgreSQL falls back to cleartext password auth for every user.<br/>For "pg_scram_sha256" users, keep the default iteration count (4096) and salt length (16): both are<br/>observable in the SCRAM server-first message, and non-default values weaken resistance to username<br/>enumeration. |
+| `max_in_flight_write_bytes` | String | 0 | Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).<br/>Set to 0 to disable the limit. Default: "0" (unlimited) |
+| `write_bytes_exhausted_policy` | String | `wait` | Policy when write bytes quota is exhausted.<br/>Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail" |
 | `runtime` | -- | -- | The runtime options. |
-| `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
-| `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute compact operations. |
-| `runtime.compact_rt_max_blocking_threads` | Integer | `4` | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
+| `runtime.global_rt_size` | Integer | Auto | The number of threads to execute the runtime for global read operations.<br/>Defaults to max(num_cpus, 2). |
+| `runtime.compact_rt_size` | Integer | Auto | The number of threads to execute compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
+| `runtime.compact_rt_max_blocking_threads` | Integer | Auto | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
-| `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout.<br/>When synchronous Prometheus or shared table batching is enabled, a nonzero timeout is<br/>raised to at least the largest active flush interval plus 1 second. The intervals come from<br/>`prom_store.pending_rows_flush_interval` and `pending_rows_batcher.pending_rows_flush_interval`. |
+| `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout.<br/>When synchronous Prometheus, OTLP metrics, or ordinary-table batching is enabled, a nonzero timeout is<br/>raised to at least the largest active flush interval plus 1 second. The intervals come from<br/>`pending_rows_batcher.logical_table.pending_rows_flush_interval` and `pending_rows_batcher.pending_rows_flush_interval`. |
 | `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `http.enable_cors` | Bool | `true` | HTTP CORS support, it's turned on by default<br/>This allows browser to access http APIs without CORS restrictions |
 | `http.cors_allowed_origins` | Array | Unset | Customize allowed origins for HTTP CORS. |
@@ -297,20 +303,22 @@
 | `http.api_server_addr` | String | `127.0.0.1:4006` | The address to bind the dedicated HTTP API server, in the same form as `addr`.<br/>Defaults to `127.0.0.1:4006`. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.bind_addr` | String | `127.0.0.1:4001` | The address to bind the gRPC server. |
-| `grpc.server_addr` | String | `127.0.0.1:4001` | The address advertised to the metasrv, and used for connections from outside the host.<br/>If left empty or unset, the server will automatically use the IP address of the first network interface<br/>on the host, with the same port number as the one specified in `grpc.bind_addr`. |
+| `grpc.server_addr` | String | Unset | The address advertised to the metasrv, and used for connections from outside the host.<br/>If left empty or unset, the server will automatically use the IP address of the first network interface<br/>on the host, with the same port number as the one specified in `grpc.bind_addr`. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
-| `grpc.flight_compression` | String | `arrow_ipc` | Compression mode for frontend side Arrow IPC service. Available options:<br/>- `none`: disable all compression<br/>- `transport`: only enable gRPC transport compression (zstd)<br/>- `arrow_ipc`: only enable Arrow IPC compression (lz4)<br/>- `all`: enable all compression.<br/>Default to `none` |
+| `grpc.flight_compression` | String | `arrow_ipc` | Compression mode for frontend side Arrow IPC service. Available options:<br/>- `none`: disable all compression<br/>- `transport`: only enable gRPC transport compression (zstd)<br/>- `arrow_ipc`: only enable Arrow IPC compression (lz4)<br/>- `all`: enable all compression.<br/>Default to `arrow_ipc`. |
+| `grpc.enable_cors` | Bool | `false` | Enable CORS for gRPC-Web clients in browsers. Disabled by default. |
+| `grpc.cors_allowed_origins` | Array | Unset | Origins allowed by gRPC CORS. An empty list allows any origin. |
 | `grpc.max_connection_age` | String | Unset | The maximum connection age for gRPC connection.<br/>The value can be a human-readable time string. For example: `10m` for ten minutes or `1h` for one hour.<br/>Refer to https://grpc.io/docs/guides/keepalive/ for more details. |
 | `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
 | `grpc.tls.mode` | String | `disable` | TLS mode. |
 | `grpc.tls.cert_path` | String | Unset | Certificate file path. |
 | `grpc.tls.key_path` | String | Unset | Private key file path. |
 | `grpc.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload.<br/>For now, gRPC tls config does not support auto reload. |
-| `internal_grpc` | -- | -- | The internal gRPC server options. Internal gRPC port for nodes inside cluster to access frontend. |
-| `internal_grpc.bind_addr` | String | `127.0.0.1:4010` | The address to bind the gRPC server. |
-| `internal_grpc.server_addr` | String | `127.0.0.1:4010` | The address advertised to the metasrv, and used for connections from outside the host.<br/>If left empty or unset, the server will automatically use the IP address of the first network interface<br/>on the host, with the same port number as the one specified in `internal_grpc.bind_addr`. |
+| `internal_grpc` | -- | -- | The internal gRPC server options. Internal gRPC port for nodes inside cluster to access frontend.<br/>The internal gRPC server starts only when this section is set. |
+| `internal_grpc.bind_addr` | String | Unset | The address to bind the gRPC server.<br/>If unset, it falls back to `127.0.0.1:4001`, the same address as `grpc.bind_addr`. |
+| `internal_grpc.server_addr` | String | Unset | The address advertised to the metasrv, and used for connections from outside the host.<br/>Unlike `grpc.server_addr`, it is not detected automatically; set it explicitly. |
 | `internal_grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
-| `internal_grpc.flight_compression` | String | `arrow_ipc` | Compression mode for frontend side Arrow IPC service. Available options:<br/>- `none`: disable all compression<br/>- `transport`: only enable gRPC transport compression (zstd)<br/>- `arrow_ipc`: only enable Arrow IPC compression (lz4)<br/>- `all`: enable all compression.<br/>Default to `none` |
+| `internal_grpc.flight_compression` | String | `arrow_ipc` | Compression mode for frontend side Arrow IPC service. Available options:<br/>- `none`: disable all compression<br/>- `transport`: only enable gRPC transport compression (zstd)<br/>- `arrow_ipc`: only enable Arrow IPC compression (lz4)<br/>- `all`: enable all compression.<br/>Default to `arrow_ipc`. |
 | `internal_grpc.tls` | -- | -- | internal gRPC server TLS options, see `mysql.tls` section. |
 | `internal_grpc.tls.mode` | String | `disable` | TLS mode. |
 | `internal_grpc.tls.cert_path` | String | Unset | Certificate file path. |
@@ -342,31 +350,31 @@
 | `influxdb` | -- | -- | InfluxDB protocol options. |
 | `influxdb.enable` | Bool | `true` | Whether to enable InfluxDB protocol in HTTP API. |
 | `influxdb.default_merge_mode` | String | `last_non_null` | Default merge mode for tables automatically created by InfluxDB protocol.<br/>Available values: "last_non_null", "last_row". |
-| `pending_rows_batcher` | -- | -- | Shared experimental ordinary-table batching for opted-in ingestion protocols.<br/>Legacy Prometheus batching settings under prom_store remain supported.<br/>HTTP write protocols sharing this batcher. Omitted or empty disables all entrances.<br/>Supported: influxdb, opentsdb, otlp, logs, loki, splunk, elasticsearch, http_sql, prom.<br/>Prom uses ordinary-table batching without metric engine, otherwise its dedicated batcher.<br/>Effective shared Prom settings take precedence; existing prom_store settings remain compatible. |
+| `pending_rows_batcher` | -- | -- | Ordinary-table batching for opted-in ingestion protocols.<br/>PENDING_ROWS_BATCH_SYNC defaults to true for both batchers. Set it to false to acknowledge<br/>queue admission without waiting for storage; later failures cannot be returned to the client.<br/>Omitted or empty protocols disables batching. Prom without metric engine uses this batcher.<br/>OTLP logs, traces and ordinary metrics use this batcher.<br/>MySQL and PostgreSQL use the same acknowledgement policy. Protocol timeouts are unchanged.<br/>Single-connection writes and INSERT SELECT may incur additional flush waits. |
 | `pending_rows_batcher.pending_rows_flush_interval` | String | `0s` | Flush interval measured from the first pending submission. Zero disables batching. |
 | `pending_rows_batcher.max_batch_rows` | Integer | `100000` | Flush after a complete submission reaches this row threshold. |
 | `pending_rows_batcher.max_concurrent_flushes` | Integer | `256` | Maximum concurrent flushes shared by the frontend batcher. |
-| `pending_rows_batcher.worker_channel_capacity` | Integer | `65526` | Maximum queued submissions per table worker. |
+| `pending_rows_batcher.worker_channel_capacity` | Integer | `65536` | Maximum queued submissions per table worker. |
 | `pending_rows_batcher.max_inflight_requests` | Integer | `3000` | Maximum admitted original requests awaiting completion. |
 | `pending_rows_batcher.flow_notification_queue_capacity` | Integer | `1024` | Maximum number of queued table Flow notifications. |
+| `pending_rows_batcher.logical_table` | -- | -- | Metric-engine logical-table batching for Prom remote write and non-legacy OTLP metrics.<br/>Requires prom_store.with_metric_engine. Logs, traces and legacy metrics are not eligible.<br/>Enable independently with protocols and a nonzero flush interval.<br/>Omitted fields use independent defaults, not parent settings.<br/>Empty protocols or a zero interval disables logical batching without fallback.<br/>Omitting this entire section preserves legacy Prom batching; it does not enable OTLP batching. |
+| `pending_rows_batcher.logical_table.pending_rows_flush_interval` | String | `0s` | Flush interval measured from the first pending submission. Zero disables batching. |
+| `pending_rows_batcher.logical_table.max_batch_rows` | Integer | `100000` | Flush after a complete submission reaches this row threshold. |
+| `pending_rows_batcher.logical_table.max_concurrent_flushes` | Integer | `256` | Maximum concurrent flushes shared by Prom and OTLP metrics. |
+| `pending_rows_batcher.logical_table.worker_channel_capacity` | Integer | `65536` | Maximum queued submissions per physical-table worker. |
+| `pending_rows_batcher.logical_table.max_inflight_requests` | Integer | `3000` | Maximum admitted original requests awaiting completion. |
+| `pending_rows_batcher.logical_table.flow_notification_queue_capacity` | Integer | `1024` | Maximum number of queued logical-table Flow notifications. |
 | `jaeger` | -- | -- | Jaeger protocol options. |
 | `jaeger.enable` | Bool | `true` | Whether to enable Jaeger protocol in HTTP API. |
 | `otlp` | -- | -- | OpenTelemetry protocol options. |
 | `otlp.enable` | Bool | `true` | Whether to enable OpenTelemetry protocol in HTTP API. |
-| `otlp.experimental_enable_exponential_histogram` | Bool | `false` | Experimental: enable cumulative OTLP exponential histogram ingestion. |
 | `otlp.trace_ingest_chunk_size` | Integer | `512` | Maximum spans per trace ingest chunk. Set to 0 to disable splitting. |
+| `otlp.trace_aux_cache_size` | String | Auto | Estimated memory budget for cached trace service/operation keys per frontend,<br/>shared across all catalogs, schemas, and trace tables. Set to 0 to disable caching.<br/>Defaults to 1/128 of the host or pod memory limit, with a minimum of 32MiB.<br/>Uses 32MiB if memory detection is unavailable.<br/>Excludes cache and allocator overhead; shared table names are charged per entry. |
 | `otlp.experimental_enable_resource_info` | Bool | `false` | Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric<br/>resource attributes, so metrics-only services reach the semantic graph. |
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
 | `prom_store.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: do not valid strings. |
-| `prom_store.experimental_enable_prometheus_native_histogram` | Bool | `false` | Experimental: enable Prometheus remote write v2 native histogram ingestion. |
-| `prom_store.pending_rows_flush_interval` | String | `0s` | Interval to flush pending rows batcher.<br/>Set to "0s" to disable batching mode in Prometheus Remote Write endpoint |
-| `prom_store.max_batch_rows` | Integer | `100000` | Max rows per pending batch before triggering a flush. |
-| `prom_store.max_concurrent_flushes` | Integer | `256` | Max number of concurrent batch flushes. |
-| `prom_store.worker_channel_capacity` | Integer | `65526` | Capacity of the pending batch worker channel. |
-| `prom_store.max_inflight_requests` | Integer | `3000` | Max inflight write requests before backpressure. |
-| `prom_store.flow_notification_queue_capacity` | Integer | `1024` | Maximum number of logical-table flow notifications waiting in the shared queue. |
 | `meta_client` | -- | -- | The metasrv client options. |
 | `meta_client.metasrv_addrs` | Array | -- | The addresses of the metasrv. |
 | `meta_client.timeout` | String | `3s` | Operation timeout. |
@@ -379,7 +387,7 @@
 | `query` | -- | -- | The query engine options. |
 | `query.parallelism` | Integer | `0` | Parallelism of the query engine.<br/>Default to 0, which means the number of CPU cores. |
 | `query.allow_query_fallback` | Bool | `false` | Whether to allow query fallback when push down optimize fails.<br/>Default to false, meaning when push down optimize failed, return error msg |
-| `query.memory_pool_size` | String | `50%` | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "4GB", "8GB") or percentage of system memory (e.g., "30%").<br/>Setting it to 0 disables the limit (unbounded, default behavior).<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans (only applies to datanodes). |
+| `query.memory_pool_size` | String | 0 | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "4GB", "8GB") or percentage of system memory (e.g., "30%").<br/>Setting it to 0 disables the limit. Defaults to 0 (unlimited); this example sets it to `50%`.<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans (only applies to datanodes). |
 | `query.experimental_memory_pool_policy` | String | `greedy` | Experimental memory pool allocation policy:<br/>- "greedy" (default): first-come-first-served allocation; preserves current behavior.<br/>- "fair": divides available memory among spillable operators and may spill earlier.<br/>Only effective when `memory_pool_size` is bounded (>0). |
 | `query.experimental_spill_mode` | String | `default` | Spill mode:<br/>- "default": preserve DataFusion built-in OS temp directory (default).<br/>- "custom": explicitly configure spill path, quota, and compression.<br/>- "disabled": explicitly disable disk spilling.<br/>Set this to "custom" before using the path/quota/compression keys below. |
 | `query.experimental_spill_path` | String | Unset | Spill directory path. Ignored unless mode is "custom". |
@@ -387,7 +395,7 @@
 | `query.experimental_spill_compression` | String | `uncompressed` | Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".<br/>Ignored unless mode is "custom". |
 | `datanode` | -- | -- | Datanode options. |
 | `datanode.client` | -- | -- | Datanode client options. |
-| `datanode.client.connect_timeout` | String | `10s` | -- |
+| `datanode.client.connect_timeout` | String | 1s | Connect server timeout. Defaults to `1s`; this example sets it to `10s`. |
 | `datanode.client.tcp_nodelay` | Bool | `true` | -- |
 | `datanode.client.max_recv_message_size` | String | `512MB` | The maximum receive message size for the gRPC client. |
 | `datanode.client.max_send_message_size` | String | `512MB` | The maximum send message size for the gRPC client. |
@@ -420,7 +428,7 @@
 | `pipeline.cache_ttl` | String | `10s` | Time to live of the frontend-local pipeline cache. A pipeline created or deleted on<br/>another frontend takes effect on this one after at most this duration. |
 | `event_recorder` | -- | -- | Configuration options for the event recorder. |
 | `event_recorder.ttl` | String | `90d` | TTL for the events table that will be used to store the events. Default is `90d`. |
-| `event_recorder.event_types` | Array | -- | Event types to record. Current available event type: `admin_function`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
+| `event_recorder.event_types` | Array | All | Event types to record. Current available event type: `admin_function`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
 
 
 ### Metasrv
@@ -432,7 +440,7 @@
 | `store_key_prefix` | String | `""` | If it's not empty, the metasrv will store all data with this key prefix. |
 | `backend` | String | `etcd_store` | The datastore for meta server.<br/>Available values:<br/>- `etcd_store` (default value)<br/>- `memory_store`<br/>- `postgres_store`<br/>- `mysql_store` |
 | `meta_table_name` | String | `greptime_metakv` | Table name in RDS to store metadata. Effect when using a RDS kvbackend.<br/>**Only used when backend is `postgres_store`.** |
-| `meta_schema_name` | String | `greptime_schema` | Optional PostgreSQL schema for metadata table and election table name qualification.<br/>When PostgreSQL public schema is not writable (e.g., PostgreSQL 15+ with restricted public),<br/>set this to a writable schema. GreptimeDB will use `meta_schema_name`.`meta_table_name`.<br/>**Only used when backend is `postgres_store`.** |
+| `meta_schema_name` | String | Unset | Optional PostgreSQL schema for metadata table and election table name qualification.<br/>When PostgreSQL public schema is not writable (e.g., PostgreSQL 15+ with restricted public),<br/>set this to a writable schema. GreptimeDB will use `meta_schema_name`.`meta_table_name`.<br/>**Only used when backend is `postgres_store`.**<br/>Unset by default; this example sets it to `greptime_schema`. |
 | `auto_create_schema` | Bool | `true` | Automatically create PostgreSQL schema if it doesn't exist.<br/>When enabled, the system will execute `CREATE SCHEMA IF NOT EXISTS <schema_name>`<br/>before creating metadata tables. This is useful in production environments where<br/>manual schema creation may be restricted.<br/>Default is true.<br/>Note: The PostgreSQL user must have CREATE SCHEMA permission for this to work.<br/>**Only used when backend is `postgres_store`.** |
 | `meta_election_lock_id` | Integer | `1` | Advisory lock id in PostgreSQL for election. Effect when using PostgreSQL as kvbackend<br/>Only used when backend is `postgres_store`. |
 | `selector` | String | `round_robin` | Datanode selector type.<br/>- `round_robin` (default value)<br/>- `lease_based`<br/>- `load_based`<br/>For details, please see "https://docs.greptime.com/developer-guide/metasrv/selector". |
@@ -443,9 +451,9 @@
 | `heartbeat_interval` | String | `3s` | Base heartbeat interval for calculating distributed time constants.<br/>The frontend heartbeat interval is 6 times of the base heartbeat interval.<br/>The flownode/datanode heartbeat interval is 1 times of the base heartbeat interval.<br/>e.g., If the base heartbeat interval is 3s, the frontend heartbeat interval is 18s, the flownode/datanode heartbeat interval is 3s.<br/>Heartbeat intervals are negotiated from metasrv during handshake; local node configs do not override this. |
 | `enable_telemetry` | Bool | `true` | Whether to enable greptimedb telemetry. Enabled by default. |
 | `runtime` | -- | -- | The runtime options. |
-| `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
-| `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute compact operations. |
-| `runtime.compact_rt_max_blocking_threads` | Integer | `4` | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
+| `runtime.global_rt_size` | Integer | Auto | The number of threads to execute the runtime for global read operations.<br/>Defaults to max(num_cpus, 2). |
+| `runtime.compact_rt_size` | Integer | Auto | The number of threads to execute compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
+| `runtime.compact_rt_max_blocking_threads` | Integer | Auto | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
 | `backend_tls` | -- | -- | TLS configuration for kv store backend (applicable for etcd, PostgreSQL, and MySQL backends)<br/>When using etcd, PostgreSQL, or MySQL as metadata store, you can configure TLS here<br/><br/>Note: if TLS is configured in both this section and the `store_addrs` connection string, the<br/>settings here will override the TLS settings in `store_addrs`. |
 | `backend_tls.mode` | String | `prefer` | TLS mode, refer to https://www.postgresql.org/docs/current/libpq-ssl.html<br/>- "disable" - No TLS<br/>- "prefer" (default) - Try TLS, fallback to plain<br/>- "require" - Require TLS<br/>- "verify_ca" - Require TLS and verify CA<br/>- "verify_full" - Require TLS and verify hostname |
 | `backend_tls.cert_path` | String | `""` | Path to client certificate file (for client authentication)<br/>Like "/path/to/client.crt" |
@@ -457,7 +465,7 @@
 | `backend_client.connect_timeout` | String | `3s` | The connect timeout for backend client. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.bind_addr` | String | `127.0.0.1:3002` | The address to bind the gRPC server. |
-| `grpc.server_addr` | String | `127.0.0.1:3002` | The communication server address for the frontend and datanode to connect to metasrv.<br/>If left empty or unset, the server will automatically use the IP address of the first network interface<br/>on the host, with the same port number as the one specified in `grpc.bind_addr`. |
+| `grpc.server_addr` | String | Unset | The communication server address for the frontend and datanode to connect to metasrv.<br/>If left empty or unset, the server will automatically use the IP address of the first network interface<br/>on the host, with the same port number as the one specified in `grpc.bind_addr`. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
 | `grpc.max_recv_message_size` | String | `512MB` | The maximum receive message size for gRPC server. |
 | `grpc.max_send_message_size` | String | `512MB` | The maximum send message size for gRPC server. |
@@ -479,7 +487,7 @@
 | `datanode` | -- | -- | Datanode options. |
 | `datanode.client` | -- | -- | Datanode client options. |
 | `datanode.client.timeout` | String | `10s` | Operation timeout. |
-| `datanode.client.connect_timeout` | String | `10s` | Connect server timeout. |
+| `datanode.client.connect_timeout` | String | 1s | Connect server timeout. Defaults to `1s`; this example sets it to `10s`. |
 | `datanode.client.tcp_nodelay` | Bool | `true` | `TCP_NODELAY` option for accepted connections. |
 | `datanode.client.max_recv_message_size` | String | `512MB` | The maximum receive message size for the gRPC client. |
 | `datanode.client.max_send_message_size` | String | `512MB` | The maximum send message size for the gRPC client. |
@@ -501,7 +509,7 @@
 | `wal.create_topic_timeout` | String | `30s` | The timeout for creating a Kafka topic.<br/>**It's only used when the provider is `kafka`**. |
 | `event_recorder` | -- | -- | Configuration options for the event recorder. |
 | `event_recorder.ttl` | String | `90d` | TTL for the events table that will be used to store the events. Default is `90d`. |
-| `event_recorder.event_types` | Array | -- | Event types to record. Current available event types: `region_migration`,<br/>`create_database`, `alter_database`, `drop_database`, `create_flow`,<br/>`drop_flow`, `create_table`, `create_logical_tables`, `alter_table`,<br/>`alter_logical_tables`, `drop_table`, `undrop_table`, `purge_dropped_table`,<br/>`truncate_table`, `create_view`, `drop_view`, `repartition`,<br/>`repartition_group`, `wal_prune`, `batch_gc`, `reconcile_catalog`,<br/>`reconcile_database`, `reconcile_table`, `reconcile_logical_tables`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
+| `event_recorder.event_types` | Array | All | Event types to record. Current available event types: `region_migration`,<br/>`create_database`, `alter_database`, `drop_database`, `create_flow`,<br/>`drop_flow`, `create_table`, `create_logical_tables`, `alter_table`,<br/>`alter_logical_tables`, `drop_table`, `undrop_table`, `purge_dropped_table`,<br/>`truncate_table`, `create_view`, `drop_view`, `repartition`,<br/>`repartition_group`, `wal_prune`, `batch_gc`, `reconcile_catalog`,<br/>`reconcile_database`, `reconcile_table`, `reconcile_logical_tables`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
 | `stats_persistence` | -- | -- | Configuration options for the stats persistence. |
 | `stats_persistence.ttl` | String | `0s` | TTL for the stats table that will be used to store the stats.<br/>Set to `0s` to disable stats persistence.<br/>Default is `0s`.<br/>If you want to enable stats persistence, set the TTL to a value greater than 0.<br/>It is recommended to set a small value, e.g., `3h`. |
 | `stats_persistence.interval` | String | `10m` | The interval to persist the stats. Default is `10m`.<br/>The minimum value is `10m`, if the value is less than `10m`, it will be overridden to `10m`. |
@@ -546,22 +554,22 @@
 | `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.bind_addr` | String | `127.0.0.1:3001` | The address to bind the gRPC server. |
-| `grpc.server_addr` | String | `127.0.0.1:3001` | The address advertised to the metasrv, and used for connections from outside the host.<br/>If left empty or unset, the server will automatically use the IP address of the first network interface<br/>on the host, with the same port number as the one specified in `grpc.bind_addr`. |
+| `grpc.server_addr` | String | Unset | The address advertised to the metasrv, and used for connections from outside the host.<br/>If left empty or unset, the server will automatically use the IP address of the first network interface<br/>on the host, with the same port number as the one specified in `grpc.bind_addr`. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
 | `grpc.max_recv_message_size` | String | `512MB` | The maximum receive message size for gRPC server. |
 | `grpc.max_send_message_size` | String | `512MB` | The maximum send message size for gRPC server. |
-| `grpc.flight_compression` | String | `arrow_ipc` | Compression mode for datanode side Arrow IPC service. Available options:<br/>- `none`: disable all compression<br/>- `transport`: only enable gRPC transport compression (zstd)<br/>- `arrow_ipc`: only enable Arrow IPC compression (lz4)<br/>- `all`: enable all compression.<br/>Default to `none` |
+| `grpc.flight_compression` | String | `arrow_ipc` | Compression mode for datanode side Arrow IPC service. Available options:<br/>- `none`: disable all compression<br/>- `transport`: only enable gRPC transport compression (zstd)<br/>- `arrow_ipc`: only enable Arrow IPC compression (lz4)<br/>- `all`: enable all compression.<br/>Default to `arrow_ipc`. |
 | `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
 | `grpc.tls.mode` | String | `disable` | TLS mode. |
 | `grpc.tls.cert_path` | String | Unset | Certificate file path. |
 | `grpc.tls.key_path` | String | Unset | Private key file path. |
 | `grpc.tls.watch` | Bool | `false` | Watch for Certificate and key file change and auto reload.<br/>For now, gRPC tls config does not support auto reload. |
 | `runtime` | -- | -- | The runtime options. |
-| `runtime.global_rt_size` | Integer | `8` | The number of threads to execute the runtime for global read operations. |
-| `runtime.compact_rt_size` | Integer | `4` | The number of threads to execute compact operations. |
-| `runtime.compact_rt_max_blocking_threads` | Integer | `4` | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
-| `runtime.query_rt_size` | Integer | `7` | The number of threads to execute datanode query operations.<br/>Defaults to max(num_cpus - 1, 2). |
-| `runtime.ingest_rt_size` | Integer | `8` | The number of threads to execute datanode ingestion operations. |
+| `runtime.global_rt_size` | Integer | Auto | The number of threads to execute the runtime for global read operations.<br/>Defaults to max(num_cpus, 2). |
+| `runtime.compact_rt_size` | Integer | Auto | The number of threads to execute compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
+| `runtime.compact_rt_max_blocking_threads` | Integer | Auto | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
+| `runtime.query_rt_size` | Integer | Auto | The number of threads to execute datanode query operations.<br/>Defaults to max(num_cpus - 1, 2). |
+| `runtime.ingest_rt_size` | Integer | Auto | The number of threads to execute datanode ingestion operations.<br/>Defaults to max(num_cpus, 2). |
 | `runtime.experimental_workload_scheduler` | -- | -- | Experimental weighted, work-conserving query/write task scheduler. |
 | `runtime.experimental_workload_scheduler.enable` | Bool | `false` | Enable when concurrent queries and writes interfere with each other—for example, when long-running queries increase ingestion latency.<br/>The weights set their relative runtime shares while both are backlogged. Disabled by default. |
 | `runtime.experimental_workload_scheduler.query_weight` | Integer | `2` | Relative query share while both query and write workloads are backlogged. |
@@ -577,7 +585,7 @@
 | `meta_client.metadata_cache_ttl` | String | `10m` | TTL of the metadata cache. |
 | `meta_client.metadata_cache_tti` | String | `5m` | -- |
 | `wal` | -- | -- | The WAL options. |
-| `wal.provider` | String | `raft_engine` | The provider of the WAL.<br/>- `raft_engine`: the wal is stored in the local file system by raft-engine.<br/>- `kafka`: it's remote wal that data is stored in Kafka.<br/>- `noop`: it's a no-op WAL provider that does not store any WAL data.<br/>**Notes: any unflushed data will be lost when the datanode is shutdown.**<br/>- `experimental_object_store`: the wal is stored as objects in an object store.<br/>**Notes: experimental and not supported yet.** |
+| `wal.provider` | String | `raft_engine` | The provider of the WAL.<br/>- `raft_engine`: the wal is stored in the local file system by raft-engine.<br/>- `kafka`: it's remote wal that data is stored in Kafka.<br/>- `noop`: it's a no-op WAL provider that does not store any WAL data.<br/>**Notes: any unflushed data will be lost when the datanode is shutdown.**<br/>- `experimental_object_store`: the wal is stored as objects in an object store.<br/>**Notes: experimental.** |
 | `wal.dir` | String | Unset | The directory to store the WAL files.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.file_size` | String | `128MB` | The size of the WAL segment file.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.purge_threshold` | String | `1GB` | The threshold of the WAL size to trigger a purge.<br/>**It's only used when the provider is `raft_engine`**. |
@@ -587,7 +595,7 @@
 | `wal.enable_log_recycle` | Bool | `true` | Whether to reuse logically truncated log files.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.prefill_log_files` | Bool | `false` | Whether to pre-create log files on start up.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.sync_period` | String | `5s` | Duration for fsyncing log files.<br/>**It's only used when the provider is `raft_engine`**. |
-| `wal.recovery_parallelism` | Integer | `2` | Parallelism during WAL recovery. |
+| `wal.recovery_parallelism` | Integer | Auto | Parallelism during WAL recovery. Defaults to the number of CPU cores; this example sets it to 2. |
 | `wal.broker_endpoints` | Array | -- | The Kafka broker endpoints.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.connect_timeout` | String | `3s` | The connect timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.timeout` | String | `5s` | The total request timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
@@ -598,11 +606,14 @@
 | `wal.overwrite_entry_start_id` | Bool | `false` | Ignore missing entries during read WAL.<br/>**It's only used when the provider is `kafka`**.<br/><br/>This option ensures that when Kafka messages are deleted, the system<br/>can still successfully replay memtable data without throwing an<br/>out-of-range error.<br/>However, enabling this option might lead to unexpected data loss,<br/>as the system will skip over missing entries instead of treating<br/>them as critical errors. |
 | `wal.storage_provider` | String | `""` | The name of the storage provider that holds the WAL objects, an empty name selects the default object store.<br/>**It's only used when the provider is `experimental_object_store`**. |
 | `wal.prefix` | String | `wal` | The path prefix of the WAL objects inside the storage provider.<br/>The objects are written under `<prefix>/datanodes/<node_id>/epochs/<generation>`, which is derived from this prefix.<br/>**It's only used when the provider is `experimental_object_store`**. |
-| `wal.flush_interval` | String | `100ms` | The interval of flushing buffered entries to the object store, at least `10ms`, defaults to `100ms`.<br/>Each non-empty timer-triggered flush creates one object, and a batch that reaches `max_batch_bytes` is flushed immediately, so under sustained load the batch seals on size and the interval no longer matters.<br/>When writes are sparse, a shorter interval lowers the acknowledgement latency of appends and raises the number of object requests: timer-triggered sealing creates at most one object per interval per node.<br/>**It's only used when the provider is `experimental_object_store`**. |
+| `wal.flush_interval` | String | `100ms` | The interval of flushing buffered entries to the object store, at least `10ms`, defaults to `100ms`.<br/>Each non-empty timer-triggered flush creates one object, and a batch that reaches `max_batch_bytes` is flushed immediately, so under sustained load the batch seals on size and the interval no longer matters.<br/>When writes are sparse, a shorter interval lowers the acknowledgement latency of `durable` appends and raises the number of object requests: timer-triggered sealing creates at most one object per interval per node, and in `enqueued` mode the backlog thresholds can seal earlier. An `enqueued` append does not wait for its batch to seal once it is admitted, but the backlog thresholds can delay admission.<br/>**It's only used when the provider is `experimental_object_store`**. |
+| `wal.ack_mode` | String | `durable` | When an append to the object store WAL returns.<br/>- `durable`: an append returns after the object holding its entries is durable (the default).<br/>- `enqueued`: an append returns once its entries are admitted and their ids are assigned, and the object is created in the background. A crash loses the unpersisted backlog.<br/>**It's only used when the provider is `experimental_object_store`**. |
+| `wal.max_unpersisted_bytes` | String | `64MB` | The size of the unpersisted backlog at which new appends stall until an upload completes, in `enqueued` mode.<br/>Nothing is dropped and nothing is rejected; the threshold does not bound what a crash during an outage can lose.<br/>**It's only used when the provider is `experimental_object_store` and `ack_mode` is `enqueued`**. |
+| `wal.max_unpersisted_age` | String | `8s` | The age of the oldest unpersisted entry at which new appends stall until an upload completes, in `enqueued` mode.<br/>**It's only used when the provider is `experimental_object_store` and `ack_mode` is `enqueued`**. |
 | `wal.on_corrupted_segment` | String | `skip` | What a read does with a segment that still does not decode after a second fetch, because its checksum does not match or its content disagrees with its footer entry.<br/>- `skip`: the segment is skipped and recorded as a WAL hole of its region, a metric is incremented and a warning is logged; the other regions of the object are unaffected (the default).<br/>- `fail`: the read fails, so the region does not open.<br/>**It's only used when the provider is `experimental_object_store`**. |
 | `query` | -- | -- | The query engine options. |
 | `query.parallelism` | Integer | `0` | Parallelism of the query engine.<br/>Default to 0, which means the number of CPU cores. |
-| `query.memory_pool_size` | String | `50%` | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit (unbounded, default behavior).<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans. |
+| `query.memory_pool_size` | String | 0 | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit. Defaults to 0 (unlimited); this example sets it to `50%`.<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans. |
 | `query.experimental_memory_pool_policy` | String | `greedy` | Experimental memory pool allocation policy:<br/>- "greedy" (default): first-come-first-served allocation; preserves current behavior.<br/>- "fair": divides available memory among spillable operators and may spill earlier.<br/>Only effective when `memory_pool_size` is bounded (>0). |
 | `query.experimental_spill_mode` | String | `default` | Spill mode:<br/>- "default": preserve DataFusion built-in OS temp directory (default).<br/>- "custom": explicitly configure spill path, quota, and compression.<br/>- "disabled": explicitly disable disk spilling.<br/>Set this to "custom" before using the path/quota/compression keys below. |
 | `query.experimental_spill_path` | String | Unset | Spill directory path. Ignored unless mode is "custom". |
@@ -610,9 +621,11 @@
 | `query.experimental_spill_compression` | String | `uncompressed` | Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".<br/>Ignored unless mode is "custom". |
 | `storage` | -- | -- | The data storage options. |
 | `storage.data_home` | String | `./greptimedb_data` | The working home directory. |
-| `storage.type` | String | `File` | The storage type used to store the data.<br/>- `File`: the data is stored in the local file system.<br/>- `S3`: the data is stored in the S3 object storage.<br/>- `Gcs`: the data is stored in the Google Cloud Storage.<br/>- `Azblob`: the data is stored in the Azure Blob Storage.<br/>- `Oss`: the data is stored in the Aliyun OSS. |
+| `storage.type` | String | `File` | The storage type used to store the data.<br/>- `File`: the data is stored in the local file system.<br/>- `S3`: the data is stored in the S3 object storage.<br/>- `Gcs`: the data is stored in the Google Cloud Storage.<br/>- `Azblob`: the data is stored in the Azure Blob Storage.<br/>- `Oss`: the data is stored in the Aliyun OSS.<br/>- `Hdfs`: the data is stored in the Hadoop Distributed File System. |
 | `storage.bucket` | String | Unset | The S3 bucket name.<br/>**It's only used when the storage type is `S3`, `Oss` and `Gcs`**. |
-| `storage.root` | String | Unset | The S3 data will be stored in the specified prefix, for example, `s3://${bucket}/${root}`.<br/>**It's only used when the storage type is `S3`, `Oss` and `Azblob`**. |
+| `storage.root` | String | Unset | The directory or object prefix under which data is stored.<br/>**It's only used when the storage type is `S3`, `Oss`, `Gcs`, `Azblob` and `Hdfs`**. |
+| `storage.name_node` | String | Unset | The HDFS NameNode URI, for example, `hdfs://127.0.0.1:9000`.<br/>**It's only used when the storage type is `Hdfs`**. |
+| `storage.options` | InlineTable | Unset | Additional options passed to the native HDFS client.<br/>**It's only used when the storage type is `Hdfs`**. |
 | `storage.access_key_id` | String | Unset | The access key id of the aws account.<br/>It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.<br/>**It's only used when the storage type is `S3` and `Oss`**. |
 | `storage.secret_access_key` | String | Unset | The secret access key of the aws account.<br/>It's **highly recommended** to use AWS IAM roles instead of hardcoding the access key id and secret key.<br/>**It's only used when the storage type is `S3`**. |
 | `storage.access_key_secret` | String | Unset | The secret access key of the aliyun account.<br/>**It's only used when the storage type is `Oss`**. |
@@ -633,7 +646,7 @@
 | `storage.http_client.skip_ssl_validation` | Bool | `false` | To skip the ssl verification<br/>**Security Notice**: Setting `skip_ssl_validation = true` disables certificate verification, making connections vulnerable to man-in-the-middle attacks. Only use this in development or trusted private networks. |
 | `[[region_engine]]` | -- | -- | The region engine options. You can configure multiple region engines.<br/>Each engine type (mito, file, metric) may appear only once; duplicates cause startup to fail. |
 | `region_engine.mito` | -- | -- | The Mito engine options. |
-| `region_engine.mito.num_workers` | Integer | `8` | Number of region workers. |
+| `region_engine.mito.num_workers` | Integer | Auto | Number of region workers. Defaults to half of the available CPU cores, rounded up. |
 | `region_engine.mito.worker_channel_size` | Integer | `128` | Request channel size of each worker. |
 | `region_engine.mito.worker_request_batch_size` | Integer | `64` | Max batch size for a worker to handle requests. |
 | `region_engine.mito.manifest_checkpoint_distance` | Integer | `10` | Number of meta action updated to trigger a new checkpoint for the manifest. |
@@ -641,6 +654,7 @@
 | `region_engine.mito.experimental_manifest_keep_removed_file_ttl` | String | `1h` | How long to keep removed files in the `removed_files` field of manifest<br/>after they are removed from manifest.<br/>files will only be removed from `removed_files` field<br/>if both `keep_removed_file_count` and `keep_removed_file_ttl` is reached. |
 | `region_engine.mito.compress_manifest` | Bool | `false` | Whether to compress manifest and checkpoint file by gzip (default false). |
 | `region_engine.mito.experimental_enable_series_index` | Bool | `false` | Under development; do not enable. Whether to enable series indexes.<br/>Indexes are stored on the local filesystem under `{data_home}/series_index`. |
+| `region_engine.mito.experimental_series_index_max_size` | String | `5GiB` | Approximate series and range index size limit in open regions, shared across workers.<br/>Workers periodically refresh usage and skip maintenance when full. In-flight reconciliation<br/>can exceed the limit. Closed-region files, temporary output, catalogs, and old snapshots<br/>retained by readers are not counted.<br/>Minimum: 1KiB. Takes effect on restart. |
 | `region_engine.mito.experimental_enable_range_index` | Bool | `false` | Whether to build and query range indexes when series indexes are enabled.<br/>Obsolete range-index metadata and files are still cleaned up when disabled. |
 | `region_engine.mito.experimental_series_index_maintenance_interval` | String | `5m` | Interval between series-index maintenance runs. Zero uses the default of 5 min. |
 | `region_engine.mito.experimental_series_index_bucket_width` | String | `5days` | Requested minimum series-index bucket width (default: 5 days), rounded up to<br/>an exact multiple of each region's compaction time window. |
@@ -675,7 +689,7 @@
 | `region_engine.mito.min_compaction_interval` | String | `0m` | Minimum time interval between two compactions.<br/>To align with the old behavior, the default value is 0 (no restrictions). |
 | `region_engine.mito.schedule_compaction_after_edit` | Bool | `true` | Whether to allow to schedule a compaction after a successful region edit.<br/><br/>Setting this to "true" is a necessary but not sufficient condition for scheduling compaction after a region edit.<br/>Other constraints, such as "min_compaction_interval", may still prevent compaction from being scheduled.<br/>Setting this to "false", however, guarantees that compaction will not be scheduled after a region edit. |
 | `region_engine.mito.default_flat_format` | Bool | `true` | Whether to enable flat format as the default SST format. |
-| `region_engine.mito.experimental_series_scan_v2` | Bool | `true` | Whether to enable the experimental two-phase mode for eligible metric series scans. |
+| `region_engine.mito.experimental_series_scan_v2` | Bool | `false` | Whether to enable the experimental two-phase mode for eligible metric series scans. |
 | `region_engine.mito.index` | -- | -- | The options for index in Mito engine. |
 | `region_engine.mito.index.aux_path` | String | `""` | Auxiliary directory path for the index in filesystem, used to store intermediate files for<br/>creating the index and staging files for searching the index, defaults to `{data_home}/index_intermediate`.<br/>The default name for this directory is `index_intermediate` for backward compatibility.<br/><br/>This path contains two subdirectories:<br/>- `__intm`: for storing intermediate files used during creating index.<br/>- `staging`: for storing staging files used during searching index. |
 | `region_engine.mito.index.staging_size` | String | `2GB` | The max capacity of the staging directory. |
@@ -732,7 +746,6 @@
 | --- | -----| ------- | ----------- |
 | `node_id` | Integer | Unset | The flownode identifier and should be unique in the cluster. |
 | `flow` | -- | -- | flow engine options. |
-| `flow.num_workers` | Integer | `0` | The number of flow worker in flownode.<br/>Not setting(or set to 0) this value will use the number of CPU cores divided by 2. |
 | `flow.batching_mode` | -- | -- | -- |
 | `flow.batching_mode.query_timeout` | String | `600s` | The default batching engine query timeout is 10 minutes. |
 | `flow.batching_mode.slow_query_threshold` | String | `60s` | will output a warn log for any query that runs for more that this threshold |
@@ -750,9 +763,9 @@
 | `flow.batching_mode.frontend_tls.client_cert_path` | String | Unset | Client Certificate file path. |
 | `flow.batching_mode.frontend_tls.client_key_path` | String | Unset | Client Private key file path. |
 | `grpc` | -- | -- | The gRPC server options. |
-| `grpc.bind_addr` | String | `127.0.0.1:6800` | The address to bind the gRPC server. |
-| `grpc.server_addr` | String | `127.0.0.1:6800` | The address advertised to the metasrv,<br/>and used for connections from outside the host |
-| `grpc.runtime_size` | Integer | `2` | The number of server worker threads. |
+| `grpc.bind_addr` | String | 127.0.0.1:3004 | The address to bind the gRPC server. Defaults to `127.0.0.1:3004`; this example sets it to `127.0.0.1:6800`. |
+| `grpc.server_addr` | String | Unset | The address advertised to the metasrv, and used for connections from outside the host.<br/>If left empty or unset, the server will automatically use the IP address of the first network interface<br/>on the host, with the same port number as the one specified in `grpc.bind_addr`. |
+| `grpc.runtime_size` | Integer | 8 | The number of server worker threads. Defaults to 8; this example sets it to 2. |
 | `grpc.max_recv_message_size` | String | `512MB` | The maximum receive message size for gRPC server. |
 | `grpc.max_send_message_size` | String | `512MB` | The maximum send message size for gRPC server. |
 | `http` | -- | -- | The HTTP server options. |
@@ -786,7 +799,7 @@
 | `tracing.tokio_console_addr` | String | Unset | The tokio console address. |
 | `query` | -- | -- | -- |
 | `query.parallelism` | Integer | `1` | Parallelism of the query engine for query sent by flownode.<br/>Default to 1, so it won't use too much cpu or memory |
-| `query.memory_pool_size` | String | `50%` | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "1GB", "2GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit (unbounded, default behavior).<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans. |
+| `query.memory_pool_size` | String | 0 | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "1GB", "2GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit. Defaults to 0 (unlimited); this example sets it to `50%`.<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans. |
 | `query.experimental_memory_pool_policy` | String | `greedy` | Experimental memory pool allocation policy:<br/>- "greedy" (default): first-come-first-served allocation; preserves current behavior.<br/>- "fair": divides available memory among spillable operators and may spill earlier.<br/>Only effective when `memory_pool_size` is bounded (>0). |
 | `query.experimental_spill_mode` | String | `default` | Spill mode:<br/>- "default": preserve DataFusion built-in OS temp directory (default).<br/>- "custom": explicitly configure spill path, quota, and compression.<br/>- "disabled": explicitly disable disk spilling.<br/>Set this to "custom" before using the path/quota/compression keys below. |
 | `query.experimental_spill_path` | String | Unset | Spill directory path. Ignored unless mode is "custom". |

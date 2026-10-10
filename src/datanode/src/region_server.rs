@@ -92,6 +92,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::{self, timeout};
 use tonic::{Request, Response, Result as TonicResult};
 
+use crate::datanode::record_shutdown_error;
 use crate::error::{
     self, BuildRegionRequestsSnafu, ConcurrentQueryLimiterClosedSnafu,
     ConcurrentQueryLimiterTimeoutSnafu, DataFusionSnafu, DecodeLogicalPlanSnafu,
@@ -354,7 +355,17 @@ impl RegionServer {
             None
         };
 
-        let ctx = request.header.as_ref().map(|h| h.into());
+        let ctx = request
+            .header
+            .as_ref()
+            .map(QueryContext::try_from)
+            .transpose()
+            .map_err(|err| {
+                crate::error::InvalidQueryContextSnafu {
+                    reason: err.to_string(),
+                }
+                .build()
+            })?;
         let query_ctx = Arc::new(ctx.unwrap_or_else(|| QueryContextBuilder::default().build()));
 
         let region_id = request.region_id;
@@ -977,7 +988,15 @@ impl FlightCraft for RegionServer {
         let query_ctx = request
             .header
             .as_ref()
-            .map(|h| Arc::new(QueryContext::from(h)))
+            .map(QueryContext::try_from)
+            .transpose()
+            .map_err(|err| {
+                servers_error::InvalidParameterSnafu {
+                    reason: err.to_string(),
+                }
+                .build()
+            })?
+            .map(Arc::new)
             .unwrap_or(QueryContext::arc());
 
         let region_server = self.clone();
@@ -1286,13 +1305,17 @@ impl RegionServerInner {
         requests: Vec<(RegionId, RegionOpenRequest)>,
         ignore_nonexistent_region: bool,
     ) -> Result<Vec<RegionId>> {
+        let request_count = requests.len();
         let region_changes = requests
             .iter()
             .map(|(region_id, open)| {
                 let attribute = parse_region_attribute(&open.engine, &open.options)?;
                 Ok((*region_id, RegionChange::Register(attribute)))
             })
-            .collect::<Result<HashMap<_, _>>>()?;
+            .collect::<Result<HashMap<_, _>>>()
+            .inspect_err(|err| {
+                record_region_open_failures(engine.name(), err.status_code(), request_count);
+            })?;
 
         for (&region_id, region_change) in &region_changes {
             self.set_region_status_not_ready(region_id, &engine, region_change)
@@ -1315,6 +1338,7 @@ impl RegionServerInner {
                                 .await
                             {
                                 error!(e; "Failed to set region to ready: {}", region_id);
+                                record_region_open_failures(engine.name(), e.status_code(), 1);
                                 errors.push(BoxedError::new(e));
                             } else {
                                 open_regions.push(region_id)
@@ -1328,6 +1352,7 @@ impl RegionServerInner {
                                 warn!("Region {} not found, ignore it, source: {:?}", region_id, e);
                             } else {
                                 error!(e; "Failed to open region: {}", region_id);
+                                record_region_open_failures(engine.name(), e.status_code(), 1);
                                 errors.push(e);
                             }
                         }
@@ -1339,6 +1364,7 @@ impl RegionServerInner {
                     self.unset_region_status(region_id, &engine, *region_change);
                 }
                 error!(e; "Failed to open batch regions");
+                record_region_open_failures(engine.name(), e.status_code(), request_count);
                 errors.push(BoxedError::new(e));
             }
         }
@@ -1374,7 +1400,10 @@ impl RegionServerInner {
                 .read()
                 .unwrap()
                 .get(&engine)
-                .with_context(|| RegionEngineNotFoundSnafu { name: &engine })?
+                .with_context(|| RegionEngineNotFoundSnafu { name: &engine })
+                .inspect_err(|err| {
+                    record_region_open_failures(&engine, err.status_code(), requests.len());
+                })?
                 .clone();
             results.push(
                 self.handle_batch_open_requests_inner(
@@ -1572,6 +1601,24 @@ impl RegionServerInner {
     }
 
     pub async fn handle_request(
+        &self,
+        region_id: RegionId,
+        request: RegionRequest,
+    ) -> Result<RegionResponse> {
+        let open_engine = match &request {
+            RegionRequest::Open(open) => Some(open.engine.clone()),
+            _ => None,
+        };
+        self.handle_request_inner(region_id, request)
+            .await
+            .inspect_err(|err| {
+                if let Some(engine) = open_engine {
+                    record_region_open_failures(&engine, err.status_code(), 1);
+                }
+            })
+    }
+
+    async fn handle_request_inner(
         &self,
         region_id: RegionId,
         request: RegionRequest,
@@ -1921,15 +1968,19 @@ impl RegionServerInner {
 
         drop(self.mito_engine.write().unwrap().take());
         let engines = self.engines.write().unwrap().drain().collect::<Vec<_>>();
+        let mut first_error = None;
         for (engine_name, engine) in engines {
-            engine
+            let result = engine
                 .stop()
                 .await
-                .context(StopRegionEngineSnafu { name: &engine_name })?;
-            info!("Region engine {engine_name} is stopped");
+                .context(StopRegionEngineSnafu { name: &engine_name });
+            if result.is_ok() {
+                info!("Region engine {engine_name} is stopped");
+            }
+            record_shutdown_error(&mut first_error, result);
         }
 
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 }
 
@@ -1945,6 +1996,17 @@ enum RegionChange {
 
 fn is_metric_engine(engine: &str) -> bool {
     engine == METRIC_ENGINE_NAME
+}
+
+/// Records failed open attempts without using arbitrary engine names as metric labels.
+fn record_region_open_failures(engine: &str, status_code: StatusCode, count: usize) {
+    let engine = match engine {
+        MITO_ENGINE_NAME | METRIC_ENGINE_NAME | FILE_ENGINE_NAME => engine,
+        _ => "unknown",
+    };
+    crate::metrics::REGION_OPEN_FAILURES_TOTAL
+        .with_label_values(&[engine, status_code.as_ref()])
+        .inc_by(count as u64);
 }
 
 fn parse_region_attribute(

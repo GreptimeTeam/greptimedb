@@ -16,6 +16,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_frontend::metrics;
 use datatypes::timestamp::TimestampNanosecond;
 use moka::future::Cache;
 
@@ -32,7 +33,7 @@ const PIPELINES_CACHE_SIZE: u64 = 10000;
 /// to encapsulate inner cache. Only public methods are exposed.
 ///
 /// `pipelines` and `original_pipelines` are keyed by the *requested* schema so
-/// a lookup is a single key probe, as [`Cache::try_get_with`] requires;
+/// a lookup is a single key probe through [`Cache::entry`];
 /// resolving it to a stored schema is the loader's job. `failover_cache` has no
 /// loader and keeps the stored-schema key.
 pub(crate) struct PipelineCache {
@@ -71,7 +72,7 @@ impl PipelineCache {
         }
     }
 
-    /// Concurrent misses on the same key share one `init` call.
+    /// Concurrent misses share one `init` call; successful waiters count as hits.
     pub(crate) async fn get_pipeline_with(
         &self,
         schema: &str,
@@ -80,13 +81,17 @@ impl PipelineCache {
         init: impl Future<Output = Result<Arc<Pipeline>>>,
     ) -> Result<Arc<Pipeline>> {
         let key = generate_pipeline_cache_key(schema, name, version);
-        self.pipelines
-            .try_get_with(key, init)
-            .await
+        let entry = self.pipelines.entry(key).or_try_insert_with(init).await;
+        metrics::record_cache_lookup(
+            "pipeline",
+            entry.as_ref().is_ok_and(|entry| !entry.is_fresh()),
+        );
+        entry
+            .map(|entry| entry.into_value())
             .map_err(|error| CacheLoadSnafu { error }.build())
     }
 
-    /// Concurrent misses on the same key share one `init` call.
+    /// Concurrent misses share one `init` call; successful waiters count as hits.
     pub(crate) async fn get_pipeline_str_with(
         &self,
         schema: &str,
@@ -95,9 +100,17 @@ impl PipelineCache {
         init: impl Future<Output = Result<PipelineContent>>,
     ) -> Result<PipelineContent> {
         let key = generate_pipeline_cache_key(schema, name, version);
-        self.original_pipelines
-            .try_get_with(key, init)
-            .await
+        let entry = self
+            .original_pipelines
+            .entry(key)
+            .or_try_insert_with(init)
+            .await;
+        metrics::record_cache_lookup(
+            "pipeline_original",
+            entry.as_ref().is_ok_and(|entry| !entry.is_fresh()),
+        );
+        entry
+            .map(|entry| entry.into_value())
             .map_err(|error| CacheLoadSnafu { error }.build())
     }
 
@@ -114,6 +127,7 @@ impl PipelineCache {
             generate_pipeline_cache_key(schema, name, version),
         ] {
             if let Some(content) = self.failover_cache.get(&key).await {
+                metrics::record_cache_lookup("pipeline_failover", true);
                 return Ok(Some(content));
             }
         }
@@ -126,7 +140,7 @@ impl PipelineCache {
             .filter(|(k, _)| k.ends_with(&suffix))
             .collect::<Vec<_>>();
 
-        match found.len() {
+        let result = match found.len() {
             0 => Ok(None),
             1 => Ok(Some(found.remove(0).1)),
             _ => MultiPipelineWithDiffSchemaSnafu {
@@ -139,7 +153,12 @@ impl PipelineCache {
                     .join(","),
             }
             .fail(),
-        }
+        };
+        metrics::record_cache_lookup(
+            "pipeline_failover",
+            result.as_ref().is_ok_and(|content| content.is_some()),
+        );
+        result
     }
 
     pub(crate) async fn insert_failover_cache(&self, content: PipelineContent, with_latest: bool) {
@@ -191,7 +210,8 @@ impl PipelineCache {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use tokio::sync::Barrier;
+    use common_frontend::metrics::{CACHE_HIT, CACHE_MISS};
+    use tokio::sync::Notify;
 
     use super::*;
 
@@ -205,36 +225,149 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[tokio::test]
     async fn test_concurrent_misses_run_one_loader() {
         const CONCURRENCY: usize = 8;
 
-        let cache = Arc::new(PipelineCache::new(Duration::from_secs(60)));
-        let loads = Arc::new(AtomicUsize::new(0));
-        let barrier = Arc::new(Barrier::new(CONCURRENCY));
-
-        let handles = (0..CONCURRENCY)
+        let hits = CACHE_HIT.with_label_values(&["pipeline_original"]);
+        let misses = CACHE_MISS.with_label_values(&["pipeline_original"]);
+        let before = (hits.get(), misses.get());
+        let cache = PipelineCache::new(Duration::from_secs(60));
+        let loads = AtomicUsize::new(0);
+        let release = Notify::new();
+        let mut requests = (0..CONCURRENCY)
             .map(|_| {
-                let (cache, loads, barrier) = (cache.clone(), loads.clone(), barrier.clone());
-                tokio::spawn(async move {
-                    barrier.wait().await;
+                Box::pin(cache.get_pipeline_str_with("db", "p", None, async {
+                    loads.fetch_add(1, Ordering::SeqCst);
+                    release.notified().await;
+                    Ok(content_at(1))
+                }))
+            })
+            .collect::<Vec<_>>();
+        for request in &mut requests {
+            assert!(futures::poll!(request.as_mut()).is_pending());
+        }
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        release.notify_waiters();
+        for request in requests {
+            assert_eq!(request.await.unwrap(), content_at(1));
+        }
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            (hits.get(), misses.get()),
+            (before.0 + CONCURRENCY as u64 - 1, before.1 + 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pipeline_lookup_metrics() {
+        let cache = PipelineCache::new(Duration::from_secs(60));
+        for compiled in [false, true] {
+            let cache_type = if compiled {
+                "pipeline"
+            } else {
+                "pipeline_original"
+            };
+            let hits = CACHE_HIT.with_label_values(&[cache_type]);
+            let misses = CACHE_MISS.with_label_values(&[cache_type]);
+            let before = (hits.get(), misses.get());
+            let load = async |fail| {
+                if compiled {
+                    cache
+                        .get_pipeline_with("db", "p", None, async {
+                            if fail {
+                                return Err(crate::error::PipelineNotFoundSnafu {
+                                    name: "p",
+                                    version: None,
+                                }
+                                .build());
+                            }
+                            Ok(Arc::new(
+                                crate::manager::table::PipelineTable::compile_pipeline(
+                                    "transform:\n  - fields: [message]\n    type: string",
+                                )?,
+                            ))
+                        })
+                        .await
+                        .map(|_| ())
+                } else {
                     cache
                         .get_pipeline_str_with("db", "p", None, async {
-                            loads.fetch_add(1, Ordering::SeqCst);
-                            // Hold the loader open so every caller is waiting on it.
-                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            if fail {
+                                return Err(crate::error::PipelineNotFoundSnafu {
+                                    name: "p",
+                                    version: None,
+                                }
+                                .build());
+                            }
                             Ok(content_at(1))
                         })
                         .await
-                        .unwrap()
-                })
-            })
-            .collect::<Vec<_>>();
-
-        for handle in handles {
-            assert_eq!(handle.await.unwrap(), content_at(1));
+                        .map(|_| ())
+                }
+            };
+            assert!(load(true).await.is_err());
+            load(false).await.unwrap();
+            // A warm lookup must not evaluate the failing initializer.
+            load(true).await.unwrap();
+            assert_eq!((hits.get(), misses.get()), (before.0 + 1, before.1 + 2));
         }
-        assert_eq!(loads.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_failover_lookup_metrics() {
+        let hits = CACHE_HIT.with_label_values(&["pipeline_failover"]);
+        let misses = CACHE_MISS.with_label_values(&["pipeline_failover"]);
+        let before = (hits.get(), misses.get());
+        let cache = PipelineCache::new(Duration::from_secs(60));
+        assert!(
+            cache
+                .get_failover_cache("db", "p", None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let local = PipelineContent {
+            schema: "a".into(),
+            ..content_at(1)
+        };
+        cache.insert_failover_cache(local.clone(), true).await;
+        // Direct schema lookup and cross-schema fallback each count one hit.
+        assert_eq!(
+            cache.get_failover_cache("a", "p", None).await.unwrap(),
+            Some(local.clone())
+        );
+        assert_eq!(
+            cache.get_failover_cache("db", "p", None).await.unwrap(),
+            Some(local)
+        );
+        cache
+            .insert_failover_cache(
+                PipelineContent {
+                    schema: "b".into(),
+                    ..content_at(2)
+                },
+                true,
+            )
+            .await;
+        assert!(cache.get_failover_cache("db", "p", None).await.is_err());
+        // Global pipelines win over local entries inserted before or after them.
+        for (schema, version) in [(EMPTY_SCHEMA_NAME, 3), ("c", 4)] {
+            cache
+                .insert_failover_cache(
+                    PipelineContent {
+                        schema: schema.into(),
+                        ..content_at(version)
+                    },
+                    true,
+                )
+                .await;
+            assert_eq!(
+                cache.get_failover_cache("db", "p", None).await.unwrap(),
+                Some(content_at(3))
+            );
+        }
+        assert_eq!((hits.get(), misses.get()), (before.0 + 4, before.1 + 2));
     }
 
     #[tokio::test]
@@ -287,26 +420,5 @@ mod tests {
 
         let failover = cache.get_failover_cache("b", "p", None).await.unwrap();
         assert_eq!(failover.map(|c| c.version), Some(v2.version));
-    }
-
-    #[tokio::test]
-    async fn test_failover_serves_global_pipeline_to_unwarmed_schema() {
-        let cache = PipelineCache::new(Duration::from_secs(60));
-        let content = content_at(1);
-
-        cache.insert_failover_cache(content.clone(), true).await;
-
-        let found = cache.get_failover_cache("b", "p", None).await.unwrap();
-        assert_eq!(found, Some(content.clone()));
-
-        // A same-named pipeline under another schema must not shadow the global one.
-        let schema_local = PipelineContent {
-            schema: "x".to_string(),
-            ..content_at(2)
-        };
-        cache.insert_failover_cache(schema_local, true).await;
-
-        let found = cache.get_failover_cache("b", "p", None).await.unwrap();
-        assert_eq!(found, Some(content));
     }
 }

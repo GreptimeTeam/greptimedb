@@ -59,4 +59,14 @@ TQL ANALYZE VERBOSE (0, 0, '1s') test{host!~".*"};
 -- SQLNESS REPLACE (flat_format.*) REDACTED
 TQL ANALYZE VERBOSE (0, 0, '1s') test{host!~".+"};
 
+INSERT INTO test VALUES (0, NULL, 2), (0, '', 3), (0, 'ext4', 4), (0, 'tmpfs', 5);
+
+TQL EVAL (0, 0, '1s') test{host!="tmpfs"};
+TQL EVAL (0, 0, '1s') test{host!~"tmpfs|vfat"};
+TQL EVAL (0, 0, '1s') test{host=""};
+TQL EVAL (0, 0, '1s') test{host!=""};
+TQL EVAL (0, 0, '1s') test{host=~"ext4|"};
+TQL EVAL (0, 0, '1s') test{host!~"ext4|"};
+TQL EVAL (0, 0, '1s') test{missing!="lo"};
+
 DROP TABLE test;

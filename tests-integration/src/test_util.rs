@@ -31,6 +31,7 @@ use client::{Client, Database};
 use common_base::Plugins;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::Configurable;
+use common_event_recorder::EventRecorderOptions;
 #[cfg(test)]
 use common_meta::DatanodeId;
 use common_meta::key::TableMetadataManager;
@@ -328,6 +329,18 @@ impl StorageType {
     }
 }
 
+/// Event recorder options for tests.
+///
+/// The production flush interval is 5s, and the event tests interleave "run a
+/// DDL, wait for its event, run the next DDL", so each barrier costs a full
+/// window. A short interval removes that wait without changing what is asserted.
+pub fn test_event_recorder_options() -> EventRecorderOptions {
+    EventRecorderOptions {
+        flush_interval: Duration::from_millis(100),
+        ..Default::default()
+    }
+}
+
 fn s3_test_config() -> S3Config {
     S3Config {
         connection: S3Connection {
@@ -363,7 +376,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
             let builder = Gcs::from(&gcs_config.connection);
             let config = ObjectStoreConfig::Gcs(gcs_config);
             let store = ObjectStore::new(builder).unwrap();
-            (config, TempDirGuard::Gcs(TempFolder::new(&store, "/")))
+            (config, TempDirGuard::remote(TempFolder::new(&store, "/")))
         }
         StorageType::Azblob => {
             let azblob_config = AzblobConfig {
@@ -381,7 +394,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
             let builder = Azblob::from(&azblob_config.connection);
             let config = ObjectStoreConfig::Azblob(azblob_config);
             let store = ObjectStore::new(builder).unwrap();
-            (config, TempDirGuard::Azblob(TempFolder::new(&store, "/")))
+            (config, TempDirGuard::remote(TempFolder::new(&store, "/")))
         }
         StorageType::Oss => {
             let oss_config = OssConfig {
@@ -398,32 +411,57 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
             let builder = Oss::from(&oss_config.connection);
             let config = ObjectStoreConfig::Oss(oss_config);
             let store = ObjectStore::new(builder).unwrap();
-            (config, TempDirGuard::Oss(TempFolder::new(&store, "/")))
+            (config, TempDirGuard::remote(TempFolder::new(&store, "/")))
         }
         StorageType::S3 | StorageType::S3WithCache => {
             let mut s3_config = s3_test_config();
 
-            if *store_type == StorageType::S3WithCache {
-                s3_config.cache.cache_path = "/tmp/greptimedb_cache".to_string();
+            // The datanode wipes `<cache_path>/cache/object/read` on startup, so a
+            // path shared between concurrently running tests lets a starting test
+            // delete the read cache of a running one.
+            let cache_dir = if *store_type == StorageType::S3WithCache {
+                let dir = create_temp_dir("gt_s3_read_cache");
+                s3_config.cache.cache_path = dir.path().to_string_lossy().to_string();
+                Some(dir)
             } else {
                 s3_config.cache.enable_read_cache = false;
-            }
+                None
+            };
 
             let builder = S3::from(&s3_config.connection);
             let config = ObjectStoreConfig::S3(s3_config);
             let store = ObjectStore::new(builder).unwrap();
-            (config, TempDirGuard::S3(TempFolder::new(&store, "/")))
+            (
+                config,
+                TempDirGuard {
+                    remote: Some(TempFolder::new(&store, "/")),
+                    local_cache: cache_dir,
+                },
+            )
         }
-        StorageType::File => (ObjectStoreConfig::File(FileConfig {}), TempDirGuard::None),
+        StorageType::File => (
+            ObjectStoreConfig::File(FileConfig {}),
+            TempDirGuard::default(),
+        ),
     }
 }
 
-pub enum TempDirGuard {
-    None,
-    S3(TempFolder),
-    Oss(TempFolder),
-    Azblob(TempFolder),
-    Gcs(TempFolder),
+#[derive(Default)]
+pub struct TempDirGuard {
+    /// Prefix to wipe from the remote object store, absent for the file backend.
+    remote: Option<TempFolder>,
+    /// Local read cache directory. Only held so it is removed when the guard drops.
+    #[allow(dead_code)]
+    local_cache: Option<TempDir>,
+}
+
+impl TempDirGuard {
+    fn remote(folder: TempFolder) -> Self {
+        Self {
+            remote: Some(folder),
+            local_cache: None,
+        }
+    }
 }
 
 pub struct TestGuard {
@@ -446,11 +484,7 @@ pub struct StorageGuard(pub TempDirGuard);
 impl TestGuard {
     pub async fn remove_all(&mut self) {
         for storage_guard in self.storage_guards.iter_mut() {
-            if let TempDirGuard::S3(guard)
-            | TempDirGuard::Oss(guard)
-            | TempDirGuard::Azblob(guard)
-            | TempDirGuard::Gcs(guard) = &mut storage_guard.0
-            {
+            if let Some(guard) = &mut storage_guard.0.remote {
                 guard.remove_all().await.unwrap()
             }
         }
@@ -465,11 +499,8 @@ impl Drop for TestGuard {
         common_runtime::spawn_global(async move {
             let mut errors = vec![];
             for guard in guards {
-                if let TempDirGuard::S3(guard)
-                | TempDirGuard::Oss(guard)
-                | TempDirGuard::Azblob(guard)
-                | TempDirGuard::Gcs(guard) = guard.0
-                    && let Err(e) = guard.remove_all().await
+                if let Some(remote) = guard.0.remote
+                    && let Err(e) = remote.remove_all().await
                 {
                     errors.push(e);
                 }
@@ -670,7 +701,7 @@ pub async fn setup_test_http_app_with_frontend_and_slow_query_threshold(
         .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
         .with_logs_handler(instance.fe_instance().clone())
         .with_influxdb_handler(instance.fe_instance().clone())
-        .with_otlp_handler(instance.fe_instance().clone(), true, false)
+        .with_otlp_handler(instance.fe_instance().clone(), true)
         .with_jaeger_handler(instance.fe_instance().clone())
         .with_greptime_config_options(instance.opts.to_toml().unwrap())
         .build();
@@ -690,18 +721,6 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
         user_provider,
         None,
         None,
-        false,
-    )
-    .await
-}
-
-pub async fn setup_test_http_app_with_otlp_exponential_histogram(
-    store_type: StorageType,
-    name: &str,
-    enabled: bool,
-) -> (Router, TestGuard) {
-    setup_test_http_app_with_frontend_and_custom_options(
-        store_type, name, None, None, None, enabled,
     )
     .await
 }
@@ -712,7 +731,6 @@ pub async fn setup_test_http_app_with_frontend_and_custom_options(
     user_provider: Option<UserProviderRef>,
     http_opts: Option<HttpOptions>,
     memory_limiter: Option<ServerMemoryLimiter>,
-    experimental_enable_exponential_histogram: bool,
 ) -> (Router, TestGuard) {
     let plugins = Plugins::new();
     if let Some(user_provider) = user_provider.clone() {
@@ -729,16 +747,18 @@ pub async fn setup_test_http_app_with_frontend_and_custom_options(
         ..Default::default()
     });
 
-    let mut http_server = HttpServerBuilder::new(http_opts)
+    // The memory limiter must be wired before the handlers: routes capture
+    // the builder's limiter at wiring time (mirrors `frontend::server`).
+    let mut http_server = HttpServerBuilder::new(http_opts);
+    if let Some(limiter) = memory_limiter {
+        http_server = http_server.with_memory_limiter(limiter);
+    }
+    let mut http_server = http_server
         .with_sql_handler(instance.fe_instance().clone())
         .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
         .with_logs_handler(instance.fe_instance().clone())
         .with_influxdb_handler(instance.fe_instance().clone())
-        .with_otlp_handler(
-            instance.fe_instance().clone(),
-            true,
-            experimental_enable_exponential_histogram,
-        )
+        .with_otlp_handler(instance.fe_instance().clone(), true)
         .with_prometheus_handler(instance.fe_instance().clone())
         .with_jaeger_handler(instance.fe_instance().clone())
         .with_dashboard_handler(instance.fe_instance().clone())
@@ -746,10 +766,6 @@ pub async fn setup_test_http_app_with_frontend_and_custom_options(
 
     if let Some(user_provider) = user_provider {
         http_server = http_server.with_user_provider(user_provider);
-    }
-
-    if let Some(limiter) = memory_limiter {
-        http_server = http_server.with_memory_limiter(limiter);
     }
 
     let http_server = http_server.build();
@@ -770,14 +786,7 @@ pub async fn setup_test_prom_app_with_frontend(
     store_type: StorageType,
     name: &str,
 ) -> (Router, TestGuard) {
-    setup_test_prom_app_with_frontend_inner(store_type, name, false, false).await
-}
-
-pub async fn setup_test_prom_app_with_frontend_native_histogram(
-    store_type: StorageType,
-    name: &str,
-) -> (Router, TestGuard) {
-    setup_test_prom_app_with_frontend_inner(store_type, name, false, true).await
+    setup_test_prom_app_with_frontend_inner(store_type, name, false, None).await
 }
 
 /// Like [`setup_test_prom_app_with_frontend`] but enables the pending-rows batcher,
@@ -787,14 +796,25 @@ pub async fn setup_test_prom_app_with_frontend_batched(
     store_type: StorageType,
     name: &str,
 ) -> (Router, TestGuard) {
-    setup_test_prom_app_with_frontend_inner(store_type, name, true, false).await
+    setup_test_prom_app_with_frontend_inner(store_type, name, true, None).await
+}
+
+/// Like [`setup_test_prom_app_with_frontend`] but wires a shared request-memory
+/// limiter into the server, mirroring production deployments that configure
+/// `max_in_flight_write_bytes`.
+pub async fn setup_test_prom_app_with_frontend_and_memory_limiter(
+    store_type: StorageType,
+    name: &str,
+    memory_limiter: Option<ServerMemoryLimiter>,
+) -> (Router, TestGuard) {
+    setup_test_prom_app_with_frontend_inner(store_type, name, false, memory_limiter).await
 }
 
 async fn setup_test_prom_app_with_frontend_inner(
     store_type: StorageType,
     name: &str,
     enable_batcher: bool,
-    experimental_enable_prometheus_native_histogram: bool,
+    memory_limiter: Option<ServerMemoryLimiter>,
 ) -> (Router, TestGuard) {
     unsafe {
         std::env::set_var("TZ", "UTC");
@@ -846,7 +866,7 @@ async fn setup_test_prom_app_with_frontend_inner(
     let http_server = build_test_prom_server(
         instance.fe_instance().clone(),
         enable_batcher,
-        experimental_enable_prometheus_native_histogram,
+        memory_limiter,
     )
     .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
     .build();
@@ -855,10 +875,12 @@ async fn setup_test_prom_app_with_frontend_inner(
 }
 
 /// Builds Prometheus HTTP routes for either a standalone or distributed frontend.
+/// `memory_limiter` must be set before the handlers are wired (handlers capture
+/// the limiter at wiring time, mirroring production in `frontend::server`).
 pub fn build_test_prom_server(
     frontend_ref: Arc<Instance>,
     enable_batcher: bool,
-    experimental_enable_prometheus_native_histogram: bool,
+    memory_limiter: Option<ServerMemoryLimiter>,
 ) -> HttpServerBuilder {
     let http_opts = HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
@@ -885,15 +907,18 @@ pub fn build_test_prom_server(
         None
     };
     assert_eq!(pending_rows_batcher.is_some(), enable_batcher);
-    HttpServerBuilder::new(http_opts)
+    let mut builder = HttpServerBuilder::new(http_opts)
         .with_sql_handler(frontend_ref.clone())
-        .with_logs_handler(frontend_ref.clone())
+        .with_logs_handler(frontend_ref.clone());
+    if let Some(limiter) = memory_limiter {
+        builder = builder.with_memory_limiter(limiter);
+    }
+    builder
         .with_prom_handler(
             frontend_ref.clone(),
             Some(frontend_ref.clone()),
             true,
             PromValidationMode::Strict,
-            experimental_enable_prometheus_native_histogram,
             pending_rows_batcher,
         )
         .with_prometheus_handler(frontend_ref)
@@ -977,8 +1002,14 @@ pub async fn setup_authenticated_grpc_database(
             .unwrap();
     let grpc_server = setup_grpc_server_for_frontend_instance(instance, Some(user_provider)).await;
     let grpc_addr = grpc_server.bind_addr().unwrap().to_string();
-    let mut database =
-        Database::new_with_dbname("greptime-public", Client::with_urls(vec![grpc_addr]));
+    let mut database = Database::new_with_dbname(
+        "greptime-public",
+        Client::with_query_and_control_managers(
+            Default::default(),
+            Default::default(),
+            vec![grpc_addr],
+        ),
+    );
     database.set_auth(api::v1::auth_header::AuthScheme::Basic(Basic {
         username: username.to_string(),
         password: password.to_string(),
@@ -1231,6 +1262,61 @@ pub async fn setup_pg_server_with_user_provider(
         .unwrap();
 
     (instance.guard, Arc::new(pg_server))
+}
+
+/// Sets up a standalone instance with both a Prometheus remote-write HTTP app
+/// (native histograms enabled) and a Postgres server attached, so native
+/// histogram data written via remote-write can be queried over the Postgres
+/// protocol.
+pub async fn setup_pg_server_with_prom_native_histogram(
+    store_type: StorageType,
+    name: &str,
+) -> (TestGuard, Router, Arc<Box<dyn Server>>) {
+    unsafe {
+        std::env::set_var("TZ", "UTC");
+    }
+
+    let instance = setup_standalone_instance(name, store_type).await;
+
+    // Prometheus remote-write HTTP app with native histograms enabled.
+    let http_server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let app = http_server.build(http_server.make_app()).unwrap();
+
+    // Postgres server on the same instance.
+    let runtime = RuntimeBuilder::default()
+        .worker_threads(2)
+        .thread_name("pg-runtime")
+        .build()
+        .unwrap();
+
+    let fe_pg_addr = format!("127.0.0.1:{}", ports::get_port());
+    let opts = PostgresOptions {
+        addr: fe_pg_addr.clone(),
+        ..Default::default()
+    };
+    let tls_server_config = Arc::new(
+        ReloadableTlsServerConfig::try_new(opts.tls.clone())
+            .expect("Failed to load certificates and keys"),
+    );
+
+    let mut pg_server = Box::new(PostgresServer::new(
+        instance.fe_instance().clone(),
+        opts.tls.should_force_tls(),
+        tls_server_config,
+        0,
+        runtime,
+        None,
+        None,
+    ));
+
+    pg_server
+        .start(fe_pg_addr.parse::<SocketAddr>().unwrap())
+        .await
+        .unwrap();
+
+    (instance.guard, app, Arc::new(pg_server))
 }
 
 pub(crate) async fn prepare_another_catalog_and_schema(instance: &Instance) {

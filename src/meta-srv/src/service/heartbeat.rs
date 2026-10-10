@@ -419,7 +419,6 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::meta::heartbeat_server::Heartbeat;
-    use api::v1::meta::*;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_telemetry::tracing_context::W3cTrace;
     use servers::grpc::GrpcOptions;
