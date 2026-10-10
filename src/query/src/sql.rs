@@ -865,7 +865,7 @@ pub fn show_query_option(
         return Ok(None);
     };
     let context = engine.engine_context(query_ctx.clone())?;
-    let value = match canonical {
+    let value = match canonical.as_str() {
         "query.allow_query_fallback" => context
             .state()
             .config_options()

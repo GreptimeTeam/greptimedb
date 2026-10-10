@@ -14,36 +14,21 @@
 
 use crate::session_config::{Error, InvalidConfigValueSnafu};
 
-/// Returns the canonical name for a supported option key.
-pub fn canonical_query_option_name(key: &str) -> Option<&'static str> {
+/// Returns a canonical query option alias or a DataFusion optimizer option name.
+pub fn canonical_query_option_name(key: &str) -> Option<String> {
     let key = key.to_ascii_lowercase();
     match key.as_str() {
-        "query_parallelism" | "query.parallelism" => Some("query.parallelism"),
+        "query_parallelism" | "query.parallelism" => Some("query.parallelism".to_string()),
         "query_fallback" | "allow_query_fallback" | "query.allow_query_fallback" => {
-            Some("query.allow_query_fallback")
+            Some("query.allow_query_fallback".to_string())
         }
         "query.enable_remote_dynamic_filter_pushdown" => {
-            Some("query.enable_remote_dynamic_filter_pushdown")
+            Some("query.enable_remote_dynamic_filter_pushdown".to_string())
         }
-        _ => DATAFUSION_OPTIONS
-            .iter()
-            .find(|name| **name == key)
-            .copied(),
+        _ if key.starts_with("datafusion.optimizer.") => Some(key),
+        _ => None,
     }
 }
-
-const DATAFUSION_OPTIONS: &[&str] = &[
-    "datafusion.optimizer.repartition_joins",
-    "datafusion.optimizer.repartition_aggregations",
-    "datafusion.optimizer.repartition_sorts",
-    "datafusion.optimizer.repartition_windows",
-    "datafusion.optimizer.enable_round_robin_repartition",
-    "datafusion.optimizer.prefer_existing_sort",
-    "datafusion.optimizer.prefer_hash_join",
-    "datafusion.optimizer.join_reordering",
-    "datafusion.optimizer.enable_topk_aggregation",
-    "datafusion.optimizer.enable_dynamic_filter_pushdown",
-];
 
 /// Validate a query option, returning its canonical name and normalized value.
 pub fn parse_query_option(key: &str, value: &str) -> Result<Option<(String, String)>, Error> {
@@ -87,9 +72,15 @@ pub fn parse_query_option(key: &str, value: &str) -> Result<Option<(String, Stri
             }
         }
     } else {
-        let normalized = value.to_ascii_lowercase();
         let mut options = datafusion_common::config::ConfigOptions::default();
-        if let Err(error) = options.set(canonical, &normalized) {
+        let set_result = options.set(&canonical, value).or_else(|error| {
+            if value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false") {
+                options.set(&canonical, &value.to_ascii_lowercase())
+            } else {
+                Err(error)
+            }
+        });
+        if let Err(error) = set_result {
             return InvalidConfigValueSnafu {
                 name: key,
                 value,
@@ -97,7 +88,22 @@ pub fn parse_query_option(key: &str, value: &str) -> Result<Option<(String, Stri
             }
             .fail();
         }
-        normalized
+        match options
+            .entries()
+            .into_iter()
+            .find(|entry| entry.key == canonical)
+            .and_then(|entry| entry.value)
+        {
+            Some(value) => value,
+            None => {
+                return InvalidConfigValueSnafu {
+                    name: key,
+                    value,
+                    hint: "No matching DataFusion configuration entry",
+                }
+                .fail();
+            }
+        }
     };
-    Ok(Some((canonical.to_string(), normalized)))
+    Ok(Some((canonical, normalized)))
 }
