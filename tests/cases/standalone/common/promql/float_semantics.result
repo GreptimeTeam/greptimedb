@@ -84,6 +84,31 @@ tql eval (0, 0, '1s') sqrt(float_semantics);
 | 1970-01-01T00:00:00 | NaN                | d    |
 +---------------------+--------------------+------+
 
+-- prom_min/prom_max have their own column names, so SQL can use them next to min/max.
+select min(val) as sql_lo, prom_min(val) as prom_lo from float_semantics;
+
++--------+---------+
+| sql_lo | prom_lo |
++--------+---------+
+| -2.5   | -2.5    |
++--------+---------+
+
+select max(val) as sql_hi, prom_max(val) as prom_hi from float_semantics;
+
++--------+---------+
+| sql_hi | prom_hi |
++--------+---------+
+| NaN    | 2.0     |
++--------+---------+
+
+select prom_min(val) as lo from float_semantics having min(val) < 0;
+
++------+
+| lo   |
++------+
+| -2.5 |
++------+
+
 drop table float_semantics;
 
 Affected Rows: 0

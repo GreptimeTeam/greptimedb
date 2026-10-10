@@ -41,7 +41,7 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::functions_aggregate::average::avg_udaf;
 use datafusion::functions_aggregate::count::count_udaf;
 use datafusion::functions_aggregate::expr_fn::first_value;
-use datafusion::functions_aggregate::min_max::max_udaf;
+use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
 use datafusion::functions_aggregate::stddev::stddev_pop_udaf;
 use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion::functions_aggregate::variance::var_pop_udaf;
@@ -4430,17 +4430,39 @@ impl PromPlanner {
             vec![]
         };
 
-        // update value column name according to the aggregators,
-        let mut new_field_columns = Vec::with_capacity(self.ctx.field_columns.len());
+        // The alias is built from normalized columns so it matches the builtin's
+        // qualified name.
+        let exprs = normalize_cols(exprs, input_plan)
+            .context(DataFusionPlanningSnafu)?
+            .into_iter()
+            .map(Self::alias_extremum_as_builtin)
+            .collect::<Vec<_>>();
 
-        let normalized_exprs =
-            normalize_cols(exprs.iter().cloned(), input_plan).context(DataFusionPlanningSnafu)?;
-        for expr in normalized_exprs {
-            new_field_columns.push(expr.schema_name().to_string());
-        }
-        self.ctx.field_columns = new_field_columns;
+        // update value column name according to the aggregators,
+        self.ctx.field_columns = exprs
+            .iter()
+            .map(|expr| expr.schema_name().to_string())
+            .collect();
 
         Ok((exprs, prev_field_exprs))
+    }
+
+    /// `prom_min`/`prom_max` keep their own names so SQL can use them next to `min`/`max`
+    /// in one aggregate. PromQL output columns keep the builtin names.
+    fn alias_extremum_as_builtin(expr: DfExpr) -> DfExpr {
+        let DfExpr::AggregateFunction(aggr) = &expr else {
+            return expr;
+        };
+        let builtin = match aggr.func.name() {
+            Extremum::MIN_NAME => min_udaf(),
+            Extremum::MAX_NAME => max_udaf(),
+            _ => return expr,
+        };
+        let name = builtin
+            .call(aggr.params.args.clone())
+            .schema_name()
+            .to_string();
+        expr.alias(name)
     }
 
     fn create_numeric_aggregate_expr(
