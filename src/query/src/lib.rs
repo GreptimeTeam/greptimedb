@@ -34,6 +34,29 @@ pub mod region_query;
 pub mod sql;
 pub(crate) mod window_sort;
 
+/// The maximum depth (the longest chain of nodes) of a logical plan that the
+/// recursive plan rewrites are allowed to walk with the worker thread stack.
+///
+/// Deeper plans are either rewritten with depth-safe fallbacks or rejected with
+/// a controlled error instead of risking a stack overflow (see issue #9356).
+pub(crate) const MAX_SAFE_PLAN_DEPTH: usize = 256;
+
+/// Returns the depth of `plan` (a leaf plan has the depth 1).
+///
+/// The plan is traversed iteratively so that scanning a deep plan can not
+/// overflow the stack.
+pub(crate) fn plan_depth(plan: &datafusion_expr::LogicalPlan) -> usize {
+    let mut depth = 0;
+    let mut stack = vec![(plan, 1_usize)];
+    while let Some((node, level)) = stack.pop() {
+        depth = depth.max(level);
+        for input in node.inputs() {
+            stack.push((input, level + 1));
+        }
+    }
+    depth
+}
+
 #[cfg(test)]
 pub(crate) mod test_util;
 #[cfg(test)]

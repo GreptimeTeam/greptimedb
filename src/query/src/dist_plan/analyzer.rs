@@ -247,6 +247,22 @@ fn unwrap_dictionary_literals(plan: LogicalPlan) -> DfResult<Transformed<Logical
 impl DistPlannerAnalyzer {
     /// Try push down as many nodes as possible
     fn try_push_down(&self, plan: LogicalPlan) -> DfResult<LogicalPlan> {
+        // `PlanRewriter` recurses over the plan tree and encodes sub-plans to
+        // Substrait without stack usage protection, so an extremely deep plan
+        // (e.g. thousands of chained `UNION ALL` branches, see issue #9356) can
+        // overflow the worker thread stack. Use the fallback plan rewriter for
+        // such plans: it only wraps every table scan in a `MergeScan`, which keeps
+        // each recursive rewrite step shallow and every remote sub-plan small.
+        let depth = crate::plan_depth(&plan);
+        if depth > crate::MAX_SAFE_PLAN_DEPTH {
+            common_telemetry::warn!(
+                "Logical plan depth {} exceeds the maximum safe depth {}, using fallback plan rewriter",
+                depth,
+                crate::MAX_SAFE_PLAN_DEPTH
+            );
+            return self.use_fallback(plan);
+        }
+
         // Use the subquery-aware transform so expression subqueries (including
         // nested scalar subqueries left in place by DataFusion 55's
         // `enable_physical_uncorrelated_scalar_subquery`) are visited at every

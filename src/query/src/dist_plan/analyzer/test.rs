@@ -2178,6 +2178,52 @@ fn remote_dyn_filter_producer_ids_do_not_collide_between_subquery_and_outer_plan
 }
 
 #[test]
+fn deep_plan_uses_fallback_plan_rewriter() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+
+    // Build a left-deep `UNION ALL` chain deeper than `MAX_SAFE_PLAN_DEPTH`,
+    // mirroring the deep plans reported in issue #9356. `PlanRewriter` (and the
+    // Substrait encoding it performs) can overflow the worker stack on such
+    // plans, so the analyzer must rewrite them with the fallback plan rewriter
+    // instead, which wraps every table scan in its own `MergeScan`.
+    const BRANCHES: usize = 512;
+    let mut plan = LogicalPlanBuilder::scan_with_filters("t", table_source.clone(), None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+    for _ in 1..BRANCHES {
+        let branch = LogicalPlanBuilder::scan_with_filters("t", table_source.clone(), None, vec![])
+            .unwrap()
+            .build()
+            .unwrap();
+        plan = LogicalPlanBuilder::from(plan)
+            .union(branch)
+            .unwrap()
+            .build()
+            .unwrap();
+    }
+    assert!(crate::plan_depth(&plan) > crate::MAX_SAFE_PLAN_DEPTH);
+
+    let rewritten = DistPlannerAnalyzer {}.try_push_down(plan).unwrap();
+
+    let mut merge_scans = 0;
+    let mut stack = vec![&rewritten];
+    while let Some(node) = stack.pop() {
+        if let LogicalPlan::Extension(extension) = node
+            && extension.node.name() == MergeScanLogicalPlan::name()
+        {
+            merge_scans += 1;
+        }
+        stack.extend(node.inputs());
+    }
+    assert_eq!(BRANCHES, merge_scans);
+}
+
+#[test]
 fn date_bin_ts_group_by() {
     init_default_ut_logging();
     let test_table = TestTable::table_with_name(0, "t".to_string());

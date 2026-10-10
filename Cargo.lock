@@ -14037,6 +14037,7 @@ dependencies = [
  "snafu 0.8.6",
  "sqlparser",
  "sqlparser_derive 0.1.1",
+ "stacker",
  "table",
  "uuid",
 ]
