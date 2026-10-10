@@ -30,21 +30,7 @@ use datafusion::execution::{FunctionRegistry, SessionStateBuilder};
 use datafusion::logical_expr::{Extension, LogicalPlan};
 use datafusion_expr::{Expr, UserDefinedLogicalNode};
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
-use promql::functions::{
-    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
-    IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime, MixedRange,
-    NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
-    NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime, NativeHistogramChanges,
-    NativeHistogramCount, NativeHistogramCountOverTime, NativeHistogramDelta,
-    NativeHistogramDivScalar, NativeHistogramDrop, NativeHistogramEq, NativeHistogramFraction,
-    NativeHistogramIDelta, NativeHistogramIRate, NativeHistogramIncrease,
-    NativeHistogramLastOverTime, NativeHistogramMulScalar, NativeHistogramNeg,
-    NativeHistogramNotEq, NativeHistogramPresentOverTime, NativeHistogramQuantile,
-    NativeHistogramRate, NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev,
-    NativeHistogramStdvar, NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime,
-    NativeHistogramToString, PredictLinear, PresentOverTime, PromqlFloatToString, QuantileOverTime,
-    Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime, quantile_udaf,
-};
+use promql::functions::register_promql_functions;
 use prost::Message;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::ResultExt;
@@ -337,79 +323,10 @@ fn register_greptime_functions(
             .context(RegisterUdfSnafu { name })?;
     }
 
-    let _ = session_state.register_udaf(quantile_udaf());
-
-    let _ = session_state.register_udf(Arc::new(IDelta::<false>::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(IDelta::<true>::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(Rate::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(Increase::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(Delta::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(Resets::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(Changes::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(Deriv::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(Round::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(AvgOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(MinOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(MaxOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(SumOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(CountOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(LastOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(AbsentOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(PresentOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(StddevOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(StdvarOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(QuantileOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(PredictLinear::scalar_udf()));
-    let double_exponential_smoothing_udf =
-        DoubleExponentialSmoothing::scalar_udf().with_aliases(["prom_holt_winters"]);
-    let _ = session_state.register_udf(Arc::new(double_exponential_smoothing_udf));
-
-    for udf in [
-        NativeHistogramAbsentOverTime::scalar_udf(),
-        NativeHistogramAdd::scalar_udf(),
-        NativeHistogramAvg::scalar_udf(),
-        NativeHistogramAvgOverTime::scalar_udf(),
-        NativeHistogramChanges::scalar_udf(),
-        NativeHistogramCount::scalar_udf(),
-        NativeHistogramCountOverTime::scalar_udf(),
-        NativeHistogramDelta::scalar_udf(),
-        NativeHistogramDivScalar::scalar_udf(),
-        NativeHistogramDrop::bool_false_udf(String::new(), None),
-        NativeHistogramDrop::bool_true_udf(String::new(), None),
-        NativeHistogramDrop::float_null_udf(String::new(), None),
-        NativeHistogramEq::scalar_udf(),
-        NativeHistogramFraction::scalar_udf(),
-        NativeHistogramIDelta::scalar_udf(),
-        NativeHistogramIRate::scalar_udf(),
-        NativeHistogramIncrease::scalar_udf(),
-        NativeHistogramLastOverTime::scalar_udf(),
-        MixedRange::float_udf(None),
-        MixedRange::histogram_udf(None),
-        NativeHistogramMulScalar::scalar_udf(),
-        NativeHistogramNeg::scalar_udf(),
-        NativeHistogramNotEq::scalar_udf(),
-        NativeHistogramPresentOverTime::scalar_udf(),
-        NativeHistogramQuantile::scalar_udf(),
-        NativeHistogramRate::scalar_udf(),
-        NativeHistogramResets::scalar_udf(),
-        NativeHistogramScalarMul::scalar_udf(),
-        NativeHistogramStddev::scalar_udf(),
-        NativeHistogramStdvar::scalar_udf(),
-        NativeHistogramSub::scalar_udf(),
-        NativeHistogramSum::scalar_udf(),
-        NativeHistogramSumOverTime::scalar_udf(),
-        NativeHistogramToString::scalar_udf(),
-        PromqlFloatToString::scalar_udf(),
-    ] {
-        let _ = session_state.register_udf(Arc::new(udf));
-    }
-
-    for udaf in [
-        NativeHistogramAggAvg::aggregate_udf(),
-        NativeHistogramAggSum::aggregate_udf(),
-    ] {
-        let _ = session_state.register_udaf(Arc::new(udaf));
-    }
+    // The PromQL functions (scalar UDFs and UDAFs), including aliases such
+    // as `prom_holt_winters` and the native-histogram functions, are
+    // registered by the `promql` crate itself.
+    register_promql_functions(session_state);
 
     Ok(())
 }
@@ -471,6 +388,10 @@ mod tests {
     use datatypes::data_type::DataType;
     use futures::stream::BoxStream;
     use promql::extension_plan::{RangeManipulate, SeriesNormalize, UnionDistinctOn};
+    use promql::functions::{
+        MixedRange, NativeHistogramAggAvg, NativeHistogramAggSum, NativeHistogramCount,
+        NativeHistogramDrop, PromqlFloatToString, Rate, Round, quantile_udaf,
+    };
     use session::context::QueryContext;
     use table::TableRef;
     use table::metadata::{TableId, TableInfoRef};
@@ -1640,5 +1561,129 @@ mod tests {
             err.contains("Type variation extensions are not supported"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_serializer_decode_centralized_promql_registration() {
+        let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
+        let factory = QueryEngineFactory::new(
+            catalog_list,
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        );
+        let engine = factory.query_engine();
+        let plan_decoder = engine
+            .engine_context(QueryContext::arc())
+            .new_plan_decoder()
+            .unwrap();
+
+        // Scalar functions registered by `register_promql_functions`.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "timestamp_range",
+                ArrowDataType::Dictionary(
+                    Box::new(ArrowDataType::Int64),
+                    Box::new(ArrowDataType::Timestamp(TimeUnit::Millisecond, None)),
+                ),
+                true,
+            ),
+            Field::new(
+                "value_range",
+                ArrowDataType::Dictionary(
+                    Box::new(ArrowDataType::Int64),
+                    Box::new(ArrowDataType::Float64),
+                ),
+                true,
+            ),
+            Field::new(
+                "timestamp",
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("range_length", ArrowDataType::Int64, true),
+        ]));
+        let plan = LogicalPlanBuilder::scan(
+            "devices",
+            Arc::new(LogicalTableSource::new(schema.clone())),
+            None,
+        )
+        .unwrap()
+        .project(vec![
+            Expr::ScalarFunction(ScalarFunction {
+                func: Arc::new(Rate::scalar_udf()),
+                args: vec![
+                    col("timestamp_range"),
+                    col("value_range"),
+                    col("timestamp"),
+                    col("range_length"),
+                ],
+            })
+            .alias("rate"),
+            Expr::ScalarFunction(ScalarFunction {
+                func: Arc::new(Round::scalar_udf()),
+                args: vec![lit(1.0), lit(0.5)],
+            })
+            .alias("rounded"),
+        ])
+        .unwrap()
+        .build()
+        .unwrap();
+        let bytes = DFLogicalSubstraitConvertor
+            .encode(&plan, DefaultSerializer)
+            .unwrap();
+        let table_provider = Arc::new(MemTable::try_new(schema, vec![vec![]]).unwrap());
+        let decoded = plan_decoder
+            .decode(
+                bytes,
+                Arc::new(DummyCatalogList::with_table_provider(table_provider)),
+                false,
+            )
+            .await
+            .unwrap()
+            .to_string();
+        assert!(decoded.contains(Rate::name()));
+        assert!(decoded.contains(Round::name()));
+
+        // The `quantile` UDAF registered together with the PromQL functions.
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "float",
+            ArrowDataType::Float64,
+            true,
+        )]));
+        let plan = LogicalPlanBuilder::scan(
+            "devices",
+            Arc::new(LogicalTableSource::new(schema.clone())),
+            None,
+        )
+        .unwrap()
+        .aggregate(
+            Vec::<Expr>::new(),
+            vec![
+                quantile_udaf()
+                    .call(vec![lit(0.5), col("float")])
+                    .alias("q"),
+            ],
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let bytes = DFLogicalSubstraitConvertor
+            .encode(&plan, DefaultSerializer)
+            .unwrap();
+        let table_provider = Arc::new(MemTable::try_new(schema, vec![vec![]]).unwrap());
+        let decoded = plan_decoder
+            .decode(
+                bytes,
+                Arc::new(DummyCatalogList::with_table_provider(table_provider)),
+                false,
+            )
+            .await
+            .unwrap()
+            .to_string();
+        assert!(decoded.contains("quantile(Float64(0.5)"));
     }
 }
