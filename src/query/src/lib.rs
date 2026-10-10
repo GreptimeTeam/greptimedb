@@ -14,8 +14,8 @@
 
 use std::sync::Arc;
 
-use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::Result as DfResult;
+use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_expr::LogicalPlan;
 
 mod analyze;
