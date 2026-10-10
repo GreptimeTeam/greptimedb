@@ -1304,4 +1304,106 @@ mod test {
         };
         assert_eq!(affected_rows, 0);
     }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_flight_query_options_are_applied_and_request_scoped() {
+        common_telemetry::init_default_ut_logging();
+
+        let (_db, server) = setup_grpc_server(StorageType::File, "flight_query_options").await;
+        let client = Database::new_with_dbname(
+            "greptime-public",
+            Client::with_urls(vec![server.bind_addr().unwrap().to_string()]),
+        );
+
+        let run = |hint: Option<(&'static str, &'static str)>| {
+            let client = client.clone();
+            async move {
+                let mut request = client.flight_request();
+                if let Some((key, value)) = hint {
+                    request = request.with_hints(&[(key, value)]);
+                }
+                request
+                    .sql("SHOW VARIABLES query.parallelism")
+                    .await
+                    .unwrap()
+                    .data
+                    .pretty_print()
+                    .await
+            }
+        };
+        let default_before = run(None).await;
+        let (canonical, legacy) = tokio::join!(
+            run(Some(("query.parallelism", "4"))),
+            run(Some(("query_parallelism", "7"))),
+        );
+        let has_value = |output: &str, expected: &str| {
+            output.lines().any(|line| {
+                line.trim().starts_with('|')
+                    && line.trim().ends_with('|')
+                    && line
+                        .rsplit('|')
+                        .nth(1)
+                        .is_some_and(|cell| cell.trim() == expected)
+            })
+        };
+        assert!(has_value(&canonical, "4"), "{canonical}");
+        assert!(has_value(&legacy, "7"), "{legacy}");
+        let default_after = run(None).await;
+        assert_eq!(
+            default_after, default_before,
+            "request-scoped hint changed the subsequent default result"
+        );
+        for (variable, hint_value, expected) in [
+            ("query.allow_query_fallback", "false", "false"),
+            (
+                "query.enable_remote_dynamic_filter_pushdown",
+                "false",
+                "false",
+            ),
+            (
+                "datafusion.optimizer.enable_dynamic_filter_pushdown",
+                "false",
+                "false",
+            ),
+            ("datafusion.optimizer.filter_null_join_keys", "true", "true"),
+            ("datafusion.optimizer.max_passes", "5", "5"),
+        ] {
+            let value = client
+                .flight_request()
+                .with_hints(&[(variable, hint_value)])
+                .sql(format!("SHOW VARIABLES {variable}"))
+                .await
+                .unwrap()
+                .data
+                .pretty_print()
+                .await;
+            assert!(has_value(&value, expected), "{variable}: {value}");
+        }
+
+        for (key, value) in [
+            ("query.parallelism", "0"),
+            ("query.unknown_option", "true"),
+            ("datafusion.optimizer.repartition_joins", "invalid"),
+            ("datafusion.execution.batch_size", "12"),
+        ] {
+            let err = client
+                .flight_request()
+                .with_hints(&[(key, value)])
+                .sql("SELECT 1")
+                .await
+                .unwrap_err();
+            assert_eq!(
+                err.status_code(),
+                StatusCode::InvalidArguments,
+                "{key}={value}: {err:?}"
+            );
+        }
+        let err = client
+            .flight_request()
+            .with_hints(&[("query.parallelism", "4"), ("query_parallelism", "7")])
+            .sql("SELECT 1")
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+    }
 }

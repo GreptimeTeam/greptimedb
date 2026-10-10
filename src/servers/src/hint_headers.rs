@@ -100,10 +100,77 @@ impl ToHeaderMap for HeaderMap {
 }
 #[cfg(test)]
 mod tests {
+    use common_error::ext::ErrorExt;
     use http::header::{HeaderMap, HeaderValue};
     use tonic::metadata::{MetadataMap, MetadataValue};
 
     use super::*;
+
+    #[test]
+    fn test_query_style_missing_equals_is_preserved() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HINTS_KEY, HeaderValue::from_static("query.parallelism"));
+        assert_eq!(
+            extract_hints(&headers),
+            vec![("query.parallelism".to_string(), String::new())]
+        );
+    }
+
+    #[test]
+    fn test_query_option_aliases_normalize_and_conflicts_fail() {
+        let hints = validate_public_hints(vec![
+            ("query_parallelism".into(), "04".into()),
+            ("query.parallelism".into(), "4".into()),
+            ("query_fallback".into(), "TRUE".into()),
+        ])
+        .unwrap();
+        assert_eq!(
+            hints,
+            vec![
+                ("query.parallelism".into(), "4".into()),
+                ("query.parallelism".into(), "4".into()),
+                ("query.allow_query_fallback".into(), "true".into()),
+            ]
+        );
+        assert!(
+            validate_public_hints(vec![
+                ("query_parallelism".into(), "4".into()),
+                ("query.parallelism".into(), "5".into()),
+            ])
+            .is_err()
+        );
+    }
+    #[test]
+    fn test_unknown_or_malformed_query_options_fail() {
+        for (key, value) in [
+            ("query.parallelism", "0"),
+            ("query.unknown_option", "true"),
+            ("datafusion.execution.batch_size", "12"),
+            ("query.enable_remote_dynamic_filter_pushdown", "yes"),
+        ] {
+            assert!(validate_public_hints(vec![(key.into(), value.into())]).is_err());
+        }
+    }
+
+    #[test]
+    fn test_unrelated_duplicate_hints_remain_last_write_wins() {
+        let hints = validate_public_hints(vec![
+            ("ttl".into(), "1d".into()),
+            ("ttl".into(), "2d".into()),
+        ])
+        .unwrap();
+        assert_eq!(hints.len(), 2);
+    }
+
+    #[test]
+    fn test_public_query_options_are_validated_before_apply() {
+        let err =
+            validate_public_hints(vec![("query.parallelism".into(), "0".into())]).unwrap_err();
+        assert_eq!(
+            err.status_code(),
+            common_error::status_code::StatusCode::InvalidArguments
+        );
+    }
 
     #[test]
     fn test_extract_skip_wal_hint() {
