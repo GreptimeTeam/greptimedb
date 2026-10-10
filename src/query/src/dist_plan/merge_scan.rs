@@ -929,13 +929,6 @@ impl MergeScanExec {
     }
 }
 
-#[cfg(test)]
-impl MergeScanExec {
-    fn remote_dyn_filter_producer_id(&self) -> Option<RemoteDynFilterProducerId> {
-        self.remote_dyn_filter_producer_id
-    }
-}
-
 /// Metrics for a region of a partition.
 #[derive(Debug, Clone)]
 struct RegionMetrics {
@@ -1333,9 +1326,9 @@ mod tests {
     };
     use datafusion::config::ConfigOptions;
     use datafusion::execution::SessionStateBuilder;
+    use datafusion::physical_plan::Partitioning;
     use datafusion::physical_plan::filter_pushdown::ChildFilterPushdownResult;
     use datafusion::physical_plan::repartition::RepartitionExec;
-    use datafusion::physical_plan::{ExecutionPlanProperties, Partitioning};
     use datafusion::physical_plan::{StatisticsArgs, StatisticsContext};
     use datafusion_expr::{LogicalPlanBuilder, col, lit};
     use datafusion_physical_expr::PhysicalExpr;
