@@ -38,6 +38,7 @@ use datafusion::arrow::array::{
     ArrayRef, DictionaryArray, Float64Array, TimestampMillisecondArray,
 };
 use datafusion::error::DataFusionError;
+use datafusion::execution::{FunctionRegistry, SessionState};
 use datafusion::physical_plan::ColumnarValue;
 use datatypes::arrow::array::Array;
 use datatypes::arrow::datatypes::{DataType, Int64Type};
@@ -62,6 +63,7 @@ pub use quantile::QuantileOverTime;
 pub use quantile_aggr::{QUANTILE_NAME, quantile_udaf};
 pub use resets::Resets;
 pub use round::Round;
+use std::sync::Arc;
 pub use vector_matching::{MatchGroupViolation, UniqueMatchGroup};
 
 use crate::range_array::RangeArray;
@@ -230,10 +232,95 @@ pub(crate) fn linear_regression_slices(
     (Some(slope), Some(intercept))
 }
 
+/// Registers every PromQL scalar function (UDF) and aggregate function (UDAF)
+/// implemented in this module into `session_state`.
+///
+/// This is the single entry point for PromQL function registration, so plan
+/// decoding does not have to enumerate individual PromQL function
+/// implementations: function names, aliases (e.g. `prom_holt_winters`) and
+/// signatures are all declared here.
+pub fn register_promql_functions(session_state: &mut SessionState) {
+    let _ = session_state.register_udaf(quantile_udaf());
+
+    let _ = session_state.register_udf(Arc::new(IDelta::<false>::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(IDelta::<true>::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Rate::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Increase::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Delta::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Resets::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Changes::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Deriv::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Round::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(AvgOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(MinOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(MaxOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(SumOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(CountOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(LastOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(AbsentOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(PresentOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(StddevOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(StdvarOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(QuantileOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(PredictLinear::scalar_udf()));
+    // Legacy Prometheus name of the double exponential smoothing function.
+    let double_exponential_smoothing_udf =
+        DoubleExponentialSmoothing::scalar_udf().with_aliases(["prom_holt_winters"]);
+    let _ = session_state.register_udf(Arc::new(double_exponential_smoothing_udf));
+
+    for udf in [
+        NativeHistogramAbsentOverTime::scalar_udf(),
+        NativeHistogramAdd::scalar_udf(),
+        NativeHistogramAvg::scalar_udf(),
+        NativeHistogramAvgOverTime::scalar_udf(),
+        NativeHistogramChanges::scalar_udf(),
+        NativeHistogramCount::scalar_udf(),
+        NativeHistogramCountOverTime::scalar_udf(),
+        NativeHistogramDelta::scalar_udf(),
+        NativeHistogramDivScalar::scalar_udf(),
+        NativeHistogramDrop::bool_false_udf(String::new(), None),
+        NativeHistogramDrop::bool_true_udf(String::new(), None),
+        NativeHistogramDrop::float_null_udf(String::new(), None),
+        NativeHistogramEq::scalar_udf(),
+        NativeHistogramFraction::scalar_udf(),
+        NativeHistogramIDelta::scalar_udf(),
+        NativeHistogramIRate::scalar_udf(),
+        NativeHistogramIncrease::scalar_udf(),
+        NativeHistogramLastOverTime::scalar_udf(),
+        MixedRange::float_udf(None),
+        MixedRange::histogram_udf(None),
+        NativeHistogramMulScalar::scalar_udf(),
+        NativeHistogramNeg::scalar_udf(),
+        NativeHistogramNotEq::scalar_udf(),
+        NativeHistogramPresentOverTime::scalar_udf(),
+        NativeHistogramQuantile::scalar_udf(),
+        NativeHistogramRate::scalar_udf(),
+        NativeHistogramResets::scalar_udf(),
+        NativeHistogramScalarMul::scalar_udf(),
+        NativeHistogramStddev::scalar_udf(),
+        NativeHistogramStdvar::scalar_udf(),
+        NativeHistogramSub::scalar_udf(),
+        NativeHistogramSum::scalar_udf(),
+        NativeHistogramSumOverTime::scalar_udf(),
+        NativeHistogramToString::scalar_udf(),
+        PromqlFloatToString::scalar_udf(),
+    ] {
+        let _ = session_state.register_udf(Arc::new(udf));
+    }
+    for udaf in [
+        NativeHistogramAggAvg::aggregate_udf(),
+        NativeHistogramAggSum::aggregate_udf(),
+    ] {
+        let _ = session_state.register_udaf(Arc::new(udaf));
+    }
+}
+
 #[cfg(test)]
 mod test {
+    use std::collections::BTreeSet;
     use std::sync::Arc;
 
+    use datafusion::execution::SessionStateBuilder;
     use datafusion::physical_plan::ColumnarValue;
     use datatypes::arrow::array::Int64Array;
     use datatypes::arrow::datatypes::Int64Type;
@@ -378,5 +465,108 @@ mod test {
 
         assert_eq!(extracted.get_offset_length(0), Some((0, 2)));
         assert_eq!(extracted.get_offset_length(1), Some((1, 2)));
+    }
+
+    #[test]
+    fn register_promql_functions_registers_all_promql_functions() {
+        let mut session_state = SessionStateBuilder::new().with_default_features().build();
+        register_promql_functions(&mut session_state);
+
+        // Every PromQL scalar function is registered under its `prom_` name;
+        // DataFusion built-ins never use the `prom_` prefix.
+        let registered: BTreeSet<&str> = session_state
+            .scalar_functions()
+            .keys()
+            .filter(|name| name.starts_with("prom_"))
+            .map(String::as_str)
+            .collect();
+        let expected: BTreeSet<&str> = [
+            "prom_absent_over_time",
+            "prom_avg_over_time",
+            "prom_changes",
+            "prom_count_over_time",
+            "prom_delta",
+            "prom_deriv",
+            "prom_double_exponential_smoothing",
+            "prom_float_to_string",
+            "prom_holt_winters",
+            "prom_idelta",
+            "prom_increase",
+            "prom_irate",
+            "prom_last_over_time",
+            "prom_max_over_time",
+            "prom_min_over_time",
+            "prom_mixed_range_float",
+            "prom_mixed_range_histogram",
+            "prom_native_histogram_absent_over_time",
+            "prom_native_histogram_add",
+            "prom_native_histogram_avg",
+            "prom_native_histogram_avg_over_time",
+            "prom_native_histogram_changes",
+            "prom_native_histogram_count",
+            "prom_native_histogram_count_over_time",
+            "prom_native_histogram_delta",
+            "prom_native_histogram_div_scalar",
+            "prom_native_histogram_drop_bool",
+            "prom_native_histogram_drop_float",
+            "prom_native_histogram_eq",
+            "prom_native_histogram_fraction",
+            "prom_native_histogram_idelta",
+            "prom_native_histogram_increase",
+            "prom_native_histogram_irate",
+            "prom_native_histogram_keep_bool",
+            "prom_native_histogram_last_over_time",
+            "prom_native_histogram_mul_scalar",
+            "prom_native_histogram_neg",
+            "prom_native_histogram_not_eq",
+            "prom_native_histogram_present_over_time",
+            "prom_native_histogram_quantile",
+            "prom_native_histogram_rate",
+            "prom_native_histogram_resets",
+            "prom_native_histogram_scalar_mul",
+            "prom_native_histogram_stddev",
+            "prom_native_histogram_stdvar",
+            "prom_native_histogram_sub",
+            "prom_native_histogram_sum",
+            "prom_native_histogram_sum_over_time",
+            "prom_native_histogram_to_string",
+            "prom_predict_linear",
+            "prom_present_over_time",
+            "prom_quantile_over_time",
+            "prom_rate",
+            "prom_resets",
+            "prom_round",
+            "prom_stddev_over_time",
+            "prom_stdvar_over_time",
+            "prom_sum_over_time",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(registered, expected);
+
+        // `prom_holt_winters` is kept as an alias of the double exponential
+        // smoothing function.
+        let des_udf = session_state
+            .scalar_functions()
+            .get(DoubleExponentialSmoothing::name())
+            .expect("prom_double_exponential_smoothing should be registered");
+        assert!(des_udf.aliases().contains(&"prom_holt_winters".to_string()));
+        let alias_udf = session_state
+            .scalar_functions()
+            .get("prom_holt_winters")
+            .expect("prom_holt_winters alias should be registered");
+        assert!(Arc::ptr_eq(des_udf, alias_udf));
+
+        for name in [
+            QUANTILE_NAME,
+            NativeHistogramAggAvg::name(),
+            NativeHistogramAggSum::name(),
+        ] {
+            let udaf = session_state
+                .aggregate_functions()
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} should be registered"));
+            assert_eq!(udaf.name(), name);
+        }
     }
 }
