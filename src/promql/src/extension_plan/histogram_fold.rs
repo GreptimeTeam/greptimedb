@@ -385,10 +385,7 @@ impl HistogramFold {
         let output_schema: SchemaRef = self.output_schema.inner().clone();
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
-            Partitioning::Hash(
-                partition_exprs.clone(),
-                exec_input.output_partitioning().partition_count(),
-            ),
+            Partitioning::UnknownPartitioning(exec_input.output_partitioning().partition_count()),
             EmissionType::Incremental,
             Boundedness::Bounded,
         ));
@@ -604,10 +601,7 @@ impl ExecutionPlan for HistogramFoldExec {
         let new_input = children[0].clone();
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(self.output_schema.clone()),
-            Partitioning::Hash(
-                self.partition_exprs.clone(),
-                new_input.output_partitioning().partition_count(),
-            ),
+            Partitioning::UnknownPartitioning(new_input.output_partitioning().partition_count()),
             EmissionType::Incremental,
             Boundedness::Bounded,
         ));
@@ -1442,6 +1436,7 @@ mod test {
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
     use datafusion::logical_expr::EmptyRelation;
+    use datafusion::physical_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
     use datafusion::prelude::SessionContext;
     use datatypes::arrow_array::StringArray;
     use futures::FutureExt;
@@ -1806,6 +1801,59 @@ mod test {
         .catch_unwind()
         .await;
         assert!(broken_result.is_err());
+    }
+
+    #[test]
+    fn fold_does_not_claim_hash_partitioning() {
+        let input: Arc<dyn ExecutionPlan> = Arc::new(prepare_test_data());
+        let logical_input = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(input.schema().to_dfschema().unwrap()),
+        });
+        let logical_fold = HistogramFold::new(
+            "le".to_string(),
+            "val".to_string(),
+            "host".to_string(),
+            0.5,
+            logical_input,
+        )
+        .unwrap();
+        let constructed = logical_fold.to_execution_plan(input.clone());
+        assert!(matches!(
+            constructed.output_partitioning(),
+            Partitioning::UnknownPartitioning(1)
+        ));
+        let output_schema = Arc::new(
+            HistogramFold::convert_schema(&Arc::new(input.schema().to_dfschema().unwrap()), "le")
+                .unwrap()
+                .as_arrow()
+                .clone(),
+        );
+        let (tag_columns, partition_exprs, properties) =
+            build_test_plan_properties(&input, output_schema.clone(), 0);
+        let fold_exec = Arc::new(HistogramFoldExec {
+            le_column_index: 1,
+            field_column_index: 2,
+            histogram_column_index: None,
+            ts_column_index: 0,
+            input: input.clone(),
+            tag_columns,
+            partition_exprs,
+            operation: HistogramFoldOperation::Quantile(0.5.into()),
+            output_schema,
+            metric: ExecutionPlanMetricsSet::new(),
+            properties,
+        });
+        let rebuilt = fold_exec
+            .replace_children(
+                vec![input],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )
+            .unwrap();
+        assert!(matches!(
+            rebuilt.output_partitioning(),
+            Partitioning::UnknownPartitioning(1)
+        ));
     }
 
     #[test]
