@@ -1500,7 +1500,10 @@ async fn check_request_skip_wal_recovery(flat_format: bool, skip_wal: bool) {
     let before = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(before.iter().map(|b| b.num_rows()).sum::<usize>(), 4);
 
-    reopen_region(&engine, region_id, table_dir, false, HashMap::new()).await;
+    // Stop the engine directly, without region close, to exercise WAL-only recovery.
+    let engine =
+        restart_without_region_close(&mut env, engine, flat_format, region_id, table_dir).await;
+
     let stream = engine
         .scan_to_stream(region_id, ScanRequest::default())
         .await
@@ -1625,7 +1628,7 @@ async fn check_request_skip_wal_mixed_batch_recovery(
     skip_wal: bool,
     flush_before_reopen: bool,
 ) {
-    use crate::region_write_ctx::RegionWriteCtx;
+    use crate::region_write_ctx::{RegionWriteCtx, WriteSource};
     use crate::request::OptionOutputTx;
     use crate::test_util::LogStoreImpl;
     use crate::wal::Wal;
@@ -1657,6 +1660,7 @@ async fn check_request_skip_wal_mixed_batch_recovery(
         &region.version_control,
         region.provider.clone(),
         None,
+        WriteSource::Request,
     );
     let mut receivers = Vec::with_capacity(4);
     for (index, (skip, timestamp)) in [(false, 0), (skip_wal, 0), (false, 0), (skip_wal, 1)]
@@ -1692,8 +1696,7 @@ async fn check_request_skip_wal_mixed_batch_recovery(
     ctx.add_wal_entry(&mut writer).unwrap();
     let response = writer.write_to_wal().await.unwrap();
     assert_eq!(response.last_entry_ids.get(&region_id), Some(&1));
-    ctx.write_memtable().await;
-    ctx.publish_sequence_and_entry_id();
+    ctx.write_memtables().await;
     drop(ctx);
     for rx in receivers {
         assert_eq!(rx.await.unwrap().unwrap(), 2);
@@ -1751,9 +1754,13 @@ async fn check_request_skip_wal_mixed_batch_recovery(
         );
     }
 
-    // A no-flush close discards memtables. Only WAL-backed rows recover
-    // unless an explicit flush has already persisted all requests.
-    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    // Bypass region close so only WAL-backed rows recover unless the explicit
+    // flush above persisted all requests.
+    let engine =
+        restart_without_region_close(&mut env, engine, flat_format, region_id, table_dir).await;
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
     let loses_skipped_rows = skip_wal && !flush_before_reopen;
     let mut expected_values = if loses_skipped_rows {
         vec![(0, 20.0), (1000, 1.0), (3000, 21.0)]
@@ -1829,4 +1836,39 @@ async fn request_skip_wal_values(engine: &MitoEngine, region_id: RegionId) -> Ve
         .collect::<Vec<_>>();
     values.sort_unstable_by_key(|(timestamp, _)| *timestamp);
     values
+}
+
+/// Restarts workers without closing regions, preserving WAL-only recovery coverage.
+async fn restart_without_region_close(
+    env: &mut TestEnv,
+    engine: MitoEngine,
+    flat_format: bool,
+    region_id: RegionId,
+    table_dir: String,
+) -> MitoEngine {
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir,
+                options: HashMap::new(),
+                skip_wal_replay: false,
+                path_type: PathType::Bare,
+                checkpoint: None,
+                requirements: Default::default(),
+            }),
+        )
+        .await
+        .unwrap();
+    engine
 }

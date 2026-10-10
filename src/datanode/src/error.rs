@@ -145,6 +145,13 @@ pub enum Error {
         source: Box<log_store::error::Error>,
     },
 
+    #[snafu(display("Invalid query context: {}", reason))]
+    InvalidQueryContext {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid SQL, error: {}", msg))]
     InvalidSql { msg: String },
 
@@ -319,8 +326,8 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Object store WAL is not supported yet"))]
-    ObjectStoreWalNotSupported {
+    #[snafu(display("Object store WAL is only supported in standalone mode"))]
+    ObjectStoreWalNotStandalone {
         #[snafu(implicit)]
         location: Location,
     },
@@ -485,7 +492,8 @@ impl ErrorExt for Error {
 
             Delete { source, .. } => source.status_code(),
 
-            InvalidSql { .. }
+            InvalidQueryContext { .. }
+            | InvalidSql { .. }
             | IllegalPrimaryKeysDef { .. }
             | MissingTimestampColumn { .. }
             | SchemaNotFound { .. }
@@ -499,6 +507,7 @@ impl ErrorExt for Error {
             | TomlFormat { .. }
             | DuplicateRegionEngineConfig { .. }
             | InvalidObjectStoreWalConfig { .. }
+            | ObjectStoreWalNotStandalone { .. }
             | BuildDatanode { .. } => StatusCode::InvalidArguments,
 
             PayloadNotExist { .. }
@@ -523,9 +532,7 @@ impl ErrorExt for Error {
 
             OpenLogStore { source, .. } => source.status_code(),
             MetaClientInit { source, .. } => source.status_code(),
-            UnsupportedOutput { .. }
-            | NotYetImplemented { .. }
-            | ObjectStoreWalNotSupported { .. } => StatusCode::Unsupported,
+            UnsupportedOutput { .. } | NotYetImplemented { .. } => StatusCode::Unsupported,
             HandleRegionRequest { source, .. }
             | GetRegionMetadata { source, .. }
             | HandleBatchOpenRequest { source, .. }

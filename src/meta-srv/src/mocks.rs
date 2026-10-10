@@ -21,6 +21,7 @@ use api::v1::meta::heartbeat_server::HeartbeatServer;
 use api::v1::meta::procedure_service_server::ProcedureServiceServer;
 use api::v1::meta::store_server::StoreServer;
 use client::client_manager::NodeClients;
+use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::key::TableMetadataManager;
 use common_meta::kv_backend::etcd::EtcdStore;
@@ -95,6 +96,7 @@ pub async fn mock(
         datanode_clients,
         in_memory,
         None,
+        Plugins::default(),
     )
     .await
 }
@@ -114,6 +116,30 @@ pub async fn mock_with_client_channel_config(
         datanode_clients,
         in_memory,
         Some(client_channel_config),
+        Plugins::default(),
+    )
+    .await
+}
+
+/// Builds a mock metasrv with the given [`Plugins`].
+///
+/// Same as [`mock`], except that the plugins are passed to the metasrv builder.
+pub async fn mock_with_plugins(
+    opts: MetasrvOptions,
+    kv_backend: KvBackendRef,
+    selector: Option<SelectorRef>,
+    datanode_clients: Option<Arc<NodeClients>>,
+    in_memory: Option<ResettableKvBackendRef>,
+    plugins: Plugins,
+) -> MockInfo {
+    mock_inner(
+        opts,
+        kv_backend,
+        selector,
+        datanode_clients,
+        in_memory,
+        None,
+        plugins,
     )
     .await
 }
@@ -125,6 +151,7 @@ async fn mock_inner(
     datanode_clients: Option<Arc<NodeClients>>,
     in_memory: Option<ResettableKvBackendRef>,
     client_channel_config: Option<ChannelConfig>,
+    plugins: Plugins,
 ) -> MockInfo {
     let server_addr = opts.grpc.server_addr.clone();
     let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
@@ -151,6 +178,8 @@ async fn mock_inner(
         Some(in_memory) => builder.in_memory(in_memory.clone()),
         None => builder,
     };
+
+    let builder = builder.plugins(plugins);
 
     let metasrv = builder.build().await.unwrap();
     metasrv.try_start().await.unwrap();

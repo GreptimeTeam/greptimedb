@@ -266,8 +266,6 @@ impl WriteCache {
             inverted_index_config: write_request.inverted_index_config,
             fulltext_index_config: write_request.fulltext_index_config,
             bloom_filter_index_config: write_request.bloom_filter_index_config,
-            #[cfg(feature = "vector_index")]
-            vector_index_config: write_request.vector_index_config,
         };
 
         let cleaner = TempFileCleaner::new(region_id, store.clone());
@@ -703,7 +701,6 @@ mod tests {
             op_type,
             metadata,
             source,
-            storage: None,
             max_sequence: None,
             sst_write_format: Default::default(),
             cache_manager: Default::default(),
@@ -713,8 +710,6 @@ mod tests {
             inverted_index_config: Default::default(),
             fulltext_index_config: Default::default(),
             bloom_filter_index_config: Default::default(),
-            #[cfg(feature = "vector_index")]
-            vector_index_config: Default::default(),
         };
 
         let upload_request = SstUploadRequest {
@@ -790,7 +785,8 @@ mod tests {
     async fn test_read_metadata_from_write_cache() {
         common_telemetry::init_default_ut_logging();
         let mut env = TestEnv::new().await;
-        let data_home = env.data_home().display().to_string();
+        // Object keys are relative to the mock store root, not native paths.
+        let data_home = "write-cache-test".to_string();
         let mock_store = env.init_object_store_manager();
 
         let local_dir = create_temp_dir("");
@@ -822,7 +818,6 @@ mod tests {
             op_type: OperationType::Flush,
             metadata,
             source,
-            storage: None,
             max_sequence: None,
             sst_write_format: Default::default(),
             cache_manager: cache_manager.clone(),
@@ -832,8 +827,6 @@ mod tests {
             inverted_index_config: Default::default(),
             fulltext_index_config: Default::default(),
             bloom_filter_index_config: Default::default(),
-            #[cfg(feature = "vector_index")]
-            vector_index_config: Default::default(),
         };
         let write_opts = WriteOptions {
             row_group_size: 512,
@@ -917,7 +910,6 @@ mod tests {
             op_type: OperationType::Flush,
             metadata,
             source,
-            storage: None,
             max_sequence: None,
             sst_write_format: Default::default(),
             cache_manager: cache_manager.clone(),
@@ -927,8 +919,6 @@ mod tests {
             inverted_index_config: Default::default(),
             fulltext_index_config: Default::default(),
             bloom_filter_index_config: Default::default(),
-            #[cfg(feature = "vector_index")]
-            vector_index_config: Default::default(),
         };
         let write_opts = WriteOptions {
             row_group_size: 512,

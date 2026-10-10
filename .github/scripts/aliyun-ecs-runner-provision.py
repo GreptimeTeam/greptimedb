@@ -49,9 +49,9 @@ import base64
 import json
 import os
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
+
+from runner_utils import append_github_output, create_registration_token, find_runner_by_name, github_api
 
 RUNNER_NAME_PREFIX = "qreg-ecs"
 RUNNER_LABEL_PREFIX = "query-regression-ecs"
@@ -243,63 +243,6 @@ def encode_user_data(script: str) -> str:
     return base64.b64encode(script.encode("utf-8")).decode("ascii")
 
 
-def github_api(token: str, method: str, path: str, body: dict | None = None) -> dict:
-    data = json.dumps(body).encode("utf-8") if body is not None else None
-    request = urllib.request.Request(
-        f"https://api.github.com{path}",
-        data=data,
-        method=method,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {token}",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            if response.status == 204:
-                return {}
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as error:
-        # GitHub's error body says exactly why (e.g. "Must have admin rights to
-        # Repository" for a PAT without the required scope); surface it instead
-        # of a bare "HTTP Error 403".
-        body = error.read().decode("utf-8", "replace")
-        raise SystemExit(
-            f"GitHub API {method} {path} failed: HTTP {error.code}: {body}\n"
-            "The token comes from the GH_PERSONAL_ACCESS_TOKEN secret; it needs "
-            "'repo' scope (classic PAT) or 'Administration: write' on the "
-            "repository (fine-grained PAT)."
-        ) from error
-
-
-def create_registration_token(github_token: str, repo: str) -> str:
-    response = github_api(
-        github_token,
-        "POST",
-        f"/repos/{repo}/actions/runners/registration-token",
-        body={},
-    )
-    return response["token"]
-
-
-def find_runner_by_name(github_token: str, repo: str, name: str) -> dict | None:
-    page = 1
-    while True:
-        response = github_api(
-            github_token,
-            "GET",
-            f"/repos/{repo}/actions/runners?per_page=100&page={page}",
-        )
-        runners = response.get("runners", [])
-        for runner in runners:
-            if runner.get("name") == name:
-                return runner
-        if len(runners) < 100:
-            return None
-        page += 1
-
-
 def make_ecs_client(config: ProvisionConfig):
     from alibabacloud_ecs20140526.client import Client as EcsClient
     from alibabacloud_tea_openapi.models import Config as OpenApiConfig
@@ -386,13 +329,6 @@ def dump_console_output(client, region_id: str, instance_id: str) -> None:
             summary.write(f"<details><summary>ECS console output ({instance_id})</summary>\n\n```\n")
             summary.write(tail)
             summary.write("\n```\n</details>\n")
-
-
-def append_github_output(name: str, value: str) -> None:
-    output_path = os.environ.get("GITHUB_OUTPUT")
-    if output_path:
-        with open(output_path, "a", encoding="utf-8") as output:
-            output.write(f"{name}={value}\n")
 
 
 def run_instance(client, config: ProvisionConfig, user_data: str) -> str:

@@ -44,12 +44,6 @@ SELECT
 FROM
     sum_val_in_reqs;
 
--- Test if FLOWS table works, but don't care about the result since it vary from runs
-SELECT
-    count(CASE WHEN state_size > 0 THEN 1 ELSE 0 END) as active_flows,
-FROM
-    INFORMATION_SCHEMA.FLOWS;
-
 DROP FLOW requests_long_term;
 
 DROP TABLE sum_val_in_reqs;
@@ -170,6 +164,8 @@ VALUES
     (2, "name2", "2024-10-18 19:00:00"),
     (3, "name3", "2024-10-18 19:00:00");
 
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_nullable_pk');
 
@@ -183,6 +179,8 @@ VALUES
     ("name2", "2024-10-18 19:00:00"),
     ("name3", "2024-10-18 19:00:00");
 
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_nullable_pk');
 

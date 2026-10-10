@@ -185,7 +185,7 @@ pub(super) fn default_max_concurrent_flushes() -> u64 {
     256
 }
 pub(super) fn default_worker_channel_capacity() -> u64 {
-    65526
+    65_536
 }
 pub(super) fn default_max_inflight_requests() -> u64 {
     3000

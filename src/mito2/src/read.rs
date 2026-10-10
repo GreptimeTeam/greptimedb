@@ -45,7 +45,6 @@ use std::time::Duration;
 
 use api::v1::OpType;
 use arrow_schema::SchemaRef;
-use async_trait::async_trait;
 use common_time::Timestamp;
 use datafusion_common::arrow::array::UInt8Array;
 use datatypes::arrow;
@@ -65,7 +64,7 @@ use datatypes::vectors::{
 };
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
-use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
+use mito_codec::row_converter::{CompositeValues, DensePrimaryKeyCodec, PrimaryKeyCodec};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
 
@@ -73,7 +72,7 @@ use crate::error::{
     ComputeArrowSnafu, ComputeVectorSnafu, ConvertVectorSnafu, DecodeSnafu, InvalidBatchSnafu,
     Result,
 };
-use crate::memtable::{BoxedBatchIterator, BoxedRecordBatchIterator};
+use crate::memtable::BoxedRecordBatchIterator;
 
 pub(crate) fn timestamp_array_to_i64_slice(arr: &ArrayRef) -> &[i64] {
     use datatypes::arrow::array::{
@@ -119,6 +118,8 @@ pub struct Batch {
     primary_key: Vec<u8>,
     /// Possibly decoded `primary_key` values. Some places would decode it in advance.
     pk_values: Option<CompositeValues>,
+    /// Lazily decoded Dense columns, shared by consumers such as index creators.
+    dense_pk_cache: Option<Box<DensePkCache>>,
     /// Timestamps of rows, should be sorted and not null.
     timestamps: VectorRef,
     /// Sequences of rows
@@ -133,6 +134,13 @@ pub struct Batch {
     fields: Vec<BatchColumn>,
     /// Cache for field index lookup.
     fields_idx: Option<HashMap<ColumnId, usize>>,
+}
+
+/// Only used when no fully decoded primary key was supplied by the reader.
+#[derive(Debug, PartialEq, Clone)]
+struct DensePkCache {
+    offsets: Vec<usize>,
+    values: Vec<Option<Value>>,
 }
 
 impl Batch {
@@ -173,12 +181,14 @@ impl Batch {
     /// Sets possibly decoded primary-key values.
     pub fn set_pk_values(&mut self, pk_values: CompositeValues) {
         self.pk_values = Some(pk_values);
+        self.dense_pk_cache = None;
     }
 
     /// Removes possibly decoded primary-key values. For testing only.
     #[cfg(any(test, feature = "test"))]
     pub fn remove_pk_values(&mut self) {
         self.pk_values = None;
+        self.dense_pk_cache = None;
     }
 
     /// Returns fields in the batch.
@@ -214,6 +224,7 @@ impl Batch {
         Self {
             primary_key: vec![],
             pk_values: None,
+            dense_pk_cache: None,
             timestamps: Arc::new(TimestampMillisecondVectorBuilder::with_capacity(0).finish()),
             sequences: Arc::new(UInt64VectorBuilder::with_capacity(0).finish()),
             op_types: Arc::new(UInt8VectorBuilder::with_capacity(0).finish()),
@@ -269,6 +280,7 @@ impl Batch {
     /// Be sure to update that field as well.
     pub fn set_primary_key(&mut self, primary_key: Vec<u8>) {
         self.primary_key = primary_key;
+        self.dense_pk_cache = None;
     }
 
     /// Slice the batch, returning a new batch.
@@ -290,6 +302,7 @@ impl Batch {
             // this becomes a bottleneck.
             primary_key: self.primary_key.clone(),
             pk_values: self.pk_values.clone(),
+            dense_pk_cache: self.dense_pk_cache.clone(),
             timestamps: self.timestamps.slice(offset, length),
             sequences: Arc::new(self.sequences.get_slice(offset, length)),
             op_types: Arc::new(self.op_types.get_slice(offset, length)),
@@ -692,89 +705,26 @@ impl Batch {
         self.sequences.get_data(index).unwrap()
     }
 
-    /// Checks the batch is monotonic by timestamps.
-    #[cfg(debug_assertions)]
-    #[allow(dead_code)]
-    pub(crate) fn check_monotonic(&self) -> Result<(), String> {
-        use std::cmp::Ordering;
-        if self.timestamps_native().is_none() {
-            return Ok(());
-        }
-
-        let timestamps = self.timestamps_native().unwrap();
-        let sequences = self.sequences.as_arrow().values();
-        for (i, window) in timestamps.windows(2).enumerate() {
-            let current = window[0];
-            let next = window[1];
-            let current_sequence = sequences[i];
-            let next_sequence = sequences[i + 1];
-            match current.cmp(&next) {
-                Ordering::Less => {
-                    // The current timestamp is less than the next timestamp.
-                    continue;
-                }
-                Ordering::Equal => {
-                    // The current timestamp is equal to the next timestamp.
-                    if current_sequence < next_sequence {
-                        return Err(format!(
-                            "sequence are not monotonic: ts {} == {} but current sequence {} < {}, index: {}",
-                            current, next, current_sequence, next_sequence, i
-                        ));
-                    }
-                }
-                Ordering::Greater => {
-                    // The current timestamp is greater than the next timestamp.
-                    return Err(format!(
-                        "timestamps are not monotonic: {} > {}, index: {}",
-                        current, next, i
-                    ));
-                }
+    /// Prepares a shared full-key cache when all Dense PK columns are needed.
+    /// Explicitly supplied decoded/defaulted values take precedence.
+    pub(crate) fn ensure_dense_pk_decoded(&mut self, codec: &DensePrimaryKeyCodec) -> Result<()> {
+        if self.pk_values.is_none() {
+            // A fallible iterator has no nonzero lower size hint. Reserve the
+            // known field count instead of growing its collected Vec per key.
+            let mut values = Vec::with_capacity(codec.num_fields());
+            for value in codec.decode_dense_iter(&self.primary_key) {
+                values.push(value.context(DecodeSnafu)?);
             }
+            self.set_pk_values(CompositeValues::Dense(values));
         }
-
         Ok(())
-    }
-
-    /// Returns Ok if the given batch is behind the current batch.
-    #[cfg(debug_assertions)]
-    #[allow(dead_code)]
-    pub(crate) fn check_next_batch(&self, other: &Batch) -> Result<(), String> {
-        // Checks the primary key
-        if self.primary_key() < other.primary_key() {
-            return Ok(());
-        }
-        if self.primary_key() > other.primary_key() {
-            return Err(format!(
-                "primary key is not monotonic: {:?} > {:?}",
-                self.primary_key(),
-                other.primary_key()
-            ));
-        }
-        // Checks the timestamp.
-        if self.last_timestamp() < other.first_timestamp() {
-            return Ok(());
-        }
-        if self.last_timestamp() > other.first_timestamp() {
-            return Err(format!(
-                "timestamps are not monotonic: {:?} > {:?}",
-                self.last_timestamp(),
-                other.first_timestamp()
-            ));
-        }
-        // Checks the sequence.
-        if self.last_sequence() >= other.first_sequence() {
-            return Ok(());
-        }
-        Err(format!(
-            "sequences are not monotonic: {:?} < {:?}",
-            self.last_sequence(),
-            other.first_sequence()
-        ))
     }
 
     /// Returns the value of the column in the primary key.
     ///
-    /// Lazily decodes the primary key and caches the result.
+    /// Reuses predecoded values when available. Otherwise Dense keys decode only
+    /// the requested column, sharing offsets and values across callers; Sparse
+    /// keys cache the full decode.
     pub fn pk_col_value(
         &mut self,
         codec: &dyn PrimaryKeyCodec,
@@ -782,6 +732,24 @@ impl Batch {
         column_id: ColumnId,
     ) -> Result<Option<&Value>> {
         if self.pk_values.is_none() {
+            if let Some(codec) = codec.as_dense() {
+                if col_idx_in_pk >= codec.num_fields() {
+                    return Ok(None);
+                }
+                let cache = self.dense_pk_cache.get_or_insert_with(|| {
+                    Box::new(DensePkCache {
+                        offsets: Vec::new(),
+                        values: vec![None; codec.num_fields()],
+                    })
+                });
+                if cache.values[col_idx_in_pk].is_none() {
+                    let value = codec
+                        .decode_value_at(&self.primary_key, col_idx_in_pk, &mut cache.offsets)
+                        .context(DecodeSnafu)?;
+                    cache.values[col_idx_in_pk] = Some(value);
+                }
+                return Ok(cache.values[col_idx_in_pk].as_ref());
+            }
             self.pk_values = Some(codec.decode(&self.primary_key).context(DecodeSnafu)?);
         }
 
@@ -811,112 +779,6 @@ impl Batch {
             .unwrap()
             .get(&column_id)
             .map(|&idx| &self.fields[idx])
-    }
-}
-
-/// A struct to check the batch is monotonic.
-#[cfg(debug_assertions)]
-#[derive(Default)]
-#[allow(dead_code)]
-pub(crate) struct BatchChecker {
-    last_batch: Option<Batch>,
-    start: Option<Timestamp>,
-    end: Option<Timestamp>,
-}
-
-#[cfg(debug_assertions)]
-#[allow(dead_code)]
-impl BatchChecker {
-    /// Attaches the given start timestamp to the checker.
-    pub(crate) fn with_start(mut self, start: Option<Timestamp>) -> Self {
-        self.start = start;
-        self
-    }
-
-    /// Attaches the given end timestamp to the checker.
-    pub(crate) fn with_end(mut self, end: Option<Timestamp>) -> Self {
-        self.end = end;
-        self
-    }
-
-    /// Returns true if the given batch is monotonic and behind
-    /// the last batch.
-    pub(crate) fn check_monotonic(&mut self, batch: &Batch) -> Result<(), String> {
-        batch.check_monotonic()?;
-
-        if let (Some(start), Some(first)) = (self.start, batch.first_timestamp())
-            && start > first
-        {
-            return Err(format!(
-                "batch's first timestamp is before the start timestamp: {:?} > {:?}",
-                start, first
-            ));
-        }
-        if let (Some(end), Some(last)) = (self.end, batch.last_timestamp())
-            && end <= last
-        {
-            return Err(format!(
-                "batch's last timestamp is after the end timestamp: {:?} <= {:?}",
-                end, last
-            ));
-        }
-
-        // Checks the batch is behind the last batch.
-        // Then Updates the last batch.
-        let res = self
-            .last_batch
-            .as_ref()
-            .map(|last| last.check_next_batch(batch))
-            .unwrap_or(Ok(()));
-        self.last_batch = Some(batch.clone());
-        res
-    }
-
-    /// Formats current batch and last batch for debug.
-    pub(crate) fn format_batch(&self, batch: &Batch) -> String {
-        use std::fmt::Write;
-
-        let mut message = String::new();
-        if let Some(last) = &self.last_batch {
-            write!(
-                message,
-                "last_pk: {:?}, last_ts: {:?}, last_seq: {:?}, ",
-                last.primary_key(),
-                last.last_timestamp(),
-                last.last_sequence()
-            )
-            .unwrap();
-        }
-        write!(
-            message,
-            "batch_pk: {:?}, batch_ts: {:?}, batch_seq: {:?}",
-            batch.primary_key(),
-            batch.timestamps(),
-            batch.sequences()
-        )
-        .unwrap();
-
-        message
-    }
-
-    /// Checks batches from the part range are monotonic. Otherwise, panics.
-    pub(crate) fn ensure_part_range_batch(
-        &mut self,
-        scanner: &str,
-        region_id: store_api::storage::RegionId,
-        partition: usize,
-        part_range: store_api::region_engine::PartitionRange,
-        batch: &Batch,
-    ) {
-        if let Err(e) = self.check_monotonic(batch) {
-            let err_msg = format!(
-                "{}: batch is not sorted, {}, region_id: {}, partition: {}, part_range: {:?}",
-                scanner, e, region_id, partition, part_range,
-            );
-            common_telemetry::error!("{err_msg}, {}", self.format_batch(batch));
-            // Only print the number of row in the panic message.
-            panic!("{err_msg}, batch rows: {}", batch.num_rows());
-        }
     }
 }
 
@@ -1098,6 +960,7 @@ impl BatchBuilder {
         Ok(Batch {
             primary_key: self.primary_key,
             pk_values: None,
+            dense_pk_cache: None,
             timestamps,
             sequences,
             op_types,
@@ -1115,29 +978,6 @@ impl From<Batch> for BatchBuilder {
             sequences: Some(batch.sequences),
             op_types: Some(batch.op_types),
             fields: batch.fields,
-        }
-    }
-}
-
-/// Async [Batch] reader and iterator wrapper.
-///
-/// This is the data source for SST writers or internal readers.
-pub enum Source {
-    /// Source from a [BoxedBatchReader].
-    Reader(BoxedBatchReader),
-    /// Source from a [BoxedBatchIterator].
-    Iter(BoxedBatchIterator),
-    /// Source from a [BoxedBatchStream].
-    Stream(BoxedBatchStream),
-}
-
-impl Source {
-    /// Returns next [Batch] from this data source.
-    pub async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        match self {
-            Source::Reader(reader) => reader.next_batch().await,
-            Source::Iter(iter) => iter.next().transpose(),
-            Source::Stream(stream) => stream.try_next().await,
         }
     }
 }
@@ -1199,36 +1039,8 @@ impl FlatSourceInner {
     }
 }
 
-/// Async batch reader.
-///
-/// The reader must guarantee [Batch]es returned by it have the same schema.
-#[async_trait]
-pub trait BatchReader: Send {
-    /// Fetch next [Batch].
-    ///
-    /// Returns `Ok(None)` when the reader has reached its end and calling `next_batch()`
-    /// again won't return batch again.
-    ///
-    /// If `Err` is returned, caller should not call this method again, the implementor
-    /// may or may not panic in such case.
-    async fn next_batch(&mut self) -> Result<Option<Batch>>;
-}
-
-/// Pointer to [BatchReader].
-pub type BoxedBatchReader = Box<dyn BatchReader>;
-
-/// Pointer to a stream that yields [Batch].
-pub type BoxedBatchStream = BoxStream<'static, Result<Batch>>;
-
 /// Pointer to a stream that yields [RecordBatch].
 pub type BoxedRecordBatchStream = BoxStream<'static, Result<RecordBatch>>;
-
-#[async_trait::async_trait]
-impl<T: BatchReader + ?Sized> BatchReader for Box<T> {
-    async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        (**self).next_batch().await
-    }
-}
 
 /// Local metrics for scanners.
 #[derive(Debug, Default)]
@@ -1253,6 +1065,79 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::test_util::new_batch_builder;
+
+    #[test]
+    fn dense_pk_columns_are_lazy_and_reset_with_the_key() {
+        use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
+
+        let codec = DensePrimaryKeyCodec::with_fields(vec![
+            (7, SortField::new(ConcreteDataType::string_datatype())),
+            (3, SortField::new(ConcreteDataType::int64_datatype())),
+            (9, SortField::new(ConcreteDataType::string_datatype())),
+        ]);
+        let values = [
+            Value::from("中文\0abcdefgh"),
+            Value::Int64(-42),
+            Value::Null,
+        ];
+        let key = codec
+            .encode(values.iter().map(Value::as_value_ref))
+            .unwrap();
+        let mut batch = new_batch_without_fields(&[1, 2], &[1, 1], &[OpType::Put, OpType::Put]);
+        batch.set_primary_key(key);
+        for pos in [2, 0, 1, 2] {
+            assert_eq!(
+                batch.pk_col_value(&codec, pos, [7, 3, 9][pos]).unwrap(),
+                Some(&values[pos])
+            );
+        }
+        assert!(batch.pk_col_value(&codec, 3, 99).unwrap().is_none());
+        let mut sliced = batch.slice(1, 1);
+        assert_eq!(sliced.pk_col_value(&codec, 0, 7).unwrap(), Some(&values[0]));
+
+        // A corrupt unrequested suffix must not force whole-key decoding.
+        batch.set_primary_key(vec![0, 1]);
+        assert_eq!(
+            batch.pk_col_value(&codec, 0, 7).unwrap(),
+            Some(&Value::Null)
+        );
+        assert!(batch.pk_col_value(&codec, 1, 3).is_err());
+        batch.set_primary_key(
+            codec
+                .encode(
+                    [
+                        ValueRef::String(""),
+                        ValueRef::Int64(8),
+                        ValueRef::String("new"),
+                    ]
+                    .into_iter(),
+                )
+                .unwrap(),
+        );
+        assert_eq!(
+            batch.pk_col_value(&codec, 2, 9).unwrap(),
+            Some(&Value::from("new"))
+        );
+        assert_eq!(
+            batch.pk_col_value(&codec, 0, 7).unwrap(),
+            Some(&Value::from(""))
+        );
+
+        // Schema compatibility may supply already decoded/defaulted values.
+        batch.set_pk_values(CompositeValues::Dense(vec![(7, Value::from("default"))]));
+        batch.ensure_dense_pk_decoded(&codec).unwrap();
+        assert_eq!(
+            batch.pk_col_value(&codec, 0, 7).unwrap(),
+            Some(&Value::from("default"))
+        );
+        assert!(batch.pk_col_value(&codec, 1, 3).unwrap().is_none());
+        batch.remove_pk_values();
+        batch.ensure_dense_pk_decoded(&codec).unwrap();
+        assert_eq!(
+            batch.pk_col_value(&codec, 1, 3).unwrap(),
+            Some(&Value::Int64(8))
+        );
+    }
 
     fn new_batch(
         timestamps: &[i64],

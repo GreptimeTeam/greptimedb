@@ -53,6 +53,7 @@ use tower_http::trace::TraceLayer;
 
 use self::authorize::AuthState;
 use self::result::table_result::TableResponse;
+use crate::batcher::BatchingProtocol;
 use crate::batcher::logical_table::LogicalTablePendingRowsBatcher;
 use crate::elasticsearch;
 use crate::error::{
@@ -111,6 +112,7 @@ mod timeout;
 pub mod utils;
 mod workload_scheduler;
 
+pub use memory_limit::decoded_body_accounting_middleware;
 use result::HttpOutputWriter;
 pub(crate) use timeout::DynamicTimeoutLayer;
 
@@ -189,22 +191,6 @@ pub(crate) enum HttpServerKind {
     Api,
 }
 
-/// HTTP write protocols eligible for the shared pending-row batcher.
-/// Prometheus uses this selector only when metric-engine storage is disabled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BatchingProtocol {
-    Prom,
-    Influxdb,
-    Opentsdb,
-    Otlp,
-    Logs,
-    Loki,
-    Splunk,
-    Elasticsearch,
-    HttpSql,
-}
-
 #[derive(Default)]
 pub struct HttpServer {
     router: StdMutex<Router>,
@@ -215,6 +201,7 @@ pub struct HttpServer {
     // server configs
     options: HttpOptions,
     batching_protocols: Vec<BatchingProtocol>,
+    logical_batching_protocols: Vec<BatchingProtocol>,
     bind_addr: Option<SocketAddr>,
     /// What this server instance exposes. See [`HttpServerKind`].
     kind: HttpServerKind,
@@ -235,8 +222,11 @@ pub fn is_api_listener_path(path: &str) -> bool {
     is_namespace(path, HTTP_API_PREFIX_WITHOUT_TRAILING_SLASH) || is_namespace(path, "/dashboard")
 }
 
+#[derive(Clone)]
+struct LogicalBatchingProtocols(Vec<BatchingProtocol>);
+
 /// Sets a local-only write selector after authentication creates the context.
-async fn set_http_write_batching(
+pub async fn set_http_write_batching(
     State(protocol): State<BatchingProtocol>,
     mut req: Request,
     next: Next,
@@ -245,8 +235,13 @@ async fn set_http_write_batching(
         .extensions()
         .get::<Arc<Vec<BatchingProtocol>>>()
         .is_some_and(|protocols| protocols.contains(&protocol));
+    let logical_enabled = req
+        .extensions()
+        .get::<LogicalBatchingProtocols>()
+        .is_some_and(|protocols| protocols.0.contains(&protocol));
     if let Some(ctx) = req.extensions_mut().get_mut::<QueryContext>() {
         ctx.set_batching_enabled(enabled);
+        ctx.set_logical_batching_enabled(logical_enabled);
     }
     next.run(req).await
 }
@@ -650,6 +645,7 @@ pub struct DashboardState {
 pub struct HttpServerBuilder {
     options: HttpOptions,
     batching_protocols: Vec<BatchingProtocol>,
+    logical_batching_protocols: Vec<BatchingProtocol>,
     user_provider: Option<UserProviderRef>,
     router: Router,
     memory_limiter: ServerMemoryLimiter,
@@ -660,13 +656,20 @@ impl HttpServerBuilder {
         Self {
             options,
             batching_protocols: Vec::new(),
+            logical_batching_protocols: Vec::new(),
             user_provider: None,
             router: Router::new(),
             memory_limiter: ServerMemoryLimiter::default(),
         }
     }
 
-    /// Selects HTTP write protocols allowed to use the shared batcher.
+    /// Selects HTTP protocols allowed to use logical-table batching.
+    pub fn with_logical_batching_protocols(mut self, protocols: Vec<BatchingProtocol>) -> Self {
+        self.logical_batching_protocols = protocols;
+        self
+    }
+
+    /// Selects HTTP protocols allowed to use ordinary-table batching.
     pub fn with_batching_protocols(mut self, protocols: Vec<BatchingProtocol>) -> Self {
         self.batching_protocols = protocols;
         self
@@ -679,7 +682,12 @@ impl HttpServerBuilder {
     }
 
     pub fn with_sql_handler(self, sql_handler: ServerSqlQueryHandlerRef) -> Self {
-        let sql_router = HttpServer::route_sql(ApiState { sql_handler });
+        let batch_body_limit = if self.options.body_limit.0 == 0 {
+            4 * 1024 * 1024
+        } else {
+            (self.options.body_limit.0 as usize).min(4 * 1024 * 1024)
+        };
+        let sql_router = HttpServer::route_sql(ApiState { sql_handler }, batch_body_limit);
 
         Self {
             router: self
@@ -714,7 +722,7 @@ impl HttpServerBuilder {
         Self {
             router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/influxdb"),
-                HttpServer::route_influxdb(handler),
+                HttpServer::route_influxdb(handler, self.memory_limiter.clone()),
             ),
             ..self
         }
@@ -726,7 +734,6 @@ impl HttpServerBuilder {
         pipeline_handler: Option<PipelineHandlerRef>,
         prom_store_with_metric_engine: bool,
         prom_validation_mode: PromValidationMode,
-        experimental_enable_prometheus_native_histogram: bool,
         pending_rows_batcher: Option<Arc<LogicalTablePendingRowsBatcher>>,
     ) -> Self {
         let state = PromStoreState {
@@ -734,8 +741,8 @@ impl HttpServerBuilder {
             pipeline_handler,
             prom_store_with_metric_engine,
             prom_validation_mode,
-            experimental_enable_prometheus_native_histogram,
             pending_rows_batcher,
+            memory_limiter: self.memory_limiter.clone(),
         };
 
         Self {
@@ -761,16 +768,11 @@ impl HttpServerBuilder {
         self,
         handler: OpenTelemetryProtocolHandlerRef,
         with_metric_engine: bool,
-        experimental_enable_exponential_histogram: bool,
     ) -> Self {
         Self {
             router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/otlp"),
-                HttpServer::route_otlp(
-                    handler,
-                    with_metric_engine,
-                    experimental_enable_exponential_histogram,
-                ),
+                HttpServer::route_otlp(handler, with_metric_engine, self.memory_limiter.clone()),
             ),
             ..self
         }
@@ -804,23 +806,23 @@ impl HttpServerBuilder {
 
         let router = self.router.nest(
             &format!("/{HTTP_API_VERSION}"),
-            HttpServer::route_pipelines(log_state.clone()),
+            HttpServer::route_pipelines(log_state.clone(), self.memory_limiter.clone()),
         );
         // deprecated since v0.11.0. Use `/logs` and `/pipelines` instead.
         let router = router.nest(
             &format!("/{HTTP_API_VERSION}/events"),
             #[allow(deprecated)]
-            HttpServer::route_log_deprecated(log_state.clone()),
+            HttpServer::route_log_deprecated(log_state.clone(), self.memory_limiter.clone()),
         );
 
         let router = router.nest(
             &format!("/{HTTP_API_VERSION}/loki"),
-            HttpServer::route_loki(log_state.clone()),
+            HttpServer::route_loki(log_state.clone(), self.memory_limiter.clone()),
         );
 
         let router = router.nest(
             &format!("/{HTTP_API_VERSION}/elasticsearch"),
-            HttpServer::route_elasticsearch(log_state.clone()),
+            HttpServer::route_elasticsearch(log_state.clone(), self.memory_limiter.clone()),
         );
 
         let router = router.nest(
@@ -832,7 +834,7 @@ impl HttpServerBuilder {
 
         let router = router.nest(
             &format!("/{HTTP_API_VERSION}/splunk"),
-            HttpServer::route_splunk(log_state),
+            HttpServer::route_splunk(log_state, self.memory_limiter.clone()),
         );
 
         Self { router, ..self }
@@ -863,7 +865,7 @@ impl HttpServerBuilder {
         Self {
             router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/dashboards"),
-                HttpServer::route_dashboard(handler),
+                HttpServer::route_dashboard(handler, self.memory_limiter.clone()),
             ),
             ..self
         }
@@ -894,6 +896,7 @@ impl HttpServerBuilder {
         HttpServer {
             options: self.options,
             batching_protocols: self.batching_protocols.clone(),
+            logical_batching_protocols: self.logical_batching_protocols.clone(),
             user_provider: self.user_provider,
             shutdown_tx: Mutex::new(None),
             router: StdMutex::new(self.router),
@@ -928,6 +931,7 @@ impl HttpServerBuilder {
         let internal = HttpServer {
             options: self.options,
             batching_protocols: self.batching_protocols.clone(),
+            logical_batching_protocols: self.logical_batching_protocols.clone(),
             user_provider: self.user_provider.clone(),
             shutdown_tx: Mutex::new(None),
             router: StdMutex::new(self.router.clone()),
@@ -946,6 +950,7 @@ impl HttpServerBuilder {
             Some(HttpServer {
                 options: api_options,
                 batching_protocols: self.batching_protocols,
+                logical_batching_protocols: self.logical_batching_protocols,
                 user_provider: self.user_provider.clone(),
                 shutdown_tx: Mutex::new(None),
                 router: StdMutex::new(self.router),
@@ -1057,20 +1062,7 @@ impl HttpServer {
                         Method::DELETE,
                         Method::HEAD,
                     ])
-                    .allow_origin(if self.options.cors_allowed_origins.is_empty() {
-                        AllowOrigin::from(Any)
-                    } else {
-                        AllowOrigin::from(
-                            self.options
-                                .cors_allowed_origins
-                                .iter()
-                                .map(|s| {
-                                    HeaderValue::from_str(s.as_str())
-                                        .context(InvalidHeaderValueSnafu)
-                                })
-                                .collect::<Result<Vec<HeaderValue>>>()?,
-                        )
-                    })
+                    .allow_origin(cors_allow_origin(&self.options.cors_allowed_origins)?)
                     .allow_headers(Any),
             )
         } else {
@@ -1099,6 +1091,9 @@ impl HttpServer {
                         authorize::check_http_auth,
                     ))
                     .layer(Extension(Arc::new(self.batching_protocols.clone())))
+                    .layer(Extension(LogicalBatchingProtocols(
+                        self.logical_batching_protocols.clone(),
+                    )))
                     .layer(middleware::from_fn(hints::extract_hints))
                     .layer(middleware::from_fn(client_ip::log_error_with_client_ip))
                     .layer(middleware::from_fn(
@@ -1178,9 +1173,13 @@ impl HttpServer {
             .with_state(metrics_handler)
     }
 
-    fn route_loki<S>(log_state: LogState) -> Router<S> {
+    fn route_loki<S>(log_state: LogState, memory_limiter: ServerMemoryLimiter) -> Router<S> {
         Router::new()
             .route("/api/v1/push", routing::post(loki::loki_ingest))
+            .layer(middleware::from_fn_with_state(
+                memory_limiter,
+                memory_limit::decoded_body_accounting_middleware,
+            ))
             .layer(
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
@@ -1192,7 +1191,7 @@ impl HttpServer {
             .with_state(log_state)
     }
 
-    fn route_splunk<S>(log_state: LogState) -> Router<S> {
+    fn route_splunk<S>(log_state: LogState, memory_limiter: ServerMemoryLimiter) -> Router<S> {
         Router::new()
             .route(
                 "/services/collector/health",
@@ -1220,6 +1219,10 @@ impl HttpServer {
                 "/services/collector/raw/1.0",
                 routing::post(splunk::handle_raw),
             )
+            .layer(middleware::from_fn_with_state(
+                memory_limiter,
+                memory_limit::decoded_body_accounting_middleware,
+            ))
             .layer(
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
@@ -1231,7 +1234,10 @@ impl HttpServer {
             .with_state(log_state)
     }
 
-    fn route_elasticsearch<S>(log_state: LogState) -> Router<S> {
+    fn route_elasticsearch<S>(
+        log_state: LogState,
+        memory_limiter: ServerMemoryLimiter,
+    ) -> Router<S> {
         Router::new()
             // Return fake responsefor HEAD '/' request.
             .route(
@@ -1303,6 +1309,10 @@ impl HttpServer {
                     axum::Json(serde_json::json!({})),
                 )),
             )
+            .layer(middleware::from_fn_with_state(
+                memory_limiter,
+                memory_limit::decoded_body_accounting_middleware,
+            ))
             .layer(ServiceBuilder::new().layer(RequestDecompressionLayer::new()))
             .layer(middleware::from_fn_with_state(
                 BatchingProtocol::Elasticsearch,
@@ -1312,7 +1322,10 @@ impl HttpServer {
     }
 
     #[deprecated(since = "0.11.0", note = "Use `route_pipelines()` instead.")]
-    fn route_log_deprecated<S>(log_state: LogState) -> Router<S> {
+    fn route_log_deprecated<S>(
+        log_state: LogState,
+        memory_limiter: ServerMemoryLimiter,
+    ) -> Router<S> {
         Router::new()
             .route("/logs", routing::post(event::log_ingester))
             .route(
@@ -1328,6 +1341,10 @@ impl HttpServer {
                 routing::delete(event::delete_pipeline),
             )
             .route("/pipelines/dryrun", routing::post(event::pipeline_dryrun))
+            .layer(middleware::from_fn_with_state(
+                memory_limiter,
+                memory_limit::decoded_body_accounting_middleware,
+            ))
             .layer(
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
@@ -1339,7 +1356,7 @@ impl HttpServer {
             .with_state(log_state)
     }
 
-    fn route_pipelines<S>(log_state: LogState) -> Router<S> {
+    fn route_pipelines<S>(log_state: LogState, memory_limiter: ServerMemoryLimiter) -> Router<S> {
         Router::new()
             .route("/ingest", routing::post(event::log_ingester))
             .route(
@@ -1359,6 +1376,10 @@ impl HttpServer {
                 routing::delete(event::delete_pipeline),
             )
             .route("/pipelines/_dryrun", routing::post(event::pipeline_dryrun))
+            .layer(middleware::from_fn_with_state(
+                memory_limiter,
+                memory_limit::decoded_body_accounting_middleware,
+            ))
             .layer(
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
@@ -1370,13 +1391,23 @@ impl HttpServer {
             .with_state(log_state)
     }
 
-    fn route_sql<S>(api_state: ApiState) -> Router<S> {
+    fn route_sql<S>(api_state: ApiState, batch_body_limit: usize) -> Router<S> {
         Router::new()
             .route(
                 "/capabilities",
-                routing::get(|| async {
-                    axum::Json(serde_json::json!({"metric_packed_import": 1}))
+                routing::get(|State(state): State<ApiState>| async move {
+                    let mut capabilities =
+                        serde_json::json!({"metric_packed_import": 1, "metric_packed_export": 1});
+                    if state.sql_handler.supports_metric_batch_ddl() {
+                        capabilities["metric_batch_ddl"] = serde_json::json!(1);
+                    }
+                    axum::Json(capabilities)
                 }),
+            )
+            .route(
+                "/ddl/logical-tables",
+                routing::post(handler::create_logical_tables)
+                    .layer(DefaultBodyLimit::max(batch_body_limit)),
             )
             .route(
                 "/sql",
@@ -1457,10 +1488,17 @@ impl HttpServer {
             .with_state(state)
     }
 
-    fn route_influxdb<S>(influxdb_handler: InfluxdbLineProtocolHandlerRef) -> Router<S> {
+    fn route_influxdb<S>(
+        influxdb_handler: InfluxdbLineProtocolHandlerRef,
+        memory_limiter: ServerMemoryLimiter,
+    ) -> Router<S> {
         Router::new()
             .route("/write", routing::post(influxdb_write_v1))
             .route("/api/v2/write", routing::post(influxdb_write_v2))
+            .layer(middleware::from_fn_with_state(
+                memory_limiter,
+                memory_limit::decoded_body_accounting_middleware,
+            ))
             .layer(
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
@@ -1487,12 +1525,16 @@ impl HttpServer {
     fn route_otlp<S>(
         otlp_handler: OpenTelemetryProtocolHandlerRef,
         with_metric_engine: bool,
-        experimental_enable_exponential_histogram: bool,
+        memory_limiter: ServerMemoryLimiter,
     ) -> Router<S> {
         Router::new()
             .route("/v1/metrics", routing::post(otlp::metrics))
             .route("/v1/traces", routing::post(otlp::traces))
             .route("/v1/logs", routing::post(otlp::logs))
+            .layer(middleware::from_fn_with_state(
+                memory_limiter,
+                memory_limit::decoded_body_accounting_middleware,
+            ))
             .layer(
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
@@ -1503,7 +1545,6 @@ impl HttpServer {
             ))
             .with_state(OtlpState {
                 with_metric_engine,
-                experimental_enable_exponential_histogram,
                 handler: otlp_handler,
             })
     }
@@ -1534,13 +1575,20 @@ impl HttpServer {
     }
 
     #[cfg(feature = "dashboard")]
-    fn route_dashboard<S>(handler: DashboardHandlerRef) -> Router<S> {
+    fn route_dashboard<S>(
+        handler: DashboardHandlerRef,
+        memory_limiter: ServerMemoryLimiter,
+    ) -> Router<S> {
         use crate::http::dashboard::{add_dashboard, delete_dashboard, list_dashboards};
 
         Router::new()
             .route("/", routing::get(list_dashboards))
             .route("/{dashboard_name}", routing::post(add_dashboard))
             .route("/{dashboard_name}", routing::delete(delete_dashboard))
+            .layer(middleware::from_fn_with_state(
+                memory_limiter,
+                memory_limit::decoded_body_accounting_middleware,
+            ))
             .layer(
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
@@ -1549,13 +1597,28 @@ impl HttpServer {
     }
 
     #[cfg(not(feature = "dashboard"))]
-    fn route_dashboard<S>(handler: DashboardHandlerRef) -> Router<S> {
+    fn route_dashboard<S>(
+        handler: DashboardHandlerRef,
+        _memory_limiter: ServerMemoryLimiter,
+    ) -> Router<S> {
         Router::new().with_state(DashboardState { handler })
     }
 }
 
 pub const HTTP_SERVER: &str = "HTTP_SERVER";
 pub const HTTP_API_SERVER: &str = "HTTP_API_SERVER";
+
+/// An empty list allows any origin.
+pub(crate) fn cors_allow_origin(origins: &[String]) -> Result<AllowOrigin> {
+    if origins.is_empty() {
+        return Ok(AllowOrigin::any());
+    }
+    let origins = origins
+        .iter()
+        .map(|origin| HeaderValue::from_str(origin).context(InvalidHeaderValueSnafu))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(AllowOrigin::list(origins))
+}
 
 #[async_trait]
 impl Server for HttpServer {
@@ -1885,6 +1948,15 @@ mod test {
                 client.get("/v1/capabilities").send().await.status(),
                 StatusCode::UNAUTHORIZED
             );
+            assert_eq!(
+                client
+                    .post("/v1/ddl/logical-tables")
+                    .form(&[("sql", "SELECT 1")])
+                    .send()
+                    .await
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
             let response = client
                 .get("/v1/capabilities")
                 .header("Authorization", "Basic dXNlcjpwYXNzd29yZA==")
@@ -1893,8 +1965,86 @@ mod test {
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(
                 response.json::<serde_json::Value>().await,
-                serde_json::json!({"metric_packed_import": 1})
+                serde_json::json!({"metric_packed_import": 1, "metric_packed_export": 1})
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn logical_ddl_form_limits_and_unsupported_handler() {
+        use axum::body::{Body, to_bytes};
+        use tower::ServiceExt;
+
+        async fn post_form(app: Router, body: String) -> (StatusCode, serde_json::Value) {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/v1/ddl/logical-tables")
+                        .header("Content-Type", "application/x-www-form-urlencoded")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            (status, serde_json::from_slice(&body).unwrap())
+        }
+
+        for limit in [0, 64] {
+            let (tx, _rx) = mpsc::channel(1);
+            let server = HttpServerBuilder::new(HttpOptions {
+                body_limit: ReadableSize(limit),
+                ..Default::default()
+            })
+            .with_sql_handler(Arc::new(DummyInstance { _tx: tx }))
+            .build();
+            let app = server.build(server.make_app()).unwrap();
+            let client = TestClient::new(app.clone()).await;
+            assert_eq!(
+                client.get("/v1/ddl/logical-tables").send().await.status(),
+                StatusCode::METHOD_NOT_ALLOWED
+            );
+            let small = client
+                .post("/v1/ddl/logical-tables")
+                .form(&[("sql", "CREATE TABLE t")])
+                .send()
+                .await;
+            assert_eq!(
+                small.json::<serde_json::Value>().await["code"],
+                common_error::status_code::StatusCode::Unsupported as u32
+            );
+            let (_, body) = post_form(
+                app.clone(),
+                if limit == 0 {
+                    format!("sql={}", "%20".repeat(1024 * 1024))
+                } else {
+                    "sql=".to_string() + &" ".repeat(65)
+                },
+            )
+            .await;
+            let code = body["code"].clone();
+            assert_eq!(
+                code,
+                if limit == 0 {
+                    common_error::status_code::StatusCode::Unsupported as u32
+                } else {
+                    common_error::status_code::StatusCode::InvalidArguments as u32
+                }
+            );
+            for body in [
+                format!("sql={}", "x".repeat(1024 * 1024 + 1)),
+                format!("sql={}", "%C3%A9".repeat(512 * 1024 + 1)),
+                format!("sql=CREATE+TABLE+t&padding={}", "x".repeat(4 * 1024 * 1024)),
+            ] {
+                let (status, body) = post_form(app.clone(), body).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(
+                    body["code"],
+                    common_error::status_code::StatusCode::InvalidArguments as u32
+                );
+            }
         }
     }
 
@@ -2480,26 +2630,50 @@ mod batching_tests {
     use common_query::Output;
     use session::context::QueryContextRef;
 
+    use crate::batcher::BatchingProtocol;
     use crate::error::Result as ServerResult;
     use crate::http::test_helpers::TestClient;
-    use crate::http::{BatchingProtocol, HttpOptions, HttpServerBuilder};
+    use crate::http::{HttpOptions, HttpServerBuilder};
     use crate::influxdb::InfluxdbRequest;
     use crate::opentsdb::codec::DataPoint;
     use crate::query_handler::{InfluxdbLineProtocolHandler, OpentsdbProtocolHandler};
 
-    #[test]
-    fn test_protocol_names_reject_unknown_values() {
-        assert_eq!(
-            serde_json::from_str::<BatchingProtocol>("\"prom\"").unwrap(),
-            BatchingProtocol::Prom
-        );
-        for name in ["sql", "unknown"] {
-            assert!(serde_json::from_str::<BatchingProtocol>(&format!("\"{name}\"")).is_err());
+    #[tokio::test]
+    async fn test_batching_selectors_are_independent() {
+        use axum::routing::post;
+        use axum::{Extension, Json, Router, middleware};
+        use session::context::{QueryContext, QueryContextBuilder};
+
+        use crate::http::{LogicalBatchingProtocols, set_http_write_batching};
+        for table in [false, true] {
+            for logical in [false, true] {
+                let app = Router::new()
+                    .route(
+                        "/",
+                        post(|Extension(ctx): Extension<QueryContext>| async move {
+                            Json([ctx.batching_enabled(), ctx.logical_batching_enabled()])
+                        }),
+                    )
+                    .route_layer(middleware::from_fn_with_state(
+                        BatchingProtocol::Otlp,
+                        set_http_write_batching,
+                    ))
+                    .layer(Extension(QueryContextBuilder::default().build()))
+                    .layer(Extension(Arc::new(if table {
+                        vec![BatchingProtocol::Otlp]
+                    } else {
+                        vec![]
+                    })))
+                    .layer(Extension(LogicalBatchingProtocols(if logical {
+                        vec![BatchingProtocol::Otlp]
+                    } else {
+                        vec![]
+                    })));
+                let client = TestClient::new(app).await;
+                let actual: [bool; 2] = client.post("/").send().await.json().await;
+                assert_eq!(actual, [table, logical]);
+            }
         }
-        assert_eq!(
-            serde_json::from_str::<BatchingProtocol>("\"http_sql\"").unwrap(),
-            BatchingProtocol::HttpSql
-        );
     }
 
     #[derive(Default)]

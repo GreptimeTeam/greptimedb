@@ -68,7 +68,8 @@ mod tests {
     use query::options::FLOW_SCHEDULED_TIME_MILLIS;
     use session::context::{QueryContextBuilder, generate_remote_query_id};
     use session::hints::{
-        INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY,
+        INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, READ_PREFERENCE_EXTENSION_KEY,
+        REMOTE_QUERY_ID_EXTENSION_KEY,
     };
 
     use super::apply_hints;
@@ -95,6 +96,10 @@ mod tests {
                     "spoofed-regs".to_string(),
                 ),
                 (
+                    READ_PREFERENCE_EXTENSION_KEY.to_string(),
+                    "follower".to_string(),
+                ),
+                (
                     FLOW_SCHEDULED_TIME_MILLIS.to_string(),
                     "1700000000000".to_string(),
                 ),
@@ -112,6 +117,8 @@ mod tests {
                 .extension(INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY)
                 .is_none()
         );
+        assert_eq!(query_ctx.read_preference(), session::ReadPreference::Leader);
+        assert!(query_ctx.extension(READ_PREFERENCE_EXTENSION_KEY).is_none());
         assert_eq!(
             query_ctx.extension(FLOW_SCHEDULED_TIME_MILLIS),
             Some("1700000000000")

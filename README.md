@@ -168,7 +168,7 @@ Read more in the [full Install Guide](https://docs.greptime.com/getting-started/
 ## Build From Source
 
 **Prerequisites:**
-* [Rust toolchain](https://www.rust-lang.org/tools/install) — nightly, pinned by [`rust-toolchain.toml`](https://github.com/GreptimeTeam/greptimedb/blob/main/rust-toolchain.toml)
+* [Rust toolchain](https://www.rust-lang.org/tools/install) — stable, pinned by [`rust-toolchain.toml`](https://github.com/GreptimeTeam/greptimedb/blob/main/rust-toolchain.toml)
 * [Protobuf compiler](https://grpc.io/docs/protoc-installation/) (>= 3.15)
 * C/C++ building essentials: `gcc` / `g++` / `autoconf` and the glibc dev package (`libc6-dev` on Ubuntu, `glibc-devel` on Fedora)
 * Python toolchain (optional, only for some test scripts)

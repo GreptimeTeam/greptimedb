@@ -615,6 +615,37 @@ mod test {
     };
 
     #[tokio::test]
+    async fn test_build_series_index_forwarding() {
+        use api::v1::region::build_index_request;
+        use store_api::region_request::RegionBuildIndexRequest;
+
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let request = || {
+            RegionRequest::BuildIndex(RegionBuildIndexRequest {
+                options: Some(build_index_request::Options::SeriesIndex(Default::default())),
+            })
+        };
+        // Default Mito config disables series indexes: reaching that error proves forwarding.
+        let error = env
+            .metric()
+            .handle_request(env.default_physical_region_id(), request())
+            .await
+            .unwrap_err();
+        let error = format!("{error:?}");
+        assert!(error.contains("series index is disabled"), "{error}");
+        let error = env
+            .metric()
+            .handle_request(env.default_logical_region_id(), request())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            common_error::status_code::StatusCode::Unsupported,
+            error.status_code()
+        );
+    }
+
+    #[tokio::test]
     async fn test_discard_unflushed_data_only() {
         let env = TestEnv::new().await;
         env.init_metric_region().await;

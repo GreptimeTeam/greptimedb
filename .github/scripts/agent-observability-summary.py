@@ -18,6 +18,8 @@ import json
 import math
 from pathlib import Path
 
+from benchmark_resource_summary import render_resources
+
 TARGETS = ('greptimedb', 'clickhouse', 'victorialogs')
 
 
@@ -201,6 +203,7 @@ def lifecycle(root, targets):
             rows.append([context, entry.get('phase'), duration(entry.get('elapsed_ms')) if valid else
                          'invalid timestamp units (legacy artifact)', entry.get('exit_code')])
     lines += ['## Phase timings', '', 'Phase duration includes orchestration overhead. Container cleanup does not prove ECS teardown.', '', table(['DB / scope', 'Phase', 'Duration', 'Exit code'], rows), '']
+    lines.append(render_resources([('dataset', root)] + [(t, root / f'{t}-1') for t in targets], table))
     return '\n'.join(lines)
 
 

@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use common_base::readable_size::ReadableSize;
+use common_runtime::runtime::RuntimeTrait;
 use common_telemetry::warn;
 use common_time::Timestamp;
 use futures::{Stream, TryStreamExt};
@@ -348,6 +349,7 @@ impl AccessLayer {
         write_opts: &WriteOptions,
         metrics: &mut Metrics,
     ) -> Result<SstInfoArray> {
+        let op_type = request.op_type;
         let region_id = request.metadata.region_id;
         let region_metadata = request.metadata.clone();
         let cache_manager = request.cache_manager.clone();
@@ -389,8 +391,6 @@ impl AccessLayer {
                 inverted_index_config: request.inverted_index_config,
                 fulltext_index_config: request.fulltext_index_config,
                 bloom_filter_index_config: request.bloom_filter_index_config,
-                #[cfg(feature = "vector_index")]
-                vector_index_config: request.vector_index_config,
             };
             // We disable write cache on file system but we still use atomic write.
             // TODO(yingwen): If we support other non-fs stores without the write cache, then
@@ -426,6 +426,10 @@ impl AccessLayer {
 
         // Put parquet metadata to cache manager.
         if !sst_info.is_empty() && cache_manager.sst_meta_cache_enabled() {
+            let runtime = match op_type {
+                OperationType::Compact => common_runtime::compact_runtime(),
+                OperationType::Flush => common_runtime::global_runtime(),
+            };
             for sst in &sst_info {
                 if let Some(parquet_metadata) = &sst.file_metadata {
                     let file_id = RegionFileId::new(region_id, sst.file_id);
@@ -445,7 +449,7 @@ impl AccessLayer {
                     // Compact cache preparation is best-effort. Run the entire operation in one
                     // detached blocking task so it neither blocks an async worker nor delays the
                     // SST write.
-                    common_runtime::spawn_blocking_global(move || {
+                    runtime.spawn_blocking(move || {
                         match prepare_sst_meta_sync(
                             &file_path,
                             Arc::unwrap_or_clone(parquet_metadata),
@@ -574,8 +578,6 @@ pub struct SstWriteRequest {
     pub metadata: RegionMetadataRef,
     pub source: FlatSource,
     pub cache_manager: CacheManagerRef,
-    #[allow(dead_code)]
-    pub storage: Option<String>,
     /// Optional uniform row sequence for writes that do not preserve sequences.
     /// Compaction passes `None` to retain the reader's effective input sequences.
     pub max_sequence: Option<SequenceNumber>,
@@ -589,8 +591,6 @@ pub struct SstWriteRequest {
     pub inverted_index_config: InvertedIndexConfig,
     pub fulltext_index_config: FulltextIndexConfig,
     pub bloom_filter_index_config: BloomFilterConfig,
-    #[cfg(feature = "vector_index")]
-    pub vector_index_config: crate::config::VectorIndexConfig,
 }
 
 /// Cleaner to remove temp files on the atomic write dir.

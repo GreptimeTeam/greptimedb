@@ -18,10 +18,9 @@ use api::v1::{ArrowIpc, SemanticType};
 use bytes::Bytes;
 use common_grpc::flight::{FlightEncoder, FlightMessage};
 use datatypes::arrow::record_batch::RecordBatch;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
-use store_api::region_engine::RegionEngine;
 use store_api::region_request::{AffectedRows, RegionBulkInsertsRequest, RegionRequest};
 use store_api::storage::RegionId;
 
@@ -74,9 +73,9 @@ impl MetricEngineInner {
         region_id: RegionId,
         mut request: RegionBulkInsertsRequest,
     ) -> Result<AffectedRows> {
-        // Simply set the aligned schema to the data region schema version to avoid filling missing columns
-        // because that schema should be constant and callers have ensured request has the same schema.
-        request.aligned_schema_version = Some(self.physical_schema_version(region_id).await?);
+        // Other logical tables can add fields to the shared physical schema.
+        // Let Mito fill fields absent from this batch before writing it.
+        request.aligned_schema_version = None;
         self.data_region
             .write_data(region_id, RegionRequest::BulkInserts(request))
             .await
@@ -121,7 +120,6 @@ impl MetricEngineInner {
         let (schema, data_header, payload) = record_batch_to_ipc(&modified_batch)?;
 
         let partition_expr_version = request.partition_expr_version;
-        let aligned_schema_version = Some(self.physical_schema_version(data_region_id).await?);
 
         let request = RegionBulkInsertsRequest {
             skip_wal: request.skip_wal,
@@ -133,20 +131,11 @@ impl MetricEngineInner {
                 payload,
             },
             partition_expr_version,
-            aligned_schema_version,
+            aligned_schema_version: None,
         };
         self.data_region
             .write_data(data_region_id, RegionRequest::BulkInserts(request))
             .await
-    }
-
-    async fn physical_schema_version(&self, region_id: RegionId) -> Result<u64> {
-        Ok(self
-            .mito
-            .get_metadata(region_id)
-            .await
-            .context(error::MitoReadOperationSnafu)?
-            .schema_version)
     }
 
     fn resolve_tag_columns_from_metadata(
@@ -365,17 +354,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_bulk_insert_physical_region_passthrough() {
-        check_bulk_insert_physical_region_passthrough(false).await;
-        check_bulk_insert_physical_region_passthrough(true).await;
+        check_bulk_insert_physical_region_passthrough(false, false).await;
+        check_bulk_insert_physical_region_passthrough(true, false).await;
     }
 
-    async fn check_bulk_insert_physical_region_passthrough(skip_wal: bool) {
+    #[tokio::test]
+    async fn test_bulk_insert_physical_region_close_recovery() {
+        check_bulk_insert_physical_region_passthrough(false, true).await;
+        check_bulk_insert_physical_region_passthrough(true, true).await;
+    }
+
+    async fn check_bulk_insert_physical_region_passthrough(skip_wal: bool, close: bool) {
         // Use flat format so that BulkMemtable is used (supports write_bulk).
         let mito_config = MitoConfig {
             default_flat_format: true,
             ..Default::default()
         };
-        let env = TestEnv::with_mito_config("", mito_config, Default::default()).await;
+        let mut env = TestEnv::with_mito_config("", mito_config, Default::default()).await;
         env.init_metric_region().await;
         env.metric().inner.flush_task.stop().await.unwrap();
         let physical_region_id = env.default_physical_region_id();
@@ -425,20 +420,23 @@ mod tests {
         let batches = RecordBatches::try_collect(stream).await.unwrap();
         assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 6);
 
-        // Closing without a flush must recover only WAL-backed data. Recreate
-        // the wrapper too, so its metadata cache cannot hide missing metadata.
         let stat = env.mito().region_statistic(physical_region_id).unwrap();
         assert_eq!(stat.sst_num, 0);
-        env.metric()
-            .handle_request(
-                physical_region_id,
-                RegionRequest::Close(RegionCloseRequest {
-                    flush_on_close: false,
-                }),
-            )
-            .await
-            .unwrap();
-        let reopened = MetricEngine::try_new(env.mito(), Default::default()).unwrap();
+        let reopened = if close {
+            env.metric()
+                .handle_request(
+                    physical_region_id,
+                    RegionRequest::Close(RegionCloseRequest::default()),
+                )
+                .await
+                .unwrap();
+            // Recreating the wrapper prevents its metadata cache from hiding data loss.
+            MetricEngine::try_new(env.mito(), Default::default()).unwrap()
+        } else {
+            // Stopping workers without Close exercises recovery from WAL alone.
+            env.reopen_engine(Default::default()).await;
+            env.metric()
+        };
         reopened.inner.flush_task.stop().await.unwrap();
         reopened
             .handle_request(
@@ -457,6 +455,11 @@ mod tests {
             )
             .await
             .unwrap();
+        let stat = env
+            .mito()
+            .region_statistic(crate::utils::to_data_region_id(physical_region_id))
+            .unwrap();
+        assert_eq!(stat.sst_num > 0, skip_wal && close);
         let stream = reopened
             .scan_to_stream(logical_region_id, ScanRequest::default())
             .await
@@ -464,7 +467,7 @@ mod tests {
         let batches = RecordBatches::try_collect(stream).await.unwrap();
         assert_eq!(
             batches.iter().map(|b| b.num_rows()).sum::<usize>(),
-            if skip_wal { 0 } else { 6 },
+            if skip_wal && !close { 0 } else { 6 },
         );
     }
 

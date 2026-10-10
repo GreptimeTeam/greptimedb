@@ -37,7 +37,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextBackend, FulltextOptions};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::provider::Provider;
-use store_api::metadata::ColumnMetadata;
+use store_api::metadata::{ColumnMetadata, RegionMetadata};
 use store_api::metric_engine_consts::{PRIMARY_KEY_ENCODING, TABLE_COLUMN_METADATA_EXTENSION_KEY};
 use store_api::region_engine::{RegionEngine, RegionManifestInfo, RegionRole};
 use store_api::region_request::{
@@ -191,6 +191,133 @@ fn assert_column_metadatas(column_name: &[(&str, ColumnId)], column_metadatas: &
             .unwrap();
         assert_eq!(column_metadata.column_schema.name, *name);
     }
+}
+
+#[tokio::test]
+async fn test_sync_columns_preserves_primary_key_order() {
+    test_sync_columns_preserves_primary_key_order_with_format(false).await;
+    test_sync_columns_preserves_primary_key_order_with_format(true).await;
+}
+
+async fn assert_sync_columns_readable(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    metadata: &RegionMetadata,
+    expected: &str,
+) {
+    let current = engine.get_region(region_id).unwrap().metadata();
+    assert_eq!(current.primary_key, metadata.primary_key);
+    let projection = metadata
+        .column_metadatas
+        .iter()
+        .map(|column| current.column_index_by_id(column.column_id).unwrap())
+        .collect();
+    let stream = engine
+        .scan_to_stream(
+            region_id,
+            ScanRequest {
+                projection: Some(projection),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        RecordBatches::try_collect(stream)
+            .await
+            .unwrap()
+            .pretty_print()
+            .unwrap(),
+        expected
+    );
+}
+
+async fn test_sync_columns_preserves_primary_key_order_with_format(flat_format: bool) {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let table_dir = request.table_dir.clone();
+    let mut row_schema = rows_schema(&request);
+    row_schema.push(tag_column_schema("tag_1", ColumnDataType::String));
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    engine
+        .handle_request(region_id, RegionRequest::Alter(add_tag1()))
+        .await
+        .unwrap();
+    let metadata = engine.get_region(region_id).unwrap().metadata();
+    assert_eq!(metadata.primary_key, vec![0, 3]);
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: row_schema,
+            rows: build_rows_for_tags("a", "b", 0, 2, 10),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    let before = RecordBatches::try_collect(
+        engine
+            .scanner(region_id, ScanRequest::default())
+            .await
+            .unwrap()
+            .scan()
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+    .pretty_print()
+    .unwrap();
+
+    let mut columns = metadata.column_metadatas.clone();
+    columns.push(ColumnMetadata {
+        column_schema: ColumnSchema::new("field_1", ConcreteDataType::float64_datatype(), true),
+        semantic_type: SemanticType::Field,
+        column_id: 4,
+    });
+    let tags = metadata.primary_key_columns().cloned().collect::<Vec<_>>();
+    let mut tags = tags.into_iter();
+    for column in &mut columns {
+        if column.semantic_type == SemanticType::Tag {
+            *column = tags.next().unwrap();
+        }
+    }
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::SyncColumns {
+                    column_metadatas: columns,
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert_sync_columns_readable(&engine, region_id, &metadata, &before).await;
+    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    assert_sync_columns_readable(&engine, region_id, &metadata, &before).await;
 }
 
 #[tokio::test]

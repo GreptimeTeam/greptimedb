@@ -73,9 +73,7 @@ tql eval(0, 5, '5s') count_over_time(counter_metric[10s]) / on(host, device) cou
 -- SQLNESS SORT_RESULT 3 1
 tql eval(0, 5, '5s') counter_metric offset 5s / on(host, device) gauge_metric{host="host1"};
 
--- Matching on a subset of the labels. Prometheus rejects this as many-to-many; GreptimeDB
--- returns the cross product instead (#9209). Recorded here to show the rewrite does not
--- change it, not to endorse it.
+-- Matching on a subset of the labels: both operands hold several devices per host.
 -- SQLNESS SORT_RESULT 3 1
 tql eval(0, 5, '5s') counter_metric / on(host) gauge_metric{host="host1"};
 

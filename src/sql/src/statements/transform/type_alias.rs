@@ -72,7 +72,7 @@ impl TransformRule for TypeAliasTransformRule {
                     alter_table.alter_operation_mut()
                 {
                     for add_column in add_columns {
-                        replace_type_alias(&mut add_column.column_def.data_type);
+                        replace_type_alias(add_column.column.mut_data_type());
                     }
                 }
             }

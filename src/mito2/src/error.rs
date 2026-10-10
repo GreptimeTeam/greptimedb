@@ -453,6 +453,14 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Failed to wait for the WAL to be durable, region_id: {}", region_id))]
+    WaitWalDurable {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+        source: BoxedError,
+    },
+
     // Shared error for each writer in the write group.
     #[snafu(display("Failed to write region"))]
     WriteGroup { source: Arc<Error> },
@@ -769,14 +777,6 @@ pub enum Error {
     #[snafu(display("Failed to apply bloom filter index"))]
     ApplyBloomFilterIndex {
         source: index::bloom_filter::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[cfg(feature = "vector_index")]
-    #[snafu(display("Failed to apply vector index: {}", reason))]
-    ApplyVectorIndex {
-        reason: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1197,22 +1197,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[cfg(feature = "vector_index")]
-    #[snafu(display("Failed to build vector index: {}", reason))]
-    VectorIndexBuild {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[cfg(feature = "vector_index")]
-    #[snafu(display("Failed to finish vector index: {}", reason))]
-    VectorIndexFinish {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Manual compaction is override by following operations."))]
     ManualCompactionOverride {},
 
@@ -1463,9 +1447,10 @@ impl ErrorExt for Error {
             OpenDal { .. } | ManifestDeltaNotFound { .. } | ReadParquet { .. } => {
                 StatusCode::StorageUnavailable
             }
-            WriteWal { source, .. } | ReadWal { source, .. } | DeleteWal { source, .. } => {
-                source.status_code()
-            }
+            WriteWal { source, .. }
+            | ReadWal { source, .. }
+            | DeleteWal { source, .. }
+            | WaitWalDurable { source, .. } => source.status_code(),
             CompressObject { .. }
             | DecompressObject { .. }
             | SerdeJson { .. }
@@ -1571,8 +1556,6 @@ impl ErrorExt for Error {
             | PushIndexValue { source, .. }
             | ApplyInvertedIndex { source, .. }
             | IndexFinish { source, .. } => source.status_code(),
-            #[cfg(feature = "vector_index")]
-            ApplyVectorIndex { .. } => StatusCode::Internal,
             PuffinReadBlob { source, .. }
             | PuffinAddBlob { source, .. }
             | PuffinInitStager { source, .. }
@@ -1614,9 +1597,6 @@ impl ErrorExt for Error {
             PushBloomFilterValue { source, .. } | BloomFilterFinish { source, .. } => {
                 source.status_code()
             }
-
-            #[cfg(feature = "vector_index")]
-            VectorIndexBuild { .. } | VectorIndexFinish { .. } => StatusCode::Internal,
 
             ManualCompactionOverride {} | CompactionCancelled {} | FlushCancelled {} => {
                 StatusCode::Cancelled
@@ -1680,6 +1660,7 @@ impl ErrorExt for Error {
             WriteWal { source, .. }
             | ReadWal { source, .. }
             | DeleteWal { source, .. }
+            | WaitWalDurable { source, .. }
             | FetchManifests { source, .. }
             | External { source, .. } => source.retry_hint(),
 

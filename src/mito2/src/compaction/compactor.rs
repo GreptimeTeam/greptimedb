@@ -461,7 +461,6 @@ impl SstMerger for DefaultSstMerger {
         write_opts: WriteOptions,
     ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
         let region_id = compaction_region.region_id;
-        let storage = compaction_region.region_options.storage.clone();
         let index_options = compaction_region
             .current_version
             .options
@@ -479,8 +478,6 @@ impl SstMerger for DefaultSstMerger {
         let inverted_index_config = compaction_region.engine_config.inverted_index.clone();
         let fulltext_index_config = compaction_region.engine_config.fulltext_index.clone();
         let bloom_filter_index_config = compaction_region.engine_config.bloom_filter_index.clone();
-        #[cfg(feature = "vector_index")]
-        let vector_index_config = compaction_region.engine_config.vector_index.clone();
 
         let input_file_names = output
             .inputs
@@ -510,7 +507,6 @@ impl SstMerger for DefaultSstMerger {
                     metadata: region_metadata.clone(),
                     source,
                     cache_manager: compaction_region.cache_manager.clone(),
-                    storage,
                     // Readers resolve file overrides before merge/dedup. Replacing
                     // their effective sequences here could promote old rows above
                     // versions in SSTs that were not part of this merge.
@@ -526,8 +522,6 @@ impl SstMerger for DefaultSstMerger {
                     inverted_index_config,
                     fulltext_index_config,
                     bloom_filter_index_config,
-                    #[cfg(feature = "vector_index")]
-                    vector_index_config,
                 },
                 &write_opts,
                 &mut metrics,

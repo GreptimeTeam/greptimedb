@@ -34,7 +34,7 @@ use datafusion::physical_plan::{
     Partitioning, PhysicalExpr, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
 use datafusion_common::DFSchema;
-use datafusion_expr::{EmptyRelation, col};
+use datafusion_expr::{EmptyRelation, ident};
 use datatypes::arrow;
 use datatypes::arrow::array::{ArrayRef, Float64Array, TimestampMillisecondArray};
 use datatypes::arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
@@ -108,7 +108,7 @@ impl UserDefinedLogicalNodeCore for Absent {
             return vec![];
         }
 
-        vec![col(&self.time_index_column)]
+        vec![ident(&self.time_index_column)]
     }
 
     fn necessary_children_exprs(&self, _output_columns: &[usize]) -> Option<Vec<Vec<usize>>> {

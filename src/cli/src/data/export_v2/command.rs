@@ -25,15 +25,15 @@ use common_error::ext::BoxedError;
 use common_telemetry::info;
 use serde_json::Value;
 use servers::http::{ColumnSchema, GreptimeQueryOutput, OutputSchema};
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 
 use crate::Tool;
 use crate::common::ObjectStoreConfig;
 use crate::data::export_v2::coordinator::{ExportDataOptions, export_data};
 use crate::data::export_v2::error::{
-    ChunkTimeWindowRequiresBoundsSnafu, DatabaseSnafu, EmptyResultSnafu, IoSnafu,
-    ManifestVersionMismatchSnafu, Result, ResumeConfigMismatchSnafu, SchemaOnlyArgsNotAllowedSnafu,
-    SchemaOnlyModeMismatchSnafu, SnapshotVerifyFailedSnafu, UnexpectedValueTypeSnafu,
+    ChunkTimeWindowRequiresBoundsSnafu, DatabaseSnafu, IoSnafu, ManifestVersionMismatchSnafu,
+    Result, ResumeConfigMismatchSnafu, SchemaOnlyArgsNotAllowedSnafu, SchemaOnlyModeMismatchSnafu,
+    SnapshotVerifyFailedSnafu, UnexpectedValueTypeSnafu,
 };
 use crate::data::export_v2::extractor::SchemaExtractor;
 use crate::data::export_v2::manifest::{
@@ -42,10 +42,11 @@ use crate::data::export_v2::manifest::{
 use crate::data::export_v2::schema::{DDL_DIR, SCHEMA_DIR, SCHEMAS_FILE};
 use crate::data::path::{data_dir_for_schema_chunk, ddl_path_for_schema};
 use crate::data::progress::{ProgressMode, build_progress_reporter};
+use crate::data::schema_export::append_schema_ddl;
 use crate::data::snapshot_storage::{
     OpenDalStorage, SnapshotStorage, validate_snapshot_uri, validate_uri,
 };
-use crate::data::sql::{escape_sql_identifier, escape_sql_literal};
+use crate::data::sql::escape_sql_literal;
 use crate::database::{DatabaseClient, parse_proxy_opts};
 
 /// Export V2 commands.
@@ -296,6 +297,10 @@ pub struct ExportCreateCommand {
     #[clap(long)]
     experimental_metric_export: bool,
 
+    /// Store independent Metric Parquet streams in shared packed objects.
+    #[clap(long, value_parser = ["packed"], requires = "experimental_metric_export")]
+    metric_data_layout: Option<String>,
+
     /// Delete existing snapshot and recreate.
     #[clap(long)]
     force: bool,
@@ -345,6 +350,16 @@ impl ExportCreateCommand {
 
         let time_range = TimeRange::parse(self.start_time.as_deref(), self.end_time.as_deref())
             .map_err(BoxedError::new)?;
+        if self.metric_data_layout.is_some()
+            && time_range.is_bounded()
+            && time_range.start == time_range.end
+        {
+            return crate::error::InvalidArgumentsSnafu {
+                msg: "Packed export requires --start-time to be earlier than --end-time",
+            }
+            .fail()
+            .map_err(BoxedError::new);
+        }
         if self.chunk_time_window.is_some() && !time_range.is_bounded() {
             return ChunkTimeWindowRequiresBoundsSnafu
                 .fail()
@@ -425,6 +440,13 @@ impl ExportCreateCommand {
                     .map_err(BoxedError::new);
             }
         }
+        if self.metric_data_layout.is_some() && !self.schema_only {
+            database_client
+                .require_packed_export()
+                .await
+                .context(DatabaseSnafu)
+                .map_err(BoxedError::new)?;
+        }
         let storage = OpenDalStorage::from_uri(&self.to, &self.storage).map_err(BoxedError::new)?;
 
         Ok(Box::new(ExportCreate {
@@ -434,6 +456,7 @@ impl ExportCreateCommand {
                 schema_only: self.schema_only,
                 format: self.format,
                 experimental_metric_export: self.experimental_metric_export,
+                packed: self.metric_data_layout.is_some(),
                 force: self.force,
                 time_range,
                 chunk_time_window: self.chunk_time_window,
@@ -462,6 +485,7 @@ struct ExportConfig {
     schema_only: bool,
     format: DataFormat,
     experimental_metric_export: bool,
+    packed: bool,
     force: bool,
     time_range: TimeRange,
     chunk_time_window: Option<Duration>,
@@ -504,7 +528,7 @@ impl ExportCreate {
                 let mut manifest = self.storage.read_manifest().await?;
 
                 // Check version compatibility
-                if manifest.version != MANIFEST_VERSION || manifest.data_layout.is_some() {
+                if manifest.validate_layout().is_err() {
                     return ManifestVersionMismatchSnafu {
                         expected: MANIFEST_VERSION,
                         found: manifest.version,
@@ -513,6 +537,15 @@ impl ExportCreate {
                 }
 
                 validate_resume_config(&manifest, &self.config)?;
+                if manifest.is_packed() {
+                    self.database_client
+                        .require_packed_export()
+                        .await
+                        .context(DatabaseSnafu)?;
+                    if !self.config.experimental_metric_export {
+                        return crate::data::export_v2::error::MetricExportUnavailableSnafu.fail();
+                    }
+                }
 
                 info!(
                     "Resuming existing snapshot: {} (completed: {}/{} chunks)",
@@ -571,10 +604,14 @@ impl ExportCreate {
             self.config.chunk_time_window,
         )?;
 
+        if self.config.packed && !self.config.schema_only {
+            manifest.version = 2;
+            manifest.data_layout = Some(common_datasource::packed_snapshot::PACKED_LAYOUT.into());
+        }
         if self.config.experimental_metric_export {
             for chunk in &manifest.chunks {
                 self.storage
-                    .prepare_export_chunk(&schema_names, chunk.id, false)
+                    .prepare_export_chunk(&schema_names, chunk.id, false, manifest.is_packed())
                     .await?;
             }
         }
@@ -584,8 +621,10 @@ impl ExportCreate {
         info!("Exported {} schemas", schema_snapshot.schemas.len());
 
         // 5. Export DDL files for import recovery.
-        let ddl_by_schema = self.build_ddl_by_schema(&schema_names).await?;
-        for (schema, ddl) in ddl_by_schema {
+        let mut sorted_schemas = schema_names;
+        sorted_schemas.sort();
+        for schema in sorted_schemas {
+            let ddl = self.build_schema_ddl(&schema).await?;
             let ddl_path = ddl_path_for_schema(&schema);
             self.storage.write_text(&ddl_path, &ddl).await?;
             info!("Exported DDL for schema {} to {}", schema, ddl_path);
@@ -623,45 +662,31 @@ impl ExportCreate {
         Ok(())
     }
 
-    async fn build_ddl_by_schema(&self, schema_names: &[String]) -> Result<Vec<(String, String)>> {
-        let mut schemas = schema_names.to_vec();
-        schemas.sort();
-
-        let mut ddl_by_schema = Vec::with_capacity(schemas.len());
-        for schema in schemas {
-            let create_database = self.show_create("DATABASE", &schema, None).await?;
-
-            let (mut physical_tables, mut tables, mut views) =
-                self.get_schema_objects(&schema).await?;
-            physical_tables.sort();
-            let mut physical_ddls = Vec::with_capacity(physical_tables.len());
-            for table in physical_tables {
-                physical_ddls.push(self.show_create("TABLE", &schema, Some(&table)).await?);
-            }
-
-            tables.sort();
-            let mut table_ddls = Vec::with_capacity(tables.len());
-            for table in tables {
-                table_ddls.push(self.show_create("TABLE", &schema, Some(&table)).await?);
-            }
-
-            views.sort();
-            let mut view_ddls = Vec::with_capacity(views.len());
-            for view in views {
-                view_ddls.push(self.show_create("VIEW", &schema, Some(&view)).await?);
-            }
-
-            let ddl = build_schema_ddl(
-                &schema,
-                create_database,
-                physical_ddls,
-                table_ddls,
-                view_ddls,
-            );
-            ddl_by_schema.push((schema, ddl));
-        }
-
-        Ok(ddl_by_schema)
+    async fn build_schema_ddl(&self, schema: &str) -> Result<String> {
+        let (mut physical_tables, mut tables, mut views) = self.get_schema_objects(schema).await?;
+        physical_tables.sort();
+        tables.sort();
+        views.sort();
+        let objects = std::iter::once(("DATABASE", None))
+            .chain(
+                physical_tables
+                    .iter()
+                    .chain(&tables)
+                    .map(|table| ("TABLE", Some(table.as_str()))),
+            )
+            .chain(views.iter().map(|view| ("VIEW", Some(view.as_str()))));
+        let mut ddl = format!("-- Schema: {schema}\n");
+        append_schema_ddl(
+            &self.database_client,
+            &self.config.catalog,
+            schema,
+            objects,
+            &mut ddl,
+        )
+        .await
+        .context(DatabaseSnafu)?;
+        ddl.push('\n');
+        Ok(ddl)
     }
 
     async fn get_schema_objects(
@@ -734,68 +759,17 @@ impl ExportCreate {
 
         Ok(tables.into_iter().collect())
     }
-
-    async fn show_create(
-        &self,
-        show_type: &str,
-        schema: &str,
-        table: Option<&str>,
-    ) -> Result<String> {
-        let sql = match table {
-            Some(table) => format!(
-                r#"SHOW CREATE {} "{}"."{}"."{}""#,
-                show_type,
-                escape_sql_identifier(&self.config.catalog),
-                escape_sql_identifier(schema),
-                escape_sql_identifier(table)
-            ),
-            None => format!(
-                r#"SHOW CREATE {} "{}"."{}""#,
-                show_type,
-                escape_sql_identifier(&self.config.catalog),
-                escape_sql_identifier(schema)
-            ),
-        };
-
-        let records: Option<Vec<Vec<Value>>> = self
-            .database_client
-            .sql_in_public(&sql)
-            .await
-            .context(DatabaseSnafu)?;
-        let rows = records.context(EmptyResultSnafu)?;
-        let row = rows.first().context(EmptyResultSnafu)?;
-        let Some(Value::String(create)) = row.get(1) else {
-            return UnexpectedValueTypeSnafu.fail();
-        };
-
-        Ok(format!("{};\n", create))
-    }
-}
-
-fn build_schema_ddl(
-    schema: &str,
-    create_database: String,
-    physical_tables: Vec<String>,
-    tables: Vec<String>,
-    views: Vec<String>,
-) -> String {
-    let mut ddl = String::new();
-    ddl.push_str(&format!("-- Schema: {}\n", schema));
-    ddl.push_str(&create_database);
-    for stmt in physical_tables {
-        ddl.push_str(&stmt);
-    }
-    for stmt in tables {
-        ddl.push_str(&stmt);
-    }
-    for stmt in views {
-        ddl.push_str(&stmt);
-    }
-    ddl.push('\n');
-    ddl
 }
 
 fn validate_resume_config(manifest: &Manifest, config: &ExportConfig) -> Result<()> {
+    if config.packed && !manifest.schema_only && !manifest.is_packed() {
+        return ResumeConfigMismatchSnafu {
+            field: "metric_data_layout",
+            existing: "standalone".to_string(),
+            requested: "packed".to_string(),
+        }
+        .fail();
+    }
     if manifest.schema_only != config.schema_only {
         return SchemaOnlyModeMismatchSnafu {
             existing_schema_only: manifest.schema_only,
@@ -1593,25 +1567,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_build_schema_ddl_order() {
-        let ddl = build_schema_ddl(
-            "public",
-            "CREATE DATABASE public;\n".to_string(),
-            vec!["PHYSICAL;\n".to_string()],
-            vec!["TABLE;\n".to_string()],
-            vec!["VIEW;\n".to_string()],
-        );
-
-        let db_pos = ddl.find("CREATE DATABASE").unwrap();
-        let physical_pos = ddl.find("PHYSICAL;").unwrap();
-        let table_pos = ddl.find("TABLE;").unwrap();
-        let view_pos = ddl.find("VIEW;").unwrap();
-        assert!(db_pos < physical_pos);
-        assert!(physical_pos < table_pos);
-        assert!(table_pos < view_pos);
-    }
-
     #[tokio::test]
     async fn test_build_rejects_chunk_window_without_bounds() {
         let cmd = ExportCreateCommand::parse_from([
@@ -1801,6 +1756,7 @@ mod tests {
             schema_only: false,
             format: DataFormat::Parquet,
             experimental_metric_export: false,
+            packed: false,
             force: false,
             time_range: TimeRange::unbounded(),
             chunk_time_window: None,
@@ -1820,7 +1776,7 @@ mod tests {
 
     #[test]
     fn test_validate_resume_config_accepts_schema_selection_with_different_case_and_order() {
-        let manifest = Manifest::new_for_export(
+        let mut manifest = Manifest::new_for_export(
             "greptime".to_string(),
             vec!["public".to_string(), "analytics".to_string()],
             false,
@@ -1829,7 +1785,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let config = ExportConfig {
+        let mut config = ExportConfig {
             catalog: "greptime".to_string(),
             schemas: Some(vec![
                 "ANALYTICS".to_string(),
@@ -1839,6 +1795,7 @@ mod tests {
             schema_only: false,
             format: DataFormat::Parquet,
             experimental_metric_export: false,
+            packed: false,
             force: false,
             time_range: TimeRange::unbounded(),
             chunk_time_window: None,
@@ -1849,6 +1806,18 @@ mod tests {
             storage_config: ObjectStoreConfig::default(),
         };
 
+        assert!(validate_resume_config(&manifest, &config).is_ok());
+        config.packed = true;
+        assert!(
+            validate_resume_config(&manifest, &config)
+                .unwrap_err()
+                .to_string()
+                .contains("metric_data_layout")
+        );
+        manifest.version = 2;
+        manifest.data_layout = Some(common_datasource::packed_snapshot::PACKED_LAYOUT.into());
+        assert!(validate_resume_config(&manifest, &config).is_ok());
+        config.packed = false;
         assert!(validate_resume_config(&manifest, &config).is_ok());
     }
 
@@ -1872,6 +1841,7 @@ mod tests {
             schema_only: false,
             format: DataFormat::Parquet,
             experimental_metric_export: false,
+            packed: false,
             force: false,
             time_range,
             chunk_time_window: Some(Duration::from_secs(3600)),
@@ -1906,6 +1876,7 @@ mod tests {
             schema_only: false,
             format: DataFormat::Csv,
             experimental_metric_export: false,
+            packed: false,
             force: false,
             time_range: TimeRange::unbounded(),
             chunk_time_window: None,
@@ -1942,6 +1913,7 @@ mod tests {
             schema_only: false,
             format: DataFormat::Parquet,
             experimental_metric_export: false,
+            packed: false,
             force: false,
             time_range: TimeRange::new(Some(start), Some(start)),
             chunk_time_window: None,

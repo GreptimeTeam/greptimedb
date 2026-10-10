@@ -41,7 +41,7 @@ impl Display for ShowKind {
 macro_rules! format_kind {
     ($self: expr, $f: expr) => {
         if $self.kind != ShowKind::All {
-            write!($f, " {}", &$self.kind)?;
+            write!($f, " {}", $self.kind)?;
         }
     };
 }
@@ -71,7 +71,7 @@ impl Display for ShowColumns {
         if self.full {
             write!(f, "FULL ")?;
         }
-        write!(f, "COLUMNS IN {}", &self.table)?;
+        write!(f, "COLUMNS IN {}", self.table)?;
         if let Some(database) = &self.database {
             write!(f, " IN {database}")?;
         }
@@ -90,7 +90,7 @@ pub struct ShowIndex {
 
 impl Display for ShowIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SHOW INDEX IN {}", &self.table)?;
+        write!(f, "SHOW INDEX IN {}", self.table)?;
         if let Some(database) = &self.database {
             write!(f, " IN {database}")?;
         }
@@ -110,7 +110,7 @@ pub struct ShowRegion {
 
 impl Display for ShowRegion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SHOW REGION IN {}", &self.table)?;
+        write!(f, "SHOW REGION IN {}", self.table)?;
         if let Some(database) = &self.database {
             write!(f, " IN {database}")?;
         }
