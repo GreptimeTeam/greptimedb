@@ -620,6 +620,59 @@ async fn expand_bounded_slice(
         batch.num_columns(),
         requested,
     )?;
+    // Parquet accepts compatible string dictionaries without expanding their values.
+    let fields = schema
+        .fields()
+        .iter()
+        .zip(batch.columns())
+        .map(|(field, array)| {
+            if let DataType::Dictionary(_, value) = array.data_type()
+                && value.as_ref() == field.data_type()
+                && matches!(value.as_ref(), DataType::Utf8 | DataType::LargeUtf8)
+            {
+                Arc::new(
+                    field
+                        .as_ref()
+                        .clone()
+                        .with_data_type(array.data_type().clone()),
+                )
+            } else {
+                field.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    let schema = Arc::new(arrow::datatypes::Schema::new_with_metadata(
+        fields,
+        schema.metadata().clone(),
+    ));
+    // Sharing compatible arrays needs no CPU conversion. Keep the size check on
+    // this task only when its dictionary inspection is bounded.
+    if start < end
+        && batch
+            .columns()
+            .iter()
+            .zip(schema.fields())
+            .all(|(array, field)| array.data_type() == field.data_type())
+        && let Some(estimated) = bounded_batch_size(&batch, end - start, &[])?
+        && estimated <= conversion
+    {
+        let reservation = retained.saturating_add(estimated.saturating_mul(4));
+        let permit = budget.reserve(reservation, cancellation).await?;
+        let expanded = expand_export_batch(&batch.slice(start, end - start), schema)?;
+        ensure!(
+            expanded.get_array_memory_size() <= reservation,
+            LogicalTableExportResourceSnafu {
+                reason: "converted backing buffers exceed reservation"
+            }
+        );
+        return Ok((
+            Payload {
+                batch: expanded,
+                permit,
+            },
+            end - start,
+        ));
+    }
     let input = batch.clone();
     let (len, estimated) = common_runtime::spawn_blocking_global(move || {
         rows_within_budget(&input, start, end, conversion, &[])
@@ -630,31 +683,6 @@ async fn expand_bounded_slice(
     let permit = budget.reserve(reservation, cancellation).await?;
     common_runtime::spawn_blocking_global(move || {
         let slice = batch.slice(start, len);
-        // Parquet accepts compatible string dictionaries without expanding their values.
-        let fields = schema
-            .fields()
-            .iter()
-            .zip(slice.columns())
-            .map(|(field, array)| {
-                if let DataType::Dictionary(_, value) = array.data_type()
-                    && value.as_ref() == field.data_type()
-                    && matches!(value.as_ref(), DataType::Utf8 | DataType::LargeUtf8)
-                {
-                    Arc::new(
-                        field
-                            .as_ref()
-                            .clone()
-                            .with_data_type(array.data_type().clone()),
-                    )
-                } else {
-                    field.clone()
-                }
-            })
-            .collect::<Vec<_>>();
-        let schema = Arc::new(arrow::datatypes::Schema::new_with_metadata(
-            fields,
-            schema.metadata().clone(),
-        ));
         let expanded = expand_export_batch(&slice, schema)?;
         ensure!(
             expanded.get_array_memory_size() <= reservation,
@@ -820,6 +848,40 @@ fn estimate_value_size(array: &dyn Array, row: usize) -> Result<usize> {
     Ok(bytes.saturating_add(16))
 }
 
+// Bound the work as well as the bytes so callers can use this on an async task.
+fn bounded_batch_size(
+    batch: &RecordBatch,
+    rows: usize,
+    json_columns: &[usize],
+) -> Result<Option<usize>> {
+    let mut dictionary_values = 1024usize;
+    let mut max_row_bytes = 0usize;
+    for (index, array) in batch.columns().iter().enumerate() {
+        let size = if let Some(width) = array.data_type().primitive_width() {
+            (width + 16).max(32)
+        } else if let Some(dictionary) = array.as_any_dictionary_opt()
+            && dictionary.values().len() < rows
+            && dictionary.values().len() <= dictionary_values
+            && matches!(
+                dictionary.values().data_type(),
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+            )
+        {
+            let values = dictionary.values();
+            dictionary_values -= values.len();
+            let max = (0..values.len()).try_fold(0usize, |max, row| {
+                Ok::<_, error::Error>(max.max(estimate_value_size(values.as_ref(), row)?))
+            })?;
+            max.saturating_add(16).max(32)
+        } else {
+            return Ok(None);
+        };
+        let expansion = if json_columns.contains(&index) { 8 } else { 1 };
+        max_row_bytes = max_row_bytes.saturating_add(size.saturating_mul(expansion));
+    }
+    Ok(max_row_bytes.checked_mul(rows))
+}
+
 pub(crate) fn rows_within_budget(
     batch: &RecordBatch,
     start: usize,
@@ -827,39 +889,11 @@ pub(crate) fn rows_within_budget(
     budget: usize,
     json_columns: &[usize],
 ) -> Result<(usize, usize)> {
-    if start < end {
-        let rows = end - start;
-        let mut max_row_bytes = 0usize;
-        let mut bounded = true;
-        for (index, array) in batch.columns().iter().enumerate() {
-            let size = if let Some(width) = array.data_type().primitive_width() {
-                (width + 16).max(32)
-            } else if let Some(dictionary) = array.as_any_dictionary_opt()
-                && dictionary.values().len() < rows
-                && matches!(
-                    dictionary.values().data_type(),
-                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
-                )
-            {
-                let values = dictionary.values();
-                let max = (0..values.len()).try_fold(0usize, |max, row| {
-                    Ok::<_, error::Error>(max.max(estimate_value_size(values.as_ref(), row)?))
-                })?;
-                max.saturating_add(16).max(32)
-            } else {
-                bounded = false;
-                break;
-            };
-            let expansion = if json_columns.contains(&index) { 8 } else { 1 };
-            max_row_bytes = max_row_bytes.saturating_add(size.saturating_mul(expansion));
-        }
-        // A conservative bound avoids revisiting repeated dictionary values for every row.
-        if bounded
-            && let Some(bytes) = max_row_bytes.checked_mul(rows)
-            && bytes <= budget
-        {
-            return Ok((rows, bytes));
-        }
+    if start < end
+        && let Some(bytes) = bounded_batch_size(batch, end - start, json_columns)?
+        && bytes <= budget
+    {
+        return Ok((end - start, bytes));
     }
     let mut bytes = 0usize;
     let mut row = start;

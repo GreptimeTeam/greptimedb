@@ -214,6 +214,71 @@ async fn dictionary_null_values_write_the_logical_parquet_schema() {
 }
 
 #[tokio::test]
+async fn compatible_dictionary_slices_share_backing_with_bounded_admission() {
+    let input = batch(vec![Some(1025); 8192], vec![Some("host"); 8192])
+        .project(&[2, 3, 1])
+        .unwrap();
+    let schema = unit().logical_tables[&1025].schema.clone();
+    let budget = ExportWriteBudget::new(1);
+    let token = CancellationToken::new();
+    let conversion = expand_bounded_slice(
+        input.clone(),
+        schema.clone(),
+        7,
+        8192,
+        1024 * 1024,
+        &budget,
+        &token,
+    );
+    tokio::pin!(conversion);
+    // Sharing an admitted batch completes without waiting for a conversion worker.
+    let std::task::Poll::Ready(result) = futures::poll!(&mut conversion) else {
+        panic!("compatible slice dispatched a conversion worker");
+    };
+    let (payload, rows) = result.unwrap();
+    assert_eq!(rows, 8185);
+    let input_values = input.column(0).as_dictionary::<UInt32Type>().values();
+    let output_values = payload
+        .batch
+        .column(0)
+        .as_dictionary::<UInt32Type>()
+        .values();
+    assert!(Arc::ptr_eq(input_values, output_values));
+    assert!(64 * 1024 * 1024 - budget.available().1 >= input.get_array_memory_size());
+    drop(payload);
+    assert_eq!(budget.available(), (1, 64 * 1024 * 1024));
+
+    // A batch which does not fit still takes the bounded conversion path.
+    let (payload, rows) =
+        expand_bounded_slice(input.clone(), schema.clone(), 7, 8192, 128, &budget, &token)
+            .await
+            .unwrap();
+    assert_eq!(rows, 1);
+    drop(payload);
+    assert!(
+        expand_bounded_slice(input, schema, 7, 8192, 1, &budget, &token)
+            .await
+            .is_err()
+    );
+    assert_eq!(budget.available(), (1, 64 * 1024 * 1024));
+}
+
+#[test]
+fn dictionary_size_bound_limits_inline_work() {
+    let values = (0..1025).map(|i| format!("host-{i}")).collect::<Vec<_>>();
+    let dictionary = DictionaryArray::<UInt32Type>::new(
+        UInt32Array::from(vec![0; 2048]),
+        Arc::new(StringArray::from_iter_values(values.iter())),
+    );
+    let input = RecordBatch::try_from_iter([("host", Arc::new(dictionary) as ArrayRef)]).unwrap();
+    assert!(bounded_batch_size(&input, 2048, &[]).unwrap().is_none());
+    assert_eq!(
+        rows_within_budget(&input, 0, 2048, 128, &[]).unwrap(),
+        (3, 114)
+    );
+}
+
+#[tokio::test]
 async fn narrow_batches_share_row_groups() {
     let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
     let batches = (0..8)
