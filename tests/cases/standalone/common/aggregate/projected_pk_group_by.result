@@ -1,0 +1,69 @@
+CREATE TABLE projected_pk_group_by (
+  marker TINYINT UNSIGNED,
+  host STRING,
+  ts TIMESTAMP TIME INDEX,
+  PRIMARY KEY (marker, host)
+);
+
+Affected Rows: 0
+
+INSERT INTO projected_pk_group_by VALUES
+  (0, 'a', 1000),
+  (0, 'a', 2000),
+  (0, 'b', 1000),
+  (0, 'b', 2000),
+  (0, 'c', 1000),
+  (1, NULL, 1000);
+
+Affected Rows: 6
+
+SELECT marker, count(*) AS row_count
+FROM projected_pk_group_by
+GROUP BY marker
+ORDER BY marker;
+
++--------+-----------+
+| marker | row_count |
++--------+-----------+
+| 0      | 5         |
+| 1      | 1         |
++--------+-----------+
+
+SELECT marker, host, count(*) AS row_count
+FROM projected_pk_group_by
+GROUP BY marker, host
+ORDER BY marker, host;
+
++--------+------+-----------+
+| marker | host | row_count |
++--------+------+-----------+
+| 0      | a    | 2         |
+| 0      | b    | 2         |
+| 0      | c    | 1         |
+| 1      |      | 1         |
++--------+------+-----------+
+
+ADMIN FLUSH_TABLE('projected_pk_group_by');
+
++--------------------------------------------+
+| ADMIN FLUSH_TABLE('projected_pk_group_by') |
++--------------------------------------------+
+| 0                                          |
++--------------------------------------------+
+
+SELECT marker, count(*) AS row_count
+FROM projected_pk_group_by
+GROUP BY marker
+ORDER BY marker;
+
++--------+-----------+
+| marker | row_count |
++--------+-----------+
+| 0      | 5         |
+| 1      | 1         |
++--------+-----------+
+
+DROP TABLE projected_pk_group_by;
+
+Affected Rows: 0
+
