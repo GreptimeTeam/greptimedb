@@ -34,6 +34,7 @@ use store_api::region_engine::{
     SyncRegionFromRequest, SyncRegionFromResponse,
 };
 use store_api::region_request::RegionRequest;
+use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{ConcreteDataType, RegionId, ScanRequest, SequenceNumber};
 
 use crate::dummy_catalog::DummyTableProvider;
@@ -191,7 +192,7 @@ fn mock_region_metadata_with_tsid(region_id: RegionId) -> RegionMetadata {
                 false,
             ),
             semantic_type: SemanticType::Tag,
-            column_id: 1,
+            column_id: ReservedColumnId::tsid(),
         })
         .push_column_metadata(ColumnMetadata {
             column_schema: ColumnSchema::new("k0", ConcreteDataType::string_datatype(), true),
@@ -212,6 +213,6 @@ fn mock_region_metadata_with_tsid(region_id: RegionId) -> RegionMetadata {
             semantic_type: SemanticType::Field,
             column_id: 4,
         })
-        .primary_key(vec![1, 2]);
+        .primary_key(vec![ReservedColumnId::tsid(), 2]);
     builder.build().unwrap()
 }
