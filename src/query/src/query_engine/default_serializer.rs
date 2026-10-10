@@ -32,7 +32,7 @@ use datafusion_expr::{Expr, UserDefinedLogicalNode};
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
 use promql::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
-    IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime, MixedRange,
+    IDelta, IeeeComparison, IeeeSqrt, Increase, LastOverTime, MaxOverTime, MinOverTime, MixedRange,
     NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
     NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime, NativeHistogramChanges,
     NativeHistogramCount, NativeHistogramCountOverTime, NativeHistogramDelta,
@@ -338,6 +338,10 @@ fn register_greptime_functions(
     }
 
     let _ = session_state.register_udaf(quantile_udaf());
+    for udf in IeeeComparison::all() {
+        let _ = session_state.register_udf(Arc::new(udf));
+    }
+    let _ = session_state.register_udf(Arc::new(IeeeSqrt::scalar_udf()));
 
     let _ = session_state.register_udf(Arc::new(IDelta::<false>::scalar_udf()));
     let _ = session_state.register_udf(Arc::new(IDelta::<true>::scalar_udf()));

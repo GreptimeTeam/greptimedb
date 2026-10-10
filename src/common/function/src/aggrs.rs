@@ -14,6 +14,7 @@
 
 pub mod approximate;
 pub mod count_hash;
+pub mod extremum;
 #[cfg(feature = "geo")]
 pub mod geo;
 pub mod vector;

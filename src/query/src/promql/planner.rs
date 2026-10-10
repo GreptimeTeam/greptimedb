@@ -27,6 +27,7 @@ use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_function::aggrs::extremum::Extremum;
 use common_function::function::FunctionContext;
 use common_query::native_histogram::native_histogram_value_type;
 use common_query::prelude::{
@@ -69,18 +70,18 @@ use promql::extension_plan::{
 };
 use promql::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
-    IDelta, Increase, LastOverTime, MatchGroupViolation, MaxOverTime, MinOverTime, MixedRange,
-    NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
-    NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime, NativeHistogramChanges,
-    NativeHistogramCount, NativeHistogramCountOverTime, NativeHistogramDelta,
-    NativeHistogramDivScalar, NativeHistogramDrop, NativeHistogramEq, NativeHistogramIDelta,
-    NativeHistogramIRate, NativeHistogramIncrease, NativeHistogramLastOverTime,
-    NativeHistogramMulScalar, NativeHistogramNeg, NativeHistogramNotEq,
-    NativeHistogramPresentOverTime, NativeHistogramRate, NativeHistogramResets,
-    NativeHistogramScalarMul, NativeHistogramStddev, NativeHistogramStdvar, NativeHistogramSub,
-    NativeHistogramSum, NativeHistogramSumOverTime, NativeHistogramToString, PredictLinear,
-    PresentOverTime, PromqlFloatToString, QuantileOverTime, Rate, Resets, Round, StddevOverTime,
-    StdvarOverTime, SumOverTime, UniqueMatchGroup, quantile_udaf,
+    IDelta, IeeeComparison, IeeeSqrt, Increase, LastOverTime, MatchGroupViolation, MaxOverTime,
+    MinOverTime, MixedRange, NativeHistogramAbsentOverTime, NativeHistogramAdd,
+    NativeHistogramAggAvg, NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime,
+    NativeHistogramChanges, NativeHistogramCount, NativeHistogramCountOverTime,
+    NativeHistogramDelta, NativeHistogramDivScalar, NativeHistogramDrop, NativeHistogramEq,
+    NativeHistogramIDelta, NativeHistogramIRate, NativeHistogramIncrease,
+    NativeHistogramLastOverTime, NativeHistogramMulScalar, NativeHistogramNeg,
+    NativeHistogramNotEq, NativeHistogramPresentOverTime, NativeHistogramRate,
+    NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev, NativeHistogramStdvar,
+    NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime, NativeHistogramToString,
+    PredictLinear, PresentOverTime, PromqlFloatToString, QuantileOverTime, Rate, Resets, Round,
+    StddevOverTime, StdvarOverTime, SumOverTime, UniqueMatchGroup, quantile_udaf,
 };
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
 use promql_parser::parser::token::TokenType;
@@ -3962,9 +3963,13 @@ impl PromPlanner {
             }
             "round" => {
                 if other_input_exprs.is_empty() {
-                    other_input_exprs.push_front(0.0f64.lit());
+                    other_input_exprs.push_front(1.0f64.lit());
                 }
                 ScalarFunc::DataFusionUdf(Arc::new(Round::scalar_udf()))
+            }
+            // DataFusion's `sqrt` rejects negative input; PromQL returns NaN for it.
+            "sqrt" if !self.all_field_columns_are_native_histograms(input_schema) => {
+                ScalarFunc::DataFusionUdf(Arc::new(IeeeSqrt::scalar_udf()))
             }
             "rad" | "deg" | "sgn" if self.all_field_columns_are_native_histograms(input_schema) => {
                 ScalarFunc::DataFusionUdf(native_histogram_drop_udf(func.name))
@@ -4673,17 +4678,39 @@ impl PromPlanner {
             vec![]
         };
 
-        // update value column name according to the aggregators,
-        let mut new_field_columns = Vec::with_capacity(self.ctx.field_columns.len());
+        // The alias is built from normalized columns so it matches the builtin's
+        // qualified name.
+        let exprs = normalize_cols(exprs, input_plan)
+            .context(DataFusionPlanningSnafu)?
+            .into_iter()
+            .map(Self::alias_extremum_as_builtin)
+            .collect::<Vec<_>>();
 
-        let normalized_exprs =
-            normalize_cols(exprs.iter().cloned(), input_plan).context(DataFusionPlanningSnafu)?;
-        for expr in normalized_exprs {
-            new_field_columns.push(expr.schema_name().to_string());
-        }
-        self.ctx.field_columns = new_field_columns;
+        // update value column name according to the aggregators,
+        self.ctx.field_columns = exprs
+            .iter()
+            .map(|expr| expr.schema_name().to_string())
+            .collect();
 
         Ok((exprs, prev_field_exprs))
+    }
+
+    /// `prom_min`/`prom_max` keep their own names so SQL can use them next to `min`/`max`
+    /// in one aggregate. PromQL output columns keep the builtin names.
+    fn alias_extremum_as_builtin(expr: DfExpr) -> DfExpr {
+        let DfExpr::AggregateFunction(aggr) = &expr else {
+            return expr;
+        };
+        let builtin = match aggr.func.name() {
+            Extremum::MIN_NAME => min_udaf(),
+            Extremum::MAX_NAME => max_udaf(),
+            _ => return expr,
+        };
+        let name = builtin
+            .call(aggr.params.args.clone())
+            .schema_name()
+            .to_string();
+        expr.alias(name)
     }
 
     fn create_numeric_aggregate_expr(
@@ -4703,8 +4730,8 @@ impl PromPlanner {
             }
             token::T_AVG => avg_udaf().call(vec![input]),
             token::T_COUNT_VALUES | token::T_COUNT => count_udaf().call(vec![input]),
-            token::T_MIN => min_udaf().call(vec![input]),
-            token::T_MAX => max_udaf().call(vec![input]),
+            token::T_MIN => Extremum::min_udaf().call(vec![input]),
+            token::T_MAX => Extremum::max_udaf().call(vec![input]),
             // PromQL's `group()` aggregator produces 1 for each group.
             // Use `max(1.0)` (per-group) to match semantics and output type (Float64).
             token::T_GROUP => max_udaf().call(vec![lit(1_f64)]),
@@ -5048,7 +5075,15 @@ impl PromPlanner {
             .field_columns
             .iter()
             .map(|col| {
-                let mut sort_exprs = Vec::with_capacity(self.ctx.tag_columns.len() + 1);
+                let mut sort_exprs = Vec::with_capacity(self.ctx.tag_columns.len() + 2);
+                // PromQL ranks NaN last for both `topk` and `bottomk`, while DataFusion
+                // orders NaN above every number.
+                sort_exprs.push(
+                    datafusion_functions::math::expr_fn::isnan(DfExpr::Column(Column::from_name(
+                        col,
+                    )))
+                    .sort(true, true),
+                );
                 // Order by value in the specific order
                 sort_exprs.push(DfExpr::Column(Column::from_name(col)).sort(asc, true));
                 // Then tags if the values are equal,
@@ -5239,12 +5274,24 @@ impl PromPlanner {
             token::T_MOD => Ok(Box::new(move |lhs: DfExpr, rhs| {
                 Ok(cast_float(lhs) % cast_float(rhs))
             })),
-            token::T_EQLC => Ok(Box::new(|lhs, rhs| Ok(lhs.eq(rhs)))),
-            token::T_NEQ => Ok(Box::new(|lhs, rhs| Ok(lhs.not_eq(rhs)))),
-            token::T_GTR => Ok(Box::new(|lhs, rhs| Ok(lhs.gt(rhs)))),
-            token::T_LSS => Ok(Box::new(|lhs, rhs| Ok(lhs.lt(rhs)))),
-            token::T_GTE => Ok(Box::new(|lhs, rhs| Ok(lhs.gt_eq(rhs)))),
-            token::T_LTE => Ok(Box::new(|lhs, rhs| Ok(lhs.lt_eq(rhs)))),
+            token::T_EQLC => Ok(Box::new(|lhs, rhs| {
+                Ok(Self::ieee_comparison(lhs, Operator::Eq, rhs))
+            })),
+            token::T_NEQ => Ok(Box::new(|lhs, rhs| {
+                Ok(Self::ieee_comparison(lhs, Operator::NotEq, rhs))
+            })),
+            token::T_GTR => Ok(Box::new(|lhs, rhs| {
+                Ok(Self::ieee_comparison(lhs, Operator::Gt, rhs))
+            })),
+            token::T_LSS => Ok(Box::new(|lhs, rhs| {
+                Ok(Self::ieee_comparison(lhs, Operator::Lt, rhs))
+            })),
+            token::T_GTE => Ok(Box::new(|lhs, rhs| {
+                Ok(Self::ieee_comparison(lhs, Operator::GtEq, rhs))
+            })),
+            token::T_LTE => Ok(Box::new(|lhs, rhs| {
+                Ok(Self::ieee_comparison(lhs, Operator::LtEq, rhs))
+            })),
             token::T_POW => Ok(Box::new(move |lhs, rhs| {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
                     func: datafusion_functions::math::power(),
@@ -5259,6 +5306,14 @@ impl PromPlanner {
             })),
             _ => UnexpectedTokenSnafu { token }.fail(),
         }
+    }
+
+    /// Compares two expressions with IEEE 754 semantics, as PromQL does; see [`IeeeComparison`].
+    fn ieee_comparison(lhs: DfExpr, op: Operator, rhs: DfExpr) -> DfExpr {
+        DfExpr::ScalarFunction(ScalarFunction {
+            func: Arc::new(IeeeComparison::scalar_udf(op)),
+            args: vec![lhs, rhs],
+        })
     }
 
     /// Check if the given op is a [comparison operator](https://prometheus.io/docs/prometheus/latest/querying/operators/#comparison-binary-operators).
