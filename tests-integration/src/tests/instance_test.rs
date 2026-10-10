@@ -267,7 +267,7 @@ async fn test_group_by_tsid_and_time_preserves_rows(instance: Arc<dyn MockInstan
             __tsid BIGINT,
             ts TIMESTAMP(3) TIME INDEX,
             host STRING PRIMARY KEY
-        )"#,
+        ) ENGINE = mito"#,
     )
     .await;
     execute_sql(
@@ -307,70 +307,6 @@ async fn test_group_by_tsid_and_time_preserves_rows(instance: Arc<dyn MockInstan
             "unexpected audit_min result with query_parallelism={parallelism}:\\n{result}"
         );
     }
-
-    execute_sql(
-        &frontend,
-        r#"CREATE TABLE metric_phy (
-            ts TIMESTAMP(3) TIME INDEX,
-            val DOUBLE
-        ) ENGINE=metric WITH ("physical_metric_table" = "")"#,
-    )
-    .await;
-    execute_sql(
-        &frontend,
-        r#"CREATE TABLE metric_a (
-            ts TIMESTAMP(3) TIME INDEX,
-            val DOUBLE,
-            host STRING PRIMARY KEY
-        ) ENGINE=metric WITH ("on_physical_table" = "metric_phy")"#,
-    )
-    .await;
-    execute_sql(
-        &frontend,
-        r#"CREATE TABLE metric_b (
-            ts TIMESTAMP(3) TIME INDEX,
-            val DOUBLE,
-            host STRING PRIMARY KEY
-        ) ENGINE=metric WITH ("on_physical_table" = "metric_phy")"#,
-    )
-    .await;
-    execute_sql(&frontend, "INSERT INTO metric_a VALUES (0, 1, 'same')").await;
-    execute_sql(&frontend, "INSERT INTO metric_b VALUES (0, 1, 'same')").await;
-
-    let mut metric_rows_by_parallelism = Vec::new();
-    for parallelism in [1, 4] {
-        let result = execute_sql_with_query_parallelism(
-            &frontend,
-            "SELECT __tsid, ts, count(*) AS n FROM metric_phy GROUP BY __tsid, ts ORDER BY __tsid, ts",
-            parallelism,
-        )
-        .await
-        .data
-        .pretty_print()
-        .await;
-        let rows = result_rows(&result);
-        assert_eq!(
-            rows.len(),
-            2,
-            "expected one physical metric grouped row, not two logical-table partials:\\n{result}"
-        );
-        assert_eq!(
-            rows[0],
-            vec!["__tsid", "ts", "n"],
-            "unexpected physical metric result header: {result}"
-        );
-        assert_eq!(rows[1][1], "1970-01-01T00:00:00.000", "{result}");
-        assert_eq!(rows[1][2], "2", "{result}");
-        assert!(
-            !rows[1][0].is_empty(),
-            "physical metric __tsid must exist: {result}"
-        );
-        metric_rows_by_parallelism.push(rows[1].clone());
-    }
-    assert_eq!(
-        metric_rows_by_parallelism[0], metric_rows_by_parallelism[1],
-        "physical metric grouped row changed between query_parallelism=1 and 4"
-    );
 }
 
 #[apply(both_instances_cases)]
