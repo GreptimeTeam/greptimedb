@@ -136,3 +136,34 @@ ALTER TABLE ts_overflow MODIFY COLUMN ts TIMESTAMP_NS;
 DESCRIBE ts_overflow;
 
 DROP TABLE ts_overflow;
+
+-- Issue 9454: persisted partition bounds keep their original unit. Widening the
+-- time index unit must be rejected before any region is altered when a persisted
+-- bound overflows the new unit.
+CREATE TABLE ts_bound_overflow (host STRING, ts TIMESTAMP TIME INDEX)
+PARTITION ON COLUMNS (ts) (
+  ts < '2024-01-01 00:00:00',
+  ts >= '2024-01-01 00:00:00' AND ts < '3000-01-01 00:00:00',
+  ts >= '3000-01-01 00:00:00'
+);
+
+INSERT INTO ts_bound_overflow VALUES ("a", "2024-06-01 12:00:00");
+
+-- 3000-01-01 fits milliseconds but overflows nanoseconds, so the widening is
+-- rejected before any region is altered.
+-- SQLNESS REPLACE \d+\(\d+,\s+\d+\) REDACTED
+ALTER TABLE ts_bound_overflow MODIFY COLUMN ts TIMESTAMP_NS;
+
+-- The rejected ALTER leaves the schema and the stored data unchanged.
+DESCRIBE ts_bound_overflow;
+
+SELECT * FROM ts_bound_overflow ORDER BY ts;
+
+-- Widening to microseconds keeps every persisted bound representable.
+ALTER TABLE ts_bound_overflow MODIFY COLUMN ts TIMESTAMP_US;
+
+DESCRIBE ts_bound_overflow;
+
+SELECT * FROM ts_bound_overflow ORDER BY ts;
+
+DROP TABLE ts_bound_overflow;

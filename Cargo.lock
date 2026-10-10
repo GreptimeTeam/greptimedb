@@ -2667,6 +2667,7 @@ dependencies = [
  "common-wal",
  "common-workload",
  "datafusion-common",
+ "datafusion-expr",
  "datatypes",
  "deadpool",
  "deadpool-postgres",
