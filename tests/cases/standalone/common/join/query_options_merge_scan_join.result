@@ -1,0 +1,174 @@
+-- SQLNESS PROTOCOL MYSQL
+CREATE TABLE query_options_merge_join_data (
+    ts TIMESTAMP TIME INDEX,
+    key_id INT,
+    is_match BOOLEAN,
+    PRIMARY KEY (key_id)
+)
+PARTITION ON COLUMNS (key_id) (
+    key_id < 10,
+    key_id >= 10 AND key_id < 20,
+    key_id >= 20 AND key_id < 30,
+    key_id >= 30
+) ENGINE = mito;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+INSERT INTO query_options_merge_join_data VALUES
+    ('2026-10-09 00:00:00', 1, false),
+    ('2026-10-09 00:00:00', 11, false),
+    ('2026-10-09 00:00:00', 21, false),
+    ('2026-10-09 00:00:00', 31, false),
+    ('2026-10-09 00:00:01', 1, true),
+    ('2026-10-09 00:00:01', 11, true),
+    ('2026-10-09 00:00:01', 21, true),
+    ('2026-10-09 00:00:01', 31, true);
+
+affected_rows: 8
+
+-- Four range regions exercise the complete key set across partial MergeScan results.
+-- SQLNESS PROTOCOL MYSQL
+SET query.parallelism = 2;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SET query.enable_remote_dynamic_filter_pushdown = true;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.parallelism;
+
++-------------------+
+| query.parallelism |
++-------------------+
+| 2                 |
++-------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.enable_remote_dynamic_filter_pushdown;
+
++---------------------------------------------+
+| query.enable_remote_dynamic_filter_pushdown |
++---------------------------------------------+
+| true                                        |
++---------------------------------------------+
+
+-- The ordered semi-join must return all keys with their first (false) row.
+-- SQLNESS PROTOCOL MYSQL
+SELECT t.key_id, MIN(t.ts) AS first_ts
+FROM query_options_merge_join_data t
+WHERE t.key_id IN (
+    SELECT s.key_id
+    FROM query_options_merge_join_data s
+    WHERE s.is_match = true
+)
+GROUP BY t.key_id
+ORDER BY t.key_id;
+
++--------+---------------------+
+| key_id | first_ts            |
++--------+---------------------+
+| 1      | 2026-10-09 00:00:00 |
+| 11     | 2026-10-09 00:00:00 |
+| 21     | 2026-10-09 00:00:00 |
+| 31     | 2026-10-09 00:00:00 |
++--------+---------------------+
+
+-- Disabling remote dynamic filtering must preserve the same full result.
+-- SQLNESS PROTOCOL MYSQL
+SET query.enable_remote_dynamic_filter_pushdown = false;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.enable_remote_dynamic_filter_pushdown;
+
++---------------------------------------------+
+| query.enable_remote_dynamic_filter_pushdown |
++---------------------------------------------+
+| false                                       |
++---------------------------------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT t.key_id, MIN(t.ts) AS first_ts
+FROM query_options_merge_join_data t
+WHERE t.key_id IN (
+    SELECT s.key_id
+    FROM query_options_merge_join_data s
+    WHERE s.is_match = true
+)
+GROUP BY t.key_id
+ORDER BY t.key_id;
+
++--------+---------------------+
+| key_id | first_ts            |
++--------+---------------------+
+| 1      | 2026-10-09 00:00:00 |
+| 11     | 2026-10-09 00:00:00 |
+| 21     | 2026-10-09 00:00:00 |
+| 31     | 2026-10-09 00:00:00 |
++--------+---------------------+
+
+-- Single-partition execution is a control, not a workaround for the bug.
+-- SQLNESS PROTOCOL MYSQL
+SET query.parallelism = 1;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SET query.enable_remote_dynamic_filter_pushdown = true;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.parallelism;
+
++-------------------+
+| query.parallelism |
++-------------------+
+| 1                 |
++-------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES query.enable_remote_dynamic_filter_pushdown;
+
++---------------------------------------------+
+| query.enable_remote_dynamic_filter_pushdown |
++---------------------------------------------+
+| true                                        |
++---------------------------------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT t.key_id, MIN(t.ts) AS first_ts
+FROM query_options_merge_join_data t
+WHERE t.key_id IN (
+    SELECT s.key_id
+    FROM query_options_merge_join_data s
+    WHERE s.is_match = true
+)
+GROUP BY t.key_id
+ORDER BY t.key_id;
+
++--------+---------------------+
+| key_id | first_ts            |
++--------+---------------------+
+| 1      | 2026-10-09 00:00:00 |
+| 11     | 2026-10-09 00:00:00 |
+| 21     | 2026-10-09 00:00:00 |
+| 31     | 2026-10-09 00:00:00 |
++--------+---------------------+
+
+-- Restore session option and remove test data.
+-- SQLNESS PROTOCOL MYSQL
+SET query.parallelism = 4;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+DROP TABLE query_options_merge_join_data;
+
+affected_rows: 0
+
