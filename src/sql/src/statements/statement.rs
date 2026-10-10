@@ -380,32 +380,55 @@ mod tests {
         const BRANCHES: usize = 2048;
 
         let sql = build_deep_union_all_sql(BRANCHES);
-        let mut statements = ParserContext::create_with_dialect(
-            &sql,
-            &GreptimeDbDialect {},
-            ParseOptions::default(),
-        )
-        .unwrap();
-        assert_eq!(statements.len(), 1);
-        let statement = statements.pop().unwrap();
 
-        // Converting deep-clones the sqlparser AST. Its derived `Clone` recursion
-        // overflows a 1MB stack for this many branches unless the conversion runs
-        // on a bigger stack (see issue #9356).
-        std::thread::Builder::new()
-            .stack_size(1024 * 1024)
+        // Parsing recurses once per `UNION ALL` branch as well, and the thread
+        // that runs the test binary has no guaranteed stack size, so pin the
+        // parse to an explicit, generous stack too.
+        let statement = std::thread::Builder::new()
+            .stack_size(DEEP_STATEMENT_CONVERSION_STACK_SIZE)
             .spawn(move || {
-                let df_statement = DfStatement::try_from(&statement).unwrap();
-                let SpStatement::Query(query) = (match df_statement {
-                    DfStatement::Statement(statement) => *statement,
-                    _ => panic!("expected a plain statement"),
-                }) else {
-                    panic!("expected a query statement");
-                };
-                assert_eq!(count_union_branches(&query), BRANCHES);
+                let mut statements = ParserContext::create_with_dialect(
+                    &sql,
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap();
+                assert_eq!(statements.len(), 1);
+                statements.pop().unwrap()
             })
             .unwrap()
             .join()
             .unwrap();
+
+        // Converting deep-clones the sqlparser AST. Its derived `Clone` recursion
+        // overflows a 1MB stack for this many branches unless the conversion runs
+        // on a bigger stack (see issue #9356). Only the conversion runs on the
+        // small stack; the statements are returned back out so that their
+        // recursion-heavy drops, which are not stack-protected either, can run on
+        // a grown stack below.
+        let (df_statement, statement) = std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(move || {
+                let df_statement = DfStatement::try_from(&statement).unwrap();
+                (df_statement, statement)
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        let SpStatement::Query(query) = (match df_statement {
+            DfStatement::Statement(statement) => *statement,
+            _ => panic!("expected a plain statement"),
+        }) else {
+            panic!("expected a query statement");
+        };
+        assert_eq!(count_union_branches(&query), BRANCHES);
+
+        // Both statements nest `BRANCHES` levels deep; run their recursive drops
+        // on a stack that fits them.
+        stacker::grow(DEEP_STATEMENT_CONVERSION_STACK_SIZE, move || {
+            drop(query);
+            drop(statement);
+        });
     }
 }
