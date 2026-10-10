@@ -407,7 +407,7 @@ Affected Rows: 1
 -- SQLNESS REPLACE \d+\(\d+,\s+\d+\) REDACTED
 ALTER TABLE ts_bound_overflow MODIFY COLUMN ts TIMESTAMP_NS;
 
-Error: 1004(InvalidArguments), Partition expression of region REDACTED is incompatible with the altered column 'ts': the persisted bound cannot be converted to type TimestampNanosecond
+Error: 1004(InvalidArguments), Partition expression of region REDACTED is incompatible with the altered column 'ts': the persisted bound can no longer be compared with the new column type TimestampNanosecond
 
 -- The rejected ALTER leaves the schema and the stored data unchanged.
 DESCRIBE ts_bound_overflow;
