@@ -33,7 +33,8 @@ use crate::cmd::bare::ServerAddr;
 use crate::cmd::compat_case::try_infer_version;
 use crate::cmd::datanode_overlay::PreparedDatanodeOverlay;
 use crate::formatter::{ErrorFormatter, MysqlFormatter, OutputFormatter, PostgresqlFormatter};
-use crate::protocol_interceptor::{MYSQL, PROTOCOL_KEY};
+use crate::hint_interceptor::{hints_from_context, unsupported_hint_error};
+use crate::protocol_interceptor::{MYSQL, POSTGRES, PROTOCOL_KEY};
 use crate::server_mode::{GrpcArgStyle, ServerMode};
 use crate::util;
 use crate::util::{PROGRAM, get_workspace_root, maybe_pull_binary};
@@ -744,7 +745,7 @@ impl Env {
             crate::util::retry_with_backoff(
                 || async {
                     let mut client = db.client.lock().await;
-                    match client.grpc_query("SELECT 1").await {
+                    match client.grpc_query("SELECT 1", &[]).await {
                         Ok(_) => Ok(()),
                         Err(e) => Err(format!("Query endpoint not ready: {e}")),
                     }
@@ -772,7 +773,12 @@ pub struct GreptimeDB {
 }
 
 impl GreptimeDB {
-    async fn postgres_query(&self, _ctx: QueryContext, query: String) -> Box<dyn Display> {
+    async fn postgres_query(&self, ctx: QueryContext, query: String) -> Box<dyn Display> {
+        let hints = hints_from_context(&ctx);
+        if !hints.is_empty() {
+            return Box::new(unsupported_hint_error(POSTGRES));
+        }
+
         let mut client = self.client.lock().await;
 
         match client.postgres_query(&query).await {
@@ -781,7 +787,12 @@ impl GreptimeDB {
         }
     }
 
-    async fn mysql_query(&self, _ctx: QueryContext, query: String) -> Box<dyn Display> {
+    async fn mysql_query(&self, ctx: QueryContext, query: String) -> Box<dyn Display> {
+        let hints = hints_from_context(&ctx);
+        if !hints.is_empty() {
+            return Box::new(unsupported_hint_error(MYSQL));
+        }
+
         let mut client = self.client.lock().await;
 
         match client.mysql_query(&query).await {
@@ -790,10 +801,11 @@ impl GreptimeDB {
         }
     }
 
-    async fn grpc_query(&self, _ctx: QueryContext, query: String) -> Box<dyn Display> {
+    async fn grpc_query(&self, ctx: QueryContext, query: String) -> Box<dyn Display> {
+        let hints = hints_from_context(&ctx);
         let mut client = self.client.lock().await;
 
-        match client.grpc_query(&query).await {
+        match client.grpc_query(&query, &hints).await {
             Ok(rows) => Box::new(OutputFormatter::from(rows)),
             Err(e) => Box::new(ErrorFormatter::from(e)),
         }
@@ -842,10 +854,15 @@ impl GreptimeDB {
         query: &str,
         ctx: &QueryContext,
     ) -> Result<String, String> {
+        let hints = hints_from_context(ctx);
         let mut client = self.client.lock().await;
 
         // Handle protocol switching
         if let Some(protocol) = ctx.context.get(PROTOCOL_KEY) {
+            if !hints.is_empty() {
+                return Err(unsupported_hint_error(protocol));
+            }
+
             if protocol == MYSQL {
                 return match client.mysql_query(query).await {
                     Ok(res) => Ok(crate::formatter::MysqlFormatter::from(res).to_string()),
@@ -861,7 +878,7 @@ impl GreptimeDB {
         }
 
         // Default: gRPC
-        match client.grpc_query(query).await {
+        match client.grpc_query(query, &hints).await {
             Ok(output) => Ok(OutputFormatter::from(output).to_string()),
             Err(e) => {
                 let status_code = e.status_code();

@@ -20,7 +20,7 @@ use sqlness::{ConfigBuilder, Runner};
 
 use crate::cmd::SqlnessConfig;
 use crate::env::kube::{Env, NaiveResourcesManager};
-use crate::{protocol_interceptor, util};
+use crate::{hint_interceptor, protocol_interceptor, util};
 
 #[derive(Debug, Parser)]
 /// Run sqlness tests in kube mode.
@@ -55,6 +55,10 @@ impl KubeCommand {
         interceptor_registry.register(
             protocol_interceptor::PREFIX,
             Arc::new(protocol_interceptor::ProtocolInterceptorFactory),
+        );
+        interceptor_registry.register(
+            hint_interceptor::PREFIX,
+            Arc::new(hint_interceptor::HintInterceptorFactory),
         );
 
         if let Some(d) = &self.config.case_dir

@@ -23,7 +23,8 @@ use tokio::sync::Mutex;
 
 use crate::client::MultiProtocolClient;
 use crate::formatter::{ErrorFormatter, MysqlFormatter, OutputFormatter, PostgresqlFormatter};
-use crate::protocol_interceptor::{MYSQL, PROTOCOL_KEY};
+use crate::hint_interceptor::{hints_from_context, unsupported_hint_error};
+use crate::protocol_interceptor::{MYSQL, POSTGRES, PROTOCOL_KEY};
 
 #[async_trait]
 pub trait DatabaseManager: Send + Sync {
@@ -104,7 +105,12 @@ pub struct GreptimeDB {
 }
 
 impl GreptimeDB {
-    async fn postgres_query(&self, _ctx: QueryContext, query: String) -> Box<dyn Display> {
+    async fn postgres_query(&self, ctx: QueryContext, query: String) -> Box<dyn Display> {
+        let hints = hints_from_context(&ctx);
+        if !hints.is_empty() {
+            return Box::new(unsupported_hint_error(POSTGRES));
+        }
+
         let mut client = self.client.lock().await;
 
         match client.postgres_query(&query).await {
@@ -113,7 +119,12 @@ impl GreptimeDB {
         }
     }
 
-    async fn mysql_query(&self, _ctx: QueryContext, query: String) -> Box<dyn Display> {
+    async fn mysql_query(&self, ctx: QueryContext, query: String) -> Box<dyn Display> {
+        let hints = hints_from_context(&ctx);
+        if !hints.is_empty() {
+            return Box::new(unsupported_hint_error(MYSQL));
+        }
+
         let mut client = self.client.lock().await;
 
         match client.mysql_query(&query).await {
@@ -122,10 +133,11 @@ impl GreptimeDB {
         }
     }
 
-    async fn grpc_query(&self, _ctx: QueryContext, query: String) -> Box<dyn Display> {
+    async fn grpc_query(&self, ctx: QueryContext, query: String) -> Box<dyn Display> {
+        let hints = hints_from_context(&ctx);
         let mut client = self.client.lock().await;
 
-        match client.grpc_query(&query).await {
+        match client.grpc_query(&query, &hints).await {
             Ok(rows) => Box::new(OutputFormatter::from(rows)),
             Err(e) => Box::new(ErrorFormatter::from(e)),
         }

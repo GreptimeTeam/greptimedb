@@ -22,6 +22,7 @@ pub mod client;
 mod cmd;
 mod env;
 pub mod formatter;
+pub mod hint_interceptor;
 pub mod protocol_interceptor;
 mod server_mode;
 mod util;

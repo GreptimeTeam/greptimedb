@@ -21,7 +21,7 @@ use sqlness::{ConfigBuilder, Runner};
 
 use crate::cmd::SqlnessConfig;
 use crate::env::bare::{Env, ServiceProvider, StoreConfig, WalConfig};
-use crate::{protocol_interceptor, util};
+use crate::{hint_interceptor, protocol_interceptor, util};
 
 #[derive(ValueEnum, Debug, Clone)]
 #[clap(rename_all = "snake_case")]
@@ -170,6 +170,10 @@ impl BareCommand {
         interceptor_registry.register(
             protocol_interceptor::PREFIX,
             Arc::new(protocol_interceptor::ProtocolInterceptorFactory),
+        );
+        interceptor_registry.register(
+            hint_interceptor::PREFIX,
+            Arc::new(hint_interceptor::HintInterceptorFactory),
         );
 
         if let Some(d) = &self.config.case_dir
