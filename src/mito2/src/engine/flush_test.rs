@@ -27,6 +27,7 @@ use common_base::readable_size::ReadableSize;
 use common_recordbatch::RecordBatches;
 use common_time::util::current_time_millis;
 use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
+use datafusion_expr::{col, lit};
 use parquet::basic::{Encoding, Type as PhysicalType};
 use rstest::rstest;
 use rstest_reuse::{self, apply};
@@ -35,9 +36,9 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::mito_engine_options::WRITE_BUFFER_SIZE_KEY;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
-    AlterKind, PathType, RegionAlterRequest, RegionCloseRequest, RegionFlushRequest,
-    RegionOpenRequest, RegionPutRequest, RegionRequest, ReplayCheckpoint, SetRegionOption,
-    UnsetRegionOption,
+    AlterKind, PathType, RegionAlterRequest, RegionCloseRequest, RegionCompactRequest,
+    RegionFlushRequest, RegionOpenRequest, RegionPutRequest, RegionRequest, ReplayCheckpoint,
+    SetRegionOption, UnsetRegionOption,
 };
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::Notify;
@@ -50,8 +51,9 @@ use crate::engine::region_hook::{RegionGcInfo, RegionHook, RegionHookRef, SstFil
 use crate::error::Error;
 use crate::manifest::action::RegionMetaActionList;
 use crate::test_util::{
-    CreateRequestBuilder, LogStoreFactory, MockWriteBufferManager, TestEnv, build_rows,
-    build_rows_for_key, flush_region, kafka_log_store_factory, multiple_log_store_factories,
+    CreateRequestBuilder, LogStoreFactory, MockWriteBufferManager, TestEnv,
+    build_delete_rows_for_key, build_rows, build_rows_for_key, build_rows_with_fields, delete_rows,
+    delete_rows_schema, flush_region, kafka_log_store_factory, multiple_log_store_factories,
     prepare_test_for_kafka_log_store, put_rows, raft_engine_log_store_factory, reopen_region,
     rows_schema, single_kafka_log_store_factory,
 };
@@ -1817,4 +1819,279 @@ async fn test_region_hook() {
         sst_count,
         manifest_count,
     );
+}
+
+/// Explicitly finish a merge instead of sleeping for the background dispatcher.
+fn compact_bulk_memtables(engine: &MitoEngine, region_id: RegionId) {
+    let version = engine.get_region(region_id).unwrap().version();
+    for memtable in version.memtables.list_memtables() {
+        memtable.compact(false).unwrap();
+    }
+}
+
+async fn scan_bulk_test_keys(engine: &MitoEngine, region_id: RegionId) -> String {
+    let mut schema = None;
+    let mut batches = Vec::new();
+    for key in ["deleted", "k"] {
+        let request = ScanRequest {
+            filters: vec![col("tag_0").eq(lit(key))],
+            ..Default::default()
+        };
+        let stream = engine.scan_to_stream(region_id, request).await.unwrap();
+        schema = Some(stream.schema());
+        batches.extend(RecordBatches::try_collect(stream).await.unwrap().take());
+    }
+    RecordBatches::try_new(schema.unwrap(), batches)
+        .unwrap()
+        .pretty_print()
+        .unwrap()
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_bulk_flush_keeps_newer_version(#[values(false, true)] delete_newer: bool) {
+    let mut env = TestEnv::new().await;
+    let config = MitoConfig {
+        default_flat_format: true,
+        min_compaction_interval: Duration::from_secs(3600),
+        ..Default::default()
+    };
+    let engine = env.create_engine(config.clone()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("memtable.type", "bulk")
+        .insert_option("memtable.bulk.merge_threshold", "2")
+        .insert_option("memtable.bulk.encode_row_threshold", "1")
+        .build();
+    let schema = rows_schema(&request);
+    let delete_schema = delete_rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: build_rows_for_key("k", 1, 2, 1),
+        },
+    )
+    .await;
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: build_rows_for_key("a", 0, 1024, 0),
+        },
+    )
+    .await;
+    if delete_newer {
+        let mut rows = build_delete_rows_for_key("b", 0, 1023);
+        rows.extend(build_delete_rows_for_key("k", 1, 2));
+        delete_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: delete_schema,
+                rows,
+            },
+        )
+        .await;
+    } else {
+        let mut rows = build_rows_for_key("b", 0, 1023, 0);
+        rows.extend(build_rows_for_key("k", 1, 2, 2));
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows,
+            },
+        )
+        .await;
+    }
+    compact_bulk_memtables(&engine, region_id);
+    // Previously this advanced the old unordered row above the newer encoded row.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: build_rows_for_key("c", 0, 1, 0),
+        },
+    )
+    .await;
+    let expected = if delete_newer {
+        "\
++-------+---------+----+
+| tag_0 | field_0 | ts |
++-------+---------+----+
++-------+---------+----+"
+    } else {
+        "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| k     | 2.0     | 1970-01-01T00:00:01 |
++-------+---------+---------------------+"
+    };
+    assert_eq!(expected, scan_bulk_test_keys(&engine, region_id).await);
+    flush_region(&engine, region_id, None).await;
+    assert_eq!(expected, scan_bulk_test_keys(&engine, region_id).await);
+    let engine = env.reopen_engine(engine, config).await;
+    reopen_region(
+        &engine,
+        region_id,
+        request.table_dir,
+        false,
+        request.options,
+    )
+    .await;
+    assert_eq!(expected, scan_bulk_test_keys(&engine, region_id).await);
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_bulk_last_non_null_merge_and_flush(#[values(false, true)] encoded: bool) {
+    let mut env = TestEnv::new().await;
+    let config = MitoConfig {
+        default_flat_format: true,
+        min_compaction_interval: Duration::from_secs(3600),
+        ..Default::default()
+    };
+    let engine = env.create_engine(config.clone()).await;
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    let request = CreateRequestBuilder::new()
+        .field_num(2)
+        .insert_option("memtable.type", "bulk")
+        .insert_option("merge_mode", "last_non_null")
+        .insert_option("memtable.bulk.merge_threshold", "2")
+        .insert_option(
+            "memtable.bulk.encode_row_threshold",
+            if encoded { "1" } else { "1000000" },
+        )
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.trigger_file_num", "2")
+        .build();
+    let schema = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    // An older SST must remain hidden behind a delete retained in the memtable.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: build_rows_with_fields("deleted", &[1], &[(Some(1), Some(1))]),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+
+    let mut a = build_rows_with_fields(
+        "a",
+        &(0..1023).collect::<Vec<_>>(),
+        &[(Some(0), None); 1023],
+    );
+    a.extend(build_rows_with_fields("k", &[1], &[(Some(1), None)]));
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: a,
+        },
+    )
+    .await;
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: build_rows_with_fields("k", &[1], &[(Some(2), None)]),
+        },
+    )
+    .await;
+    delete_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: delete_rows_schema(&request),
+            rows: build_delete_rows_for_key("deleted", 1, 2),
+        },
+    )
+    .await;
+    let before = scan_bulk_test_keys(&engine, region_id).await;
+    assert!(before.contains("| k     | 2.0"));
+    assert!(!before.contains("| deleted"));
+
+    let mut c = build_rows_with_fields(
+        "c",
+        &(0..1022).collect::<Vec<_>>(),
+        &[(Some(0), None); 1022],
+    );
+    c.extend(build_rows_with_fields("k", &[1], &[(None, Some(3))]));
+    c.extend(build_rows_with_fields("deleted", &[1], &[(None, Some(3))]));
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: schema.clone(),
+            rows: c,
+        },
+    )
+    .await;
+    compact_bulk_memtables(&engine, region_id);
+    let expected = "\
++---------+---------+---------+---------------------+
+| tag_0   | field_0 | field_1 | ts                  |
++---------+---------+---------+---------------------+
+| deleted |         | 3.0     | 1970-01-01T00:00:01 |
+| k       | 2.0     | 3.0     | 1970-01-01T00:00:01 |
++---------+---------+---------+---------------------+";
+    assert_eq!(expected, scan_bulk_test_keys(&engine, region_id).await);
+    // Leave a raw source beside merged parts so flush also exercises grouping.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: build_rows_with_fields("z", &[0], &[(Some(0), None)]),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    assert_eq!(expected, scan_bulk_test_keys(&engine, region_id).await);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest::default()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(expected, scan_bulk_test_keys(&engine, region_id).await);
+    let engine = env.reopen_engine(engine, config).await;
+    reopen_region(
+        &engine,
+        region_id,
+        request.table_dir,
+        false,
+        request.options,
+    )
+    .await;
+    assert_eq!(expected, scan_bulk_test_keys(&engine, region_id).await);
 }
