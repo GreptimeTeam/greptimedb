@@ -393,7 +393,8 @@ Affected Rows: 0
 CREATE TABLE ts_bound_overflow (host STRING, ts TIMESTAMP TIME INDEX)
 PARTITION ON COLUMNS (ts) (
   ts < '2024-01-01 00:00:00',
-  ts >= '2024-01-01 00:00:00' AND ts < '3000-01-01 00:00:00'
+  ts >= '2024-01-01 00:00:00' AND ts < '3000-01-01 00:00:00',
+  ts >= '3000-01-01 00:00:00'
 );
 
 Affected Rows: 0

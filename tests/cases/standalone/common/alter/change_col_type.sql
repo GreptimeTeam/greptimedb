@@ -143,7 +143,8 @@ DROP TABLE ts_overflow;
 CREATE TABLE ts_bound_overflow (host STRING, ts TIMESTAMP TIME INDEX)
 PARTITION ON COLUMNS (ts) (
   ts < '2024-01-01 00:00:00',
-  ts >= '2024-01-01 00:00:00' AND ts < '3000-01-01 00:00:00'
+  ts >= '2024-01-01 00:00:00' AND ts < '3000-01-01 00:00:00',
+  ts >= '3000-01-01 00:00:00'
 );
 
 INSERT INTO ts_bound_overflow VALUES ("a", "2024-06-01 12:00:00");
