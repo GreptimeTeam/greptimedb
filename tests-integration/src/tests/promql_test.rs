@@ -251,7 +251,7 @@ async fn histogram_fraction_binary_join_preserves_partitioned_rows() {
         execute_all(
             &instance,
             &format!(
-                "{create}\nINSERT INTO {table} VALUES\n                    (0, 'h', 'a', 1),\n                    (0, 'h', 'b', 1),\n                    (0, 'h', 'c', 1),\n                    (0, 'h', 'd', 1);"
+                "{create}\nINSERT INTO {table} (ts, host, shard, val) VALUES\n                    (0, 'h', 'a', 1),\n                    (0, 'h', 'b', 1),\n                    (0, 'h', 'c', 1),\n                    (0, 'h', 'd', 1);"
             ),
             QueryContext::arc(),
         )
