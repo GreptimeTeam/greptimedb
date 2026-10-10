@@ -107,6 +107,7 @@ arrow-buffer = "=59.2.0"
 arrow-flight = "=59.2.0"
 arrow-ipc = { version = "=59.2.0", default-features = false, features = ["lz4", "zstd"] }
 arrow-schema = { version = "=59.2.0", features = ["serde"] }
+arrow-select = "=59.2.0"
 async-stream = "0.3"
 async-trait = "0.1"
 # Remember to update axum-extra, axum-macros when updating axum

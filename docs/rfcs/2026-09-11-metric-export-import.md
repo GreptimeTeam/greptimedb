@@ -516,6 +516,9 @@ configuration option; disabling it selects the existing path. Add packed-import
 support before enabling packed snapshot creation. The writer and reader form one
 first-release feature, even though they land in separate PRs.
 
+The [user guide](../how-to/metric-snapshot-export-import.md) describes the current
+commands, compatibility and recovery behavior.
+
 The [tracking issue](https://github.com/GreptimeTeam/greptimedb/issues/9120) owns
 the PR breakdown and implementation dependencies. Each implementation slice
 must verify its own correctness and failure behavior. Release acceptance requires:
@@ -552,18 +555,39 @@ batching, still writing standalone table objects; (C) B plus packing and its
 reader, with identical DDL handling; (D) C plus batch DDL. If general restore
 request deduplication is available, include it in B as well.
 
-The proposed release target is at least 3x faster full export and full restore
-for D versus A on 10,000 and 100,000 small logical tables with MinIO request
-latency increased by 5 ms. Fix this target during RFC review, before running
-release measurements. The independent local C-versus-B experiment establishes
-neither this comparison nor proof of that target.
+The release target is at least 3x faster full export and full restore for D
+versus A on both 10,000 and 100,000 small logical tables at both +50 ms and
++100 ms added MinIO request latency. Populate every selected table with the same
+deterministic data across controls, initially 32 rows per table. Include schema
+export, metadata discovery and CLI startup/shutdown in complete wall duration.
+The independent local C-versus-B experiment establishes neither this comparison
+nor proof of that target. Keep production improvements already shared by all
+controls in A, and identify which increments can actually be isolated.
 
-Use Linux release builds and at least three alternating rounds for primary
-comparisons. Report medians/spread, schema/data/full durations, CPU, RSS, bytes,
-objects, request counts and queue/cache peaks. Include zero-added-latency,
-local-file, mixed small/large-table and wide-schema controls. Investigate and
-remeasure full-duration regressions exceeding 5% versus A; do not generalize the
-latency-injected speedup to these cases. Check values and schemas outside timing.
+Start with native optimized release builds on macOS. Record hardware, OS,
+MinIO placement, container/VM CPU and memory limits, and connection/storage
+settings. Linux deployment-side performance confirmation can follow separately;
+Linux root/non-root and Windows correctness checks remain distinct requirements.
+Earlier development-build diagnostics, runs with paging interference and sparse
+fixtures with only one populated table do not establish this acceptance.
+
+Calibrate one added delay per object-store HTTP request, including HEAD, GET
+(and range GET), PUT, LIST, DELETE and each multipart operation. Do not delay
+individual packets, streaming body chunks or database SQL/DDL. Route CLI and
+server object access through the same controlled endpoint and report measured
+per-method latency distributions. Synthetic delay is not a cloud provider profile.
+
+Use a small calibration pilot before each scale and at least three alternating
+A/B/C/D rounds for primary comparisons, with fresh restore namespaces, equal
+concurrency and comparable cache/compaction conditions. Report medians/spread,
+schema/data/full durations, CPU, RSS, swap activity, bytes, objects, requests and
+queue/cache peaks. Check RAM, disk and MinIO health before large runs; do not
+compile concurrently. Fix interfering paging/load or report the scale unverified.
+Retain local-file and MinIO 0/+5 ms controls, mixed small/large tables, wide
+physical column unions and multiple physical groups. Add +20 ms only if needed
+to explain sensitivity. Investigate and remeasure full-duration regressions
+exceeding 5% versus A. Check table membership, schemas and typed values outside
+timing, and report B/A, C/B and D/C independently where comparable.
 
 Validate actual write/part sizes at or below 8 MiB, aggregate concurrency across
 groups/chunks, and resource release after success, cancellation and failure.
