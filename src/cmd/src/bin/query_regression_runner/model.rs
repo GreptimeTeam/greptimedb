@@ -120,6 +120,12 @@ pub(super) struct RemoteWrite {
     pub(super) base_setup_sql: Vec<String>,
     #[serde(default)]
     pub(super) candidate_setup_sql: Vec<String>,
+    /// SQL statements both targets run after the post-ingest visibility count
+    /// check and before measurement. Cases use it for manual compaction plus
+    /// fail-closed layout assertions so both builds are measured on the same
+    /// physical SST layout. A failing statement aborts the target.
+    #[serde(default)]
+    pub(super) post_ingest_sql: Vec<String>,
     pub(super) prom_store: PromStore,
     pub(super) value: RemoteValue,
     pub(super) storage: Option<StorageConfig>,
@@ -183,6 +189,10 @@ pub(super) struct StorageConfig {
     pub(super) include_metadata_files: bool,
     pub(super) min_files: u64,
     pub(super) min_files_with_column: u64,
+    /// Exact number of inspected physical data files. Unlike `min_files`, this
+    /// rejects leftovers: stale compaction inputs still on disk are inspected
+    /// and read even though the manifest no longer lists them.
+    pub(super) exact_files: Option<u64>,
     pub(super) require_encodings: Vec<String>,
     pub(super) forbid_encodings: Vec<String>,
     pub(super) max_total_file_size_bytes: Option<u64>,
