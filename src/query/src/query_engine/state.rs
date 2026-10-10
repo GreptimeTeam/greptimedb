@@ -59,6 +59,7 @@ use crate::dist_plan::{
     MergeSortExtensionPlanner, RemoteDynFilterReceiverExtensionPlanner,
     RemoteDynFilterRegistryLease,
 };
+use crate::error::InvalidQueryContextExtensionSnafu;
 use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_BYTES};
 use crate::optimizer::ExtensionAnalyzerRule;
 use crate::optimizer::const_normalization::ConstNormalizationRule;
@@ -310,7 +311,55 @@ impl QueryEngineState {
         rules.retain(|rule| rule.name() != name);
     }
 
-    /// Optimize the logical plan by the extension analyzer rules.
+    /// Applies validated query options to one per-query DataFusion configuration.
+    pub fn apply_query_options(
+        &self,
+        state: &mut SessionState,
+        query_ctx: QueryContextRef,
+    ) -> crate::error::Result<QueryContextRef> {
+        let query_ctx = Arc::new(query_ctx.query_option_snapshot().map_err(|error| {
+            InvalidQueryContextExtensionSnafu {
+                reason: error.to_string(),
+            }
+            .build()
+        })?);
+        let options = query_ctx.extensions();
+        for (key, value) in &options {
+            if key.starts_with("datafusion.") {
+                state
+                    .config_mut()
+                    .options_mut()
+                    .set(key, value)
+                    .map_err(|error| {
+                        InvalidQueryContextExtensionSnafu {
+                            reason: error.to_string(),
+                        }
+                        .build()
+                    })?;
+            }
+        }
+        if let Some(partitions) = options.get("query.parallelism") {
+            let partitions = partitions.parse::<usize>().map_err(|error| {
+                InvalidQueryContextExtensionSnafu {
+                    reason: error.to_string(),
+                }
+                .build()
+            })?;
+            *state.config_mut() = state.config().clone().with_target_partitions(partitions);
+        }
+        if let Some(fallback) = options.get("query.allow_query_fallback") {
+            state
+                .config_mut()
+                .options_mut()
+                .extensions
+                .insert(DistPlannerOptions {
+                    allow_query_fallback: fallback == "true",
+                });
+        }
+        Ok(query_ctx)
+    }
+
+    /// Optimize the logical plan using registered extension analyzer rules.
     pub fn optimize_by_extension_rules(
         &self,
         plan: DfLogicalPlan,
@@ -319,7 +368,7 @@ impl QueryEngineState {
         self.extension_rules
             .iter()
             .try_fold(plan, |acc_plan, rule| {
-                rule.analyze(acc_plan, context, self.session_state().config_options())
+                rule.analyze(acc_plan, context, context.state().config_options())
             })
     }
 

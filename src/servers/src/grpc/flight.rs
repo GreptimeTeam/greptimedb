@@ -197,6 +197,7 @@ impl FlightCraft for GreptimeRequestHandler {
         request: Request<Ticket>,
     ) -> TonicResult<Response<TonicStream<FlightData>>> {
         let mut hints = hint_headers::extract_hints(request.metadata());
+        hints = hint_headers::validate_public_hints(hints)?;
         hints.extend(extract_flow_extensions(request.metadata())?);
         let snapshot_seqs = extract_snapshot_seqs(request.metadata())?;
         let channel = request

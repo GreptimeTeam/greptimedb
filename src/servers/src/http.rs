@@ -1032,17 +1032,12 @@ impl HttpServer {
     /// Attaches middlewares and debug routes to the router.
     /// Callers should call this method after [HttpServer::make_app()].
     pub fn build(&self, router: Router) -> Result<Router> {
-        let timeout_layer = if self.options.timeout != Duration::default() {
-            Some(
-                ServiceBuilder::new().layer(
-                    DynamicTimeoutLayer::new(self.options.timeout)
-                        .with_status_code_fn(Self::request_timeout_status_code),
-                ),
-            )
-        } else {
-            info!("HTTP server timeout is disabled");
-            None
-        };
+        let timeout_layer = Some(
+            ServiceBuilder::new().layer(
+                DynamicTimeoutLayer::new(self.options.timeout)
+                    .with_status_code_fn(Self::request_timeout_status_code),
+            ),
+        );
         let body_limit_layer = if self.options.body_limit != ReadableSize(0) {
             Some(
                 ServiceBuilder::new()

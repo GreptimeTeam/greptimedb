@@ -84,7 +84,7 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
         let query = if let Ok(statements) = &parsed_query {
             statements
                 .iter()
-                .map(|s| s.to_string())
+                .map(statement_to_query)
                 .collect::<Vec<_>>()
                 .join(";")
         } else {
@@ -117,6 +117,24 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
             Ok(results)
         }
     }
+}
+
+fn statement_to_query(statement: &SqlParserStatement) -> String {
+    if let SqlParserStatement::ShowVariable { variable } = statement
+        && variable.len() > 1
+        && (variable[0].value.eq_ignore_ascii_case("query")
+            || variable[0].value.eq_ignore_ascii_case("datafusion"))
+    {
+        return format!(
+            "SHOW {}",
+            variable
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(".")
+        );
+    }
+    statement.to_string()
 }
 
 async fn send_warning_opt<C>(client: &mut C, query_context: QueryContextRef) -> PgWireResult<()>
@@ -337,7 +355,7 @@ impl QueryParser for DefaultQueryParser {
         let (sql, copy_to_stdout_format) = if let Ok(mut statements) = parsed_statements {
             let first_stmt = statements.remove(0);
             let format = check_copy_to_stdout(&first_stmt);
-            (first_stmt.to_string(), format)
+            (statement_to_query(&first_stmt), format)
         } else {
             // bypass the error: it can run into error because of different
             // versions of sqlparser

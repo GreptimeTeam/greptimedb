@@ -486,10 +486,10 @@ impl FrontendClient {
                 query, batch_opts, ..
             } => {
                 let query_parallelism = query.parallelism.to_string();
-                let hints = vec![
-                    (QUERY_PARALLELISM_HINT, query_parallelism.as_str()),
-                    (READ_PREFERENCE_HINT, batch_opts.read_preference.as_ref()),
-                ];
+                let mut hints = vec![(READ_PREFERENCE_HINT, batch_opts.read_preference.as_ref())];
+                if query.parallelism > 0 {
+                    hints.push((QUERY_PARALLELISM_HINT, query_parallelism.as_str()));
+                }
                 let db = self.get_random_active_frontend(catalog, schema).await?;
                 *peer_desc = Some(PeerDesc::Dist {
                     peer: db.peer.clone(),
@@ -510,10 +510,13 @@ impl FrontendClient {
                 query,
             } => {
                 *peer_desc = Some(PeerDesc::Standalone);
-                let mut extensions_map = HashMap::from([(
-                    QUERY_PARALLELISM_HINT.to_string(),
-                    query.parallelism.to_string(),
-                )]);
+                let mut extensions_map = HashMap::new();
+                if query.parallelism > 0 {
+                    extensions_map.insert(
+                        QUERY_PARALLELISM_HINT.to_string(),
+                        query.parallelism.to_string(),
+                    );
+                }
                 for (key, value) in extensions {
                     extensions_map.insert((*key).to_string(), (*value).to_string());
                 }
@@ -591,10 +594,14 @@ impl FrontendClient {
                     .current_catalog(catalog.to_string())
                     .current_schema(schema.to_string())
                     .channel(Channel::Internal)
-                    .extensions(HashMap::from([(
-                        QUERY_PARALLELISM_HINT.to_string(),
-                        query.parallelism.to_string(),
-                    )]))
+                    .extensions(if query.parallelism > 0 {
+                        HashMap::from([(
+                            QUERY_PARALLELISM_HINT.to_string(),
+                            query.parallelism.to_string(),
+                        )])
+                    } else {
+                        HashMap::new()
+                    })
                     .build();
                 let ctx = Arc::new(ctx);
                 let database_client = {
@@ -650,14 +657,16 @@ impl FrontendClient {
                     peer: db.peer.clone(),
                 });
 
+                let query_parallelism = query.parallelism.to_string();
+                let mut hints = vec![(READ_PREFERENCE_HINT, batch_opts.read_preference.as_ref())];
+                if query.parallelism > 0 {
+                    hints.push((QUERY_PARALLELISM_HINT, query_parallelism.as_str()));
+                }
                 db.database
                     .handle_with_retry(
                         req.clone(),
                         batch_opts.experimental_grpc_max_retries,
-                        &[
-                            (QUERY_PARALLELISM_HINT, &query.parallelism.to_string()),
-                            (READ_PREFERENCE_HINT, batch_opts.read_preference.as_ref()),
-                        ],
+                        &hints,
                     )
                     .await
                     .with_context(|_| InvalidRequestSnafu {
@@ -671,10 +680,14 @@ impl FrontendClient {
                 let ctx = QueryContextBuilder::default()
                     .current_catalog(catalog.to_string())
                     .current_schema(schema.to_string())
-                    .extensions(HashMap::from([(
-                        QUERY_PARALLELISM_HINT.to_string(),
-                        query.parallelism.to_string(),
-                    )]))
+                    .extensions(if query.parallelism > 0 {
+                        HashMap::from([(
+                            QUERY_PARALLELISM_HINT.to_string(),
+                            query.parallelism.to_string(),
+                        )])
+                    } else {
+                        HashMap::new()
+                    })
                     .build();
                 let ctx = Arc::new(ctx);
                 {
