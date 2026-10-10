@@ -22,6 +22,29 @@ use object_store::ObjectStore;
 const FETCH_PARALLELISM: usize = 8;
 pub(crate) const MERGE_GAP: usize = 512 * 1024;
 
+/// Returns the bytes [fetch_byte_ranges] reads for `ranges`. Ranges less than [MERGE_GAP]
+/// apart are read as one, like OpenDAL's `Reader::fetch`, and the returned slices may keep the
+/// whole merged buffer alive.
+pub(crate) fn fetched_bytes(ranges: &[Range<u64>]) -> u64 {
+    let mut sorted = ranges.to_vec();
+    sorted.sort_unstable_by_key(|range| range.start);
+    let mut total = 0;
+    let mut current: Option<Range<u64>> = None;
+    for range in sorted.into_iter().filter(|range| range.start < range.end) {
+        match &mut current {
+            Some(merged) if range.start <= merged.end.saturating_add(MERGE_GAP as u64) => {
+                merged.end = merged.end.max(range.end);
+            }
+            _ => {
+                if let Some(merged) = current.replace(range) {
+                    total += merged.end - merged.start;
+                }
+            }
+        }
+    }
+    total + current.map_or(0, |merged| merged.end - merged.start)
+}
+
 /// Asynchronously fetches byte ranges from an object store.
 ///
 /// * `FETCH_PARALLELISM` - The number of concurrent fetch operations.
@@ -53,4 +76,21 @@ pub async fn fetch_byte_ranges(
     );
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fetched_bytes_merges_ranges_like_opendal() {
+        const KB: u64 = 1024;
+        // Ranges closer than the merge gap are read with the gap between them.
+        assert_eq!(408 * KB, fetched_bytes(&[404 * KB..408 * KB, 0..4 * KB]));
+        assert_eq!(8 * KB, fetched_bytes(&[0..4 * KB, 600 * KB..604 * KB]));
+        assert_eq!(
+            6 * KB,
+            fetched_bytes(&[0..4 * KB, 2 * KB..6 * KB, 9 * KB..9 * KB])
+        );
+    }
 }

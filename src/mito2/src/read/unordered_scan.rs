@@ -267,7 +267,8 @@ impl UnorderedScan {
         // then the ref count won't be decremented.
         // This is a rare case and keeping all remaining entries still uses less memory than a per partition cache.
         pruner.add_partition_ranges(&part_ranges);
-        let partition_pruner = Arc::new(PartitionPruner::new(pruner, &part_ranges));
+        let partition_pruner =
+            Arc::new(PartitionPruner::new(pruner, &part_ranges).with_readahead());
 
         let stream = try_stream! {
             part_metrics.on_first_poll();

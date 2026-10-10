@@ -1164,6 +1164,7 @@ impl EngineInner {
         .with_query_stat_counters(region.region_stats.query_stat_counters())
         .with_max_concurrent_scan_files(self.config.max_concurrent_scan_files)
         .with_scan_memory_pool(self.scan_memory_pool.clone())
+        .with_scan_memory_tracker(self.scan_memory_tracker.clone())
         .with_experimental_series_scan_v2(self.config.experimental_series_scan_v2)
         .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())

@@ -171,6 +171,8 @@ mod tests {
     use common_function::function_factory::ScalarFunctionFactory;
     use common_function::scalars::matches::MatchesFunction;
     use common_function::scalars::matches_term::MatchesTermFunction;
+    use common_memory_manager::OnExhaustedPolicy;
+    use common_recordbatch::QueryMemoryTracker;
     use common_time::Timestamp;
     use datafusion_common::{Column, ScalarValue};
     use datafusion_expr::expr::ScalarFunction;
@@ -216,7 +218,10 @@ mod tests {
     use crate::sst::index::{IndexBuildType, Indexer, IndexerBuilder, IndexerBuilderImpl};
     use crate::sst::parquet::flat_format::FlatWriteFormat;
     use crate::sst::parquet::metadata::extract_primary_key_range;
-    use crate::sst::parquet::reader::{ParquetReader, ParquetReaderBuilder, ReaderMetrics};
+    use crate::sst::parquet::push_decoder::{PrefetchBudget, prefetch_charge};
+    use crate::sst::parquet::reader::{
+        ParquetReader, ParquetReaderBuilder, PrefetchColumns, ReaderMetrics,
+    };
     use crate::sst::parquet::row_selection::RowGroupSelection;
     use crate::sst::parquet::writer::ParquetWriter;
     use crate::sst::{
@@ -500,6 +505,313 @@ mod tests {
             ],
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_prefetch_holds_budget_until_released() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use object_store::layers::mock::{
+            Buffer, BytesRange, MockLayerBuilder, Result as MockResult, RpRead, oio,
+        };
+
+        /// Never completes a read once `block` is set.
+        struct BlockingReader {
+            inner: oio::Reader,
+            block: Arc<AtomicBool>,
+        }
+
+        impl oio::Read for BlockingReader {
+            async fn open(
+                &self,
+                range: BytesRange,
+            ) -> MockResult<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
+                if self.block.load(Ordering::Relaxed) {
+                    std::future::pending::<()>().await;
+                }
+                self.inner.open(range).await
+            }
+
+            async fn read(&self, range: BytesRange) -> MockResult<(RpRead, Buffer)> {
+                if self.block.load(Ordering::Relaxed) {
+                    std::future::pending::<()>().await;
+                }
+                self.inner.read(range).await
+            }
+        }
+
+        let block = Arc::new(AtomicBool::new(false));
+        let reader_block = block.clone();
+        let layer = MockLayerBuilder::default()
+            .reader_factory(Arc::new(move |_path, _args, reader| {
+                Box::new(BlockingReader {
+                    inner: reader,
+                    block: reader_block.clone(),
+                }) as oio::Reader
+            }))
+            .build()
+            .unwrap();
+        let mut env = TestEnv::new().await.with_mock_layer(layer);
+        let object_store = env.init_object_store_manager();
+        let handle = sst_file_handle(0, 1000);
+        let metadata = Arc::new(sst_region_metadata());
+        let source = new_flat_source_from_record_batches(vec![
+            new_record_batch_by_range(&["a", "d"], 0, 60),
+            new_record_batch_by_range(&["b", "f"], 0, 40),
+            new_record_batch_by_range(&["b", "h"], 100, 200),
+        ]);
+        let write_opts = WriteOptions {
+            row_group_size: 50,
+            ..Default::default()
+        };
+        let mut metrics = Metrics::new(WriteType::Flush);
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store.clone(),
+            metadata.clone(),
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            FixedPathProvider {
+                region_file_id: handle.file_id(),
+            },
+            &mut metrics,
+        )
+        .await;
+        writer
+            .write_all_flat_as_primary_key(source, None, &write_opts)
+            .await
+            .unwrap();
+
+        let builder = ParquetReaderBuilder::new(
+            FILE_DIR.to_string(),
+            PathType::Bare,
+            handle.clone(),
+            object_store,
+        );
+        let (context, _) = builder
+            .build_reader_input(&mut ReaderMetrics::default())
+            .await
+            .unwrap()
+            .unwrap();
+        let budget = Arc::new(tokio::sync::Semaphore::new(1000));
+        let tracker = QueryMemoryTracker::builder(0, OnExhaustedPolicy::Fail).build();
+
+        let reader_builder = context.reader_builder();
+        let start = |row_group_idx| {
+            let ranges = reader_builder.prefetch_ranges(row_group_idx, None, PrefetchColumns::Scan);
+            let kept: u64 = ranges.iter().map(|range| range.end - range.start).sum();
+            let charge = prefetch_charge(&ranges);
+            let slot = reader_builder.prefetch(
+                row_group_idx,
+                ranges,
+                PrefetchBudget::new(
+                    budget
+                        .clone()
+                        .try_acquire_many_owned(charge.div_ceil(1024) as u32)
+                        .unwrap(),
+                    tracker.try_reserve_optional(charge as usize),
+                ),
+                false,
+            );
+            (slot, kept)
+        };
+        let (slot, kept) = start(1);
+        let prefetched = slot.clone().await;
+        assert!(prefetched.is_some());
+        drop(prefetched);
+        // Fetched bytes keep their budget until the reader drops them.
+        assert_eq!(
+            1000 - kept.div_ceil(1024) as usize,
+            budget.available_permits()
+        );
+        // The reservation keeps whole kilobytes.
+        assert!((kept..=kept.next_multiple_of(1024)).contains(&(tracker.current() as u64)));
+        drop(slot);
+        assert_eq!(1000, budget.available_permits());
+        assert_eq!(0, tracker.current());
+
+        // Dropping the prefetch aborts a fetch stuck on storage and returns its budget.
+        block.store(true, Ordering::Relaxed);
+        let (slot, _) = start(2);
+        tokio::task::yield_now().await;
+        assert!(budget.available_permits() < 1000);
+        drop(slot);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while budget.available_permits() != 1000 || tracker.current() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropped prefetch kept its budget");
+    }
+
+    #[tokio::test]
+    async fn test_prefetch_with_row_selection_reads_selected_pages() {
+        use std::sync::atomic::Ordering;
+
+        use futures::TryStreamExt;
+        use parquet::arrow::arrow_reader::{RowSelection, RowSelector};
+
+        use crate::sst::parquet::push_decoder::PREFETCH_SERVED;
+
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let handle = sst_file_handle(0, 1000);
+        let metadata = Arc::new(sst_region_metadata());
+        // One row group of three data pages per column (20k rows per page by default).
+        let source = new_flat_source_from_record_batches(vec![new_record_batch_by_range(
+            &["a", "d"],
+            0,
+            60000,
+        )]);
+        let write_opts = WriteOptions {
+            row_group_size: 60000,
+            ..Default::default()
+        };
+        let mut metrics = Metrics::new(WriteType::Flush);
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store.clone(),
+            metadata,
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            FixedPathProvider {
+                region_file_id: handle.file_id(),
+            },
+            &mut metrics,
+        )
+        .await;
+        writer
+            .write_all_flat_as_primary_key(source, None, &write_opts)
+            .await
+            .unwrap();
+        let (context, _) =
+            ParquetReaderBuilder::new(FILE_DIR.to_string(), PathType::Bare, handle, object_store)
+                .page_index_policy(PageIndexPolicy::Required)
+                .build_reader_input(&mut ReaderMetrics::default())
+                .await
+                .unwrap()
+                .unwrap();
+        let reader_builder = context.reader_builder();
+        let selection =
+            RowSelection::from(vec![RowSelector::select(1000), RowSelector::skip(59000)]);
+        let budget = Arc::new(tokio::sync::Semaphore::new(1000));
+
+        for columns in [PrefetchColumns::Scan, PrefetchColumns::PrimaryKey] {
+            let size = |ranges: &[std::ops::Range<u64>]| {
+                ranges
+                    .iter()
+                    .map(|range| range.end - range.start)
+                    .sum::<u64>()
+            };
+            let ranges = reader_builder.prefetch_ranges(0, Some(&selection), columns);
+            assert!(
+                size(&ranges) < size(&reader_builder.prefetch_ranges(0, None, columns)),
+                "{columns:?} prefetch reads unselected pages"
+            );
+            let slot = reader_builder.prefetch(
+                0,
+                ranges,
+                PrefetchBudget::new(budget.clone().try_acquire_owned().unwrap(), None),
+                false,
+            );
+            let served = PREFETCH_SERVED.load(Ordering::Relaxed);
+            let build_ctx = context.build_context(0, Some(selection.clone()), None, Some(slot));
+            let stream = match columns {
+                PrefetchColumns::Scan => reader_builder.build(build_ctx).await,
+                PrefetchColumns::PrimaryKey => reader_builder.build_primary_key(build_ctx).await,
+            }
+            .unwrap();
+            let batches = stream.try_collect::<Vec<_>>().await.unwrap();
+            assert_eq!(1000, batches.iter().map(|b| b.num_rows()).sum::<usize>());
+            assert!(
+                PREFETCH_SERVED.load(Ordering::Relaxed) > served,
+                "{columns:?} read did not use the prefetch"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_prefetch_budget_shrinks_to_the_pages_kept() {
+        use futures::TryStreamExt;
+        use parquet::arrow::arrow_reader::{RowSelection, RowSelector};
+
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let handle = sst_file_handle(0, 1000);
+        let metadata = Arc::new(sst_region_metadata());
+        // One row group of three data pages per column (20k rows per page by default).
+        let source = new_flat_source_from_record_batches(vec![new_record_batch_by_range(
+            &["a", "d"],
+            0,
+            60000,
+        )]);
+        let write_opts = WriteOptions {
+            row_group_size: 60000,
+            ..Default::default()
+        };
+        let mut metrics = Metrics::new(WriteType::Flush);
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store.clone(),
+            metadata,
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            FixedPathProvider {
+                region_file_id: handle.file_id(),
+            },
+            &mut metrics,
+        )
+        .await;
+        writer
+            .write_all_flat_as_primary_key(source, None, &write_opts)
+            .await
+            .unwrap();
+        let (context, _) =
+            ParquetReaderBuilder::new(FILE_DIR.to_string(), PathType::Bare, handle, object_store)
+                .page_index_policy(PageIndexPolicy::Required)
+                .build_reader_input(&mut ReaderMetrics::default())
+                .await
+                .unwrap()
+                .unwrap();
+        let reader_builder = context.reader_builder();
+        // The first and the last page of each column: their fetch also reads the page between.
+        let selection = RowSelection::from(vec![
+            RowSelector::select(1000),
+            RowSelector::skip(49000),
+            RowSelector::select(1000),
+            RowSelector::skip(9000),
+        ]);
+        let ranges = reader_builder.prefetch_ranges(0, Some(&selection), PrefetchColumns::Scan);
+        let kept: u64 = ranges.iter().map(|range| range.end - range.start).sum();
+        let charge = prefetch_charge(&ranges);
+        assert!(charge > 2 * kept);
+
+        let total = 100_000;
+        let budget = Arc::new(tokio::sync::Semaphore::new(total));
+        let tracker = QueryMemoryTracker::builder(0, OnExhaustedPolicy::Fail).build();
+        let slot = reader_builder.prefetch(
+            0,
+            ranges,
+            PrefetchBudget::new(
+                budget
+                    .clone()
+                    .try_acquire_many_owned(charge.div_ceil(1024) as u32)
+                    .unwrap(),
+                tracker.try_reserve_optional(charge as usize),
+            ),
+            false,
+        );
+        assert!(slot.clone().await.is_some());
+        assert_eq!(
+            total - kept.div_ceil(1024) as usize,
+            budget.available_permits()
+        );
+        assert_eq!(kept.next_multiple_of(1024) as usize, tracker.current());
+
+        let stream = reader_builder
+            .build(context.build_context(0, Some(selection), None, Some(slot)))
+            .await
+            .unwrap();
+        let batches = stream.try_collect::<Vec<_>>().await.unwrap();
+        assert_eq!(2000, batches.iter().map(|b| b.num_rows()).sum::<usize>());
     }
 
     #[tokio::test]

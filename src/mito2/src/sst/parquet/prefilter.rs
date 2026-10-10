@@ -585,6 +585,8 @@ pub(crate) struct PrefilterContext {
 pub(crate) struct PrefilterContextBuilder {
     pk_filters: Option<Arc<Vec<SimpleFilterEvaluator>>>,
     pk_filter_expr_strs: Option<SmallVec<[String; 1]>>,
+    /// Every column the prefilter may read.
+    column_names: HashSet<String>,
     filters: Vec<SimpleFilterContext>,
     physical_filters: Vec<PhysicalFilterContext>,
     codec: Arc<dyn PrimaryKeyCodec>,
@@ -664,6 +666,7 @@ impl PrefilterContextBuilder {
         Some(Self {
             pk_filters,
             pk_filter_expr_strs,
+            column_names: prefilter_column_names,
             filters,
             physical_filters,
             codec: Arc::clone(codec),
@@ -672,6 +675,11 @@ impl PrefilterContextBuilder {
             arrow_schema: read_format.arrow_schema().clone(),
             proven_simple_filters,
         })
+    }
+
+    /// Returns the projection of every column the prefilter may read.
+    pub(crate) fn projection_mask(&self, parquet_schema: &SchemaDescriptor) -> ProjectionMask {
+        compute_projection_mask(&self.column_names, &self.arrow_schema, parquet_schema)
     }
 
     /// Builds a [PrefilterContext] for a specific row group.
@@ -987,6 +995,7 @@ async fn build_prefilter_masks(
             build_ctx.row_selection.clone(),
             projection,
             build_ctx.fetch_metrics,
+            build_ctx.prefetched.as_ref(),
         )
         .await?;
 
