@@ -270,12 +270,12 @@ mod tests {
     }
 
     fn version_with_files(metadata: RegionMetadataRef, files: Vec<FileMeta>) -> VersionRef {
-        let mutable = Arc::new(TimePartitions::new(
+        let mutable = TimePartitions::new(
             metadata.clone(),
             Arc::new(TimeSeriesMemtableBuilder::default()),
             0,
             None,
-        ));
+        );
         Arc::new(
             VersionBuilder::new(metadata, mutable)
                 .add_files(new_noop_file_purger(), files.into_iter())

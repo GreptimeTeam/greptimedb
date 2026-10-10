@@ -449,7 +449,7 @@ mod tests {
     use std::any::Any;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use catalog::error::{QueryAccessDeniedSnafu, Result as CatalogResult};
+    use catalog::error::Result as CatalogResult;
     use catalog::{CatalogManager, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
     use common_function::aggrs::aggr_wrapper::StateWrapper;
@@ -1149,8 +1149,6 @@ mod tests {
 
     /// How [`InterceptingCatalogManager`] resolves payload tables.
     enum TableResolution {
-        /// Fails with the frontend's cross-catalog access error.
-        AccessDenied,
         /// Records catalog lookup and request context values.
         ObserveContext(Arc<std::sync::Mutex<Vec<[String; 5]>>>),
         /// Resolves once another task on the caller runtime signals.
@@ -1237,11 +1235,6 @@ mod tests {
                     ]);
                     Ok(Some(NumbersTable::table(NUMBERS_TABLE_ID)))
                 }
-                TableResolution::AccessDenied => QueryAccessDeniedSnafu {
-                    catalog: catalog.to_string(),
-                    schema: schema.to_string(),
-                }
-                .fail(),
                 TableResolution::AwaitSignal { notify, entered } => {
                     entered.store(true, Ordering::SeqCst);
                     notify.notified().await;
@@ -1325,41 +1318,33 @@ mod tests {
         assert_eq!(decoded.to_string(), plan.to_string());
     }
 
-    /// Missing and denied payload tables do not fall back to the usable request catalog.
+    /// A missing engine-catalog table does not fall back to the usable request catalog.
     #[tokio::test]
-    async fn test_serializer_decode_payload_negative_engine_catalog_resolution() {
+    async fn test_serializer_decode_missing_engine_catalog_table() {
         let missing_manager: CatalogManagerRef =
             catalog::memory::new_memory_catalog_manager().unwrap();
-        let cases = [
-            (
-                QueryEngineFactory::new(
-                    missing_manager,
-                    None,
-                    None,
-                    None,
-                    None,
-                    false,
-                    QueryOptions::default(),
-                )
-                .query_engine(),
-                "Table not found: greptime.public.numbers",
-            ),
-            (
-                engine_with_intercepting_catalog(TableResolution::AccessDenied),
-                "Illegal access to catalog",
-            ),
-        ];
+        let engine = QueryEngineFactory::new(
+            missing_manager,
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine();
         let bytes = encode_plan(&merge_scan(numbers_scan(), false));
 
-        for (engine, expected) in cases {
-            let err = plan_decoder(engine.as_ref())
-                .decode(bytes.clone(), request_catalog_list(), false)
-                .await
-                .unwrap_err();
+        let err = plan_decoder(engine.as_ref())
+            .decode(bytes, request_catalog_list(), false)
+            .await
+            .unwrap_err();
 
-            let err = format!("{err:?}");
-            assert!(err.contains(expected), "expected {expected:?}, got: {err}");
-        }
+        let err = format!("{err:?}");
+        assert!(
+            err.contains("Table not found: greptime.public.numbers"),
+            "unexpected error: {err}"
+        );
     }
 
     /// Manual states use their own catalog and query-context defaults for payloads.

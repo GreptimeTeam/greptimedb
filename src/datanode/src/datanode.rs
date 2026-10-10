@@ -187,6 +187,13 @@ impl Datanode {
         self.region_server.clone()
     }
 
+    /// Returns the object store log store when the datanode runs on the object
+    /// store WAL.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn object_store_log_store(&self) -> Option<Arc<ObjectStoreLogStore>> {
+        self.object_store_log_store.clone()
+    }
+
     pub fn plugins(&self) -> Plugins {
         self.plugins.clone()
     }

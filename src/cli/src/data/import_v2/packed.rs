@@ -16,12 +16,11 @@ use std::collections::HashSet;
 
 use common_datasource::packed_snapshot::{PACK_INDEX_FILE, PackIndex};
 use snafu::ResultExt;
-use sql::dialect::GreptimeDbDialect;
-use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::statement::Statement;
 
 use crate::data::export_v2::manifest::{ChunkStatus, Manifest};
 use crate::data::import_v2::error::{InvalidPackedSnapshotSnafu, Result, SnapshotStorageSnafu};
+use crate::data::import_v2::{command, executor};
 use crate::data::path::{data_dir_for_schema_chunk, ddl_path_for_schema};
 use crate::data::snapshot_storage::SnapshotStorage;
 
@@ -51,49 +50,46 @@ pub(crate) async fn validate_snapshot(
             .read_text(&ddl_path_for_schema(schema))
             .await
             .context(SnapshotStorageSnafu)?;
-        let statements = ParserContext::create_with_dialect(
-            &ddl,
-            &GreptimeDbDialect {},
-            ParseOptions::default(),
-        )
-        .map_err(|e| {
-            InvalidPackedSnapshotSnafu {
-                reason: e.to_string(),
-            }
-            .build()
-        })?;
         let mut names = HashSet::new();
-        for statement in statements {
-            if let Statement::CreateTable(create) = statement {
-                if create.engine.eq_ignore_ascii_case("metric")
-                    && create.options.get("on_physical_table").is_none()
-                {
-                    continue;
+        for sql in command::iter_ddl_statements(&ddl) {
+            let statements = executor::parse_ddl(&sql).map_err(|_| {
+                InvalidPackedSnapshotSnafu {
+                    reason: "invalid snapshot DDL",
                 }
-                let parts: Vec<_> = create
-                    .name
-                    .0
-                    .iter()
-                    .map(|p| p.as_ident().map(|i| i.value.as_str()))
-                    .collect();
-                let allowed = match parts.as_slice() {
-                    [Some(_)] => true,
-                    [Some(s), Some(_)] => *s == schema,
-                    [Some(c), Some(s), Some(_)] => *c == manifest.catalog && *s == schema,
-                    _ => false,
-                };
-                if !allowed {
-                    return InvalidPackedSnapshotSnafu {
-                        reason: "snapshot table DDL escapes its catalog/schema",
+                .build()
+            })?;
+            for statement in statements {
+                if let Statement::CreateTable(create) = statement {
+                    if create.engine.eq_ignore_ascii_case("metric")
+                        && create.options.get("on_physical_table").is_none()
+                    {
+                        continue;
                     }
-                    .fail();
-                }
-                let name = parts.last().and_then(|p| *p).unwrap_or_default();
-                if !names.insert(name.to_string()) {
-                    return InvalidPackedSnapshotSnafu {
-                        reason: "duplicate snapshot table DDL",
+                    let parts: Vec<_> = create
+                        .name
+                        .0
+                        .iter()
+                        .map(|p| p.as_ident().map(|i| i.value.as_str()))
+                        .collect();
+                    let allowed = match parts.as_slice() {
+                        [Some(_)] => true,
+                        [Some(s), Some(_)] => *s == schema,
+                        [Some(c), Some(s), Some(_)] => *c == manifest.catalog && *s == schema,
+                        _ => false,
+                    };
+                    if !allowed {
+                        return InvalidPackedSnapshotSnafu {
+                            reason: "snapshot table DDL escapes its catalog/schema",
+                        }
+                        .fail();
                     }
-                    .fail();
+                    let name = parts.last().and_then(|p| *p).unwrap_or_default();
+                    if !names.insert(name.to_string()) {
+                        return InvalidPackedSnapshotSnafu {
+                            reason: "duplicate snapshot table DDL",
+                        }
+                        .fail();
+                    }
                 }
             }
         }
@@ -180,13 +176,14 @@ mod tests {
             .unwrap();
         let uri = url::Url::from_file_path(dir.path()).unwrap();
         let storage = OpenDalStorage::from_uri(uri.as_str(), &Default::default()).unwrap();
-        storage.write_text("schema/ddl/public.sql", "CREATE TABLE p (ts TIMESTAMP TIME INDEX) ENGINE=metric WITH(physical_metric_table=''); CREATE TABLE \"logical.name\" (ts TIMESTAMP TIME INDEX) ENGINE=metric WITH(on_physical_table='p'); CREATE VIEW v AS SELECT * FROM \"logical.name\";").await.unwrap();
+        let large = "x".repeat(servers::query_handler::sql::MAX_LOGICAL_TABLE_DDL_BYTES);
+        storage.write_text("schema/ddl/public.sql", &format!("CREATE TABLE p (ts TIMESTAMP TIME INDEX) ENGINE=metric WITH(physical_metric_table=''); CREATE TABLE \"logical.name\" (ts TIMESTAMP TIME INDEX) ENGINE=metric WITH(on_physical_table='p'); CREATE VIEW v AS SELECT * FROM \"logical.name\"; CREATE TABLE ordinary (ts TIMESTAMP TIME INDEX, payload STRING DEFAULT '{large}'); CREATE VIEW large_view AS SELECT '{large}' AS payload;")).await.unwrap();
         let path = "data/public/1/pack-index.json";
-        let index = serde_json::json!({"version":1,"objects":[{"path":"pack-0.bin","kind":"pack","length":12}],"tables":[{"table_name":"logical.name","object":"pack-0.bin","offset":0,"length":12,"row_count":0}]});
+        let index = serde_json::json!({"version":1,"objects":[{"path":"pack-0.bin","kind":"pack","length":24}],"tables":[{"table_name":"logical.name","object":"pack-0.bin","offset":0,"length":12,"row_count":0},{"table_name":"ordinary","object":"pack-0.bin","offset":12,"length":12,"row_count":0}]});
         storage.write_text(path, &index.to_string()).await.unwrap();
         assert!(dir.path().join(path).is_file());
         storage
-            .write_text("data/public/1/pack-0.bin", "abcdefghijkl")
+            .write_text("data/public/1/pack-0.bin", "abcdefghijklmnopqrstuvwx")
             .await
             .unwrap();
         let mut manifest = Manifest::new_schema_only("greptime".into(), vec!["public".into()]);

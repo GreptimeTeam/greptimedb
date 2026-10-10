@@ -188,7 +188,6 @@ impl Stream for MemtableStream {
 #[cfg(test)]
 mod test {
     use common_recordbatch::util;
-    use datatypes::prelude::*;
     use datatypes::schema::ColumnSchema;
     use datatypes::vectors::{Helper, Int32Vector, StringVector};
 

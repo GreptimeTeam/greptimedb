@@ -29,10 +29,12 @@ use common_telemetry::tracing::Instrument;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
 use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
+use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
 use datafusion_common::pruning::PruningStatistics;
-use datafusion_common::{Column, ScalarValue};
+use datafusion_common::{Column, ScalarValue, ToDFSchema};
 use datafusion_expr::Expr;
+use datafusion_expr::simplify::SimplifyContext;
 use datafusion_expr::utils::expr_to_columns;
 use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt64Array};
 use datatypes::extension::json::is_json2_extension_type;
@@ -57,8 +59,8 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheStrategy;
 use crate::config::DEFAULT_MAX_CONCURRENT_SCAN_FILES;
 use crate::error::{
-    InvalidPartitionExprSnafu, InvalidRequestSnafu, RegionSequenceDomainBrokenSnafu, Result,
-    SequenceRangeUnsupportedSnafu,
+    EvalPartitionFilterSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu,
+    RegionSequenceDomainBrokenSnafu, Result, SequenceRangeUnsupportedSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
@@ -2197,6 +2199,22 @@ impl PredicateGroup {
                     expr: expr_json.clone(),
                 })?;
 
+            // Persisted partition bounds retain their original types after schema changes.
+            let schema = metadata
+                .schema
+                .arrow_schema()
+                .clone()
+                .to_dfschema_ref()
+                .context(EvalPartitionFilterSnafu)?;
+            let simplifier = ExprSimplifier::new(
+                SimplifyContext::builder()
+                    .with_schema(schema.clone())
+                    .build(),
+            );
+            let logical_expr = simplifier
+                .coerce(logical_expr, &schema)
+                .and_then(|expr| simplifier.simplify(expr))
+                .context(EvalPartitionFilterSnafu)?;
             combined_exprs.push(logical_expr);
             region_partition_expr = Some(expr);
         }
@@ -2337,6 +2355,75 @@ mod tests {
                     .build(),
             )))
             .with_files(vec![file])
+    }
+
+    #[test]
+    fn test_partition_time_filter_after_unit_widening() {
+        use datatypes::arrow::array::TimestampMicrosecondArray;
+
+        let bound = Value::Timestamp(Timestamp::new_millisecond(1));
+        for (expr, expected) in [
+            (
+                partition_col("ts").lt(bound.clone()),
+                vec![true, false, false],
+            ),
+            (partition_col("ts").gt_eq(bound), vec![false, true, true]),
+        ] {
+            let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+            builder.push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_microsecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 0,
+            });
+            builder.primary_key(vec![]);
+            builder.partition_expr_json(Some(expr.as_json_str().unwrap()));
+            let metadata = builder.build().unwrap();
+            let group = PredicateGroup::new(&metadata, &[]).unwrap();
+            let filters = group.time_filters().unwrap();
+            let input: ArrayRef = Arc::new(TimestampMicrosecondArray::from(vec![999, 1000, 1001]));
+            assert_eq!(filters.len(), 1);
+            assert_eq!(
+                filters[0].evaluate_array(&input).unwrap(),
+                datafusion_common::arrow::buffer::BooleanBuffer::from(expected),
+            );
+        }
+    }
+
+    #[test]
+    fn test_partition_time_filter_overflow_after_unit_widening() {
+        // Year 3000 fits milliseconds but overflows nanoseconds.
+        let bound = Value::Timestamp(Timestamp::new_millisecond(32_503_680_000_000));
+        let expr = partition_col("ts").lt(bound);
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        builder.push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 0,
+        });
+        builder.primary_key(vec![]);
+        builder.partition_expr_json(Some(expr.as_json_str().unwrap()));
+        let metadata = builder.build().unwrap();
+
+        let error = PredicateGroup::new(&metadata, &[])
+            .err()
+            .expect("an overflowing partition bound must fail scan construction");
+        let crate::error::Error::EvalPartitionFilter { error, .. } = error else {
+            panic!("unexpected error: {error:?}");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("converted value exceeds the representable i64 range"),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -2801,12 +2888,12 @@ mod tests {
             })
             .primary_key(vec![0]);
         let metadata = Arc::new(builder.build().unwrap());
-        let mutable = Arc::new(crate::memtable::time_partition::TimePartitions::new(
+        let mutable = crate::memtable::time_partition::TimePartitions::new(
             metadata.clone(),
             Arc::new(crate::test_util::memtable_util::EmptyMemtableBuilder::default()),
             0,
             None,
-        ));
+        );
         let version = Arc::new(
             crate::region::version::VersionBuilder::new(metadata.clone(), mutable).build(),
         );
@@ -3080,12 +3167,12 @@ mod tests {
             ..Default::default()
         };
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
-        let mutable = Arc::new(crate::memtable::time_partition::TimePartitions::new(
+        let mutable = crate::memtable::time_partition::TimePartitions::new(
             metadata.clone(),
             Arc::new(crate::test_util::memtable_util::EmptyMemtableBuilder::default()),
             0,
             None,
-        ));
+        );
         let version = Arc::new(
             crate::region::version::VersionBuilder::new(metadata, mutable)
                 .options(crate::region::options::RegionOptions {
@@ -3120,12 +3207,12 @@ mod tests {
             ..Default::default()
         };
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
-        let mutable = Arc::new(crate::memtable::time_partition::TimePartitions::new(
+        let mutable = crate::memtable::time_partition::TimePartitions::new(
             metadata.clone(),
             Arc::new(crate::test_util::memtable_util::EmptyMemtableBuilder::default()),
             0,
             None,
-        ));
+        );
         let target_region_id = metadata.region_id;
 
         // Files at or below the cursor are excluded. Among the remaining files,
@@ -3137,23 +3224,25 @@ mod tests {
             (None, false, true, false),
             (None, true, true, true),
         ] {
-            let version =
-                crate::region::version::VersionBuilder::new(metadata.clone(), mutable.clone())
-                    .options(crate::region::options::RegionOptions {
-                        preserve_row_sequence: true,
-                        ..Default::default()
-                    })
-                    .add_files(
-                        new_noop_file_purger(),
-                        [FileMeta {
-                            region_id: target_region_id,
-                            sequence,
-                            preserve_row_sequence: marked,
-                            ..Default::default()
-                        }]
-                        .into_iter(),
-                    )
-                    .build();
+            let version = crate::region::version::VersionBuilder::new(
+                metadata.clone(),
+                mutable.new_with_part_duration(None, None),
+            )
+            .options(crate::region::options::RegionOptions {
+                preserve_row_sequence: true,
+                ..Default::default()
+            })
+            .add_files(
+                new_noop_file_purger(),
+                [FileMeta {
+                    region_id: target_region_id,
+                    sequence,
+                    preserve_row_sequence: marked,
+                    ..Default::default()
+                }]
+                .into_iter(),
+            )
+            .build();
             let (files, range) = exact_sequence_range(&request, &version).unwrap();
             assert_eq!(expected_files, !files.is_empty());
             assert_eq!(expected_range, range.is_some());
@@ -3168,24 +3257,26 @@ mod tests {
             (None, true, 1, true),
         ] {
             let file_id = store_api::storage::FileId::random();
-            let version =
-                crate::region::version::VersionBuilder::new(metadata.clone(), mutable.clone())
-                    .options(crate::region::options::RegionOptions {
-                        preserve_row_sequence: true,
-                        ..Default::default()
-                    })
-                    .add_files(
-                        new_noop_file_purger(),
-                        [FileMeta {
-                            region_id: RegionId::new(1, 2),
-                            file_id,
-                            sequence,
-                            preserve_row_sequence: marked,
-                            ..Default::default()
-                        }]
-                        .into_iter(),
-                    )
-                    .build();
+            let version = crate::region::version::VersionBuilder::new(
+                metadata.clone(),
+                mutable.new_with_part_duration(None, None),
+            )
+            .options(crate::region::options::RegionOptions {
+                preserve_row_sequence: true,
+                ..Default::default()
+            })
+            .add_files(
+                new_noop_file_purger(),
+                [FileMeta {
+                    region_id: RegionId::new(1, 2),
+                    file_id,
+                    sequence,
+                    preserve_row_sequence: marked,
+                    ..Default::default()
+                }]
+                .into_iter(),
+            )
+            .build();
             let result = exact_sequence_range(&request, &version);
             if expected_error {
                 assert!(result.is_err());

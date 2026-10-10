@@ -132,12 +132,7 @@ impl VersionControlBuilder {
 
     pub(crate) fn build_version(&self) -> Version {
         let metadata = Arc::new(self.metadata.clone());
-        let mutable = Arc::new(TimePartitions::new(
-            metadata.clone(),
-            self.memtable_builder.clone(),
-            0,
-            None,
-        ));
+        let mutable = TimePartitions::new(metadata.clone(), self.memtable_builder.clone(), 0, None);
         VersionBuilder::new(metadata, mutable)
             .add_files(self.file_purger.clone(), self.files.values().cloned())
             .build()

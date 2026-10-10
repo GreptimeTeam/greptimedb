@@ -26,23 +26,25 @@ use crate::frontend::FrontendOptions;
 use crate::instance::Instance;
 
 impl Instance {
-    pub(crate) fn init_logical_batcher(self: &Arc<Self>, options: &FrontendOptions) {
+    /// Initializes the shared logical batcher for enabled ingestion endpoints.
+    /// Disabled endpoints leave it uninitialized so downstream routers can enable it.
+    pub fn init_logical_batcher(self: &Arc<Self>, options: &FrontendOptions) {
+        let options_batcher = options.logical_batcher_options();
+        let enabled = options_batcher
+            .protocols
+            .iter()
+            .any(|protocol| match protocol {
+                BatchingProtocol::Prom => options.prom_store.enable,
+                BatchingProtocol::Otlp => options.otlp.enable,
+                _ => false,
+            });
+        if !options.prom_store.with_metric_engine
+            || !enabled
+            || !options_batcher.pending_rows_batching_enabled()
+        {
+            return;
+        }
         self.logical_batcher.get_or_init(|| {
-            let options_batcher = options.logical_batcher_options();
-            let enabled = options_batcher
-                .protocols
-                .iter()
-                .any(|protocol| match protocol {
-                    BatchingProtocol::Prom => options.prom_store.enable,
-                    BatchingProtocol::Otlp => options.otlp.enable,
-                    _ => false,
-                });
-            if !options.prom_store.with_metric_engine
-                || !enabled
-                || !options_batcher.pending_rows_batching_enabled()
-            {
-                return None;
-            }
             LogicalTablePendingRowsBatcher::try_new(
                 self.partition_manager().clone(),
                 self.node_manager().clone(),

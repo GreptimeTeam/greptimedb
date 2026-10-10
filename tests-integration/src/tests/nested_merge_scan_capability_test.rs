@@ -952,7 +952,7 @@ async fn test_nested_merge_scan_capability_inner_failure_fails_query() {
         .expect("the query must fail when one of its inner regions fails");
     info!("the nested plan failed as a whole: {error}");
 
-    // The increased Flight DoGet count proves execution reached the remote region owner.
+    // The increased DoGet count proves execution reached the remote region owner.
     let actual = rpc_requests(&cluster, *build_datanode);
     assert!(
         actual > baseline,
@@ -988,7 +988,7 @@ fn assert_cross_datanode_region_query(
         let baseline = baseline_requests[datanode];
         assert!(
             actual > baseline,
-            "expected a nested Flight DoGet at datanode {datanode}, DoGet count {actual}, baseline {baseline}"
+            "expected a nested Flight DoGet at datanode {datanode}, count {actual}, baseline {baseline}"
         );
     }
 }

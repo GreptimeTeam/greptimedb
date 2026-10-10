@@ -48,8 +48,10 @@ use catalog::process_manager::{
 use client::OutputData;
 use common_base::Plugins;
 use common_base::cancellation::CancellableFuture;
+use common_batcher::request_limiter::RequestLimiter;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_event_recorder::EventRecorderRef;
+use common_frontend::metrics::{CACHE_HIT, CACHE_MISS};
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::key::TableMetadataManagerRef;
@@ -141,6 +143,8 @@ pub struct Instance {
     slow_query_options: SlowQueryOptions,
     influxdb_default_merge_mode: InfluxdbMergeMode,
     trace_ingest_chunk_size: usize,
+    trace_aux_cache: otlp::TraceAuxCache,
+    trace_aux_limiter: Option<RequestLimiter>,
     otlp_resource_info: bool,
     suspend: Arc<AtomicBool>,
 
@@ -148,7 +152,7 @@ pub struct Instance {
     // first layer key: db-string
     // key: direct input metric name
     // value: if runs in legacy mode
-    otlp_metrics_table_legacy_cache: DashMap<String, DashMap<String, bool>>,
+    otlp_metrics_table_legacy_cache: Arc<DashMap<String, DashMap<String, bool>>>,
 }
 
 impl Instance {
@@ -570,6 +574,12 @@ fn fast_legacy_check(
         .iter()
         .filter_map(|name| cache.get(name))
         .collect::<Vec<_>>();
+    CACHE_HIT
+        .with_label_values(&["otlp_metrics_legacy"])
+        .inc_by(hit_cache.len() as u64);
+    CACHE_MISS
+        .with_label_values(&["otlp_metrics_legacy"])
+        .inc_by((names.len() - hit_cache.len()) as u64);
     if !hit_cache.is_empty() {
         let hit_legacy = hit_cache.iter().any(|en| *en.value());
         let hit_prom = hit_cache.iter().any(|en| !*en.value());
@@ -780,6 +790,98 @@ impl Instance {
             other => other,
         };
         query_interceptor.post_execute(Output { data, meta }, query_ctx)
+    }
+
+    async fn batch_create_logical_tables(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Result<Vec<Output>> {
+        use servers::query_handler::sql::{
+            MAX_LOGICAL_TABLE_DDL_BYTES, MAX_LOGICAL_TABLE_DDL_STATEMENTS,
+        };
+        ensure!(!self.is_suspended(), error::SuspendedSnafu);
+        ensure!(
+            query.len() <= MAX_LOGICAL_TABLE_DDL_BYTES,
+            InvalidSqlSnafu {
+                err_msg: "logical-table DDL exceeds 1 MiB"
+            }
+        );
+        let interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
+        let interceptor = interceptor.as_ref();
+        let query = interceptor.pre_parsing(query, query_ctx.clone())?;
+        ensure!(
+            query.len() <= MAX_LOGICAL_TABLE_DDL_BYTES,
+            InvalidSqlSnafu {
+                err_msg: "logical-table DDL exceeds 1 MiB"
+            }
+        );
+        let statements = parse_stmt(query.as_ref(), query_ctx.sql_dialect()).map_err(|_| {
+            InvalidSqlSnafu {
+                err_msg: "invalid logical-table DDL",
+            }
+            .build()
+        })?;
+        ensure!(
+            !statements.is_empty() && statements.len() <= MAX_LOGICAL_TABLE_DDL_STATEMENTS,
+            InvalidSqlSnafu {
+                err_msg: "logical-table batch requires 1 to 128 statements"
+            }
+        );
+        let original_statements = interceptor.map(|_| statements.clone());
+        let statements = interceptor.post_parsing(statements, query_ctx.clone())?;
+        ensure!(
+            !statements.is_empty() && statements.len() <= MAX_LOGICAL_TABLE_DDL_STATEMENTS,
+            InvalidSqlSnafu {
+                err_msg: "logical-table batch requires 1 to 128 statements"
+            }
+        );
+        let measure_rewritten_sql = || {
+            let mut remaining = MAX_LOGICAL_TABLE_DDL_BYTES - (statements.len() - 1);
+            statements.iter().all(|statement| {
+                matches!(statement, Statement::CreateTable(create) if create.consume_sql_size_budget(&mut remaining))
+            })
+        };
+        ensure!(
+            original_statements
+                .as_ref()
+                .is_none_or(|original| original == &statements)
+                || measure_rewritten_sql(),
+            InvalidSqlSnafu {
+                err_msg: "invalid or oversized rewritten logical-table DDL"
+            }
+        );
+        for statement in &statements {
+            ensure!(
+                matches!(statement, Statement::CreateTable(_)),
+                InvalidSqlSnafu {
+                    err_msg: "batch requires explicit Metric logical CREATE TABLE statements"
+                }
+            );
+            interceptor.pre_execute(Some(statement), None, query_ctx.clone())?;
+        }
+        for statement in &statements {
+            self.check_sql_permission(statement, &query_ctx).await?;
+            check_permission(self.plugins.clone(), statement, &query_ctx)?;
+        }
+        let count = statements.len();
+        let creates = statements
+            .into_iter()
+            .filter_map(|statement| {
+                if let Statement::CreateTable(create) = statement {
+                    Some(create)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        self.statement_executor
+            .batch_create_logical_tables(creates, query_ctx.clone())
+            .await
+            .context(TableOperationSnafu)?;
+        (0..count)
+            .map(|_| interceptor.post_execute(Output::new_with_affected_rows(0), query_ctx.clone()))
+            .collect()
     }
 
     #[tracing::instrument(skip_all, name = "SqlQueryHandler::do_query")]
@@ -1113,6 +1215,21 @@ impl Instance {
 
 #[async_trait]
 impl SqlQueryHandler for Instance {
+    fn supports_metric_batch_ddl(&self) -> bool {
+        true
+    }
+
+    async fn create_logical_tables(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Vec<Output>> {
+        self.batch_create_logical_tables(query, query_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)
+    }
+
     async fn do_query(
         &self,
         query: &str,
@@ -3311,12 +3428,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_event_recorder_is_exposed() -> TestResult<()> {
+    async fn test_instance_shared_state() -> TestResult<()> {
         let instance =
             test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
                 .await?;
 
         let _event_recorder = instance.event_recorder();
+        assert!(Arc::ptr_eq(
+            &instance.otlp_metrics_table_legacy_cache,
+            &instance.clone().otlp_metrics_table_legacy_cache,
+        ));
 
         Ok(())
     }
@@ -3447,11 +3568,20 @@ mod tests {
             })?;
         let ctx = test_query_ctx(1);
         let handler: PipelineHandlerRef = Arc::new(instance.clone());
+        let hits = CACHE_HIT.with_label_values(&["pipeline_table"]);
+        let misses = CACHE_MISS.with_label_values(&["pipeline_table"]);
+        let before = (hits.get(), misses.get());
 
         handler
             .get_pipeline("pipeline", None, ctx.clone())
             .await
             .unwrap();
+        assert_eq!((hits.get(), misses.get()), (before.0 + 1, before.1 + 1));
+        handler
+            .get_pipeline("pipeline", None, ctx.clone())
+            .await
+            .unwrap();
+        assert_eq!((hits.get(), misses.get()), (before.0 + 3, before.1 + 1));
         assert_permission_denied(
             PipelineHandler::get_pipeline_str(&instance, "pipeline", None, ctx.clone()).await,
         );
@@ -3770,11 +3900,15 @@ mod tests {
 
     #[test]
     fn test_fast_legacy_check_is_read_only() {
+        let hits = CACHE_HIT.with_label_values(&["otlp_metrics_legacy"]);
+        let misses = CACHE_MISS.with_label_values(&["otlp_metrics_legacy"]);
+        let before = (hits.get(), misses.get());
         let cache = DashMap::new();
         cache.insert("metric1".to_string(), true);
 
         let names = vec!["metric1".to_string(), "metric2".to_string()];
         assert_eq!(Some(true), fast_legacy_check(&cache, &names).unwrap());
+        assert_eq!((hits.get(), misses.get()), (before.0 + 1, before.1 + 1));
         assert!(!cache.contains_key("metric2"));
 
         cache_legacy_mode(&cache, &names, true).unwrap();
@@ -3786,6 +3920,9 @@ mod tests {
         cache_incompatible.insert("metric1".to_string(), true);
         cache_incompatible.insert("metric2".to_string(), false);
         assert!(fast_legacy_check(&cache_incompatible, &names).is_err());
+        assert_eq!((hits.get(), misses.get()), (before.0 + 3, before.1 + 1));
+        assert_eq!(None, fast_legacy_check(&cache, &[]).unwrap());
+        assert_eq!((hits.get(), misses.get()), (before.0 + 3, before.1 + 1));
     }
 
     #[test]
@@ -4142,6 +4279,214 @@ mod tests {
             StatusCode::TableNotFound,
             "dropping a non-existent view without IF EXISTS must report TableNotFound, got {err}"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn logical_ddl_validates_and_authorizes_rewritten_batch_before_submission()
+    -> TestResult<()> {
+        struct Rewrite(&'static str);
+        impl SqlQueryInterceptor for Rewrite {
+            type Error = Error;
+            fn pre_parsing<'a>(
+                &self,
+                query: &'a str,
+                _: QueryContextRef,
+            ) -> Result<std::borrow::Cow<'a, str>> {
+                Ok(if self.0 == "sql_bytes" {
+                    std::borrow::Cow::Owned(format!("{query}{}", " ".repeat(1024 * 1024 + 1)))
+                } else {
+                    std::borrow::Cow::Borrowed(query)
+                })
+            }
+            fn pre_execute(
+                &self,
+                statement: Option<&Statement>,
+                _: Option<&LogicalPlan>,
+                _: QueryContextRef,
+            ) -> Result<()> {
+                ensure!(
+                    !(self.0 == "pre_execute"
+                        && matches!(statement,
+                    Some(Statement::CreateTable(create)) if create.name.to_string() == "allowed2")),
+                    InvalidSqlSnafu {
+                        err_msg: "second member rejected by interceptor"
+                    }
+                );
+                Ok(())
+            }
+            fn post_parsing(
+                &self,
+                mut statements: Vec<Statement>,
+                _: QueryContextRef,
+            ) -> Result<Vec<Statement>> {
+                match self.0 {
+                    "target" => {
+                        statements[1] = parse_one_sql(
+                            "CREATE TABLE denied (ts TIMESTAMP TIME INDEX) ENGINE=metric WITH (on_physical_table='phy')",
+                        )
+                    }
+                    "count" => statements = (0..129).map(|i| parse_one_sql(&format!(
+                        "CREATE TABLE allowed_{i} (ts TIMESTAMP TIME INDEX) ENGINE=metric WITH (on_physical_table='phy')"
+                    ))).collect(),
+                    "type" => statements[1] = parse_one_sql("SELECT 1"),
+                    "secret_bytes" | "array_bytes" | "small_option" => {
+                        if let Statement::CreateTable(create) = &mut statements[1] {
+                            let value = "x".repeat(if self.0 == "small_option" { 10 } else { 2 * 1024 * 1024 });
+                            if self.0 == "array_bytes" {
+                                create.options.insert_options("non_scalar", vec![value.as_str()].into());
+                            } else {
+                                create.options.insert("secret_access_key".to_string(), value);
+                            }
+                        }
+                    }
+                    "partition_shape" => {
+                        if let Statement::CreateTable(create) = &mut statements[1] {
+                            create.partitions = Some(sql::statements::create::Partitions {
+                                column_list: vec![],
+                                exprs: vec![sqlparser::ast::Expr::Identifier(sqlparser::ast::Ident::new("hidden"))],
+                            });
+                        }
+                    }
+                    "vector_hidden" => {
+                        statements[1] = parse_one_sql("CREATE TABLE allowed2 (ts TIMESTAMP TIME INDEX, v VECTOR(3)) ENGINE=metric WITH (on_physical_table='phy')");
+                        if let Statement::CreateTable(create) = &mut statements[1] {
+                            create.columns[1].column_def.options.push(sqlparser::ast::ColumnOptionDef {
+                                name: None,
+                                option: sqlparser::ast::ColumnOption::Comment("private-value".repeat(200_000)),
+                            });
+                        }
+                    }
+                    mode if mode.starts_with("fulltext_") || mode.starts_with("skipping_")
+                        || mode.starts_with("inverted_") || mode.starts_with("vector_") => {
+                        if let Statement::CreateTable(create) = &mut statements[1] {
+                            let (kind, value_type) = mode.split_once('_').unwrap();
+                            let value = "x".repeat(if value_type == "small" { 10 } else { 2 * 1024 * 1024 });
+                            let extensions = &mut create.columns[1].extensions;
+                            let options = match kind {
+                                "fulltext" => &mut extensions.fulltext_index_options,
+                                "skipping" => &mut extensions.skipping_index_options,
+                                "inverted" => &mut extensions.inverted_index_options,
+                                _ => &mut extensions.vector_options,
+                            }.get_or_insert_default();
+                            if kind == "vector" {
+                                options.insert("dim".to_string(), "3".to_string());
+                            }
+                            if value_type == "array" {
+                                options.insert_options("non_scalar", vec![value.as_str()].into());
+                            } else {
+                                options.insert("secret_access_key".to_string(), value);
+                            }
+                        }
+                    }
+                    "physical_null" | "physical_array" => {
+                        let value = if self.0 == "physical_null" { "NULL" } else { "['x']" };
+                        statements[1] = parse_one_sql(&format!(
+                            "CREATE TABLE allowed2 (ts TIMESTAMP TIME INDEX) ENGINE=metric WITH (on_physical_table='phy', physical_metric_table={value})"
+                        ));
+                    }
+                    "ast_bytes" => {
+                        if let Statement::CreateTable(create) = &mut statements[1] {
+                            create.name =
+                                ObjectName(vec![sqlparser::ast::ObjectNamePart::Identifier(
+                                    sqlparser::ast::Ident::new("t".repeat(1024 * 1024)),
+                                )]);
+                        }
+                    }
+                    _ => {}
+                }
+                Ok(statements)
+            }
+        }
+        for mode in [
+            "none",
+            "target",
+            "count",
+            "type",
+            "sql_bytes",
+            "ast_bytes",
+            "secret_bytes",
+            "array_bytes",
+            "small_option",
+            "physical_null",
+            "physical_array",
+            "fulltext_secret",
+            "fulltext_array",
+            "fulltext_small",
+            "skipping_secret",
+            "skipping_array",
+            "skipping_small",
+            "inverted_secret",
+            "inverted_array",
+            "inverted_small",
+            "vector_secret",
+            "vector_array",
+            "vector_small",
+            "vector_hidden",
+            "partition_shape",
+            "pre_execute",
+            "cross_catalog",
+            "valid",
+        ] {
+            let catalog =
+                catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "source")?);
+            let executor = Arc::new(MockProcedureExecutor::new(catalog.clone()));
+            let plugins = Plugins::new();
+            plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
+            plugins.insert::<SqlQueryInterceptorRef<Error>>(Arc::new(Rewrite(mode)));
+            plugins.insert(QueryOptions {
+                disallow_cross_catalog_query: mode == "cross_catalog",
+            });
+            let instance = test_instance_with_catalog_manager(
+                catalog,
+                test_table(1025, "target")?,
+                plugins,
+                None,
+                executor.clone(),
+            )
+            .await?;
+            let create = |name| {
+                format!(
+                    "CREATE TABLE {name} (ts TIMESTAMP TIME INDEX, host STRING) ENGINE=metric WITH (on_physical_table='phy')"
+                )
+            };
+            let sql = format!(
+                "{};{}",
+                create("allowed"),
+                create(match mode {
+                    "none" => "denied",
+                    "cross_catalog" => "other.public.allowed2",
+                    _ => "allowed2",
+                })
+            );
+            let result =
+                SqlQueryHandler::create_logical_tables(&instance, &sql, QueryContext::arc()).await;
+            let submits = matches!(mode, "valid" | "small_option")
+                || (mode.ends_with("_small") && !mode.starts_with("vector_"));
+            if matches!(mode, "none" | "target") {
+                let err = result.unwrap_err();
+                assert_eq!(
+                    err.status_code(),
+                    StatusCode::PermissionDenied,
+                    "{mode}: {err}"
+                );
+            } else {
+                assert_eq!(
+                    result.unwrap_err().status_code(),
+                    match mode {
+                        _ if submits => StatusCode::Unsupported,
+                        "cross_catalog" => StatusCode::AccessDenied,
+                        _ => StatusCode::InvalidArguments,
+                    },
+                    "{mode}"
+                );
+            }
+            assert_eq!(
+                executor.submitted.lock().unwrap().len(),
+                usize::from(submits),
+                "{mode}"
+            );
+        }
         Ok(())
     }
 

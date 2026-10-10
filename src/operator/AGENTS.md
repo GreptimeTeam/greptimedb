@@ -46,3 +46,5 @@ the default `meter-macros/noop` build and active metering when changing this pat
 Finite requests split internally use `admit_write` / `admit_row_insert_batches`
 before dispatch. Their database-scoped `QueryContext` admission prevents a second
 row debit while `do_request` still records WCU for the actual writes.
+Async table-batcher outputs carry storage completions in `OutputMeta`; keep
+them when combining submissions so callers can distinguish admission from success.

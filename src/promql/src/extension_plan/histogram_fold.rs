@@ -846,6 +846,8 @@ impl HistogramFoldStream {
         self.find_first_complete_bucket(&batch)
     }
 
+    /// Returns the first group's candidate bucket count once a group boundary is
+    /// observed. Optimistic validation checks its bounds before folding.
     fn find_first_complete_bucket(&self, batch: &RecordBatch) -> DataFusionResult<Option<usize>> {
         if batch.num_rows() == 0 {
             return Ok(None);
@@ -853,21 +855,14 @@ impl HistogramFoldStream {
 
         let vectors = Helper::try_into_vectors(batch.columns())
             .map_err(|e| DataFusionError::Execution(e.to_string()))?;
-        let le_array = batch.column(self.le_column_index);
-
         let mut tag_values_buf = Vec::with_capacity(self.normal_indices.len());
         self.collect_tag_values(&vectors, 0, &mut tag_values_buf);
-        let mut group_start = 0usize;
 
-        for row in 0..batch.num_rows() {
+        for row in 1..batch.num_rows() {
             if !self.is_same_group(&vectors, row, &tag_values_buf) {
-                // new group begins
-                self.collect_tag_values(&vectors, row, &mut tag_values_buf);
-                group_start = row;
-            }
-
-            if Self::is_positive_infinity(le_array, row) {
-                return Ok(Some(row - group_start + 1));
+                // A new series/timestamp proves that the previous group is
+                // complete, including any numerically equal +Inf boundaries.
+                return Ok(Some(row));
             }
         }
 
@@ -888,7 +883,10 @@ impl HistogramFoldStream {
         let field_array = field_array.as_primitive::<Float64Type>();
         let mut tag_values_buf = Vec::with_capacity(self.normal_indices.len());
 
-        while remaining_rows >= bucket_num && self.mode == FoldMode::Optimistic {
+        // Keep one row of lookahead: +Inf alone does not prove completion.
+        // A group ending at the batch boundary stays buffered until more input
+        // arrives, or flush_remaining completes it at EOF.
+        while remaining_rows > bucket_num && self.mode == FoldMode::Optimistic {
             self.collect_tag_values(&vectors, cursor, &mut tag_values_buf);
             if !self.validate_optimistic_group(
                 &vectors,
@@ -987,6 +985,9 @@ impl HistogramFoldStream {
         tag_values: &[ValueRef<'_>],
     ) -> bool {
         let inf_index = cursor + bucket_num - 1;
+        if self.is_same_group(vectors, inf_index + 1, tag_values) {
+            return false;
+        }
         if !Self::is_positive_infinity(le_array, inf_index) {
             return false;
         }
@@ -1217,7 +1218,7 @@ impl HistogramFoldStream {
 
     fn flush_remaining(&mut self) -> DataFusionResult<()> {
         if self.mode == FoldMode::Optimistic && self.input_buffered_rows > 0 {
-            let buffered_batches: Vec<_> = self.input_buffer.drain(..).collect();
+            let buffered_batches: Vec<_> = std::mem::take(&mut self.input_buffer);
             if !buffered_batches.is_empty() {
                 let batch = concat_batches(&self.input_schema, buffered_batches.as_slice())?;
                 self.switch_to_safe_mode(batch)?;
@@ -1274,8 +1275,31 @@ impl HistogramFoldStream {
             }
         }
 
-        // check input value
-        if !bucket.windows(2).all(|w| w[0] <= w[1]) {
+        // Detect equal numeric boundaries during validation so unique buckets
+        // need neither another scan nor an allocation.
+        let has_duplicates = !bucket.windows(2).all(|w| w[0] < w[1]);
+        if has_duplicates && !bucket.windows(2).all(|w| w[0] <= w[1]) {
+            return Ok(f64::NAN);
+        }
+        // Counts must be coalesced before repairing monotonicity.
+        let coalesced = has_duplicates.then(|| {
+            let mut bounds = Vec::with_capacity(bucket.len());
+            let mut counts = Vec::with_capacity(counter.len());
+            for (&bound, &count) in bucket.iter().zip(counter) {
+                if bounds.last() == Some(&bound) {
+                    *counts.last_mut().unwrap() += count;
+                } else {
+                    bounds.push(bound);
+                    counts.push(count);
+                }
+            }
+            (bounds, counts)
+        });
+        let (bucket, counter) = match &coalesced {
+            Some((bounds, counts)) => (bounds.as_slice(), counts.as_slice()),
+            None => (bucket, counter),
+        };
+        if matches!(operation, HistogramFoldOperation::Quantile(_)) && bucket.len() < 2 {
             return Ok(f64::NAN);
         }
         let counter = match operation {
@@ -1339,26 +1363,6 @@ impl HistogramFoldStream {
     }
 
     fn evaluate_fraction(lower: f64, upper: f64, bucket: &[f64], counter: &[f64]) -> f64 {
-        let coalesced = bucket
-            .windows(2)
-            .any(|bounds| bounds[0] == bounds[1])
-            .then(|| {
-                let mut bounds = Vec::with_capacity(bucket.len());
-                let mut counts = Vec::with_capacity(counter.len());
-                for (&bound, &count) in bucket.iter().zip(counter) {
-                    if bounds.last() == Some(&bound) {
-                        *counts.last_mut().unwrap() += count;
-                    } else {
-                        bounds.push(bound);
-                        counts.push(count);
-                    }
-                }
-                (bounds, counts)
-            });
-        let (bucket, counter) = match &coalesced {
-            Some((bounds, counts)) => (bounds.as_slice(), counts.as_slice()),
-            None => (bucket, counter),
-        };
         let total = *counter.last().unwrap();
         if total == 0.0 || lower.is_nan() || upper.is_nan() {
             return f64::NAN;
@@ -1466,8 +1470,8 @@ mod test {
 
         // 12 items
         let host_column_1 = Arc::new(StringArray::from(vec![
-            "host_1", "host_1", "host_1", "host_1", "host_1", "host_1", "host_1", "host_1",
-            "host_1", "host_1", "host_1", "host_1",
+            "host_1", "host_1", "host_1", "host_1", "host_1", "host_2", "host_2", "host_2",
+            "host_2", "host_2", "host_3", "host_3",
         ])) as _;
         let le_column_1 = Arc::new(StringArray::from(vec![
             "0.001", "0.1", "10", "1000", "+Inf", "0.001", "0.1", "10", "1000", "+inf", "0.001",
@@ -1478,14 +1482,14 @@ mod test {
         ])) as _;
 
         // 2 items
-        let host_column_2 = Arc::new(StringArray::from(vec!["host_1", "host_1"])) as _;
+        let host_column_2 = Arc::new(StringArray::from(vec!["host_3", "host_3"])) as _;
         let le_column_2 = Arc::new(StringArray::from(vec!["10", "1000"])) as _;
         let val_column_2 = Arc::new(Float64Array::from(vec![1.0, 1.0])) as _;
 
         // 11 items
         let host_column_3 = Arc::new(StringArray::from(vec![
-            "host_1", "host_2", "host_2", "host_2", "host_2", "host_2", "host_2", "host_2",
-            "host_2", "host_2", "host_2",
+            "host_3", "host_4", "host_4", "host_4", "host_4", "host_4", "host_5", "host_5",
+            "host_5", "host_5", "host_5",
         ])) as _;
         let le_column_3 = Arc::new(StringArray::from(vec![
             "+INF", "0.001", "0.1", "10", "1000", "+iNf", "0.001", "0.1", "10", "1000", "+Inf",
@@ -1651,10 +1655,10 @@ mod test {
 | host   | val               |
 +--------+-------------------+
 | host_1 | 257.5             |
-| host_1 | 5.05              |
-| host_1 | 0.0004            |
-| host_2 | NaN               |
-| host_2 | 6.040000000000001 |
+| host_2 | 5.05              |
+| host_3 | 0.0004            |
+| host_4 | NaN               |
+| host_5 | 6.040000000000001 |
 +--------+-------------------+",
         );
         assert_eq!(result_literal, expected);
@@ -1831,7 +1835,7 @@ mod test {
             Field::new("le", DataType::Utf8, true),
             Field::new("val", DataType::Float64, true),
         ]));
-        let host_column = Arc::new(StringArray::from(vec!["a", "a", "a", "a", "b", "b"])) as _;
+        let host_column = Arc::new(StringArray::from(vec!["a", "a", "b", "b", "c", "c"])) as _;
         let le_column = Arc::new(StringArray::from(vec![
             "0.1", "+Inf", "0.1", "1.0", "0.1", "+Inf",
         ])) as _;
@@ -1852,8 +1856,8 @@ mod test {
 | host | val |
 +------+-----+
 | a    | 0.1 |
-| a    | NaN |
-| b    | 0.1 |
+| b    | NaN |
+| c    | 0.1 |
 +------+-----+",
         );
         assert_eq!(result_literal, expected);
@@ -1928,6 +1932,79 @@ mod test {
             result[0].column(1).as_primitive::<Float64Type>().value(0),
             1.0
         );
+    }
+
+    #[tokio::test]
+    async fn trailing_invalid_bounds_fall_back_before_eof() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("host", DataType::Utf8, false),
+            Field::new("le", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, false),
+        ]));
+        for trailing_bound in [Some("bad"), None] {
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec![
+                        "a", "a", "a", "b", "b", "b", "c", "c", "c",
+                    ])),
+                    Arc::new(StringArray::from(
+                        [Some("1"), Some("+Inf"), trailing_bound].repeat(3),
+                    )),
+                    Arc::new(Float64Array::from([2.0, 4.0, 99.0].repeat(3))),
+                ],
+            )
+            .unwrap();
+            let fold = build_fold_exec_from_batches(vec![batch.clone()], schema.clone(), 0.5, 0);
+            let mut stream = HistogramFoldStream {
+                le_column_index: 1,
+                field_column_index: 2,
+                histogram_column_index: None,
+                operation: fold.operation,
+                normal_indices: vec![0],
+                bucket_size: None,
+                batch_size: 1,
+                output_schema: fold.output_schema.clone(),
+                input_schema: schema.clone(),
+                mode: FoldMode::Optimistic,
+                safe_group: None,
+                input_buffer: vec![],
+                input_buffered_rows: 0,
+                output_buffer: HistogramFoldStream::empty_output_buffer(&schema).unwrap(),
+                output_buffered_rows: 0,
+                input: fold
+                    .input
+                    .execute(0, SessionContext::default().task_ctx())
+                    .unwrap(),
+                metric: BaselineMetrics::new(&fold.metric, 0),
+            };
+
+            // Neither +Inf nor a batch boundary alone completes the group.
+            assert!(stream.fold_input(batch.slice(0, 2)).unwrap().is_none());
+            assert!(stream.fold_input(batch.slice(2, 1)).unwrap().is_none());
+            assert_eq!(stream.mode, FoldMode::Optimistic);
+
+            for (offset, host) in [(3, "a"), (6, "b")] {
+                let output = stream
+                    .fold_input(batch.slice(offset, 3))
+                    .unwrap()
+                    .expect("a completed group should produce output before EOF")
+                    .unwrap();
+                assert_eq!(stream.mode, FoldMode::Safe);
+                assert_eq!(stream.input_buffered_rows, 0);
+                assert!(stream.input_buffer.is_empty());
+                assert_eq!(output.num_rows(), 1);
+                assert_eq!(string_array_value_at_index(output.column(0), 0), Some(host));
+                assert_eq!(output.column(1).as_primitive::<Float64Type>().value(0), 1.0);
+            }
+
+            stream.flush_remaining().unwrap();
+            let output = stream.take_output_buf().unwrap().unwrap();
+            assert_eq!(output.num_rows(), 1);
+            assert_eq!(string_array_value_at_index(output.column(0), 0), Some("c"));
+            assert_eq!(output.column(1).as_primitive::<Float64Type>().value(0), 1.0);
+            assert!(stream.take_output_buf().unwrap().is_none());
+        }
     }
 
     #[tokio::test]
@@ -2043,6 +2120,171 @@ mod test {
         assert_eq!(values.len(), 2);
         assert!(values[0].is_nan());
         assert!((values[1] - 0.55).abs() < 1e-10, "{values:?}");
+    }
+
+    #[test]
+    fn evaluate_quantile_duplicate_bounds() {
+        let cases = [
+            // Issue #9443: coalesce before repairing the count at 1000.
+            (
+                vec![10.0, 10.0, 100.0, 100.0, 1000.0, f64::INFINITY],
+                vec![40.0, 40.0, 50.0, 50.0, 50.0, 100.0],
+                0.95,
+                77.5,
+            ),
+            // Repairing the split counts first would incorrectly inflate them.
+            (
+                vec![10.0, 10.0, 100.0, 100.0, f64::INFINITY],
+                vec![30.0, 10.0, 40.0, 20.0, 60.0],
+                0.5,
+                7.5,
+            ),
+            (
+                vec![10.0, f64::INFINITY, f64::INFINITY],
+                vec![40.0, 20.0, 30.0],
+                0.5,
+                6.25,
+            ),
+            (
+                vec![f64::INFINITY, f64::INFINITY],
+                vec![20.0, 30.0],
+                0.5,
+                f64::NAN,
+            ),
+            (
+                vec![-0.0, 0.0, 10.0, f64::INFINITY],
+                vec![10.0, 10.0, 40.0, 40.0],
+                0.75,
+                5.0,
+            ),
+        ];
+        for (bounds, counts, quantile, expected) in cases {
+            let actual = HistogramFoldStream::evaluate_row(
+                HistogramFoldOperation::Quantile(quantile.into()),
+                &bounds,
+                &counts,
+            )
+            .unwrap();
+            if expected.is_nan() {
+                assert!(actual.is_nan());
+            } else {
+                assert!((actual - expected).abs() < 1e-10, "{actual} != {expected}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_infinity_bounds_across_batches() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("le", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+        ]));
+        let duplicate = [("10", 20.0), ("10.0", 20.0), ("+Inf", 25.0), ("+inf", 25.0)];
+        let regular = [("10", 20.0), ("10.0", 20.0), ("+Inf", 50.0)];
+        // Cover discovery, an already established optimistic bucket count,
+        // fallback, and the final group at EOF.
+        for groups in [
+            vec![duplicate.as_slice()],
+            vec![duplicate.as_slice(), regular.as_slice()],
+            vec![regular.as_slice(), duplicate.as_slice(), regular.as_slice()],
+        ] {
+            let mut timestamps = Vec::new();
+            let mut bounds = Vec::new();
+            let mut counts = Vec::new();
+            for (timestamp, group) in groups.iter().enumerate() {
+                for &(bound, count) in *group {
+                    timestamps.push(timestamp as i64);
+                    bounds.push(bound);
+                    counts.push(count);
+                }
+            }
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampMillisecondArray::from(timestamps)),
+                    Arc::new(StringArray::from(bounds)),
+                    Arc::new(Float64Array::from(counts)),
+                ],
+            )
+            .unwrap();
+            for batch_size in 1..=batch.num_rows() {
+                let batches = (0..batch.num_rows())
+                    .step_by(batch_size)
+                    .map(|offset| batch.slice(offset, batch_size.min(batch.num_rows() - offset)))
+                    .collect();
+                let fold = build_fold_exec_from_batches(batches, schema.clone(), 0.5, 0);
+                let result =
+                    datafusion::physical_plan::collect(fold, SessionContext::default().task_ctx())
+                        .await
+                        .unwrap();
+                let values: Vec<_> = result
+                    .iter()
+                    .flat_map(|batch| {
+                        batch
+                            .column(1)
+                            .as_primitive::<Float64Type>()
+                            .values()
+                            .iter()
+                            .copied()
+                    })
+                    .collect();
+                assert_eq!(values, vec![6.25; groups.len()], "batch size {batch_size}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_bounds_across_batches_and_safe_fallback() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "ts",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("le", DataType::Utf8, false),
+            Field::new("val", DataType::Float64, false),
+        ]));
+        // The first group establishes six buckets for optimistic folding. The
+        // shorter second group forces safe mode; both have duplicate bounds.
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    1000, 1000, 1000, 1000, 1000, 1000, 2000, 2000, 2000, 2000, 2000,
+                ])),
+                Arc::new(StringArray::from(vec![
+                    "10", "10.0", "100", "100.0", "1000", "+Inf", "10", "10.0", "100", "100.0",
+                    "+Inf",
+                ])),
+                Arc::new(Float64Array::from(vec![
+                    40.0, 40.0, 50.0, 50.0, 50.0, 100.0, 40.0, 40.0, 50.0, 50.0, 100.0,
+                ])),
+            ],
+        )
+        .unwrap();
+        // Split each pair of equal boundaries across an input batch boundary.
+        let batches = (0..batch.num_rows()).map(|i| batch.slice(i, 1)).collect();
+        let fold = build_fold_exec_from_batches(batches, schema, 0.95, 0);
+        let result = datafusion::physical_plan::collect(fold, SessionContext::default().task_ctx())
+            .await
+            .unwrap();
+        let values: Vec<_> = result
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .column(1)
+                    .as_primitive::<Float64Type>()
+                    .values()
+                    .iter()
+                    .copied()
+            })
+            .collect();
+        assert_eq!(values, vec![77.5, 77.5]);
     }
 
     #[test]

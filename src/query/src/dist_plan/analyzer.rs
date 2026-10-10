@@ -653,7 +653,7 @@ impl PlanRewriter {
                 ))
             })?;
 
-            for (_col_name, alias_set) in part_cols.iter_mut() {
+            for alias_set in part_cols.values_mut() {
                 let aliased_cols = aliased_columns_for(
                     &alias_set.clone().into_iter().collect(),
                     plan,

@@ -20,8 +20,8 @@ default_column_prefix = "greptime"
 ## Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",
 ## "mysql_native_password:<hex_sha1_sha1_password>",
 ## "pg_scram_sha256:<iterations>:<hex_salt>:<hex_stored_key>:<hex_server_key>"
-## "pbkdf2_sha256" and "pg_scram_sha256" protect passwords at rest, but cannot authenticate over MySQL's
-## native password handshake; a MySQL client must send the password in cleartext for such users.
+## "pbkdf2_sha256" and "pg_scram_sha256" protect passwords at rest, but such users cannot log in over MySQL:
+## `static_user_provider` and `watch_file_user_provider` only negotiate `mysql_native_password`, which cannot verify these formats.
 ## "mysql_native_password" is MySQL-specific and cannot authenticate over PostgreSQL at all.
 ## PostgreSQL SCRAM only covers "plain" and "pg_scram_sha256" users; if any user is "pbkdf2_sha256" or
 ## "mysql_native_password", PostgreSQL falls back to cleartext password auth for every user.
@@ -33,22 +33,26 @@ default_column_prefix = "greptime"
 
 ## Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
 ## Set to 0 to disable the limit. Default: "0" (unlimited)
-## @toml2docs:none-default
+## @toml2docs:none-default="0"
 #+ max_in_flight_write_bytes = "1GB"
 
 ## Policy when write bytes quota is exhausted.
 ## Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail"
-## @toml2docs:none-default
 #+ write_bytes_exhausted_policy = "wait"
 
 ## The runtime options.
 #+ [runtime]
 ## The number of threads to execute the runtime for global read operations.
+## Defaults to max(num_cpus, 2).
+## @toml2docs:none-default="Auto"
 #+ global_rt_size = 8
 ## The number of threads to execute compact operations.
+## Defaults to max(num_cpus / 2, 2).
+## @toml2docs:none-default="Auto"
 #+ compact_rt_size = 4
 ## The maximum number of blocking threads for compact operations.
 ## Defaults to max(num_cpus / 2, 2).
+## @toml2docs:none-default="Auto"
 #+ compact_rt_max_blocking_threads = 4
 
 ## The HTTP server options.
@@ -86,6 +90,7 @@ bind_addr = "127.0.0.1:4001"
 ## The address advertised to the metasrv, and used for connections from outside the host.
 ## If left empty or unset, the server will automatically use the IP address of the first network interface
 ## on the host, with the same port number as the one specified in `grpc.bind_addr`.
+## @toml2docs:none-default
 server_addr = "127.0.0.1:4001"
 ## The number of server worker threads.
 runtime_size = 8
@@ -94,7 +99,7 @@ runtime_size = 8
 ## - `transport`: only enable gRPC transport compression (zstd)
 ## - `arrow_ipc`: only enable Arrow IPC compression (lz4)
 ## - `all`: enable all compression.
-## Default to `none`
+## Default to `arrow_ipc`.
 flight_compression = "arrow_ipc"
 ## Enable CORS for gRPC-Web clients in browsers. Disabled by default.
 #+ enable_cors = false
@@ -125,12 +130,15 @@ key_path = ""
 watch = false
 
 ## The internal gRPC server options. Internal gRPC port for nodes inside cluster to access frontend.
+## The internal gRPC server starts only when this section is set.
 [internal_grpc]
 ## The address to bind the gRPC server.
+## If unset, it falls back to `127.0.0.1:4001`, the same address as `grpc.bind_addr`.
+## @toml2docs:none-default
 bind_addr = "127.0.0.1:4010"
 ## The address advertised to the metasrv, and used for connections from outside the host.
-## If left empty or unset, the server will automatically use the IP address of the first network interface
-## on the host, with the same port number as the one specified in `internal_grpc.bind_addr`.
+## Unlike `grpc.server_addr`, it is not detected automatically; set it explicitly.
+## @toml2docs:none-default
 server_addr = "127.0.0.1:4010"
 ## The number of server worker threads.
 runtime_size = 8
@@ -139,7 +147,7 @@ runtime_size = 8
 ## - `transport`: only enable gRPC transport compression (zstd)
 ## - `arrow_ipc`: only enable Arrow IPC compression (lz4)
 ## - `all`: enable all compression.
-## Default to `none`
+## Default to `arrow_ipc`.
 flight_compression = "arrow_ipc"
 
 ## internal gRPC server TLS options, see `mysql.tls` section.
@@ -302,6 +310,13 @@ enable = true
 enable = true
 ## Maximum spans per trace ingest chunk. Set to 0 to disable splitting.
 trace_ingest_chunk_size = 512
+## Estimated memory budget for cached trace service/operation keys per frontend,
+## shared across all catalogs, schemas, and trace tables. Set to 0 to disable caching.
+## Defaults to 1/128 of the host or pod memory limit, with a minimum of 32MiB.
+## Uses 32MiB if memory detection is unavailable.
+## Excludes cache and allocator overhead; shared table names are charged per entry.
+## @toml2docs:none-default="Auto"
+#+ trace_aux_cache_size = "32MiB"
 ## Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric
 ## resource attributes, so metrics-only services reach the semantic graph.
 experimental_enable_resource_info = false
@@ -357,9 +372,10 @@ allow_query_fallback = false
 
 ## Memory pool size for query execution operators (aggregation, sorting, join).
 ## Supports absolute size (e.g., "4GB", "8GB") or percentage of system memory (e.g., "30%").
-## Setting it to 0 disables the limit (unbounded, default behavior).
+## Setting it to 0 disables the limit. Defaults to 0 (unlimited); this example sets it to `50%`.
 ## When this limit is reached, queries will fail with ResourceExhausted error.
 ## NOTE: This does NOT limit memory used by table scans (only applies to datanodes).
+## @toml2docs:none-default="0"
 memory_pool_size = "50%"
 
 ## Experimental memory pool allocation policy:
@@ -390,6 +406,8 @@ memory_pool_size = "50%"
 [datanode]
 ## Datanode client options.
 [datanode.client]
+## Connect server timeout. Defaults to `1s`; this example sets it to `10s`.
+## @toml2docs:none-default="1s"
 connect_timeout = "10s"
 tcp_nodelay = true
 ## The maximum receive message size for the gRPC client.
@@ -494,4 +512,5 @@ ttl = "90d"
 ## Event types to record. Current available event type: `admin_function`.
 ## When omitted, all current and future event types are recorded.
 ## Set to an empty array to disable event recording.
+## @toml2docs:none-default="All"
 #+ event_types = ["admin_function"]

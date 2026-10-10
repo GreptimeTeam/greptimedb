@@ -150,3 +150,90 @@ DROP TABLE application_logs;
 
 Affected Rows: 0
 
+create table json2_alter_add_settings (
+    ts timestamp time index
+) with (
+    'append_mode' = 'true'
+);
+
+Affected Rows: 0
+
+-- ADD COLUMN preserves JSON2 settings and type hints, including for existing rows.
+insert into json2_alter_add_settings values (1);
+
+Affected Rows: 1
+
+alter table json2_alter_add_settings add column j json2(max_auto_expanded_paths = 100);
+
+Affected Rows: 0
+
+alter table json2_alter_add_settings add column k json2(service string);
+
+Affected Rows: 0
+
+alter table json2_alter_add_settings add column m json2(max_auto_expanded_paths = 0, nested.value bigint);
+
+Affected Rows: 0
+
+show create table json2_alter_add_settings;
+
++--------------------------+---------------------------------------------------------+
+| Table                    | Create Table                                            |
++--------------------------+---------------------------------------------------------+
+| json2_alter_add_settings | CREATE TABLE IF NOT EXISTS "json2_alter_add_settings" ( |
+|                          |   "ts" TIMESTAMP(3) NOT NULL,                           |
+|                          |   "j" JSON2(                                            |
+|                          |     max_auto_expanded_paths = 100                       |
+|                          |   ) NULL,                                               |
+|                          |   "k" JSON2(                                            |
+|                          |     max_auto_expanded_paths = 100,                      |
+|                          |     "service" STRING                                    |
+|                          |   ) NULL,                                               |
+|                          |   "m" JSON2(                                            |
+|                          |     max_auto_expanded_paths = 0,                        |
+|                          |     "nested"."value" BIGINT                             |
+|                          |   ) NULL,                                               |
+|                          |   TIME INDEX ("ts")                                     |
+|                          | )                                                       |
+|                          |                                                         |
+|                          | ENGINE=mito                                             |
+|                          | WITH(                                                   |
+|                          |   append_mode = 'true'                                  |
+|                          | )                                                       |
++--------------------------+---------------------------------------------------------+
+
+insert into json2_alter_add_settings values
+    (2, '{"a":1}', '{"service":"api"}', '{"nested":{"value":42},"extra":true}');
+
+Affected Rows: 1
+
+select ts, j, k.service, m.nested.value, m from json2_alter_add_settings order by ts;
+
++-------------------------+---------+-----------------------------------------------------------------------+-------------------------------------------------------------------------+--------------------------------------+
+| ts                      | j       | json_get(json2_alter_add_settings.k,Utf8("$.service"),Utf8View(NULL)) | json_get(json2_alter_add_settings.m,Utf8("$.nested.value"),Int64(NULL)) | m                                    |
++-------------------------+---------+-----------------------------------------------------------------------+-------------------------------------------------------------------------+--------------------------------------+
+| 1970-01-01T00:00:00.001 |         |                                                                       |                                                                         |                                      |
+| 1970-01-01T00:00:00.002 | {"a":1} | api                                                                   | 42                                                                      | {"extra":true,"nested":{"value":42}} |
++-------------------------+---------+-----------------------------------------------------------------------+-------------------------------------------------------------------------+--------------------------------------+
+
+admin flush_table('json2_alter_add_settings');
+
++-----------------------------------------------+
+| ADMIN flush_table('json2_alter_add_settings') |
++-----------------------------------------------+
+| 0                                             |
++-----------------------------------------------+
+
+select ts, j, k.service, m.nested.value, m from json2_alter_add_settings order by ts;
+
++-------------------------+---------+-----------------------------------------------------------------------+-------------------------------------------------------------------------+--------------------------------------+
+| ts                      | j       | json_get(json2_alter_add_settings.k,Utf8("$.service"),Utf8View(NULL)) | json_get(json2_alter_add_settings.m,Utf8("$.nested.value"),Int64(NULL)) | m                                    |
++-------------------------+---------+-----------------------------------------------------------------------+-------------------------------------------------------------------------+--------------------------------------+
+| 1970-01-01T00:00:00.001 |         |                                                                       |                                                                         |                                      |
+| 1970-01-01T00:00:00.002 | {"a":1} | api                                                                   | 42                                                                      | {"extra":true,"nested":{"value":42}} |
++-------------------------+---------+-----------------------------------------------------------------------+-------------------------------------------------------------------------+--------------------------------------+
+
+drop table json2_alter_add_settings;
+
+Affected Rows: 0
+

@@ -515,6 +515,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid SQL, error: {err_msg}"))]
+    InvalidFlowOption {
+        err_msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid flow request body: {:?}", body))]
     InvalidFlowRequestBody {
         body: Box<Option<api::v1::flow::flow_request::Body>>,
@@ -1247,6 +1254,7 @@ impl ErrorExt for Error {
 
             ProcedureNotFound { .. }
             | InvalidViewInfo { .. }
+            | InvalidFlowOption { .. }
             | PrimaryKeyNotFound { .. }
             | EmptyKey { .. }
             | AlterLogicalTablesInvalidArguments { .. }

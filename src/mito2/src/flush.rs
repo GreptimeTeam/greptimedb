@@ -232,7 +232,7 @@ pub enum FlushReason {
     Repartition,
     /// Flush triggered by remote WAL pruning.
     RemoteWalPrune,
-    /// Flush before closing a Noop WAL region.
+    /// Flush before closing a region.
     Closing,
 }
 
