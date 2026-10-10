@@ -363,13 +363,12 @@ async fn run_cases() -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    if std::env::args().skip(1).any(|arg| arg == "--bench") {
-        run_cases().await?;
-        correlation::run_cases().await?;
-        return correlation::run_bench().await;
-    }
     run_cases().await?;
-    correlation::run_cases().await
+    correlation::run_cases().await?;
+    if std::env::args().skip(1).any(|arg| arg == "--bench") {
+        correlation::run_bench().await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

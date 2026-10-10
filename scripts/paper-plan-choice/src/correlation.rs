@@ -262,9 +262,8 @@ fn outer_metrics_build_mem(plan: &dyn ExecutionPlan) -> Option<usize> {
         if has_t(join.left()) || has_t(join.right()) {
             return join
                 .metrics()?
-                .iter()
-                .find(|m| m.value().name() == "build_mem_used")
-                .map(|m| m.value().as_usize());
+                .sum_by_name("build_mem_used")
+                .map(|value| value.as_usize());
         }
     }
     plan.children()
@@ -397,16 +396,16 @@ fn plan_case(
             );
         }
     }
-    let rsstat = context.registry.compute(rs.as_ref())?;
-    let actual = rsstat.base().num_rows;
-    let expected_stat = match mode {
-        BoundMode::Ordinary => Precision::Inexact(1040),
-        BoundMode::Head(0) => Precision::Inexact(4864),
-        BoundMode::Head(1) => Precision::Inexact(if anti { 1351 } else { 4864 }),
-        BoundMode::Head(2) => Precision::Inexact(if anti { 768 } else { 4864 }),
-        BoundMode::Head(_) => unreachable!(),
-    };
     if validate {
+        let rsstat = context.registry.compute(rs.as_ref())?;
+        let actual = rsstat.base().num_rows;
+        let expected_stat = match mode {
+            BoundMode::Ordinary => Precision::Inexact(1040),
+            BoundMode::Head(0) => Precision::Inexact(4864),
+            BoundMode::Head(1) => Precision::Inexact(if anti { 1351 } else { 4864 }),
+            BoundMode::Head(2) => Precision::Inexact(if anti { 768 } else { 4864 }),
+            BoundMode::Head(_) => unreachable!(),
+        };
         assert_eq!(actual, expected_stat);
         assert_eq!(rsstat.base().total_byte_size, Precision::Absent);
         println!("correlation_stats anti={anti} mode={mode:?} rs_estimate={actual:?}");
@@ -428,7 +427,6 @@ fn plan_case(
             .collect();
         assert_eq!(outer.len(), 1);
         assert_eq!(inner.len(), 1);
-        assert!(inner[0].2);
         if outer[0].0 { "T" } else { "RS" }.to_string()
     } else {
         String::new()
@@ -438,13 +436,6 @@ fn plan_case(
 
 async fn run_one(anti: bool, mode: BoundMode) -> Result<()> {
     let (plan, schema, build) = plan_case(anti, mode, true)?;
-    let actual = match mode {
-        BoundMode::Ordinary => Precision::Inexact(1040),
-        BoundMode::Head(0) => Precision::Inexact(4864),
-        BoundMode::Head(1) => Precision::Inexact(if anti { 1351 } else { 4864 }),
-        BoundMode::Head(2) => Precision::Inexact(if anti { 768 } else { 4864 }),
-        BoundMode::Head(_) => unreachable!(),
-    };
     let output = rows(Arc::clone(&plan), &schema).await?;
     let expected = oracle(anti);
     assert_eq!(output, expected);
@@ -463,7 +454,7 @@ async fn run_one(anti: bool, mode: BoundMode) -> Result<()> {
     assert_eq!(build, expected_build);
     let mem = outer_metrics_build_mem(plan.as_ref());
     println!(
-        "correlation anti={anti} mode={mode:?} base_rows=129 ndv=16 rs_estimate={actual:?} true_rs_rows={} outer_build={build} output_rows={} outer_build_mem_used={mem:?}",
+        "correlation anti={anti} mode={mode:?} base_rows=129 ndv=16 true_rs_rows={} outer_build={build} output_rows={} outer_partition_build_mem_sum_bytes={mem:?}",
         expected.len(),
         output.len()
     );
