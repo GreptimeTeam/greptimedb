@@ -4956,7 +4956,7 @@ async fn mixed_native_histogram_rate_executes_real_ranges() {
     );
     let state = build_query_engine_state();
     let (mut exprs, _) = planner
-        .create_function_expr(&call.func, vec![], input.schema(), &state, None)
+        .create_function_expr(&call.func, vec![], input.schema(), &state, None, true)
         .unwrap();
     exprs.insert(0, planner.create_time_index_column_expr().unwrap());
     let plan = LogicalPlanBuilder::from(input)
@@ -8413,7 +8413,7 @@ async fn test_mixed_or_routes_float_histogram_and_label_functions() {
         };
         let state = build_query_engine_state();
         let (mut exprs, _) = planner
-            .create_function_expr(&call.func, vec![], input.schema(), &state, None)
+            .create_function_expr(&call.func, vec![], input.schema(), &state, None, true)
             .unwrap();
         exprs.insert(0, planner.create_time_index_column_expr().unwrap());
         exprs.extend(planner.create_tag_column_exprs().unwrap());
@@ -8466,7 +8466,14 @@ async fn test_mixed_or_routes_float_histogram_and_label_functions() {
     let args = planner.create_function_args(&call.args.args).unwrap();
     let state = build_query_engine_state();
     let (mut exprs, _) = planner
-        .create_function_expr(&call.func, args.literals, input.schema(), &state, None)
+        .create_function_expr(
+            &call.func,
+            args.literals,
+            input.schema(),
+            &state,
+            None,
+            true,
+        )
         .unwrap();
     exprs.insert(0, planner.create_time_index_column_expr().unwrap());
     exprs.extend(planner.create_tag_column_exprs().unwrap());
