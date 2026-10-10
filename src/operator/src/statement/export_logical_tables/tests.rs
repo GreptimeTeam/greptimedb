@@ -128,6 +128,59 @@ async fn read(store: &ObjectStore, path: &str) -> (SchemaRef, Vec<RecordBatch>) 
 }
 
 #[tokio::test]
+async fn single_table_plan_filters_other_routing_ids_before_export() {
+    let mut unit = unit();
+    unit.logical_tables.retain(|id, _| *id == 1025);
+    let schema = unit.physical_table.schema();
+    let input = expand_export_batch(
+        &batch(
+            vec![Some(1027), Some(1025), Some(1024), Some(1025), Some(1026)],
+            vec![
+                Some("other"),
+                Some("selected-a"),
+                None,
+                Some("selected-b"),
+                None,
+            ],
+        ),
+        schema.arrow_schema().clone(),
+    )
+    .unwrap();
+    unit.physical_table = table::test_util::MemTable::table(
+        "phy",
+        GreptimeRecordBatch::from_df_record_batch(schema, input),
+    );
+    let context = datafusion::prelude::SessionContext::new_with_config(
+        datafusion::prelude::SessionConfig::new().with_target_partitions(4),
+    );
+    let batches = context
+        .execute_logical_plan(unit.build_plan(None).unwrap())
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
+    let summary = export_stream(
+        &unit,
+        stream(batches),
+        &store,
+        LogicalTableExportLimits::default(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(summary.rows, 2);
+    assert_eq!(summary.files, 1);
+    let (_, output) = read(&store, "cpu.v1.parquet").await;
+    let hosts = output
+        .iter()
+        .flat_map(|batch| batch.column(0).as_string::<i32>().iter())
+        .collect::<Vec<_>>();
+    assert_eq!(hosts, vec![Some("selected-a"), Some("selected-b")]);
+}
+
+#[tokio::test]
 async fn narrow_batches_share_row_groups() {
     let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
     let batches = (0..8)
