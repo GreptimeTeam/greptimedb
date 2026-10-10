@@ -23,6 +23,7 @@ use arrow::array::{
     TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
     TimestampSecondArray,
 };
+use arrow::datatypes::DataType as ArrowDataType;
 use catalog::CatalogManagerRef;
 use common_error::ext::BoxedError;
 use common_recordbatch::DfRecordBatch;
@@ -31,14 +32,15 @@ use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::SessionState;
+use datafusion::functions::datetime::date_bin::DateBinFunc;
 use datafusion::logical_expr::Expr;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 use datafusion_common::tree_node::{
     Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter, TreeNodeVisitor,
 };
-use datafusion_common::{DFSchema, TableReference};
+use datafusion_common::{Column, DFSchema, ScalarValue, TableReference};
 use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
-use datafusion_expr::{ColumnarValue, LogicalPlan};
+use datafusion_expr::{Case, ColumnarValue, LogicalPlan, Operator, binary_expr, lit};
 use datafusion_physical_expr::PhysicalExprRef;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::TIME_INDEX_KEY;
@@ -173,6 +175,159 @@ impl TimeWindowExpr {
     /// The time window size of the expr, get from calling `eval` with a test timestamp
     pub fn time_window_size(&self) -> &Option<std::time::Duration> {
         &self.eval_time_window_size
+    }
+
+    /// Builds the remote grouping key that deduplicates recovery window capture for
+    /// the safely recognized time-window form.
+    ///
+    /// Recovery capture projects source timestamps and aligns windows locally with
+    /// [`Self::eval`]. When the time-window expression is exactly the built-in
+    /// `date_bin` over the source time index column with a literal whole-second stride
+    /// and an epoch origin, the projection can instead send
+    /// `CASE WHEN ts >= 0 AND ts <= <bound> THEN date_bin(ts) ELSE ts END` and group by
+    /// it: every in-range timestamp is replaced by one representative timestamp of its
+    /// own window, so the decoder keeps evaluating [`Self::eval`] on far fewer rows.
+    /// `bound` is the largest absolute timestamp whose nanosecond conversion still fits
+    /// in `i64`, so the recognized shape never hits `date_bin`'s overflow path.
+    ///
+    /// The guard has two halves, both required:
+    ///
+    /// 1. Structure: the exact built-in `date_bin`, applied directly to the source time
+    ///    index column, with a literal stride that is a positive whole number of
+    ///    seconds and either no origin or a literal epoch-zero origin. Calendar
+    ///    strides, casts, and non-epoch origins are not the epoch-anchored floor the
+    ///    remote grouping relies on.
+    /// 2. Cached `eval` agreement: the width cached at construction time must equal
+    ///    that stride, and the cached origin must equal
+    ///    `floor(DEFAULT_TEST_TIMESTAMP / stride) * stride` in the source unit. This
+    ///    rejects shapes whose local window bounds are not the remote bins, e.g. a
+    ///    sub-second stride over a coarser timestamp unit, where `date_bin`'s truncated
+    ///    output would merge two windows that [`Self::eval`] keeps apart.
+    ///
+    /// Returns `None` for every other expression; callers must then keep projecting raw
+    /// timestamps, which the decoder handles directly.
+    pub fn safe_remote_dedup_group_expr(&self) -> Option<Expr> {
+        /// Returns the literal stride in nanoseconds when `expr` is a literal interval
+        /// that is a positive whole number of seconds, and `None` for every other
+        /// literal, including calendar intervals and sub-second or non-positive strides.
+        fn literal_stride_ns(expr: &Expr) -> Option<i64> {
+            let Expr::Literal(value, _) = expr else {
+                return None;
+            };
+            let stride_ns = match value {
+                ScalarValue::IntervalMonthDayNano(Some(interval)) => {
+                    if interval.months != 0 || interval.days != 0 {
+                        return None;
+                    }
+                    interval.nanoseconds
+                }
+                ScalarValue::IntervalDayTime(Some(interval)) => {
+                    if interval.days != 0 {
+                        return None;
+                    }
+                    i64::from(interval.milliseconds).checked_mul(1_000_000)?
+                }
+                _ => return None,
+            };
+            (stride_ns > 0 && stride_ns % 1_000_000_000 == 0).then_some(stride_ns)
+        }
+
+        /// Returns whether `expr` is a literal timestamp at the Unix epoch.
+        fn is_epoch_zero(expr: &Expr) -> bool {
+            matches!(
+                expr,
+                Expr::Literal(
+                    ScalarValue::TimestampSecond(Some(0), _)
+                        | ScalarValue::TimestampMillisecond(Some(0), _)
+                        | ScalarValue::TimestampMicrosecond(Some(0), _)
+                        | ScalarValue::TimestampNanosecond(Some(0), _),
+                    _
+                )
+            )
+        }
+
+        let Expr::ScalarFunction(func) = &self.logical_expr else {
+            return None;
+        };
+        // The built-in `date_bin` itself, not a user function that shadows its name.
+        func.func.inner().downcast_ref::<DateBinFunc>()?;
+        let is_time_index =
+            |expr: &Expr| matches!(expr, Expr::Column(column) if column.name == self.column_name);
+        let stride_ns = match func.args.as_slice() {
+            [interval, time_index] if is_time_index(time_index) => literal_stride_ns(interval)?,
+            [interval, time_index, origin]
+                if is_time_index(time_index) && is_epoch_zero(origin) =>
+            {
+                literal_stride_ns(interval)?
+            }
+            _ => return None,
+        };
+        let ArrowDataType::Timestamp(arrow_unit, timezone) = self.df_schema.field(0).data_type()
+        else {
+            return None;
+        };
+        let unit = TimeUnit::from(arrow_unit);
+        // `literal_stride_ns` only accepts whole-second strides, so the stride is
+        // always a multiple of the source unit and `date_bin` cannot truncate it.
+        let unit_ns = i64::from(unit.factor());
+        let stride_in_unit = stride_ns / unit_ns;
+        if self.eval_time_window_size?.as_nanos() != stride_ns as u128 {
+            return None;
+        }
+        let origin = self.eval_time_original?;
+        if origin.unit() != unit {
+            return None;
+        }
+        let test_value = DEFAULT_TEST_TIMESTAMP.convert_to(unit)?.value();
+        if origin.value()
+            != test_value
+                .div_euclid(stride_in_unit)
+                .checked_mul(stride_in_unit)?
+        {
+            return None;
+        }
+
+        // Re-point the recognized call at the unqualified time index column: the
+        // expression found in the plan may carry a table qualifier (e.g. an aliased
+        // source) that does not match the recovery plan's input schema.
+        let time_index = Expr::Column(Column::new_unqualified(self.column_name.clone()));
+        let binned = Expr::ScalarFunction(datafusion_expr::expr::ScalarFunction::new_udf(
+            func.func.clone(),
+            func.args
+                .iter()
+                .map(|arg| match arg {
+                    Expr::Column(column) if column.name == self.column_name => time_index.clone(),
+                    other => other.clone(),
+                })
+                .collect(),
+        ));
+        let timestamp_literal = |value: i64| match unit {
+            TimeUnit::Second => ScalarValue::TimestampSecond(Some(value), timezone.clone()),
+            TimeUnit::Millisecond => {
+                ScalarValue::TimestampMillisecond(Some(value), timezone.clone())
+            }
+            TimeUnit::Microsecond => {
+                ScalarValue::TimestampMicrosecond(Some(value), timezone.clone())
+            }
+            TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(value), timezone.clone()),
+        };
+        let max_representable_ns = i64::MAX / unit_ns;
+        let in_range = binary_expr(
+            time_index.clone(),
+            Operator::GtEq,
+            lit(timestamp_literal(0)),
+        )
+        .and(binary_expr(
+            time_index.clone(),
+            Operator::LtEq,
+            lit(timestamp_literal(max_representable_ns)),
+        ));
+
+        Some(Expr::Case(Case::new(
+            None,
+            vec![(Box::new(in_range), Box::new(binned))],
+            Some(Box::new(time_index)),
+        )))
     }
 
     pub fn from_expr(

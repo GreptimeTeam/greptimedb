@@ -32,7 +32,7 @@ use datafusion::sql::unparser::expr_to_sql;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::utils::quote_identifier;
 use datafusion_common::{DFSchemaRef, ScalarValue, TableReference};
-use datafusion_expr::{DmlStatement, LogicalPlan, Projection, WriteOp, col, lit};
+use datafusion_expr::{Aggregate, DmlStatement, LogicalPlan, Projection, WriteOp, col, lit};
 use datatypes::schema::Schema;
 use datatypes::vectors::Helper;
 use futures::TryStreamExt;
@@ -797,12 +797,27 @@ impl BatchingTask {
         } else {
             input
         };
-        let timestamp_plan = LogicalPlan::Projection(
-            Projection::try_new(vec![col(&time_window_expr.column_name)], Arc::new(input))
-                .context(DatafusionSnafu {
-                    context: "Failed to project recovery source timestamps".to_string(),
+        // Remote window dedup: when the time-window expression is the exact built-in
+        // `date_bin` shape whose cached `eval` bounds provably match remote epoch-anchored
+        // bins (`safe_remote_dedup_group_expr`), group by one representative timestamp per
+        // window so the frontend returns far fewer rows. The decoder below still evaluates
+        // `time_window_expr.eval` on whatever arrives, so NULL, out-of-range, and every
+        // unrecognized time-window form keep their current behavior.
+        let input = Arc::new(input);
+        let timestamp_plan = match time_window_expr.safe_remote_dedup_group_expr() {
+            Some(group_expr) => LogicalPlan::Aggregate(
+                Aggregate::try_new(input, vec![group_expr], vec![]).context(DatafusionSnafu {
+                    context: "Failed to build recovery remote time-window dedup".to_string(),
                 })?,
-        );
+            ),
+            None => LogicalPlan::Projection(
+                Projection::try_new(vec![col(&time_window_expr.column_name)], input).context(
+                    DatafusionSnafu {
+                        context: "Failed to project recovery source timestamps".to_string(),
+                    },
+                )?,
+            ),
+        };
         let catalog = &self.config.sink_table_name[0];
         let schema = &self.config.sink_table_name[1];
         let timestamp_plan = timestamp_plan
