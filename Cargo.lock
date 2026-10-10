@@ -6945,6 +6945,7 @@ dependencies = [
  "ahash 0.8.12",
  "async-trait",
  "asynchronous-codec",
+ "base64 0.22.1",
  "bytemuck",
  "bytes",
  "common-base",

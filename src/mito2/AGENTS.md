@@ -82,6 +82,9 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 
 ## Gotchas
 
+- JSON2 hint inverted indexes use typed path keys from `src/index/src/target.rs`
+  inside the shared inverted-index blob. Do not record hint roots as ordinary
+  column indexes in `FileMeta`; see `sst/index/column.rs` for leaf/null handling.
 - Sequence numbers are strictly increasing per region; dedup and snapshot reads
   depend on this. Do not change assignment lightly.
 - Manifest version is monotonic — never reset or skip it.
