@@ -67,6 +67,9 @@ pub enum PgErrorCode {
     /// connection_exception
     #[snafu(display("connection_exception"))]
     Ec08000 = 400,
+    /// protocol_violation
+    #[snafu(display("protocol_violation"))]
+    Ec08P01 = 401,
     // === End of Class 08 — Connection Exception =====
 
     // === Begin of Class 09 — Triggered Action Exception ===
@@ -130,6 +133,12 @@ pub enum PgErrorCode {
     /// invalid_parameter_value
     #[snafu(display("invalid_parameter_value"))]
     Ec22023 = 1401,
+    /// invalid_text_representation
+    #[snafu(display("invalid_text_representation"))]
+    Ec22P02 = 1402,
+    /// bad_copy_file_format
+    #[snafu(display("bad_copy_file_format"))]
+    Ec22P04 = 1403,
     // === End of Class 22 — Data Exception =====
 
     // === Begin of Class 23 — Integrity Constraint Violation ===
@@ -295,6 +304,9 @@ pub enum PgErrorCode {
     /// operator_intervention
     #[snafu(display("operator_intervention"))]
     Ec57000 = 3600,
+    /// query_canceled
+    #[snafu(display("query_canceled"))]
+    Ec57014 = 3602,
 
     /// cannot_connect_now
     #[snafu(display("cannot_connect_now"))]

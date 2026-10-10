@@ -112,7 +112,18 @@ fn create_postgres_server_with_user_provider(
     tls: TlsOption,
     user_provider: Option<UserProviderRef>,
 ) -> Result<Box<dyn Server>> {
+    create_postgres_server_inner(table, tls, user_provider).map(|(server, _)| server)
+}
+
+fn create_postgres_server_inner(
+    table: TableRef,
+    tls: TlsOption,
+    user_provider: Option<UserProviderRef>,
+) -> Result<(Box<dyn Server>, Arc<crate::RecordingCopyInHandler>)> {
     let instance = Arc::new(create_testing_instance(table));
+    let copy_in_handler = Arc::new(crate::RecordingCopyInHandler::new(
+        instance.catalog_manager(),
+    ));
     let io_runtime = RuntimeBuilder::default()
         .worker_threads(4)
         .thread_name("postgres-io-handlers")
@@ -124,15 +135,19 @@ fn create_postgres_server_with_user_provider(
             .expect("Failed to load certificates and keys"),
     );
 
-    Ok(Box::new(PostgresServer::new(
-        instance,
-        tls.should_force_tls(),
-        tls_server_config,
-        0,
-        io_runtime,
-        user_provider,
-        None,
-    )))
+    Ok((
+        Box::new(PostgresServer::new(
+            instance,
+            copy_in_handler.clone(),
+            tls.should_force_tls(),
+            tls_server_config,
+            0,
+            io_runtime,
+            user_provider,
+            None,
+        )),
+        copy_in_handler,
+    ))
 }
 
 async fn start_test_server_with_user_provider(
@@ -848,4 +863,423 @@ async fn do_simple_query_with_secure_server(
     };
 
     do_simple_query(server_tls, client_tls).await
+}
+
+// ---------------------------------------------------------------------------
+// COPY FROM STDIN tests
+// ---------------------------------------------------------------------------
+
+use futures::SinkExt;
+
+fn copy_in_test_table() -> TableRef {
+    use common_recordbatch::RecordBatch;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use datatypes::types::TimestampType;
+    use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector, VectorRef};
+
+    let column_schemas = vec![
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::Timestamp(TimestampType::Millisecond(Default::default())),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("val", ConcreteDataType::float64_datatype(), true),
+        ColumnSchema::new("note", ConcreteDataType::string_datatype(), true),
+    ];
+    let schema = Arc::new(datatypes::schema::Schema::new(column_schemas));
+    let columns: Vec<VectorRef> = vec![
+        Arc::new(TimestampMillisecondVector::from_slice([0i64])),
+        Arc::new(StringVector::from_slice(&["localhost"])),
+        Arc::new(Float64Vector::from_slice([1.0f64])),
+        Arc::new(StringVector::from_slice(&["seed"])),
+    ];
+    let recordbatch = RecordBatch::new(schema, columns).unwrap();
+    MemTable::table("metrics", recordbatch)
+}
+
+async fn start_copy_in_test_server(
+    table: TableRef,
+) -> Result<(Box<dyn Server>, u16, Arc<crate::RecordingCopyInHandler>)> {
+    common_telemetry::init_default_ut_logging();
+    let _ = install_default_crypto_provider();
+    let (mut server, handler) = create_postgres_server_inner(table, Default::default(), None)?;
+    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+    server.start(listening).await.unwrap();
+    let port = server.bind_addr().unwrap().port();
+    Ok((server, port, handler))
+}
+
+fn recorded_rows(handler: &crate::RecordingCopyInHandler) -> Vec<api::v1::Row> {
+    handler
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|request| {
+            request.inserts.iter().flat_map(|insert| {
+                insert
+                    .rows
+                    .clone()
+                    .map(|rows| rows.rows)
+                    .unwrap_or_default()
+            })
+        })
+        .collect()
+}
+
+async fn feed_copy_in(
+    client: &Client,
+    sql: &str,
+    chunks: Vec<bytes::Bytes>,
+) -> std::result::Result<u64, PgError> {
+    let mut sink = Box::pin(client.copy_in(sql).await?);
+    for chunk in chunks {
+        sink.as_mut().send(chunk).await?;
+    }
+    sink.as_mut().finish().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_copy_in_csv() -> Result<()> {
+    let (server, port, handler) = start_copy_in_test_server(copy_in_test_table()).await?;
+    let client = create_plain_connection(port, false).await.unwrap();
+
+    let rows = feed_copy_in(
+        &client,
+        "COPY metrics FROM STDIN WITH (FORMAT csv)",
+        vec![bytes::Bytes::from_static(
+            b"2023-11-14 22:13:20,host1,1.5,hello\n2023-11-14 22:13:21,host2,,\"quoted, comma\"\n",
+        )],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 2);
+
+    let rows = recorded_rows(&handler);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0].values[1].value_data,
+        Some(api::v1::value::ValueData::StringValue("host1".to_string()))
+    );
+    assert_eq!(
+        rows[0].values[2].value_data,
+        Some(api::v1::value::ValueData::F64Value(1.5))
+    );
+    // Unquoted empty field is NULL, quoted field keeps its content.
+    assert_eq!(rows[1].values[2].value_data, None);
+    assert_eq!(
+        rows[1].values[3].value_data,
+        Some(api::v1::value::ValueData::StringValue(
+            "quoted, comma".to_string()
+        ))
+    );
+
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_copy_in_text_format() -> Result<()> {
+    let (server, port, handler) = start_copy_in_test_server(copy_in_test_table()).await?;
+    let client = create_plain_connection(port, false).await.unwrap();
+
+    let mut sink = Box::pin(client.copy_in("COPY metrics FROM STDIN").await.unwrap());
+    sink.as_mut()
+        .send(bytes::Bytes::from_static(
+            b"2023-11-14 22:13:22\thost3\t2.5\twith\\ttab\n2023-11-14 22:13:23\thost4\t\\N\t\\N\n",
+        ))
+        .await
+        .unwrap();
+    let rows = sink.as_mut().finish().await.unwrap();
+    assert_eq!(rows, 2);
+
+    let rows = recorded_rows(&handler);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0].values[3].value_data,
+        Some(api::v1::value::ValueData::StringValue(
+            "with\ttab".to_string()
+        ))
+    );
+    assert_eq!(rows[1].values[2].value_data, None);
+
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_copy_in_column_list_and_batches() -> Result<()> {
+    let (server, port, handler) = start_copy_in_test_server(copy_in_test_table()).await?;
+    let client = create_plain_connection(port, false).await.unwrap();
+
+    let mut chunks = Vec::new();
+    let mut payload = String::new();
+    for i in 0..20000u64 {
+        payload.push_str(&format!("{i},2023-11-14 22:13:20,host{i},0.5\n"));
+        if (i + 1) % 100 == 0 {
+            chunks.push(bytes::Bytes::from(std::mem::take(&mut payload)));
+        }
+    }
+    let rows = feed_copy_in(
+        &client,
+        "COPY metrics (note, ts, host, val) FROM STDIN (FORMAT csv)",
+        chunks,
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 20000);
+
+    let recorded = handler.requests.lock().unwrap().clone();
+    // The 20000 rows must have been flushed in multiple batches.
+    assert!(recorded.len() > 1);
+    let total: usize = recorded
+        .iter()
+        .map(|request| {
+            request.inserts[0]
+                .rows
+                .as_ref()
+                .map(|rows| rows.rows.len())
+                .unwrap_or(0)
+        })
+        .sum();
+    assert_eq!(total, 20000);
+
+    let rows = recorded_rows(&handler);
+    // The column list reorders the fields: first field lands in `note`.
+    assert_eq!(
+        rows[0].values[0].value_data,
+        Some(api::v1::value::ValueData::StringValue("0".to_string()))
+    );
+
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_copy_in_unknown_table() -> Result<()> {
+    let (server, port, _handler) = start_copy_in_test_server(copy_in_test_table()).await?;
+    let client = create_plain_connection(port, false).await.unwrap();
+
+    let err = match client
+        .copy_in::<_, bytes::Bytes>("COPY not_exist FROM STDIN")
+        .await
+    {
+        Ok(_) => panic!("expected COPY to unknown table to fail"),
+        Err(e) => e,
+    };
+    let message = err.as_db_error().expect("expected db error").message();
+    assert!(message.contains("does not exist"), "{message}");
+
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_copy_in_bad_value() -> Result<()> {
+    let (server, port, handler) = start_copy_in_test_server(copy_in_test_table()).await?;
+    let client = create_plain_connection(port, false).await.unwrap();
+
+    let err = match feed_copy_in(
+        &client,
+        "COPY metrics FROM STDIN WITH (FORMAT csv)",
+        vec![bytes::Bytes::from_static(b"not_a_timestamp,host1,1.5,x\n")],
+    )
+    .await
+    {
+        Ok(_) => panic!("expected COPY to fail"),
+        Err(e) => e,
+    };
+    let message = err.as_db_error().expect("expected db error").message();
+    assert!(message.contains("invalid input syntax"), "{message}");
+    // The failed batch must not be written.
+    assert!(handler.requests.lock().unwrap().is_empty());
+
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_copy_in_multi_statement_rejected() -> Result<()> {
+    let (server, port, _handler) = start_copy_in_test_server(copy_in_test_table()).await?;
+    let client = create_plain_connection(port, false).await.unwrap();
+
+    let err = match feed_copy_in(
+        &client,
+        "COPY metrics FROM STDIN; SELECT 1",
+        vec![bytes::Bytes::from_static(b"1,2,3,4\n")],
+    )
+    .await
+    {
+        Ok(_) => panic!("expected multi-statement COPY to fail"),
+        Err(e) => e,
+    };
+    let message = err
+        .as_db_error()
+        .expect("expected db error")
+        .message()
+        .to_string();
+    assert!(message.contains("alone"), "{message}");
+
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+/// A minimal raw PostgreSQL client to drive the SIMPLE query protocol
+/// (psql-compatible) for COPY FROM STDIN, which tokio-postgres cannot do.
+struct RawPgClient {
+    stream: tokio::net::TcpStream,
+    buffer: Vec<u8>,
+}
+
+impl RawPgClient {
+    async fn connect(port: u16) -> std::io::Result<Self> {
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
+        // StartupMessage: protocol 3.0, user=greptime, database=public.
+        let mut startup = Vec::new();
+        startup.extend_from_slice(&196608u32.to_be_bytes());
+        startup.extend_from_slice(b"user\0greptime\0");
+        startup.extend_from_slice(b"database\0public\0\0");
+        let mut message = (startup.len() as u32 + 4).to_be_bytes().to_vec();
+        message.extend_from_slice(&startup);
+        use tokio::io::AsyncWriteExt;
+        stream.write_all(&message).await?;
+        Ok(Self {
+            stream,
+            buffer: Vec::new(),
+        })
+    }
+
+    async fn send(&mut self, type_byte: u8, payload: &[u8]) -> std::io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let mut message = vec![type_byte];
+        message.extend_from_slice(&(payload.len() as u32 + 4).to_be_bytes());
+        message.extend_from_slice(payload);
+        self.stream.write_all(&message).await
+    }
+
+    async fn query(&mut self, sql: &str) -> std::io::Result<()> {
+        let mut payload = sql.as_bytes().to_vec();
+        payload.push(0);
+        self.send(b'Q', &payload).await
+    }
+
+    /// Reads the next backend message: `(type, payload)`.
+    async fn read_message(&mut self) -> std::io::Result<(u8, Vec<u8>)> {
+        use tokio::io::AsyncReadExt;
+        while self.buffer.len() < 5 {
+            let n = self.buffer.len();
+            self.buffer.resize(n + 1024, 0);
+            let read = self.stream.read(&mut self.buffer[n..]).await?;
+            if read == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "connection closed",
+                ));
+            }
+            self.buffer.truncate(n + read);
+        }
+        let type_byte = self.buffer[0];
+        let len = u32::from_be_bytes([
+            self.buffer[1],
+            self.buffer[2],
+            self.buffer[3],
+            self.buffer[4],
+        ]) as usize;
+        while self.buffer.len() < len + 1 {
+            let n = self.buffer.len();
+            self.buffer.resize(n + 1024, 0);
+            let read = self.stream.read(&mut self.buffer[n..]).await?;
+            if read == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "connection closed",
+                ));
+            }
+            self.buffer.truncate(n + read);
+        }
+        let payload = self.buffer[5..len + 1].to_vec();
+        self.buffer.drain(..len + 1);
+        Ok((type_byte, payload))
+    }
+
+    /// Reads messages until one of `wanted` types shows up; returns it.
+    async fn expect(&mut self, wanted: &str) -> std::io::Result<(u8, Vec<u8>)> {
+        loop {
+            let (type_byte, payload) = self.read_message().await?;
+            if wanted.contains(type_byte as char) {
+                return Ok((type_byte, payload));
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_copy_in_simple_protocol() -> Result<()> {
+    let (server, port, handler) = start_copy_in_test_server(copy_in_test_table()).await?;
+    let mut client = RawPgClient::connect(port).await.unwrap();
+
+    // Consume the ReadyForQuery after startup.
+    client.expect("Z").await.unwrap();
+
+    client
+        .query("COPY metrics FROM STDIN WITH (FORMAT csv)")
+        .await
+        .unwrap();
+    // CopyInResponse: format byte + column count.
+    let (type_byte, payload) = client.expect("GE").await.unwrap();
+    assert_eq!(type_byte as char, 'G');
+    assert_eq!(payload[0], 0);
+    assert_eq!(u16::from_be_bytes([payload[1], payload[2]]), 4);
+
+    client
+        .send(b'd', b"2023-11-14 22:13:20,host1,1.5,x\n")
+        .await
+        .unwrap();
+    client
+        .send(b'd', b"2023-11-14 22:13:21,host2,2.5,y\n")
+        .await
+        .unwrap();
+    client.send(b'c', &[]).await.unwrap();
+
+    let (type_byte, payload) = client.expect("CE").await.unwrap();
+    assert_eq!(type_byte as char, 'C');
+    let tag = std::str::from_utf8(&payload[..payload.len() - 1]).unwrap();
+    assert_eq!(tag, "COPY 2");
+
+    // The connection must return to normal operation.
+    client.expect("Z").await.unwrap();
+    client.query("SELECT 1").await.unwrap();
+    client.expect("Z").await.unwrap();
+
+    let rows = recorded_rows(&handler);
+    assert_eq!(rows.len(), 2);
+
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_copy_in_simple_protocol_copy_fail() -> Result<()> {
+    let (server, port, handler) = start_copy_in_test_server(copy_in_test_table()).await?;
+    let mut client = RawPgClient::connect(port).await.unwrap();
+    client.expect("Z").await.unwrap();
+
+    client.query("COPY metrics FROM STDIN").await.unwrap();
+    client.expect("G").await.unwrap();
+    client.send(b'd', b"partial row without").await.unwrap();
+    // CopyFail aborts the copy; buffered partial data is discarded.
+    let mut fail = b"client changed its mind\0".to_vec();
+    client.send(b'f', &fail).await.unwrap();
+    fail.clear();
+
+    client.expect("E").await.unwrap();
+    // The connection stays usable and nothing was written.
+    client.expect("Z").await.unwrap();
+    assert!(handler.requests.lock().unwrap().is_empty());
+
+    server.shutdown().await.unwrap();
+    Ok(())
 }
