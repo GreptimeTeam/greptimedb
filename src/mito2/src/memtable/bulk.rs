@@ -60,6 +60,7 @@ use crate::memtable::{
     AllocTracker, BoxedBatchIterator, BoxedRecordBatchIterator, EncodedBulkPart, EncodedRange,
     IterBuilder, KeyValues, MemScanMetrics, Memtable, MemtableBuilder, MemtableId, MemtableRange,
     MemtableRangeContext, MemtableRanges, MemtableRef, MemtableStats, RangesOptions,
+    group_by_sequence,
 };
 use crate::read::flat_dedup::{FlatDedupIterator, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeIterator;
@@ -177,7 +178,7 @@ enum MergedPart {
 
 /// Result of collecting parts to merge
 struct CollectedParts {
-    /// Groups of parts ready for merging (each group has up to 16 parts)
+    /// Consecutive groups of parts ready for merging.
     groups: Vec<Vec<PartToMerge>>,
 }
 
@@ -202,38 +203,11 @@ impl BulkParts {
         self.unordered_part.is_empty() && self.parts.is_empty()
     }
 
-    /// Returns true if enough parts of the same type are available to merge.
+    /// Returns whether a consecutive group is ready to merge.
     fn should_merge_parts(&self, merge_threshold: usize, encode_bytes_threshold: usize) -> bool {
-        let mut bulk_count = 0;
-        let mut encoded_count = 0;
-
-        for wrapper in &self.parts {
-            if !Self::is_merge_candidate(wrapper, encode_bytes_threshold) {
-                continue;
-            }
-
-            if wrapper.part.is_encoded() {
-                encoded_count += 1;
-            } else {
-                bulk_count += 1;
-            }
-
-            if bulk_count >= merge_threshold || encoded_count >= merge_threshold {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    /// Returns whether a part is small enough to benefit from merging.
-    fn is_merge_candidate(wrapper: &BulkPartWrapper, encode_bytes_threshold: usize) -> bool {
-        !wrapper.merging
-            && Self::is_merge_candidate_by_size(
-                wrapper.part.is_encoded(),
-                wrapper.part.estimated_size(),
-                encode_bytes_threshold,
-            )
+        !self
+            .pick_merge_groups(merge_threshold, 1, encode_bytes_threshold)
+            .is_empty()
     }
 
     fn is_merge_candidate_by_size(
@@ -250,79 +224,105 @@ impl BulkParts {
             || self.unordered_part.estimated_bytes() > encode_bytes_threshold
     }
 
-    /// Collects unmerged parts and marks them as being merged.
-    /// Only collects parts of types that meet the threshold.
-    /// Parts are grouped by row count for parallel processing.
+    /// Converts buffered small writes into a sorted part once a threshold is reached.
+    fn seal_unordered(&mut self, metadata: &RegionMetadataRef) -> Result<()> {
+        if let Some(part) = self.unordered_part.to_bulk_part(metadata)? {
+            self.parts.push(BulkPartWrapper {
+                part: PartToMerge::Bulk {
+                    part,
+                    file_id: FileId::random(),
+                },
+                merging: false,
+            });
+            self.unordered_part.clear();
+        }
+        Ok(())
+    }
+
+    /// Selects consecutive sequence components without crossing unordered, busy,
+    /// or oversized parts. Overlapping components are indivisible, even above the size limit.
+    fn pick_merge_groups(
+        &self,
+        merge_threshold: usize,
+        max_merge_groups: usize,
+        encode_bytes_threshold: usize,
+    ) -> Vec<Vec<usize>> {
+        if self.parts.len() < merge_threshold.max(2) || max_merge_groups == 0 {
+            return Vec::new();
+        }
+        // The unordered interval participates in overlap grouping as a barrier,
+        // so neither overlapping parts nor parts on opposite sides can be merged.
+        let intervals = self
+            .parts
+            .iter()
+            .enumerate()
+            .map(|(index, wrapper)| {
+                let part = &wrapper.part;
+                (Some(index), (part.min_sequence(), part.max_sequence()))
+            })
+            .chain(
+                self.unordered_part
+                    .sequence_bounds()
+                    .map(|bounds| (None, bounds)),
+            )
+            .collect();
+        let components = group_by_sequence(intervals, |(_, bounds)| *bounds);
+        let mut groups = Vec::new();
+        let mut pending = Vec::new();
+        for component in components {
+            if groups.len() >= max_merge_groups {
+                break;
+            }
+            let Some(component) = component
+                .into_iter()
+                .map(|(index, _)| index)
+                .collect::<Option<Vec<_>>>()
+            else {
+                pending.clear();
+                continue;
+            };
+            let busy = component.iter().any(|&i| self.parts[i].merging);
+            let oversized = component.len() == 1 && {
+                let part = &self.parts[component[0]].part;
+                !Self::is_merge_candidate_by_size(
+                    part.is_encoded(),
+                    part.estimated_size(),
+                    encode_bytes_threshold,
+                )
+            };
+            if busy || oversized {
+                pending.clear();
+                continue;
+            }
+            pending.extend(component);
+            if pending.len() >= merge_threshold.max(2) {
+                groups.push(std::mem::take(&mut pending));
+            }
+        }
+        groups
+    }
+
     fn collect_parts_to_merge(
         &mut self,
         merge_threshold: usize,
         max_merge_groups: usize,
         encode_bytes_threshold: usize,
     ) -> CollectedParts {
-        let mut bulk_indices = Vec::new();
-        let mut encoded_indices = Vec::new();
-
-        for (idx, wrapper) in self.parts.iter().enumerate() {
-            if !Self::is_merge_candidate(wrapper, encode_bytes_threshold) {
-                continue;
-            }
-            let num_rows = wrapper.part.num_rows();
-            if wrapper.part.is_encoded() {
-                encoded_indices.push((idx, num_rows));
-            } else {
-                bulk_indices.push((idx, num_rows));
-            }
-        }
-
-        let mut groups = Vec::new();
-
-        // Process bulk parts if threshold met
-        if bulk_indices.len() >= merge_threshold {
-            groups.extend(self.collect_and_group_parts(
-                bulk_indices,
-                merge_threshold,
-                max_merge_groups,
-            ));
-        }
-
-        // Process encoded parts if threshold met
-        if encoded_indices.len() >= merge_threshold {
-            groups.extend(self.collect_and_group_parts(
-                encoded_indices,
-                merge_threshold,
-                max_merge_groups,
-            ));
-        }
-
-        CollectedParts { groups }
-    }
-
-    /// Sorts indices by row count, groups into chunks, marks as merging, and returns groups.
-    fn collect_and_group_parts(
-        &mut self,
-        mut indices: Vec<(usize, usize)>,
-        merge_threshold: usize,
-        max_merge_groups: usize,
-    ) -> Vec<Vec<PartToMerge>> {
-        if indices.is_empty() {
-            return Vec::new();
-        }
-
-        indices.sort_unstable_by_key(|(_, num_rows)| *num_rows);
-        indices
-            .chunks(merge_threshold)
-            .take(max_merge_groups)
-            .map(|chunk| {
-                chunk
-                    .iter()
-                    .map(|(idx, _)| {
-                        let wrapper = &mut self.parts[*idx];
+        let groups = self
+            .pick_merge_groups(merge_threshold, max_merge_groups, encode_bytes_threshold)
+            .into_iter()
+            .map(|group| {
+                group
+                    .into_iter()
+                    .map(|i| {
+                        let wrapper = &mut self.parts[i];
                         wrapper.merging = true;
                         wrapper.part.clone()
                     })
                     .collect()
             })
-            .collect()
+            .collect();
+        CollectedParts { groups }
     }
 
     /// Installs merged parts and removes the original parts by file ids.
@@ -493,18 +493,8 @@ impl Memtable for BulkMemtable {
                 bulk_parts.unordered_part.push(fragment);
 
                 // Compacts unordered_part if the row or byte threshold is exceeded.
-                if bulk_parts.should_compact_unordered_part(self.config.encode_bytes_threshold)
-                    && let Some(bulk_part) =
-                        bulk_parts.unordered_part.to_bulk_part(&self.metadata)?
-                {
-                    bulk_parts.parts.push(BulkPartWrapper {
-                        part: PartToMerge::Bulk {
-                            part: bulk_part,
-                            file_id: FileId::random(),
-                        },
-                        merging: false,
-                    });
-                    bulk_parts.unordered_part.clear();
+                if bulk_parts.should_compact_unordered_part(self.config.encode_bytes_threshold) {
+                    bulk_parts.seal_unordered(&self.metadata)?;
                 }
             } else {
                 bulk_parts.parts.push(BulkPartWrapper {
@@ -1110,6 +1100,15 @@ impl PartToMerge {
         }
     }
 
+    /// Returns the lower bound of input sequences.
+    fn min_sequence(&self) -> SequenceNumber {
+        match self {
+            PartToMerge::Bulk { part, .. } => part.min_sequence,
+            PartToMerge::Multi { part, .. } => part.min_sequence(),
+            PartToMerge::Encoded { part, .. } => part.metadata().min_sequence,
+        }
+    }
+
     /// Gets the maximum sequence number of this part.
     fn max_sequence(&self) -> u64 {
         match self {
@@ -1261,12 +1260,14 @@ impl MemtableCompactor {
     ) -> Result<()> {
         let start = Instant::now();
 
-        // Collect pre-grouped parts
-        let collected = bulk_parts.write().unwrap().collect_parts_to_merge(
-            self.config.merge_threshold,
-            self.config.max_merge_groups,
-            self.config.encode_bytes_threshold,
-        );
+        let collected = {
+            let mut parts = bulk_parts.write().unwrap();
+            parts.collect_parts_to_merge(
+                self.config.merge_threshold,
+                self.config.max_merge_groups,
+                self.config.encode_bytes_threshold,
+            )
+        };
 
         if collected.groups.is_empty() {
             return Ok(());
@@ -1355,6 +1356,11 @@ impl MemtableCompactor {
             .map(|p| p.max_timestamp())
             .max()
             .unwrap_or(i64::MIN);
+        let min_sequence = parts_to_merge
+            .iter()
+            .map(PartToMerge::min_sequence)
+            .min()
+            .unwrap_or(0);
         let max_sequence = parts_to_merge
             .iter()
             .map(|p| p.max_sequence())
@@ -1450,7 +1456,7 @@ impl MemtableCompactor {
                 schema,
                 min_timestamp,
                 max_timestamp,
-                max_sequence,
+                min_sequence..=max_sequence,
                 &mut metrics,
             )?;
 
@@ -1476,6 +1482,7 @@ impl MemtableCompactor {
                 batches,
                 min_timestamp,
                 max_timestamp,
+                min_sequence,
                 max_sequence,
                 estimated_series_count,
                 metadata,
@@ -1799,6 +1806,10 @@ mod tests {
         // Dedup can remove the oldest rows, but their lower bound remains safe.
         assert_eq!(10, memtable.stats().min_sequence);
         assert_eq!(201, memtable.stats().max_sequence);
+        let ranges = memtable.ranges(None, RangesOptions::default()).unwrap();
+        let merged = ranges.ranges.values().next().unwrap();
+        assert!(merged.encoded().is_some());
+        assert_eq!(10, merged.stats().min_sequence);
         let fork = memtable.fork(2, &metadata);
         assert!(fork.is_empty());
         assert_eq!(0, fork.min_sequence());
@@ -2615,7 +2626,7 @@ mod tests {
         assert_eq!(5, large_part.num_rows());
         memtable.write_bulk(large_part).unwrap();
 
-        // Write another small part (2 rows) - should trigger compaction of unordered_part
+        // A later small write fills the unordered part to its compact threshold.
         let part = create_bulk_part_with_converter(
             "small_2",
             2,
@@ -2880,49 +2891,67 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_parts_to_merge_grouping() {
-        let mut bulk_parts = BulkParts::default();
-
-        // Add 16 bulk parts with different row counts
-        for i in 0..16 {
-            let num_rows = (i % 4) + 1; // 1 to 4 rows
-            let timestamps: Vec<i64> = (0..num_rows)
-                .map(|j| 1000 + i as i64 * 100 + j as i64)
-                .collect();
-            let values: Vec<Option<f64>> =
-                (0..num_rows).map(|j| Some((i * 10 + j) as f64)).collect();
-            let part = create_bulk_part_with_converter(
-                &format!("key_{}", i),
-                i as u32,
-                timestamps,
-                values,
-                100 + i as u64,
-            )
-            .unwrap();
-            bulk_parts.parts.push(create_bulk_part_wrapper(part));
-        }
-
-        // Should trigger merge since we have 16 parts
-        assert!(bulk_parts.should_merge_parts(DEFAULT_MERGE_THRESHOLD, usize::MAX));
-
-        // Collect parts to merge
-        let collected = bulk_parts.collect_parts_to_merge(
-            DEFAULT_MERGE_THRESHOLD,
-            DEFAULT_MAX_MERGE_GROUPS,
-            usize::MAX,
+    fn test_collect_parts_to_merge_sequence_components() {
+        let make_part = |min, max| {
+            let mut part =
+                create_bulk_part_with_converter("key", 0, vec![1000], vec![Some(1.0)], max)
+                    .unwrap();
+            part.min_sequence = min;
+            part
+        };
+        let metadata = metadata_for_test();
+        let encoder = BulkPartEncoder::new(metadata.clone(), DEFAULT_ROW_GROUP_SIZE).unwrap();
+        // Deliberately use installation order rather than sequence order.
+        let mut parts = BulkParts {
+            parts: vec![
+                create_bulk_part_wrapper(make_part(70, 70)),
+                create_bulk_part_wrapper(make_part(10, 30)),
+                BulkPartWrapper {
+                    part: PartToMerge::Multi {
+                        part: MultiBulkPart::from_bulk_part(make_part(35, 50), &metadata),
+                        file_id: FileId::random(),
+                    },
+                    merging: false,
+                },
+                create_bulk_part_wrapper(make_part(60, 60)),
+                BulkPartWrapper {
+                    part: PartToMerge::Encoded {
+                        part: encoder.encode_part(&make_part(20, 40)).unwrap().unwrap(),
+                        file_id: FileId::random(),
+                    },
+                    merging: false,
+                },
+            ],
+            ..Default::default()
+        };
+        // The oversized encoded part connects three intervals transitively;
+        // neither the merge threshold nor its size may split that component.
+        assert_eq!(
+            vec![vec![1, 4, 2], vec![3, 0]],
+            parts.pick_merge_groups(2, 2, 1)
         );
+        // Touching the unordered interval blocks the entire transitive component.
+        parts.unordered_part.push(make_part(50, 55));
+        assert_eq!(vec![vec![3, 0]], parts.pick_merge_groups(2, 2, 1));
+        parts.unordered_part.clear();
 
-        // Should have groups
-        assert!(!collected.groups.is_empty());
+        // Even without overlap, a group cannot straddle pending small writes.
+        parts.unordered_part.push(make_part(65, 65));
+        assert_eq!(vec![vec![1, 4, 2]], parts.pick_merge_groups(2, 2, 1));
+        parts.unordered_part.clear();
 
-        // All groups should have parts
-        for group in &collected.groups {
-            assert!(!group.is_empty());
-        }
-
-        // Total parts collected should be 16
-        let total_parts: usize = collected.groups.iter().map(|g| g.len()).sum();
-        assert_eq!(16, total_parts);
+        parts.parts[4].merging = true;
+        let selected = parts.collect_parts_to_merge(2, 2, 1);
+        assert_eq!(1, selected.groups.len());
+        assert_eq!(
+            vec![60, 70],
+            selected.groups[0]
+                .iter()
+                .map(PartToMerge::max_sequence)
+                .collect::<Vec<_>>()
+        );
+        assert!(!parts.parts[1].merging);
+        assert!(!parts.parts[2].merging);
     }
 
     #[test]
