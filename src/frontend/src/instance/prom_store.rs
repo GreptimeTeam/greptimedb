@@ -54,7 +54,7 @@ use servers::query_handler::{
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
-use store_api::mito_engine_options::SST_FORMAT_KEY;
+use store_api::mito_engine_options::{EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING, SST_FORMAT_KEY};
 use table::TableRef;
 use table::table_reference::TableReference;
 use tracing::instrument;
@@ -96,10 +96,22 @@ fn required_physical_table_for_create_type(create_type: &AutoCreateTableType) ->
     }
 }
 
-fn fill_metric_physical_table_options(table_options: &mut HashMap<String, String>) {
+fn fill_metric_physical_table_options(
+    table_options: &mut HashMap<String, String>,
+    ctx: &QueryContextRef,
+) {
     // We always enforce flat format in this ingestion path.
     table_options.insert(SST_FORMAT_KEY.to_string(), "flat".to_string());
     table_options.insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), "true".to_string());
+    // Opt-in per-request hint: only newly created physical metric tables call
+    // this (an existing table returns before the create). Invalid values are
+    // rejected by the table option validation of the create request.
+    if let Some(encoding) = ctx.extension(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING) {
+        table_options.insert(
+            EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING.to_string(),
+            encoding.to_string(),
+        );
+    }
 }
 
 #[inline]
@@ -698,7 +710,7 @@ impl Instance {
         .map_err(BoxedError::new)
         .context(error::ExecuteGrpcQuerySnafu)?;
         create_table_expr.engine = METRIC_ENGINE_NAME.to_string();
-        fill_metric_physical_table_options(&mut create_table_expr.table_options);
+        fill_metric_physical_table_options(&mut create_table_expr.table_options, &ctx);
 
         self.statement_executor
             .create_table_inner(&mut create_table_expr, None, ctx, TriggerReason::AutoCreate)
@@ -851,9 +863,13 @@ mod tests {
 
     #[test]
     fn test_metric_physical_table_options_forces_flat_sst_format() {
+        let ctx = Arc::new(QueryContext::with(
+            common_catalog::consts::DEFAULT_CATALOG_NAME,
+            common_catalog::consts::DEFAULT_SCHEMA_NAME,
+        ));
         let mut table_options = HashMap::new();
 
-        fill_metric_physical_table_options(&mut table_options);
+        fill_metric_physical_table_options(&mut table_options, &ctx);
 
         assert_eq!(
             Some("flat"),
@@ -863,6 +879,59 @@ mod tests {
             Some("true"),
             table_options
                 .get(PHYSICAL_TABLE_METADATA_KEY)
+                .map(String::as_str)
+        );
+        // Without the hint the encoding stays at its default.
+        assert!(!table_options.contains_key(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING));
+    }
+
+    #[test]
+    fn test_metric_physical_table_options_copy_float_field_encoding_hint() {
+        let mut query_ctx = QueryContext::with(
+            common_catalog::consts::DEFAULT_CATALOG_NAME,
+            common_catalog::consts::DEFAULT_SCHEMA_NAME,
+        );
+        query_ctx.set_extension(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING, "byte_stream_split");
+        let ctx = Arc::new(query_ctx);
+        let mut table_options = HashMap::new();
+
+        fill_metric_physical_table_options(&mut table_options, &ctx);
+
+        // The hint is copied and the physical marker/flat SST settings survive.
+        assert_eq!(
+            Some("byte_stream_split"),
+            table_options
+                .get(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING)
+                .map(String::as_str)
+        );
+        assert_eq!(
+            Some("flat"),
+            table_options.get(SST_FORMAT_KEY).map(String::as_str)
+        );
+        assert_eq!(
+            Some("true"),
+            table_options
+                .get(PHYSICAL_TABLE_METADATA_KEY)
+                .map(String::as_str)
+        );
+
+        // Malformed values are copied verbatim so the create-request table
+        // option validation rejects the new physical table instead of
+        // silently falling back to the default encoding.
+        let mut query_ctx = QueryContext::with(
+            common_catalog::consts::DEFAULT_CATALOG_NAME,
+            common_catalog::consts::DEFAULT_SCHEMA_NAME,
+        );
+        query_ctx.set_extension(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING, "invalid");
+        let ctx = Arc::new(query_ctx);
+        let mut table_options = HashMap::new();
+
+        fill_metric_physical_table_options(&mut table_options, &ctx);
+
+        assert_eq!(
+            Some("invalid"),
+            table_options
+                .get(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING)
                 .map(String::as_str)
         );
     }

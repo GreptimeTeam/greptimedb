@@ -67,8 +67,8 @@ use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
 use store_api::mito_engine_options::{
-    APPEND_MODE_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, TTL_KEY,
-    TWCS_TIME_WINDOW,
+    APPEND_MODE_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS, EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING,
+    MERGE_MODE_KEY, TTL_KEY, TWCS_TIME_WINDOW,
 };
 use store_api::storage::{RegionId, TableId};
 use table::TableRef;
@@ -584,18 +584,44 @@ impl Inserter {
         });
         validate_column_count_match(&requests)?;
 
-        // check and create physical table
-        let physical_table_ref = self
-            .create_physical_table_on_demand(&ctx, physical_table.clone(), statement_executor)
-            .await?;
+        // Existing logical tables retain their original physical binding. Do not
+        // require or create the newly selected physical table unless a logical
+        // destination is missing (it may be an entirely different table).
+        let mut needs_physical_table = false;
+        for req in &requests.inserts {
+            if self
+                .get_table(
+                    ctx.current_catalog(),
+                    &ctx.current_schema(),
+                    &req.table_name,
+                )
+                .await?
+                .is_none()
+            {
+                needs_physical_table = true;
+                break;
+            }
+        }
+        let physical_table_ref = if needs_physical_table {
+            Some(
+                self.create_physical_table_on_demand(
+                    &ctx,
+                    physical_table.clone(),
+                    statement_executor,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
 
         // check and create logical tables; `create_or_alter_tables_on_demand`
         // aligns each request's time index unit with the unit of the table it
         // targets, inside its existing table lookups: existing tables keep
         // their own unit (which matches the physical table they are bound
         // to), and new tables use the selected physical table's unit (from
-        // `physical_table_ref`). Ingestion endpoints encode timestamps in a
-        // fixed unit (prometheus remote write always uses millisecond; OTLP
+        // `physical_table_ref`, when needed). Ingestion endpoints encode
+        // timestamps in a fixed unit (prometheus remote write uses milliseconds; OTLP
         // keeps nanosecond precision on the metric engine path), and the
         // metric engine requires each logical table's requests to match its
         // time index unit. Narrowing conversions truncate the sub-unit part
@@ -611,7 +637,7 @@ impl Inserter {
                 statement_executor,
                 true,
                 true,
-                table_time_index_unit(&physical_table_ref),
+                physical_table_ref.as_ref().and_then(table_time_index_unit),
             )
             .await?;
         let name_to_info = table_infos
@@ -1052,11 +1078,10 @@ impl Inserter {
     /// remote write. This will modify the `RowInsertRequests` in place.
     /// `is_single_value` indicates whether the default schema only contains single value column so we can accommodate it.
     ///
-    /// `align_time_index_unit` is the selected physical metric table's time
-    /// index unit; passing `Some` (metric engine path only) rewrites each
-    /// request's time index column, inside this function's existing table
-    /// lookups (no extra catalog access): existing destination tables are
-    /// converted to their own unit, and new tables to the given unit.
+    /// On the metric engine path, existing destination tables use their own
+    /// time index unit; new tables use `align_time_index_unit` from the selected
+    /// physical table. The latter can be `None` if all destinations existed
+    /// when this write began.
     #[allow(clippy::too_many_arguments)]
     async fn create_or_alter_tables_on_demand(
         &self,
@@ -1110,7 +1135,7 @@ impl Inserter {
                 // Metric path: an existing destination table keeps its own
                 // time index unit (it may be bound to another physical
                 // table than the one selected by this request).
-                if align_time_index_unit.is_some()
+                if matches!(auto_create_table_type, AutoCreateTableType::Logical(_))
                     && let Some(rows) = req.rows.as_mut()
                     && let Some(target_unit) = table_time_index_unit(&table)
                 {
@@ -1154,7 +1179,7 @@ impl Inserter {
                     // Metric path: an existing destination table keeps its
                     // own time index unit (it may be bound to another
                     // physical table than the one selected by this request).
-                    if align_time_index_unit.is_some()
+                    if matches!(auto_create_table_type, AutoCreateTableType::Logical(_))
                         && let Some(rows) = req.rows.as_mut()
                         && let Some(target_unit) = table_time_index_unit(&table)
                     {
@@ -1460,6 +1485,16 @@ impl Inserter {
         create_table_expr
             .table_options
             .insert(PHYSICAL_TABLE_METADATA_KEY.to_string(), "true".to_string());
+        // Opt-in per-request hint: only newly created physical metric tables
+        // (an existing table returns above) pick up the SST float field
+        // encoding. Invalid values are rejected by the table option
+        // validation of the create request.
+        if let Some(encoding) = ctx.extension(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING) {
+            create_table_expr.table_options.insert(
+                EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING.to_string(),
+                encoding.to_string(),
+            );
+        }
 
         // create physical table
         let res = statement_executor
