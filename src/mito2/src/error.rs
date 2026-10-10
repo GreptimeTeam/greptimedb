@@ -1087,6 +1087,14 @@ pub enum Error {
         column_name: String,
     },
 
+    #[snafu(display("Failed to retrieve compression options of column {column_name}"))]
+    CompressionOptions {
+        #[snafu(implicit)]
+        location: Location,
+        source: datatypes::error::Error,
+        column_name: String,
+    },
+
     #[snafu(display("Failed to create fulltext index creator"))]
     CreateFulltextCreator {
         source: index::fulltext_index::error::Error,
@@ -1579,6 +1587,7 @@ impl ErrorExt for Error {
             RemoteCompaction { .. } => StatusCode::Unexpected,
 
             IndexOptions { source, .. } => source.status_code(),
+            CompressionOptions { source, .. } => source.status_code(),
             CreateFulltextCreator { source, .. } => source.status_code(),
             CastVector { source, .. } => source.status_code(),
             FulltextPushText { source, .. }
@@ -1677,6 +1686,7 @@ impl ErrorExt for Error {
             | ConvertVector { source, .. }
             | ConvertValue { source, .. }
             | IndexOptions { source, .. }
+            | CompressionOptions { source, .. }
             | CastVector { source, .. } => source.retry_hint(),
 
             BuildIndexApplier { source, .. }
