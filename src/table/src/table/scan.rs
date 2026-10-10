@@ -55,6 +55,7 @@ use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::region_engine::{
     PartitionRange, PrepareRequest, QueryScanContext, RegionScannerRef,
 };
+use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 
 use crate::table::metrics::StreamMetrics;
@@ -118,13 +119,15 @@ impl RegionScanExec {
         }
 
         let metadata = scanner.metadata();
-        let is_logical_region = scanner_props.is_logical_region();
+        let has_internal_tsid = metadata
+            .column_by_name(DATA_SCHEMA_TSID_COLUMN_NAME)
+            .is_some_and(|column| column.column_id == ReservedColumnId::tsid());
         let mut pk_names = metadata
             .primary_key_columns()
             .map(|col| col.column_schema.name.clone())
             .collect::<Vec<_>>();
         // workaround for logical table
-        if scanner.properties().is_logical_region() {
+        if scanner_props.is_logical_region() {
             pk_names.sort_unstable();
         }
         let pk_columns = pk_names
@@ -171,9 +174,9 @@ impl RegionScanExec {
                 }
                 orderings.push(pk_time_ordering);
 
-                // A logical metric scan is restricted to one table, so its internal TSID
-                // identifies a series. An ordinary user column with this name does not.
-                if scanner_props.is_logical_region()
+                // Preserve metric TSID properties only for its reserved internal column,
+                // not a same-named user column.
+                if has_internal_tsid
                     && let (Ok(tsid_col), Some(ts)) = (
                         Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema),
                         ts_col.clone(),
@@ -858,13 +861,9 @@ mod test {
     }
 
     #[test]
-    fn test_logical_per_series_uses_tsid_hash_and_ordering() {
-        let schema = Arc::new(Schema::new(vec![
-            ColumnSchema::new(
-                DATA_SCHEMA_TSID_COLUMN_NAME,
-                ConcreteDataType::uint64_datatype(),
-                false,
-            ),
+    fn test_per_series_partitioning_requires_all_primary_keys() {
+        let full_schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("marker", ConcreteDataType::int32_datatype(), false),
             ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
             ColumnSchema::new(
                 "ts",
@@ -872,21 +871,12 @@ mod test {
                 false,
             ),
         ]));
-        let batch = RecordBatch::new(
-            schema.clone(),
-            vec![
-                Arc::new(datatypes::vectors::UInt64Vector::from_slice([1])) as _,
-                Arc::new(datatypes::vectors::StringVector::from_slice(&["host"])) as _,
-                Arc::new(TimestampMillisecondVector::from_slice([1])) as _,
-            ],
-        )
-        .unwrap();
-        let mut builder = RegionMetadataBuilder::new(RegionId::new(1234, 5686));
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1234, 5683));
         builder
             .push_column_metadata(ColumnMetadata {
                 column_schema: ColumnSchema::new(
-                    DATA_SCHEMA_TSID_COLUMN_NAME,
-                    ConcreteDataType::uint64_datatype(),
+                    "marker",
+                    ConcreteDataType::int32_datatype(),
                     false,
                 ),
                 semantic_type: SemanticType::Tag,
@@ -912,12 +902,215 @@ mod test {
             })
             .primary_key(vec![1, 2]);
         let metadata = Arc::new(builder.build().unwrap());
-        let batches = RecordBatches::try_new(schema.clone(), vec![batch]).unwrap();
-        let mut properties = ScannerProperties::default();
-        properties.set_logical_region(true);
+
+        for (schema, expected) in [
+            (
+                full_schema.clone(),
+                Partitioning::Hash(
+                    vec![
+                        Arc::new(
+                            Column::new_with_schema("marker", full_schema.arrow_schema()).unwrap(),
+                        ) as _,
+                        Arc::new(
+                            Column::new_with_schema("host", full_schema.arrow_schema()).unwrap(),
+                        ) as _,
+                    ],
+                    2,
+                ),
+            ),
+            (
+                Arc::new(Schema::new(vec![
+                    ColumnSchema::new("marker", ConcreteDataType::int32_datatype(), false),
+                    ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                ])),
+                Partitioning::UnknownPartitioning(2),
+            ),
+        ] {
+            let batches = RecordBatches::try_new(schema, vec![]).unwrap();
+            let scanner = Box::new(RepeatableScanner {
+                batches,
+                properties: ScannerProperties::new(vec![vec![], vec![]], false, 0),
+                metadata: metadata.clone(),
+                dynamic_filters: Arc::new(Mutex::new(Vec::new())),
+            });
+            let request = ScanRequest {
+                distribution: Some(TimeSeriesDistribution::PerSeries),
+                ..Default::default()
+            };
+            let plan = RegionScanExec::new(scanner, request, None).unwrap();
+            let actual = plan.properties().output_partitioning();
+            match (&actual, &expected) {
+                (
+                    Partitioning::UnknownPartitioning(actual_count),
+                    Partitioning::UnknownPartitioning(expected_count),
+                ) => assert_eq!(actual_count, expected_count),
+                _ => assert_eq!(actual, &expected),
+            }
+        }
+    }
+
+    #[test]
+    fn test_per_series_uses_internal_tsid_hash_and_ordering() {
+        for logical_region in [false, true] {
+            let schema = Arc::new(Schema::new(vec![
+                ColumnSchema::new(
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
+                    ConcreteDataType::uint64_datatype(),
+                    false,
+                ),
+                ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+                ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+            ]));
+            let batch = RecordBatch::new(
+                schema.clone(),
+                vec![
+                    Arc::new(datatypes::vectors::UInt64Vector::from_slice([1])) as _,
+                    Arc::new(datatypes::vectors::StringVector::from_slice(&["host"])) as _,
+                    Arc::new(TimestampMillisecondVector::from_slice([1])) as _,
+                ],
+            )
+            .unwrap();
+            let mut builder = RegionMetadataBuilder::new(RegionId::new(1234, 5686));
+            builder
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        DATA_SCHEMA_TSID_COLUMN_NAME,
+                        ConcreteDataType::uint64_datatype(),
+                        false,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: ReservedColumnId::tsid(),
+                })
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "host",
+                        ConcreteDataType::string_datatype(),
+                        false,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: 2,
+                })
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                    semantic_type: SemanticType::Timestamp,
+                    column_id: 3,
+                })
+                .primary_key(vec![ReservedColumnId::tsid(), 2]);
+            let metadata = Arc::new(builder.build().unwrap());
+            let batches = RecordBatches::try_new(schema.clone(), vec![batch]).unwrap();
+            let mut properties = ScannerProperties::default();
+            properties.set_logical_region(logical_region);
+            let scanner = Box::new(RepeatableScanner {
+                batches,
+                properties,
+                metadata,
+                dynamic_filters: Arc::new(Mutex::new(Vec::new())),
+            });
+            let plan = RegionScanExec::new(
+                scanner,
+                ScanRequest {
+                    distribution: Some(TimeSeriesDistribution::PerSeries),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+
+            assert_eq!(
+                plan.properties.partitioning,
+                Partitioning::Hash(
+                    vec![Arc::new(
+                        Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &plan.arrow_schema)
+                            .unwrap()
+                    ) as _],
+                    1
+                )
+            );
+            for names in [
+                vec![DATA_SCHEMA_TSID_COLUMN_NAME, "host", "ts"],
+                vec![DATA_SCHEMA_TSID_COLUMN_NAME, "ts"],
+            ] {
+                let ordering = names.into_iter().map(|name| {
+                    PhysicalSortExpr::new(
+                        Arc::new(Column::new_with_schema(name, &plan.arrow_schema).unwrap()),
+                        SortOptions {
+                            descending: false,
+                            nulls_first: true,
+                        },
+                    )
+                });
+                assert!(
+                    plan.properties
+                        .equivalence_properties()
+                        .ordering_satisfy(ordering)
+                        .unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_ordinary_per_series_does_not_order_by_user_tsid_field() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                DATA_SCHEMA_TSID_COLUMN_NAME,
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ]));
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1234, 5687));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
+                    ConcreteDataType::uint64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "host",
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 3,
+            })
+            .primary_key(vec![2]);
+        let metadata = Arc::new(builder.build().unwrap());
+        let batches = RecordBatches::try_new(schema, vec![]).unwrap();
         let scanner = Box::new(RepeatableScanner {
             batches,
-            properties,
+            properties: ScannerProperties::default(),
             metadata,
             dynamic_filters: Arc::new(Mutex::new(Vec::new())),
         });
@@ -934,12 +1127,25 @@ mod test {
         assert_eq!(
             plan.properties.partitioning,
             Partitioning::Hash(
-                vec![Arc::new(
-                    Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &plan.arrow_schema)
-                        .unwrap()
-                ) as _],
+                vec![Arc::new(Column::new_with_schema("host", &plan.arrow_schema).unwrap()) as _],
                 1
             )
+        );
+        assert!(
+            !plan
+                .properties
+                .equivalence_properties()
+                .ordering_satisfy([PhysicalSortExpr::new(
+                    Arc::new(
+                        Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &plan.arrow_schema,)
+                            .unwrap(),
+                    ),
+                    SortOptions {
+                        descending: false,
+                        nulls_first: true,
+                    },
+                )])
+                .unwrap()
         );
     }
 

@@ -28,6 +28,7 @@ use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 use datatypes::arrow::datatypes::{DataType, TimeUnit as ArrowTimeUnit};
 use promql::extension_plan::{InstantManipulate, SeriesDivide, SeriesNormalize};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
+use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
 
 use crate::dummy_catalog::DummyTableProvider;
@@ -192,8 +193,8 @@ impl ScanHintRule {
             && sort_cols[0].name == DATA_SCHEMA_TSID_COLUMN_NAME
             && sort_cols[1].name == time_index_name
             && region_metadata
-                .primary_key_columns()
-                .any(|column| column.column_schema.name == DATA_SCHEMA_TSID_COLUMN_NAME)
+                .column_by_name(DATA_SCHEMA_TSID_COLUMN_NAME)
+                .is_some_and(|column| column.column_id == ReservedColumnId::tsid())
         {
             adapter.with_distribution(TimeSeriesDistribution::PerSeries);
             return;
@@ -1503,59 +1504,73 @@ mod test {
     #[test]
     fn set_order_hint_does_not_treat_user_tsid_field_as_series_identity() {
         let region_id = RegionId::new(1, 1);
-        let mut builder = RegionMetadataBuilder::new(region_id);
-        builder
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("k0", ConcreteDataType::string_datatype(), true),
-                semantic_type: SemanticType::Tag,
-                column_id: 1,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    DATA_SCHEMA_TSID_COLUMN_NAME,
-                    ConcreteDataType::uint64_datatype(),
-                    false,
-                ),
-                semantic_type: SemanticType::Field,
-                column_id: 2,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "ts",
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    false,
-                ),
-                semantic_type: SemanticType::Timestamp,
-                column_id: 3,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("v0", ConcreteDataType::float64_datatype(), false),
-                semantic_type: SemanticType::Field,
-                column_id: 4,
-            })
-            .primary_key(vec![1]);
-        let metadata = Arc::new(builder.build().unwrap());
-        let engine = Arc::new(MetaRegionEngine::with_metadata(metadata.clone()));
-        let provider = Arc::new(DummyTableProvider::new(region_id, engine, metadata));
-        let table_source = Arc::new(DefaultTableSource::new(provider));
-        let plan = LogicalPlanBuilder::scan("t", table_source, None)
-            .unwrap()
-            .sort(vec![
-                col(DATA_SCHEMA_TSID_COLUMN_NAME).sort(true, true),
-                col("ts").sort(true, true),
-            ])
-            .unwrap()
-            .build()
-            .unwrap();
+        for semantic_type in [SemanticType::Field, SemanticType::Tag] {
+            let mut builder = RegionMetadataBuilder::new(region_id);
+            builder
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "k0",
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: 1,
+                })
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        DATA_SCHEMA_TSID_COLUMN_NAME,
+                        ConcreteDataType::uint64_datatype(),
+                        false,
+                    ),
+                    semantic_type,
+                    column_id: 2,
+                })
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                    semantic_type: SemanticType::Timestamp,
+                    column_id: 3,
+                })
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "v0",
+                        ConcreteDataType::float64_datatype(),
+                        false,
+                    ),
+                    semantic_type: SemanticType::Field,
+                    column_id: 4,
+                })
+                .primary_key(if semantic_type == SemanticType::Tag {
+                    vec![1, 2]
+                } else {
+                    vec![1]
+                });
+            let metadata = Arc::new(builder.build().unwrap());
+            let engine = Arc::new(MetaRegionEngine::with_metadata(metadata.clone()));
+            let provider = Arc::new(DummyTableProvider::new(region_id, engine, metadata));
+            let table_source = Arc::new(DefaultTableSource::new(provider));
+            let plan = LogicalPlanBuilder::scan("t", table_source, None)
+                .unwrap()
+                .sort(vec![
+                    col(DATA_SCHEMA_TSID_COLUMN_NAME).sort(true, true),
+                    col("ts").sort(true, true),
+                ])
+                .unwrap()
+                .build()
+                .unwrap();
 
-        let rewritten = ScanHintRule
-            .rewrite(plan, &OptimizerContext::default())
-            .unwrap()
-            .data;
+            let rewritten = ScanHintRule
+                .rewrite(plan, &OptimizerContext::default())
+                .unwrap()
+                .data;
 
-        let request = &scan_requests(&rewritten)[0];
-        assert_eq!(request.distribution, None);
-        assert!(request.output_ordering.is_some());
+            let request = &scan_requests(&rewritten)[0];
+            assert_eq!(request.distribution, None);
+            assert!(request.output_ordering.is_some());
+        }
     }
 
     #[test]
