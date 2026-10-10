@@ -25,6 +25,7 @@ use common_error::ext::ErrorExt;
 use common_telemetry::{debug, error};
 use headers::ContentType;
 use once_cell::sync::Lazy;
+use pipeline::util::to_pipeline_version;
 use pipeline::{
     GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME, GreptimePipelineParams, PipelineDefinition,
 };
@@ -44,7 +45,9 @@ use crate::http::event::{
     LogIngesterQueryParams, LogState, PipelineIngestRequest,
     extract_pipeline_params_map_from_headers, ingest_logs_inner,
 };
-use crate::http::header::constants::GREPTIME_PIPELINE_NAME_HEADER_NAME;
+use crate::http::header::constants::{
+    GREPTIME_PIPELINE_NAME_HEADER_NAME, GREPTIME_PIPELINE_VERSION_HEADER_NAME,
+};
 use crate::metrics::{
     METRIC_ELASTICSEARCH_LOGS_DOCS_COUNT, METRIC_ELASTICSEARCH_LOGS_INGESTION_ELAPSED,
 };
@@ -155,6 +158,15 @@ async fn do_handle_bulk_api(
             .unwrap_or(GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME)
     });
 
+    // The pipeline version can be selected with the `version` query parameter or the
+    // `x-greptime-pipeline-version` header; the query parameter takes precedence, consistent
+    // with how `pipeline_name` is resolved above. Without either, the latest version is used.
+    let pipeline_version = params.version.as_deref().or_else(|| {
+        headers
+            .get(GREPTIME_PIPELINE_VERSION_HEADER_NAME)
+            .and_then(|v| v.to_str().ok())
+    });
+
     // Read the ndjson payload and convert it to a vector of Value.
     let requests = match parse_bulk_request(&payload, &index, &params.msg_field) {
         Ok(requests) => requests,
@@ -173,10 +185,11 @@ async fn do_handle_bulk_api(
     };
     let log_num = requests.len();
 
-    let pipeline = match PipelineDefinition::from_name(pipeline_name, None, None) {
+    let pipeline_result = to_pipeline_version(pipeline_version)
+        .and_then(|version| PipelineDefinition::from_name(pipeline_name, version, None));
+    let pipeline = match pipeline_result {
         Ok(pipeline) => pipeline,
         Err(e) => {
-            // should be unreachable
             error!(e; "Failed to ingest logs");
             return (
                 status_code_to_http_status(&e.status_code()),
