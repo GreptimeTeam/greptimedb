@@ -547,7 +547,7 @@ fn nested_plan_of(probe: &LogicalPlan, build: LogicalPlan) -> LogicalPlan {
     info!("probe side of the nested plan:\n{probe}");
     info!("build side of the nested plan:\n{build}");
 
-    let inner = MergeScanLogicalPlan::new(build, false, Default::default()).into_logical_plan();
+    let inner = MergeScanLogicalPlan::new(build, false).into_logical_plan();
     let plan = LogicalPlanBuilder::from(probe.clone())
         .join(
             inner,
