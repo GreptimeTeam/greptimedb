@@ -258,6 +258,58 @@ WHERE greptime_timestamp = (
 }
 
 #[apply(both_instances_cases)]
+async fn test_group_by_tsid_and_time_preserves_rows(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE audit_min (
+            __tsid BIGINT,
+            ts TIMESTAMP(3) TIME INDEX,
+            host STRING PRIMARY KEY
+        ) ENGINE = mito"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        "INSERT INTO audit_min VALUES (1, 0, 'a'), (1, 0, 'b')",
+    )
+    .await;
+
+    fn result_rows(result: &str) -> Vec<Vec<String>> {
+        result
+            .lines()
+            .filter(|line| line.trim_start().starts_with('|'))
+            .map(|line| {
+                line.trim()
+                    .trim_matches('|')
+                    .split('|')
+                    .map(|cell| cell.trim().to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    let audit_query =
+        "SELECT __tsid, ts, count(*) AS n FROM audit_min GROUP BY __tsid, ts ORDER BY __tsid, ts";
+    for parallelism in [1, 4] {
+        let result = execute_sql_with_query_parallelism(&frontend, audit_query, parallelism)
+            .await
+            .data
+            .pretty_print()
+            .await;
+        assert_eq!(
+            result_rows(&result),
+            vec![
+                vec!["__tsid", "ts", "n"],
+                vec!["1", "1970-01-01T00:00:00", "2"],
+            ],
+            "unexpected audit_min result with query_parallelism={parallelism}:\\n{result}"
+        );
+    }
+}
+
+#[apply(both_instances_cases)]
 async fn test_show_create_table(instance: Arc<dyn MockInstance>) {
     let frontend = instance.frontend();
     let sql = if instance.is_distributed_mode() {
