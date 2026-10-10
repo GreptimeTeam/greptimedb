@@ -49,7 +49,7 @@ use datafusion::logical_expr::expr::{Alias, ScalarFunction, WindowFunction};
 use datafusion::logical_expr::expr_rewriter::normalize_cols;
 use datafusion::logical_expr::{
     BinaryExpr, Cast, EmptyRelation, Extension, LogicalPlan, LogicalPlanBuilder, Operator,
-    ScalarUDF as ScalarUdfDef, WindowFrame, WindowFunctionDefinition,
+    ScalarUDF as ScalarUdfDef, WindowFrame, WindowFunctionDefinition, scalar_subquery,
 };
 use datafusion::prelude as df_prelude;
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
@@ -126,6 +126,23 @@ const SPECIAL_HISTOGRAM_QUANTILE: &str = "histogram_quantile";
 const SPECIAL_HISTOGRAM_FRACTION: &str = "histogram_fraction";
 /// `vector` function in PromQL
 const SPECIAL_VECTOR_FUNCTION: &str = "vector";
+
+/// Error text for a runtime `scalar(...)` parameter of a range query: one value
+/// cannot be broadcast to the rows of every evaluation step.
+const DYNAMIC_SCALAR_UNSUPPORTED_IN_RANGE_QUERY: &str =
+    "dynamic scalar parameter not supported in range query";
+/// Error text for a runtime `scalar(...)` parameter of a function that reads
+/// its parameter while planning, e.g. `histogram_quantile`, `topk` and
+/// `bottomk`.
+const DYNAMIC_SCALAR_UNSUPPORTED_FOR_FUNCTION: &str =
+    "dynamic scalar parameter not supported for this function";
+/// Functions whose scalar parameter may be a runtime `scalar(...)` expression.
+///
+/// The parameter of these functions only becomes an argument of an ordinary
+/// scalar function call, so the value computed by the parameter's subquery can
+/// be broadcast to every row the function is applied to.
+const DYNAMIC_SCALAR_FUNCTIONS: [&str; 3] = ["clamp_min", "clamp_max", "quantile_over_time"];
+
 /// `le` column for conventional histogram.
 const LE_COLUMN_NAME: &str = "le";
 
@@ -2070,6 +2087,14 @@ impl PromPlanner {
         // some special functions that are not expression but a plan
         match func.name {
             SPECIAL_HISTOGRAM_QUANTILE | SPECIAL_HISTOGRAM_FRACTION => {
+                // The histogram helpers keep their scalar parameters as
+                // compile-time constants in `HistogramFold`, so a runtime
+                // `scalar(...)` parameter is rejected here. The last argument is
+                // the input vector, not a parameter.
+                let params = &args.args[..args.args.len().saturating_sub(1)];
+                for param in params {
+                    Self::ensure_static_scalar_param(func.name, param.as_ref())?;
+                }
                 return self
                     .create_histogram_plan(func.name, args, query_engine_state)
                     .await;
@@ -2084,6 +2109,11 @@ impl PromPlanner {
 
         // transform function arguments
         let args = self.create_function_args(&args.args)?;
+        // A `scalar(...)` parameter is only known when the query runs, so it is
+        // turned into an expression reading the parameter's own subquery here.
+        let literals = self
+            .build_scalar_params(func.name, &args.literals, query_engine_state)
+            .await?;
         // Only a vector selector keeps the timestamps of its samples. Any other expression
         // produces samples at the evaluation time, which is what `timestamp()` reports for it.
         let mut timestamp_arg = args.input.as_ref();
@@ -2137,11 +2167,47 @@ impl PromPlanner {
         let input_tag_columns = self.ctx.tag_columns.clone();
         let (mut func_exprs, new_tags) = self.create_function_expr(
             func,
-            args.literals.clone(),
+            literals.clone(),
             input.schema(),
             query_engine_state,
             range_fold_offset,
         )?;
+        // Lower dynamic clamps here to avoid mixed-shape SQL clamp arguments.
+        if matches!(func.name, "clamp_min" | "clamp_max")
+            && args
+                .literals
+                .iter()
+                .any(|param| matches!(param, ScalarParam::Dynamic(_)))
+        {
+            for expr in &mut func_exprs {
+                if let DfExpr::Alias(alias) = expr
+                    && let DfExpr::ScalarFunction(call) = alias.expr.as_ref()
+                    && matches!(call.func.name(), "clamp_min" | "clamp_max")
+                    && let [value, bound] = call.args.as_slice()
+                {
+                    let value = value.clone();
+                    let bound = bound.clone();
+                    let value_is_nan = DfExpr::ScalarFunction(ScalarFunction {
+                        func: datafusion_functions::math::isnan(),
+                        args: vec![value.clone()],
+                    });
+                    let bound_is_nan = DfExpr::ScalarFunction(ScalarFunction {
+                        func: datafusion_functions::math::isnan(),
+                        args: vec![bound.clone()],
+                    });
+                    let comparison = if call.func.name() == "clamp_min" {
+                        value.clone().lt(bound.clone())
+                    } else {
+                        value.clone().gt(bound.clone())
+                    };
+                    *alias.expr = when(value.clone().is_null().or(value_is_nan), value.clone())
+                        .when(bound_is_nan, lit(f64::NAN))
+                        .when(comparison, bound)
+                        .otherwise(value)
+                        .context(DataFusionPlanningSnafu)?;
+                }
+            }
+        }
         func_exprs.insert(0, self.create_time_index_column_expr()?);
         func_exprs.extend_from_slice(&self.create_tag_column_exprs()?);
         if let Some(tsid_col) =
@@ -2169,18 +2235,10 @@ impl PromPlanner {
                 .sort(self.create_field_columns_sort_exprs(false))
                 .context(DataFusionPlanningSnafu)?,
             "sort_by_label" => builder
-                .sort(Self::create_sort_exprs_by_tags(
-                    func.name,
-                    args.literals,
-                    true,
-                )?)
+                .sort(Self::create_sort_exprs_by_tags(func.name, literals, true)?)
                 .context(DataFusionPlanningSnafu)?,
             "sort_by_label_desc" => builder
-                .sort(Self::create_sort_exprs_by_tags(
-                    func.name,
-                    args.literals,
-                    false,
-                )?)
+                .sort(Self::create_sort_exprs_by_tags(func.name, literals, false)?)
                 .context(DataFusionPlanningSnafu)?,
 
             _ => builder,
@@ -3208,7 +3266,13 @@ impl PromPlanner {
         for arg in args {
             // First try to parse as literal expression (including binary expressions like 100.0 + 3.0)
             if let Some(expr) = Self::try_build_literal_expr(arg) {
-                result.literals.push(expr);
+                result.literals.push(ScalarParam::Static(expr));
+            } else if Self::is_scalar_call(arg) {
+                // A `scalar(...)` call is a runtime scalar parameter rather than
+                // a second vector input.
+                result
+                    .literals
+                    .push(ScalarParam::Dynamic(arg.as_ref().clone()));
             } else {
                 // If not a literal, treat as vector input
                 match arg.as_ref() {
@@ -3227,14 +3291,119 @@ impl PromPlanner {
                     }
 
                     _ => {
-                        let expr = Self::get_param_as_literal_expr(Some(arg.as_ref()), None, None)?;
-                        result.literals.push(expr);
+                        let param = Self::get_param_as_scalar_expr(Some(arg.as_ref()), None, None)?;
+                        result.literals.push(param);
                     }
                 }
             }
         }
 
         Ok(result)
+    }
+
+    /// Returns true if `expr` is a `scalar(...)` call, i.e. a scalar value that
+    /// is only known when the query runs.
+    fn is_scalar_call(expr: &PromExpr) -> bool {
+        matches!(expr, PromExpr::Call(Call { func, .. }) if func.name == SCALAR_FUNCTION)
+    }
+
+    /// Rejects a runtime `scalar(...)` parameter of a function whose parameter
+    /// has to be known while planning.
+    fn ensure_static_scalar_param(func_name: &str, param: &PromExpr) -> Result<()> {
+        ensure!(
+            !Self::is_scalar_call(param),
+            FunctionInvalidArgumentSnafu {
+                fn_name: format!("{func_name}: {DYNAMIC_SCALAR_UNSUPPORTED_FOR_FUNCTION}"),
+            }
+        );
+
+        Ok(())
+    }
+
+    /// Builds the expressions of the scalar parameters of a call.
+    ///
+    /// A [`ScalarParam::Dynamic`] parameter (`scalar(...)`) is evaluated when
+    /// the query runs, so it is only accepted for the functions in
+    /// [`DYNAMIC_SCALAR_FUNCTIONS`] and only for an instant query, where the
+    /// single computed value can be broadcast to the rows of the input.
+    async fn build_scalar_params(
+        &mut self,
+        func_name: &str,
+        params: &[ScalarParam],
+        query_engine_state: &QueryEngineState,
+    ) -> Result<Vec<DfExpr>> {
+        let mut exprs = Vec::with_capacity(params.len());
+
+        for param in params {
+            match param {
+                ScalarParam::Static(expr) => exprs.push(expr.clone()),
+                ScalarParam::Dynamic(param_expr) => {
+                    // A dynamic parameter is computed once for every evaluation
+                    // timestamp, so it can only be broadcast to the input's rows
+                    // when the query has a single evaluation timestamp.
+                    ensure!(
+                        self.ctx.start == self.ctx.end,
+                        FunctionInvalidArgumentSnafu {
+                            fn_name: format!(
+                                "{func_name}: {DYNAMIC_SCALAR_UNSUPPORTED_IN_RANGE_QUERY}"
+                            ),
+                        }
+                    );
+                    ensure!(
+                        DYNAMIC_SCALAR_FUNCTIONS.contains(&func_name),
+                        FunctionInvalidArgumentSnafu {
+                            fn_name: format!(
+                                "{func_name}: {DYNAMIC_SCALAR_UNSUPPORTED_FOR_FUNCTION}"
+                            ),
+                        }
+                    );
+                    exprs.push(
+                        self.build_dynamic_scalar_subquery(
+                            func_name,
+                            param_expr,
+                            query_engine_state,
+                        )
+                        .await?,
+                    );
+                }
+            }
+        }
+
+        Ok(exprs)
+    }
+
+    /// Plans a runtime `scalar(...)` parameter as a subquery and returns the
+    /// expression reading its value column as a scalar.
+    ///
+    /// The subquery is planned on its own, so the planner state of the call the
+    /// parameter belongs to is restored before returning: that call still plans
+    /// its own input from it.
+    async fn build_dynamic_scalar_subquery(
+        &mut self,
+        func_name: &str,
+        param_expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<DfExpr> {
+        let outer_ctx = self.ctx.clone();
+        let param_plan = self.prom_expr_to_plan(param_expr, query_engine_state).await;
+        // The value column of the parameter's plan, e.g. `scalar(<field>)` of
+        // the `ScalarCalculate` plan that plans `scalar(...)`.
+        let value_column = self.ctx.field_columns.first().cloned();
+        self.ctx = outer_ctx;
+        let param_plan = param_plan?;
+        let value_column = value_column.with_context(|| FunctionInvalidArgumentSnafu {
+            fn_name: format!("{func_name}: scalar parameter without a value column"),
+        })?;
+
+        // A scalar subquery must produce a single column, so only the value
+        // column of the parameter's plan is kept.
+        let subquery = LogicalPlanBuilder::from(param_plan)
+            .project(vec![DfExpr::Column(Column::from_name(&value_column))])
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+
+        Ok(scalar_subquery(Arc::new(subquery)))
     }
 
     fn create_mixed_range_function_exprs(
@@ -4804,34 +4973,50 @@ impl PromPlanner {
         Ok(val)
     }
 
+    /// Returns the given parameter as a scalar expression that is known while
+    /// planning.
+    ///
+    /// A runtime `scalar(...)` parameter is rejected: use
+    /// [`Self::get_param_as_scalar_expr`] and
+    /// [`Self::build_scalar_params`] for the functions that accept one.
     fn get_param_as_literal_expr(
         param: Option<&PromExpr>,
         op: Option<TokenType>,
         expected_type: Option<ArrowDataType>,
     ) -> Result<DfExpr> {
-        let prom_param = param.with_context(|| {
-            if let Some(op) = op {
-                FunctionInvalidArgumentSnafu {
-                    fn_name: op.to_string(),
-                }
-            } else {
-                FunctionInvalidArgumentSnafu {
-                    fn_name: "unknown".to_string(),
-                }
+        match Self::get_param_as_scalar_expr(param, op, expected_type)? {
+            ScalarParam::Static(expr) => Ok(expr),
+            ScalarParam::Dynamic(_) => FunctionInvalidArgumentSnafu {
+                fn_name: format!(
+                    "{}: {DYNAMIC_SCALAR_UNSUPPORTED_FOR_FUNCTION}",
+                    Self::function_argument_name(op)
+                ),
             }
+            .fail(),
+        }
+    }
+
+    /// Returns the given parameter as a scalar expression, which is either a
+    /// compile-time literal or a runtime `scalar(...)` expression.
+    fn get_param_as_scalar_expr(
+        param: Option<&PromExpr>,
+        op: Option<TokenType>,
+        expected_type: Option<ArrowDataType>,
+    ) -> Result<ScalarParam> {
+        let prom_param = param.with_context(|| FunctionInvalidArgumentSnafu {
+            fn_name: Self::function_argument_name(op),
         })?;
 
-        let expr = Self::try_build_literal_expr(prom_param).with_context(|| {
-            if let Some(op) = op {
+        let Some(expr) = Self::try_build_literal_expr(prom_param) else {
+            ensure!(
+                Self::is_scalar_call(prom_param),
                 FunctionInvalidArgumentSnafu {
-                    fn_name: op.to_string(),
+                    fn_name: Self::function_argument_name(op),
                 }
-            } else {
-                FunctionInvalidArgumentSnafu {
-                    fn_name: "unknown".to_string(),
-                }
-            }
-        })?;
+            );
+
+            return Ok(ScalarParam::Dynamic(prom_param.clone()));
+        };
 
         // check if the type is expected
         if let Some(expected_type) = expected_type {
@@ -4847,7 +5032,14 @@ impl PromPlanner {
             }
         }
 
-        Ok(expr)
+        Ok(ScalarParam::Static(expr))
+    }
+
+    /// The name of a function argument used in errors raised while reading the
+    /// argument.
+    fn function_argument_name(op: Option<TokenType>) -> String {
+        op.map(|op| op.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
     }
 
     /// Create [DfExpr::WindowFunction] expr for each value column with given window function.
@@ -6366,7 +6558,23 @@ impl PromPlanner {
 #[derive(Default, Debug)]
 struct FunctionArgs {
     input: Option<PromExpr>,
-    literals: Vec<DfExpr>,
+    literals: Vec<ScalarParam>,
+}
+
+/// A scalar parameter of a PromQL function call.
+#[derive(Debug, Clone)]
+enum ScalarParam {
+    /// A parameter whose value is known while planning, e.g. the `2` of
+    /// `clamp_min(some_metric, 2)`.
+    Static(DfExpr),
+    /// A parameter that is only computed when the query runs, i.e. a
+    /// `scalar(...)` call such as the `scalar(vector(3))` of
+    /// `clamp_min(some_metric, scalar(vector(3)))`.
+    ///
+    /// It is planned as a scalar subquery by
+    /// [`PromPlanner::build_scalar_params`], which also rejects the functions
+    /// and query shapes that cannot broadcast a runtime parameter.
+    Dynamic(PromExpr),
 }
 
 /// Represents different types of scalar functions supported in PromQL expressions.

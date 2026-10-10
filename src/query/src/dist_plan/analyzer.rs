@@ -37,7 +37,7 @@ use datafusion_optimizer::push_down_filter::PushDownFilter;
 use datafusion_optimizer::rewrite_set_comparison::RewriteSetComparison;
 use datafusion_optimizer::scalar_subquery_to_join::ScalarSubqueryToJoin;
 use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
-use promql::extension_plan::SeriesDivide;
+use promql::extension_plan::{RangeManipulate, SeriesDivide};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -492,6 +492,23 @@ impl PlanRewriter {
         // is the dominant cost on deep PromQL plans.
         // When the root does not encode, the plan holds at least one node that has to stay
         // on the frontend and only the per-node check locates it.
+        // RangeManipulate's packed dictionary must stay with its frontend-only consumer;
+        // cut at the ordinary input instead. Only do so for this known unsupported shape.
+        if let LogicalPlan::Extension(ext) = plan
+            && ext.node.as_any().is::<RangeManipulate>()
+            && let Some((consumer @ LogicalPlan::Projection(_), _)) = self
+                .stack
+                .iter()
+                .rev()
+                .find(|(_, level)| Some(*level) == self.level.checked_sub(2))
+            && matches!(
+                Categorizer::check_plan(consumer, self.partition_cols.clone())?,
+                Commutativity::Unimplemented
+            )
+        {
+            return Ok(true);
+        }
+
         if !self.whole_plan_encodable
             && let Err(e) = DFLogicalSubstraitConvertor.encode(plan, DefaultSerializer)
         {
