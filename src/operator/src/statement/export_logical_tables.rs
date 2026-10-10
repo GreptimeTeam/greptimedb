@@ -41,7 +41,7 @@ use common_recordbatch::SendableRecordBatchStream;
 use common_time::range::TimestampRange;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::TableReference as DfTableReference;
-use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, col};
+use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, col, lit};
 use futures::StreamExt;
 use object_store::ObjectStore;
 use session::context::QueryContextRef;
@@ -79,7 +79,7 @@ impl Default for LogicalTableExportLimits {
             input_batch_bytes: 64 * 1024 * 1024,
             conversion_bytes: 1024 * 1024,
             writer: ParquetWriterLimits {
-                row_group_rows: 8192,
+                row_group_rows: 1024 * 1024,
                 flush_threshold_bytes: 8 * 1024 * 1024,
                 max_row_groups: 4096,
             },
@@ -255,7 +255,7 @@ impl LogicalTableExport {
 
     fn build_plan(&self, time_range: Option<&TimestampRange>) -> Result<LogicalPlan> {
         let info = self.physical_table.table_info();
-        let filters = self
+        let mut filters = self
             .physical_table
             .schema()
             .timestamp_column()
@@ -264,6 +264,10 @@ impl LogicalTableExport {
             })
             .into_iter()
             .collect::<Vec<_>>();
+        if self.logical_tables.len() == 1 {
+            let id = *self.logical_tables.first_key_value().unwrap().0;
+            filters.push(col(TABLE_ID).eq(lit(id)));
+        }
         let source = Arc::new(DefaultTableSource::new(Arc::new(
             DfTableProviderAdapter::new(self.physical_table.clone()),
         )));
@@ -283,11 +287,13 @@ impl LogicalTableExport {
                 .filter(filter)
                 .context(error::BuildDfLogicalPlanSnafu)?;
         }
-        builder
-            .sort(vec![col(TABLE_ID).sort(true, false)])
-            .context(error::BuildDfLogicalPlanSnafu)?
-            .build()
-            .context(error::BuildDfLogicalPlanSnafu)
+        // A single selected table has a constant routing key after filtering.
+        if self.logical_tables.len() > 1 {
+            builder = builder
+                .sort(vec![col(TABLE_ID).sort(true, false)])
+                .context(error::BuildDfLogicalPlanSnafu)?;
+        }
+        builder.build().context(error::BuildDfLogicalPlanSnafu)
     }
 }
 
@@ -795,6 +801,40 @@ pub(crate) fn rows_within_budget(
     budget: usize,
     json_columns: &[usize],
 ) -> Result<(usize, usize)> {
+    if start < end {
+        let rows = end - start;
+        let mut max_row_bytes = 0usize;
+        let mut bounded = true;
+        for (index, array) in batch.columns().iter().enumerate() {
+            let size = if let Some(width) = array.data_type().primitive_width() {
+                (width + 16).max(32)
+            } else if let Some(dictionary) = array.as_any_dictionary_opt()
+                && dictionary.values().len() < rows
+                && matches!(
+                    dictionary.values().data_type(),
+                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+                )
+            {
+                let values = dictionary.values();
+                let max = (0..values.len()).try_fold(0usize, |max, row| {
+                    Ok::<_, error::Error>(max.max(estimate_value_size(values.as_ref(), row)?))
+                })?;
+                max.saturating_add(16).max(32)
+            } else {
+                bounded = false;
+                break;
+            };
+            let expansion = if json_columns.contains(&index) { 8 } else { 1 };
+            max_row_bytes = max_row_bytes.saturating_add(size.saturating_mul(expansion));
+        }
+        // A conservative bound avoids revisiting repeated dictionary values for every row.
+        if bounded
+            && let Some(bytes) = max_row_bytes.checked_mul(rows)
+            && bytes <= budget
+        {
+            return Ok((rows, bytes));
+        }
+    }
     let mut bytes = 0usize;
     let mut row = start;
     while row < end {

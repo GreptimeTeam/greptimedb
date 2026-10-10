@@ -128,6 +128,33 @@ async fn read(store: &ObjectStore, path: &str) -> (SchemaRef, Vec<RecordBatch>) 
 }
 
 #[tokio::test]
+async fn narrow_batches_share_row_groups() {
+    let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
+    let batches = (0..8)
+        .map(|_| batch(vec![Some(1025); 8192], vec![Some("host"); 8192]))
+        .collect();
+    let summary = export_stream(
+        &unit(),
+        stream(batches),
+        &store,
+        LogicalTableExportLimits::default(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(summary.rows, 65536);
+    let bytes = store.read("cpu.v1.parquet").await.unwrap().to_bytes();
+    let reader = ParquetRecordBatchReaderBuilder::try_new(bytes).unwrap();
+    assert_eq!(reader.metadata().num_row_groups(), 1);
+    let rows: usize = reader
+        .build()
+        .unwrap()
+        .map(|batch| batch.unwrap().num_rows())
+        .sum();
+    assert_eq!(rows, summary.rows);
+}
+
+#[tokio::test]
 async fn routes_across_batches_and_writes_empty_files() {
     let unit = unit();
     let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
@@ -250,6 +277,19 @@ async fn existing_outputs_are_not_overwritten() {
 }
 
 #[test]
+fn repeated_dictionary_budget_preserves_null_and_offset_charges() {
+    let host = "x".repeat(64);
+    let input = batch(vec![Some(1025); 8], vec![Some(host.as_str()); 8])
+        .project(&[2, 4, 1])
+        .unwrap();
+    // Each row charges 96 bytes for the dictionary value, 32 for null, and 24 for time.
+    assert_eq!(rows_within_budget(&input, 0, 8, 1215, &[]).unwrap().0, 7);
+    let (rows, estimated) = rows_within_budget(&input, 0, 8, 1280, &[]).unwrap();
+    assert_eq!(rows, 8);
+    assert!((1216..=1280).contains(&estimated));
+}
+
+#[test]
 fn dictionary_and_nested_histogram_values_are_bounded_before_expansion() {
     let dictionary = DictionaryArray::<UInt32Type>::try_new(
         UInt32Array::from(vec![0, 0, 0]),
@@ -291,6 +331,25 @@ fn validates_selected_schemas_and_projects_only_selected_columns() {
             .unwrap();
     assert_eq!(one.scan_projection, vec![0, 3]);
     assert_eq!(one.logical_tables[&1025].projection, vec![1]);
+    let LogicalPlan::Filter(filter) = one.build_plan(None).unwrap() else {
+        panic!("single-table export must filter the routing key without sorting");
+    };
+    let datafusion_expr::Expr::BinaryExpr(predicate) = filter.predicate else {
+        panic!("expected table-id equality");
+    };
+    assert_eq!(predicate.op, datafusion_expr::Operator::Eq);
+    assert!(matches!(
+        predicate.left.as_ref(),
+        datafusion_expr::Expr::Column(column) if column.name == TABLE_ID
+    ));
+    assert!(matches!(
+        predicate.right.as_ref(),
+        datafusion_expr::Expr::Literal(datafusion_common::ScalarValue::UInt32(Some(1025)), _)
+    ));
+    assert!(matches!(
+        unit.build_plan(None).unwrap(),
+        LogicalPlan::Sort(_)
+    ));
     assert!(
         LogicalTableExport::try_new(unit.physical_table.clone(), &[selected.clone(), selected])
             .is_err()
