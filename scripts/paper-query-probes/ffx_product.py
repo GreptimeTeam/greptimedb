@@ -241,17 +241,26 @@ def load_case_queries(case_root):
     cases = []
     for path in sorted(case_root.glob("paper_ffx_*/case.toml")):
         case = tomllib.loads(path.read_text())
-        cases.append((case["case"]["name"], {q["name"]: q["query"] for q in case["scenario"]["queries"]}))
-    if len(cases) != 3:
-        raise RuntimeError(f"Expected 3 paper_ffx cases; found {len(cases)}")
+        queries = {q["name"]: q["query"] for q in case["scenario"]["queries"]}
+        if len(queries) != len(case["scenario"]["queries"]):
+            raise RuntimeError(f"Duplicate query name in {path}")
+        cases.append((case["case"]["name"], queries))
+    if not cases:
+        raise RuntimeError(f"No paper_ffx cases found under {case_root}")
     return cases
 
 def run_existing(url, case_root):
     evidence = []
     for case_name, queries in load_case_queries(case_root):
-        filters = ("wide", "narrow", "rare") if case_name.endswith("balanced") else ("wide",)
+        filters = sorted(name[len("raw_full_"):] for name in queries if name.startswith("raw_full_"))
+        if not filters:
+            raise RuntimeError(f"{case_name}: no raw_full_* queries found")
         case_evidence = {"case": case_name, "checks": []}
         for filt in filters:
+            required = (f"factor_full_{filt}", f"raw_{filt}", f"factor_{filt}")
+            missing = [name for name in required if name not in queries]
+            if missing:
+                raise RuntimeError(f"{case_name}/{filt}: missing paired queries {missing}")
             raw_full, factor_full = request(url, queries[f"raw_full_{filt}"]), request(url, queries[f"factor_full_{filt}"])
             check = compare_full(raw_full, factor_full, None, f"{case_name}/{filt}")
             names, rows = result(raw_full)
@@ -263,12 +272,9 @@ def run_existing(url, case_root):
                     raise AssertionError(f"{case_name}/{filt}: duplicate full-result key {key}")
                 groups[key] = (row[indexes["pairs"]], row[indexes["valid"]],
                                row[indexes["total"]], row[indexes["score"]])
-            full_order = sorted(groups.items(), key=lambda item: (
-                item[1][3] is None, -(float(item[1][3]) if item[1][3] is not None else 0.0),
-                item[0][0] is None, item[0][0] or "", item[0][1] is None, item[0][1] or ""))[:10]
             check["top10"] = compare_top(request(url, queries[f"raw_{filt}"]),
                                           request(url, queries[f"factor_{filt}"]),
-                                          f"{case_name}/{filt}", full_order)
+                                          f"{case_name}/{filt}", list(groups.items()))
             case_evidence["checks"].append(check)
         case_evidence["explain_analyze"] = {
             name: request(url, queries[name])
