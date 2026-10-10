@@ -876,7 +876,7 @@ mod test {
             schema.clone(),
             vec![
                 Arc::new(datatypes::vectors::UInt64Vector::from_slice([1])) as _,
-                Arc::new(datatypes::vectors::StringVector::from_slice(["host"])) as _,
+                Arc::new(datatypes::vectors::StringVector::from_slice(&["host"])) as _,
                 Arc::new(TimestampMillisecondVector::from_slice([1])) as _,
             ],
         )
@@ -956,7 +956,7 @@ mod test {
             });
             assert!(
                 plan.properties
-                    .equivalence_properties
+                    .equivalence_properties()
                     .ordering_satisfy(ordering)
                     .unwrap()
             );
@@ -1036,7 +1036,7 @@ mod test {
         assert!(
             !plan
                 .properties
-                .equivalence_properties
+                .equivalence_properties()
                 .ordering_satisfy([PhysicalSortExpr::new(
                     Arc::new(
                         Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &plan.arrow_schema,)
