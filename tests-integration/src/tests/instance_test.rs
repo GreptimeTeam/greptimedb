@@ -302,7 +302,7 @@ async fn test_group_by_tsid_and_time_preserves_rows(instance: Arc<dyn MockInstan
             result_rows(&result),
             vec![
                 vec!["__tsid", "ts", "n"],
-                vec!["1", "1970-01-01T00:00:00.000", "2"],
+                vec!["1", "1970-01-01T00:00:00", "2"],
             ],
             "unexpected audit_min result with query_parallelism={parallelism}:\\n{result}"
         );
