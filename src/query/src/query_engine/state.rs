@@ -70,7 +70,6 @@ use crate::optimizer::global_limit::EnsureGlobalLimitForFetch;
 use crate::optimizer::json_schema_concretize::JsonSchemaConcretizeRule;
 use crate::optimizer::json_type_concretize::JsonTypeConcretizeRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
-use crate::optimizer::pass_distribution::PassDistribution;
 use crate::optimizer::promql_tsid_narrow_join::PromqlTsidNarrowJoin;
 use crate::optimizer::remove_duplicate::RemoveDuplicate;
 use crate::optimizer::scan_hint::ScanHintRule;
@@ -232,17 +231,13 @@ impl QueryEngineState {
         physical_optimizer
             .rules
             .insert(5, Arc::new(ParallelizeScan));
-        // Pass distribution requirement to MergeScanExec to avoid unnecessary shuffling
-        physical_optimizer
-            .rules
-            .insert(6, Arc::new(PassDistribution));
         // Prefer collecting narrow PromQL build sides over repartitioning wide label streams.
         physical_optimizer
             .rules
-            .insert(7, Arc::new(PromqlTsidNarrowJoin));
+            .insert(6, Arc::new(PromqlTsidNarrowJoin));
         // Re-enforce sorting after custom rules update scan partitioning and distribution.
         // Keep it immediately before DataFusion's default EnsureRequirements.
-        physical_optimizer.rules.insert(8, Arc::new(EnforceSorting));
+        physical_optimizer.rules.insert(7, Arc::new(EnforceSorting));
         // Add rule for windowed sort
         physical_optimizer
             .rules
