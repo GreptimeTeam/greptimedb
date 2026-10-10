@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["convert_literal","lineage_literal","retarget_assignment_cast","rewrite_assignment","rewrite_insert_assignments","rewrite_values","session_timezone","source_literal","unalias","unalias_mut"],"struct":["SessionTimezone"]};

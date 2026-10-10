@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["calculate_topic_stat"],"struct":["ActiveBucket","CalculatedTopicStat","HistoryTopicStat","PartialTopicStat","TopicStatsRegistry","TopicStatsStore"],"type":["TopicStatsRegistryRef"]};

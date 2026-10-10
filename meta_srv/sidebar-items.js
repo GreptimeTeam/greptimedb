@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"macro":[["add_compressed_service",1],["check_leader",1],["define_ticker",1]],"mod":["bootstrap","cache_invalidator","cluster","discovery","error","event","failure_detector","gc","greptimedb_telemetry","handler","key","metasrv","metrics","mocks","peer","procedure","pubsub","region","selector","service","state","utils"]};

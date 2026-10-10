@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["extract_bound_operand","extract_column_value","extract_expr_operand","extract_upper_bound","generate_unique_bound","is_upper_op"],"struct":["SimplePartitions"]};

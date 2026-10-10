@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CharClass","TermKind"],"fn":["boundary_ok","classify_char","classify_term","is_han"],"static":["HAN_SCRIPT_DATA"],"struct":["MatchesTermFinder","MatchesTermFunction"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ELASTICSEARCH_VERSION"],"fn":["do_handle_bulk_api","elasticsearch_headers","get_index_from_cmd","get_log_value_from_msg_field","handle_bulk_api","handle_bulk_api_with_index","handle_get_license","handle_get_version","parse_bulk_request","write_bulk_response"],"static":["ELASTICSEARCH_HEADERS"]};

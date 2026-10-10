@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["encode_bytes","encode_length","encode_semantic_value","merge_toml_values","restore_path_in_table","restore_protected_path","semantic_profile_key","validate_protected_ancestors","validate_relative_reference","value_at_path"],"struct":["DatanodeOverlay","DatanodeProtectionPolicy","DottedPath","PreparedDatanodeOverlay"]};

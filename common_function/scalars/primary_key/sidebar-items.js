@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["NAME","NULL_VALUE_LITERAL"],"fn":["build_codec","build_list_array","column_name","decode_binary_array","decode_binary_view_array","decode_dictionary","decode_one","decode_primary_keys","parse_encoding","parse_region_metadata","value_to_string"],"struct":["DecodePrimaryKeyFunction"],"type":["NameValuePair"]};

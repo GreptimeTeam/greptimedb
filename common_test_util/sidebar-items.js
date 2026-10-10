@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["find_workspace_path"],"mod":["flight","ports","recordbatch","temp_dir"],"static":["WORKSPACE_ROOT"]};

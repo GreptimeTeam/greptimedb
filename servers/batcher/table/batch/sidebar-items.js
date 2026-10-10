@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["combine_batches","flush_batch","send_batch","validate_affected_rows"],"struct":["Batch"]};

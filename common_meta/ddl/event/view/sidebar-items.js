@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CREATE_VIEW_EVENT_TYPE","DROP_VIEW_EVENT_TYPE","PAYLOAD_VERSION"],"enum":["ViewDdlPayload"],"struct":["CreateViewEventIntent","CreateViewPayload","DropViewPayload","ViewDdlEvent"]};

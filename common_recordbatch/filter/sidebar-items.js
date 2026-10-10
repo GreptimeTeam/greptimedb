@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["TimestampUnitCast"],"fn":["batch_filter","boolean_array_to_scan_mask","regexp_is_match_dictionary","regexp_is_match_scalar","timestamp_scalar_value"],"mod":["predicate","timestamp"],"struct":["SimpleFilterEvaluator"]};

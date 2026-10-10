@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["dictionary_encode_string_columns","is_scan_local","supports_pk_dictionary_encoding"],"struct":["DfTableProviderAdapter"]};

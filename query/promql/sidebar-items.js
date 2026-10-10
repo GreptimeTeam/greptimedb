@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["is_promql_extension_plan","plan_contains_promql_extension"],"mod":["error","label_values","planner"]};

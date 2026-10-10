@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CURRENT_TIMESTAMP","CURRENT_TIMESTAMP_FN","NOW_FN"],"enum":["ColumnDefaultConstraint"],"fn":["create_current_timestamp","create_current_timestamp_vector","value_type_match"]};

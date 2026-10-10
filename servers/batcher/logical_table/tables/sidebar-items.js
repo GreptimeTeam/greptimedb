@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["align_create_schema_time_index"],"struct":["TableResolutionPlan"],"trait":["PendingRowsSchemaAlterer"],"type":["PendingRowsSchemaAltererRef"]};

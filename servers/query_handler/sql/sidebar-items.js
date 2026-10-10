@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_LOGICAL_TABLE_DDL_BYTES","MAX_LOGICAL_TABLE_DDL_STATEMENTS"],"trait":["SqlQueryHandler"],"type":["ServerSqlQueryHandlerRef"]};

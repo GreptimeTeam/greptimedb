@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["is_jsonb_integer"],"macro":[["json_is",1]],"struct":["JsonIsArray","JsonIsBool","JsonIsFloat","JsonIsInt","JsonIsNull","JsonIsObject","JsonIsString"]};

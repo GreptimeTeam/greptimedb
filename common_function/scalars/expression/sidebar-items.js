@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["scalar_unary_op"],"mod":["ctx","if_func","is_null","unary"],"struct":["EvalContext","ExpressionFunction"]};

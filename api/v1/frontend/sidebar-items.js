@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["frontend_client","frontend_server"],"struct":["KillProcessRequest","KillProcessResponse","ListProcessRequest","ListProcessResponse","ProcessInfo"]};

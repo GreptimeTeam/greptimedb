@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AlignMode","ResolvedAlignMode"],"fn":["align_array","align_projected_batch","resolve_align_mode","rewrite_array"],"struct":["JsonSchemaAligner","RewriteSettings"],"type":["ProjectedRecordBatchStream"]};

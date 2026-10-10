@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PENDING_ROWS_BATCH_SYNC_ENV"],"enum":["BatchingProtocol"],"fn":["pending_rows_batch_sync_enabled"],"mod":["flow_notifier","flow_sender","logical_table","table"]};

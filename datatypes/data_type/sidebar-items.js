@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ConcreteDataType"],"macro":[["impl_new_concrete_type_functions",1]],"trait":["DataType"],"type":["DataTypeRef"]};
