@@ -32,6 +32,14 @@ CREATE TABLE plain_table (
 
 SELECT table_schema, table_name, signal_type, source, source_version, pipeline, metadata_quality, semantic_options
 FROM information_schema.table_semantics
+WHERE table_schema = 'public'
+ORDER BY table_name;
+
+-- System table scope is exposed without changing the view's columns.
+SELECT table_name, semantic_options
+FROM information_schema.table_semantics
+WHERE table_schema = 'information_schema'
+  AND table_name IN ('build_info', 'partitions', 'process_list', 'table_semantics')
 ORDER BY table_name;
 
 -- Predicate pushdown on a promoted column.

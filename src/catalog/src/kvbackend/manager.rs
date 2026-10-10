@@ -94,6 +94,11 @@ pub struct KvBackendCatalogManager {
 pub(super) const CATALOG_CACHE_MAX_CAPACITY: u64 = 128;
 
 impl KvBackendCatalogManager {
+    /// Returns the registered system tables, excluding user-created metadata.
+    pub fn information_schema_provider(&self) -> &InformationSchemaProvider {
+        &self.system_catalog.information_schema_provider
+    }
+
     pub fn view_info_cache(&self) -> Result<ViewInfoCacheRef> {
         self.cache_registry.get().context(CacheNotFoundSnafu {
             name: "view_info_cache",
