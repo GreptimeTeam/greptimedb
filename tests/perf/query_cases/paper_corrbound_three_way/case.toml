@@ -1,0 +1,205 @@
+# Controlled three-way join-order comparison using the existing direct-SST DSL.
+# Each table occupies one shared-layout region. Integer payloads are non-NULL;
+# this case does not cover nullable join-key or payload statistics. Written join
+# parentheses request SQL trees only, not optimizer hints. Timed queries return
+# complete rows without aggregation or floating-point values; the runner compares
+# the same query on base and candidate and reports HTTP wall-clock latency through complete response parsing, in query-block order.
+# Full answer equality and final plan/operator statistics must be checked against
+# an independent oracle; this fixture alone does not assert plan shape or NULLs.
+
+[case]
+name = "paper_corrbound_three_way"
+description = "Three-way SQL join orders under aligned and anti-correlated filters"
+
+[scenario]
+kind = "direct_readable_sst"
+seed = 20240601
+
+[[scenario.tables]]
+database = "public"
+name = "paper_corrbound_r"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["host"]
+time_index = "ts"
+
+[[scenario.tables.columns]]
+name = "host"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 16, prefix = "h" }
+
+[[scenario.tables.columns]]
+name = "rid"
+type = "UINT64"
+semantic = "field"
+
+[[scenario.tables.columns]]
+name = "ts"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+[[scenario.tables]]
+database = "public"
+name = "paper_corrbound_s"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["host"]
+time_index = "ts"
+
+[[scenario.tables.columns]]
+name = "host"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 16, prefix = "h" }
+
+[[scenario.tables.columns]]
+name = "sid"
+type = "UINT64"
+semantic = "field"
+
+[[scenario.tables.columns]]
+name = "ts"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+[[scenario.tables]]
+database = "public"
+name = "paper_corrbound_t"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["host"]
+time_index = "ts"
+
+[[scenario.tables.columns]]
+name = "host"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 2048, prefix = "h" }
+
+[[scenario.tables.columns]]
+name = "tid"
+type = "UINT64"
+semantic = "field"
+
+[[scenario.tables.columns]]
+name = "ts"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+[scenario.layout]
+regions = 1
+sst_count = 4
+rows_per_sst = 512
+row_group_size = 128
+series_count = 2048
+start_unix_nanos = 1704067200000000000
+step_nanos = 1000000000
+time_range_layout = "non_overlapping_per_sst"
+series_layout = "round_robin"
+
+[[scenario.queries]]
+name = "rs_first_aligned"
+kind = "sql"
+query = "SELECT r.host AS r_key, r.rid AS r_val, s.host AS s_key, s.sid AS s_val, t.host AS t_key, t.tid AS t_val FROM (paper_corrbound_r AS r JOIN paper_corrbound_s AS s ON r.host = s.host) JOIN paper_corrbound_t AS t ON s.host = t.host WHERE r.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND r.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (r.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR r.host = 'h0') AND s.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND s.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (s.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR s.host = 'h0') AND t.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND t.ts < '2024-01-01 00:34:08+0000'::TIMESTAMP ORDER BY r_key ASC NULLS LAST, r_val ASC NULLS LAST, s_key ASC NULLS LAST, s_val ASC NULLS LAST, t_key ASC NULLS LAST, t_val ASC NULLS LAST"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 50
+
+[[scenario.queries]]
+name = "t_first_aligned"
+kind = "sql"
+query = "SELECT r.host AS r_key, r.rid AS r_val, s.host AS s_key, s.sid AS s_val, t.host AS t_key, t.tid AS t_val FROM paper_corrbound_t AS t JOIN (paper_corrbound_s AS s JOIN paper_corrbound_r AS r ON s.host = r.host) ON s.host = t.host WHERE r.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND r.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (r.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR r.host = 'h0') AND s.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND s.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (s.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR s.host = 'h0') AND t.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND t.ts < '2024-01-01 00:34:08+0000'::TIMESTAMP ORDER BY r_key ASC NULLS LAST, r_val ASC NULLS LAST, s_key ASC NULLS LAST, s_val ASC NULLS LAST, t_key ASC NULLS LAST, t_val ASC NULLS LAST"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 50
+
+[[scenario.queries]]
+name = "rs_first_anti"
+kind = "sql"
+query = "SELECT r.host AS r_key, r.rid AS r_val, s.host AS s_key, s.sid AS s_val, t.host AS t_key, t.tid AS t_val FROM (paper_corrbound_r AS r JOIN paper_corrbound_s AS s ON r.host = s.host) JOIN paper_corrbound_t AS t ON s.host = t.host WHERE r.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND r.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (r.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR r.host = 'h0') AND s.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND s.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (s.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR s.host = 'h1') AND t.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND t.ts < '2024-01-01 00:34:08+0000'::TIMESTAMP ORDER BY r_key ASC NULLS LAST, r_val ASC NULLS LAST, s_key ASC NULLS LAST, s_val ASC NULLS LAST, t_key ASC NULLS LAST, t_val ASC NULLS LAST"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 50
+
+[[scenario.queries]]
+name = "t_first_anti"
+kind = "sql"
+query = "SELECT r.host AS r_key, r.rid AS r_val, s.host AS s_key, s.sid AS s_val, t.host AS t_key, t.tid AS t_val FROM paper_corrbound_t AS t JOIN (paper_corrbound_s AS s JOIN paper_corrbound_r AS r ON s.host = r.host) ON s.host = t.host WHERE r.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND r.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (r.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR r.host = 'h0') AND s.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND s.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (s.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR s.host = 'h1') AND t.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND t.ts < '2024-01-01 00:34:08+0000'::TIMESTAMP ORDER BY r_key ASC NULLS LAST, r_val ASC NULLS LAST, s_key ASC NULLS LAST, s_val ASC NULLS LAST, t_key ASC NULLS LAST, t_val ASC NULLS LAST"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 50
+
+[[scenario.queries]]
+name = "diagnostic_explain_rs_first_aligned"
+kind = "sql"
+query = "EXPLAIN VERBOSE SELECT r.host AS r_key, r.rid AS r_val, s.host AS s_key, s.sid AS s_val, t.host AS t_key, t.tid AS t_val FROM (paper_corrbound_r AS r JOIN paper_corrbound_s AS s ON r.host = s.host) JOIN paper_corrbound_t AS t ON s.host = t.host WHERE r.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND r.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (r.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR r.host = 'h0') AND s.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND s.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (s.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR s.host = 'h0') AND t.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND t.ts < '2024-01-01 00:34:08+0000'::TIMESTAMP ORDER BY r_key ASC NULLS LAST, r_val ASC NULLS LAST, s_key ASC NULLS LAST, s_val ASC NULLS LAST, t_key ASC NULLS LAST, t_val ASC NULLS LAST"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "diagnostic_explain_t_first_aligned"
+kind = "sql"
+query = "EXPLAIN VERBOSE SELECT r.host AS r_key, r.rid AS r_val, s.host AS s_key, s.sid AS s_val, t.host AS t_key, t.tid AS t_val FROM paper_corrbound_t AS t JOIN (paper_corrbound_s AS s JOIN paper_corrbound_r AS r ON s.host = r.host) ON s.host = t.host WHERE r.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND r.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (r.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR r.host = 'h0') AND s.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND s.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (s.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR s.host = 'h0') AND t.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND t.ts < '2024-01-01 00:34:08+0000'::TIMESTAMP ORDER BY r_key ASC NULLS LAST, r_val ASC NULLS LAST, s_key ASC NULLS LAST, s_val ASC NULLS LAST, t_key ASC NULLS LAST, t_val ASC NULLS LAST"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "diagnostic_explain_rs_first_anti"
+kind = "sql"
+query = "EXPLAIN VERBOSE SELECT r.host AS r_key, r.rid AS r_val, s.host AS s_key, s.sid AS s_val, t.host AS t_key, t.tid AS t_val FROM (paper_corrbound_r AS r JOIN paper_corrbound_s AS s ON r.host = s.host) JOIN paper_corrbound_t AS t ON s.host = t.host WHERE r.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND r.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (r.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR r.host = 'h0') AND s.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND s.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (s.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR s.host = 'h1') AND t.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND t.ts < '2024-01-01 00:34:08+0000'::TIMESTAMP ORDER BY r_key ASC NULLS LAST, r_val ASC NULLS LAST, s_key ASC NULLS LAST, s_val ASC NULLS LAST, t_key ASC NULLS LAST, t_val ASC NULLS LAST"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "diagnostic_explain_t_first_anti"
+kind = "sql"
+query = "EXPLAIN VERBOSE SELECT r.host AS r_key, r.rid AS r_val, s.host AS s_key, s.sid AS s_val, t.host AS t_key, t.tid AS t_val FROM paper_corrbound_t AS t JOIN (paper_corrbound_s AS s JOIN paper_corrbound_r AS r ON s.host = r.host) ON s.host = t.host WHERE r.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND r.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (r.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR r.host = 'h0') AND s.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND s.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (s.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR s.host = 'h1') AND t.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND t.ts < '2024-01-01 00:34:08+0000'::TIMESTAMP ORDER BY r_key ASC NULLS LAST, r_val ASC NULLS LAST, s_key ASC NULLS LAST, s_val ASC NULLS LAST, t_key ASC NULLS LAST, t_val ASC NULLS LAST"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "diagnostic_analyze_rs_first_aligned"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT r.host AS r_key, r.rid AS r_val, s.host AS s_key, s.sid AS s_val, t.host AS t_key, t.tid AS t_val FROM (paper_corrbound_r AS r JOIN paper_corrbound_s AS s ON r.host = s.host) JOIN paper_corrbound_t AS t ON s.host = t.host WHERE r.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND r.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (r.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR r.host = 'h0') AND s.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND s.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (s.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR s.host = 'h0') AND t.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND t.ts < '2024-01-01 00:34:08+0000'::TIMESTAMP ORDER BY r_key ASC NULLS LAST, r_val ASC NULLS LAST, s_key ASC NULLS LAST, s_val ASC NULLS LAST, t_key ASC NULLS LAST, t_val ASC NULLS LAST"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "diagnostic_analyze_t_first_aligned"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT r.host AS r_key, r.rid AS r_val, s.host AS s_key, s.sid AS s_val, t.host AS t_key, t.tid AS t_val FROM paper_corrbound_t AS t JOIN (paper_corrbound_s AS s JOIN paper_corrbound_r AS r ON s.host = r.host) ON s.host = t.host WHERE r.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND r.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (r.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR r.host = 'h0') AND s.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND s.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (s.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR s.host = 'h0') AND t.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND t.ts < '2024-01-01 00:34:08+0000'::TIMESTAMP ORDER BY r_key ASC NULLS LAST, r_val ASC NULLS LAST, s_key ASC NULLS LAST, s_val ASC NULLS LAST, t_key ASC NULLS LAST, t_val ASC NULLS LAST"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "diagnostic_analyze_rs_first_anti"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT r.host AS r_key, r.rid AS r_val, s.host AS s_key, s.sid AS s_val, t.host AS t_key, t.tid AS t_val FROM (paper_corrbound_r AS r JOIN paper_corrbound_s AS s ON r.host = s.host) JOIN paper_corrbound_t AS t ON s.host = t.host WHERE r.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND r.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (r.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR r.host = 'h0') AND s.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND s.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (s.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR s.host = 'h1') AND t.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND t.ts < '2024-01-01 00:34:08+0000'::TIMESTAMP ORDER BY r_key ASC NULLS LAST, r_val ASC NULLS LAST, s_key ASC NULLS LAST, s_val ASC NULLS LAST, t_key ASC NULLS LAST, t_val ASC NULLS LAST"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "diagnostic_analyze_t_first_anti"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT r.host AS r_key, r.rid AS r_val, s.host AS s_key, s.sid AS s_val, t.host AS t_key, t.tid AS t_val FROM paper_corrbound_t AS t JOIN (paper_corrbound_s AS s JOIN paper_corrbound_r AS r ON s.host = r.host) ON s.host = t.host WHERE r.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND r.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (r.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR r.host = 'h0') AND s.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND s.ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (s.ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR s.host = 'h1') AND t.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND t.ts < '2024-01-01 00:34:08+0000'::TIMESTAMP ORDER BY r_key ASC NULLS LAST, r_val ASC NULLS LAST, s_key ASC NULLS LAST, s_val ASC NULLS LAST, t_key ASC NULLS LAST, t_val ASC NULLS LAST"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "diagnostic_source_counts"
+kind = "sql"
+query = "SELECT 'R' AS source, COUNT(*) AS row_count FROM paper_corrbound_r WHERE ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR host = 'h0') UNION ALL SELECT 'S_aligned', COUNT(*) FROM paper_corrbound_s WHERE ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR host = 'h0') UNION ALL SELECT 'S_anti', COUNT(*) FROM paper_corrbound_s WHERE ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND ts < '2024-01-01 00:18:08+0000'::TIMESTAMP AND (ts < '2024-01-01 00:01:04+0000'::TIMESTAMP OR host = 'h1') UNION ALL SELECT 'T', COUNT(*) FROM paper_corrbound_t WHERE ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND ts < '2024-01-01 00:34:08+0000'::TIMESTAMP ORDER BY source"
+warmup = 0
+iterations = 1
