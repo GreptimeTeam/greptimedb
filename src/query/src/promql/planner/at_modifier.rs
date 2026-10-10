@@ -41,7 +41,7 @@ impl PromPlanner {
     /// - `offset` shifts the anchor backwards: the window ends at `anchor - offset`.
     ///
     /// Returns `None` when the selector has no `@` modifier.
-    fn at_ref_time(
+    pub(crate) fn at_ref_time(
         &self,
         at: &Option<AtModifier>,
         offset: &Option<Offset>,

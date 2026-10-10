@@ -10,13 +10,13 @@ create table count_total (
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (partitioning.*) REDACTED
 tql explain (0, 100, '1s') 
-    increase(count_total{
+    max_over_time(increase(count_total{
       tag_a="ffa",
-    }[1h])[12h:1h];
+    }[1h])[12h:1h]);
 
 tql eval (0, 100, '1s') 
-    increase(count_total{
+    max_over_time(increase(count_total{
       tag_a="ffa",
-    }[1h])[12h:1h];
+    }[1h])[12h:1h]);
 
 drop table count_total;

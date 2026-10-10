@@ -106,14 +106,17 @@ use crate::promql::error::{
     CatalogSnafu, ColumnNotFoundSnafu, DataFusionPlanningSnafu, ExpectRangeSelectorSnafu,
     FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu, InvalidRegularExpressionSnafu,
     InvalidTimeRangeSnafu, MultiFieldsNotSupportedSnafu, MultipleMetricMatchersSnafu,
-    MultipleVectorSnafu, NoMetricMatcherSnafu, Result, SubqueryTimestampOutOfRangeSnafu,
-    TableNameNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu,
-    UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, ValueNotFoundSnafu,
-    ZeroRangeSelectorSnafu,
+    MultipleVectorSnafu, NoMetricMatcherSnafu, RangeVectorInRangeQuerySnafu, Result,
+    SubqueryTimestampOutOfRangeSnafu, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu,
+    UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu,
+    UnsupportedMatcherOpSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu, ZeroSubqueryStepSnafu,
 };
 use crate::promql::label_values::signed_millis_since_epoch;
 use crate::query_engine::QueryEngineState;
 
+/// Step of a subquery without an explicit one (`x[5m:]`). Prometheus uses the global
+/// evaluation interval, whose default is one minute, rather than the query step.
+const DEFAULT_SUBQUERY_STEP_MS: Millisecond = 60_000;
 /// `time()` function in PromQL.
 const SPECIAL_TIME_FUNCTION: &str = "time";
 /// `scalar()` function in PromQL.
@@ -315,7 +318,7 @@ impl PromPlanner {
         };
 
         let plan = planner
-            .prom_expr_to_plan(&stmt.expr, query_engine_state)
+            .prom_root_expr_to_plan(&stmt.expr, query_engine_state)
             .await?;
 
         // Never leak internal series identifier to output.
@@ -397,6 +400,170 @@ impl PromPlanner {
         };
 
         Ok(res)
+    }
+
+    /// Plans the root expression of a statement, or the expression wrapped by a root extension
+    /// such as `EXPLAIN` or an alias.
+    ///
+    /// Prometheus only accepts a range-vector expression in an instant query, whose result is
+    /// the matrix of samples the expression selects.
+    async fn prom_root_expr_to_plan(
+        &mut self,
+        prom_expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<LogicalPlan> {
+        if matches!(prom_expr, PromExpr::Extension(_))
+            || prom_expr.value_type() != ValueType::Matrix
+        {
+            return self.prom_expr_to_plan(prom_expr, query_engine_state).await;
+        }
+        ensure!(self.ctx.start == self.ctx.end, RangeVectorInRangeQuerySnafu);
+        self.prom_range_vector_result_to_plan(prom_expr, query_engine_state)
+            .await
+    }
+
+    /// Plans the result of a range-vector expression in an instant query: the raw samples of a
+    /// range selector, or the evaluation points of a subquery, with their own timestamps.
+    ///
+    /// Range functions consume the same expressions through [`RangeManipulate`], whose range
+    /// arrays are an internal representation that must not reach the query output.
+    async fn prom_range_vector_result_to_plan(
+        &mut self,
+        prom_expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<LogicalPlan> {
+        let mut expr = prom_expr;
+        while let PromExpr::Paren(ParenExpr { expr: inner }) = expr {
+            expr = inner;
+        }
+        match expr {
+            PromExpr::MatrixSelector(selector) => {
+                self.prom_range_selector_samples_to_plan(selector).await
+            }
+            PromExpr::Subquery(subquery) => {
+                self.prom_subquery_samples_to_plan(subquery, query_engine_state)
+                    .await
+            }
+            _ => UnsupportedExprSnafu {
+                name: format!("range vector result of {expr:?}"),
+            }
+            .fail(),
+        }
+    }
+
+    /// Selects the samples of `selector` in `(t - offset - range, t - offset]`, where `t` is the
+    /// evaluation time or the `@` anchor. Stale markers are dropped and timestamps are kept.
+    async fn prom_range_selector_samples_to_plan(
+        &mut self,
+        selector: &MatrixSelector,
+    ) -> Result<LogicalPlan> {
+        let MatrixSelector { vs, range } = selector;
+        let VectorSelector {
+            name,
+            offset,
+            matchers,
+            at,
+        } = vs;
+        let matchers = self.preprocess_label_matchers(matchers, name)?;
+        ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
+        self.ctx.range = Some(range.as_millis() as _);
+        let offset_ms = match self.at_modifier_offset(at, offset)? {
+            Some(at_offset) => at_offset,
+            None => Self::offset_millis(offset),
+        };
+        if let Some(empty_plan) = self.setup_context().await? {
+            return Ok(empty_plan);
+        }
+        let plan = self
+            .selector_to_series_normalize_plan(offset_ms, matchers, true)
+            .await?;
+        self.millisecond_time_index_plan(plan)
+    }
+
+    /// Casts a microsecond or nanosecond time index to milliseconds, the precision of every
+    /// other PromQL result and the only one the Prometheus HTTP API encodes.
+    fn millisecond_time_index_plan(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
+        let time_index =
+            self.ctx
+                .time_index_column
+                .as_deref()
+                .with_context(|| TimeIndexNotFoundSnafu {
+                    table: self.ctx.table_name.clone().unwrap_or_default(),
+                })?;
+        let (_, field) = plan
+            .schema()
+            .qualified_field_with_unqualified_name(time_index)
+            .context(DataFusionPlanningSnafu)?;
+        let millis = match field.data_type() {
+            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, _) => return Ok(plan),
+            ArrowDataType::Timestamp(_, timezone) => {
+                ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, timezone.clone())
+            }
+            other => unreachable!("time index is a timestamp, got {other}"),
+        };
+        let exprs = plan
+            .schema()
+            .iter()
+            .map(|(qualifier, field)| {
+                let column = DfExpr::Column(Column::new(qualifier.cloned(), field.name()));
+                if field.name() == time_index {
+                    column
+                        .cast_to(&millis, plan.schema())
+                        .map(|cast| cast.alias_qualified(qualifier.cloned(), field.name().clone()))
+                } else {
+                    Ok(column)
+                }
+            })
+            .collect::<datafusion::error::Result<Vec<_>>>()
+            .context(DataFusionPlanningSnafu)?;
+        LogicalPlanBuilder::from(plan)
+            .project(exprs)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)
+    }
+
+    /// Evaluates the inner expression of `subquery` at the multiples of its step in
+    /// `(t - offset - range, t - offset]`, where `t` is the evaluation time or the `@` anchor.
+    async fn prom_subquery_samples_to_plan(
+        &mut self,
+        subquery: &SubqueryExpr,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<LogicalPlan> {
+        let SubqueryExpr {
+            expr,
+            range,
+            step,
+            offset,
+            at,
+            ..
+        } = subquery;
+        ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
+        let end = match self.at_ref_time(at, offset)? {
+            Some(anchor) => anchor,
+            None => Self::anchor_sub(self.ctx.end, Self::offset_millis(offset))?,
+        };
+        self.ctx.interval = match step {
+            Some(step) => step.as_millis() as _,
+            None => DEFAULT_SUBQUERY_STEP_MS,
+        };
+        let interval = self.ctx.interval;
+        ensure!(interval > 0, ZeroSubqueryStepSnafu);
+        let window = Self::subquery_child_window(end, end, 0, 0, range.as_millis() as _, interval)?;
+        let Some((start, end)) = window else {
+            // No step multiple falls in the window; plan the inner expression only for its
+            // schema.
+            self.ctx.start = end;
+            self.ctx.end = end;
+            let plan = self.prom_expr_to_plan(expr, query_engine_state).await?;
+            return Ok(LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: plan.schema().clone(),
+            }));
+        };
+        self.ctx.start = start;
+        self.ctx.end = end;
+        self.prom_expr_to_plan(expr, query_engine_state).await
     }
 
     async fn prom_subquery_expr_to_plan(
@@ -2226,7 +2393,7 @@ impl PromPlanner {
         let expr = &ext_expr.expr;
         let children = expr.children();
         let plan = self
-            .prom_expr_to_plan(&children[0], query_engine_state)
+            .prom_root_expr_to_plan(&children[0], query_engine_state)
             .await?;
         // Wrapper for the explanation/analyze of the existing plan
         // https://docs.rs/datafusion-expr/latest/datafusion_expr/logical_plan/builder/struct.LogicalPlanBuilder.html#method.explain
