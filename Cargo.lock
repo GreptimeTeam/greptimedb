@@ -8696,6 +8696,7 @@ dependencies = [
  "api",
  "aquamarine",
  "arrow-schema 59.2.0",
+ "arrow-select 59.2.0",
  "async-channel 1.9.0",
  "async-stream",
  "async-trait",
