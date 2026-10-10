@@ -181,6 +181,39 @@ async fn single_table_plan_filters_other_routing_ids_before_export() {
 }
 
 #[tokio::test]
+async fn dictionary_null_values_write_the_logical_parquet_schema() {
+    let input = batch(vec![Some(1025); 4], vec![Some("placeholder"); 4]);
+    let mut columns = input.columns().to_vec();
+    columns[2] = Arc::new(
+        DictionaryArray::<UInt32Type>::try_new(
+            UInt32Array::from(vec![Some(0), Some(1), None, Some(0)]),
+            Arc::new(StringArray::from(vec![Some("host"), None])),
+        )
+        .unwrap(),
+    );
+    let input = RecordBatch::try_new(input.schema(), columns).unwrap();
+    let unit = unit();
+    let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
+    let summary = export_stream(
+        &unit,
+        stream(vec![input]),
+        &store,
+        LogicalTableExportLimits::default(),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(summary.rows, 4);
+    let (schema, output) = read(&store, "cpu.v1.parquet").await;
+    assert_eq!(schema.fields(), unit.logical_tables[&1025].schema.fields());
+    let hosts = output
+        .iter()
+        .flat_map(|batch| batch.column(0).as_string::<i32>().iter())
+        .collect::<Vec<_>>();
+    assert_eq!(hosts, vec![Some("host"), None, None, Some("host")]);
+}
+
+#[tokio::test]
 async fn narrow_batches_share_row_groups() {
     let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
     let batches = (0..8)
@@ -860,9 +893,12 @@ async fn retained_backing_is_reserved_before_conversion_and_until_payload_drop()
     drop(blocker);
     let (payload, rows) = convert.await.unwrap();
     assert_eq!(rows, 1);
-    assert!(
-        64 * 1024 * 1024 - budget.available().1 >= full + payload.batch.get_array_memory_size()
-    );
+    assert!(matches!(
+        payload.batch.column(0).data_type(),
+        DataType::Dictionary(_, _)
+    ));
+    // The retained dictionary shares its input buffers, so they are charged once.
+    assert!(64 * 1024 * 1024 - budget.available().1 >= full);
     drop(payload);
     assert_eq!(budget.available(), (1, 64 * 1024 * 1024));
     assert!(budget.reserve(64 * 1024 * 1024 + 1, &token).await.is_err());

@@ -630,6 +630,34 @@ async fn expand_bounded_slice(
     let permit = budget.reserve(reservation, cancellation).await?;
     common_runtime::spawn_blocking_global(move || {
         let slice = batch.slice(start, len);
+        // Parquet accepts compatible string dictionaries without expanding their values.
+        let fields = schema
+            .fields()
+            .iter()
+            .zip(slice.columns())
+            .map(|(field, array)| {
+                if let DataType::Dictionary(_, value) = array.data_type()
+                    && value.as_ref() == field.data_type()
+                    && matches!(
+                        value.as_ref(),
+                        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+                    )
+                {
+                    Arc::new(
+                        field
+                            .as_ref()
+                            .clone()
+                            .with_data_type(array.data_type().clone()),
+                    )
+                } else {
+                    field.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        let schema = Arc::new(arrow::datatypes::Schema::new_with_metadata(
+            fields,
+            schema.metadata().clone(),
+        ));
         let expanded = expand_export_batch(&slice, schema)?;
         ensure!(
             expanded.get_array_memory_size() <= reservation,
