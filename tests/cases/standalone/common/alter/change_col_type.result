@@ -386,7 +386,6 @@ DROP TABLE ts_overflow;
 
 Affected Rows: 0
 
-
 -- Issue 9454: persisted partition bounds keep their original unit. Widening the
 -- time index unit must be rejected before any region is altered when a persisted
 -- bound overflows the new unit.
