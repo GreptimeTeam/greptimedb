@@ -19,7 +19,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use common_telemetry::{debug, warn};
-use datafusion::arrow::array::{Array, ArrayRef, Int64Array, TimestampMillisecondArray};
+use datafusion::arrow::array::{
+    Array, ArrayRef, Float64Array, Int64Array, TimestampMillisecondArray,
+};
 use datafusion::arrow::compute;
 use datafusion::arrow::datatypes::{DataType, Field, Int64Type, SchemaRef, TimeUnit};
 use datafusion::arrow::error::ArrowError;
@@ -31,13 +33,16 @@ use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_expr::ScalarFunctionExpr;
+use datafusion::physical_expr::expressions::{Column, Literal};
 use datafusion::physical_plan::metrics::{
     BaselineMetrics, Count, ExecutionPlanMetricsSet, MetricBuilder, MetricValue, MetricsSet,
 };
+use datafusion::physical_plan::projection::{ProjectionExec, ProjectionExpr};
 use datafusion::physical_plan::{
-    ChildStats, DisplayAs, DisplayFormatType, Distribution, ExecutionPlan,
+    ChildStats, ChildrenPropertiesMode, DisplayAs, DisplayFormatType, Distribution, ExecutionPlan,
     InputDistributionRequirements, PhysicalExpr, PlanProperties, RecordBatchStream,
-    SendableRecordBatchStream, Statistics, StatisticsArgs,
+    ReplaceChildrenOptions, SendableRecordBatchStream, Statistics, StatisticsArgs,
 };
 use datafusion_expr::ident;
 use datatypes::timestamp::timestamp_array_to_primitive;
@@ -208,6 +213,7 @@ impl RangeManipulate {
             output_schema,
             metric: ExecutionPlanMetricsSet::new(),
             properties,
+            fused_rate: None,
         })
     }
 
@@ -435,7 +441,7 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RangeManipulateExec {
     offset: Millisecond,
     start: Millisecond,
@@ -450,6 +456,161 @@ pub struct RangeManipulateExec {
     output_schema: SchemaRef,
     metric: ExecutionPlanMetricsSet,
     properties: Arc<PlanProperties>,
+    fused_rate: Option<FusedRate>,
+}
+
+#[derive(Debug, Clone)]
+struct FusedRate {
+    rate_source: usize,
+    rate_position: usize,
+    timestamp_position: usize,
+    projections: Vec<ProjectionExpr>,
+    folded_schema: SchemaRef,
+}
+
+impl RangeManipulateExec {
+    /// Fuse a projection containing one supported PromQL rate expression into this range operator.
+    ///
+    /// Returns `None` when the raw columns or projection shape do not match the rate kernel ABI.
+    pub fn try_fuse_rate_projection(
+        &self,
+        projection: &ProjectionExec,
+    ) -> DataFusionResult<Option<Arc<dyn ExecutionPlan>>> {
+        if self.offset != 0 {
+            return Ok(None);
+        }
+        let raw_input_schema = self.input.schema();
+        let Some((time_index, _)) = raw_input_schema.column_with_name(&self.time_index_column)
+        else {
+            return Ok(None);
+        };
+        if raw_input_schema
+            .fields()
+            .get(time_index)
+            .map(|f| f.data_type())
+            != Some(&DataType::Timestamp(TimeUnit::Millisecond, None))
+        {
+            return Ok(None);
+        }
+        let Some((time_range_index, _)) =
+            self.output_schema.column_with_name(&self.time_range_column)
+        else {
+            return Ok(None);
+        };
+        let Some((rate_field_name, rate_field_index)) =
+            self.field_columns.iter().find_map(|name| {
+                self.output_schema
+                    .column_with_name(name)
+                    .map(|(index, _)| (name, index))
+            })
+        else {
+            return Ok(None);
+        };
+        let Some((raw_rate_index, raw_rate_field)) =
+            raw_input_schema.column_with_name(rate_field_name)
+        else {
+            return Ok(None);
+        };
+        if raw_rate_field.data_type() != &DataType::Float64 {
+            return Ok(None);
+        }
+        if raw_input_schema.field(time_index).is_nullable() {
+            return Ok(None);
+        }
+        let projections = projection.expr().to_vec();
+        let mut rate_position = None;
+        let mut timestamp_position = None;
+        for (position, item) in projections.iter().enumerate() {
+            if let Some(function) = item.expr.downcast_ref::<ScalarFunctionExpr>() {
+                if rate_position.is_some()
+                    || crate::functions::Rate::scalar_udf() != *function.fun()
+                    || function.args().len() != 4
+                {
+                    return Ok(None);
+                }
+                let Some(ts_arg) = function.args()[0].downcast_ref::<Column>() else {
+                    return Ok(None);
+                };
+                let Some(value_arg) = function.args()[1].downcast_ref::<Column>() else {
+                    return Ok(None);
+                };
+                let Some(eval_arg) = function.args()[2].downcast_ref::<Column>() else {
+                    return Ok(None);
+                };
+                let Some(range_arg) = function.args()[3].downcast_ref::<Literal>() else {
+                    return Ok(None);
+                };
+                if ts_arg.index() != time_range_index
+                    || eval_arg.index() != time_index
+                    || value_arg.index() != rate_field_index
+                {
+                    return Ok(None);
+                }
+                let datafusion::common::ScalarValue::Int64(Some(duration)) = range_arg.value()
+                else {
+                    return Ok(None);
+                };
+                if *duration != self.range {
+                    return Ok(None);
+                }
+                rate_position = Some(position);
+            } else {
+                let Some(column) = item.expr.downcast_ref::<Column>() else {
+                    return Ok(None);
+                };
+                if column.index() == time_range_index
+                    || self.field_columns.iter().any(|name| {
+                        self.output_schema
+                            .column_with_name(name)
+                            .is_some_and(|(i, _)| i == column.index())
+                    })
+                {
+                    return Ok(None);
+                }
+                if column.index() == time_index && timestamp_position.replace(position).is_some() {
+                    return Ok(None);
+                }
+            }
+        }
+        let Some(rate_position) = rate_position else {
+            return Ok(None);
+        };
+        let Some(timestamp_position) = timestamp_position else {
+            return Ok(None);
+        };
+        if self.output_schema.fields().get(time_range_index).is_none()
+            || raw_input_schema.fields().get(raw_rate_index).is_none()
+            || projections.iter().any(|item| {
+                item.expr
+                    .downcast_ref::<Column>()
+                    .is_some_and(|column| self.output_schema.fields().get(column.index()).is_none())
+            })
+        {
+            return Ok(None);
+        }
+        let base = Arc::new(Self {
+            fused_rate: None,
+            ..self.clone()
+        }) as Arc<dyn ExecutionPlan>;
+        let rebuilt = ProjectionExec::try_new_with_schema_metadata(
+            projections.clone(),
+            base,
+            projection.schema().as_ref(),
+        )?;
+        let fused = Self {
+            fused_rate: Some(FusedRate {
+                rate_source: raw_rate_index,
+                rate_position,
+                timestamp_position,
+                projections,
+                folded_schema: self.output_schema.clone(),
+            }),
+            output_schema: projection.schema(),
+            properties: rebuilt.properties().clone(),
+            ..self.clone()
+        };
+        Ok(Some(Arc::new(fused)))
+    }
 }
 
 impl ExecutionPlan for RangeManipulateExec {
@@ -496,13 +657,32 @@ impl ExecutionPlan for RangeManipulateExec {
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         assert!(!children.is_empty());
         let exec_input = children[0].clone();
-        let properties = exec_input.properties();
-        let properties = Arc::new(PlanProperties::new(
-            EquivalenceProperties::new(self.output_schema.clone()),
-            properties.partitioning.clone(),
-            properties.emission_type,
-            properties.boundedness,
-        ));
+        let properties = if let Some(fused) = &self.fused_rate {
+            let ordinary = Arc::new(Self {
+                fused_rate: None,
+                output_schema: fused.folded_schema.clone(),
+                ..self.as_ref().clone()
+            })
+            .replace_children(
+                vec![exec_input.clone()],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )?;
+            ProjectionExec::try_new_with_schema_metadata(
+                fused.projections.clone(),
+                ordinary,
+                self.output_schema.as_ref(),
+            )?
+            .properties()
+            .clone()
+        } else {
+            let properties = exec_input.properties();
+            Arc::new(PlanProperties::new(
+                EquivalenceProperties::new(self.output_schema.clone()),
+                properties.partitioning.clone(),
+                properties.emission_type,
+                properties.boundedness,
+            ))
+        };
         Ok(Arc::new(Self {
             offset: self.offset,
             start: self.start,
@@ -516,6 +696,7 @@ impl ExecutionPlan for RangeManipulateExec {
             input: children[0].clone(),
             metric: self.metric.clone(),
             properties,
+            fused_rate: self.fused_rate.clone(),
         }))
     }
 
@@ -567,6 +748,7 @@ impl ExecutionPlan for RangeManipulateExec {
             input,
             metric: baseline_metric,
             num_series,
+            fused_rate: self.fused_rate.clone(),
         }))
     }
 
@@ -604,7 +786,11 @@ impl ExecutionPlan for RangeManipulateExec {
     }
 
     fn name(&self) -> &str {
-        "RangeManipulateExec"
+        if self.fused_rate.is_some() {
+            "PromRangeRateExec"
+        } else {
+            "RangeManipulateExec"
+        }
     }
 }
 
@@ -616,8 +802,17 @@ impl DisplayAs for RangeManipulateExec {
             | DisplayFormatType::TreeRender => {
                 write!(
                     f,
-                    "PromRangeManipulateExec: req range=[{}..{}], interval=[{}], eval range=[{}], time index=[{}]",
-                    self.start, self.end, self.interval, self.range, self.time_index_column
+                    "{}: req range=[{}..{}], interval=[{}], eval range=[{}], time index=[{}]",
+                    if self.fused_rate.is_some() {
+                        "PromRangeRateExec"
+                    } else {
+                        "PromRangeManipulateExec"
+                    },
+                    self.start,
+                    self.end,
+                    self.interval,
+                    self.range,
+                    self.time_index_column
                 )
             }
         }
@@ -640,6 +835,7 @@ pub struct RangeManipulateStream {
     metric: BaselineMetrics,
     /// Number of series processed.
     num_series: Count,
+    fused_rate: Option<FusedRate>,
 }
 
 impl RecordBatchStream for RangeManipulateStream {
@@ -682,7 +878,6 @@ impl RangeManipulateStream {
     // But they are not exactly the same, because we don't eager-evaluate on the data in this plan.
     // And the generated timestamp is not aligned to the step. It's expected to do later.
     pub fn manipulate(&self, input: RecordBatch) -> DataFusionResult<Option<RecordBatch>> {
-        let mut other_columns = (0..input.columns().len()).collect::<HashSet<_>>();
         // calculate the range
         let (ranges, (start, end)) = self.calculate_range(&input)?;
         // ignore this if all ranges are empty
@@ -690,7 +885,64 @@ impl RangeManipulateStream {
             return Ok(None);
         }
 
+        if let Some(fused) = &self.fused_rate {
+            let timestamps = input
+                .column(self.time_index)
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .ok_or_else(|| {
+                    DataFusionError::Execution("Fused rate requires millisecond timestamps".into())
+                })?;
+            let values = input
+                .column(fused.rate_source)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .ok_or_else(|| {
+                    DataFusionError::Execution("Fused rate requires Float64 values".into())
+                })?;
+            let aligned = if start != self.start || end != self.end {
+                Self::build_aligned_ts_array(start, end, self.interval)
+            } else {
+                self.aligned_ts_array.clone()
+            };
+            let eval_ts = aligned
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .ok_or_else(|| {
+                    DataFusionError::Execution(
+                        "Fused rate requires millisecond evaluation timestamps".into(),
+                    )
+                })?;
+            let rates = crate::functions::Rate::calculate_ranges(
+                timestamps, values, &ranges, eval_ts, self.range,
+            )?;
+            let take_indices = Int64Array::from(vec![0; ranges.len()]);
+            let mut columns = Vec::with_capacity(fused.projections.len());
+            for (position, projection) in fused.projections.iter().enumerate() {
+                if position == fused.rate_position {
+                    columns.push(Arc::new(rates.clone()) as ArrayRef);
+                } else if position == fused.timestamp_position {
+                    columns.push(aligned.clone());
+                } else {
+                    let Some(column) = projection.expr.downcast_ref::<Column>() else {
+                        return Err(DataFusionError::Execution(
+                            "Invalid fused rate projection mapping".into(),
+                        ));
+                    };
+                    columns.push(compute::take(
+                        input.column(column.index()),
+                        &take_indices,
+                        None,
+                    )?);
+                }
+            }
+            return RecordBatch::try_new(self.output_schema.clone(), columns)
+                .map(Some)
+                .map_err(|e| DataFusionError::ArrowError(Box::new(e), None));
+        }
+
         // transform columns
+        let mut other_columns = (0..input.columns().len()).collect::<HashSet<_>>();
         let mut new_columns = input.columns().to_vec();
         for index in self.field_columns.iter() {
             let _ = other_columns.remove(index);
@@ -1035,21 +1287,301 @@ mod test {
     use datafusion::arrow::datatypes::{
         ArrowPrimitiveType, DataType, Field, Int64Type, Schema, TimestampMillisecondType,
     };
+    use datafusion::common::ScalarValue;
     use datafusion::common::ToDFSchema;
+    use datafusion::config::ConfigOptions;
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
     use datafusion::logical_expr::{
         EmptyRelation, Extension, LogicalPlan, UserDefinedLogicalNodeCore,
     };
     use datafusion::physical_expr::Partitioning;
+    use datafusion::physical_expr::ScalarFunctionExpr;
+    use datafusion::physical_expr::expressions::Literal as PhysicalLiteral;
     use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
     use datafusion::physical_plan::memory::MemoryStream;
+    use datafusion::physical_plan::projection::ProjectionExec;
     use datafusion::physical_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
     use datafusion::prelude::SessionContext;
     use datatypes::arrow::array::TimestampMillisecondArray;
     use futures::FutureExt;
 
     use super::*;
+
+    fn rate_projection(schema: &SchemaRef, duration: i64) -> ProjectionExec {
+        rate_projection_with_udf(schema, duration, crate::functions::Rate::scalar_udf())
+    }
+
+    fn rate_projection_with_udf(
+        schema: &SchemaRef,
+        duration: i64,
+        udf: datafusion::logical_expr::ScalarUDF,
+    ) -> ProjectionExec {
+        let config = Arc::new(ConfigOptions::default());
+        let args = vec![
+            Arc::new(Column::new("timestamp_range", 5)) as Arc<dyn PhysicalExpr>,
+            Arc::new(Column::new("value", 3)),
+            Arc::new(Column::new("timestamp", 4)),
+            Arc::new(PhysicalLiteral::new(ScalarValue::Int64(Some(duration)))),
+        ];
+        let rate_field = Arc::new(Field::new("rate", DataType::Float64, true));
+        let rate = Arc::new(ScalarFunctionExpr::new(
+            "prom_rate",
+            Arc::new(udf),
+            args,
+            rate_field,
+            config.clone(),
+        ));
+        ProjectionExec::try_new(
+            vec![
+                (
+                    Arc::new(Column::new("timestamp", 4)) as Arc<dyn PhysicalExpr>,
+                    "timestamp".to_string(),
+                ),
+                (Arc::new(Column::new("dc", 1)), "dc".to_string()),
+                (rate as Arc<dyn PhysicalExpr>, "rate".to_string()),
+            ],
+            Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
+                schema.clone(),
+            )),
+        )
+        .unwrap()
+    }
+
+    async fn fusion_fixture(
+        start: i64,
+        end: i64,
+        interval: i64,
+        range: i64,
+    ) -> (
+        RangeManipulateExec,
+        Arc<dyn ExecutionPlan>,
+        ProjectionExec,
+        RecordBatch,
+    ) {
+        let raw_schema = Arc::new(Schema::new(vec![
+            Field::new("host", DataType::Utf8, true),
+            Field::new("dc", DataType::Utf8, true),
+            Field::new("unused", DataType::Int64, true),
+            Field::new("value", DataType::Float64, true),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            raw_schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec![Some("h"); 7])),
+                Arc::new(StringArray::from(vec![Some("west"); 7])),
+                Arc::new(Int64Array::from(vec![Some(1); 7])),
+                Arc::new(Float64Array::from(vec![
+                    Some(1.0),
+                    Some(3.0),
+                    Some(0.5),
+                    None,
+                    Some(2.0),
+                    Some(4.0),
+                    Some(7.0),
+                ])),
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    0, 10, 20, 30, 40, 50, 60,
+                ])),
+            ],
+        )
+        .unwrap();
+        let source = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch.clone()]], raw_schema.clone(), None).unwrap(),
+        ))) as Arc<dyn ExecutionPlan>;
+        let logical = LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: raw_schema.to_dfschema_ref().unwrap(),
+        });
+        let logical = RangeManipulate::new(
+            start,
+            end,
+            interval,
+            0,
+            range,
+            "timestamp".into(),
+            vec!["value".into()],
+            logical,
+        )
+        .unwrap();
+        let range_exec = logical.to_execution_plan(source.clone());
+        let range_exec = range_exec
+            .downcast_ref::<RangeManipulateExec>()
+            .unwrap()
+            .clone();
+        let folded_schema = range_exec.schema();
+        let projection = rate_projection(&folded_schema, range);
+        (range_exec, source, projection, batch)
+    }
+
+    #[tokio::test]
+    async fn fused_rate_projection_matches_range_projection_for_clipped_windows() {
+        for (start, end, interval, duration) in
+            [(15, 45, 10, 30), (20, 20, 10, 20), (-15, 105, 10, 30)]
+        {
+            let (range, source, projection, _) =
+                fusion_fixture(start, end, interval, duration).await;
+            let fused = range
+                .try_fuse_rate_projection(&projection)
+                .unwrap()
+                .expect("supported rate projection");
+            assert_eq!(fused.name(), "PromRangeRateExec");
+            let fused = fused.downcast_ref::<RangeManipulateExec>().unwrap().clone();
+            assert_eq!(fused.schema(), projection.schema());
+            let replacement = range.input.clone();
+            let fused = Arc::new(fused)
+                .replace_children(
+                    vec![replacement],
+                    ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+                )
+                .unwrap();
+            assert_eq!(fused.schema(), projection.schema());
+            let ordinary_range = range.input.clone();
+            let ordinary = ProjectionExec::try_new_with_schema_metadata(
+                projection.expr().to_vec(),
+                range_to_exec(&range, ordinary_range),
+                projection.schema().as_ref(),
+            )
+            .unwrap();
+            let expected = datafusion::physical_plan::collect(
+                Arc::new(ordinary),
+                SessionContext::default().task_ctx(),
+            )
+            .await
+            .unwrap();
+            let actual =
+                datafusion::physical_plan::collect(fused, SessionContext::default().task_ctx())
+                    .await
+                    .unwrap();
+            assert_eq!(actual.len(), expected.len());
+            for (actual, expected) in actual.iter().zip(expected.iter()) {
+                assert_eq!(actual.schema(), expected.schema());
+                assert_eq!(actual.column(0), expected.column(0));
+                assert_eq!(actual.column(1), expected.column(1));
+                let a = actual
+                    .column(2)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                let e = expected
+                    .column(2)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                assert_eq!(a.len(), e.len());
+                for (a, e) in a.iter().zip(e.iter()) {
+                    match (a, e) {
+                        (None, None) => {}
+                        (Some(a), Some(e)) => assert_eq!(a.to_bits(), e.to_bits()),
+                        _ => panic!("rate null mismatch"),
+                    }
+                }
+            }
+            let _ = source;
+        }
+    }
+
+    #[tokio::test]
+    async fn fused_replacement_recomputes_projection_properties() {
+        let (range, _, projection, _) = fusion_fixture(15, 45, 10, 30).await;
+        let fused = range
+            .try_fuse_rate_projection(&projection)
+            .unwrap()
+            .unwrap();
+        let replacement = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![], vec![]], range.input.schema(), None).unwrap(),
+        ))) as Arc<dyn ExecutionPlan>;
+        let fused = fused
+            .replace_children(
+                vec![replacement.clone()],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )
+            .unwrap();
+        let ordinary = Arc::new(range.clone())
+            .replace_children(
+                vec![replacement],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )
+            .unwrap();
+        let ordinary = ProjectionExec::try_new_with_schema_metadata(
+            projection.expr().to_vec(),
+            ordinary,
+            projection.schema().as_ref(),
+        )
+        .unwrap();
+        assert!(matches!(
+            fused.properties().partitioning,
+            Partitioning::UnknownPartitioning(2)
+        ));
+        assert_eq!(
+            fused.properties().partitioning.partition_count(),
+            ordinary.properties().partitioning.partition_count()
+        );
+        assert_eq!(
+            fused.properties().emission_type,
+            ordinary.properties().emission_type
+        );
+        assert_eq!(
+            fused.properties().boundedness,
+            ordinary.properties().boundedness
+        );
+    }
+
+    #[tokio::test]
+    async fn same_name_custom_rate_udf_is_not_fused() {
+        let (range, _, projection, _) = fusion_fixture(15, 45, 10, 30).await;
+        let custom_udf = datafusion_expr::create_udf(
+            "prom_rate",
+            vec![
+                RangeArray::convert_data_type(DataType::Timestamp(TimeUnit::Millisecond, None)),
+                RangeArray::convert_data_type(DataType::Float64),
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                DataType::Int64,
+            ],
+            DataType::Float64,
+            datafusion::logical_expr::Volatility::Volatile,
+            Arc::new(|_| {
+                Ok(datafusion::physical_plan::ColumnarValue::Scalar(
+                    ScalarValue::Float64(Some(1.0)),
+                ))
+            }),
+        );
+        let custom_projection = rate_projection_with_udf(&range.schema(), 30, custom_udf);
+        assert_eq!(
+            custom_projection.expr()[2]
+                .expr
+                .downcast_ref::<ScalarFunctionExpr>()
+                .unwrap()
+                .name(),
+            projection.expr()[2]
+                .expr
+                .downcast_ref::<ScalarFunctionExpr>()
+                .unwrap()
+                .name()
+        );
+        assert!(
+            range
+                .try_fuse_rate_projection(&custom_projection)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    fn range_to_exec(
+        range: &RangeManipulateExec,
+        source: Arc<dyn ExecutionPlan>,
+    ) -> Arc<dyn ExecutionPlan> {
+        Arc::new(RangeManipulateExec {
+            input: source,
+            fused_rate: None,
+            ..range.clone()
+        })
+    }
 
     const TIME_INDEX_COLUMN: &str = "timestamp";
 
@@ -1138,6 +1670,7 @@ mod test {
             input: memory_exec,
             metric: ExecutionPlanMetricsSet::new(),
             properties,
+            fused_rate: None,
         });
         let session_context = SessionContext::default();
         let result = datafusion::physical_plan::collect(normalize_exec, session_context.task_ctx())
@@ -1767,6 +2300,7 @@ mod test {
             input: Box::pin(empty_stream),
             metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
             num_series: Count::new(),
+            fused_rate: None,
         };
 
         // Create test data with timestamps not aligned to query pattern
@@ -1896,6 +2430,7 @@ mod test {
             input: Box::pin(empty_stream),
             metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
             num_series: Count::new(),
+            fused_rate: None,
         };
         let batch = RecordBatch::try_new(
             schema,

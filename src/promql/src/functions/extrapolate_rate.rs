@@ -31,7 +31,7 @@
 
 use std::fmt::Display;
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use datafusion::arrow::array::{Float64Array, Float64Builder, TimestampMillisecondArray};
 use datafusion::arrow::datatypes::TimeUnit;
@@ -179,13 +179,35 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             .values()
             .as_any()
             .downcast_ref::<TimestampMillisecondArray>()
-            .expect("validated by extract_range_dict")
-            .values();
+            .expect("validated by extract_range_dict");
         let value_array = value_dict
             .values()
             .as_any()
             .downcast_ref::<Float64Array>()
             .expect("validated by extract_range_dict");
+        let result = Self::calc_ranges(
+            all_timestamps,
+            value_array,
+            keys.iter().copied().map(unpack),
+            &eval_ts_array,
+            self.range_length,
+        )?;
+        Ok(ColumnarValue::Array(Arc::new(result)))
+    }
+
+    /// Shared numeric kernel for the dictionary range caller and raw range callers.
+    fn calc_ranges<I>(
+        timestamps: &TimestampMillisecondArray,
+        value_array: &Float64Array,
+        ranges: I,
+        eval_ts_array: &TimestampMillisecondArray,
+        range_length: i64,
+    ) -> DfResult<Float64Array>
+    where
+        I: Iterator<Item = (u32, u32)> + ExactSizeIterator + Clone,
+    {
+        let num_windows = ranges.len();
+        let all_timestamps = timestamps.values();
         // A NULL field value means the series has no sample at that timestamp, so the padding
         // under a null slot must not be read. Skip the per-window null scan when the whole
         // backing array is null-free, which is the common case.
@@ -194,7 +216,6 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
         let eval_ts = eval_ts_array.values();
 
         let mut result_builder = Float64Builder::with_capacity(num_windows);
-        let range_length = self.range_length;
         let range_length_secs = range_length as f64 / 1000.0;
 
         // Range windows normally overlap heavily, so scanning every one for resets costs far
@@ -205,10 +226,10 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
         let mut reset_index = if IS_COUNTER && !has_nulls {
             let budget = all_values.len().saturating_sub(1);
             let mut scanned_pairs = 0usize;
-            keys.iter()
-                .any(|&key| {
-                    scanned_pairs =
-                        scanned_pairs.saturating_add(unpack(key).1.saturating_sub(1) as usize);
+            ranges
+                .clone()
+                .any(|(_, length)| {
+                    scanned_pairs = scanned_pairs.saturating_add(length.saturating_sub(1) as usize);
                     scanned_pairs > budget
                 })
                 .then(|| CounterResetIndex::new(all_values))
@@ -216,8 +237,7 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             None
         };
 
-        for index in 0..num_windows {
-            let (raw_offset, raw_length) = unpack(keys[index]);
+        for (index, (raw_offset, raw_length)) in ranges.enumerate() {
             let offset = raw_offset as usize;
             let length = raw_length as usize;
 
@@ -303,8 +323,43 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             result_builder.append_value(result_value * factor);
         }
 
-        let result = ColumnarValue::Array(Arc::new(result_builder.finish()));
-        Ok(result)
+        Ok(result_builder.finish())
+    }
+}
+
+impl ExtrapolatedRate<true, true> {
+    /// Evaluates raw typed range bounds using the same kernel as the dictionary UDF.
+    pub(crate) fn calculate_ranges(
+        timestamps: &TimestampMillisecondArray,
+        values: &Float64Array,
+        ranges: &[(u32, u32)],
+        evaluation_timestamps: &TimestampMillisecondArray,
+        range_length: i64,
+    ) -> DfResult<Float64Array> {
+        if evaluation_timestamps.len() != ranges.len() {
+            return Err(DataFusionError::Execution(format!(
+                "{}: evaluation timestamp vector should have the same number of rows as range inputs, found {} and {}",
+                Self::func_name(),
+                evaluation_timestamps.len(),
+                ranges.len()
+            )));
+        }
+        for &(offset, length) in ranges {
+            let end = (offset as usize).checked_add(length as usize);
+            if end.is_none_or(|end| end > timestamps.len() || end > values.len()) {
+                return Err(DataFusionError::Execution(format!(
+                    "{}: range ({offset}, {length}) exceeds timestamp or value array bounds",
+                    Self::func_name()
+                )));
+            }
+        }
+        ExtrapolatedRate::<true, true>::calc_ranges(
+            timestamps,
+            values,
+            ranges.iter().copied(),
+            evaluation_timestamps,
+            range_length,
+        )
     }
 }
 
@@ -488,7 +543,9 @@ impl ExtrapolatedRate<true, true> {
     }
 
     pub fn scalar_udf() -> ScalarUDF {
-        Self::scalar_udf_with_name(Self::name())
+        static RATE_UDF: LazyLock<ScalarUDF> =
+            LazyLock::new(|| Rate::scalar_udf_with_name(Rate::name()));
+        RATE_UDF.clone()
     }
 }
 
@@ -624,6 +681,72 @@ mod test {
                 ),
                 _ => panic!("range {range:?}: batched {batched:?} != single {single:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn raw_rate_ranges_match_dictionary_calc() {
+        let timestamps = Arc::new(TimestampMillisecondArray::from_iter_values(
+            (0..13).map(|i| i * 1_000),
+        ));
+        let ranges = [(0, 0), (0, 1), (0, 3), (0, 4), (1, 4), (2, 4)];
+        let eval_ts = Arc::new(TimestampMillisecondArray::from_iter_values([
+            5_000, 5_000, 5_000, 5_000, 6_000, 7_000,
+        ]));
+        for values in [
+            Float64Array::from(vec![1e16, 1.0, 0.0, 1.0, 2.0, 0.0, 3.0, 2.0, 4.0]),
+            Float64Array::from_iter([
+                Some(1.0),
+                Some(2.0),
+                Some(3.0),
+                None,
+                Some(5.0),
+                Some(1.0),
+                Some(2.0),
+                Some(f64::NAN),
+                Some(4.0),
+            ]),
+        ] {
+            let values = Arc::new(values);
+            let ts_dict = RangeArray::from_ranges(timestamps.clone(), ranges)
+                .unwrap()
+                .into_dict();
+            let values_dict = RangeArray::from_ranges(values.clone(), ranges)
+                .unwrap()
+                .into_dict();
+            let input = [
+                ColumnarValue::Array(Arc::new(ts_dict)),
+                ColumnarValue::Array(Arc::new(values_dict)),
+                ColumnarValue::Array(eval_ts.clone()),
+                ColumnarValue::Scalar(ScalarValue::Int64(Some(5_000))),
+            ];
+            let dictionary_array = extract_array(&Rate::new(5_000).calc(&input).unwrap()).unwrap();
+            let dictionary = dictionary_array
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let raw =
+                Rate::calculate_ranges(&timestamps, &values, &ranges, &eval_ts, 5_000).unwrap();
+            assert_eq!(dictionary.len(), raw.len());
+            for (expected, actual) in dictionary.iter().zip(raw.iter()) {
+                match (expected, actual) {
+                    (None, None) => {}
+                    (Some(expected), Some(actual)) => {
+                        assert_eq!(expected.to_bits(), actual.to_bits())
+                    }
+                    _ => panic!("dictionary and raw range nulls differ"),
+                }
+            }
+            assert!(
+                Rate::calculate_ranges(
+                    &timestamps,
+                    &values,
+                    &[(8, 2)],
+                    &TimestampMillisecondArray::from(vec![Some(10_000)]),
+                    5_000,
+                )
+                .is_err()
+            );
         }
     }
 
