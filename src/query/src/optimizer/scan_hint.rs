@@ -191,6 +191,9 @@ impl ScanHintRule {
         if sort_cols.len() == 2
             && sort_cols[0].name == DATA_SCHEMA_TSID_COLUMN_NAME
             && sort_cols[1].name == time_index_name
+            && region_metadata
+                .primary_key_columns()
+                .any(|column| column.column_schema.name == DATA_SCHEMA_TSID_COLUMN_NAME)
         {
             adapter.with_distribution(TimeSeriesDistribution::PerSeries);
             return;
@@ -1495,6 +1498,64 @@ mod test {
             scan_req.series_row_selector,
             Some(TimeSeriesRowSelector::LastRow { after_merge: false })
         );
+    }
+
+    #[test]
+    fn set_order_hint_does_not_treat_user_tsid_field_as_series_identity() {
+        let region_id = RegionId::new(1, 1);
+        let mut builder = RegionMetadataBuilder::new(region_id);
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("k0", ConcreteDataType::string_datatype(), true),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
+                    ConcreteDataType::uint64_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 3,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new("v0", ConcreteDataType::float64_datatype(), false),
+                semantic_type: SemanticType::Field,
+                column_id: 4,
+            })
+            .primary_key(vec![1]);
+        let metadata = Arc::new(builder.build().unwrap());
+        let engine = Arc::new(MetaRegionEngine::with_metadata(metadata.clone()));
+        let provider = Arc::new(DummyTableProvider::new(region_id, engine, metadata));
+        let table_source = Arc::new(DefaultTableSource::new(provider));
+        let plan = LogicalPlanBuilder::scan("t", table_source, None)
+            .unwrap()
+            .sort(vec![
+                col(DATA_SCHEMA_TSID_COLUMN_NAME).sort(true, true),
+                col("ts").sort(true, true),
+            ])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let rewritten = ScanHintRule
+            .rewrite(plan, &OptimizerContext::default())
+            .unwrap()
+            .data;
+
+        let request = &scan_requests(&rewritten)[0];
+        assert_eq!(request.distribution, None);
+        assert!(request.output_ordering.is_some());
     }
 
     #[test]
