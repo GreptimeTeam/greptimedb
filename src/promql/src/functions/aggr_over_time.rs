@@ -150,11 +150,168 @@ fn evaluate_presence(
     ))))
 }
 
+/// Which aggregate a batch evaluator folds over each window.
+#[derive(Clone, Copy)]
+enum AggregationEvaluator {
+    Sum,
+    Avg,
+    Stdvar,
+    Stddev,
+}
+
+fn sum_over_time_evaluator(
+    input: &[ColumnarValue],
+    name: &str,
+) -> Result<ColumnarValue, DataFusionError> {
+    evaluate_aggregation(input, name, AggregationEvaluator::Sum)
+}
+
+fn avg_over_time_evaluator(
+    input: &[ColumnarValue],
+    name: &str,
+) -> Result<ColumnarValue, DataFusionError> {
+    evaluate_aggregation(input, name, AggregationEvaluator::Avg)
+}
+
+fn stdvar_over_time_evaluator(
+    input: &[ColumnarValue],
+    name: &str,
+) -> Result<ColumnarValue, DataFusionError> {
+    evaluate_aggregation(input, name, AggregationEvaluator::Stdvar)
+}
+
+fn stddev_over_time_evaluator(
+    input: &[ColumnarValue],
+    name: &str,
+) -> Result<ColumnarValue, DataFusionError> {
+    evaluate_aggregation(input, name, AggregationEvaluator::Stddev)
+}
+
+/// Folds every window of one value range in a single pass, keeping the arithmetic of
+/// the scalar kernels the generic range-function wrapper used to call per window.
+fn evaluate_aggregation(
+    input: &[ColumnarValue],
+    name: &str,
+    operation: AggregationEvaluator,
+) -> Result<ColumnarValue, DataFusionError> {
+    assert_eq!(input.len(), 2);
+
+    let timestamp_ranges = RangeArray::try_new(extract_array(&input[0])?.to_data().into())?;
+    let value_ranges = RangeArray::try_new(extract_array(&input[1])?.to_data().into())?;
+    let len = timestamp_ranges.len();
+    if len != value_ranges.len() {
+        return Err(DataFusionError::Execution(format!(
+            "RangeArray have different lengths in PromQL function {name}: array1={len}, array2={}",
+            value_ranges.len()
+        )));
+    }
+
+    if timestamp_ranges.is_empty() {
+        return Ok(ColumnarValue::Array(Arc::new(Float64Array::from_iter(
+            std::iter::empty::<Option<f64>>(),
+        ))));
+    }
+
+    // The generic range-function wrapper downcasts both arrays for each window.
+    // Do it once after retaining its zero-window behavior above.
+    assert!(
+        timestamp_ranges
+            .values()
+            .as_any()
+            .is::<TimestampMillisecondArray>()
+    );
+    let values = value_ranges
+        .values()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    // `Sum` and `Avg` stay on Arrow's `compute::sum`; `Stdvar` keeps the integer-count
+    // Welford form and `Stddev` the compensated form, so no variant rounds differently.
+    let evaluator: fn(&Float64Array, usize, usize) -> Option<f64> = match operation {
+        AggregationEvaluator::Sum => {
+            |values, offset, length| compute::sum(&values.slice(offset, length))
+        }
+        AggregationEvaluator::Avg => |values, offset, length| {
+            let window = values.slice(offset, length);
+            // `sum` already skips null slots and yields `None` for an all-null window, so
+            // only the divisor needs to count samples instead of slots.
+            let sample_count = window.len() - window.null_count();
+            compute::sum(&window).map(|result| result / sample_count as f64)
+        },
+        AggregationEvaluator::Stdvar => |values, offset, length| {
+            let mut count = 0;
+            let mut mean: f64 = 0.0;
+            let mut result: f64 = 0.0;
+            for index in offset..offset + length {
+                if values.is_null(index) {
+                    continue;
+                }
+
+                let value = values.value(index);
+                let new_count = count + 1;
+                let delta1 = value - mean;
+                let new_mean = delta1 / new_count as f64 + mean;
+                let delta2 = value - new_mean;
+                let new_result = result + delta1 * delta2;
+
+                count = new_count;
+                mean = new_mean;
+                result = new_result;
+            }
+            (count > 0).then(|| result / count as f64)
+        },
+        AggregationEvaluator::Stddev => |values, offset, length| {
+            let mut count = 0.0;
+            let mut mean = 0.0;
+            let mut comp_mean = 0.0;
+            let mut deviations_sum_sq = 0.0;
+            let mut comp_deviations_sum_sq = 0.0;
+            for index in offset..offset + length {
+                if values.is_null(index) {
+                    continue;
+                }
+
+                let current_value = values.value(index);
+                count += 1.0;
+                let delta = current_value - (mean + comp_mean);
+                let (new_mean, new_comp_mean) = compensated_sum_inc(delta / count, mean, comp_mean);
+                mean = new_mean;
+                comp_mean = new_comp_mean;
+                let (new_deviations_sum_sq, new_comp_deviations_sum_sq) = compensated_sum_inc(
+                    delta * (current_value - (mean + comp_mean)),
+                    deviations_sum_sq,
+                    comp_deviations_sum_sq,
+                );
+                deviations_sum_sq = new_deviations_sum_sq;
+                comp_deviations_sum_sq = new_comp_deviations_sum_sq;
+            }
+            (count > 0.0).then(|| ((deviations_sum_sq + comp_deviations_sum_sq) / count).sqrt())
+        },
+    };
+
+    let mut result = Vec::with_capacity(len);
+    for index in 0..len {
+        let (_, timestamp_length) = timestamp_ranges.get_offset_length(index).unwrap();
+        let (value_offset, value_length) = value_ranges.get_offset_length(index).unwrap();
+        if timestamp_length != value_length {
+            return Err(DataFusionError::Execution(format!(
+                "RangeArray's element {index} have different lengths in PromQL function {name}: array1={timestamp_length}, array2={value_length}"
+            )));
+        }
+        result.push(evaluator(values, value_offset, value_length));
+    }
+
+    Ok(ColumnarValue::Array(Arc::new(Float64Array::from_iter(
+        result,
+    ))))
+}
+
 /// The average value of all points in the specified interval.
 #[range_fn(
     name = AvgOverTime,
     ret = Float64Array,
-    display_name = prom_avg_over_time
+    display_name = prom_avg_over_time,
+    evaluator = avg_over_time_evaluator
 )]
 pub fn avg_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
     // `sum` already skips null slots and yields `None` for an all-null window, so only the
@@ -490,7 +647,8 @@ fn max_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option
 #[range_fn(
     name = SumOverTime,
     ret = Float64Array,
-    display_name = prom_sum_over_time
+    display_name = prom_sum_over_time,
+    evaluator = sum_over_time_evaluator
 )]
 pub fn sum_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
     compute::sum(values)
@@ -549,7 +707,8 @@ pub fn present_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -
 #[range_fn(
     name = StdvarOverTime,
     ret = Float64Array,
-    display_name = prom_stdvar_over_time
+    display_name = prom_stdvar_over_time,
+    evaluator = stdvar_over_time_evaluator
 )]
 pub fn stdvar_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
     let mut count = 0;
@@ -574,7 +733,8 @@ pub fn stdvar_over_time(_: &TimestampMillisecondArray, values: &Float64Array) ->
 #[range_fn(
     name = StddevOverTime,
     ret = Float64Array,
-    display_name = prom_stddev_over_time
+    display_name = prom_stddev_over_time,
+    evaluator = stddev_over_time_evaluator
 )]
 pub fn stddev_over_time(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
     let mut count = 0.0;
@@ -617,24 +777,32 @@ mod test {
         }
     }
 
-    fn old_min_max_over_windows(
+    type ScalarKernel = fn(&TimestampMillisecondArray, &Float64Array) -> Option<f64>;
+
+    /// Runs one retained scalar kernel over every window of a sliced value range.
+    fn old_kernel_over_windows(
         values: &Float64Array,
         ranges: &[(u32, u32)],
-        is_min: bool,
+        kernel: fn(&TimestampMillisecondArray, &Float64Array) -> Option<f64>,
     ) -> Vec<Option<f64>> {
         ranges
             .iter()
             .map(|&(offset, length)| {
                 let values = values.slice(offset as usize, length as usize);
-                let values = values.as_any().downcast_ref::<Float64Array>().unwrap();
                 let timestamps = TimestampMillisecondArray::new_null(values.len());
-                if is_min {
-                    min_over_time(&timestamps, values)
-                } else {
-                    max_over_time(&timestamps, values)
-                }
+                kernel(&timestamps, &values)
             })
             .collect()
+    }
+
+    fn old_min_max_over_windows(
+        values: &Float64Array,
+        ranges: &[(u32, u32)],
+        is_min: bool,
+    ) -> Vec<Option<f64>> {
+        let kernel: fn(&TimestampMillisecondArray, &Float64Array) -> Option<f64> =
+            if is_min { min_over_time } else { max_over_time };
+        old_kernel_over_windows(values, ranges, kernel)
     }
 
     fn run_min_max_udf(
@@ -1413,6 +1581,233 @@ mod test {
                 .value(0),
             3.0
         );
+    }
+
+    /// The four window aggregates whose batches share one evaluator, paired with the
+    /// retained scalar kernels that define their oracle.
+    fn aggregation_udfs() -> [(ScalarUDF, ScalarKernel); 4] {
+        [
+            (SumOverTime::scalar_udf(), sum_over_time),
+            (AvgOverTime::scalar_udf(), avg_over_time),
+            (StdvarOverTime::scalar_udf(), stdvar_over_time),
+            (StddevOverTime::scalar_udf(), stddev_over_time),
+        ]
+    }
+
+    /// Compares every aggregation UDF against its scalar kernel over the same windows.
+    ///
+    /// The batch inputs reuse the sliced range builder and runner shared with the
+    /// extrema cases, so the timestamp and value ranges carry independent offsets and
+    /// sliced keys while the kernels see one window at a time.
+    fn assert_aggregation_udfs_match_oracle(
+        timestamp_values: &TimestampMillisecondArray,
+        all_values: &Float64Array,
+        timestamp_ranges: &[(u32, u32)],
+        value_ranges: &[(u32, u32)],
+    ) {
+        for (udf, kernel) in aggregation_udfs() {
+            let expected = old_kernel_over_windows(all_values, value_ranges, kernel);
+            let (timestamps, values) =
+                min_max_range_inputs(timestamp_values, all_values, timestamp_ranges, value_ranges);
+            assert_option_bits(&run_min_max_udf(udf, timestamps, values), &expected);
+        }
+    }
+
+    #[test]
+    fn aggregation_udfs_match_scalar_oracles_across_window_shapes() {
+        // Samples include cancellation-sensitive magnitudes, NaN payloads, both
+        // infinities and both signed zeros, with payloads hidden under the null slots.
+        let values = sliced_float_values(vec![
+            None,
+            Some(f64::from_bits(0x7ff8_0000_0000_00a1)),
+            Some(-0.0),
+            Some(0.0),
+            Some(1.0e16),
+            Some(1.0),
+            Some(-1.0e16),
+            Some(1.0),
+            Some(f64::INFINITY),
+            Some(f64::NEG_INFINITY),
+            Some(f64::from_bits(0xfff8_0000_0000_00b2)),
+            None,
+            Some(1.0e-16),
+            Some(3.0),
+            Some(-7.25),
+            Some(2.5),
+        ]);
+        let timestamps = Arc::new(TimestampMillisecondArray::from_iter_values(0..24)).slice(1, 20);
+        // The windows overlap, repeat, retreat, jump over a gap and end empty, while the
+        // timestamp and value ranges advance with independent offsets.
+        let timestamp_ranges = [
+            (0, 0),
+            (0, 4),
+            (2, 4),
+            (5, 3),
+            (9, 7),
+            (2, 5),
+            (12, 0),
+            (16, 0),
+        ];
+        let value_ranges = [
+            (4, 0),
+            (1, 4),
+            (3, 4),
+            (0, 3),
+            (6, 7),
+            (1, 5),
+            (12, 0),
+            (13, 0),
+        ];
+
+        assert_aggregation_udfs_match_oracle(
+            &timestamps,
+            &values,
+            &timestamp_ranges,
+            &value_ranges,
+        );
+    }
+
+    #[test]
+    fn aggregation_udfs_match_scalar_oracles_on_lane_boundary_windows() {
+        // Window lengths and offsets straddle Arrow's lane and validity-chunk boundaries,
+        // over a sliced array whose null slots keep payloads a window must not read.
+        let payloads = (0..160)
+            .map(|index| match index % 6 {
+                0 => 1.0e16,
+                1 => -1.0e16,
+                2 => 1.0,
+                3 => 1.0e-16,
+                _ => index as f64 * 0.25,
+            })
+            .collect::<Vec<_>>();
+        let valid = (0..160).map(|index| index % 5 != 0).collect::<Vec<_>>();
+        let values =
+            Float64Array::new(payloads.into(), Some(NullBuffer::from(valid))).slice(1, 159);
+        let timestamps =
+            Arc::new(TimestampMillisecondArray::from_iter_values(0..200)).slice(1, 199);
+
+        let mut timestamp_ranges = Vec::new();
+        let mut value_ranges = Vec::new();
+        for start in [0u32, 1, 3, 15, 16, 17, 31, 32, 33, 63, 64, 65] {
+            for length in [0u32, 1, 2, 3, 4, 5, 15, 16, 17, 31, 32, 33] {
+                if start + length > 128 {
+                    continue;
+                }
+                value_ranges.push((start, length));
+                // The same window lengths at another offset: the evaluator must use the
+                // value range's offset and only compare the two lengths.
+                timestamp_ranges.push((start + 7, length));
+            }
+        }
+
+        assert_aggregation_udfs_match_oracle(
+            &timestamps,
+            &values,
+            &timestamp_ranges,
+            &value_ranges,
+        );
+    }
+
+    #[test]
+    fn aggregation_udfs_return_null_when_no_sample_is_usable() {
+        // Include empty and all-null windows; hidden null payloads must not be aggregated.
+        let values = Float64Array::new(
+            vec![9.5, 1000.0, 1000.0, 1000.0, 1000.0, 1000.0, 1000.0, 1000.0].into(),
+            Some(NullBuffer::from(vec![
+                true, false, false, true, false, false, false, true,
+            ])),
+        );
+        let timestamps = TimestampMillisecondArray::from_iter_values(0..8);
+        let timestamp_ranges = [(0, 0), (1, 2), (1, 4), (7, 1), (0, 8)];
+        let value_ranges = [(5, 0), (1, 2), (1, 4), (7, 1), (0, 8)];
+
+        assert_aggregation_udfs_match_oracle(
+            &timestamps,
+            &values,
+            &timestamp_ranges,
+            &value_ranges,
+        );
+    }
+
+    #[test]
+    fn aggregation_udfs_return_empty_for_empty_batches() {
+        // Zero windows return before the value downcast, so a non-Float64 value range
+        // that a windowed call could not read still yields an empty output.
+        let empty_inputs = || {
+            let timestamps = RangeArray::from_ranges(
+                Arc::new(TimestampMillisecondArray::from_iter_values([0])),
+                [(0, 1)],
+            )
+            .unwrap();
+            let values = RangeArray::from_ranges(
+                Arc::new(datatypes::arrow::array::Int64Array::from(vec![1])),
+                [(0, 1)],
+            )
+            .unwrap();
+            (
+                slice_range_array(timestamps, 1, 0),
+                slice_range_array(values, 1, 0),
+            )
+        };
+
+        for (udf, _) in aggregation_udfs() {
+            let (timestamps, values) = empty_inputs();
+            let output = invoke_range_udf(udf, timestamps, values).unwrap();
+            assert!(extract_array(&output).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn aggregation_udf_errors_match_the_generic_wrapper() {
+        use crate::functions::test_util::assert_execution_error;
+
+        let timestamps = Arc::new(TimestampMillisecondArray::from_iter_values(0..3));
+        let values = Arc::new(Float64Array::from_iter_values([1.0, 2.0, 3.0]));
+        for (udf, _) in aggregation_udfs() {
+            let name = udf.name().to_string();
+
+            // Outer window-count mismatch, reported with the first array's length.
+            let error = invoke_range_udf(
+                udf.clone(),
+                RangeArray::from_ranges(timestamps.clone(), [(0, 1), (1, 1)]).unwrap(),
+                RangeArray::from_ranges(values.clone(), [(0, 1)]).unwrap(),
+            )
+            .unwrap_err();
+            assert_execution_error(
+                error,
+                &format!(
+                    "RangeArray have different lengths in PromQL function {name}: array1=2, array2=1"
+                ),
+            );
+
+            // A mismatch found later in the batch names the offending window.
+            let error = invoke_range_udf(
+                udf.clone(),
+                RangeArray::from_ranges(timestamps.clone(), [(0, 1), (1, 2)]).unwrap(),
+                RangeArray::from_ranges(values.clone(), [(0, 1), (1, 1)]).unwrap(),
+            )
+            .unwrap_err();
+            assert_execution_error(
+                error,
+                &format!(
+                    "RangeArray's element 1 have different lengths in PromQL function {name}: array1=2, array2=1"
+                ),
+            );
+
+            // Ranges are validated through the shared accessor before any downcast.
+            let invalid_values =
+                unsafe { RangeArray::from_ranges_unchecked(values.clone(), [(2, 2)]) };
+            let error = invoke_range_udf(
+                udf,
+                RangeArray::from_ranges(timestamps.clone(), [(0, 1)]).unwrap(),
+                invalid_values,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "External error: Illegal range: offset 2, length 2, array len 3"
+            );
+        }
     }
 
     #[test]
