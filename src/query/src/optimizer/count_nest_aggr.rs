@@ -205,6 +205,13 @@ impl CountNestAggrRule {
     fn collect_required_instant_columns_into(plan: &LogicalPlan, required: &mut HashSet<String>) {
         match plan {
             LogicalPlan::Projection(projection) => {
+                for expr in &projection.expr {
+                    required.extend(
+                        expr.column_refs()
+                            .into_iter()
+                            .map(|column| column.name.clone()),
+                    );
+                }
                 Self::collect_required_instant_columns_into(projection.input.as_ref(), required);
             }
             LogicalPlan::Extension(extension) => {
@@ -342,5 +349,257 @@ impl CountNestAggrRule {
             }
             _ => Ok(plan.clone()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use datafusion::functions_aggregate::sum::sum_udaf;
+    use datafusion::logical_expr::EmptyRelation;
+    use datafusion_common::tree_node::TreeNodeRecursion;
+    use datafusion_common::{Column, DFSchema};
+    use datafusion_expr::col;
+    use datatypes::arrow::datatypes::{DataType, Field, TimeUnit};
+
+    use super::*;
+
+    /// Unmarked source: plain arrow fields, no region metadata. It carries the
+    /// columns the fixtures reference plus `unused`, which nothing reads.
+    fn source_plan() -> LogicalPlan {
+        let fields = vec![
+            (
+                None,
+                Arc::new(Field::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                )),
+            ),
+            (None, Arc::new(Field::new("tag", DataType::Utf8, true))),
+            (
+                None,
+                Arc::new(Field::new("value", DataType::Float64, false)),
+            ),
+            (None, Arc::new(Field::new("aux", DataType::Float64, true))),
+            (
+                None,
+                Arc::new(Field::new("unused", DataType::Float64, true)),
+            ),
+        ];
+        LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            schema: Arc::new(DFSchema::new_with_metadata(fields, HashMap::new()).unwrap()),
+        })
+    }
+
+    /// `SeriesDivide(tag, ts) -> InstantManipulate(ts, value)`.
+    fn instant_chain() -> LogicalPlan {
+        let divide = LogicalPlan::Extension(Extension {
+            node: Arc::new(SeriesDivide::new(
+                vec!["tag".to_string()],
+                "ts".to_string(),
+                source_plan(),
+            )),
+        });
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(InstantManipulate::new(
+                0,
+                1000,
+                1000,
+                1000,
+                0,
+                "ts".to_string(),
+                vec!["tag".to_string()],
+                Some("value".to_string()),
+                divide,
+            )),
+        })
+    }
+
+    /// Builds the oracle shape `Sort <- count <- Sort <- sum <- <input>` and runs
+    /// [`CountNestAggrRule::try_rewrite_sort`] on it.
+    ///
+    /// The rule only matches bare aggregate expressions, so both aggregates are
+    /// built without aliases, and the outer `count` argument is a column named
+    /// exactly like the inner aggregate's output field. That name is read back
+    /// from the inner schema the same way the rule's own name check does.
+    fn try_rewrite(input: LogicalPlan, inner_value: Expr) -> Result<Option<LogicalPlan>> {
+        let inner_agg_plan = LogicalPlanBuilder::from(input)
+            .aggregate(
+                vec![col("ts"), col("tag")],
+                vec![sum_udaf().call(vec![inner_value])],
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        let inner_output_column = {
+            let LogicalPlan::Aggregate(inner_agg) = &inner_agg_plan else {
+                unreachable!("plan builder must produce an Aggregate node");
+            };
+            Column::new_unqualified(
+                inner_agg
+                    .schema
+                    .field(inner_agg.group_expr.len())
+                    .name()
+                    .clone(),
+            )
+        };
+        let inner_sort = LogicalPlanBuilder::from(inner_agg_plan)
+            .sort(vec![col("ts").sort(true, true)])
+            .unwrap()
+            .build()
+            .unwrap();
+        let outer_agg = LogicalPlanBuilder::from(inner_sort)
+            .aggregate(
+                vec![col("ts")],
+                vec![count_udaf().call(vec![Expr::Column(inner_output_column)])],
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        let outer_sort = LogicalPlanBuilder::from(outer_agg)
+            .sort(vec![col("ts").sort(true, true)])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let LogicalPlan::Sort(sort) = outer_sort else {
+            unreachable!("plan builder must produce a Sort node");
+        };
+        CountNestAggrRule::try_rewrite_sort(&sort)
+    }
+
+    /// Strings of every projection expression in `plan`, in plan order.
+    fn projection_exprs(plan: &LogicalPlan) -> Vec<String> {
+        let mut exprs = Vec::new();
+        plan.apply(|node| {
+            if let LogicalPlan::Projection(projection) = node {
+                exprs.extend(projection.expr.iter().map(|expr| expr.to_string()));
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+        exprs
+    }
+
+    /// Column names the `SeriesDivide` node reads after pruning.
+    fn series_divide_input_columns(plan: &LogicalPlan) -> Vec<String> {
+        let mut columns = Vec::new();
+        plan.apply(|node| {
+            if let LogicalPlan::Extension(extension) = node
+                && extension.node.as_any().is::<SeriesDivide>()
+            {
+                columns = extension.node.inputs()[0]
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|field| field.name().clone())
+                    .collect();
+                return Ok(TreeNodeRecursion::Stop);
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+        columns
+    }
+
+    /// Asserts the shared post-rewrite invariants for one fixture case: the
+    /// rewrite really happened, pruning below `SeriesDivide` kept `aux` (the
+    /// retained projection still reads it) and dropped `unused`, and every
+    /// `kept` expression fragment is still printed in the projection chain.
+    fn assert_rewritten(rewritten: &LogicalPlan, case: &str, kept: &[&str]) {
+        assert!(
+            has_distinct(rewritten),
+            "{case}: rewrite must occur: {rewritten}"
+        );
+        assert_eq!(
+            series_divide_input_columns(rewritten),
+            ["ts", "tag", "value", "aux"],
+            "{case}: expected aux retained and unused pruned: {rewritten}"
+        );
+        let exprs = projection_exprs(rewritten);
+        for &fragment in kept {
+            assert!(
+                exprs.iter().any(|expr| expr.contains(fragment)),
+                "{case}: expected a projection expression containing {fragment:?}: {rewritten}"
+            );
+        }
+    }
+
+    fn has_distinct(plan: &LogicalPlan) -> bool {
+        let mut found = false;
+        plan.apply(|node| {
+            if matches!(node, LogicalPlan::Distinct(_)) {
+                found = true;
+                return Ok(TreeNodeRecursion::Stop);
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+        found
+    }
+
+    #[test]
+    fn rewrite_retains_plain_aux_column_for_retained_projection() {
+        let projection = LogicalPlanBuilder::from(instant_chain())
+            .project(vec![col("ts"), col("tag"), col("value"), col("aux")])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let rewritten = try_rewrite(projection, col("value"))
+            .expect("rewrite must not fail")
+            .expect("rule must fire");
+        assert_rewritten(&rewritten, "plain aux", &["aux"]);
+    }
+
+    #[test]
+    fn rewrite_retains_computed_aux_alias_for_retained_projection() {
+        let projection = LogicalPlanBuilder::from(instant_chain())
+            .project(vec![
+                col("ts"),
+                col("tag"),
+                col("value"),
+                (col("aux") + lit(1.0)).alias("aux_plus_one"),
+            ])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let rewritten = try_rewrite(projection, col("value"))
+            .expect("rewrite must not fail")
+            .expect("rule must fire");
+        assert_rewritten(&rewritten, "computed aux alias", &["aux +", "aux_plus_one"]);
+    }
+
+    #[test]
+    fn rewrite_retains_aux_through_two_alias_layers() {
+        let layer = LogicalPlanBuilder::from(instant_chain())
+            .project(vec![
+                col("ts"),
+                col("tag"),
+                col("value").alias("v1"),
+                col("aux").alias("aux1"),
+            ])
+            .unwrap()
+            .build()
+            .unwrap();
+        let projection = LogicalPlanBuilder::from(layer)
+            .project(vec![
+                col("ts"),
+                col("tag"),
+                col("v1").alias("v2"),
+                col("aux1"),
+            ])
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let rewritten = try_rewrite(projection, col("v2"))
+            .expect("rewrite must not fail")
+            .expect("rule must fire");
+        assert_rewritten(&rewritten, "two alias layers", &["aux AS aux1", "aux1"]);
     }
 }
