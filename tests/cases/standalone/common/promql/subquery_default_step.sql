@@ -19,4 +19,7 @@ tql eval (300, 300, '1s') count_over_time(subquery_default_step[5m:]);
 
 tql eval (300, 300, '1s') count_over_time(subquery_default_step[5m:30s]);
 
+-- The outer range query keeps its own step around the subquery's default step.
+tql eval (300, 360, '15s') count_over_time(subquery_default_step[5m:]);
+
 drop table subquery_default_step;
