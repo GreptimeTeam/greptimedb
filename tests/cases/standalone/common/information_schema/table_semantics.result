@@ -54,6 +54,7 @@ Affected Rows: 0
 
 SELECT table_schema, table_name, signal_type, source, source_version, pipeline, metadata_quality, semantic_options
 FROM information_schema.table_semantics
+WHERE table_schema = 'public'
 ORDER BY table_name;
 
 +--------------+----------------+-------------+---------------+----------------+--------------------+------------------+-----------------------------------------------------------------+
@@ -62,6 +63,22 @@ ORDER BY table_name;
 | public       | metrics_tagged | metric      | opentelemetry | 2.0            | greptime_metric_v1 | declared         | {"metric.type":"counter","metric.unit":"By"}                    |
 | public       | traces_tagged  | trace       | opentelemetry |                |                    |                  | {"trace.conventions":"https://opentelemetry.io/schemas/1.27.0"} |
 +--------------+----------------+-------------+---------------+----------------+--------------------+------------------+-----------------------------------------------------------------+
+
+-- System table scope is exposed without changing the view's columns.
+SELECT table_name, semantic_options
+FROM information_schema.table_semantics
+WHERE table_schema = 'information_schema'
+  AND table_name IN ('build_info', 'partitions', 'process_list', 'table_semantics')
+ORDER BY table_name;
+
++-----------------+---------------------------+
+| table_name      | semantic_options          |
++-----------------+---------------------------+
+| build_info      | {"table_scope":"cluster"} |
+| partitions      | {"table_scope":"catalog"} |
+| process_list    | {"table_scope":"cluster"} |
+| table_semantics | {"table_scope":"catalog"} |
++-----------------+---------------------------+
 
 -- Predicate pushdown on a promoted column.
 SELECT table_name, signal_type
