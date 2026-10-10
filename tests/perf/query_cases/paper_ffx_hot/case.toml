@@ -119,7 +119,7 @@ query = "WITH ff AS (SELECT host, SUM(metric_value) AS fm, COUNT(metric_value) A
 warmup = 0
 iterations = 1
 
-# Diagnostic single executions are excluded from benchmark comparison.
+# Diagnostic queries are run once by the runner and must be excluded from performance analysis.
 [[scenario.queries]]
 name = "diagnostic_explain_raw_wide"
 kind = "sql"
