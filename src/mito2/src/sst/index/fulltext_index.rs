@@ -16,4 +16,10 @@ pub(crate) mod applier;
 pub(crate) mod creator;
 
 pub(crate) const INDEX_BLOB_TYPE_TANTIVY: &str = "greptime-fulltext-index-v1";
-pub(crate) const INDEX_BLOB_TYPE_BLOOM: &str = "greptime-fulltext-index-bloom";
+/// Bloom blobs tokenized by `ScriptTokenizer`. A new key instead of a config field so that
+/// older versions, which would probe these tokens with their own rules and drop rows,
+/// don't find the blob and scan without pruning.
+pub(crate) const INDEX_BLOB_TYPE_BLOOM: &str = "greptime-fulltext-index-bloom-v2";
+/// Bloom blobs from older versions. Their tokens don't follow `matches_term` boundaries,
+/// so queries never probe them; they are kept only for index metadata listing.
+pub(crate) const INDEX_BLOB_TYPE_BLOOM_V1: &str = "greptime-fulltext-index-bloom";

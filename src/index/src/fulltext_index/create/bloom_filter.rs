@@ -29,7 +29,7 @@ use crate::fulltext_index::error::{
     AbortedSnafu, BiErrorsSnafu, BloomFilterFinishSnafu, ExternalSnafu, PuffinAddBlobSnafu, Result,
     SerializeToJsonSnafu,
 };
-use crate::fulltext_index::tokenizer::{Analyzer, ChineseTokenizer, EnglishTokenizer};
+use crate::fulltext_index::tokenizer::{Analyzer, ScriptTokenizer};
 use crate::fulltext_index::{Config, KEY_FULLTEXT_CONFIG};
 
 const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
@@ -50,11 +50,9 @@ impl BloomFilterFulltextIndexCreator {
         global_memory_usage: Arc<AtomicUsize>,
         global_memory_usage_threshold: Option<usize>,
     ) -> Self {
-        let tokenizer = match config.analyzer {
-            crate::fulltext_index::Analyzer::English => Box::new(EnglishTokenizer) as _,
-            crate::fulltext_index::Analyzer::Chinese => Box::new(ChineseTokenizer) as _,
-        };
-        let analyzer = Analyzer::new(tokenizer, config.case_sensitive);
+        // Both analyzers tokenize the same way: query probes must be derivable from the
+        // term alone, which a context-dependent segmenter like jieba can't provide.
+        let analyzer = Analyzer::new(Box::new(ScriptTokenizer), config.case_sensitive);
 
         let inner = BloomFilterCreator::new(
             rows_per_segment,
