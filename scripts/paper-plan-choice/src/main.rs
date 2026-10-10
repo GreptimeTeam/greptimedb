@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod correlation;
+
 use std::sync::Arc;
 
 use arrow_array::{Array, Int64Array, RecordBatch};
@@ -361,7 +363,13 @@ async fn run_cases() -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    run_cases().await
+    if std::env::args().skip(1).any(|arg| arg == "--bench") {
+        run_cases().await?;
+        correlation::run_cases().await?;
+        return correlation::run_bench().await;
+    }
+    run_cases().await?;
+    correlation::run_cases().await
 }
 
 #[cfg(test)]
