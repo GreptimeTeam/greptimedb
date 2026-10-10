@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cache::{
-    build_datanode_cache_registry, build_fundamental_cache_registry,
+    build_datanode_layered_cache_registry, build_fundamental_cache_registry,
     with_default_composite_cache_registry,
 };
 use catalog::information_schema::NoopInformationExtension;
@@ -209,11 +209,8 @@ impl GreptimeDbStandaloneBuilder {
     ) -> GreptimeDbStandalone {
         let plugins = self.plugin.clone().unwrap_or_default();
 
-        let layered_cache_registry = Arc::new(
-            LayeredCacheRegistryBuilder::default()
-                .add_cache_registry(build_datanode_cache_registry(kv_backend.clone()))
-                .build(),
-        );
+        let layered_cache_registry =
+            Arc::new(build_datanode_layered_cache_registry(kv_backend.clone()));
 
         let mut builder =
             DatanodeBuilder::new(opts.datanode_options(), plugins.clone(), kv_backend.clone());
