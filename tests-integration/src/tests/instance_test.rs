@@ -379,8 +379,8 @@ ORDER BY r.k"#;
         );
 
         let pruned_sql = r#"SELECT count(*) roots, count(c.n) roots_with_children, sum(c.n) children
-FROM (SELECT k FROM join_repro WHERE kind = 'root' AND k < '8') r
-LEFT JOIN (SELECT k, count(*) n FROM join_repro WHERE kind = 'child' AND k < 'c' GROUP BY k) c ON c.k = r.k"#;
+FROM (SELECT k FROM join_repro WHERE kind = 'root' AND k >= '1' AND k < '9') r
+LEFT JOIN (SELECT k, count(*) n FROM join_repro WHERE kind = 'child' AND k < '8' GROUP BY k) c ON c.k = r.k"#;
         let pruned = execute_sql_with_query_parallelism(&frontend, pruned_sql, parallelism)
             .await
             .data
@@ -388,7 +388,29 @@ LEFT JOIN (SELECT k, count(*) n FROM join_repro WHERE kind = 'child' AND k < 'c'
             .await;
         assert_eq!(
             pruned,
-            "+-------+---------------------+----------+\n| roots | roots_with_children | children |\n+-------+---------------------+----------+\n| 8     | 8                   | 24       |\n+-------+---------------------+----------+"
+            "+-------+---------------------+----------+\n| roots | roots_with_children | children |\n+-------+---------------------+----------+\n| 8     | 7                   | 21       |\n+-------+---------------------+----------+"
+        );
+
+        let pruned_explain = execute_sql_with_query_parallelism(
+            &frontend,
+            &format!("EXPLAIN {pruned_sql}"),
+            parallelism,
+        )
+        .await
+        .data
+        .pretty_print()
+        .await;
+        assert!(
+            pruned_explain.contains("HashJoinExec: mode=Partitioned"),
+            "query_parallelism={parallelism} pruned join should remain partitioned; explain:\n{pruned_explain}"
+        );
+        let hash_repartition_lines = pruned_explain
+            .lines()
+            .filter(|line| line.contains("RepartitionExec: partitioning=Hash([k@0]"))
+            .count();
+        assert_eq!(
+            hash_repartition_lines, 2,
+            "query_parallelism={parallelism} pruned join should repartition both inputs on k; explain:\n{pruned_explain}"
         );
     }
 }
@@ -445,12 +467,17 @@ ORDER BY t.key_id"#;
         .data
         .pretty_print()
         .await;
-    assert_eq!(
-        output,
-        "+--------+---------------------+\n| key_id | first_ts            |\n+--------+---------------------+\n| 1      | 2026-10-09T00:00:00 |\n| 11     | 2026-10-09T00:00:00 |\n| 21     | 2026-10-09T00:00:00 |\n| 31     | 2026-10-09T00:00:00 |\n+--------+---------------------+"
-    );
+    let expected = r#"+--------+---------------------+
+| key_id | first_ts            |
++--------+---------------------+
+| 1      | 2026-10-09T00:00:00 |
+| 11     | 2026-10-09T00:00:00 |
+| 21     | 2026-10-09T00:00:00 |
+| 31     | 2026-10-09T00:00:00 |
++--------+---------------------+"#;
+    assert_eq!(output, expected);
 
-    let explain = execute_sql_with(&frontend, &format!("EXPLAIN {query}"), query_ctx)
+    let explain = execute_sql_with(&frontend, &format!("EXPLAIN {query}"), query_ctx.clone())
         .await
         .data
         .pretty_print()
@@ -463,6 +490,54 @@ ORDER BY t.key_id"#;
         explain.contains("RepartitionExec: partitioning=Hash([key_id@1], 2)")
             && explain.contains("RepartitionExec: partitioning=Hash([key_id@0], 2)"),
         "parallel left-semi join should repartition both inputs on key_id; explain:\n{explain}"
+    );
+
+    let analyze_explain = execute_sql_with(
+        &frontend,
+        &format!("EXPLAIN ANALYZE VERBOSE {query}"),
+        query_ctx.clone(),
+    )
+    .await
+    .data
+    .pretty_print()
+    .await;
+    let has_remote_dyn_filter = |explain: &str| {
+        explain.lines().any(|line| {
+            line.contains("SeqScan: region=")
+                && line.contains("\"dyn_filters\"")
+                && line.contains("DynamicFilter")
+        })
+    };
+    assert!(
+        has_remote_dyn_filter(&analyze_explain),
+        "expected remote region SeqScan dyn_filters to include DynamicFilter; explain:\n{analyze_explain}"
+    );
+
+    let mut query_ctx_without_rdf = QueryContext::with_db_name(None);
+    query_ctx_without_rdf.set_extension(QUERY_PARALLELISM_HINT, "2");
+    query_ctx_without_rdf.set_extension(QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN, "false");
+    let query_ctx_without_rdf = Arc::new(query_ctx_without_rdf);
+    let output_without_rdf = execute_sql_with(&frontend, query, query_ctx_without_rdf.clone())
+        .await
+        .data
+        .pretty_print()
+        .await;
+    assert_eq!(output_without_rdf, expected);
+
+    let analyze_explain_without_rdf = execute_sql_with(
+        &frontend,
+        &format!("EXPLAIN ANALYZE VERBOSE {query}"),
+        query_ctx_without_rdf,
+    )
+    .await
+    .data
+    .pretty_print()
+    .await;
+    assert!(
+        !analyze_explain_without_rdf
+            .lines()
+            .any(|line| line.contains("SeqScan: region=") && line.contains("\"dyn_filters\"")),
+        "expected no region SeqScan dyn_filters line when remote dynamic filter pushdown is disabled; explain:\n{analyze_explain_without_rdf}"
     );
 }
 

@@ -63,7 +63,6 @@ use tokio::time;
 use tokio::time::Instant;
 use tracing::{Instrument, Span};
 
-use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::analyzer::utils::patch_batch_timezone;
 use crate::dist_plan::dyn_filter_bridge::{
     CapturedDynFilter, capture_remote_dyn_filters_for_pushdown,
@@ -338,7 +337,6 @@ pub struct MergeScanLogicalPlan {
     output_schema: DFSchemaRef,
     /// If this plan is a placeholder
     is_placeholder: bool,
-    partition_cols: AliasMapping,
     /// Assigned after dist-plan rewriting so rewriters only deal with plan shape.
     remote_dyn_filter_producer_id: Option<RemoteDynFilterProducerId>,
 }
@@ -349,29 +347,20 @@ impl PartialOrd for MergeScanLogicalPlan {
             input,
             output_schema,
             is_placeholder,
-            partition_cols,
             remote_dyn_filter_producer_id,
         } = self;
         let Self {
             input: other_input,
             output_schema: other_output_schema,
             is_placeholder: other_is_placeholder,
-            partition_cols: other_partition_cols,
             remote_dyn_filter_producer_id: other_remote_dyn_filter_producer_id,
         } = other;
 
-        let ordering = (
-            input,
-            is_placeholder,
-            partition_cols,
-            remote_dyn_filter_producer_id,
-        )
-            .partial_cmp(&(
-                other_input,
-                other_is_placeholder,
-                other_partition_cols,
-                other_remote_dyn_filter_producer_id,
-            ));
+        let ordering = (input, is_placeholder, remote_dyn_filter_producer_id).partial_cmp(&(
+            other_input,
+            other_is_placeholder,
+            other_remote_dyn_filter_producer_id,
+        ));
         match ordering {
             Some(std::cmp::Ordering::Equal) if output_schema != other_output_schema => None,
             ordering => ordering,
@@ -418,12 +407,11 @@ impl UserDefinedLogicalNodeCore for MergeScanLogicalPlan {
 
 impl MergeScanLogicalPlan {
     /// Creates a merge scan with the input plan's schema.
-    pub fn new(input: LogicalPlan, is_placeholder: bool, partition_cols: AliasMapping) -> Self {
+    pub fn new(input: LogicalPlan, is_placeholder: bool) -> Self {
         Self {
             output_schema: input.schema().clone(),
             input,
             is_placeholder,
-            partition_cols,
             remote_dyn_filter_producer_id: None,
         }
     }
@@ -459,10 +447,6 @@ impl MergeScanLogicalPlan {
 
     pub fn input(&self) -> &LogicalPlan {
         &self.input
-    }
-
-    pub fn partition_cols(&self) -> &AliasMapping {
-        &self.partition_cols
     }
 
     pub fn remote_dyn_filter_producer_id(&self) -> Option<RemoteDynFilterProducerId> {
@@ -1347,17 +1331,13 @@ mod tests {
     use common_recordbatch::{
         DfRecordBatch, EmptyRecordBatchStream, RecordBatch, RecordBatchStream,
     };
-    use datafusion::common::NullEquality;
     use datafusion::config::ConfigOptions;
     use datafusion::execution::SessionStateBuilder;
-    use datafusion::physical_optimizer::PhysicalOptimizerRule;
     use datafusion::physical_plan::filter_pushdown::ChildFilterPushdownResult;
-    use datafusion::physical_plan::joins::{HashJoinExec, PartitionMode};
     use datafusion::physical_plan::repartition::RepartitionExec;
     use datafusion::physical_plan::{ExecutionPlanProperties, Partitioning};
     use datafusion::physical_plan::{StatisticsArgs, StatisticsContext};
-    use datafusion::prelude::SessionConfig;
-    use datafusion_expr::{JoinType, LogicalPlanBuilder, col, lit};
+    use datafusion_expr::{LogicalPlanBuilder, col, lit};
     use datafusion_physical_expr::PhysicalExpr;
     use datafusion_physical_expr::expressions::{
         Column, DynamicFilterPhysicalExpr, lit as physical_lit,
@@ -1576,148 +1556,6 @@ mod tests {
                 Partitioning::UnknownPartitioning(count) if *count == expected
             ));
         }
-    }
-
-    #[tokio::test]
-    async fn merge_scan_left_join_shuffles_unknown_partitioning_before_hash_join() {
-        use arrow::array::Array;
-        let schema = int64_schema(&["k", "n"]);
-        let region = |id| RegionId::new(2048, id);
-        let make_batch = |rows: &[(i64, i64)]| {
-            record_batch(
-                schema.clone(),
-                vec![
-                    Arc::new(Int64Vector::from_slice(
-                        rows.iter().map(|row| row.0).collect::<Vec<_>>(),
-                    )) as _,
-                    Arc::new(Int64Vector::from_slice(
-                        rows.iter().map(|row| row.1).collect::<Vec<_>>(),
-                    )) as _,
-                ],
-            )
-        };
-
-        // The peer vectors are intentionally differently ordered. Left rows include
-        // key 99, which has no right-side match and must survive the LEFT JOIN.
-        let left_regions = vec![region(3), region(1), region(2)];
-        let right_regions = vec![region(2), region(3), region(1)];
-        let left_responses = vec![
-            (region(1), make_batch(&[(1, 10), (2, 20)])),
-            (region(2), make_batch(&[(3, 30)])),
-            (region(3), make_batch(&[(99, 90)])),
-        ];
-        let right_responses = vec![
-            (region(1), make_batch(&[(1, 2)])),
-            (region(2), make_batch(&[(2, 3)])),
-            (region(3), make_batch(&[(3, 4)])),
-        ];
-        let mut left_scan = merge_scan_exec_with_handler(
-            left_regions,
-            schema.arrow_schema().as_ref().clone(),
-            Arc::new(TestRegionQueryHandler::new(left_responses)),
-            2,
-        );
-        left_scan.remote_dyn_filter_producer_id = Some(RemoteDynFilterProducerId::new(42));
-        let left = Arc::new(left_scan) as Arc<dyn ExecutionPlan>;
-        let mut right_scan = merge_scan_exec_with_handler(
-            right_regions,
-            schema.arrow_schema().as_ref().clone(),
-            Arc::new(TestRegionQueryHandler::new(right_responses)),
-            2,
-        );
-        right_scan.remote_dyn_filter_producer_id = Some(RemoteDynFilterProducerId::new(43));
-        let right = Arc::new(right_scan) as Arc<dyn ExecutionPlan>;
-        assert!(matches!(
-            left.output_partitioning(),
-            Partitioning::UnknownPartitioning(2)
-        ));
-        assert!(matches!(
-            right.output_partitioning(),
-            Partitioning::UnknownPartitioning(2)
-        ));
-
-        let join = Arc::new(
-            HashJoinExec::try_new(
-                left,
-                right,
-                vec![(
-                    Arc::new(Column::new("k", 0)) as _,
-                    Arc::new(Column::new("k", 0)) as _,
-                )],
-                None,
-                &JoinType::Left,
-                None,
-                PartitionMode::Partitioned,
-                NullEquality::NullEqualsNothing,
-                false,
-            )
-            .unwrap(),
-        ) as Arc<dyn ExecutionPlan>;
-        let session = SessionStateBuilder::new()
-            .with_config(SessionConfig::new().with_target_partitions(2))
-            .with_default_features()
-            .build();
-        let optimized =
-            datafusion::physical_optimizer::ensure_requirements::EnsureRequirements::new()
-                .optimize(join, session.config_options())
-                .unwrap();
-        let mut producer_ids = Vec::new();
-        for child in optimized.children() {
-            let repartition = child
-                .downcast_ref::<RepartitionExec>()
-                .expect("EnsureRequirements must wrap both join inputs in a shuffle");
-            let scan = repartition
-                .input()
-                .downcast_ref::<MergeScanExec>()
-                .expect("actual shuffle must retain the MergeScan child");
-            producer_ids.push(scan.remote_dyn_filter_producer_id().unwrap());
-        }
-        producer_ids.sort_unstable();
-        assert_eq!(
-            producer_ids,
-            vec![
-                RemoteDynFilterProducerId::new(42),
-                RemoteDynFilterProducerId::new(43)
-            ]
-        );
-        let batches = datafusion::physical_plan::collect(optimized, session.task_ctx())
-            .await
-            .unwrap();
-        let mut actual = Vec::new();
-        for batch in batches {
-            let lk = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap();
-            let ln = batch
-                .column(1)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap();
-            let rn = batch
-                .column(3)
-                .as_any()
-                .downcast_ref::<Int64Array>()
-                .unwrap();
-            for row in 0..batch.num_rows() {
-                actual.push((
-                    lk.value(row),
-                    ln.value(row),
-                    (!rn.is_null(row)).then(|| rn.value(row)),
-                ));
-            }
-        }
-        actual.sort_unstable();
-        assert_eq!(
-            actual,
-            vec![
-                (1, 10, Some(2)),
-                (2, 20, Some(3)),
-                (3, 30, Some(4)),
-                (99, 90, None)
-            ]
-        );
     }
 
     #[test]
