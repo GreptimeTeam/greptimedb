@@ -1,0 +1,203 @@
+# WeightedAVG raw join versus host/area factorization; fixed direct-SST layout.
+# Each measurement is timed separately. The query list deliberately puts raw
+# first; compare with that ordering limitation in mind.
+
+[case]
+name = "paper_ffx_balanced"
+description = "Raw versus factorized weightedAVG at a balanced join cardinality"
+
+[scenario]
+kind = "direct_readable_sst"
+seed = 5204
+
+[[scenario.tables]]
+database = "public"
+name = "paper_ffx_balanced_fact"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["host", "instance"]
+time_index = "ts"
+
+[[scenario.tables.columns]]
+name = "host"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 16, prefix = "h" }
+
+[[scenario.tables.columns]]
+name = "instance"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 80, prefix = "i" }
+
+[[scenario.tables.columns]]
+name = "metric_value"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 1.0, max = 500.0 }
+
+[[scenario.tables.columns]]
+name = "ts"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+[[scenario.tables]]
+database = "public"
+name = "paper_ffx_balanced_dim"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["host", "area"]
+time_index = "ts"
+
+[[scenario.tables.columns]]
+name = "host"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 16, prefix = "h" }
+
+[[scenario.tables.columns]]
+name = "area"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 5, prefix = "a" }
+
+[[scenario.tables.columns]]
+name = "weight"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.1, max = 10.0 }
+
+[[scenario.tables.columns]]
+name = "ts"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+[scenario.layout]
+regions = 1
+sst_count = 4
+rows_per_sst = 1280
+row_group_size = 128
+series_count = 80
+start_unix_nanos = 1704067200000000000
+step_nanos = 1000000000
+time_range_layout = "non_overlapping_per_sst"
+series_layout = "round_robin"
+
+[[scenario.queries]]
+name = "raw_wide"
+kind = "sql"
+query = "SELECT f.host, d.area, AVG(f.metric_value * d.weight) AS score FROM paper_ffx_balanced_fact f JOIN paper_ffx_balanced_dim d ON f.host = d.host WHERE f.ts >= TIMESTAMP '2024-01-01 00:00:00' AND f.ts < TIMESTAMP '2024-01-01 01:25:20' AND d.ts >= TIMESTAMP '2024-01-01 00:00:00' AND d.ts < TIMESTAMP '2024-01-01 01:25:20' GROUP BY f.host, d.area ORDER BY score DESC NULLS LAST, f.host, d.area LIMIT 10"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 50
+
+[[scenario.queries]]
+name = "factor_wide"
+kind = "sql"
+query = "WITH ff AS (SELECT host, SUM(metric_value) AS fm, COUNT(metric_value) AS fn FROM paper_ffx_balanced_fact WHERE ts >= TIMESTAMP '2024-01-01 00:00:00' AND ts < TIMESTAMP '2024-01-01 01:25:20' GROUP BY host), dd AS (SELECT host, area, SUM(weight) AS dw, COUNT(weight) AS dn FROM paper_ffx_balanced_dim WHERE ts >= TIMESTAMP '2024-01-01 00:00:00' AND ts < TIMESTAMP '2024-01-01 01:25:20' GROUP BY host, area) SELECT ff.host, dd.area, CASE WHEN ff.fn = 0 OR dd.dn = 0 THEN NULL ELSE (ff.fm * dd.dw) / (CAST(ff.fn AS DOUBLE) * CAST(dd.dn AS DOUBLE)) END AS score FROM ff JOIN dd ON ff.host = dd.host ORDER BY score DESC NULLS LAST, ff.host, dd.area LIMIT 10"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 50
+
+[[scenario.queries]]
+name = "raw_narrow"
+kind = "sql"
+query = "SELECT f.host, d.area, AVG(f.metric_value * d.weight) AS score FROM paper_ffx_balanced_fact f JOIN paper_ffx_balanced_dim d ON f.host = d.host WHERE f.ts >= TIMESTAMP '2024-01-01 01:25:04' AND f.ts < TIMESTAMP '2024-01-01 01:25:20' AND d.ts >= TIMESTAMP '2024-01-01 00:00:00' AND d.ts < TIMESTAMP '2024-01-01 01:25:20' GROUP BY f.host, d.area ORDER BY score DESC NULLS LAST, f.host, d.area LIMIT 10"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 50
+
+[[scenario.queries]]
+name = "factor_narrow"
+kind = "sql"
+query = "WITH ff AS (SELECT host, SUM(metric_value) AS fm, COUNT(metric_value) AS fn FROM paper_ffx_balanced_fact WHERE ts >= TIMESTAMP '2024-01-01 01:25:04' AND ts < TIMESTAMP '2024-01-01 01:25:20' GROUP BY host), dd AS (SELECT host, area, SUM(weight) AS dw, COUNT(weight) AS dn FROM paper_ffx_balanced_dim WHERE ts >= TIMESTAMP '2024-01-01 00:00:00' AND ts < TIMESTAMP '2024-01-01 01:25:20' GROUP BY host, area) SELECT ff.host, dd.area, CASE WHEN ff.fn = 0 OR dd.dn = 0 THEN NULL ELSE (ff.fm * dd.dw) / (CAST(ff.fn AS DOUBLE) * CAST(dd.dn AS DOUBLE)) END AS score FROM ff JOIN dd ON ff.host = dd.host ORDER BY score DESC NULLS LAST, ff.host, dd.area LIMIT 10"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 50
+
+[[scenario.queries]]
+name = "raw_rare"
+kind = "sql"
+query = "SELECT f.host, d.area, AVG(f.metric_value * d.weight) AS score FROM paper_ffx_balanced_fact f JOIN paper_ffx_balanced_dim d ON f.host = d.host WHERE f.ts >= TIMESTAMP '2024-01-01 00:00:00' AND f.ts < TIMESTAMP '2024-01-01 01:25:20' AND d.ts >= TIMESTAMP '2024-01-01 00:00:00' AND d.ts < TIMESTAMP '2024-01-01 01:25:20' AND d.area = 'a0' GROUP BY f.host, d.area ORDER BY score DESC NULLS LAST, f.host, d.area LIMIT 10"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 50
+
+[[scenario.queries]]
+name = "factor_rare"
+kind = "sql"
+query = "WITH ff AS (SELECT host, SUM(metric_value) AS fm, COUNT(metric_value) AS fn FROM paper_ffx_balanced_fact WHERE ts >= TIMESTAMP '2024-01-01 00:00:00' AND ts < TIMESTAMP '2024-01-01 01:25:20' GROUP BY host), dd AS (SELECT host, area, SUM(weight) AS dw, COUNT(weight) AS dn FROM paper_ffx_balanced_dim WHERE ts >= TIMESTAMP '2024-01-01 00:00:00' AND ts < TIMESTAMP '2024-01-01 01:25:20' AND area = 'a0' GROUP BY host, area) SELECT ff.host, dd.area, CASE WHEN ff.fn = 0 OR dd.dn = 0 THEN NULL ELSE (ff.fm * dd.dw) / (CAST(ff.fn AS DOUBLE) * CAST(dd.dn AS DOUBLE)) END AS score FROM ff JOIN dd ON ff.host = dd.host ORDER BY score DESC NULLS LAST, ff.host, dd.area LIMIT 10"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 50
+
+[[scenario.queries]]
+name = "raw_full_wide"
+kind = "sql"
+query = "SELECT f.host, d.area, COUNT(*) AS pairs, COUNT(f.metric_value * d.weight) AS valid, SUM(f.metric_value * d.weight) AS total, AVG(f.metric_value * d.weight) AS score FROM paper_ffx_balanced_fact f JOIN paper_ffx_balanced_dim d ON f.host = d.host WHERE f.ts >= TIMESTAMP '2024-01-01 00:00:00' AND f.ts < TIMESTAMP '2024-01-01 01:25:20' AND d.ts >= TIMESTAMP '2024-01-01 00:00:00' AND d.ts < TIMESTAMP '2024-01-01 01:25:20' GROUP BY f.host, d.area ORDER BY f.host NULLS LAST, d.area NULLS LAST"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "factor_full_wide"
+kind = "sql"
+query = "WITH ff AS (SELECT host, SUM(metric_value) AS fm, COUNT(metric_value) AS fn, COUNT(*) AS fc FROM paper_ffx_balanced_fact WHERE ts >= TIMESTAMP '2024-01-01 00:00:00' AND ts < TIMESTAMP '2024-01-01 01:25:20' GROUP BY host), dd AS (SELECT host, area, SUM(weight) AS dw, COUNT(weight) AS dn, COUNT(*) AS dc FROM paper_ffx_balanced_dim WHERE ts >= TIMESTAMP '2024-01-01 00:00:00' AND ts < TIMESTAMP '2024-01-01 01:25:20' GROUP BY host, area) SELECT ff.host, dd.area, ff.fc * dd.dc AS pairs, ff.fn * dd.dn AS valid, ff.fm * dd.dw AS total, CASE WHEN ff.fn = 0 OR dd.dn = 0 THEN NULL ELSE (ff.fm * dd.dw) / (CAST(ff.fn AS DOUBLE) * CAST(dd.dn AS DOUBLE)) END AS score FROM ff JOIN dd ON ff.host = dd.host ORDER BY ff.host NULLS LAST, dd.area NULLS LAST"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "raw_full_narrow"
+kind = "sql"
+query = "SELECT f.host, d.area, COUNT(*) AS pairs, COUNT(f.metric_value * d.weight) AS valid, SUM(f.metric_value * d.weight) AS total, AVG(f.metric_value * d.weight) AS score FROM paper_ffx_balanced_fact f JOIN paper_ffx_balanced_dim d ON f.host = d.host WHERE f.ts >= TIMESTAMP '2024-01-01 01:25:04' AND f.ts < TIMESTAMP '2024-01-01 01:25:20' AND d.ts >= TIMESTAMP '2024-01-01 00:00:00' AND d.ts < TIMESTAMP '2024-01-01 01:25:20' GROUP BY f.host, d.area ORDER BY f.host NULLS LAST, d.area NULLS LAST"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "factor_full_narrow"
+kind = "sql"
+query = "WITH ff AS (SELECT host, SUM(metric_value) AS fm, COUNT(metric_value) AS fn, COUNT(*) AS fc FROM paper_ffx_balanced_fact WHERE ts >= TIMESTAMP '2024-01-01 01:25:04' AND ts < TIMESTAMP '2024-01-01 01:25:20' GROUP BY host), dd AS (SELECT host, area, SUM(weight) AS dw, COUNT(weight) AS dn, COUNT(*) AS dc FROM paper_ffx_balanced_dim WHERE ts >= TIMESTAMP '2024-01-01 00:00:00' AND ts < TIMESTAMP '2024-01-01 01:25:20' GROUP BY host, area) SELECT ff.host, dd.area, ff.fc * dd.dc AS pairs, ff.fn * dd.dn AS valid, ff.fm * dd.dw AS total, CASE WHEN ff.fn = 0 OR dd.dn = 0 THEN NULL ELSE (ff.fm * dd.dw) / (CAST(ff.fn AS DOUBLE) * CAST(dd.dn AS DOUBLE)) END AS score FROM ff JOIN dd ON ff.host = dd.host ORDER BY ff.host NULLS LAST, dd.area NULLS LAST"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "raw_full_rare"
+kind = "sql"
+query = "SELECT f.host, d.area, COUNT(*) AS pairs, COUNT(f.metric_value * d.weight) AS valid, SUM(f.metric_value * d.weight) AS total, AVG(f.metric_value * d.weight) AS score FROM paper_ffx_balanced_fact f JOIN paper_ffx_balanced_dim d ON f.host = d.host WHERE f.ts >= TIMESTAMP '2024-01-01 00:00:00' AND f.ts < TIMESTAMP '2024-01-01 01:25:20' AND d.ts >= TIMESTAMP '2024-01-01 00:00:00' AND d.ts < TIMESTAMP '2024-01-01 01:25:20' AND d.area = 'a0' GROUP BY f.host, d.area ORDER BY f.host NULLS LAST, d.area NULLS LAST"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "factor_full_rare"
+kind = "sql"
+query = "WITH ff AS (SELECT host, SUM(metric_value) AS fm, COUNT(metric_value) AS fn, COUNT(*) AS fc FROM paper_ffx_balanced_fact WHERE ts >= TIMESTAMP '2024-01-01 00:00:00' AND ts < TIMESTAMP '2024-01-01 01:25:20' GROUP BY host), dd AS (SELECT host, area, SUM(weight) AS dw, COUNT(weight) AS dn, COUNT(*) AS dc FROM paper_ffx_balanced_dim WHERE ts >= TIMESTAMP '2024-01-01 00:00:00' AND ts < TIMESTAMP '2024-01-01 01:25:20' AND area = 'a0' GROUP BY host, area) SELECT ff.host, dd.area, ff.fc * dd.dc AS pairs, ff.fn * dd.dn AS valid, ff.fm * dd.dw AS total, CASE WHEN ff.fn = 0 OR dd.dn = 0 THEN NULL ELSE (ff.fm * dd.dw) / (CAST(ff.fn AS DOUBLE) * CAST(dd.dn AS DOUBLE)) END AS score FROM ff JOIN dd ON ff.host = dd.host ORDER BY ff.host NULLS LAST, dd.area NULLS LAST"
+warmup = 0
+iterations = 1
+
+# Diagnostic single executions are excluded from benchmark comparison.
+[[scenario.queries]]
+name = "diagnostic_explain_raw_wide"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT f.host, d.area, AVG(f.metric_value * d.weight) AS score FROM paper_ffx_balanced_fact f JOIN paper_ffx_balanced_dim d ON f.host = d.host WHERE f.ts >= TIMESTAMP '2024-01-01 00:00:00' AND f.ts < TIMESTAMP '2024-01-01 01:25:20' AND d.ts >= TIMESTAMP '2024-01-01 00:00:00' AND d.ts < TIMESTAMP '2024-01-01 01:25:20' GROUP BY f.host, d.area"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "diagnostic_explain_factor_wide"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE WITH ff AS (SELECT host, SUM(metric_value) AS fm, COUNT(metric_value) AS fn FROM paper_ffx_balanced_fact WHERE ts >= TIMESTAMP '2024-01-01 00:00:00' AND ts < TIMESTAMP '2024-01-01 01:25:20' GROUP BY host), dd AS (SELECT host, area, SUM(weight) AS dw, COUNT(weight) AS dn FROM paper_ffx_balanced_dim WHERE ts >= TIMESTAMP '2024-01-01 00:00:00' AND ts < TIMESTAMP '2024-01-01 01:25:20' GROUP BY host, area) SELECT ff.host, dd.area, (ff.fm * dd.dw) / (CAST(ff.fn AS DOUBLE) * CAST(dd.dn AS DOUBLE)) AS score FROM ff JOIN dd ON ff.host = dd.host"
+warmup = 0
+iterations = 1
