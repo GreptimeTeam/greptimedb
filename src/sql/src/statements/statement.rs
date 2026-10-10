@@ -315,21 +315,132 @@ pub struct Hint {
     pub prefix: String,
 }
 
+/// Stack size used for the sqlparser AST deep clone performed by
+/// [`TryFrom<&Statement> for DfStatement`].
+///
+/// The sqlparser AST uses a derived `Clone` implementation, which recurses once
+/// per AST level, so cloning a pathologically deep statement (e.g. thousands of
+/// chained `UNION ALL` branches) can overflow the caller's stack. The
+/// global-worker thread only has a 2MB stack in release builds, so run the
+/// conversion on a dedicated stack that fits such statements (see issue #9356).
+///
+/// Debug builds spend roughly an order of magnitude more stack per AST level
+/// than release builds, and overrunning a grown stack aborts the process (on
+/// Windows silently) instead of unwinding, so tests must stay well under this
+/// budget on every platform.
+const DEEP_STATEMENT_CONVERSION_STACK_SIZE: usize = 16 * 1024 * 1024;
+
 impl TryFrom<&Statement> for DfStatement {
     type Error = Error;
 
     fn try_from(s: &Statement) -> Result<Self, Self::Error> {
-        let s = match s {
-            Statement::Query(query) => SpStatement::Query(Box::new(query.inner.clone())),
-            Statement::Insert(insert) => insert.inner.clone(),
-            Statement::Delete(delete) => delete.inner.clone(),
-            _ => {
-                return ConvertToDfStatementSnafu {
-                    statement: format!("{s:?}"),
+        stacker::grow(DEEP_STATEMENT_CONVERSION_STACK_SIZE, || {
+            let s = match s {
+                Statement::Query(query) => SpStatement::Query(Box::new(query.inner.clone())),
+                Statement::Insert(insert) => insert.inner.clone(),
+                Statement::Delete(delete) => delete.inner.clone(),
+                _ => {
+                    return ConvertToDfStatementSnafu {
+                        statement: format!("{s:?}"),
+                    }
+                    .fail();
                 }
-                .fail();
+            };
+            Ok(DfStatement::Statement(Box::new(s)))
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlparser::ast::SetExpr;
+
+    use super::*;
+    use crate::dialect::GreptimeDbDialect;
+    use crate::parser::{ParseOptions, ParserContext};
+
+    fn build_deep_union_all_sql(branches: usize) -> String {
+        let mut sql = String::new();
+        for i in 0..branches {
+            if i > 0 {
+                sql.push_str(" UNION ALL ");
             }
+            sql.push_str("SELECT number FROM numbers");
+        }
+        sql
+    }
+
+    fn count_union_branches(query: &sqlparser::ast::Query) -> usize {
+        let mut branches = 1;
+        let mut current: &SetExpr = &query.body;
+        while let SetExpr::SetOperation { left, .. } = current {
+            branches += 1;
+            current = left;
+        }
+        branches
+    }
+
+    // The branch count is bounded from both sides:
+    //
+    // - The conversion must need more than the 1MB stack of the thread below,
+    //   otherwise the test would pass even without the grown stack and would
+    //   stop guarding the fix.
+    // - It must stay comfortably under `DEEP_STATEMENT_CONVERSION_STACK_SIZE`
+    //   even for debug builds on every CI platform, because overrunning a
+    //   grown stack aborts the process (silently on Windows) instead of
+    //   failing the test. Debug builds spend ~16KB of stack per branch on this
+    //   clone, so 128 branches (~2-3MB) leave a wide margin.
+    #[test]
+    fn try_into_df_statement_with_deep_union_all() {
+        const BRANCHES: usize = 128;
+
+        let sql = build_deep_union_all_sql(BRANCHES);
+
+        // Parsing recurses once per `UNION ALL` branch as well, and the thread
+        // that runs the test binary has no guaranteed stack size, so pin the
+        // parse to an explicit, generous stack too.
+        let statement = std::thread::Builder::new()
+            .stack_size(DEEP_STATEMENT_CONVERSION_STACK_SIZE)
+            .spawn(move || {
+                let mut statements = ParserContext::create_with_dialect(
+                    &sql,
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap();
+                assert_eq!(statements.len(), 1);
+                statements.pop().unwrap()
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        // Converting deep-clones the sqlparser AST. Its derived `Clone` recursion
+        // overflows a 1MB stack for this many branches unless the conversion
+        // grows the stack, so run it on a deliberately small thread and let the
+        // grown stack inside `try_from` do the work (see issue #9356).
+        let (df_statement, statement) = std::thread::Builder::new()
+            .stack_size(1024 * 1024)
+            .spawn(move || {
+                let df_statement = DfStatement::try_from(&statement).unwrap();
+                (df_statement, statement)
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+
+        let SpStatement::Query(query) = (match df_statement {
+            DfStatement::Statement(statement) => *statement,
+            _ => panic!("expected a plain statement"),
+        }) else {
+            panic!("expected a query statement");
         };
-        Ok(DfStatement::Statement(Box::new(s)))
+        assert_eq!(count_union_branches(&query), BRANCHES);
+
+        // Dropping both statements recurses as well, but at this branch count
+        // their drops fit any test-harness thread (measured), so they can run
+        // on the current one without a grown stack.
+        drop(query);
+        drop(statement);
     }
 }

@@ -400,6 +400,25 @@ impl RangePlanRewriter {
     }
 
     pub async fn rewrite(&mut self, plan: LogicalPlan) -> Result<LogicalPlan> {
+        // `rewrite_logical_plan` recurses on the async call stack, which cannot be
+        // moved to a bigger stack, so a very deep plan can overflow the worker stack
+        // (see issue #9356). The walk only ever changes a plan when some node carries
+        // a `range_fn` expression, so skip it entirely when there is none, and reject
+        // over-deep range queries with a controlled error instead of overflowing.
+        let (depth, has_range_fn) = scan_plan(&plan);
+        if !has_range_fn {
+            return Ok(plan);
+        }
+        ensure!(
+            depth <= crate::MAX_SAFE_PLAN_DEPTH,
+            RangeQuerySnafu {
+                msg: format!(
+                    "Plan depth {depth} exceeds the maximum supported depth {} of range queries",
+                    crate::MAX_SAFE_PLAN_DEPTH
+                ),
+            }
+        );
+
         match self.rewrite_logical_plan(&plan).await? {
             Some(new_plan) => Ok(new_plan),
             None => Ok(plan),
@@ -714,6 +733,28 @@ fn build_range_input_projection(
     LogicalPlanBuilder::from(input.clone())
         .project(projection)?
         .build()
+}
+
+/// Iteratively scans `plan` to find its depth and whether any node contains a
+/// `range_fn` expression.
+///
+/// [`RangePlanRewriter::rewrite_logical_plan`] only ever changes a plan when some
+/// projection contains a `range_fn` expression, so callers can skip the recursive
+/// walk entirely when the returned flag is false.
+fn scan_plan(plan: &LogicalPlan) -> (usize, bool) {
+    let mut depth = 0;
+    let mut has_range_fn = false;
+    let mut stack = vec![(plan, 1_usize)];
+    while let Some((node, level)) = stack.pop() {
+        depth = depth.max(level);
+        if !has_range_fn && have_range_in_exprs(&node.expressions_consider_join()) {
+            has_range_fn = true;
+        }
+        for input in node.inputs() {
+            stack.push((input, level + 1));
+        }
+    }
+    (depth, has_range_fn)
 }
 
 fn have_range_in_exprs(exprs: &[Expr]) -> bool {
@@ -1737,5 +1778,43 @@ mod test {
         ));
 
         assert!(interval_only_in_expr(&expr));
+    }
+
+    fn build_deep_union_all_sql(branches: usize) -> String {
+        let mut sql = String::new();
+        for i in 0..branches {
+            if i > 0 {
+                sql.push_str(" UNION ALL ");
+            }
+            sql.push_str("SELECT timestamp, tag_0, field_0, timestamp_2 FROM test_0");
+        }
+        sql
+    }
+
+    #[tokio::test]
+    async fn deep_union_all_without_range_fn_is_unchanged() {
+        // A plan without range functions must skip the recursive walk in
+        // `RangePlanRewriter::rewrite`, which used to overflow the worker stack
+        // for deep `UNION ALL` chains (see issue #9356).
+        let sql = build_deep_union_all_sql(300);
+        let plan = do_union_query(&sql).await.unwrap();
+        assert!(!plan.to_string().contains("RangeSelect"));
+    }
+
+    #[tokio::test]
+    async fn deep_range_query_is_rejected() {
+        // Range queries deeper than `MAX_SAFE_PLAN_DEPTH` are rejected with an
+        // error, because the recursive range rewrite cannot be moved to a bigger
+        // stack and would risk a stack overflow on such plans (see issue #9356).
+        let inner = build_deep_union_all_sql(300);
+        let sql = format!(
+            "SELECT timestamp, tag_0, avg(field_0) RANGE '5m' FROM ({inner}) \
+             WHERE timestamp >= '1970-01-01 00:00:00' ALIGN '1h' BY (tag_0)"
+        );
+        let err = do_union_query(&sql).await.unwrap_err().to_string();
+        assert!(
+            err.contains("exceeds the maximum supported depth"),
+            "unexpected error: {err}"
+        );
     }
 }

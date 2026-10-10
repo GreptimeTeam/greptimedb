@@ -2178,6 +2178,157 @@ fn remote_dyn_filter_producer_ids_do_not_collide_between_subquery_and_outer_plan
 }
 
 #[test]
+fn deep_plan_uses_fallback_plan_rewriter() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+
+    // Build a left-deep `UNION ALL` chain deeper than `MAX_SAFE_PLAN_DEPTH`,
+    // mirroring the deep plans reported in issue #9356. `PlanRewriter` (and the
+    // Substrait encoding it performs) can overflow the worker stack on such
+    // plans, so the analyzer must rewrite them with the fallback plan rewriter
+    // instead, which wraps every table scan in its own `MergeScan`.
+    const BRANCHES: usize = 512;
+    let mut plan = LogicalPlanBuilder::scan_with_filters("t", table_source.clone(), None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+    for _ in 1..BRANCHES {
+        let branch = LogicalPlanBuilder::scan_with_filters("t", table_source.clone(), None, vec![])
+            .unwrap()
+            .build()
+            .unwrap();
+        plan = LogicalPlanBuilder::from(plan)
+            .union(branch)
+            .unwrap()
+            .build()
+            .unwrap();
+    }
+    assert!(crate::plan_depth(&plan).unwrap() > crate::MAX_SAFE_PLAN_DEPTH);
+
+    let rewritten = DistPlannerAnalyzer {}.try_push_down(plan).unwrap();
+
+    let mut merge_scans = 0;
+    let mut stack = vec![&rewritten];
+    while let Some(node) = stack.pop() {
+        if let LogicalPlan::Extension(extension) = node
+            && extension.node.name() == MergeScanLogicalPlan::name()
+        {
+            merge_scans += 1;
+        }
+        stack.extend(node.inputs());
+    }
+    assert_eq!(BRANCHES, merge_scans);
+}
+
+#[test]
+fn plan_depth_counts_subqueries_embedded_in_expressions() {
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+
+    // Build a chain of `EXISTS (SELECT ... WHERE EXISTS (...))` subqueries
+    // deeper than `MAX_SAFE_PLAN_DEPTH` while only counting relational inputs
+    // stays shallow. The recursive subquery-aware rewrites dive into embedded
+    // subqueries at the node that carries them, so the depth guard must count
+    // them too, otherwise such plans bypass the guard (issue #9356).
+    const DEPTH: usize = 512;
+    let mut plan = LogicalPlanBuilder::scan_with_filters("t", table_source.clone(), None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+    for _ in 0..DEPTH {
+        let subquery = Subquery {
+            subquery: Arc::new(plan),
+            outer_ref_columns: Default::default(),
+            spans: Default::default(),
+        };
+        plan = LogicalPlanBuilder::scan_with_filters("t", table_source.clone(), None, vec![])
+            .unwrap()
+            .filter(Expr::Exists(Exists {
+                subquery,
+                negated: false,
+            }))
+            .unwrap()
+            .build()
+            .unwrap();
+    }
+
+    assert!(crate::plan_depth(&plan).unwrap() > crate::MAX_SAFE_PLAN_DEPTH);
+}
+
+#[test]
+fn deep_plan_fallback_rewrites_scans_inside_subqueries() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "numbers".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+
+    // Same deep `UNION ALL` chain as `deep_plan_uses_fallback_plan_rewriter`
+    // (which forces the fallback path), but the first branch carries an
+    // `EXISTS` subquery embedding a `TableScan` that is not part of the union
+    // chain. The fallback rewriter must wrap that scan in `MergeScan` too,
+    // otherwise a bare `TableScan` survives into distributed planning.
+    const BRANCHES: usize = 512;
+    let subquery_scan =
+        LogicalPlanBuilder::scan_with_filters("t", table_source.clone(), None, vec![])
+            .unwrap()
+            .build()
+            .unwrap();
+    let mut plan = LogicalPlanBuilder::scan_with_filters("t", table_source.clone(), None, vec![])
+        .unwrap()
+        .filter(Expr::Exists(Exists {
+            subquery: Subquery {
+                subquery: Arc::new(subquery_scan),
+                outer_ref_columns: Default::default(),
+                spans: Default::default(),
+            },
+            negated: false,
+        }))
+        .unwrap()
+        .build()
+        .unwrap();
+    for _ in 1..BRANCHES {
+        let branch = LogicalPlanBuilder::scan_with_filters("t", table_source.clone(), None, vec![])
+            .unwrap()
+            .build()
+            .unwrap();
+        plan = LogicalPlanBuilder::from(plan)
+            .union(branch)
+            .unwrap()
+            .build()
+            .unwrap();
+    }
+    assert!(crate::plan_depth(&plan).unwrap() > crate::MAX_SAFE_PLAN_DEPTH);
+
+    let rewritten = DistPlannerAnalyzer {}.try_push_down(plan).unwrap();
+
+    let mut merge_scans = 0;
+    let mut bare_scans = 0;
+    rewritten
+        .apply_with_subqueries(|node| {
+            match node {
+                LogicalPlan::TableScan(_) => bare_scans += 1,
+                LogicalPlan::Extension(extension)
+                    if extension.node.name() == MergeScanLogicalPlan::name() =>
+                {
+                    merge_scans += 1;
+                }
+                _ => {}
+            }
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+    assert_eq!(0, bare_scans);
+    // One scan per union branch plus the scan inside the subquery.
+    assert_eq!(BRANCHES + 1, merge_scans);
+}
+
+#[test]
 fn date_bin_ts_group_by() {
     init_default_ut_logging();
     let test_table = TestTable::table_with_name(0, "t".to_string());
