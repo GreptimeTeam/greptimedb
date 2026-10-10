@@ -324,7 +324,13 @@ impl QueryEngineState {
             .build()
         })?);
         let options = query_ctx.extensions();
-        for (key, value) in &options {
+        const MASTER: &str = "datafusion.optimizer.enable_dynamic_filter_pushdown";
+        // The master switch cascades to children, so apply explicit child overrides afterward.
+        for (key, value) in options
+            .get_key_value(MASTER)
+            .into_iter()
+            .chain(options.iter().filter(|(key, _)| key.as_str() != MASTER))
+        {
             if key.starts_with("datafusion.") {
                 state
                     .config_mut()
