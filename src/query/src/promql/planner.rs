@@ -587,9 +587,10 @@ impl PromPlanner {
         };
 
         let current_interval = self.ctx.interval;
-        if let Some(step) = step {
-            self.ctx.interval = step.as_millis() as _;
-        }
+        self.ctx.interval = match step {
+            Some(step) => step.as_millis() as _,
+            None => DEFAULT_SUBQUERY_STEP_MS,
+        };
         ensure!(self.ctx.interval > 0, ZeroRangeSelectorSnafu);
         let current_start = self.ctx.start;
         let current_end = self.ctx.end;
