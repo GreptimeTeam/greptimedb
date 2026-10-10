@@ -469,7 +469,7 @@ mod tests {
             .await
             .unwrap();
 
-        let engine_ctx = engine.engine_context(query_ctx);
+        let engine_ctx = engine.engine_context(query_ctx).unwrap();
         let state = engine_ctx.state();
 
         let analyzed_plan = state

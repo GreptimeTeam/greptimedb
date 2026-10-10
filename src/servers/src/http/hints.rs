@@ -15,7 +15,7 @@
 use axum::body::Body;
 use axum::http::Request;
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use common_telemetry::debug;
 use session::context::QueryContext;
 use session::hints::is_reserved_extension_key;
@@ -24,13 +24,24 @@ use crate::hint_headers;
 
 pub async fn extract_hints(mut request: Request<Body>, next: Next) -> Response {
     let hints = hint_headers::extract_hints(request.headers());
+    let dedicated_read_preference = request
+        .headers()
+        .contains_key(&crate::http::header::GREPTIME_DB_HEADER_READ_PREFERENCE);
+    let hints = match hint_headers::validate_public_hints(hints) {
+        Ok(hints) => hints,
+        Err(error) => return error.into_response(),
+    };
     if let Some(query_ctx) = request.extensions_mut().get_mut::<QueryContext>() {
-        apply_hints(query_ctx, hints);
+        apply_hints(query_ctx, hints, dedicated_read_preference);
     }
     next.run(request).await
 }
 
-fn apply_hints(query_ctx: &mut QueryContext, hints: Vec<(String, String)>) {
+fn apply_hints(
+    query_ctx: &mut QueryContext,
+    hints: Vec<(String, String)>,
+    dedicated_read_preference: bool,
+) {
     for (key, value) in hints {
         if is_reserved_extension_key(&key) {
             debug!(
@@ -39,7 +50,15 @@ fn apply_hints(query_ctx: &mut QueryContext, hints: Vec<(String, String)>) {
             );
             continue;
         }
-        query_ctx.set_extension(key, value);
+        if key.eq_ignore_ascii_case(session::hints::READ_PREFERENCE_HINT) {
+            if !dedicated_read_preference
+                && let Ok(preference) = value.parse::<session::ReadPreference>()
+            {
+                query_ctx.set_read_preference(preference);
+            }
+        } else {
+            query_ctx.set_extension(key, value);
+        }
     }
 }
 
@@ -86,6 +105,7 @@ mod tests {
                 ),
                 ("ttl".to_string(), "7d".to_string()),
             ],
+            false,
         );
 
         assert_eq!(

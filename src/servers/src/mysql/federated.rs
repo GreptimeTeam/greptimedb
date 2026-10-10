@@ -280,8 +280,16 @@ fn check_show_variables(query: &str) -> Option<Output> {
         ))
     } else if SHOW_LOWER_CASE_PATTERN.is_match(query) {
         Some(show_variables("lower_case_table_names", "0"))
-    } else if SHOW_VARIABLES_LIKE_PATTERN.is_match(query) {
-        Some(show_variables("", ""))
+    } else if let Some(matched) = SHOW_VARIABLES_LIKE_PATTERN.find(query) {
+        let mut remainder = strip_leading_comments(&query[matched.end()..]);
+        while let Some(rest) = remainder.strip_prefix(';') {
+            remainder = strip_leading_comments(rest);
+        }
+        if remainder.is_empty() {
+            Some(show_variables("", ""))
+        } else {
+            None
+        }
     } else {
         None
     };

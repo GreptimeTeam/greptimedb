@@ -299,6 +299,21 @@ impl Instance {
 
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
+        let query_ctx = if matches!(&stmt, Statement::SetVariables(_)) {
+            query_ctx
+        } else {
+            Arc::new(
+                query_ctx
+                    .query_option_snapshot()
+                    .map_err(|error| {
+                        query::error::InvalidQueryContextExtensionSnafu {
+                            reason: error.to_string(),
+                        }
+                        .build()
+                    })
+                    .context(PlanStatementSnafu)?,
+            )
+        };
 
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();

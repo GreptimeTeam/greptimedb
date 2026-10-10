@@ -350,6 +350,15 @@ impl StatementExecutor {
 
     #[tracing::instrument(skip_all)]
     pub fn show_variable(&self, stmt: ShowVariables, query_ctx: QueryContextRef) -> Result<Output> {
+        if let Some(output) = query::sql::show_query_option(
+            stmt.clone(),
+            query_ctx.clone(),
+            self.query_engine.as_ref(),
+        )
+        .context(error::ExecuteStatementSnafu)?
+        {
+            return Ok(output);
+        }
         query::sql::show_variable(stmt, query_ctx).context(error::ExecuteStatementSnafu)
     }
 

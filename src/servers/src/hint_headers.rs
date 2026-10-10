@@ -16,6 +16,8 @@ use http::HeaderMap;
 use session::hints::{HINT_KEYS, HINTS_KEY, HINTS_KEY_PREFIX};
 use tonic::metadata::MetadataMap;
 
+use crate::error::{InvalidParameterSnafu, Result};
+
 pub(crate) fn extract_hints<T: ToHeaderMap>(headers: &T) -> Vec<(String, String)> {
     let mut hints = Vec::new();
     if let Some(value_str) = headers.get(HINTS_KEY) {
@@ -23,6 +25,16 @@ pub(crate) fn extract_hints<T: ToHeaderMap>(headers: &T) -> Vec<(String, String)
             let mut parts = hint.splitn(2, '=');
             if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
                 hints.push((key.trim().to_string(), value.trim().to_string()));
+            } else {
+                let key = hint.trim();
+                let key_lower = key.to_ascii_lowercase();
+                let owned_prefix =
+                    key_lower.starts_with("query.") || key_lower.starts_with("datafusion.");
+                if owned_prefix
+                    || session::query_options::canonical_query_option_name(key).is_some()
+                {
+                    hints.push((key.to_string(), String::new()));
+                }
             }
         });
         // If hints are provided in the `x-greptime-hints` header, ignore the rest of the headers
@@ -35,6 +47,40 @@ pub(crate) fn extract_hints<T: ToHeaderMap>(headers: &T) -> Vec<(String, String)
         }
     }
     hints
+}
+
+/// Validate query options supplied through public protocol hints.
+pub(crate) fn validate_public_hints(hints: Vec<(String, String)>) -> Result<Vec<(String, String)>> {
+    use std::collections::HashMap;
+
+    let mut normalized = Vec::with_capacity(hints.len());
+    let mut seen = HashMap::new();
+    for (key, value) in hints {
+        if session::hints::is_reserved_extension_key(&key) {
+            continue;
+        }
+        match session::query_options::parse_query_option(&key, &value) {
+            Ok(Some((canonical, normalized_value))) => {
+                if let Some(existing) = seen.insert(canonical.clone(), normalized_value.clone())
+                    && existing != normalized_value
+                {
+                    return InvalidParameterSnafu {
+                        reason: format!("Conflicting values for hint `{canonical}`"),
+                    }
+                    .fail();
+                }
+                normalized.push((canonical, normalized_value));
+            }
+            Ok(None) => normalized.push((key, value)),
+            Err(error) => {
+                return InvalidParameterSnafu {
+                    reason: error.to_string(),
+                }
+                .fail();
+            }
+        }
+    }
+    Ok(normalized)
 }
 
 pub(crate) trait ToHeaderMap {

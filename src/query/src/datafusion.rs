@@ -55,9 +55,7 @@ use tracing::Span;
 
 use crate::analyze::DistAnalyzeExec;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
-use crate::dist_plan::{
-    DistPlannerOptions, MergeScanLogicalPlan, RemoteDynFilterReceiverInjectorRef,
-};
+use crate::dist_plan::{MergeScanLogicalPlan, RemoteDynFilterReceiverInjectorRef};
 use crate::error::{
     CatalogSnafu, CreateRecordBatchSnafu, MissingTableMutationHandlerSnafu,
     MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, TableMutationSnafu,
@@ -155,7 +153,8 @@ impl DatafusionQueryEngine {
         plan: LogicalPlan,
         query_ctx: QueryContextRef,
     ) -> Result<Output> {
-        let mut ctx = self.engine_context(query_ctx.clone());
+        let mut ctx = self.engine_context(query_ctx)?;
+        let query_ctx = ctx.query_ctx();
         let plan = if let Some(receiver_injector) =
             self.plugins.get::<RemoteDynFilterReceiverInjectorRef>()
         {
@@ -547,53 +546,14 @@ impl QueryEngine for DatafusionQueryEngine {
         self.state.read_table(table).map_err(Into::into)
     }
 
-    fn engine_context(&self, query_ctx: QueryContextRef) -> QueryEngineContext {
+    fn engine_context(&self, query_ctx: QueryContextRef) -> Result<QueryEngineContext> {
         let mut state = self.state.session_state();
+        let query_ctx = self.state.apply_query_options(&mut state, query_ctx)?;
         state.config_mut().set_extension(query_ctx.clone());
         state.config_mut().set_extension(self.state.clone());
-        // note that hints in "x-greptime-hints" is automatically parsed
-        // and set to query context's extension, so we can get it from query context.
-        if let Some(parallelism) = query_ctx.extension(QUERY_PARALLELISM_HINT) {
-            if let Ok(n) = parallelism.parse::<u64>() {
-                if n > 0 {
-                    let new_cfg = state.config().clone().with_target_partitions(n as usize);
-                    *state.config_mut() = new_cfg;
-                }
-            } else {
-                common_telemetry::warn!(
-                    "Failed to parse query_parallelism: {}, using default value",
-                    parallelism
-                );
-            }
-        }
-
         // configure execution options
         state.config_mut().options_mut().execution.time_zone =
             Some(query_ctx.timezone().to_string());
-
-        // usually it's impossible to have both `set variable` set by sql client and
-        // hint in header by grpc client, so only need to deal with them separately
-        if query_ctx.configuration_parameter().allow_query_fallback() {
-            state
-                .config_mut()
-                .options_mut()
-                .extensions
-                .insert(DistPlannerOptions {
-                    allow_query_fallback: true,
-                });
-        } else if let Some(fallback) = query_ctx.extension(QUERY_FALLBACK_HINT) {
-            // also check the query context for fallback hint
-            // if it is set, we will enable the fallback
-            if fallback.to_lowercase().parse::<bool>().unwrap_or(false) {
-                state
-                    .config_mut()
-                    .options_mut()
-                    .extensions
-                    .insert(DistPlannerOptions {
-                        allow_query_fallback: true,
-                    });
-            }
-        }
 
         state
             .config_mut()
@@ -634,7 +594,7 @@ impl QueryEngine for DatafusionQueryEngine {
             }
         }
 
-        QueryEngineContext::new(state, query_ctx)
+        Ok(QueryEngineContext::new(state, query_ctx))
     }
 
     fn engine_state(&self) -> &QueryEngineState {
@@ -1189,7 +1149,7 @@ mod tests {
             .as_any()
             .downcast_ref::<DatafusionQueryEngine>()
             .unwrap();
-        let engine_ctx = engine.engine_context(QueryContext::arc());
+        let engine_ctx = engine.engine_context(QueryContext::arc()).unwrap();
         let state = engine_ctx.state();
 
         let schema = Arc::new(datatypes::schema::Schema::new(vec![ColumnSchema::new(
@@ -1249,7 +1209,7 @@ mod tests {
             .as_any()
             .downcast_ref::<DatafusionQueryEngine>()
             .unwrap();
-        let engine_ctx = engine.engine_context(QueryContext::arc());
+        let engine_ctx = engine.engine_context(QueryContext::arc()).unwrap();
         let state = engine_ctx.state();
 
         assert!(

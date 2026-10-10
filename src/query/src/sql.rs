@@ -376,7 +376,7 @@ async fn query_from_information_schema_dataframe(
             let view = dataframe.into_view();
             let dataframe = SessionContext::new_with_state(
                 query_engine
-                    .engine_context(query_ctx.clone())
+                    .engine_context(query_ctx.clone())?
                     .state()
                     .clone(),
             )
@@ -842,6 +842,72 @@ pub async fn show_charsets_dataframe(
         kind,
     )
     .await
+}
+
+/// Shows one supported query optimizer option, returning `None` for legacy SHOW handling.
+pub fn show_query_option(
+    stmt: ShowVariables,
+    query_ctx: QueryContextRef,
+    engine: &dyn crate::QueryEngine,
+) -> Result<Option<Output>> {
+    let name = stmt.variable.to_string();
+    let Some(canonical) = session::query_options::canonical_query_option_name(&name) else {
+        if name.to_ascii_lowercase().starts_with("query.")
+            || name.to_ascii_lowercase().starts_with("datafusion.")
+        {
+            session::query_options::parse_query_option(&name, "").map_err(|error| {
+                error::InvalidQueryContextExtensionSnafu {
+                    reason: error.to_string(),
+                }
+                .build()
+            })?;
+        }
+        return Ok(None);
+    };
+    let context = engine.engine_context(query_ctx.clone())?;
+    let value = match canonical.as_str() {
+        "query.allow_query_fallback" => context
+            .state()
+            .config_options()
+            .extensions
+            .get::<crate::dist_plan::DistPlannerOptions>()
+            .map(|options| options.allow_query_fallback)
+            .unwrap_or(false)
+            .to_string(),
+        "query.enable_remote_dynamic_filter_pushdown" => {
+            crate::options::remote_dyn_filter_pushdown_enabled_from_extensions(
+                &context.query_ctx().extensions(),
+            )?
+            .to_string()
+        }
+        "query.parallelism" => context.state().config().target_partitions().to_string(),
+        _ => context
+            .state()
+            .config_options()
+            .entries()
+            .into_iter()
+            .find(|entry| entry.key == canonical)
+            .and_then(|entry| entry.value)
+            .ok_or_else(|| {
+                error::InvalidQueryContextExtensionSnafu {
+                    reason: format!(
+                        "No DataFusion configuration entry for supported option {canonical}"
+                    ),
+                }
+                .build()
+            })?,
+    };
+    let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+        name.clone(),
+        ConcreteDataType::string_datatype(),
+        false,
+    )]));
+    let records = RecordBatches::try_from_columns(
+        schema,
+        vec![Arc::new(StringVector::from(vec![value])) as _],
+    )
+    .context(error::CreateRecordBatchSnafu)?;
+    Ok(Some(Output::new_with_record_batches(records)))
 }
 
 pub fn show_variable(stmt: ShowVariables, query_ctx: QueryContextRef) -> Result<Output> {

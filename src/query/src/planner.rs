@@ -55,6 +55,7 @@ use crate::error::{
     UnimplementedSnafu,
 };
 use crate::log_query::planner::LogQueryPlanner;
+use crate::options::ScheduledTimeExtension;
 use crate::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryLanguageParser, QueryStatement};
 use crate::promql::planner::PromPlanner;
 use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
@@ -95,24 +96,40 @@ impl DfLogicalPlanner {
     /// in the query context.
     fn derive_session_state_with_scheduled_time(
         &self,
-        query_ctx: &QueryContextRef,
-    ) -> Result<SessionState> {
+        query_ctx: QueryContextRef,
+    ) -> Result<QueryEngineContext> {
         let extensions = query_ctx.extensions();
-        match crate::options::parse_scheduled_time_datetime(&extensions)? {
+        let mut state = match crate::options::parse_scheduled_time_datetime(&extensions)? {
             Some(dt) => {
                 let execution_props = self
                     .session_state
                     .execution_props()
                     .clone()
                     .with_query_execution_start_time(dt);
-                Ok(
-                    SessionStateBuilder::new_from_existing(self.session_state.clone())
-                        .with_execution_props(execution_props)
-                        .build(),
-                )
+                SessionStateBuilder::new_from_existing(self.session_state.clone())
+                    .with_execution_props(execution_props)
+                    .build()
             }
-            None => Ok(self.session_state.clone()),
-        }
+            None => self.session_state.clone(),
+        };
+        let query_ctx = self
+            .engine_state
+            .apply_query_options(&mut state, query_ctx)?;
+        state.config_mut().set_extension(query_ctx.clone());
+        state.config_mut().set_extension(self.engine_state.clone());
+        state
+            .config_mut()
+            .options_mut()
+            .extensions
+            .insert(ScheduledTimeExtension {
+                scheduled_time: crate::options::scheduled_time_from_ctx(&query_ctx),
+            });
+        let config_options = state.config_options().clone();
+        let _ = state
+            .execution_props_mut()
+            .config_options
+            .insert(config_options);
+        Ok(QueryEngineContext::new(state, query_ctx))
     }
 
     /// Basically the same with `explain_to_plan` in DataFusion, but adapted to Greptime's
@@ -220,7 +237,9 @@ impl DfLogicalPlanner {
             .fail()?;
         }
 
-        let scheduled_state = self.derive_session_state_with_scheduled_time(&query_ctx)?;
+        let engine_context = self.derive_session_state_with_scheduled_time(query_ctx)?;
+        let scheduled_state = engine_context.state().clone();
+        let query_ctx = engine_context.query_ctx();
         let table_provider = DfTableSourceProvider::new(
             self.engine_state.catalog_manager().clone(),
             self.engine_state.disallow_cross_catalog_query(),
@@ -243,7 +262,7 @@ impl DfLogicalPlanner {
         )
         .await?;
 
-        let config_options = self.session_state.config().options();
+        let config_options = scheduled_state.config().options();
         let parser_options = &config_options.sql_parser;
         let parser_options = ParserOptions {
             map_string_types_to_utf8view: false,
@@ -273,10 +292,9 @@ impl DfLogicalPlanner {
             .await?;
 
         // Optimize logical plan by extension rules
-        let context = QueryEngineContext::new(scheduled_state, query_ctx);
         let plan = self
             .engine_state
-            .optimize_by_extension_rules(plan, &context)?;
+            .optimize_by_extension_rules(plan, &engine_context)?;
         common_telemetry::debug!("Logical planner, optimize result: {plan}");
 
         Ok(plan)
@@ -291,16 +309,17 @@ impl DfLogicalPlanner {
         normalize_ident: bool,
         query_ctx: QueryContextRef,
     ) -> Result<DfExpr> {
-        let scheduled_state = self.derive_session_state_with_scheduled_time(&query_ctx)?;
+        let engine_context = self.derive_session_state_with_scheduled_time(query_ctx)?;
+        let query_ctx = engine_context.query_ctx();
         let context_provider = DfContextProviderAdapter::try_new(
             self.engine_state.clone(),
-            scheduled_state,
+            engine_context.state().clone(),
             None,
             query_ctx,
         )
         .await?;
 
-        let config_options = self.session_state.config().options();
+        let config_options = engine_context.state().config().options();
         let parser_options = &config_options.sql_parser;
         let parser_options: ParserOptions = ParserOptions {
             map_string_types_to_utf8view: false,
@@ -315,7 +334,9 @@ impl DfLogicalPlanner {
 
     #[tracing::instrument(skip_all)]
     async fn plan_pql(&self, stmt: &EvalStmt, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
-        let mut scheduled_state = self.derive_session_state_with_scheduled_time(&query_ctx)?;
+        let engine_context = self.derive_session_state_with_scheduled_time(query_ctx)?;
+        let query_ctx = engine_context.query_ctx();
+        let mut scheduled_state = engine_context.state().clone();
         let promql_annotations = query_ctx.remote_query_id().map(promql_annotation_collector);
         if let Some(collector) = &promql_annotations {
             scheduled_state
@@ -706,22 +727,19 @@ impl LogicalPlanner for DfLogicalPlanner {
         query: LogQuery,
         query_ctx: QueryContextRef,
     ) -> Result<LogicalPlan> {
-        let plan_decoder = Arc::new(DefaultPlanDecoder::new(
-            self.session_state.clone(),
-            &query_ctx,
-        )?);
+        let engine_context = self.derive_session_state_with_scheduled_time(query_ctx)?;
+        let query_ctx = engine_context.query_ctx();
+        let state = engine_context.state().clone();
+        let plan_decoder = Arc::new(DefaultPlanDecoder::new(state.clone(), &query_ctx)?);
         let table_provider = DfTableSourceProvider::new(
             self.engine_state.catalog_manager().clone(),
             self.engine_state.disallow_cross_catalog_query(),
             query_ctx,
             plan_decoder,
-            self.session_state
-                .config_options()
-                .sql_parser
-                .enable_ident_normalization,
+            state.config_options().sql_parser.enable_ident_normalization,
         );
 
-        let mut planner = LogQueryPlanner::new(table_provider, self.session_state.clone());
+        let mut planner = LogQueryPlanner::new(table_provider, state);
         planner
             .query_to_plan(query)
             .await
@@ -962,7 +980,7 @@ mod tests {
             .plan(&stmt, query_ctx.clone())
             .await
             .unwrap();
-        let context = engine.engine_context(query_ctx.clone());
+        let context = engine.engine_context(query_ctx.clone()).unwrap();
         let state = context.state();
         state
             .analyzer()
