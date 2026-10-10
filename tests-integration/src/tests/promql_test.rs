@@ -258,31 +258,27 @@ async fn histogram_fraction_binary_join_preserves_partitioned_rows() {
                         .as_any()
                         .downcast_ref::<TimestampMillisecondArray>()
                         .unwrap();
-                    let host = batch
-                        .column_by_name("host")
-                        .unwrap()
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .unwrap();
-                    let shard = batch
-                        .column_by_name("shard")
-                        .unwrap()
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .unwrap();
+                    let host_array =
+                        cast(batch.column_by_name("host").unwrap(), &DataType::Utf8).unwrap();
+                    let host = host_array.as_any().downcast_ref::<StringArray>().unwrap();
+                    let shard_array =
+                        cast(batch.column_by_name("shard").unwrap(), &DataType::Utf8).unwrap();
+                    let shard = shard_array.as_any().downcast_ref::<StringArray>().unwrap();
                     let value = batch
                         .columns()
                         .iter()
                         .find_map(|column| column.as_any().downcast_ref::<Float64Array>())
                         .unwrap();
-                    (0..batch.num_rows()).map(move |row| {
-                        (
-                            ts.value(row),
-                            host.value(row).to_owned(),
-                            shard.value(row).to_owned(),
-                            value.value(row),
-                        )
-                    })
+                    (0..batch.num_rows())
+                        .map(move |row| {
+                            (
+                                ts.value(row),
+                                host.value(row).to_owned(),
+                                shard.value(row).to_owned(),
+                                value.value(row),
+                            )
+                        })
+                        .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>();
             rows.sort_by(|left, right| left.2.cmp(&right.2));
