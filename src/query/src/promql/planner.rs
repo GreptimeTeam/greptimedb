@@ -21,7 +21,6 @@ mod set_operator;
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
 
 use arrow::datatypes::IntervalDayTime;
 use async_recursion::async_recursion;
@@ -112,6 +111,7 @@ use crate::promql::error::{
     UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, ValueNotFoundSnafu,
     ZeroRangeSelectorSnafu,
 };
+use crate::promql::label_values::signed_millis_since_epoch;
 use crate::query_engine::QueryEngineState;
 
 /// `time()` function in PromQL.
@@ -241,10 +241,11 @@ impl BinaryResultLabels {
 }
 
 impl PromPlannerContext {
-    fn from_eval_stmt(stmt: &EvalStmt) -> Self {
-        let start = stmt.start.duration_since(UNIX_EPOCH).unwrap().as_millis() as Millisecond;
-        let end = stmt.end.duration_since(UNIX_EPOCH).unwrap().as_millis() as Millisecond;
-        Self {
+    fn from_eval_stmt(stmt: &EvalStmt) -> Result<Self> {
+        // Evaluation times before the Unix epoch are valid in Prometheus.
+        let start = signed_millis_since_epoch(stmt.start)?;
+        let end = signed_millis_since_epoch(stmt.end)?;
+        Ok(Self {
             start,
             end,
             interval: stmt.interval.as_millis() as _,
@@ -252,7 +253,7 @@ impl PromPlannerContext {
             stmt_start: start,
             stmt_end: end,
             ..Default::default()
-        }
+        })
     }
 
     /// Reset all planner states
@@ -309,7 +310,7 @@ impl PromPlanner {
     ) -> Result<LogicalPlan> {
         let mut planner = Self {
             table_provider,
-            ctx: PromPlannerContext::from_eval_stmt(stmt),
+            ctx: PromPlannerContext::from_eval_stmt(stmt)?,
             promql_annotations,
         };
 
