@@ -70,6 +70,13 @@ concern, not query-time semantics).
 | `greptime.semantic.source_version` | Source protocol version, e.g. Prometheus remote write `1.0` / `2.0` |
 | `greptime.semantic.pipeline` | `greptime_trace_v1` (the signal-agnostic successor to `table_data_model`) |
 
+**Information-schema tables** carry `greptime.semantic.table_scope`: `catalog`
+means the provider filters every query to its construction catalog; `cluster`
+means cluster-wide or shared data, including compatibility stubs. The scope is
+declared at registration and appears as `table_scope` in `semantic_options`.
+Enterprise authorization trusts only registered system-table metadata. Setting
+this option on a user table does not change its permissions.
+
 **Trace**: `greptime.semantic.trace.conventions` (the OTel `schema_url` the rows conform to, or `mixed` / `unknown` when not single-valued).
 
 **Metric** — v1 assumes one metric type per table, which is how both Prom RW and the post-v0.16 OTel ingestion path land data today; mixed-type tables are a follow-up. These are stamped for OTLP (which declares them on the wire and then discards them); Prometheus carries its type/unit in the name and gets identity only.

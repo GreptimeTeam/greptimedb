@@ -515,6 +515,17 @@ mod tests {
     }
 
     #[test]
+    fn extract_system_table_scope() {
+        let info = table_info(&[(table::requests::SEMANTIC_TABLE_SCOPE, "catalog")]);
+        let row = SemanticRow::extract(&info).unwrap();
+        assert_eq!(
+            row.options_json.as_deref(),
+            Some(r#"{"table_scope":"catalog"}"#)
+        );
+        assert!(row.signal_type.is_none());
+    }
+
+    #[test]
     fn extract_skips_untagged_table() {
         let info = table_info(&[("ttl", "7d")]);
         assert!(SemanticRow::extract(&info).is_none());
