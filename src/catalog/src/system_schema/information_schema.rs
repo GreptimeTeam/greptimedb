@@ -168,15 +168,15 @@ pub struct MakeInformationTableRequest {
 pub enum InformationSchemaTableScope {
     /// Every query is filtered to the catalog supplied when constructing the provider.
     Catalog,
-    /// The table contains cluster-wide or shared data, including compatibility stubs.
-    Cluster,
+    /// The table contains catalog-independent or shared data, including compatibility stubs.
+    Global,
 }
 
 impl InformationSchemaTableScope {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Catalog => "catalog",
-            Self::Cluster => "cluster",
+            Self::Global => "global",
         }
     }
 }
@@ -378,9 +378,10 @@ impl InformationSchemaProvider {
     }
 
     fn build_tables(&mut self) {
-        use InformationSchemaTableScope::{Catalog, Cluster};
+        use InformationSchemaTableScope::{Catalog, Global};
 
-        let mut tables = HashMap::new();
+        // Registration requires a scope; metadata is attached centrally below.
+        let mut table_scopes = HashMap::new();
 
         // SECURITY NOTE:
         // Carefully consider the tables that may expose sensitive cluster configurations,
@@ -388,20 +389,17 @@ impl InformationSchemaProvider {
         // Only put these tables under `greptime` catalog to prevent info leak.
         if self.catalog_name == DEFAULT_CATALOG_NAME {
             for (name, scope) in [
-                (BUILD_INFO, Cluster),
+                (BUILD_INFO, Global),
                 (REGION_PEERS, Catalog),
-                (CLUSTER_INFO, Cluster),
-                (PROCEDURE_INFO, Cluster),
-                (REGION_STATISTICS, Cluster),
-                (REGION_INFO, Cluster),
-                (SSTS_MANIFEST, Cluster),
-                (SSTS_STORAGE, Cluster),
-                (SSTS_INDEX_META, Cluster),
+                (CLUSTER_INFO, Global),
+                (PROCEDURE_INFO, Global),
+                (REGION_STATISTICS, Global),
+                (REGION_INFO, Global),
+                (SSTS_MANIFEST, Global),
+                (SSTS_STORAGE, Global),
+                (SSTS_INDEX_META, Global),
             ] {
-                tables.insert(
-                    name.to_string(),
-                    self.build_scoped_table(name, scope).unwrap(),
-                );
+                table_scopes.insert(name, scope);
             }
         }
 
@@ -420,47 +418,35 @@ impl InformationSchemaProvider {
             TABLE_SEMANTICS,
             PARTITIONS,
         ] {
-            tables.insert(
-                name.to_string(),
-                self.build_scoped_table(name, Catalog).unwrap(),
-            );
+            table_scopes.insert(name, Catalog);
         }
-        if let Some(process_list) = self.build_scoped_table(PROCESS_LIST, Cluster) {
-            tables.insert(PROCESS_LIST.to_string(), process_list);
+        if self.process_manager.is_some() {
+            table_scopes.insert(PROCESS_LIST, Global);
         }
         // Add memory tables
         for name in MEMORY_TABLES.iter() {
-            tables.insert(
-                (*name).to_string(),
-                self.build_scoped_table(name, Cluster).expect(name),
-            );
+            table_scopes.insert(*name, Global);
         }
         for (name, factory) in &self.extra_table_factories {
-            tables.insert(
-                name.clone(),
-                self.build_scoped_table(name, factory.scope()).expect(name),
-            );
+            table_scopes.insert(name.as_str(), factory.scope());
         }
-        self.tables = tables;
-    }
-
-    fn build_scoped_table(
-        &self,
-        name: &str,
-        scope: InformationSchemaTableScope,
-    ) -> Option<TableRef> {
-        self.build_table(name).map(|table| {
-            let mut info = (*table.table_info()).clone();
-            info.meta
-                .options
-                .extra_options
-                .insert(SEMANTIC_TABLE_SCOPE.to_string(), scope.as_str().to_string());
-            Arc::new(Table::new(
-                Arc::new(info),
-                FilterPushDownType::Inexact,
-                table.data_source(),
-            ))
-        })
+        self.tables = table_scopes
+            .into_iter()
+            .map(|(name, scope)| {
+                let table = self.build_table(name).expect(name);
+                let mut info = (*table.table_info()).clone();
+                info.meta
+                    .options
+                    .extra_options
+                    .insert(SEMANTIC_TABLE_SCOPE.to_string(), scope.as_str().to_string());
+                let table = Arc::new(Table::new(
+                    Arc::new(info),
+                    FilterPushDownType::Inexact,
+                    table.data_source(),
+                ));
+                (name.to_string(), table)
+            })
+            .collect();
     }
 }
 
@@ -655,13 +641,13 @@ mod tests {
 
     #[test]
     fn every_registered_information_schema_table_has_scope() {
-        use InformationSchemaTableScope::{Catalog, Cluster};
+        use InformationSchemaTableScope::{Catalog, Global};
 
         let manager: Arc<dyn CatalogManager> = MemoryCatalogManager::new();
         let backend = Arc::new(MemoryKvBackend::default());
         let factories: HashMap<_, InformationSchemaTableFactoryRef> = [
             ("future_catalog_table", Catalog),
-            ("future_cluster_table", Cluster),
+            ("future_global_table", Global),
         ]
         .into_iter()
         .map(|(name, scope)| {
@@ -689,27 +675,33 @@ mod tests {
             "future_catalog_table",
         ];
 
-        for catalog in [DEFAULT_CATALOG_NAME, "tenant"] {
+        for (catalog, with_process_manager) in [
+            (DEFAULT_CATALOG_NAME, true),
+            (DEFAULT_CATALOG_NAME, false),
+            ("tenant", true),
+            ("tenant", false),
+        ] {
             let provider = InformationSchemaProvider::new(
                 catalog.to_string(),
                 Arc::downgrade(&manager),
                 Arc::new(FlowMetadataManager::new(backend.clone())),
-                Some(Arc::new(ProcessManager::new(String::new(), None))),
+                with_process_manager.then(|| Arc::new(ProcessManager::new(String::new(), None))),
                 backend.clone(),
             )
             .with_extra_table_factories(factories.clone());
-            let expected_count = 44 + usize::from(cfg!(feature = "enterprise"))
-                - if catalog == DEFAULT_CATALOG_NAME {
-                    0
-                } else {
-                    9
-                };
+            let expected_count =
+                43 + usize::from(with_process_manager) + usize::from(cfg!(feature = "enterprise"))
+                    - if catalog == DEFAULT_CATALOG_NAME {
+                        0
+                    } else {
+                        9
+                    };
             assert_eq!(provider.tables().len(), expected_count);
             for (name, table) in provider.tables() {
                 let scope = if catalog_tables.contains(&name.as_str()) {
                     Catalog
                 } else {
-                    Cluster
+                    Global
                 };
                 assert_eq!(
                     table
@@ -727,14 +719,10 @@ mod tests {
                 provider.table(REGION_PEERS).is_some(),
                 catalog == DEFAULT_CATALOG_NAME
             );
-            assert!(
-                provider
-                    .table(PROCESS_LIST)
-                    .unwrap()
-                    .schema()
-                    .column_schema_by_name("catalog")
-                    .is_some()
-            );
+            assert_eq!(provider.table(PROCESS_LIST).is_some(), with_process_manager);
+            if let Some(table) = provider.table(PROCESS_LIST) {
+                assert!(table.schema().column_schema_by_name("catalog").is_some());
+            }
         }
     }
 
