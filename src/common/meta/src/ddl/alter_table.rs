@@ -17,6 +17,8 @@ mod metadata;
 mod partition_compat;
 mod region_request;
 
+pub use partition_compat::validate_region_partition_bounds;
+
 use std::collections::HashSet;
 use std::vec;
 

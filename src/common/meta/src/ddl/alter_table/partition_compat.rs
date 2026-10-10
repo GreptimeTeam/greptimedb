@@ -15,27 +15,32 @@
 //! Preflight validation of persisted partition expressions against an ALTER TABLE schema change.
 //!
 //! Persisted partition bounds keep the types they were written with. When a column
-//! referenced by a partition expression changes its type, the region rewrites the bound
-//! literal to the new column type while building the partition predicate on scan. If a
-//! bound cannot be represented with the new type (a classic example is a millisecond
-//! timestamp bound that overflows when the time index column is widened to nanoseconds),
-//! every scan of that region fails at that point. Such an ALTER must be rejected before
-//! it is submitted to any region, otherwise already-altered regions keep failing while
-//! the rest of the table is untouched.
+//! referenced by a partition expression changes its type, the region coerces the bound
+//! literal and the new column type to a common comparison type while building the
+//! partition predicate on scan. If no common type exists, or the bound cannot be cast
+//! to it (a classic example is a millisecond timestamp bound that overflows when the
+//! time index column is widened to nanoseconds), every scan of that region fails at
+//! that point. Such an ALTER must be rejected before it is submitted to any region,
+//! otherwise already-altered regions keep failing while the rest of the table is
+//! untouched.
 //!
 //! The `partition` crate depends on `common-meta`, so this crate cannot depend on
 //! `partition` back and cannot reuse [`partition::expr::PartitionExpr`]. The `Persisted*`
 //! types below mirror the JSON representation of `partition::partition::PartitionBound` and
 //! `partition::expr::PartitionExpr` and must be kept in sync with `partition/src/partition.rs`
-//! and `partition/src/expr.rs`. The compatibility check itself deliberately repeats the
-//! same conversion (value -> [`ScalarValue`]) and the same checked cast
-//! ([`ScalarValue::cast_to`]) that the region performs when it coerces the persisted bound
-//! to the new column type, so a bound that would fail on scan is rejected here as well.
+//! and `partition/src/expr.rs`; round-trip tests in `partition` run real serialized
+//! expressions through this validator so drift fails in CI. The compatibility check itself
+//! deliberately repeats the same conversion (value -> [`ScalarValue`]) and the same
+//! comparison coercion the region performs when it builds the partition predicate
+//! (`ExprSimplifier::coerce` / [`comparison_coercion`]): both sides are cast to the common
+//! comparison type, and the persisted bound must be castable to that type with
+//! [`ScalarValue::cast_to`]. A bound that would fail on scan is rejected here as well.
 
 use std::collections::HashMap;
 
 use common_telemetry::warn;
 use datafusion_common::ScalarValue;
+use datafusion_expr::type_coercion::binary::comparison_coercion;
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::schema::Schema;
 use datatypes::value::{
@@ -111,7 +116,10 @@ pub(crate) fn changed_column_types(
 /// Validates that the persisted partition bounds of every region are still representable
 /// with the types of `changed_columns`. Returns an error naming the first offending
 /// region without modifying anything.
-pub(crate) fn validate_region_partition_bounds(
+///
+/// Public so that round-trip tests in the `partition` crate can run real serialized
+/// partition expressions through the same mirror used here.
+pub fn validate_region_partition_bounds(
     changed_columns: &HashMap<String, ConcreteDataType>,
     region_routes: &[RegionRoute],
 ) -> Result<()> {
@@ -205,11 +213,29 @@ fn validate_comparison(
         return Ok(());
     };
 
+    // Mirror `ExprSimplifier::coerce` in `PredicateGroup::new`: the region casts
+    // both the column and the persisted bound to the common comparison type. The
+    // bound is not cast to the column type itself, so narrowing a column (e.g.
+    // BIGINT to INT with an out-of-range bound) is fine as long as the bound
+    // survives the common type, while a bound that cannot be cast to it — or a
+    // pair of types without a common comparison type — fails every scan.
     let target_arrow_type = target_type.as_arrow_type();
-    if scalar.data_type() == target_arrow_type {
-        return Ok(());
-    }
-    if let Err(error) = scalar.cast_to(&target_arrow_type) {
+    let Some(common_type) = comparison_coercion(&target_arrow_type, &scalar.data_type()) else {
+        warn!(
+            "Persisted partition bound has no common comparison type with the altered \
+             column type, region_id: {}, column: '{}', target_type: {}",
+            region_id, column, target_type
+        );
+        return PartitionExprIncompatibleSnafu {
+            region_id,
+            column: column.clone(),
+            target_type: target_type.to_string(),
+        }
+        .fail();
+    };
+    if scalar.data_type() != common_type
+        && let Err(error) = scalar.cast_to(&common_type)
+    {
         warn!(
             error;
             "Persisted partition bound is not representable with the altered column type, \
@@ -407,5 +433,32 @@ mod tests {
             &routes(&["", r#""MaxValue""#, r#"{"Value":{"UInt32":1}}"#, "not-json"]),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn test_field_narrowing_keeps_bounds_the_scan_coerces() {
+        // BIGINT bound outside the INT range with the column narrowed to INT: the
+        // region casts the column up to the common Int64 comparison type, so the
+        // bound still scans and the ALTER must not be rejected.
+        let bound =
+            r#"{"Expr":{"lhs":{"Column":"v"},"op":"Lt","rhs":{"Value":{"Int64":3000000000}}}}"#;
+        validate_region_partition_bounds(
+            &changed("v", ConcreteDataType::int32_datatype()),
+            &routes(&[bound]),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_bound_without_common_comparison_type_is_rejected() {
+        // No comparison coercion exists between a boolean bound and an int column,
+        // so the region's predicate build fails and the ALTER must be rejected.
+        let bound = r#"{"Expr":{"lhs":{"Column":"v"},"op":"Lt","rhs":{"Value":{"Boolean":true}}}}"#;
+        let err = validate_region_partition_bounds(
+            &changed("v", ConcreteDataType::int32_datatype()),
+            &routes(&[bound]),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("'v'"), "unexpected error: {err}");
     }
 }

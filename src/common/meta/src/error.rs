@@ -1143,7 +1143,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Partition expression of region {} is incompatible with the altered column '{}': the persisted bound cannot be converted to type {}",
+        "Partition expression of region {} is incompatible with the altered column '{}': the persisted bound can no longer be compared with the new column type {}",
         region_id,
         column,
         target_type

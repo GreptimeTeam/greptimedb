@@ -463,6 +463,14 @@ impl Display for PartitionExpr {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use common_meta::ddl::alter_table::validate_region_partition_bounds;
+    use common_meta::error::Error;
+    use common_meta::rpc::router::{Region, RegionRoute};
+    use datatypes::data_type::ConcreteDataType;
+    use store_api::storage::RegionId;
+
     use super::*;
 
     #[test]
@@ -862,5 +870,98 @@ mod tests {
         assert!(columns.contains("a"));
         assert!(columns.contains("b"));
         assert!(columns.contains("c"));
+    }
+
+    /// Real serialized expressions must survive the round trip through
+    /// `common-meta`'s persisted-expression mirror: whenever that mirror drifts
+    /// from these types, deserialization fails, validation is skipped and the
+    /// overflowing cases below stop producing `PartitionExprIncompatible`.
+    #[test]
+    fn test_serialized_expressions_validate_against_type_changes() {
+        let overflow_ms = serde_json::from_str::<Value>(
+            r#"{"Timestamp":{"value":32503680000000,"unit":"Millisecond"}}"#,
+        )
+        .unwrap();
+        let start_ms =
+            serde_json::from_str::<Value>(r#"{"Timestamp":{"value":0,"unit":"Millisecond"}}"#)
+                .unwrap();
+        let ts_ns = ConcreteDataType::timestamp_nanosecond_datatype();
+
+        let routes = |expr: &PartitionExpr| {
+            vec![RegionRoute {
+                region: Region {
+                    id: RegionId::new(1024, 1),
+                    partition_expr: expr.as_json_str().unwrap(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }]
+        };
+        let changed = |column: &str, data_type: ConcreteDataType| {
+            HashMap::from([(column.to_string(), data_type)])
+        };
+
+        // Compile-time tripwire: exhaustively matching the operand and operator
+        // variants makes a new variant break this test at compile time, so the
+        // `partition_compat::Persisted*` mirror and these cases must be extended
+        // together instead of silently skipping validation.
+        fn walk(expr: &PartitionExpr) {
+            walk_operand(&expr.lhs);
+            walk_operand(&expr.rhs);
+            match expr.op {
+                RestrictedOp::Eq
+                | RestrictedOp::NotEq
+                | RestrictedOp::Lt
+                | RestrictedOp::LtEq
+                | RestrictedOp::Gt
+                | RestrictedOp::GtEq
+                | RestrictedOp::And
+                | RestrictedOp::Or => {}
+            }
+        }
+        fn walk_operand(operand: &Operand) {
+            match operand {
+                Operand::Column(_) | Operand::Value(_) => {}
+                Operand::Expr(expr) => walk(expr),
+            }
+        }
+
+        // Every expression shape must be rejected while the bound overflows
+        // nanoseconds, with the error naming the offending column.
+        let simple = col("ts").lt(overflow_ms.clone());
+        let nested_and = col("ts")
+            .gt_eq(start_ms.clone())
+            .and(col("ts").lt(overflow_ms.clone()));
+        let nested_or = PartitionExpr::new(
+            Operand::Expr(col("host").eq(Value::String("a".into()))),
+            RestrictedOp::Or,
+            Operand::Expr(col("ts").lt(overflow_ms.clone())),
+        );
+        for expr in [&simple, &nested_and, &nested_or] {
+            walk(expr);
+            let err =
+                validate_region_partition_bounds(&changed("ts", ts_ns.clone()), &routes(expr))
+                    .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    Error::PartitionExprIncompatible { ref column, .. } if column == "ts"
+                ),
+                "unexpected error: {err}"
+            );
+        }
+
+        // A representable bound passes.
+        let compatible = col("ts").lt(start_ms);
+        validate_region_partition_bounds(&changed("ts", ts_ns), &routes(&compatible)).unwrap();
+
+        // Narrowing a field column must not be over-rejected: the scan casts the
+        // column up to the common Int64 type instead of the bound down to Int32.
+        let narrowing = col("v").lt(Value::Int64(3_000_000_000));
+        validate_region_partition_bounds(
+            &changed("v", ConcreteDataType::int32_datatype()),
+            &routes(&narrowing),
+        )
+        .unwrap();
     }
 }
