@@ -3254,6 +3254,79 @@ async fn test_scoped_base_repair_plan_applies_dirty_window_filter() {
 }
 
 #[tokio::test]
+async fn test_scoped_plan_keeps_negative_dirty_marker_without_expiry() {
+    let TestTaskParts {
+        task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT max(number) AS number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window",
+    )
+    .await;
+    task.state
+        .write()
+        .unwrap()
+        .dirty_time_windows
+        .add_window(Timestamp::new_second(-5), None);
+
+    let plan = task
+        .gen_query_with_time_window(
+            query_engine,
+            &aggregate_time_window_sink_schema(),
+            &[],
+            false,
+            Some(1),
+        )
+        .await
+        .unwrap()
+        .expect("negative dirty marker should generate a scoped plan without expiry");
+    assert!(matches!(plan.coverage, QueryCoverage::ScopedBaseRepair));
+    assert!(plan.plan.to_string().contains("Filter:"));
+    let DirtyRestore::Scoped(filter) = &plan.dirty_restore else {
+        panic!("scoped base repair should carry scoped dirty restore info");
+    };
+    assert_eq!(
+        filter.time_ranges,
+        vec![(Timestamp::new_second(-5), Timestamp::new_second(0))]
+    );
+    assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
+
+    task.restore_dirty_windows(&plan.dirty_restore);
+    assert_eq!(task.state.read().unwrap().dirty_time_windows.len(), 1);
+
+    let TestTaskParts {
+        mut task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT max(number) AS number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window",
+    )
+    .await;
+    Arc::get_mut(&mut task.config)
+        .expect("test task config should be uniquely owned")
+        .expire_after = Some(expire_after_for_retention_filter_test());
+    task.state
+        .write()
+        .unwrap()
+        .dirty_time_windows
+        .add_window(Timestamp::new_second(-5), None);
+
+    assert!(
+        task.gen_query_with_time_window(
+            query_engine,
+            &aggregate_time_window_sink_schema(),
+            &[],
+            false,
+            Some(1),
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
+}
+
+#[tokio::test]
 async fn test_full_snapshot_seeding_applies_expire_after_retention_filter() {
     let TestTaskParts {
         mut task,
