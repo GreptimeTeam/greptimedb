@@ -204,92 +204,125 @@ async fn histogram_fraction_binary_join_preserves_partitioned_rows() {
     .await;
     let instance = distributed.frontend();
 
-    execute_all(
-        &instance,
-        r#"CREATE TABLE pa_promql_m (
-            ts TIMESTAMP TIME INDEX,
-            host STRING,
-            shard STRING,
-            val DOUBLE,
-            PRIMARY KEY (host, shard)
-        ) PARTITION ON COLUMNS (shard) (
-            shard < 'b',
-            shard >= 'b' AND shard < 'c',
-            shard >= 'c' AND shard < 'd',
-            shard >= 'd'
-        );
-        INSERT INTO pa_promql_m VALUES
-            (0, 'h', 'a', 1),
-            (0, 'h', 'b', 1),
-            (0, 'h', 'c', 1),
-            (0, 'h', 'd', 1);"#,
-        QueryContext::arc(),
-    )
-    .await;
-
-    let expr = r#"histogram_fraction(-Inf,+Inf,abs(label_replace((pa_promql_m + on(host) group_left() (sum by(host)(pa_promql_m))),"le","+Inf","missing_label",".*")))"#;
-    for parallelism in [1, 4] {
-        let mut query_ctx = QueryContext::with_db_name(None);
-        query_ctx.set_extension(QUERY_PARALLELISM_HINT, parallelism.to_string());
-        let query_ctx = Arc::new(query_ctx);
-        for (query, expected_value) in [
-            (format!("TQL EVAL (0, 0, '1s') {expr}"), 1.0),
-            (
-                format!("TQL EVAL (0, 0, '1s') {expr} + on(host, shard) pa_promql_m"),
-                2.0,
+    for (table, create) in [
+        (
+            "pa_promql_m",
+            r#"CREATE TABLE pa_promql_m (
+                ts TIMESTAMP TIME INDEX,
+                host STRING,
+                shard STRING,
+                val DOUBLE,
+                PRIMARY KEY (host, shard)
+            ) PARTITION ON COLUMNS (shard) (
+                shard < 'b',
+                shard >= 'b' AND shard < 'c',
+                shard >= 'c' AND shard < 'd',
+                shard >= 'd'
+            );"#,
+        ),
+        (
+            "lg_hist_m_2",
+            r#"CREATE TABLE phy_hist_m_2 (
+                ts TIMESTAMP TIME INDEX,
+                host STRING,
+                shard STRING,
+                val DOUBLE,
+                PRIMARY KEY (host, shard)
+            ) PARTITION ON COLUMNS (shard) (
+                shard < 'b',
+                shard >= 'b' AND shard < 'c',
+                shard >= 'c' AND shard < 'd',
+                shard >= 'd'
+            ) ENGINE=metric WITH ('physical_metric_table' = 'true');
+            CREATE TABLE lg_hist_m_2 (
+                ts TIMESTAMP TIME INDEX,
+                host STRING,
+                shard STRING,
+                val DOUBLE,
+                PRIMARY KEY (host, shard)
+            ) PARTITION ON COLUMNS (shard) (
+                shard < 'b',
+                shard >= 'b' AND shard < 'c',
+                shard >= 'c' AND shard < 'd',
+                shard >= 'd'
+            ) ENGINE=metric WITH ('on_physical_table' = 'phy_hist_m_2');"#,
+        ),
+    ] {
+        execute_all(
+            &instance,
+            &format!(
+                "{create}\nINSERT INTO {table} VALUES\n                    (0, 'h', 'a', 1),\n                    (0, 'h', 'b', 1),\n                    (0, 'h', 'c', 1),\n                    (0, 'h', 'd', 1);"
             ),
-        ] {
-            let output = instance
-                .do_query(&query, query_ctx.clone())
-                .await
-                .remove(0)
-                .unwrap();
-            let batches = match output.data {
-                OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-                OutputData::RecordBatches(batches) => batches,
-                other => panic!("expected result batches, got {other:?}"),
-            };
-            let mut rows = batches
-                .iter()
-                .flat_map(|batch| {
-                    let ts = batch
-                        .column_by_name("ts")
-                        .unwrap()
-                        .as_any()
-                        .downcast_ref::<TimestampMillisecondArray>()
-                        .unwrap();
-                    let host_array =
-                        cast(batch.column_by_name("host").unwrap(), &DataType::Utf8).unwrap();
-                    let host = host_array.as_any().downcast_ref::<StringArray>().unwrap();
-                    let shard_array =
-                        cast(batch.column_by_name("shard").unwrap(), &DataType::Utf8).unwrap();
-                    let shard = shard_array.as_any().downcast_ref::<StringArray>().unwrap();
-                    let value = batch
-                        .columns()
-                        .iter()
-                        .find_map(|column| column.as_any().downcast_ref::<Float64Array>())
-                        .unwrap();
-                    (0..batch.num_rows())
-                        .map(move |row| {
-                            (
-                                ts.value(row),
-                                host.value(row).to_owned(),
-                                shard.value(row).to_owned(),
-                                value.value(row),
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>();
-            rows.sort_by(|left, right| left.2.cmp(&right.2));
-            assert_eq!(
-                rows,
-                ["a", "b", "c", "d"]
-                    .into_iter()
-                    .map(|shard| (0, "h".to_owned(), shard.to_owned(), expected_value))
-                    .collect::<Vec<_>>(),
-                "query_parallelism={parallelism}, query={query}"
-            );
+            QueryContext::arc(),
+        )
+        .await;
+
+        let expr = format!(
+            r#"histogram_fraction(-Inf,+Inf,abs(label_replace(({table} + on(host) group_left() (sum by(host)({table}))),"le","+Inf","missing_label",".*")))"#
+        );
+        for parallelism in [1, 4] {
+            let mut query_ctx = QueryContext::with_db_name(None);
+            query_ctx.set_extension(QUERY_PARALLELISM_HINT, parallelism.to_string());
+            let query_ctx = Arc::new(query_ctx);
+            for (query, expected_value) in [
+                (format!("TQL EVAL (0, 0, '1s') {expr}"), 1.0),
+                (
+                    format!("TQL EVAL (0, 0, '1s') {expr} + on(host, shard) {table}"),
+                    2.0,
+                ),
+            ] {
+                let output = instance
+                    .do_query(&query, query_ctx.clone())
+                    .await
+                    .remove(0)
+                    .unwrap();
+                let batches = match output.data {
+                    OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+                    OutputData::RecordBatches(batches) => batches,
+                    other => panic!("expected result batches, got {other:?}"),
+                };
+                let mut rows = batches
+                    .iter()
+                    .flat_map(|batch| {
+                        let ts = batch
+                            .column_by_name("ts")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<TimestampMillisecondArray>()
+                            .unwrap();
+                        let host_array =
+                            cast(batch.column_by_name("host").unwrap(), &DataType::Utf8).unwrap();
+                        let host = host_array.as_any().downcast_ref::<StringArray>().unwrap();
+                        let shard_array =
+                            cast(batch.column_by_name("shard").unwrap(), &DataType::Utf8).unwrap();
+                        let shard = shard_array.as_any().downcast_ref::<StringArray>().unwrap();
+                        let value = batch
+                            .columns()
+                            .iter()
+                            .find_map(|column| column.as_any().downcast_ref::<Float64Array>())
+                            .unwrap();
+                        (0..batch.num_rows())
+                            .map(move |row| {
+                                (
+                                    ts.value(row),
+                                    host.value(row).to_owned(),
+                                    shard.value(row).to_owned(),
+                                    value.value(row),
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                rows.sort_by(|left, right| left.2.cmp(&right.2));
+                assert_eq!(
+                    rows,
+                    ["a", "b", "c", "d"]
+                        .into_iter()
+                        .map(|shard| (0, "h".to_owned(), shard.to_owned(), expected_value))
+                        .collect::<Vec<_>>(),
+                    "query_parallelism={parallelism}, query={query}"
+                );
+            }
         }
     }
 }
