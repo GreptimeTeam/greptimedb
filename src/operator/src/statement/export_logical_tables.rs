@@ -638,10 +638,7 @@ async fn expand_bounded_slice(
             .map(|(field, array)| {
                 if let DataType::Dictionary(_, value) = array.data_type()
                     && value.as_ref() == field.data_type()
-                    && matches!(
-                        value.as_ref(),
-                        DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
-                    )
+                    && matches!(value.as_ref(), DataType::Utf8 | DataType::LargeUtf8)
                 {
                     Arc::new(
                         field
