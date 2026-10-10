@@ -74,9 +74,9 @@ ORDER BY table_name;
 +-----------------+---------------------------+
 | table_name      | semantic_options          |
 +-----------------+---------------------------+
-| build_info      | {"table_scope":"cluster"} |
+| build_info      | {"table_scope":"global"}  |
 | partitions      | {"table_scope":"catalog"} |
-| process_list    | {"table_scope":"cluster"} |
+| process_list    | {"table_scope":"global"}  |
 | table_semantics | {"table_scope":"catalog"} |
 +-----------------+---------------------------+
 

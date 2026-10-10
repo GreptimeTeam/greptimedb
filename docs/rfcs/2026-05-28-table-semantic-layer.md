@@ -71,9 +71,9 @@ concern, not query-time semantics).
 | `greptime.semantic.pipeline` | `greptime_trace_v1` (the signal-agnostic successor to `table_data_model`) |
 
 **Information-schema tables** carry `greptime.semantic.table_scope`: `catalog`
-means the provider filters every query to its construction catalog; `cluster`
-means cluster-wide or shared data, including compatibility stubs. The scope is
-declared at registration and appears as `table_scope` in `semantic_options`.
+means the provider filters every query to its construction catalog; `global`
+means catalog-independent or shared data, including compatibility stubs. The
+scope is declared at registration and appears as `table_scope` in `semantic_options`.
 Enterprise authorization trusts only registered system-table metadata. Setting
 this option on a user table does not change its permissions.
 
