@@ -391,9 +391,7 @@ mod tests {
 
     #[test]
     fn test_nested_expression_is_validated() {
-        let expr = format!(
-            r#"{{"Expr":{{"lhs":{{"Expr":{{"lhs":{{"Column":"ts"}},"op":"GtEq","rhs":{{"Value":{{"Timestamp":{{"value":0,"unit":"Millisecond"}}}}}}}}}},"op":"And","rhs":{{"Expr":{{"lhs":{{"Column":"ts"}},"op":"Lt","rhs":{{"Value":{{"Timestamp":{{"value":32503680000000,"unit":"Millisecond"}}}}}}}}}}}}}}"#
-        );
+        let expr = r#"{"Expr":{"lhs":{"Expr":{"lhs":{"Column":"ts"},"op":"GtEq","rhs":{"Value":{"Timestamp":{"value":0,"unit":"Millisecond"}}}}},"op":"And","rhs":{"Expr":{"lhs":{"Column":"ts"},"op":"Lt","rhs":{"Value":{"Timestamp":{"value":32503680000000,"unit":"Millisecond"}}}}}}}"#.to_string();
         let err = validate_region_partition_bounds(
             &changed("ts", ConcreteDataType::timestamp_nanosecond_datatype()),
             &routes(&[&expr]),
