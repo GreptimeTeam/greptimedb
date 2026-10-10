@@ -264,8 +264,9 @@ impl LogicalTableExport {
             })
             .into_iter()
             .collect::<Vec<_>>();
-        if self.logical_tables.len() == 1 {
-            let id = *self.logical_tables.first_key_value().unwrap().0;
+        if self.logical_tables.len() == 1
+            && let Some((&id, _)) = self.logical_tables.first_key_value()
+        {
             filters.push(col(TABLE_ID).eq(lit(id)));
         }
         let source = Arc::new(DefaultTableSource::new(Arc::new(
