@@ -51,7 +51,6 @@ use datafusion_physical_expr::{
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::compute::SortOptions;
 use futures::{Stream, StreamExt};
-use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::region_engine::{
     PartitionRange, PrepareRequest, QueryScanContext, RegionScannerRef,
 };
@@ -170,28 +169,6 @@ impl RegionScanExec {
                 }
                 orderings.push(pk_time_ordering);
 
-                // Metric engine physical tables keep tag columns alongside `__tsid`. When `__tsid`
-                // is present, the scan output is also ordered by `(__tsid, time index)` which can
-                // help eliminate redundant sorts for promql plans (e.g. SeriesDivide).
-                //
-                // `pk_time_ordering` and the potential `(__tsid, time index)` ordering are actually
-                // the same thing, thus present in one `OrderingEquivalenceClass`.
-                if let (Ok(tsid_col), Some(ts)) = (
-                    Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema),
-                    ts_col.clone(),
-                ) {
-                    orderings.push(vec![
-                        PhysicalSortExpr::new(
-                            Arc::new(tsid_col) as _,
-                            SortOptions {
-                                descending: false,
-                                nulls_first: true,
-                            },
-                        ),
-                        ts,
-                    ]);
-                }
-
                 EquivalenceProperties::new_with_orderings(arrow_schema.clone(), orderings)
             }
             Some(TimeSeriesDistribution::TimeWindowed) => {
@@ -208,20 +185,18 @@ impl RegionScanExec {
         };
 
         let partitioning = match request.distribution {
-            Some(TimeSeriesDistribution::PerSeries) => {
-                match Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema) {
-                    Ok(tsid_col) => {
-                        Partitioning::Hash(vec![Arc::new(tsid_col) as _], num_output_partition)
-                    }
-                    Err(_) if pk_columns.len() == pk_names.len() => {
-                        Partitioning::Hash(pk_columns.clone(), num_output_partition)
-                    }
-                    Err(_) => Partitioning::UnknownPartitioning(num_output_partition),
-                }
+            Some(TimeSeriesDistribution::PerSeries) if has_internal_tsid => {
+                let tsid = Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema)
+                    .ok()
+                    .map(|column| vec![Arc::new(column) as _]);
+                Partitioning::Hash(tsid.unwrap_or(pk_columns), num_output_partition)
             }
-            Some(TimeSeriesDistribution::TimeWindowed) | None => {
-                Partitioning::UnknownPartitioning(num_output_partition)
+            Some(TimeSeriesDistribution::PerSeries) if pk_columns.len() == pk_names.len() => {
+                Partitioning::Hash(pk_columns.clone(), num_output_partition)
             }
+            Some(TimeSeriesDistribution::PerSeries)
+            | Some(TimeSeriesDistribution::TimeWindowed)
+            | None => Partitioning::UnknownPartitioning(num_output_partition),
         };
 
         let properties = Arc::new(PlanProperties::new(
@@ -290,12 +265,7 @@ impl RegionScanExec {
         }
 
         let mut properties = self.properties.as_ref().clone();
-        let new_partitioning = match properties.partitioning {
-            Partitioning::Hash(ref columns, _) => {
-                Partitioning::Hash(columns.clone(), target_partitions)
-            }
-            _ => Partitioning::UnknownPartitioning(target_partitions),
-        };
+        let new_partitioning = Partitioning::UnknownPartitioning(target_partitions);
         properties.partitioning = new_partitioning;
 
         {
@@ -861,96 +831,30 @@ mod test {
     }
 
     #[test]
-    fn test_per_series_partitioning_requires_all_primary_keys() {
-        let full_schema = Arc::new(Schema::new(vec![
-            ColumnSchema::new("marker", ConcreteDataType::int32_datatype(), false),
-            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
-            ColumnSchema::new(
-                "ts",
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-            ),
-        ]));
-        let mut builder = RegionMetadataBuilder::new(RegionId::new(1234, 5683));
-        builder
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "marker",
-                    ConcreteDataType::int32_datatype(),
-                    false,
-                ),
-                semantic_type: SemanticType::Tag,
-                column_id: 1,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "host",
-                    ConcreteDataType::string_datatype(),
-                    false,
-                ),
-                semantic_type: SemanticType::Tag,
-                column_id: 2,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "ts",
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    false,
-                ),
-                semantic_type: SemanticType::Timestamp,
-                column_id: 3,
-            })
-            .primary_key(vec![1, 2]);
-        let metadata = Arc::new(builder.build().unwrap());
-
-        for (schema, expected) in [
-            (
-                full_schema.clone(),
-                Partitioning::Hash(
-                    vec![
-                        Arc::new(
-                            Column::new_with_schema("marker", full_schema.arrow_schema()).unwrap(),
-                        ) as _,
-                        Arc::new(
-                            Column::new_with_schema("host", full_schema.arrow_schema()).unwrap(),
-                        ) as _,
-                    ],
-                    2,
-                ),
-            ),
-            (
-                Arc::new(Schema::new(vec![
-                    ColumnSchema::new("marker", ConcreteDataType::int32_datatype(), false),
-                    ColumnSchema::new(
-                        "ts",
-                        ConcreteDataType::timestamp_millisecond_datatype(),
-                        false,
-                    ),
-                ])),
-                Partitioning::UnknownPartitioning(2),
-            ),
-        ] {
-            let batches = RecordBatches::try_new(schema, vec![]).unwrap();
-            let scanner = Box::new(RepeatableScanner {
-                batches,
-                properties: ScannerProperties::new(vec![vec![], vec![]], false, 0),
-                metadata: metadata.clone(),
-                dynamic_filters: Arc::new(Mutex::new(Vec::new())),
-            });
-            let request = ScanRequest {
+    fn test_per_series_partitioning_is_unknown_and_stays_unknown_after_repartition() {
+        let (schema, _, metadata) = dynamic_filter_test_data(5685, false);
+        let recordbatches = RecordBatches::try_new(schema, vec![]).unwrap();
+        let scanner = Box::new(SinglePartitionScanner::new(
+            recordbatches.as_stream(),
+            false,
+            metadata,
+            None,
+        ));
+        let plan = RegionScanExec::new(
+            scanner,
+            ScanRequest {
                 distribution: Some(TimeSeriesDistribution::PerSeries),
+                projection: Some(vec![0]),
                 ..Default::default()
-            };
-            let plan = RegionScanExec::new(scanner, request, None).unwrap();
-            let actual = plan.properties().output_partitioning();
-            match (&actual, &expected) {
-                (
-                    Partitioning::UnknownPartitioning(actual_count),
-                    Partitioning::UnknownPartitioning(expected_count),
-                ) => assert_eq!(actual_count, expected_count),
-                _ => assert_eq!(actual, &expected),
-            }
-        }
+            },
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.properties.partitioning,
+            Partitioning::UnknownPartitioning(1)
+        );
     }
 
     #[test]
