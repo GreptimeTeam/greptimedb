@@ -224,18 +224,50 @@ impl Pusher {
     }
 
     #[inline]
-    pub async fn push(&self, res: HeartbeatResponse) -> Result<()> {
-        self.sender.send(Ok(res)).await.map_err(|e| {
-            error::PushMessageSnafu {
-                err_msg: e.to_string(),
-            }
-            .build()
-        })
+    pub fn header(&self) -> ResponseHeader {
+        self.res_header.clone()
+    }
+}
+
+/// An owned snapshot of the [`Pusher`] fields the push paths need, so a caller can drop
+/// the [`Pushers`] read guard before awaiting the send. It must not hold a [`Pusher`]:
+/// dropping one fires the deregister signal, which reads as a closed channel.
+struct PusherHandle {
+    sender: Sender<std::result::Result<HeartbeatResponse, tonic::Status>>,
+    res_header: ResponseHeader,
+    deregister_signal_receiver: DeregisterSignalReceiver,
+}
+
+impl PusherHandle {
+    /// Snapshots `pusher`, which callers read under the [`Pushers`] guard.
+    fn from_pusher(pusher: &Pusher) -> Self {
+        Self {
+            sender: pusher.sender.clone(),
+            res_header: pusher.header(),
+            deregister_signal_receiver: pusher.deregister_signal_receiver.clone(),
+        }
+    }
+
+    /// Sends one mailbox message, consuming the handle.
+    async fn push(self, mailbox_message: MailboxMessage) -> Result<()> {
+        self.sender
+            .send(Ok(HeartbeatResponse {
+                header: Some(self.res_header),
+                mailbox_message: Some(mailbox_message),
+                ..Default::default()
+            }))
+            .await
+            .map_err(|e| {
+                error::PushMessageSnafu {
+                    err_msg: e.to_string(),
+                }
+                .build()
+            })
     }
 
     #[inline]
-    pub fn header(&self) -> ResponseHeader {
-        self.res_header.clone()
+    fn deregister_signal_receiver(&self) -> DeregisterSignalReceiver {
+        self.deregister_signal_receiver.clone()
     }
 }
 
@@ -249,41 +281,41 @@ impl Pushers {
         pusher_id: PusherId,
         mailbox_message: MailboxMessage,
     ) -> Result<DeregisterSignalReceiver> {
-        let pushers = self.0.read().await;
-        let pusher = pushers
-            .get(&pusher_id)
-            .with_context(|| error::PusherNotFoundSnafu {
-                pusher_id: pusher_id.to_string(),
-            })?;
+        // Releases the guard before the send below, which parks while the target's
+        // channel is full. `PusherNotFound` is still reported from inside the guard.
+        let handle = {
+            let pushers = self.0.read().await;
+            let pusher = pushers
+                .get(&pusher_id)
+                .with_context(|| error::PusherNotFoundSnafu {
+                    pusher_id: pusher_id.to_string(),
+                })?;
+            PusherHandle::from_pusher(pusher)
+        };
 
-        pusher
-            .push(HeartbeatResponse {
-                header: Some(pusher.header()),
-                mailbox_message: Some(mailbox_message),
-                ..Default::default()
-            })
-            .await?;
+        let deregister_signal_receiver = handle.deregister_signal_receiver();
+        handle.push(mailbox_message).await?;
 
-        Ok(pusher.deregister_signal_receiver.clone())
+        Ok(deregister_signal_receiver)
     }
 
     async fn broadcast(&self, role: Role, mailbox_message: &MailboxMessage) -> Result<()> {
-        let pushers = self.0.read().await;
-        let pushers = pushers
-            .range(PusherId::role_range(role))
-            .map(|(_, value)| value)
-            .collect::<Vec<_>>();
-        let mut results = Vec::with_capacity(pushers.len());
+        // Collects owned handles, releasing the guard before the sends below. Collecting
+        // `&Pusher` would hold it for the whole `join_all`.
+        let targets = {
+            let pushers = self.0.read().await;
+            pushers
+                .range(PusherId::role_range(role))
+                .map(|(_, pusher)| PusherHandle::from_pusher(pusher))
+                .collect::<Vec<_>>()
+        };
 
-        for pusher in pushers {
+        let mut results = Vec::with_capacity(targets.len());
+        for handle in targets {
             let mut mailbox_message = mailbox_message.clone();
             mailbox_message.id = 0; // one-way message
 
-            results.push(pusher.push(HeartbeatResponse {
-                header: Some(pusher.header()),
-                mailbox_message: Some(mailbox_message),
-                ..Default::default()
-            }))
+            results.push(handle.push(mailbox_message));
         }
 
         // Checks the error out of the loop.
@@ -924,14 +956,15 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use api::v1::meta::{HeartbeatRequest, MailboxMessage, RequestHeader, Role};
+    use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, MailboxMessage, RequestHeader, Role};
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::sequence::SequenceBuilder;
+    use futures::future::poll_immediate;
     use tokio::sync::mpsc;
 
     use super::{
         HandleControl, HeartbeatAccumulator, HeartbeatHandler, HeartbeatHandlerGroupBuilder,
-        PusherId, Pushers,
+        PusherHandle, PusherId, Pushers,
     };
     use crate::error;
     use crate::handler::collect_stats_handler::CollectStatsHandler;
@@ -1396,5 +1429,91 @@ mod tests {
 
         let extensions = res.extensions;
         assert_eq!(extensions.get("custom.key").unwrap(), b"custom-value");
+    }
+
+    async fn full_pusher(
+        pushers: &Pushers,
+        id: PusherId,
+    ) -> mpsc::Receiver<std::result::Result<HeartbeatResponse, tonic::Status>> {
+        let (tx, rx) = mpsc::channel(1);
+        tx.try_send(Ok(HeartbeatResponse::default())).unwrap();
+        pushers.insert(id, Pusher::new(tx)).await;
+        // Callers keep `rx` alive: dropping it would make the send fail instead of park.
+        rx
+    }
+
+    fn test_mailbox_message(subject: &str) -> MailboxMessage {
+        MailboxMessage {
+            id: 0,
+            subject: subject.to_string(),
+            timestamp_millis: 123,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pushers_push_does_not_fence_the_registry() {
+        let pushers = Pushers::default();
+
+        let full_id = PusherId::new(Role::Datanode, 1);
+        let _full_rx = full_pusher(&pushers, full_id).await;
+
+        let (healthy_tx, mut healthy_rx) = mpsc::channel(1);
+        let healthy_id = PusherId::new(Role::Datanode, 2);
+        pushers.insert(healthy_id, Pusher::new(healthy_tx)).await;
+
+        let msg = test_mailbox_message("fence-test");
+
+        let mut parked = Box::pin(pushers.push(full_id, msg.clone()));
+        assert!(poll_immediate(parked.as_mut()).await.is_none());
+
+        let (writer_tx, _writer_rx) = mpsc::channel(1);
+        let mut writer =
+            Box::pin(pushers.insert(PusherId::new(Role::Datanode, 3), Pusher::new(writer_tx)));
+        assert!(poll_immediate(writer.as_mut()).await.is_some());
+
+        let mut healthy = Box::pin(pushers.push(healthy_id, msg));
+        assert!(poll_immediate(healthy.as_mut()).await.is_some());
+        assert!(healthy_rx.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_pushers_broadcast_does_not_fence_the_registry() {
+        let pushers = Pushers::default();
+
+        let _full_rx = full_pusher(&pushers, PusherId::new(Role::Datanode, 1)).await;
+        let (healthy_tx, _healthy_rx) = mpsc::channel(1);
+        pushers
+            .insert(PusherId::new(Role::Datanode, 2), Pusher::new(healthy_tx))
+            .await;
+
+        let msg = test_mailbox_message("broadcast-fence-test");
+        let mut parked = Box::pin(pushers.broadcast(Role::Datanode, &msg));
+        assert!(poll_immediate(parked.as_mut()).await.is_none());
+
+        let (writer_tx, _writer_rx) = mpsc::channel(1);
+        let mut writer =
+            Box::pin(pushers.insert(PusherId::new(Role::Flownode, 1), Pusher::new(writer_tx)));
+        assert!(poll_immediate(writer.as_mut()).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_pusher_handle_does_not_fire_the_deregister_signal() {
+        let (tx, _rx) = mpsc::channel(1);
+        let pusher = Pusher::new(tx);
+        let mut signal = pusher.deregister_signal_receiver.clone();
+
+        let handle = PusherHandle::from_pusher(&pusher);
+        drop(handle);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), signal.changed())
+                .await
+                .is_err()
+        );
+
+        // The real `Pusher` still owns the signal.
+        drop(pusher);
+        assert!(signal.changed().await.is_ok());
     }
 }

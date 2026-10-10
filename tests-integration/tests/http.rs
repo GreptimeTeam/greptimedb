@@ -2475,6 +2475,7 @@ pub async fn test_promql_over_non_millisecond_physical_tables(store_type: Storag
         "query_range?query=unit_gauge&start=0&end=5&step=1",
         "query?query=avg_over_time(unit_gauge[1m])&time=2",
         "query?query=rate(unit_gauge[1m])&time=2",
+        "query?query=unit_gauge[1m]&time=2",
     ];
     for path in query_paths {
         let mut baseline: Option<(String, PrometheusResponse)> = None;
@@ -2537,6 +2538,24 @@ pub async fn test_promql_over_non_millisecond_physical_tables(store_type: Storag
                 "values": [
                     [1.0, "1.0"], [2.0, "2.0"], [3.0, "2.0"], [4.0, "2.0"], [5.0, "2.0"]
                 ]
+            }]
+        }))
+        .unwrap()
+    );
+
+    let res = client
+        .get("/v1/prometheus/api/v1/query?db=promql_units_ms&query=unit_gauge[1m]&time=2")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!({
+            "resultType": "matrix",
+            "result": [{
+                "metric": {"__name__": "unit_gauge", "job": "demo"},
+                "values": [[1.0, "1.0"], [2.0, "2.0"]]
             }]
         }))
         .unwrap()
@@ -3523,6 +3542,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "disable_ec2_metadata =",
         "cache_path =",
         "cache_capacity =",
+        "trace_aux_cache_size =",
         "memory_pool_size =",
         "scan_memory_limit =",
         "sas_token =",

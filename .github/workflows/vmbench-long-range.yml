@@ -20,8 +20,18 @@ on:
         - 1mo
         default: 1w
         required: true
+      compare_greptimedb:
+        description: Compare baseline and candidate sequentially on the same host (adds one full GreptimeDB run)
+        type: boolean
+        default: false
+        required: false
+      baseline_greptimedb_tag:
+        description: Baseline Docker Hub greptime/greptimedb tag; required when comparison is enabled
+        type: string
+        default: v1.2.1
+        required: false
       greptimedb_tag:
-        description: Docker Hub greptime/greptimedb tag
+        description: Candidate Docker Hub greptime/greptimedb tag
         type: string
         default: latest
         required: true
@@ -31,9 +41,9 @@ on:
         default: v1.114.0@sha256:227ad53fd57a4b4430624898a1be0cac39431e1235fa0dc92f567cce38969344
         required: true
       runtime_image:
-        description: Aliyun runtime image (tag or digest reference)
+        description: 'Runtime image: auto = AWS ECR Public or Aliyun ACR by provider; explicit tag/digest overrides'
         type: string
-        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:20260918-545dc570@sha256:0ff03e7e690575e875bb85b3054a03486dd9359073546dc715da177153cf7a29
+        default: auto
         required: true
       provider:
         description: Cloud provider for the benchmark runner
@@ -79,11 +89,13 @@ on:
 permissions:
   contents: read
 env:
+  COMPARE_GREPTIMEDB: ${{ inputs.compare_greptimedb }}
+  BASELINE_GREPTIMEDB_TAG: ${{ inputs.baseline_greptimedb_tag }}
   BENCHMARK_ROOT: ${{ inputs.benchmark_root }}
   RANGE_PRESET: ${{ inputs.range_preset }}
   GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
   VICTORIAMETRICS_TAG: ${{ inputs.victoriametrics_tag }}
-  RUNTIME_IMAGE: ${{ inputs.runtime_image }}
+  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || inputs.provider == 'AWS' && 'public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime:b43785b56f42@sha256:e38811eb68caf3682ba56f5591a3e8e27e78e7983a923abb29fa2d7cd8fdbd46' || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:b43785b56f42@sha256:e38811eb68caf3682ba56f5591a3e8e27e78e7983a923abb29fa2d7cd8fdbd46' }}
   PROVIDER: ${{ inputs.provider }}
   REQUESTED_INSTANCE_TYPE: ${{ inputs.instance_type }}
   SYSTEM_DISK_GIB: ${{ inputs.system_disk_gib }}
@@ -107,6 +119,12 @@ jobs:
       with:
         path: greptimedb
         persist-credentials: false
+    - name: Validate version comparison
+      env:
+        RUN_GREPTIMEDB: ${{ inputs.run_greptimedb }}
+      run: |
+        python3 greptimedb/tests/perf/test_benchmark_version_comparison.py
+        python3 greptimedb/.github/scripts/benchmark-version-comparison.py validate
     - name: Resolve CI runner
       id: runner
       run: python3 greptimedb/.github/scripts/ci-runner-config.py --provider "$PROVIDER" --instance-type "$REQUESTED_INSTANCE_TYPE"
@@ -135,8 +153,8 @@ jobs:
         ((BENCHMARK_TIMEOUT_MINUTES <= 360 && JANITOR_TTL_HOURS <= 168))
         # Match the existing ECS workflow's provision, teardown and queue headroom.
         ((JANITOR_TTL_HOURS * 60 >= BENCHMARK_TIMEOUT_MINUTES + 120))
-        [[ "$RUNTIME_IMAGE" == *.cr.aliyuncs.com/* ]]
-        docker pull "$RUNTIME_IMAGE"
+        [[ "$RUNTIME_IMAGE" == *.cr.aliyuncs.com/* || "$RUNTIME_IMAGE" == public.ecr.aws/* ]]
+        bash greptimedb/.github/scripts/pull-benchmark-image.sh "$RUNTIME_IMAGE"
         metadata=$(docker image inspect "$RUNTIME_IMAGE")
         resolved=$(jq -er '.[0].RepoDigests[0]' <<< "$metadata")
         revision=$(jq -er '.[0].Config.Labels["org.opencontainers.image.revision"]' <<< "$metadata")
@@ -146,6 +164,9 @@ jobs:
         args=(--workload vmbench-long-range --range-preset "$RANGE_PRESET"
           --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY"
           --run-classification controlled_server_benchmark --no-open-browser)
+        if [[ "$COMPARE_GREPTIMEDB" == true ]]; then
+          args+=(--target "greptimedb:name=greptimedb-baseline,image=greptime/greptimedb:$BASELINE_GREPTIMEDB_TAG,url=http://127.0.0.1:14000/v1/prometheus/api/v1/query_range")
+        fi
         # Tags become target-spec fields; reject separators before passing them to the planner.
         for target in greptimedb victoriametrics; do
           case "$target" in
@@ -273,13 +294,13 @@ jobs:
           available=$(df -Pk "$path" | awk 'NR == 2 {print $4}')
           ((available >= 10 * 1024 * 1024)) || { echo "Need at least 10 GiB free on $path"; exit 1; }
         done
-        docker pull "$RESOLVED_RUNTIME_IMAGE"
+        bash greptimedb/.github/scripts/pull-benchmark-image.sh "$RESOLVED_RUNTIME_IMAGE"
         docker image inspect "$RESOLVED_RUNTIME_IMAGE" > "$METADATA_ROOT/runtime-image.json"
         test "$(jq -r '.[0].Config.Labels["org.opencontainers.image.revision"]' "$METADATA_ROOT/runtime-image.json")" = "$RESOLVED_O11YBENCH_REF"
         plan="$METADATA_ROOT/warm.json"
         while IFS=$'\t' read -r target reference; do
           echo "Resolving $target: $reference"
-          docker pull "$reference"
+          bash greptimedb/.github/scripts/pull-benchmark-image.sh "$reference"
           docker image inspect "$reference" > "$METADATA_ROOT/$target-image.json"
           digest=$(jq -er '.[0].RepoDigests[0]' "$METADATA_ROOT/$target-image.json")
           jq --arg target "$target" --arg image "$digest" '.targets |= map(if .name == $target then .image = $image else . end)' "$plan" > "$plan.tmp"
@@ -303,6 +324,10 @@ jobs:
       if: always()
       run: |
         docker ps -aq --filter "label=o11ybench.run-id=$RUN_ID-warm" | xargs -r docker rm -fv
+    - name: GreptimeDB version comparison
+      if: always() && inputs.compare_greptimedb
+      run: |
+        python3 greptimedb/.github/scripts/benchmark-version-comparison.py report --kind long-range --root "$ARTIFACT_ROOT-warm" >> "$GITHUB_STEP_SUMMARY"
     - name: Stage benchmark artifacts
       if: always()
       run: |

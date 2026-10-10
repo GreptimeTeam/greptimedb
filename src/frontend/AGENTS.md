@@ -34,6 +34,9 @@ remote datanodes via `operator`/`client`.
 | `heartbeat` | `src/frontend/src/heartbeat.rs` | Heartbeat to metasrv; handles suspend / cache invalidation |
 | `service_config` | `src/frontend/src/service_config/` | Per-protocol option structs |
 
+Shared frontend cache counters live in `src/common/frontend/src/metrics.rs`,
+including caches owned by pipeline and protocol handlers.
+
 ## Request lifecycles
 
 - **SQL query** (`instance.rs`): `do_query_inner` handles parsing, interceptors,
@@ -57,6 +60,17 @@ remote datanodes via `operator`/`client`.
 - **Flight bulk insert** (`instance/grpc.rs`): initializes on the first batch after
   the lazy schema handshake; checks permissions and reconciles missing columns
   through `Inserter` once per stream, then reuses the refreshed table.
+
+- **OTLP trace lookup tables** (`instance/otlp/trace_ingest.rs`): `Instance` owns
+  a shared cache of confirmed service/operation writes, which bypass batching.
+  `otlp.trace_aux_cache_size` sets its estimated byte budget at startup; zero disables it.
+  Async main writes retain completion results; a frontend task writes auxiliary
+  rows only for confirmed chunks before populating the cache.
+  Cold async trace requests reserve a shared auxiliary slot before main writes,
+  bounded separately by the table batcher's `max_inflight_requests`; confirmed
+  cache hits bypass this admission. The slot lasts through auxiliary completion.
+  These tables are ingestion-managed; manual mutation requires restarting
+  serving frontends.
 
 - **Logical-table batching** (`instance/logical_batcher.rs`): `Services` initializes
   one shared batcher for opted-in HTTP Prom and nonlegacy OTLP metric-engine

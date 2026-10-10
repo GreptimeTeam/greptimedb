@@ -2888,12 +2888,12 @@ mod tests {
             })
             .primary_key(vec![0]);
         let metadata = Arc::new(builder.build().unwrap());
-        let mutable = Arc::new(crate::memtable::time_partition::TimePartitions::new(
+        let mutable = crate::memtable::time_partition::TimePartitions::new(
             metadata.clone(),
             Arc::new(crate::test_util::memtable_util::EmptyMemtableBuilder::default()),
             0,
             None,
-        ));
+        );
         let version = Arc::new(
             crate::region::version::VersionBuilder::new(metadata.clone(), mutable).build(),
         );
@@ -3167,12 +3167,12 @@ mod tests {
             ..Default::default()
         };
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
-        let mutable = Arc::new(crate::memtable::time_partition::TimePartitions::new(
+        let mutable = crate::memtable::time_partition::TimePartitions::new(
             metadata.clone(),
             Arc::new(crate::test_util::memtable_util::EmptyMemtableBuilder::default()),
             0,
             None,
-        ));
+        );
         let version = Arc::new(
             crate::region::version::VersionBuilder::new(metadata, mutable)
                 .options(crate::region::options::RegionOptions {
@@ -3207,12 +3207,12 @@ mod tests {
             ..Default::default()
         };
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
-        let mutable = Arc::new(crate::memtable::time_partition::TimePartitions::new(
+        let mutable = crate::memtable::time_partition::TimePartitions::new(
             metadata.clone(),
             Arc::new(crate::test_util::memtable_util::EmptyMemtableBuilder::default()),
             0,
             None,
-        ));
+        );
         let target_region_id = metadata.region_id;
 
         // Files at or below the cursor are excluded. Among the remaining files,
@@ -3224,23 +3224,25 @@ mod tests {
             (None, false, true, false),
             (None, true, true, true),
         ] {
-            let version =
-                crate::region::version::VersionBuilder::new(metadata.clone(), mutable.clone())
-                    .options(crate::region::options::RegionOptions {
-                        preserve_row_sequence: true,
-                        ..Default::default()
-                    })
-                    .add_files(
-                        new_noop_file_purger(),
-                        [FileMeta {
-                            region_id: target_region_id,
-                            sequence,
-                            preserve_row_sequence: marked,
-                            ..Default::default()
-                        }]
-                        .into_iter(),
-                    )
-                    .build();
+            let version = crate::region::version::VersionBuilder::new(
+                metadata.clone(),
+                mutable.new_with_part_duration(None, None),
+            )
+            .options(crate::region::options::RegionOptions {
+                preserve_row_sequence: true,
+                ..Default::default()
+            })
+            .add_files(
+                new_noop_file_purger(),
+                [FileMeta {
+                    region_id: target_region_id,
+                    sequence,
+                    preserve_row_sequence: marked,
+                    ..Default::default()
+                }]
+                .into_iter(),
+            )
+            .build();
             let (files, range) = exact_sequence_range(&request, &version).unwrap();
             assert_eq!(expected_files, !files.is_empty());
             assert_eq!(expected_range, range.is_some());
@@ -3255,24 +3257,26 @@ mod tests {
             (None, true, 1, true),
         ] {
             let file_id = store_api::storage::FileId::random();
-            let version =
-                crate::region::version::VersionBuilder::new(metadata.clone(), mutable.clone())
-                    .options(crate::region::options::RegionOptions {
-                        preserve_row_sequence: true,
-                        ..Default::default()
-                    })
-                    .add_files(
-                        new_noop_file_purger(),
-                        [FileMeta {
-                            region_id: RegionId::new(1, 2),
-                            file_id,
-                            sequence,
-                            preserve_row_sequence: marked,
-                            ..Default::default()
-                        }]
-                        .into_iter(),
-                    )
-                    .build();
+            let version = crate::region::version::VersionBuilder::new(
+                metadata.clone(),
+                mutable.new_with_part_duration(None, None),
+            )
+            .options(crate::region::options::RegionOptions {
+                preserve_row_sequence: true,
+                ..Default::default()
+            })
+            .add_files(
+                new_noop_file_purger(),
+                [FileMeta {
+                    region_id: RegionId::new(1, 2),
+                    file_id,
+                    sequence,
+                    preserve_row_sequence: marked,
+                    ..Default::default()
+                }]
+                .into_iter(),
+            )
+            .build();
             let result = exact_sequence_range(&request, &version);
             if expected_error {
                 assert!(result.is_err());

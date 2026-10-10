@@ -52,9 +52,10 @@ impl HeartbeatHandler for RegionFailureHandler {
             return Ok(HandleControl::Continue);
         };
 
+        // Never blocks: the region lease has already been decided earlier in the
+        // chain, so a busy supervisor must not withhold the heartbeat response.
         self.heartbeat_acceptor
-            .accept(DatanodeHeartbeat::from(stat))
-            .await;
+            .accept(DatanodeHeartbeat::from(stat));
 
         Ok(HandleControl::Continue)
     }
@@ -62,6 +63,8 @@ impl HeartbeatHandler for RegionFailureHandler {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use api::v1::meta::HeartbeatRequest;
     use common_catalog::consts::default_engine;
     use common_meta::datanode::{RegionManifestInfo, RegionStat, Stat};
@@ -73,7 +76,45 @@ mod tests {
     use crate::handler::{HeartbeatAccumulator, HeartbeatHandler};
     use crate::metasrv::builder::MetasrvBuilder;
     use crate::region::supervisor::tests::new_test_supervisor;
-    use crate::region::supervisor::{Event, HeartbeatAcceptor};
+    use crate::region::supervisor::{DatanodeHeartbeat, Event, HeartbeatAcceptor};
+
+    fn new_region_stat(region_id: u64) -> RegionStat {
+        RegionStat {
+            id: RegionId::from_u64(region_id),
+            rcus: 0,
+            wcus: 0,
+            approximate_bytes: 0,
+            engine: default_engine().to_string(),
+            role: RegionRole::Follower,
+            num_rows: 0,
+            memtable_size: 0,
+            manifest_size: 0,
+            sst_size: 0,
+            sst_num: 0,
+            index_size: 0,
+            region_manifest: RegionManifestInfo::Mito {
+                manifest_version: 0,
+                flushed_entry_id: 0,
+                file_removed_cnt: 0,
+            },
+            data_topic_latest_entry_id: 0,
+            metadata_topic_latest_entry_id: 0,
+            written_bytes: 0,
+            query_cpu_time: 0,
+            query_scanned_bytes: 0,
+            min_timestamp: None,
+            max_timestamp: None,
+        }
+    }
+
+    fn new_stat() -> Stat {
+        Stat {
+            id: 42,
+            region_stats: vec![new_region_stat(1), new_region_stat(2), new_region_stat(3)],
+            timestamp_millis: 1000,
+            ..Default::default()
+        }
+    }
 
     #[tokio::test]
     async fn test_handle_heartbeat() {
@@ -85,45 +126,47 @@ mod tests {
         let metasrv = builder.build().await.unwrap();
         let mut ctx = metasrv.new_ctx();
         let acc = &mut HeartbeatAccumulator::default();
-        fn new_region_stat(region_id: u64) -> RegionStat {
-            RegionStat {
-                id: RegionId::from_u64(region_id),
-                rcus: 0,
-                wcus: 0,
-                approximate_bytes: 0,
-                engine: default_engine().to_string(),
-                role: RegionRole::Follower,
-                num_rows: 0,
-                memtable_size: 0,
-                manifest_size: 0,
-                sst_size: 0,
-                sst_num: 0,
-                index_size: 0,
-                region_manifest: RegionManifestInfo::Mito {
-                    manifest_version: 0,
-                    flushed_entry_id: 0,
-                    file_removed_cnt: 0,
-                },
-                data_topic_latest_entry_id: 0,
-                metadata_topic_latest_entry_id: 0,
-                written_bytes: 0,
-                query_cpu_time: 0,
-                query_scanned_bytes: 0,
-                min_timestamp: None,
-                max_timestamp: None,
-            }
-        }
-        acc.stat = Some(Stat {
-            id: 42,
-            region_stats: vec![new_region_stat(1), new_region_stat(2), new_region_stat(3)],
-            timestamp_millis: 1000,
-            ..Default::default()
-        });
+        acc.stat = Some(new_stat());
 
         handler.handle(req, &mut ctx, acc).await.unwrap();
         let (tx, rx) = oneshot::channel();
         sender.send(Event::Dump(tx)).await.unwrap();
         let detector = rx.await.unwrap();
         assert_eq!(detector.iter().collect::<Vec<_>>().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_handle_heartbeat_does_not_block_on_full_supervisor_queue() {
+        // Regression test for #9419: a full queue used to park the handler.
+        // Keep the supervisor alive, or the queue reports Closed.
+        let (_supervisor, sender) = new_test_supervisor();
+        // Built directly, so the supervisor stays undrained.
+        let handler = RegionFailureHandler {
+            heartbeat_acceptor: HeartbeatAcceptor::new(sender.clone()),
+        };
+
+        let stat = new_stat();
+        let mut queued = 0;
+        while sender
+            .try_send(Event::HeartbeatArrived(DatanodeHeartbeat::from(&stat)))
+            .is_ok()
+        {
+            queued += 1;
+        }
+        assert_eq!(queued, sender.max_capacity());
+
+        let builder = MetasrvBuilder::new();
+        let metasrv = builder.build().await.unwrap();
+        let mut ctx = metasrv.new_ctx();
+        let acc = &mut HeartbeatAccumulator::default();
+        // Without a stat the handler returns before the acceptor.
+        acc.stat = Some(stat);
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            handler.handle(&HeartbeatRequest::default(), &mut ctx, acc),
+        )
+        .await;
+        assert!(result.is_ok());
     }
 }

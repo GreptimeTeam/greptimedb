@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use catalog::kvbackend::new_table_cache;
 use common_meta::cache::{
-    CacheRegistry, CacheRegistryBuilder, LayeredCacheRegistryBuilder, new_schema_cache,
-    new_table_flownode_set_cache, new_table_info_cache, new_table_name_cache,
+    CacheRegistry, CacheRegistryBuilder, LayeredCacheRegistry, LayeredCacheRegistryBuilder,
+    new_schema_cache, new_table_flownode_set_cache, new_table_info_cache, new_table_name_cache,
     new_table_route_cache, new_table_schema_cache, new_view_info_cache,
 };
 use common_meta::kv_backend::KvBackendRef;
@@ -53,11 +53,11 @@ pub const TABLE_FLOWNODE_SET_CACHE_NAME: &str = "table_flownode_set_cache";
 pub const TABLE_ROUTE_CACHE_NAME: &str = "table_route_cache";
 pub const PARTITION_INFO_CACHE_NAME: &str = "partition_info_cache";
 
-/// Builds cache registry for datanode, including:
-/// - Schema cache.
-/// - Table id to schema name cache.
-pub fn build_datanode_cache_registry(kv_backend: KvBackendRef) -> CacheRegistry {
-    // Builds table id schema name cache that never expires.
+/// Builds the datanode cache registry with base metadata caches before derived caches.
+///
+/// Invalidating the base layer first prevents a concurrent query from refilling a derived cache
+/// from stale metadata after that derived cache has been invalidated.
+pub fn build_datanode_layered_cache_registry(kv_backend: KvBackendRef) -> LayeredCacheRegistry {
     let cache = CacheBuilder::new(DEFAULT_CACHE_MAX_CAPACITY).build();
     let table_id_schema_cache = Arc::new(new_table_schema_cache(
         TABLE_SCHEMA_NAME_CACHE_NAME.to_string(),
@@ -65,7 +65,6 @@ pub fn build_datanode_cache_registry(kv_backend: KvBackendRef) -> CacheRegistry 
         kv_backend.clone(),
     ));
 
-    // Builds schema cache
     let cache = default_cache();
     let schema_cache = Arc::new(new_schema_cache(
         SCHEMA_CACHE_NAME.to_string(),
@@ -73,9 +72,57 @@ pub fn build_datanode_cache_registry(kv_backend: KvBackendRef) -> CacheRegistry 
         kv_backend.clone(),
     ));
 
-    CacheRegistryBuilder::default()
+    let cache = default_cache();
+    let table_info_cache = Arc::new(new_table_info_cache(
+        TABLE_INFO_CACHE_NAME.to_string(),
+        cache,
+        kv_backend.clone(),
+    ));
+
+    let cache = default_cache();
+    let table_name_cache = Arc::new(new_table_name_cache(
+        TABLE_NAME_CACHE_NAME.to_string(),
+        cache,
+        kv_backend.clone(),
+    ));
+
+    let cache = default_cache();
+    let table_route_cache = Arc::new(new_table_route_cache(
+        TABLE_ROUTE_CACHE_NAME.to_string(),
+        cache,
+        kv_backend.clone(),
+    ));
+
+    let cache = default_cache();
+    let table_cache = Arc::new(new_table_cache(
+        TABLE_CACHE_NAME.to_string(),
+        cache,
+        table_info_cache.clone(),
+        table_name_cache.clone(),
+    ));
+
+    let cache = default_cache();
+    let partition_info_cache = Arc::new(new_partition_info_cache(
+        PARTITION_INFO_CACHE_NAME.to_string(),
+        cache,
+        table_route_cache.clone(),
+    ));
+
+    let base_registry = CacheRegistryBuilder::default()
         .add_cache(table_id_schema_cache)
         .add_cache(schema_cache)
+        .add_cache(table_info_cache)
+        .add_cache(table_name_cache)
+        .add_cache(table_route_cache)
+        .build();
+    let derived_registry = CacheRegistryBuilder::default()
+        .add_cache(table_cache)
+        .add_cache(partition_info_cache)
+        .build();
+
+    LayeredCacheRegistryBuilder::default()
+        .add_cache_registry(base_registry)
+        .add_cache_registry(derived_registry)
         .build()
 }
 

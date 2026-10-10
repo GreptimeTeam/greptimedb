@@ -112,6 +112,7 @@ mod timeout;
 pub mod utils;
 mod workload_scheduler;
 
+pub use memory_limit::decoded_body_accounting_middleware;
 use result::HttpOutputWriter;
 pub(crate) use timeout::DynamicTimeoutLayer;
 
