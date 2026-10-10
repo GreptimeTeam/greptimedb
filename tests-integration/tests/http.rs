@@ -3523,6 +3523,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "disable_ec2_metadata =",
         "cache_path =",
         "cache_capacity =",
+        "trace_aux_cache_size =",
         "memory_pool_size =",
         "scan_memory_limit =",
         "sas_token =",

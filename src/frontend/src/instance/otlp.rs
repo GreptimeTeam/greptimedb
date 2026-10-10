@@ -52,6 +52,7 @@ use table::requests::{
     SOURCE_OPENTELEMETRY,
 };
 
+pub(crate) use self::trace_ingest::TraceAuxCache;
 use self::trace_ingest::trace_conventions;
 use crate::instance::Instance;
 use crate::metrics::{OTLP_LOGS_ROWS, OTLP_METRICS_ROWS, OTLP_RESOURCE_INFO_WRITE_ERRORS};

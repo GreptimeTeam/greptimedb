@@ -732,6 +732,29 @@ fn test_example_configs_document_actual_defaults() {
 }
 
 #[test]
+fn test_load_trace_aux_cache_size() {
+    let default = FrontendOptions::default().otlp.trace_aux_cache_size;
+    for (setting, size) in [
+        ("", default),
+        ("trace_aux_cache_size = 0", ReadableSize(0)),
+        ("trace_aux_cache_size = \"1MiB\"", ReadableSize::mb(1)),
+    ] {
+        let config = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(config.path(), format!("[otlp]\n{setting}\n")).unwrap();
+
+        let frontend =
+            GreptimeOptions::<FrontendOptions>::load_layered_options(config.path().to_str(), "")
+                .unwrap();
+        let standalone =
+            GreptimeOptions::<StandaloneOptions>::load_layered_options(config.path().to_str(), "")
+                .unwrap();
+        for options in [frontend.component, standalone.component.frontend_options()] {
+            assert_eq!(options.otlp.trace_aux_cache_size, size);
+        }
+    }
+}
+
+#[test]
 fn test_load_removed_histogram_options() {
     for enabled in [false, true] {
         let config = tempfile::NamedTempFile::new().unwrap();

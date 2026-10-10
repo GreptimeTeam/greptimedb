@@ -123,6 +123,7 @@ sqlx = { workspace = true, features = [
     "chrono",
 ] }
 store-api.workspace = true
+temp-env.workspace = true
 time = "0.3"
 tokio-postgres = { workspace = true }
 tokio-util.workspace = true
