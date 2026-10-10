@@ -68,7 +68,7 @@ pub(crate) use utils::AliasMapping;
 /// Placeholder for other physical partition columns that are not in logical table
 const OTHER_PHY_PART_COL_PLACEHOLDER: &str = "__OTHER_PHYSICAL_PART_COLS_PLACEHOLDER__";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DistPlannerOptions {
     pub allow_query_fallback: bool,
 }

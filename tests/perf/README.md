@@ -348,6 +348,28 @@ seed = 12345
 The outer driver currently supports `direct_readable_sst`,
 `prom_remote_write_then_query`, and `otlp_trace_load`.
 
+A direct-SST case sizes its tables with the shared `[scenario.layout]` and can
+override `sst_count` and `rows_per_sst` per table, so a case can join a large fact
+table with a small dimension table. Setting `require_region_statistics = true`
+on any query makes the candidate direct-SST target wait for every case table's
+leader reports with non-zero disk size in `information_schema.region_statistics`.
+This untimed wait precedes all candidate measurements; timeout or request failure
+aborts that target with no timed samples. The base target and candidate cases
+without an opted-in query do not wait. A query can list
+`candidate_session_sql` statements that only the candidate target runs; the
+runner sends them in the same `/v1/sql` request as the query itself (validation,
+warmup and measurement), because every request gets its own session context and a
+`SET` statement only affects the statements of its own request. A base build that
+does not know a setting yet therefore keeps measuring the query without it, which
+is what makes `SET experimental_dist_join = true` a candidate-only opt-in.
+
+A SQL query can set `candidate_remote_operator`, e.g. `HashJoinExec`, to require
+one separate untimed `EXPLAIN ANALYZE` with the same session prefix. It must show
+the operator in a positive stage and absent from stage 0; failed requests or
+malformed stage/node/plan rows abort all candidate measurements. This proves only
+the preflight execution, not later timed SELECT plans. The base target and
+candidate cases without the field are unchanged.
+
 ## Metrics
 
 Primary gates should compare query work rather than plan text:
@@ -565,3 +587,15 @@ Additional SQL optimizer cases:
   `LIMIT`.
 - `sql_join_filter_order`: two direct-SST tables joined on a shared tag with
   time filters, aggregate ordering, and `LIMIT`.
+- `sql_join_dist_broadcast`: a 32-SST fact table joined with a 16-row dimension
+  table, comparing the join on the frontend with the nested broadcast join
+  rewrite of the experimental `experimental_dist_join` opt-in. Only the
+  candidate target sends the opt-in, through `candidate_session_sql`, and the
+  candidate query sets `require_region_statistics = true` so it waits for the
+  region statistics the rewrite needs before it is measured. It also sets
+  `candidate_remote_operator = "HashJoinExec"`, so a candidate run in which the
+  join stayed on the frontend fails without a timed sample instead of only
+  reporting the un-rewritten latency.
+
+These cases are not part of the routine default case group; run them by path, for
+example `--cases tests/perf/query_cases/sql_join_dist_broadcast/case.toml`.

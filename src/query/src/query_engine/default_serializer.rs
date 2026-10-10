@@ -478,6 +478,7 @@ mod tests {
 
     use super::*;
     use crate::QueryEngineFactory;
+    use crate::dist_plan::RemoteDynFilterProducerId;
     use crate::dummy_catalog::DummyCatalogList;
     use crate::optimizer::test_util::mock_table_provider;
     use crate::options::QueryOptions;
@@ -723,7 +724,9 @@ mod tests {
             QueryOptions::default(),
         )
         .query_engine();
-        let plan = merge_scan(numbers_scan(), true);
+        let plan = MergeScanLogicalPlan::new(numbers_scan(), true, Default::default())
+            .with_remote_dyn_filter_producer_id(RemoteDynFilterProducerId::new(7))
+            .into_logical_plan();
         let decoded = plan_decoder(engine.as_ref())
             .decode(encode_plan(&plan), request_catalog_list(), false)
             .await
@@ -741,6 +744,9 @@ mod tests {
         assert_eq!(merge_scan.input().to_string(), numbers_scan().to_string());
         // `PbMergeScan` doesn't carry `partition_cols`, so decoded nodes have an empty mapping.
         assert!(merge_scan.partition_cols().is_empty());
+        // `PbMergeScan` doesn't carry the remote dynamic filter producer id either: a decoded
+        // boundary has none, and `MergeScanExec` fails open for it.
+        assert_eq!(None, merge_scan.remote_dyn_filter_producer_id());
     }
 
     /// Payload table binding uses the engine catalog, not the request catalog.
@@ -1229,7 +1235,6 @@ mod tests {
                     ]);
                     Ok(Some(NumbersTable::table(NUMBERS_TABLE_ID)))
                 }
-
                 TableResolution::AwaitSignal { notify, entered } => {
                     entered.store(true, Ordering::SeqCst);
                     notify.notified().await;

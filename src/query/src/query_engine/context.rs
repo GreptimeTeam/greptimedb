@@ -37,6 +37,15 @@ impl QueryEngineContext {
         &self.state
     }
 
+    /// Mutable access to the session state of this query.
+    ///
+    /// The state is built for a single query (see `DatafusionQueryEngine::engine_context`), so
+    /// changes are query local and do not reach the engine state.
+    #[inline]
+    pub(crate) fn state_mut(&mut self) -> &mut SessionState {
+        &mut self.state
+    }
+
     #[inline]
     pub fn query_ctx(&self) -> QueryContextRef {
         self.query_ctx.clone()

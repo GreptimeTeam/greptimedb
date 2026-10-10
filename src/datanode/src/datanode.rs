@@ -19,7 +19,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use catalog::information_schema::NoopInformationExtension;
+use catalog::information_extension::DistributedInformationExtension;
+use catalog::information_schema::{InformationExtensionRef, NoopInformationExtension};
 use catalog::kvbackend::KvBackendCatalogManagerBuilder;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
@@ -365,6 +366,7 @@ impl DatanodeBuilder {
                 region_event_listener,
                 file_ref_manager,
                 cache_registry.clone(),
+                meta_client.as_ref(),
             )
             .await?;
 
@@ -506,19 +508,16 @@ impl DatanodeBuilder {
         event_listener: RegionServerEventListenerRef,
         file_ref_manager: FileReferenceManagerRef,
         cache_registry: Arc<LayeredCacheRegistry>,
+        meta_client: Option<&MetaClientRef>,
     ) -> Result<RegionServer> {
         let opts: &DatanodeOptions = &self.opts;
 
-        // Keep `with_dist_planner` false: datanodes execute received MergeScan plans.
-        let catalog_manager = KvBackendCatalogManagerBuilder::new(
-            Arc::new(NoopInformationExtension),
-            self.kv_backend.clone(),
-            cache_registry.clone(),
-        )
-        .build();
-        let partition_manager = catalog_manager.partition_manager();
-
-        // MergeScan region requests stream until completion, so they have no client timeout.
+        // The datanode executes received plans, including nested `MergeScan` nodes. The
+        // distributed planner is registered when both the partition manager and region query
+        // handler are provided; `with_dist_planner` remains false so the datanode does not rewrite
+        // its own plans.
+        // The same client pool backs distributed information queries and MergeScan dispatch.
+        // Streaming region queries have no request timeout, and use configured Flight compression.
         let mut channel_config = ChannelConfig {
             timeout: None,
             ..Default::default()
@@ -527,7 +526,24 @@ impl DatanodeBuilder {
             channel_config.accept_compression = true;
             channel_config.send_compression = true;
         }
-        let node_manager: NodeManagerRef = Arc::new(NodeClients::new(channel_config));
+        let node_clients = Arc::new(NodeClients::new(channel_config));
+        let node_manager: NodeManagerRef = node_clients.clone();
+
+        let information_extension: InformationExtensionRef = match meta_client {
+            Some(meta_client) => Arc::new(DistributedInformationExtension::new(
+                meta_client.clone(),
+                node_clients.clone(),
+            )),
+            None => Arc::new(NoopInformationExtension),
+        };
+        let catalog_manager = KvBackendCatalogManagerBuilder::new(
+            information_extension,
+            self.kv_backend.clone(),
+            cache_registry.clone(),
+        )
+        .build();
+        let partition_manager = catalog_manager.partition_manager();
+
         let region_query_handler =
             if let Some(factory) = self.plugins.get::<RegionQueryHandlerFactoryRef>() {
                 factory.build(partition_manager.clone(), node_manager)

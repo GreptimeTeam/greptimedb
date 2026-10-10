@@ -491,6 +491,7 @@ pub struct MergeScanExec {
     target_partition: usize,
     partition_cols: AliasMapping,
     enable_per_region_metrics: bool,
+    row_estimate: Option<usize>,
 }
 
 impl std::fmt::Debug for MergeScanExec {
@@ -592,24 +593,39 @@ impl MergeScanExec {
             target_partition,
             partition_cols,
             enable_per_region_metrics,
+            row_estimate: None,
         })
     }
 
-    /// Conservative row-count upper bound for all selected regions.
+    /// Attaches an ordinary-scan row estimate to this merge scan.
+    pub fn with_row_estimate(mut self, row_estimate: usize) -> Self {
+        self.row_estimate = Some(row_estimate);
+        self
+    }
+
+    /// Row estimate for the whole merge scan, or a conservative plan-derived upper bound.
     ///
-    /// This is not an expected cardinality: DataFusion receives it as an
-    /// inexact estimate only because `Statistics` has no upper-bound precision.
+    /// The explicit estimate is inexact, not a bound. The fallback plan-derived upper bound is
+    /// also represented as inexact because `Statistics` has no upper-bound precision.
     fn estimated_num_rows(&self) -> Precision<usize> {
         if self.regions.is_empty() {
             return Precision::Inexact(0);
         }
 
         let Some(rows_per_region) = remote_plan_row_bound(&self.plan) else {
-            return Precision::Absent;
+            return self
+                .row_estimate
+                .map_or(Precision::Absent, Precision::Inexact);
         };
-        rows_per_region
-            .checked_mul(self.regions.len())
-            .map_or(Precision::Absent, Precision::Inexact)
+        let Some(row_bound) = rows_per_region.checked_mul(self.regions.len()) else {
+            return self
+                .row_estimate
+                .map_or(Precision::Absent, Precision::Inexact);
+        };
+        Precision::Inexact(
+            self.row_estimate
+                .map_or(row_bound, |estimate| estimate.min(row_bound)),
+        )
     }
 
     /// Number of partitions populated by the region striping in [`Self::to_stream`].
@@ -981,6 +997,7 @@ impl MergeScanExec {
             target_partition: self.target_partition,
             partition_cols: self.partition_cols.clone(),
             enable_per_region_metrics: self.enable_per_region_metrics,
+            row_estimate: self.row_estimate,
         })
     }
 
@@ -1662,6 +1679,88 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn merge_scan_reports_attached_row_estimate_and_preserves_plan_bound() {
+        let regions = vec![RegionId::new(1024, 1), RegionId::new(1024, 2)];
+        let uncapped = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .build()
+            .unwrap();
+        let exec = merge_scan_exec_with_plan(regions, uncapped, 10).with_row_estimate(123);
+        let stats = merge_scan_statistics(&exec);
+        assert_eq!(stats.num_rows, Precision::Inexact(123));
+        assert_eq!(stats.total_byte_size, Precision::Absent);
+        assert!(stats.column_statistics.iter().all(|column| {
+            column.null_count == Precision::Absent
+                && column.max_value == Precision::Absent
+                && column.min_value == Precision::Absent
+                && column.distinct_count == Precision::Absent
+        }));
+        assert_eq!(
+            exec.statistics_from_inputs(&[], &StatisticsArgs::new().with_partition(Some(0)),)
+                .unwrap()
+                .num_rows,
+            Precision::Absent
+        );
+        let limited = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(50))
+            .unwrap()
+            .build()
+            .unwrap();
+        let exec = merge_scan_exec_with_plan(vec![RegionId::new(1024, 1)], limited, 10)
+            .with_row_estimate(100);
+        assert_eq!(
+            merge_scan_statistics(&exec).num_rows,
+            Precision::Inexact(50)
+        );
+
+        let two_region_limit = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(50))
+            .unwrap()
+            .build()
+            .unwrap();
+        let exec = merge_scan_exec_with_plan(
+            vec![RegionId::new(1024, 1), RegionId::new(1024, 2)],
+            two_region_limit,
+            10,
+        )
+        .with_row_estimate(123);
+        assert_eq!(
+            merge_scan_statistics(&exec).num_rows,
+            Precision::Inexact(100)
+        );
+
+        let overflow_limit = LogicalPlanBuilder::empty(true)
+            .project(vec![lit(1i64).alias("col")])
+            .unwrap()
+            .limit(0, Some(i64::MAX as usize))
+            .unwrap()
+            .build()
+            .unwrap();
+        let overflow_cap = i64::MAX as usize;
+        assert_eq!(Some(overflow_cap), remote_plan_row_bound(&overflow_limit));
+        assert_eq!(None, overflow_cap.checked_mul(3));
+        let exec = merge_scan_exec_with_plan(
+            vec![
+                RegionId::new(1024, 1),
+                RegionId::new(1024, 2),
+                RegionId::new(1024, 3),
+            ],
+            overflow_limit,
+            10,
+        )
+        .with_row_estimate(123);
+        assert_eq!(
+            merge_scan_statistics(&exec).num_rows,
+            Precision::Inexact(123)
+        );
     }
 
     #[test]
@@ -3329,7 +3428,8 @@ mod tests {
             Some(remote_dyn_filter_producer_id),
             false,
         )
-        .unwrap();
+        .unwrap()
+        .with_row_estimate(17);
 
         assert_eq!(
             exec.remote_dyn_filter_producer_id(),
@@ -3353,6 +3453,7 @@ mod tests {
             Some(remote_dyn_filter_producer_id),
             "try_with_new_distribution must preserve remote dynamic filter producer id"
         );
+        assert_eq!(cloned.row_estimate, Some(17));
     }
 
     #[test]
