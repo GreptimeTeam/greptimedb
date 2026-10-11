@@ -543,7 +543,7 @@ async fn cancellation_drops_input_and_aborts_active_upload() {
 }
 
 #[tokio::test]
-async fn native_histogram_parquet_roundtrip() {
+async fn supported_metric_types_parquet_roundtrip() {
     fn sample(data_type: &DataType) -> ArrayRef {
         match data_type {
             DataType::Struct(fields) => Arc::new(StructArray::new(
@@ -569,44 +569,102 @@ async fn native_histogram_parquet_roundtrip() {
             other => panic!("unexpected histogram field {other}"),
         }
     }
-    let data_type = common_query::native_histogram::native_histogram_arrow_type();
-    let field = Field::new("histogram", data_type.clone(), true);
-    let unit = LogicalTableExport::try_new(
-        table(
-            1024,
-            "phy",
-            vec![Field::new(TABLE_ID, DataType::UInt32, false), field.clone()],
-            true,
-        ),
-        &[table(1025, "histogram", vec![field], false)],
-    )
-    .unwrap();
-    let batch = RecordBatch::try_from_iter_with_nullable([
-        (
-            TABLE_ID,
-            Arc::new(UInt32Array::from(vec![1025; 2])) as ArrayRef,
-            false,
-        ),
-        ("histogram", sample(&data_type), true),
-    ])
-    .unwrap();
-    let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
-    let summary = export_stream(
-        &unit,
-        stream(vec![batch.clone()]),
-        &store,
-        export_limits(),
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(summary.rows, 2);
-    let (schema, batches) = read(&store, "histogram.parquet").await;
-    assert_eq!(schema.fields(), unit.logical_tables[&1025].schema.fields());
-    assert_eq!(
-        arrow::compute::concat_batches(&schema, &batches).unwrap(),
-        batch.project(&[1]).unwrap()
-    );
+    use common_datasource::file_format::parquet::packed_reader::{
+        PackReadWindows, PackedParquetReader,
+    };
+    use common_datasource::packed_snapshot::{PACK_INDEX_FILE, PackIndex};
+    use common_datasource::packed_writer::PackedWriter;
+    use datafusion::parquet::arrow::ParquetRecordBatchStreamBuilder;
+    use futures::TryStreamExt;
+
+    let timestamps: [ArrayRef; 4] = [
+        Arc::new(arrow::array::TimestampSecondArray::from(vec![4, 5])),
+        Arc::new(arrow::array::TimestampMillisecondArray::from(vec![4, 5])),
+        Arc::new(arrow::array::TimestampMicrosecondArray::from(vec![4, 5])),
+        Arc::new(arrow::array::TimestampNanosecondArray::from(vec![4, 5])),
+    ];
+    let values = [
+        Arc::new(Float64Array::from(vec![Some(3.5), None])) as ArrayRef,
+        sample(&common_query::native_histogram::native_histogram_arrow_type()),
+    ];
+    for timestamp in timestamps {
+        for value in &values {
+            let logical = RecordBatch::try_from_iter_with_nullable([
+                ("ts", timestamp.clone(), false),
+                (
+                    "host",
+                    Arc::new(StringArray::from(vec![Some(""), None])) as ArrayRef,
+                    true,
+                ),
+                ("value", value.clone(), true),
+            ])
+            .unwrap();
+            let mut fields = vec![Field::new(TABLE_ID, DataType::UInt32, false)];
+            fields.extend(logical.schema().fields().iter().map(|f| f.as_ref().clone()));
+            let unit = LogicalTableExport::try_new(
+                table(1024, "phy", fields.clone(), true),
+                &[table(1025, "metric", fields[1..].to_vec(), false)],
+            )
+            .unwrap();
+            let mut columns = vec![Arc::new(UInt32Array::from(vec![1025; 2])) as ArrayRef];
+            columns.extend_from_slice(logical.columns());
+            let input = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+            for packed in [false, true] {
+                let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
+                let writer = packed.then(|| PackedWriter::new(store.clone()).unwrap());
+                let summary = export_stream_managed(
+                    &unit,
+                    stream(vec![input.clone()]),
+                    &store,
+                    export_limits(),
+                    &CancellationToken::new(),
+                    ExportWriteBudget::new(1),
+                    writer.clone(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(summary.rows, 2);
+                let batches = if let Some(writer) = writer {
+                    writer
+                        .lock()
+                        .await
+                        .finish(&CancellationToken::new())
+                        .await
+                        .unwrap();
+                    let index: PackIndex = serde_json::from_slice(
+                        &store.read(PACK_INDEX_FILE).await.unwrap().to_bytes(),
+                    )
+                    .unwrap();
+                    index.validate_membership(["metric"]).unwrap();
+                    let entry = &index.tables[0];
+                    let object = &index.objects[0];
+                    let reader = PackedParquetReader::new(
+                        PackReadWindows::new(store.clone()),
+                        object.path.clone(),
+                        object.length,
+                        entry.offset,
+                        entry.length,
+                    )
+                    .unwrap();
+                    ParquetRecordBatchStreamBuilder::new(reader)
+                        .await
+                        .unwrap()
+                        .build()
+                        .unwrap()
+                        .try_collect::<Vec<_>>()
+                        .await
+                        .unwrap()
+                } else {
+                    read(&store, "metric.parquet").await.1
+                };
+                assert_eq!(batches[0].schema().fields(), logical.schema().fields());
+                assert_eq!(
+                    arrow::compute::concat_batches(&logical.schema(), &batches).unwrap(),
+                    logical
+                );
+            }
+        }
+    }
 }
 
 struct PausedFileWriter {
