@@ -4457,6 +4457,68 @@ async fn test_range_cache_key_separates_sequence_ranges() {
 }
 
 #[tokio::test]
+async fn test_single_source_ranges_preserve_batches() {
+    for (file_count, row_group_size) in [(1, 64), (1, 16), (2, 16)] {
+        let mut env = TestEnv::new().await;
+        let engine = env
+            .create_engine(MitoConfig {
+                default_flat_format: true,
+                ..Default::default()
+            })
+            .await;
+        let region_id = RegionId::new(1, 1);
+        let request = CreateRequestBuilder::new()
+            .insert_option("memtable.type", "bulk")
+            .insert_option("max_row_group_row_count", &row_group_size.to_string())
+            .build();
+        let schema = test_util::rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        let rows_per_file = 64 / file_count;
+        for file in 0..file_count {
+            test_util::put_rows(
+                &engine,
+                region_id,
+                Rows {
+                    schema: schema.clone(),
+                    rows: test_util::build_rows(file * rows_per_file, (file + 1) * rows_per_file),
+                },
+            )
+            .await;
+            test_util::flush_region(&engine, region_id, None).await;
+        }
+        let Scanner::Seq(scanner) = engine
+            .scanner(region_id, ScanRequest::default())
+            .await
+            .unwrap()
+        else {
+            panic!("expected a sequential scan");
+        };
+        assert_eq!(file_count, scanner.input().files.len());
+        assert_eq!(
+            64 / row_group_size,
+            scanner.properties().partitions[0].len()
+        );
+        let stream = scanner
+            .scan_partition(&Default::default(), &ExecutionPlanMetricsSet::default(), 0)
+            .unwrap();
+        let batches = stream.try_collect::<Vec<_>>().await.unwrap();
+        assert_eq!(
+            vec![row_group_size; 64 / row_group_size],
+            batches
+                .iter()
+                .map(|batch| batch.num_rows())
+                .collect::<Vec<_>>()
+        );
+        let mut values = scan_field_values(&batches);
+        values.sort_by(f64::total_cmp);
+        assert_eq!((0..64).map(|i| i as f64).collect::<Vec<_>>(), values);
+    }
+}
+
+#[tokio::test]
 async fn test_reset_state_discards_dynamic_field_pruning() {
     for (append_mode, expected_scanner_name) in [(false, "SeqScan"), (true, "UnorderedScan")] {
         let mut env = TestEnv::with_prefix(if append_mode {
