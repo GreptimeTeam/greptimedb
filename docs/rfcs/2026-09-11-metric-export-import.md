@@ -31,13 +31,21 @@ includes reports of exports taking days for roughly 100,000 logical tables with
 only several GiB of data. Table count, physical schema width and data volume must
 be measured separately; total database bytes do not describe the transfer cost.
 
-The [experiment conclusions](2026-09-11-metric-export-import/experiment-results.md)
-support shared scans, batch DDL, explicit-file COPY and packed-object transfer.
-Packing with a bounded range reader substantially reduces storage requests and
-improves full export and restore for many small logical tables. Benefits depend
-on request latency, and memory use increases. Remaining CREATE work makes batch
-DDL part of the first release. These local experiments establish direction;
-production V2 recovery and release performance still require acceptance tests.
+Local standalone experiments with development builds, local files and Docker
+MinIO support shared scans, batch DDL, explicit-file COPY and packed-object
+transfer. Packing with a bounded range reader reduces storage requests and
+improves full export and restore for many small logical tables; low-latency
+export gains are smaller. CPU and request overhead fell while peak process
+memory increased. Remaining CREATE work makes batch DDL part of the first
+release. Explicit-file COPY removes repeated directory traversal while retaining
+ordinary per-table insertion, independently of merged database writes.
+
+The exercised fixtures preserved schemas, DDL and typed values. Standalone-file
+experiments used the existing importer; packing used an independent driver and
+prototype range reader. These experiments establish design direction, not
+production packed-format compatibility, V2 recovery safety or release performance.
+The 8 MiB write/part limit was a design choice, not a measured optimum. Current
+acceptance status is maintained in the [tracking issue](https://github.com/GreptimeTeam/greptimedb/issues/9120).
 
 # Terminology
 
