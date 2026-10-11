@@ -1211,6 +1211,11 @@ pub(crate) fn should_split_flat_batches_for_merge(
     stream_ctx: &Arc<StreamContext>,
     range_meta: &RangeMeta,
 ) -> Option<usize> {
+    // A single input stream bypasses FlatMergeReader.
+    if stream_ctx.ranges.len() == 1 && range_meta.row_group_indices.len() == 1 {
+        return None;
+    }
+
     // Number of files to split and scan.
     let mut num_files_to_split = 0;
     let mut num_mem_rows = 0;
@@ -1389,6 +1394,36 @@ mod split_tests {
         assert!(
             should_split_flat_batches_for_merge(&stream_ctx, &single_file_range_meta()).is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn split_only_when_scan_has_multiple_sources() {
+        for (range_count, file_count, expected_batch_size) in [
+            (1, 1, None),
+            (2, 1, Some(DEFAULT_READ_BATCH_SIZE / 4)),
+            (1, 2, Some(DEFAULT_READ_BATCH_SIZE / 4)),
+        ] {
+            let files = (0..file_count)
+                .map(|_| sst_file_handle_with_file_id(FileId::random(), 0, 1000))
+                .collect();
+            let mut range = single_file_range_meta();
+            for index in 1..file_count {
+                range.indices.push(SourceIndex {
+                    index,
+                    num_row_groups: 1,
+                });
+                range.row_group_indices.push(RowGroupIndex {
+                    index,
+                    row_group_index: 0,
+                });
+            }
+            let mut stream_ctx = new_stream_context_with_files(files).await;
+            stream_ctx.ranges = vec![range.clone(); range_count];
+            assert_eq!(
+                should_split_flat_batches_for_merge(&Arc::new(stream_ctx), &range),
+                expected_batch_size
+            );
+        }
     }
 
     #[test]
