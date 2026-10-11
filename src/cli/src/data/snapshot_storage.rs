@@ -295,8 +295,9 @@ pub trait SnapshotStorage: Send + Sync {
         schemas: &[String],
         chunk_id: u32,
         resume: bool,
+        packed: bool,
     ) -> Result<()> {
-        let _ = (schemas, chunk_id, resume);
+        let _ = (schemas, chunk_id, resume, packed);
         InvalidUriSnafu {
             uri: "snapshot",
             reason: "storage does not support preparing export chunks",
@@ -730,6 +731,7 @@ impl SnapshotStorage for OpenDalStorage {
         schemas: &[String],
         chunk_id: u32,
         resume: bool,
+        packed: bool,
     ) -> Result<()> {
         let mut files = Vec::new();
         for schema in schemas {
@@ -751,10 +753,17 @@ impl SnapshotStorage for OpenDalStorage {
                     continue;
                 }
                 let name = path.strip_prefix(&prefix).unwrap_or("");
-                if !resume || entry.metadata().is_dir() || !valid_chunk_filename(name) {
+                if !resume
+                    || entry.metadata().is_dir()
+                    || !(if packed {
+                        valid_packed_chunk_filename(name)
+                    } else {
+                        valid_chunk_filename(name)
+                    })
+                {
                     return InvalidUriSnafu {
                         uri: path,
-                        reason: "expected an empty new chunk or direct Parquet files in an owned unfinished chunk",
+                        reason: "expected an empty new chunk or recognized files in an owned unfinished chunk",
                     }.fail();
                 }
                 files.push(path.to_string());
@@ -784,6 +793,17 @@ impl SnapshotStorage for OpenDalStorage {
                 operation: "delete snapshot",
             })
     }
+}
+
+fn valid_packed_chunk_filename(name: &str) -> bool {
+    name == common_datasource::packed_snapshot::PACK_INDEX_FILE
+        || [("pack-", ".bin"), ("table-", ".parquet")]
+            .iter()
+            .any(|(prefix, suffix)| {
+                name.strip_prefix(prefix)
+                    .and_then(|n| n.strip_suffix(suffix))
+                    .is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
+            })
 }
 
 fn valid_chunk_filename(name: &str) -> bool {
@@ -1074,7 +1094,7 @@ mod tests {
         let schemas = vec!["public".to_string(), "other".to_string()];
         assert!(
             storage
-                .prepare_export_chunk(&schemas, 2, false)
+                .prepare_export_chunk(&schemas, 2, false, false)
                 .await
                 .is_err()
         );
@@ -1085,11 +1105,11 @@ mod tests {
                 .unwrap()
         );
         storage
-            .prepare_export_chunk(&schemas, 2, true)
+            .prepare_export_chunk(&schemas, 2, true, false)
             .await
             .unwrap();
         storage
-            .prepare_export_chunk(&schemas, 2, true)
+            .prepare_export_chunk(&schemas, 2, true, false)
             .await
             .unwrap();
         assert!(
@@ -1129,7 +1149,7 @@ mod tests {
             }
             assert!(
                 storage
-                    .prepare_export_chunk(&["public".into(), "other".into()], 2, true)
+                    .prepare_export_chunk(&["public".into(), "other".into()], 2, true, false)
                     .await
                     .is_err()
             );
@@ -1141,6 +1161,70 @@ mod tests {
                 "keep"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn packed_retry_preserves_foreign_files_and_completed_chunks() {
+        let dir = tempdir().unwrap();
+        let storage = make_storage_with_rooted_fs(dir.path());
+        let owned = ["pack-000000.bin", "table-42.parquet", "pack-index.json"];
+        for name in owned {
+            storage
+                .write_text(&format!("data/public/2/{name}"), "partial")
+                .await
+                .unwrap();
+        }
+        for path in [
+            "data/public/1/pack-000000.bin",
+            "data/public/2/foreign.parquet",
+        ] {
+            storage.write_text(path, "keep").await.unwrap();
+        }
+        let schemas = ["public".into()];
+        assert!(
+            storage
+                .prepare_export_chunk(&schemas, 2, true, true)
+                .await
+                .is_err()
+        );
+        for name in owned {
+            assert!(
+                storage
+                    .file_exists(&format!("data/public/2/{name}"))
+                    .await
+                    .unwrap()
+            );
+        }
+        assert_eq!(
+            storage
+                .read_text("data/public/2/foreign.parquet")
+                .await
+                .unwrap(),
+            "keep"
+        );
+        storage
+            .object_store
+            .delete("data/public/2/foreign.parquet")
+            .await
+            .unwrap();
+        storage
+            .prepare_export_chunk(&schemas, 2, true, true)
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .list_files_recursive("data/public/2/")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            storage
+                .read_text("data/public/1/pack-000000.bin")
+                .await
+                .unwrap(),
+            "keep"
+        );
     }
 
     #[tokio::test]
@@ -1159,7 +1243,7 @@ mod tests {
             .await
             .unwrap();
         let error = storage
-            .prepare_export_chunk(&["public".into()], 2, true)
+            .prepare_export_chunk(&["public".into()], 2, true, false)
             .await
             .unwrap_err();
         let Error::StorageOperation {
@@ -1191,7 +1275,7 @@ mod tests {
             .await
             .unwrap();
         storage
-            .prepare_export_chunk(&[schema], 2, true)
+            .prepare_export_chunk(&[schema], 2, true, false)
             .await
             .unwrap();
         assert!(!storage.file_exists(&owned).await.unwrap());

@@ -791,7 +791,9 @@ mod tests {
     use common_function::utils::partition_expr_version;
     use common_query::prelude::{greptime_native_histogram, greptime_timestamp, greptime_value};
     use common_recordbatch::RecordBatches;
-    use datatypes::arrow::array::{Float64Array, TimestampMillisecondArray};
+    use datatypes::arrow::array::{
+        Float64Array, TimestampMicrosecondArray, TimestampMillisecondArray,
+    };
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
     use datatypes::value::Value as PartitionValue;
@@ -932,14 +934,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_put_skip_wal_batch_recovery() {
-        check_put_skip_wal_batch_recovery("sparse", false).await;
-        check_put_skip_wal_batch_recovery("sparse", true).await;
-        check_put_skip_wal_batch_recovery("dense", false).await;
-        check_put_skip_wal_batch_recovery("dense", true).await;
+        check_put_skip_wal_batch_recovery("sparse", false, false).await;
+        check_put_skip_wal_batch_recovery("sparse", true, false).await;
+        check_put_skip_wal_batch_recovery("dense", false, false).await;
+        check_put_skip_wal_batch_recovery("dense", true, false).await;
     }
 
-    async fn check_put_skip_wal_batch_recovery(encoding: &str, skip_wal: bool) {
-        let env = TestEnv::new().await;
+    #[tokio::test]
+    async fn test_put_skip_wal_batch_close_recovery() {
+        check_put_skip_wal_batch_recovery("sparse", false, true).await;
+        check_put_skip_wal_batch_recovery("sparse", true, true).await;
+        check_put_skip_wal_batch_recovery("dense", false, true).await;
+        check_put_skip_wal_batch_recovery("dense", true, true).await;
+    }
+
+    async fn check_put_skip_wal_batch_recovery(encoding: &str, skip_wal: bool, close: bool) {
+        let mut env = TestEnv::new().await;
         let engine = env.metric();
         engine.inner.flush_task.stop().await.unwrap();
         let physical_region_id = env.default_physical_region_id();
@@ -1007,18 +1017,21 @@ mod tests {
             assert!(stat.memtable_size > 0);
             assert_eq!(stat.sst_num, 0);
         }
-        engine
-            .handle_request(
-                physical_region_id,
-                RegionRequest::Close(RegionCloseRequest {
-                    flush_on_close: false,
-                }),
-            )
-            .await
-            .unwrap();
-
-        // Recreate the wrapper as well, discarding its metadata cache.
-        let reopened = MetricEngine::try_new(env.mito(), Default::default()).unwrap();
+        let reopened = if close {
+            engine
+                .handle_request(
+                    physical_region_id,
+                    RegionRequest::Close(RegionCloseRequest::default()),
+                )
+                .await
+                .unwrap();
+            // Recreate the wrapper as well, discarding its metadata cache.
+            MetricEngine::try_new(env.mito(), Default::default()).unwrap()
+        } else {
+            // Bypass Close to retain coverage of rows lost without WAL protection.
+            env.reopen_engine(Default::default()).await;
+            env.metric()
+        };
         reopened.inner.flush_task.stop().await.unwrap();
         reopened
             .handle_request(
@@ -1040,12 +1053,17 @@ mod tests {
             )
             .await
             .unwrap();
+        let stat = env
+            .mito()
+            .region_statistic(crate::utils::to_data_region_id(physical_region_id))
+            .unwrap();
+        assert_eq!(stat.sst_num > 0, skip_wal && close);
         let recovered_metadata = reopened.get_metadata(logical_region_id).await.unwrap();
         assert_eq!(
             metadata_before.column_metadatas,
             recovered_metadata.column_metadatas
         );
-        let expected = if skip_wal {
+        let expected = if skip_wal && !close {
             vec![]
         } else {
             vec![(0, 30.0), (1, 10.0), (2, 20.0), (3, 30.0)]
@@ -1053,7 +1071,7 @@ mod tests {
         assert_eq!(
             scan_timestamp_values(&reopened, logical_region_id).await,
             expected,
-            "encoding={encoding}, skip_wal={skip_wal}"
+            "encoding={encoding}, skip_wal={skip_wal}, close={close}"
         );
     }
 
@@ -1114,6 +1132,91 @@ mod tests {
             .gt_eq(PartitionValue::String("job-0".into()))
             .and(col("job").lt(PartitionValue::String("job-9".into())));
         expr.as_json_str().unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_put_and_scan_microsecond_physical_region() {
+        let env = TestEnv::new().await;
+        let engine = env.metric();
+        let physical_region_id = env.default_physical_region_id();
+        let logical_region_id = env.default_logical_region_id();
+        env.create_physical_region_with_ts_type(
+            physical_region_id,
+            &TestEnv::default_table_dir(),
+            vec![],
+            ConcreteDataType::timestamp_microsecond_datatype(),
+        )
+        .await;
+
+        // A logical region with a matching microsecond time index is accepted.
+        let region_create_request = test_util::create_logical_region_request_with_ts_type(
+            &["job"],
+            physical_region_id,
+            &table_dir("test", logical_region_id.table_id()),
+            ConcreteDataType::timestamp_microsecond_datatype(),
+        );
+        engine
+            .handle_request(
+                logical_region_id,
+                RegionRequest::Create(region_create_request),
+            )
+            .await
+            .unwrap();
+
+        // Writing microsecond rows works.
+        let affected_rows = engine
+            .handle_request(
+                logical_region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    rows: Rows {
+                        schema: test_util::row_schema_with_tags_and_ts_datatype(
+                            &["job"],
+                            ColumnDataType::TimestampMicrosecond,
+                        ),
+                        rows: test_util::build_rows_with_ts_datatype(
+                            1,
+                            2,
+                            ColumnDataType::TimestampMicrosecond,
+                        ),
+                    },
+                    hint: None,
+                    partition_expr_version: None,
+                    skip_wal: false,
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(affected_rows.affected_rows, 2);
+
+        // The scan returns timestamps in the physical region's unit.
+        let stream = engine
+            .scan_to_stream(logical_region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        let mut rows = Vec::new();
+        for batch in batches.iter() {
+            let batch = batch.df_record_batch();
+            let timestamps = batch
+                .column(batch.schema().index_of(greptime_timestamp()).unwrap())
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap();
+            let values = batch
+                .column(batch.schema().index_of(greptime_value()).unwrap())
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            rows.extend(
+                timestamps
+                    .values()
+                    .iter()
+                    .copied()
+                    .zip(values.values().iter().copied()),
+            );
+        }
+        rows.sort_unstable_by_key(|(timestamp, _)| *timestamp);
+        assert_eq!(rows, vec![(0, 0.0), (1, 1.0)]);
     }
 
     async fn create_logical_region_with_tags(

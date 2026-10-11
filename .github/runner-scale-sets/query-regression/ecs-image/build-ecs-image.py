@@ -25,7 +25,7 @@
 
 """Build the query-regression ECS custom image (manual ops tool).
 
-Boots a temporary pay-as-you-go ECS instance from a public Ubuntu 24.04 image,
+Boots a temporary pay-as-you-go ECS instance from a public Ubuntu 26.04 image,
 builds the existing runner container image (the Dockerfile in the parent
 directory remains the single source of the tool contract), materializes the
 tool directories onto the host filesystem so the workflow's "Verify runner
@@ -58,9 +58,9 @@ POLL_INTERVAL_SECONDS = 15
 CONSOLE_POLL_INTERVAL_SECONDS = 30
 BUILD_TIMEOUT_SECONDS = 60 * 60
 
-# Same apt package contract as the runner Dockerfile; the base
-# actions-runner image is Ubuntu 24.04, so an Ubuntu 24.04 host resolves the
-# same tool versions (protoc 3.21.12, mold 2.40.4, Python 3.14.4).
+# Same apt package contract as the runner Dockerfile; the base is an
+# Ubuntu 26.04 image, so an Ubuntu 26.04 host resolves the same tool
+# versions (protoc 3.21.12, mold 2.40.4, Python 3.14.4).
 # Docker itself comes from Docker's official repository (docker-ce), not the
 # distribution-packaged docker.io.
 APT_PACKAGES = [
@@ -229,6 +229,64 @@ def call_api_with_retry(fn, description: str, attempts: int = 5):
     raise RuntimeError("unreachable: retry loop exited without returning")
 
 
+def resolve_base_image_id(client, region_id: str) -> str:
+    """Resolve the latest public Ubuntu 26.04 x86_64 system image.
+
+    Used as the default for --base-image-id: the runner Dockerfile pins
+    every tool version itself, so a current stock Ubuntu LTS base is all
+    the builder needs. Pass --base-image-id (or ALIYUN_ECS_BASE_IMAGE_ID)
+    to pin a specific base image deterministically.
+    """
+    from alibabacloud_ecs20140526 import models as ecs_models
+
+    def _is_target_ubuntu(image) -> bool:
+        # osname is localized (e.g. "Ubuntu 26.04 64位"), osname_en the
+        # English form; accept either. Keep the Ubuntu version in sync with
+        # the tool-version pins asserted by the Verify step in
+        # query-regression.yml (e.g. python3 3.14 comes from 26.04).
+        for os_name in (image.osname_en, image.osname):
+            if os_name and "Ubuntu" in os_name and "26.04" in os_name:
+                return True
+        return False
+
+    page_size = 100
+    images: list = []
+    page_number = 1
+    while True:
+        page = call_api_with_retry(
+            lambda: client.describe_images(
+                ecs_models.DescribeImagesRequest(
+                    region_id=region_id,
+                    image_owner_alias="system",
+                    ostype="linux",
+                    architecture="x86_64",
+                    page_number=page_number,
+                    page_size=page_size,
+                )
+            ),
+            f"DescribeImages(system base, page {page_number})",
+        ).body.images.image or []
+        images.extend(page)
+        if len(page) < page_size:
+            break
+        page_number += 1
+
+    candidates = [image for image in images if _is_target_ubuntu(image)]
+    if not candidates:
+        raise SystemExit(
+            "No public Ubuntu 26.04 x86_64 system image found in region "
+            f"{region_id}; pass --base-image-id explicitly"
+        )
+    candidates.sort(key=lambda image: image.creation_time or "", reverse=True)
+    picked = candidates[0]
+    print(
+        f"Resolved base image: {picked.image_id} ({picked.osname_en or picked.osname}, "
+        f"created {picked.creation_time}) from {len(candidates)} candidates",
+        flush=True,
+    )
+    return picked.image_id
+
+
 def read_console_output(client, region_id: str, instance_id: str) -> str:
     """Fetch the instance's serial console output; no in-guest agent needed."""
     from alibabacloud_ecs20140526 import models as ecs_models
@@ -253,13 +311,19 @@ def main() -> int:
     parser.add_argument("--image-name", default=None, help="Defaults to a timestamped name.")
     args = parser.parse_args()
 
-    for name in ("region_id", "vswitch_id", "security_group_id", "base_image_id"):
+    for name in ("region_id", "vswitch_id", "security_group_id"):
         if not getattr(args, name):
             raise SystemExit(f"Missing required configuration: --{name.replace('_', '-')}")
 
     from alibabacloud_ecs20140526 import models as ecs_models
 
     client = make_ecs_client(args.region_id)
+    # --base-image-id is optional: default to the latest public Ubuntu 26.04
+    # image in the region (the Dockerfile pins every tool version itself, so
+    # base drift is low-risk; pass --base-image-id or set
+    # ALIYUN_ECS_BASE_IMAGE_ID to pin deterministically).
+    if not args.base_image_id:
+        args.base_image_id = resolve_base_image_id(client, args.region_id)
     image_name = args.image_name or time.strftime(
         "greptimedb-query-regression-runner-%Y%m%d%H%M%S", time.gmtime()
     )

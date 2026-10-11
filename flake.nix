@@ -22,7 +22,7 @@
         lib = nixpkgs.lib;
         rustToolchain = fenix.packages.${system}.fromToolchainName {
           name = (lib.importTOML ./rust-toolchain.toml).toolchain.channel;
-          sha256 = "sha256-h+t2xTBz5yt2YIO+1VMIIGlCU7gyp2LYOFvaV1nwOXU=";
+          sha256 = "sha256-p8h3Sl/YRByZfZTAKXdsvF6xEenXKrXSVvpphmZENH4=";
         };
       in
       {
@@ -34,6 +34,7 @@
             gcc
             protobuf
             gnumake
+            mold
             wild
             (rustToolchain.withComponents [
               "cargo"

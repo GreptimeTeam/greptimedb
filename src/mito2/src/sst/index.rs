@@ -1588,7 +1588,6 @@ mod tests {
             op_type: OperationType::Flush,
             metadata: metadata.clone(),
             source,
-            storage: None,
             max_sequence: None,
             sst_write_format: Default::default(),
             cache_manager: Default::default(),
@@ -1612,12 +1611,12 @@ mod tests {
         file_purger: FilePurgerRef,
         files: HashMap<FileId, FileMeta>,
     ) -> VersionControlRef {
-        let mutable = Arc::new(TimePartitions::new(
+        let mutable = TimePartitions::new(
             metadata.clone(),
             Arc::new(EmptyMemtableBuilder::default()),
             0,
             None,
-        ));
+        );
         let version_builder = VersionBuilder::new(metadata, mutable)
             .add_files(file_purger, files.values().cloned())
             .build();

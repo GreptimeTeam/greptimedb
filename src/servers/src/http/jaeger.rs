@@ -328,7 +328,7 @@ impl QueryTraceParams {
                     }
                     .build()
                 })?;
-            for (_, v) in tags_map.iter_mut() {
+            for v in tags_map.values_mut() {
                 if let Some(number) = convert_string_to_number(v) {
                     *v = number;
                 }

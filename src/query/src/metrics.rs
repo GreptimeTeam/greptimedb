@@ -423,7 +423,7 @@ fn finalize_region_watermarks(merged: BTreeMap<u64, MergeState>) -> Vec<RegionWa
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use api::v1::region::{RemoteDynFilterUnregister, RemoteDynFilterUpdate};
@@ -509,7 +509,6 @@ mod tests {
                 Arc::new(NoopRegionQueryHandler),
                 query_ctx,
                 1,
-                BTreeMap::<String, BTreeSet<datafusion_common::Column>>::new(),
                 Some(RemoteDynFilterProducerId::new(0)),
                 false,
             )

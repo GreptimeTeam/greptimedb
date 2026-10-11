@@ -368,3 +368,127 @@ async fn test_logical_split_rows_rejects_physical_only_partition_column() {
         partition::error::Error::UndefinedColumn { ref column, .. } if column == "b"
     ));
 }
+
+#[tokio::test]
+async fn test_partition_routing_with_empty_default_expression() {
+    use datatypes::arrow::array::{ArrayRef, RecordBatch, StringArray};
+    use datatypes::value::Value;
+    use partition::expr::col;
+    use store_api::storage::RegionId;
+
+    for (transition, target_count) in [(true, 1), (true, 3), (false, 3)] {
+        let backend = Arc::new(common_meta::kv_backend::memory::MemoryKvBackend::new());
+        let route_cache = test_new_table_route_cache(backend.clone());
+        let manager = PartitionRuleManager::new(
+            backend.clone(),
+            route_cache.clone(),
+            test_new_partition_info_cache(route_cache),
+        );
+        let value = |s: &str| Value::String(s.into());
+        let mut exprs = vec![
+            col("host").lt(value("36z0")),
+            col("host")
+                .gt_eq(value("36z0"))
+                .and(col("host").lt(value("7Ez0"))),
+            col("host")
+                .gt_eq(value("7Ez0"))
+                .and(col("host").lt(value("BMz0"))),
+            col("host").gt_eq(value("BMz0")),
+        ];
+        if target_count == 1 {
+            exprs = vec![
+                col("host").lt(value("36z0")),
+                col("host").gt_eq(value("36z0")),
+            ];
+        }
+        let routes = exprs
+            .into_iter()
+            .enumerate()
+            .map(|(i, expr)| RegionRoute {
+                region: Region {
+                    id: RegionId::new(1027, i as u32),
+                    partition_expr: if transition && i == 0 {
+                        String::new()
+                    } else {
+                        expr.as_json_str().unwrap()
+                    },
+                    ..Default::default()
+                },
+                leader_peer: Some(Peer::new(1, "")),
+                ..Default::default()
+            })
+            .collect();
+        let info = new_test_table_info_with_columns(
+            1027,
+            "physical",
+            vec![
+                ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+                ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+            ],
+            vec![0],
+        );
+        let metadata_manager = TableMetadataManager::new(backend);
+        metadata_manager
+            .create_table_metadata(
+                info.clone(),
+                TableRouteValue::physical(routes),
+                new_test_region_wal_options((0..=target_count).collect()),
+            )
+            .await
+            .unwrap();
+        let mut logical_info = info.clone();
+        logical_info.ident.table_id = 1028;
+        logical_info.name = "logical".into();
+        metadata_manager
+            .create_table_metadata(
+                logical_info.clone(),
+                TableRouteValue::logical(1027),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let hosts = [None, Some("1"), Some("5"), Some("8"), Some("animi")];
+        let expected_regions = if target_count == 1 {
+            [0, 0, 1, 1, 1]
+        } else {
+            [0, 0, 1, 2, 3]
+        };
+        let batch = RecordBatch::try_from_iter([(
+            "host",
+            Arc::new(StringArray::from(hosts.to_vec())) as ArrayRef,
+        )])
+        .unwrap();
+        for table_info in [&info, &logical_info] {
+            let (rule, _) = manager.find_table_partition_rule(table_info).await.unwrap();
+            for (host, expected) in hosts.into_iter().zip(expected_regions) {
+                assert_eq!(
+                    rule.find_region(&[host.map(value).unwrap_or(Value::Null)])
+                        .unwrap(),
+                    expected
+                );
+            }
+            let splits = rule.split_record_batch(&batch).unwrap();
+            assert_eq!(splits.len(), target_count as usize + 1);
+            for (region, mask) in splits {
+                let selected = mask
+                    .array()
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, selected)| (selected == Some(true)).then_some(i))
+                    .collect::<Vec<_>>();
+                let expected = expected_regions
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, expected)| (*expected == region).then_some(i))
+                    .collect::<Vec<_>>();
+                assert_eq!(selected, expected);
+            }
+        }
+    }
+}

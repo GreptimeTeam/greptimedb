@@ -14,22 +14,15 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use api::v1::meta::{
-    Partition as PbPartition, Peer as PbPeer, Region as PbRegion, Table as PbTable,
-    TableRoute as PbTableRoute,
-};
 use common_time::util::current_time_millis;
 use derive_builder::Builder;
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use snafu::OptionExt;
 use store_api::region_engine::RegionRole;
 use store_api::storage::{RegionId, RegionNumber};
 use strum::AsRefStr;
-use table::table_name::TableName;
 
 use crate::DatanodeId;
-use crate::error::{self, Result};
 use crate::key::RegionDistribution;
 use crate::peer::Peer;
 
@@ -55,18 +48,11 @@ pub fn region_distribution(region_routes: &[RegionRoute]) -> RegionDistribution 
                 .add_follower_region(region_number);
         }
     }
-    for (_, region_role_set) in regions_id_map.iter_mut() {
+    for region_role_set in regions_id_map.values_mut() {
         // Sort the regions in ascending order.
         region_role_set.sort()
     }
     regions_id_map
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct TableRoute {
-    pub table: Table,
-    pub region_routes: Vec<RegionRoute>,
-    region_leaders: HashMap<RegionNumber, Option<Peer>>,
 }
 
 /// Returns the leader peers of the table.
@@ -165,94 +151,6 @@ pub fn find_follower_regions(region_routes: &[RegionRoute], datanode: &Peer) -> 
             None
         })
         .collect()
-}
-
-impl TableRoute {
-    pub fn new(table: Table, region_routes: Vec<RegionRoute>) -> Self {
-        let region_leaders = region_routes
-            .iter()
-            .map(|x| (x.region.id.region_number(), x.leader_peer.clone()))
-            .collect::<HashMap<_, _>>();
-        Self {
-            table,
-            region_routes,
-            region_leaders,
-        }
-    }
-
-    pub fn try_from_raw(peers: &[PbPeer], table_route: PbTableRoute) -> Result<Self> {
-        let table = table_route
-            .table
-            .context(error::RouteInfoCorruptedSnafu {
-                err_msg: "'table' is empty in table route",
-            })?
-            .try_into()?;
-
-        let mut region_routes = Vec::with_capacity(table_route.region_routes.len());
-        for region_route in table_route.region_routes.into_iter() {
-            let region = region_route
-                .region
-                .context(error::RouteInfoCorruptedSnafu {
-                    err_msg: "'region' is empty in region route",
-                })?
-                .into();
-
-            let leader_peer = peers.get(region_route.leader_peer_index as usize).cloned();
-
-            let follower_peers = region_route
-                .follower_peer_indexes
-                .into_iter()
-                .filter_map(|x| peers.get(x as usize).cloned())
-                .collect::<Vec<_>>();
-
-            region_routes.push(RegionRoute {
-                region,
-                leader_peer,
-                follower_peers,
-                leader_state: None,
-                leader_down_since: None,
-                write_route_policy: None,
-            });
-        }
-
-        Ok(Self::new(table, region_routes))
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-pub struct Table {
-    pub id: u64,
-    pub table_name: TableName,
-    #[serde(serialize_with = "as_utf8", deserialize_with = "from_utf8")]
-    pub table_schema: Vec<u8>,
-}
-
-impl TryFrom<PbTable> for Table {
-    type Error = error::Error;
-
-    fn try_from(t: PbTable) -> Result<Self> {
-        let table_name = t
-            .table_name
-            .context(error::RouteInfoCorruptedSnafu {
-                err_msg: "table name required",
-            })?
-            .into();
-        Ok(Self {
-            id: t.id,
-            table_name,
-            table_schema: t.table_schema,
-        })
-    }
-}
-
-impl From<Table> for PbTable {
-    fn from(table: Table) -> Self {
-        PbTable {
-            id: table.id,
-            table_name: Some(table.table_name.into()),
-            table_schema: table.table_schema,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Builder)]
@@ -430,18 +328,6 @@ impl RegionRoute {
     }
 }
 
-pub struct RegionRoutes(pub Vec<RegionRoute>);
-
-impl RegionRoutes {
-    pub fn region_leader_map(&self) -> HashMap<RegionNumber, &Peer> {
-        convert_to_region_leader_map(&self.0)
-    }
-
-    pub fn find_region_leader(&self, region_number: RegionNumber) -> Option<&Peer> {
-        self.region_leader_map().get(&region_number).copied()
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Region {
     pub id: RegionId,
@@ -508,72 +394,12 @@ impl Region {
     }
 }
 
-/// Gets the partition expression of the `PbRegion` in compatible mode.
-#[allow(deprecated)]
-pub fn pb_region_partition_expr(r: &PbRegion) -> String {
-    if let Some(partition) = &r.partition {
-        if !partition.expression.is_empty() {
-            partition.expression.clone()
-        } else if !partition.value_list.is_empty() {
-            String::from_utf8_lossy(&partition.value_list[0]).to_string()
-        } else {
-            "".to_string()
-        }
-    } else {
-        "".to_string()
-    }
-}
-
-impl From<PbRegion> for Region {
-    fn from(r: PbRegion) -> Self {
-        let partition_expr = pb_region_partition_expr(&r);
-        Self {
-            id: r.id.into(),
-            name: r.name,
-            partition_expr,
-            attrs: r.attrs.into_iter().collect::<BTreeMap<_, _>>(),
-        }
-    }
-}
-
-impl From<Region> for PbRegion {
-    fn from(region: Region) -> Self {
-        let partition_expr = region.partition_expr();
-        Self {
-            id: region.id.into(),
-            name: region.name,
-            partition: Some(PbPartition {
-                expression: partition_expr,
-                ..Default::default()
-            }),
-            attrs: region.attrs.into_iter().collect::<HashMap<_, _>>(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct LegacyPartition {
     #[serde(serialize_with = "as_utf8_vec", deserialize_with = "from_utf8_vec")]
     pub column_list: Vec<Vec<u8>>,
     #[serde(serialize_with = "as_utf8_vec", deserialize_with = "from_utf8_vec")]
     pub value_list: Vec<Vec<u8>>,
-}
-
-fn as_utf8<S: Serializer>(val: &[u8], serializer: S) -> std::result::Result<S::Ok, S::Error> {
-    serializer.serialize_str(
-        String::from_utf8(val.to_vec())
-            .unwrap_or_else(|_| "<unknown-not-UTF8>".to_string())
-            .as_str(),
-    )
-}
-
-pub fn from_utf8<'de, D>(deserializer: D) -> std::result::Result<Vec<u8>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-
-    Ok(s.into_bytes())
 }
 
 fn as_utf8_vec<S: Serializer>(
@@ -887,59 +713,5 @@ mod tests {
         let got: LegacyPartition = serde_json::from_str(&output).unwrap();
 
         assert_eq!(got, p);
-    }
-
-    #[test]
-    #[allow(deprecated)]
-    fn test_region_partition_expr() {
-        let r = PbRegion {
-            id: 1,
-            name: "r1".to_string(),
-            partition: None,
-            attrs: Default::default(),
-        };
-        assert_eq!(pb_region_partition_expr(&r), "");
-
-        let r2: Region = r.into();
-        assert_eq!(r2.partition_expr(), "");
-
-        let r3: PbRegion = r2.into();
-        assert_eq!(r3.partition.as_ref().unwrap().expression, "");
-
-        let r = PbRegion {
-            id: 1,
-            name: "r1".to_string(),
-            partition: Some(PbPartition {
-                column_list: vec![b"a".to_vec()],
-                value_list: vec![b"{}".to_vec()],
-                expression: Default::default(),
-            }),
-            attrs: Default::default(),
-        };
-        assert_eq!(pb_region_partition_expr(&r), "{}");
-
-        let r2: Region = r.into();
-        assert_eq!(r2.partition_expr(), "{}");
-
-        let r3: PbRegion = r2.into();
-        assert_eq!(r3.partition.as_ref().unwrap().expression, "{}");
-
-        let r = PbRegion {
-            id: 1,
-            name: "r1".to_string(),
-            partition: Some(PbPartition {
-                column_list: vec![b"a".to_vec()],
-                value_list: vec![b"{}".to_vec()],
-                expression: "a>b".to_string(),
-            }),
-            attrs: Default::default(),
-        };
-        assert_eq!(pb_region_partition_expr(&r), "a>b");
-
-        let r2: Region = r.into();
-        assert_eq!(r2.partition_expr(), "a>b");
-
-        let r3: PbRegion = r2.into();
-        assert_eq!(r3.partition.as_ref().unwrap().expression, "a>b");
     }
 }

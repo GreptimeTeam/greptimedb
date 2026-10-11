@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
+use common_datasource::packed_writer::PackedWriterRef;
 use futures::stream::FuturesUnordered;
 use futures::{FutureExt, StreamExt};
 use object_store::ObjectStore;
@@ -111,6 +112,7 @@ pub(crate) struct Payload {
 }
 
 pub(crate) struct TableWriters {
+    pub(crate) packed: Option<PackedWriterRef>,
     current: Option<(u32, mpsc::Sender<Payload>)>,
     tasks: FuturesUnordered<JoinHandle<Result<()>>>,
     budget: Arc<ExportWriteBudget>,
@@ -120,6 +122,7 @@ impl TableWriters {
     pub(crate) fn new(budget: Arc<ExportWriteBudget>) -> Self {
         Self {
             current: None,
+            packed: None,
             tasks: FuturesUnordered::new(),
             budget,
         }
@@ -150,7 +153,11 @@ impl TableWriters {
         self.close_input();
         let permit = self.budget.writer(token).await?;
         self.reap_for_admission(token).await?;
-        let writer = ActiveWriter::open(table, store, limits).await?;
+        let writer = if let Some(packed) = &self.packed {
+            ActiveWriter::open_packed(table, id, store, limits, packed.clone())?
+        } else {
+            ActiveWriter::open(table, store, limits).await?
+        };
         let (sender, receiver) = mpsc::channel(2);
         self.current = Some((id, sender));
         let token = token.clone();

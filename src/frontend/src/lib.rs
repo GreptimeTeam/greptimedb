@@ -23,3 +23,5 @@ pub(crate) mod metrics;
 pub mod server;
 pub mod service_config;
 mod stream_wrapper;
+
+pub use metrics::{OTLP_METRICS_ROWS, OTLP_RESOURCE_INFO_WRITE_ERRORS};

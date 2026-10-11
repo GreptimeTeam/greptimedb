@@ -99,6 +99,7 @@ jobs:
           python3 tests/perf/test_aliyun_ecs_runner_scripts.py
           python3 tests/perf/test_ci_runner_scripts.py
           python3 tests/perf/test_agent_observability_summary.py
+          python3 tests/perf/test_tracesbench_summary.py
 
   check:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}

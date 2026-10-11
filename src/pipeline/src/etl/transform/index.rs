@@ -25,7 +25,7 @@ const INDEX_INVERTED: &str = "inverted";
 #[allow(clippy::enum_variant_names)]
 pub enum Index {
     Time,
-    // deprecated, use Inverted instead
+    // Deprecated, equivalent to `tag: true`.
     Tag,
     Fulltext,
     Skipping,

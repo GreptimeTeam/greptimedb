@@ -322,7 +322,8 @@ mod tests {
     use common_time::Timezone;
     use query::options::FLOW_SCHEDULED_TIME_MILLIS;
     use session::hints::{
-        INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY,
+        INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, READ_PREFERENCE_EXTENSION_KEY,
+        REMOTE_QUERY_ID_EXTENSION_KEY,
     };
     use snafu::ResultExt;
     use tonic::Code;
@@ -419,6 +420,10 @@ mod tests {
                 ("auto_create_table".to_string(), "true".to_string()),
                 ("read_preference".to_string(), "leader".to_string()),
                 (
+                    READ_PREFERENCE_EXTENSION_KEY.to_string(),
+                    "follower".to_string(),
+                ),
+                (
                     REMOTE_QUERY_ID_EXTENSION_KEY.to_string(),
                     "spoofed".to_string(),
                 ),
@@ -446,6 +451,8 @@ mod tests {
             ReadPreference::Leader
         ));
         assert_eq!(query_context.extension("auto_create_table"), Some("true"));
+        assert_eq!(query_context.extension(READ_PREFERENCE_HINT), None);
+        assert_eq!(query_context.extension(READ_PREFERENCE_EXTENSION_KEY), None);
         assert_ne!(query_context.remote_query_id(), Some("spoofed"));
         assert!(
             query_context

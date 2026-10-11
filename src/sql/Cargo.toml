@@ -13,6 +13,7 @@ enterprise = []
 [dependencies]
 api.workspace = true
 arrow-buffer.workspace = true
+arrow-schema.workspace = true
 chrono.workspace = true
 common-base.workspace = true
 common-catalog.workspace = true

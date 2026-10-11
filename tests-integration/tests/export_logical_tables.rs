@@ -1416,6 +1416,59 @@ async fn export_http(instance: Arc<Instance>) -> (String, tokio::task::JoinHandl
     (addr, task)
 }
 
+#[derive(Default)]
+struct ImportRequests {
+    batches: std::sync::atomic::AtomicUsize,
+    fail_batch: std::sync::atomic::AtomicBool,
+    capabilities: std::sync::atomic::AtomicUsize,
+}
+
+async fn import_http(
+    instance: Arc<Instance>,
+    older: bool,
+) -> (String, tokio::task::JoinHandle<()>, Arc<ImportRequests>) {
+    use axum::response::IntoResponse;
+    use std::sync::atomic::Ordering;
+    let requests = Arc::new(ImportRequests::default());
+    requests.fail_batch.store(!older, Ordering::SeqCst);
+    let observed = requests.clone();
+    let server = servers::http::HttpServerBuilder::new(Default::default())
+        .with_sql_handler(instance)
+        .build();
+    let app = server
+        .build(server.make_app())
+        .unwrap()
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let observed = observed.clone();
+                async move {
+                    let batch = request.uri().path() == "/v1/ddl/logical-tables";
+                    if request.uri().path() == "/v1/capabilities" {
+                        observed.capabilities.fetch_add(1, Ordering::SeqCst);
+                        if older {
+                            return axum::http::StatusCode::NOT_FOUND.into_response();
+                        }
+                    }
+                    if batch {
+                        observed.batches.fetch_add(1, Ordering::SeqCst);
+                    }
+                    let response = next.run(request).await;
+                    if batch && observed.fail_batch.swap(false, Ordering::SeqCst) {
+                        assert!(response.status().is_success());
+                        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    }
+                    response
+                }
+            },
+        ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (addr, task, requests)
+}
+
 struct FailSecondChunk {
     fail: std::sync::atomic::AtomicBool,
     copies: std::sync::atomic::AtomicUsize,
@@ -1451,7 +1504,12 @@ impl servers::interceptor::SqlQueryInterceptor for FailSecondChunk {
 
 #[tokio::test]
 async fn metric_export_v2_cli_resume_roundtrip() {
-    metric_export_v2_cli_roundtrip(false).await;
+    metric_export_v2_cli_roundtrip(false, false, false).await;
+}
+
+#[tokio::test]
+async fn metric_import_v2_older_target_roundtrip() {
+    metric_export_v2_cli_roundtrip(false, false, true).await;
 }
 
 #[tokio::test]
@@ -1461,11 +1519,54 @@ async fn metric_export_v2_cli_s3_resume_roundtrip() {
     if std::env::var("GT_S3_ENDPOINT_URL").is_ok_and(|e| !e.is_empty())
         && std::env::var("GT_S3_BUCKET").is_ok_and(|b| !b.is_empty())
     {
-        metric_export_v2_cli_roundtrip(true).await;
+        metric_export_v2_cli_roundtrip(true, false, false).await;
     }
 }
 
-async fn metric_export_v2_cli_roundtrip(s3: bool) {
+#[tokio::test(flavor = "multi_thread")]
+async fn packed_export_v2_cli_local_roundtrip() {
+    metric_export_v2_cli_roundtrip(false, true, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn packed_export_v2_cli_s3_roundtrip() {
+    if std::env::var("GT_S3_ENDPOINT_URL").is_ok_and(|e| !e.is_empty())
+        && std::env::var("GT_S3_BUCKET").is_ok_and(|b| !b.is_empty())
+    {
+        metric_export_v2_cli_roundtrip(true, true, false).await;
+    }
+}
+
+async fn exported_table_path(
+    store: &object_store::ObjectStore,
+    packed: bool,
+    chunk: u32,
+    name: &str,
+) -> String {
+    let prefix = format!("data/public/{chunk}/");
+    if !packed {
+        return format!("{prefix}{name}.parquet");
+    }
+    let index: common_datasource::packed_snapshot::PackIndex = serde_json::from_slice(
+        &store
+            .read(&format!("{prefix}pack-index.json"))
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    format!(
+        "{prefix}{}",
+        index
+            .tables
+            .iter()
+            .find(|t| t.table_name == name)
+            .unwrap()
+            .object
+    )
+}
+
+async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
     use servers::interceptor::SqlQueryInterceptorRef;
     let plugins = common_base::Plugins::new();
     let faults = Arc::new(FailSecondChunk {
@@ -1498,7 +1599,24 @@ async fn metric_export_v2_cli_roundtrip(s3: bool) {
     .await;
     sql(instance, "INSERT INTO audit VALUES ('a',1,1),('z',NULL,3)").await;
     sql(instance, "CREATE VIEW dashboard AS SELECT * FROM audit").await;
+    let special_name = "audit.dashboard";
+    let quoted_special = special_name.replace('"', "\"\"");
+    sql(
+        instance,
+        &format!("CREATE VIEW \"{quoted_special}\" AS SELECT * FROM audit"),
+    )
+    .await;
+    if packed && !s3 {
+        for id in 0..128 {
+            let name = format!("batch_{id:03}");
+            sql(instance, &format!("CREATE TABLE {name} (host STRING PRIMARY KEY, val DOUBLE, ts TIMESTAMP TIME INDEX) ENGINE=metric WITH (on_physical_table='v2_a')")).await;
+            names.push(name);
+        }
+    }
     sql(instance, "CREATE DATABASE z_later").await;
+    if packed {
+        sql(instance, "CREATE DATABASE empty_schema").await;
+    }
     sql(
         instance,
         "CREATE TABLE z_later.events (ts TIMESTAMP TIME INDEX, val BIGINT)",
@@ -1527,9 +1645,27 @@ async fn metric_export_v2_cli_roundtrip(s3: bool) {
         names.push("bulk".into());
     }
     let (addr, server) = export_http(instance.clone()).await;
+    if packed && !s3 {
+        let client = cli::DatabaseClient::new(
+            addr.clone(),
+            "greptime".into(),
+            None,
+            std::time::Duration::from_secs(60),
+            None,
+            true,
+        );
+        let error = client.sql_in_public(
+            "SHOW CREATE TABLE audit; SHOW CREATE TABLE missing_middle; SHOW CREATE VIEW dashboard"
+        ).await.unwrap_err();
+        assert!(error.to_string().contains("SQL request failed"), "{error}");
+    }
+
     let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
     for experimental in [false, true] {
         for layout in ["packed", "invalid"] {
+            if experimental && layout == "packed" {
+                continue;
+            }
             let path = destination
                 .path()
                 .join(format!("unsupported-{experimental}-{layout}"));
@@ -1544,10 +1680,45 @@ async fn metric_export_v2_cli_roundtrip(s3: bool) {
             )
             .await
             .remove(0);
-            let error = result.expect_err("export must reject import-only layouts");
+            let error = result.expect_err("export must reject unsupported layouts");
             assert!(
                 format!("{error:?}").contains("metric_data_layout"),
                 "{error:?}"
+            );
+            assert!(!path.exists());
+        }
+    }
+    if packed && !s3 {
+        for window in [None, Some("3ms")] {
+            let path = destination.path().join("empty-range");
+            let uri = url::Url::from_directory_path(&path).unwrap();
+            let mut args = vec![
+                "export-v2",
+                "create",
+                "--addr",
+                &addr,
+                "--to",
+                uri.as_str(),
+                "--schemas",
+                "public",
+                "--experimental-metric-export",
+                "--metric-data-layout",
+                "packed",
+                "--no-proxy",
+                "--start-time",
+                "1970-01-01T00:00:00Z",
+                "--end-time",
+                "1970-01-01T00:00:00Z",
+            ];
+            if let Some(window) = window {
+                args.extend(["--chunk-time-window", window]);
+            }
+            let error = run_data_cli(&args).await.unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("Packed export requires --start-time to be earlier than --end-time"),
+                "{error}"
             );
             assert!(!path.exists());
         }
@@ -1604,7 +1775,11 @@ async fn metric_export_v2_cli_roundtrip(s3: bool) {
         "--to",
         &uri,
         "--schemas",
-        "public,z_later",
+        if packed {
+            "public,z_later,empty_schema"
+        } else {
+            "public,z_later"
+        },
         "--experimental-metric-export",
         "--no-proxy",
         "--start-time",
@@ -1617,6 +1792,9 @@ async fn metric_export_v2_cli_roundtrip(s3: bool) {
         "never",
     ];
     args.extend(storage_args.iter().map(String::as_str));
+    if packed {
+        args.extend(["--metric-data-layout", "packed"]);
+    }
     assert!(run_data_cli(&args).await.is_err());
     let before: cli::export_v2::manifest::Manifest =
         serde_json::from_slice(&store.read("manifest.json").await.unwrap().to_vec()).unwrap();
@@ -1631,7 +1809,7 @@ async fn metric_export_v2_cli_roundtrip(s3: bool) {
     if s3 {
         assert!(
             store
-                .stat("data/public/1/bulk.parquet")
+                .stat(&exported_table_path(&store, packed, 1, "bulk").await)
                 .await
                 .unwrap()
                 .content_length()
@@ -1642,7 +1820,12 @@ async fn metric_export_v2_cli_roundtrip(s3: bool) {
     for path in &before.chunks[0].files {
         preserved.push((path.clone(), store.read(path).await.unwrap().to_vec()));
     }
-    assert!(store.exists("data/public/2/audit.parquet").await.unwrap());
+    assert!(
+        store
+            .exists(&exported_table_path(&store, packed, 2, "audit").await)
+            .await
+            .unwrap()
+    );
     store
         .write("data/public/2/unknown.txt", "keep")
         .await
@@ -1666,6 +1849,59 @@ async fn metric_export_v2_cli_roundtrip(s3: bool) {
     let after: cli::export_v2::manifest::Manifest =
         serde_json::from_slice(&store.read("manifest.json").await.unwrap().to_vec()).unwrap();
     assert!(after.is_complete());
+    assert_eq!(after.version, if packed { 2 } else { 1 });
+    assert_eq!(before.data_layout, after.data_layout);
+    if packed {
+        use common_datasource::packed_snapshot::{ObjectKind, PackIndex};
+        for chunk in &after.chunks {
+            let empty: PackIndex = serde_json::from_slice(
+                &store
+                    .read(&format!("data/empty_schema/{}/pack-index.json", chunk.id))
+                    .await
+                    .unwrap()
+                    .to_bytes(),
+            )
+            .unwrap();
+            empty.validate_membership([]).unwrap();
+            let prefix = format!("data/public/{}/", chunk.id);
+            let index: PackIndex = serde_json::from_slice(
+                &store
+                    .read(&format!("{prefix}pack-index.json"))
+                    .await
+                    .unwrap()
+                    .to_bytes(),
+            )
+            .unwrap();
+            index
+                .validate_membership(names.iter().map(String::as_str))
+                .unwrap();
+            assert_eq!(
+                index
+                    .objects
+                    .iter()
+                    .filter(|o| o.kind == ObjectKind::Pack)
+                    .count(),
+                1
+            );
+            assert!(index.tables.iter().filter(|t| t.row_count == 0).count() >= 2);
+            let mut expected = index
+                .objects
+                .iter()
+                .map(|o| format!("{prefix}{}", o.path))
+                .collect::<Vec<_>>();
+            expected.push(format!("{prefix}pack-index.json"));
+            expected.sort();
+            assert_eq!(
+                chunk
+                    .files
+                    .iter()
+                    .filter(|f| f.starts_with(&prefix))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
     assert_eq!(
         serde_json::to_value(&before.chunks[0]).unwrap(),
         serde_json::to_value(&after.chunks[0]).unwrap()
@@ -1686,7 +1922,8 @@ async fn metric_export_v2_cli_roundtrip(s3: bool) {
         )
         .await;
     }
-    let (target_addr, target_server) = export_http(target.fe_instance().clone()).await;
+    let (target_addr, target_server, requests) =
+        import_http(target.fe_instance().clone(), older).await;
     let state = destination.path().join("restore-state.json");
     let mut import = vec![
         "import-v2",
@@ -1701,7 +1938,29 @@ async fn metric_export_v2_cli_roundtrip(s3: bool) {
         "never",
     ];
     import.extend(storage_args.iter().map(String::as_str));
+    use std::sync::atomic::Ordering;
+    if !older {
+        assert!(run_data_cli(&import).await.is_err());
+        assert_eq!(requests.batches.load(Ordering::SeqCst), 1);
+        assert_eq!(requests.capabilities.load(Ordering::SeqCst), 1);
+        let failed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+        assert_eq!(failed["ddl_completed"], false);
+        assert!(
+            failed["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|t| t["status"] == "pending")
+        );
+    }
     run_data_cli(&import).await.unwrap();
+    assert_eq!(
+        requests.capabilities.load(Ordering::SeqCst),
+        if older { 1 } else { 2 }
+    );
+    assert_eq!(requests.batches.load(Ordering::SeqCst) > 1, !older);
+    assert!(!state.exists());
     for name in names {
         let source_table = table(instance, &name).await;
         let target_table = table(target.fe_instance(), &name).await;
@@ -1727,6 +1986,92 @@ async fn metric_export_v2_cli_roundtrip(s3: bool) {
         )
         .await
     );
+    for view in ["dashboard", special_name] {
+        let query = format!(
+            "SELECT * FROM \"{}\" ORDER BY ts,host",
+            view.replace('"', "\"\"")
+        );
+        assert_eq!(
+            values(instance, &query).await,
+            values(target.fe_instance(), &query).await
+        );
+        assert_eq!(
+            table(instance, view).await.schema().column_schemas(),
+            table(target.fe_instance(), view)
+                .await
+                .schema()
+                .column_schemas()
+        );
+    }
+    if packed {
+        let schema_uri = format!("{uri}/schema-only");
+        let mut schema_args = vec![
+            "export-v2",
+            "create",
+            "--addr",
+            &addr,
+            "--to",
+            &schema_uri,
+            "--schemas",
+            "public",
+            "--schema-only",
+            "--experimental-metric-export",
+            "--metric-data-layout",
+            "packed",
+            "--no-proxy",
+            "--progress",
+            "never",
+        ];
+        schema_args.extend(storage_args.iter().map(String::as_str));
+        run_data_cli(&schema_args).await.unwrap();
+        let schema_manifest: cli::export_v2::manifest::Manifest = serde_json::from_slice(
+            &store
+                .read("schema-only/manifest.json")
+                .await
+                .unwrap()
+                .to_bytes(),
+        )
+        .unwrap();
+        assert!(schema_manifest.schema_only && schema_manifest.chunks.is_empty());
+        assert_eq!(schema_manifest.version, 1);
+        assert!(schema_manifest.data_layout.is_none());
+        let schema_target = GreptimeDbStandaloneBuilder::new("schema_only_target")
+            .build()
+            .await;
+        let (schema_addr, schema_server, schema_requests) =
+            import_http(schema_target.fe_instance().clone(), false).await;
+        schema_requests.fail_batch.store(false, Ordering::SeqCst);
+        let schema_state = destination.path().join("schema-only-state.json");
+        let mut schema_import = vec![
+            "import-v2",
+            "--addr",
+            &schema_addr,
+            "--from",
+            &schema_uri,
+            "--state-path",
+            schema_state.to_str().unwrap(),
+            "--no-proxy",
+            "--progress",
+            "never",
+        ];
+        schema_import.extend(storage_args.iter().map(String::as_str));
+        let probes = schema_requests.capabilities.load(Ordering::SeqCst);
+        schema_import.push("--dry-run");
+        run_data_cli(&schema_import).await.unwrap();
+        assert_eq!(schema_requests.capabilities.load(Ordering::SeqCst), probes);
+        schema_import.pop();
+        let batches = schema_requests.batches.load(Ordering::SeqCst);
+        run_data_cli(&schema_import).await.unwrap();
+        assert!(schema_requests.batches.load(Ordering::SeqCst) > batches);
+        assert!(!schema_state.exists());
+        assert!(
+            values(schema_target.fe_instance(), "SELECT * FROM dashboard")
+                .await
+                .is_empty()
+        );
+        schema_server.abort();
+        let _ = schema_server.await;
+    }
     server.abort();
     target_server.abort();
     if s3 {

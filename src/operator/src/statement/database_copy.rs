@@ -60,7 +60,7 @@ pub(crate) fn parse_parallelism_from_option_map(options: &HashMap<String, String
         .clamp(1, Semaphore::MAX_PERMITS)
 }
 
-/// Rejects import-only layouts before either database export path creates output.
+/// Rejects layouts unsupported by the per-table export path.
 pub(crate) fn validate_database_export_layout(options: &HashMap<String, String>) -> Result<()> {
     if let Some(layout) = options.get("metric_data_layout") {
         return error::InvalidCopyParameterSnafu {

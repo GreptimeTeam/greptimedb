@@ -200,6 +200,9 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Unsupported operation: {}", operation))]
+    UnsupportedOperation { operation: String },
+
     #[snafu(display("Invalid query: {}", reason))]
     InvalidQuery {
         reason: String,
@@ -317,6 +320,18 @@ pub enum Error {
         location: Location,
         #[snafu(source)]
         error: std::io::Error,
+    },
+
+    #[snafu(display(
+        "Decompressed request body is too large: {} bytes exceeds the limit {} bytes",
+        size,
+        limit
+    ))]
+    DecompressedBodyTooLarge {
+        size: u64,
+        limit: u64,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Failed to compress prometheus remote request"))]
@@ -755,7 +770,7 @@ impl ErrorExt for Error {
             | InvalidPromRemoteReadQueryResult { .. }
             | OtlpMetricModeIncompatible { .. } => StatusCode::IllegalState,
 
-            UnsupportedDataType { .. } => StatusCode::Unsupported,
+            UnsupportedDataType { .. } | UnsupportedOperation { .. } => StatusCode::Unsupported,
 
             #[cfg(not(windows))]
             UpdateJemallocMetrics { .. } => StatusCode::Internal,
@@ -785,6 +800,7 @@ impl ErrorExt for Error {
             | DecompressSnappyPromRemoteRequest { .. }
             | DecompressSnappyLokiRequest { .. }
             | DecompressZstdPromRemoteRequest { .. }
+            | DecompressedBodyTooLarge { .. }
             | InvalidPromRemoteRequest { .. }
             | InvalidFlightTicket { .. }
             | InvalidPrepareStatement { .. }
@@ -928,7 +944,7 @@ impl From<std::io::Error> for Error {
     }
 }
 
-fn log_error_if_necessary(error: &Error) {
+pub(crate) fn log_error_if_necessary(error: &Error) {
     if error.status_code().should_log_error() {
         error!(error; "Failed to handle HTTP request ");
     } else {

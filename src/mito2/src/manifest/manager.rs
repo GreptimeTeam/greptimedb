@@ -49,7 +49,7 @@ pub struct RegionManifestOptions {
     pub manifest_dir: String,
     pub object_store: ObjectStore,
     pub compress_type: CompressionType,
-    /// Interval of version ([ManifestVersion](store_api::manifest::ManifestVersion)) between two checkpoints.
+    /// Interval of version ([ManifestVersion](store_api::ManifestVersion)) between two checkpoints.
     /// Set to 0 to disable checkpoint.
     pub checkpoint_distance: u64,
     pub remove_file_options: RemoveFileOptions,

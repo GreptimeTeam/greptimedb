@@ -200,7 +200,6 @@ impl ObjbenchCommand {
             metadata: region_meta,
             source,
             cache_manager,
-            storage: None,
             max_sequence: None,
             sst_write_format: FormatType::PrimaryKey,
             index_options: Default::default(),

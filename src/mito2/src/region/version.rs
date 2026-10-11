@@ -32,7 +32,7 @@ use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::error::Result;
 use crate::manifest::action::{RegionEdit, TruncateKind};
-use crate::memtable::time_partition::{TimePartitions, TimePartitionsRef};
+use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
 use crate::memtable::{MemtableBuilderRef, MemtableId};
 use crate::region::options::RegionOptions;
@@ -319,13 +319,13 @@ impl VersionControl {
         version: &Version,
         metadata: RegionMetadataRef,
         memtable_builder: MemtableBuilderRef,
-    ) -> TimePartitionsRef {
-        Arc::new(TimePartitions::new(
+    ) -> TimePartitions {
+        TimePartitions::new(
             metadata,
             memtable_builder,
             version.memtables.mutable.next_memtable_id(),
             Some(version.memtables.mutable.part_duration()),
-        ))
+        )
     }
 }
 
@@ -402,7 +402,7 @@ pub(crate) struct VersionBuilder {
 
 impl VersionBuilder {
     /// Returns a new builder.
-    pub(crate) fn new(metadata: RegionMetadataRef, mutable: TimePartitionsRef) -> Self {
+    pub(crate) fn new(metadata: RegionMetadataRef, mutable: TimePartitions) -> Self {
         VersionBuilder {
             metadata: metadata.clone(),
             memtables: Arc::new(MemtableVersion::new(mutable)),

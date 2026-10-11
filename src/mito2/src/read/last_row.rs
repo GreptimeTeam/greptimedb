@@ -16,7 +16,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use datatypes::arrow::array::{Array, BinaryArray};
 use datatypes::arrow::compute::concat_batches;
 use datatypes::arrow::record_batch::RecordBatch;
@@ -30,97 +29,12 @@ use crate::cache::{
 };
 use crate::error::{ComputeArrowSnafu, Result};
 use crate::read::read_columns::JsonTargetTypes;
-use crate::read::{
-    Batch, BatchReader, BoxedBatchReader, BoxedRecordBatchStream, timestamp_array_to_i64_slice,
-};
+use crate::read::{BoxedRecordBatchStream, timestamp_array_to_i64_slice};
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::flat_format::{primary_key_column_index, time_index_column_index};
 use crate::sst::parquet::format::{PrimaryKeyArray, primary_key_offsets};
 use crate::sst::parquet::read_columns::ParquetReadColumns;
 use crate::sst::parquet::reader::FlatRowGroupReader;
-
-/// Reader to keep the last row for each time series.
-/// It assumes that batches from the input reader are
-/// - sorted
-/// - all deleted rows has been filtered.
-/// - not empty
-///
-/// This reader is different from the [MergeMode](crate::region::options::MergeMode) as
-/// it focus on time series (the same key).
-#[allow(dead_code)]
-pub(crate) struct LastRowReader {
-    /// Inner reader.
-    reader: BoxedBatchReader,
-    /// The last batch pending to return.
-    selector: LastRowSelector,
-}
-
-#[allow(dead_code)]
-impl LastRowReader {
-    /// Creates a new `LastRowReader`.
-    pub(crate) fn new(reader: BoxedBatchReader) -> Self {
-        Self {
-            reader,
-            selector: LastRowSelector::default(),
-        }
-    }
-
-    /// Returns the last row of the next key.
-    pub(crate) async fn next_last_row(&mut self) -> Result<Option<Batch>> {
-        while let Some(batch) = self.reader.next_batch().await? {
-            if let Some(yielded) = self.selector.on_next(batch) {
-                return Ok(Some(yielded));
-            }
-        }
-        Ok(self.selector.finish())
-    }
-}
-
-#[async_trait]
-impl BatchReader for LastRowReader {
-    async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        self.next_last_row().await
-    }
-}
-
-/// Common struct that selects only the last row of each time series.
-#[derive(Default)]
-pub struct LastRowSelector {
-    last_batch: Option<Batch>,
-}
-
-impl LastRowSelector {
-    /// Handles next batch. Return the yielding batch if present.
-    pub fn on_next(&mut self, batch: Batch) -> Option<Batch> {
-        if let Some(last) = &self.last_batch {
-            if last.primary_key() == batch.primary_key() {
-                // Same key, update last batch.
-                self.last_batch = Some(batch);
-                None
-            } else {
-                // Different key, return the last row in `last` and update `last_batch` by
-                // current batch.
-                debug_assert!(!last.is_empty());
-                let last_row = last.slice(last.num_rows() - 1, 1);
-                self.last_batch = Some(batch);
-                Some(last_row)
-            }
-        } else {
-            self.last_batch = Some(batch);
-            None
-        }
-    }
-
-    /// Finishes the selector and returns the pending batch if any.
-    pub fn finish(&mut self) -> Option<Batch> {
-        if let Some(last) = self.last_batch.take() {
-            // This is the last key.
-            let last_row = last.slice(last.num_rows() - 1, 1);
-            return Some(last_row);
-        }
-        None
-    }
-}
 
 /// Cached last row reader for flat format row group.
 /// If the last rows are already cached (as flat `RecordBatch`), returns cached values.
@@ -514,7 +428,6 @@ fn last_timestamp_start(ts_values: &[i64], range_start: usize, range_end: usize)
 mod tests {
     use std::sync::Arc;
 
-    use api::v1::OpType;
     use datatypes::arrow::array::{
         ArrayRef, BinaryDictionaryBuilder, Int64Array, TimestampMillisecondArray, UInt8Array,
         UInt64Array,
@@ -523,72 +436,6 @@ mod tests {
     use datatypes::arrow::record_batch::RecordBatch;
 
     use super::*;
-    use crate::test_util::{VecBatchReader, check_reader_result, new_batch};
-
-    #[tokio::test]
-    async fn test_last_row_one_batch() {
-        let input = [new_batch(
-            b"k1",
-            &[1, 2],
-            &[11, 11],
-            &[OpType::Put, OpType::Put],
-            &[21, 22],
-        )];
-        let reader = VecBatchReader::new(&input);
-        let mut reader = LastRowReader::new(Box::new(reader));
-        check_reader_result(
-            &mut reader,
-            &[new_batch(b"k1", &[2], &[11], &[OpType::Put], &[22])],
-        )
-        .await;
-
-        // Only one row.
-        let input = [new_batch(b"k1", &[1], &[11], &[OpType::Put], &[21])];
-        let reader = VecBatchReader::new(&input);
-        let mut reader = LastRowReader::new(Box::new(reader));
-        check_reader_result(
-            &mut reader,
-            &[new_batch(b"k1", &[1], &[11], &[OpType::Put], &[21])],
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn test_last_row_multi_batch() {
-        let input = [
-            new_batch(
-                b"k1",
-                &[1, 2],
-                &[11, 11],
-                &[OpType::Put, OpType::Put],
-                &[21, 22],
-            ),
-            new_batch(
-                b"k1",
-                &[3, 4],
-                &[11, 11],
-                &[OpType::Put, OpType::Put],
-                &[23, 24],
-            ),
-            new_batch(
-                b"k2",
-                &[1, 2],
-                &[11, 11],
-                &[OpType::Put, OpType::Put],
-                &[31, 32],
-            ),
-        ];
-        let reader = VecBatchReader::new(&input);
-        let mut reader = LastRowReader::new(Box::new(reader));
-        check_reader_result(
-            &mut reader,
-            &[
-                new_batch(b"k1", &[4], &[11], &[OpType::Put], &[24]),
-                new_batch(b"k2", &[2], &[11], &[OpType::Put], &[32]),
-            ],
-        )
-        .await;
-    }
 
     /// Helper to build a flat format RecordBatch for testing.
     fn new_flat_batch(primary_keys: &[&[u8]], timestamps: &[i64], fields: &[i64]) -> RecordBatch {

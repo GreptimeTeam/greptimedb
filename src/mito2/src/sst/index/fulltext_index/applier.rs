@@ -464,23 +464,15 @@ impl FulltextIndexApplier {
         let mut applier = BloomFilterApplier::new(reader)
             .await
             .context(ApplyBloomFilterIndexSnafu)?;
-        for (_, row_group_output) in output.iter_mut() {
-            // All rows are filtered out, skip the search
-            if row_group_output.is_empty() {
-                continue;
-            }
-
-            *row_group_output = applier
-                .search(
-                    &predicates,
-                    row_group_output,
-                    metrics
-                        .as_deref_mut()
-                        .map(|m| &mut m.bloom_filter_read_metrics),
-                )
-                .await
-                .context(ApplyBloomFilterIndexSnafu)?;
-        }
+        let mut row_groups = output.iter_mut().map(|(_, r)| r).collect::<Vec<_>>();
+        applier
+            .search_groups(
+                &predicates,
+                &mut row_groups,
+                metrics.map(|m| &mut m.bloom_filter_read_metrics),
+            )
+            .await
+            .context(ApplyBloomFilterIndexSnafu)?;
 
         Ok(true)
     }

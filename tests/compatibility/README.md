@@ -2,7 +2,18 @@
 
 Compatibility tests verify that one GreptimeDB version can restart on state written by another version.
 
-Tests are run via `cargo sqlness compat` and reuse the sqlness-runner infrastructure.
+SQL restart tests are run via `cargo sqlness compat` and reuse the sqlness-runner infrastructure.
+
+## Wire fixtures
+
+Frozen protobuf fixtures are exercised by the Rust tests that own their context
+conversion, not by SQLness case discovery. The
+[legacy query-context fixture](wire/read_preference/README.md) checks omitted
+read-preference defaulting and unrelated metadata preservation:
+
+```shell
+cargo nextest run -p session -E 'test(test_legacy_query_context_wire_defaults_to_leader)'
+```
 
 ## Quick Start
 

@@ -31,6 +31,7 @@ pub(super) struct CopyOptions {
     pub(super) time_range: TimeRange,
     pub(super) parallelism: usize,
     pub(crate) experimental_metric_export: bool,
+    pub(super) packed: bool,
 }
 
 pub(super) struct CopyTarget {
@@ -219,6 +220,9 @@ fn build_with_options(options: &CopyOptions) -> String {
     let mut parts = vec![format!("FORMAT='{}'", options.format)];
     if options.experimental_metric_export {
         parts.push("experimental_metric_export='true'".to_string());
+    }
+    if options.packed {
+        parts.push("metric_data_layout='packed'".to_string());
     }
     if let Some(start) = options.time_range.start {
         parts.push(format!(

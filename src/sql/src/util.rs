@@ -16,7 +16,6 @@ use std::collections::HashSet;
 use std::fmt::{Display, Formatter};
 use std::ops::ControlFlow;
 
-use itertools::Itertools;
 use promql_parser::label::{METRIC_NAME, MatchOp};
 use promql_parser::parser::{
     Expr as PromExpr, MatrixSelector as PromMatrixSelector, VectorSelector as PromVectorSelector,
@@ -161,12 +160,20 @@ impl Display for OptionValue {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         if let Some(s) = self.as_string() {
             write!(f, "'{s}'")
-        } else if let Some(s) = self.as_list() {
-            write!(
-                f,
-                "[{}]",
-                s.into_iter().map(|x| format!("'{x}'")).join(", ")
-            )
+        } else if let Expr::Array(array) = &self.0
+            && array
+                .elem
+                .iter()
+                .all(|expr| Self::expr_as_string(expr).is_some())
+        {
+            f.write_str("[")?;
+            for (index, expr) in array.elem.iter().enumerate() {
+                if index > 0 {
+                    f.write_str(", ")?;
+                }
+                write!(f, "'{}'", Self::expr_as_string(expr).unwrap())?;
+            }
+            f.write_str("]")
         } else {
             write!(f, "'{}'", self.0)
         }
@@ -667,6 +674,7 @@ fn extract_tables_from_sql_query(query: &sqlparser::ast::Query, names: &mut Hash
 
 #[cfg(test)]
 mod tests {
+    use itertools::Itertools;
     use sqlparser::tokenizer::Token;
 
     use super::*;

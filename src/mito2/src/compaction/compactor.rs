@@ -461,7 +461,6 @@ impl SstMerger for DefaultSstMerger {
         write_opts: WriteOptions,
     ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
         let region_id = compaction_region.region_id;
-        let storage = compaction_region.region_options.storage.clone();
         let index_options = compaction_region
             .current_version
             .options
@@ -508,7 +507,6 @@ impl SstMerger for DefaultSstMerger {
                     metadata: region_metadata.clone(),
                     source,
                     cache_manager: compaction_region.cache_manager.clone(),
-                    storage,
                     // Readers resolve file overrides before merge/dedup. Replacing
                     // their effective sequences here could promote old rows above
                     // versions in SSTs that were not part of this merge.

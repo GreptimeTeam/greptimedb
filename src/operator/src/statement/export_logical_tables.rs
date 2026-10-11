@@ -31,6 +31,7 @@ use arrow::datatypes::{DataType, SchemaRef};
 use arrow::downcast_dictionary_array;
 use arrow::record_batch::RecordBatch;
 use common_datasource::object_store::build_backend_for_write;
+use common_datasource::packed_writer::{PackedTableWriter, PackedWriterRef};
 use common_datasource::parquet_writer::{
     ParquetCreationPolicy, ParquetFileWriter, ParquetWriterLimits,
 };
@@ -108,6 +109,7 @@ pub struct LogicalTableExport {
 }
 
 pub(crate) struct LogicalTableProjection {
+    name: String,
     output: DatabaseExportFile,
     schema: SchemaRef,
     projection: Vec<usize>,
@@ -196,6 +198,7 @@ impl LogicalTableExport {
                     .insert(
                         info.table_id(),
                         LogicalTableProjection {
+                            name: name.clone(),
                             output: DatabaseExportFile::new(directory, name, ".parquet")?,
                             schema,
                             projection: indices,
@@ -322,6 +325,7 @@ impl StatementExecutor {
             &cancellation.child_token(),
             query_ctx,
             ExportWriteBudget::new(1),
+            None,
         )
         .await
     }
@@ -337,6 +341,7 @@ impl StatementExecutor {
         cancellation: &CancellationToken,
         query_ctx: QueryContextRef,
         budget: Arc<ExportWriteBudget>,
+        packed: Option<PackedWriterRef>,
     ) -> Result<LogicalTableExportSummary> {
         limits.validate()?;
         let (store, stream) = tokio::select! {
@@ -356,7 +361,7 @@ impl StatementExecutor {
                 Ok((store, stream))
             } => result?,
         };
-        export_stream_managed(unit, stream, &store, limits, cancellation, budget).await
+        export_stream_managed(unit, stream, &store, limits, cancellation, budget, packed).await
     }
 }
 
@@ -375,6 +380,7 @@ async fn export_stream(
         limits,
         &cancellation.child_token(),
         ExportWriteBudget::new(1),
+        None,
     )
     .await
 }
@@ -386,8 +392,10 @@ async fn export_stream_managed(
     limits: LogicalTableExportLimits,
     cancellation: &CancellationToken,
     budget: Arc<ExportWriteBudget>,
+    packed: Option<PackedWriterRef>,
 ) -> Result<LogicalTableExportSummary> {
     let mut writers = TableWriters::new(budget.clone());
+    writers.packed = packed;
     let result = write_tables(
         unit,
         stream,
@@ -535,6 +543,26 @@ struct ActiveWriter {
 }
 
 impl ActiveWriter {
+    fn open_packed(
+        table: &LogicalTableProjection,
+        id: u32,
+        store: &ObjectStore,
+        limits: LogicalTableExportLimits,
+        shared: PackedWriterRef,
+    ) -> Result<Self> {
+        let path = format!("table-{id}.parquet");
+        let packed = PackedTableWriter::new(shared, table.name.clone(), id, false);
+        let writer = ParquetFileWriter::open_packed(
+            table.schema.clone(),
+            store.clone(),
+            &path,
+            Some(limits.writer),
+            packed,
+        )
+        .map_err(|e| map_writer_error(e, &path))?;
+        Ok(Self { path, writer })
+    }
+
     async fn open(
         table: &LogicalTableProjection,
         store: &ObjectStore,

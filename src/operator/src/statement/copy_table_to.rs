@@ -24,6 +24,7 @@ use common_datasource::file_format::csv::stream_to_csv;
 use common_datasource::file_format::json::stream_to_json;
 use common_datasource::file_format::parquet::stream_to_parquet;
 use common_datasource::object_store::build_backend_for_write_with_path;
+use common_datasource::packed_writer::PackedTableWriter;
 use common_datasource::parquet_writer::ParquetFileWriter;
 use common_query::Output;
 use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
@@ -127,7 +128,7 @@ impl StatementExecutor {
         req: CopyTableRequest,
         query_ctx: QueryContextRef,
     ) -> Result<usize> {
-        self.copy_captured_table_to_managed(table, req, query_ctx, None)
+        self.copy_captured_table_to_managed(table, req, query_ctx, None, None)
             .await
     }
 
@@ -137,6 +138,7 @@ impl StatementExecutor {
         req: CopyTableRequest,
         query_ctx: QueryContextRef,
         managed: Option<(&ExportWriteBudget, &CancellationToken)>,
+        packed: Option<PackedTableWriter>,
     ) -> Result<usize> {
         let info = table.table_info();
         let table_ref = TableReference::full(&info.catalog_name, &info.schema_name, &info.name);
@@ -185,7 +187,7 @@ impl StatementExecutor {
         } = &req;
 
         debug!("Copy table: {table_id} to location: {location}");
-        self.copy_to_file_managed(&format, output, location, connection, managed)
+        self.copy_to_file_managed(&format, output, location, connection, managed, packed)
             .await
     }
 
@@ -196,7 +198,7 @@ impl StatementExecutor {
         location: &str,
         connection: &HashMap<String, String>,
     ) -> Result<usize> {
-        self.copy_to_file_managed(format, output, location, connection, None)
+        self.copy_to_file_managed(format, output, location, connection, None, None)
             .await
     }
 
@@ -207,6 +209,7 @@ impl StatementExecutor {
         location: &str,
         connection: &HashMap<String, String>,
         managed: Option<(&ExportWriteBudget, &CancellationToken)>,
+        packed: Option<PackedTableWriter>,
     ) -> Result<usize> {
         let output = if managed.is_none() {
             output
@@ -229,7 +232,15 @@ impl StatementExecutor {
             violated: format!("Expected filename, path: {location}"),
         })?;
         if let Some((budget, token)) = managed {
-            stream_to_managed_parquet(stream, backend.object_store, &filename, budget, token).await
+            stream_to_managed_parquet_with_packed(
+                stream,
+                backend.object_store,
+                &filename,
+                budget,
+                token,
+                packed,
+            )
+            .await
         } else {
             self.stream_to_file(stream, format, backend.object_store, &filename)
                 .await
@@ -237,12 +248,24 @@ impl StatementExecutor {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn stream_to_managed_parquet(
+    stream: SendableRecordBatchStream,
+    store: ObjectStore,
+    path: &str,
+    budget: &ExportWriteBudget,
+    token: &CancellationToken,
+) -> Result<usize> {
+    stream_to_managed_parquet_with_packed(stream, store, path, budget, token, None).await
+}
+
+async fn stream_to_managed_parquet_with_packed(
     mut stream: SendableRecordBatchStream,
     store: ObjectStore,
     path: &str,
     budget: &ExportWriteBudget,
     token: &CancellationToken,
+    packed: Option<PackedTableWriter>,
 ) -> Result<usize> {
     use common_recordbatch::{RecordBatch, map_dictionary_to_values_schema};
     let original = stream.schema();
@@ -261,10 +284,21 @@ pub(crate) async fn stream_to_managed_parquet(
     } else {
         expanded_schema.clone()
     };
-    let mut writer =
-        ParquetFileWriter::open(output_schema.arrow_schema().clone(), store, path, 1, None)
-            .await
-            .context(error::WriteStreamToFileSnafu { path })?;
+    let packed_destination = packed.is_some();
+    let mut writer = if let Some(packed) = packed {
+        ParquetFileWriter::open_packed(
+            output_schema.arrow_schema().clone(),
+            store,
+            path,
+            Some(
+                crate::statement::export_logical_tables::LogicalTableExportLimits::default().writer,
+            ),
+            packed,
+        )
+    } else {
+        ParquetFileWriter::open(output_schema.arrow_schema().clone(), store, path, 1, None).await
+    }
+    .context(error::WriteStreamToFileSnafu { path })?;
     let mut started = false;
     let result = async {
         let mut rows = 0;
@@ -358,7 +392,9 @@ pub(crate) async fn stream_to_managed_parquet(
     .await;
     if result.is_err() {
         token.cancel();
-        if started && let Err(error) = writer.abort().await {
+        if (started || packed_destination)
+            && let Err(error) = writer.abort().await
+        {
             common_telemetry::warn!(error; "Failed to abort ordinary export file");
         }
     }

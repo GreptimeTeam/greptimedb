@@ -15,9 +15,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use api::v1::{ColumnSchema, RowInsertRequests, Rows};
+use api::v1::{ColumnSchema, RowInsertRequests, Rows, SemanticType};
 use arrow::datatypes::Schema as ArrowSchema;
 use async_trait::async_trait;
+use common_time::timestamp::TimeUnit;
 use session::context::QueryContextRef;
 use snafu::OptionExt;
 
@@ -91,6 +92,17 @@ impl LogicalTablePendingRowsBatcher {
             .plan_table_resolution(&catalog, &schema, ctx, &unique_tables)
             .await?;
 
+        // New tables are created on the request's selected physical table;
+        // their time index must use the physical table's unit (a missing
+        // physical table is auto-created as millisecond by the schema
+        // alterer, matching the default here).
+        if !plan.tables_to_create.is_empty() {
+            let physical_unit = self.physical_time_index_unit_or_default(ctx).await;
+            for (_, request_schema) in &mut plan.tables_to_create {
+                align_create_schema_time_index(request_schema, physical_unit);
+            }
+        }
+
         self.create_missing_tables_and_refresh_schemas(
             &catalog,
             &schema,
@@ -106,6 +118,17 @@ impl LogicalTablePendingRowsBatcher {
         let aligned_batches = Self::build_aligned_batches(&table_rows, &plan.region_schemas)?;
 
         Ok((aligned_batches, total_rows))
+    }
+}
+
+/// Rewrites the time index column of a create-table schema to `unit`, if the
+/// schema carries a timestamp column in another unit.
+fn align_create_schema_time_index(request_schema: &mut [ColumnSchema], unit: TimeUnit) {
+    for column in request_schema {
+        if column.semantic_type == SemanticType::Timestamp as i32 {
+            column.datatype = api::helper::timestamp_datatype(unit) as i32;
+            column.datatype_extension = None;
+        }
     }
 }
 

@@ -489,45 +489,6 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
     }
 }
 
-#[allow(dead_code)]
-pub(super) fn type_pg_to_gt(origin: &Type) -> Result<ConcreteDataType> {
-    // Note that we only support a small amount of pg data types
-    match origin {
-        &Type::BOOL => Ok(ConcreteDataType::boolean_datatype()),
-        &Type::INT2 => Ok(ConcreteDataType::int16_datatype()),
-        &Type::INT4 => Ok(ConcreteDataType::int32_datatype()),
-        &Type::INT8 => Ok(ConcreteDataType::int64_datatype()),
-        &Type::NUMERIC => Ok(ConcreteDataType::uint64_datatype()),
-        &Type::VARCHAR | &Type::CHAR | &Type::TEXT => Ok(ConcreteDataType::string_datatype()),
-        &Type::TIMESTAMP | &Type::TIMESTAMPTZ => Ok(ConcreteDataType::timestamp_datatype(
-            common_time::timestamp::TimeUnit::Millisecond,
-        )),
-        &Type::DATE => Ok(ConcreteDataType::date_datatype()),
-        &Type::TIME => Ok(ConcreteDataType::timestamp_datatype(
-            common_time::timestamp::TimeUnit::Microsecond,
-        )),
-        &Type::INT2_ARRAY => Ok(ConcreteDataType::list_datatype(Arc::new(
-            ConcreteDataType::int16_datatype(),
-        ))),
-        &Type::INT4_ARRAY => Ok(ConcreteDataType::list_datatype(Arc::new(
-            ConcreteDataType::int32_datatype(),
-        ))),
-        &Type::INT8_ARRAY => Ok(ConcreteDataType::list_datatype(Arc::new(
-            ConcreteDataType::int64_datatype(),
-        ))),
-        &Type::NUMERIC_ARRAY => Ok(ConcreteDataType::list_datatype(Arc::new(
-            ConcreteDataType::uint64_datatype(),
-        ))),
-        &Type::VARCHAR_ARRAY | &Type::CHAR_ARRAY | &Type::TEXT_ARRAY => Ok(
-            ConcreteDataType::list_datatype(Arc::new(ConcreteDataType::string_datatype())),
-        ),
-        _ => server_error::InternalSnafu {
-            err_msg: format!("unimplemented datatype {origin:?}"),
-        }
-        .fail(),
-    }
-}
-
 pub(super) fn invalid_parameter_error(msg: &str, detail: Option<String>) -> PgWireError {
     let mut error_info = PgErrorCode::Ec22023.to_err_info(msg.to_string());
     error_info.detail = detail;

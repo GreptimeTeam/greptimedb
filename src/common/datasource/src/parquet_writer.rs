@@ -28,6 +28,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::error::{self, Result};
+use crate::packed_writer::PackedTableWriter;
 
 /// Destination creation policy; conditional failures never authorize path deletion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,12 +53,18 @@ pub struct ParquetWriterLimits {
 /// operation can leave a filesystem worker running after cleanup.
 pub struct ParquetFileWriter {
     encoder: Option<ArrowWriter<Vec<u8>>>,
-    sink: Writer,
+    sink: ParquetSink,
+    rows: u64,
     store: ObjectStore,
     path: String,
     limits: Option<ParquetWriterLimits>,
     creation: ParquetCreationPolicy,
     close_started: bool,
+}
+
+enum ParquetSink {
+    Object(Writer),
+    Packed(Box<PackedTableWriter>),
 }
 
 impl ParquetFileWriter {
@@ -90,31 +97,7 @@ impl ParquetFileWriter {
         limits: Option<ParquetWriterLimits>,
         creation: ParquetCreationPolicy,
     ) -> Result<Self> {
-        let mut props = WriterProperties::builder()
-            .set_compression(Compression::ZSTD(ZstdLevel::default()))
-            .set_statistics_truncate_length(None)
-            .set_column_index_truncate_length(None);
-        if let Some(limits) = limits {
-            ensure!(
-                limits.row_group_rows > 0
-                    && limits.flush_threshold_bytes > 0
-                    && limits.max_row_groups > 0,
-                error::InvalidParquetWriterLimitsSnafu
-            );
-            props = props
-                .set_max_row_group_row_count(Some(limits.row_group_rows))
-                .set_max_row_group_bytes(None);
-        }
-        for field in schema.fields() {
-            if matches!(field.data_type(), DataType::Timestamp(_, _)) {
-                let column = ColumnPath::new(vec![field.name().clone()]);
-                props = props
-                    .set_column_dictionary_enabled(column.clone(), false)
-                    .set_column_encoding(column, Encoding::DELTA_BINARY_PACKED);
-            }
-        }
-        let encoder = ArrowWriter::try_new(Vec::new(), schema, Some(props.build()))
-            .context(error::WriteParquetSnafu { path })?;
+        let encoder = build_encoder(schema, limits, path)?;
         let sink = store
             .writer_with(path)
             .concurrent(concurrency)
@@ -124,11 +107,32 @@ impl ParquetFileWriter {
             .context(error::WriteObjectSnafu { path })?;
         Ok(Self {
             encoder: Some(encoder),
-            sink,
+            sink: ParquetSink::Object(sink),
+            rows: 0,
             store,
             path: path.to_owned(),
             limits,
             creation,
+            close_started: false,
+        })
+    }
+
+    /// Encode into a request-owned pack or standalone destination.
+    pub fn open_packed(
+        schema: SchemaRef,
+        store: ObjectStore,
+        path: &str,
+        limits: Option<ParquetWriterLimits>,
+        packed: PackedTableWriter,
+    ) -> Result<Self> {
+        Ok(Self {
+            encoder: Some(build_encoder(schema, limits, path)?),
+            sink: ParquetSink::Packed(Box::new(packed)),
+            rows: 0,
+            store,
+            path: path.into(),
+            limits,
+            creation: ParquetCreationPolicy::IfNotExists,
             close_started: false,
         })
     }
@@ -182,6 +186,7 @@ impl ParquetFileWriter {
             check_cancelled(cancellation)?;
             self.write_bytes(bytes).await?;
             check_cancelled(cancellation)?;
+            self.rows += len as u64;
             offset += len;
         }
         Ok(())
@@ -189,11 +194,14 @@ impl ParquetFileWriter {
 
     async fn write_bytes(&mut self, bytes: Vec<u8>) -> Result<()> {
         let bytes = Bytes::from(bytes);
+        let sink = match &mut self.sink {
+            ParquetSink::Packed(packed) => return packed.write(bytes).await,
+            ParquetSink::Object(sink) => sink,
+        };
         let chunk = DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize;
         // Slices retain the complete encoded allocation until its last submission.
         for offset in (0..bytes.len()).step_by(chunk) {
-            self.sink
-                .write(bytes.slice(offset..(offset + chunk).min(bytes.len())))
+            sink.write(bytes.slice(offset..(offset + chunk).min(bytes.len())))
                 .await
                 .context(error::WriteObjectSnafu { path: &self.path })?;
         }
@@ -218,9 +226,12 @@ impl ParquetFileWriter {
         .context(error::JoinHandleSnafu)??;
         self.write_bytes(bytes).await?;
         check_cancelled(cancellation)?;
+        let sink = match &mut self.sink {
+            ParquetSink::Packed(packed) => return packed.finish(self.rows, cancellation).await,
+            ParquetSink::Object(sink) => sink,
+        };
         self.close_started = true;
-        self.sink
-            .close()
+        sink.close()
             .await
             .context(error::WriteObjectSnafu { path: &self.path })?;
         check_cancelled(cancellation)?;
@@ -230,7 +241,10 @@ impl ParquetFileWriter {
     /// Abort after all in-flight operations complete. Preserve ambiguous commits;
     /// conditional callers delegate cleanup exclusively to the backend.
     pub async fn abort(mut self) -> Result<()> {
-        let result = self.sink.abort().await;
+        let result = match &mut self.sink {
+            ParquetSink::Packed(packed) => return packed.abort().await,
+            ParquetSink::Object(sink) => sink.abort().await,
+        };
         if self.creation == ParquetCreationPolicy::Overwrite
             && result.as_ref().is_err_and(|error| {
                 error.kind() == object_store::ErrorKind::Unsupported
@@ -251,6 +265,39 @@ impl ParquetFileWriter {
         }
         Ok(())
     }
+}
+
+fn build_encoder(
+    schema: SchemaRef,
+    limits: Option<ParquetWriterLimits>,
+    path: &str,
+) -> Result<ArrowWriter<Vec<u8>>> {
+    let mut props = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(ZstdLevel::default()))
+        .set_statistics_truncate_length(None)
+        .set_column_index_truncate_length(None);
+    if let Some(limits) = limits {
+        ensure!(
+            limits.row_group_rows > 0
+                && limits.flush_threshold_bytes > 0
+                && limits.max_row_groups > 0,
+            error::InvalidParquetWriterLimitsSnafu
+        );
+        props = props
+            .set_max_row_group_row_count(Some(limits.row_group_rows))
+            .set_max_row_group_bytes(None);
+    }
+    for field in schema.fields() {
+        if matches!(field.data_type(), DataType::Timestamp(_, _)) {
+            let column = ColumnPath::new(vec![field.name().clone()]);
+            props = props
+                .set_column_dictionary_enabled(column.clone(), false)
+                .set_column_encoding(column, Encoding::DELTA_BINARY_PACKED);
+        }
+    }
+    let encoder = ArrowWriter::try_new(Vec::new(), schema, Some(props.build()))
+        .context(error::WriteParquetSnafu { path })?;
+    Ok(encoder)
 }
 
 fn check_cancelled(cancellation: Option<&CancellationToken>) -> Result<()> {
@@ -498,7 +545,7 @@ mod tests {
                 .await
                 .unwrap();
         // No storage-layer chunking: observe the application's actual submissions.
-        writer.sink = store.writer("large.parquet").await.unwrap();
+        writer.sink = ParquetSink::Object(store.writer("large.parquet").await.unwrap());
         writer.write(batch.clone(), None).await.unwrap();
         writer.finish(None).await.unwrap();
         let sizes = sizes.lock().unwrap().clone();
@@ -701,7 +748,8 @@ mod tests {
                 .await
                 .unwrap();
         // Force footer bytes through the sink before its close operation.
-        writer.sink = store.writer_with("cancel.parquet").chunk(1).await.unwrap();
+        writer.sink =
+            ParquetSink::Object(store.writer_with("cancel.parquet").chunk(1).await.unwrap());
         let cancellation = CancellationToken::new();
         let result = {
             let finish = writer.finish(Some(&cancellation));

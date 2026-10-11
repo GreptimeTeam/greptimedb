@@ -581,40 +581,6 @@ impl PrimaryKeyCodec for SparsePrimaryKeyCodec {
     }
 }
 
-/// Field with column id.
-pub struct FieldWithId {
-    pub field: SortField,
-    pub column_id: ColumnId,
-}
-
-/// A special encoder for memtable.
-pub struct SparseEncoder {
-    fields: Vec<FieldWithId>,
-}
-
-impl SparseEncoder {
-    pub fn new(fields: Vec<FieldWithId>) -> Self {
-        Self { fields }
-    }
-
-    pub fn encode_to_vec<'a, I>(&self, row: I, buffer: &mut Vec<u8>) -> Result<()>
-    where
-        I: Iterator<Item = ValueRef<'a>>,
-    {
-        let mut serializer = Serializer::new(buffer);
-        for (value, field) in row.zip(self.fields.iter()) {
-            if !value.is_null() {
-                field
-                    .column_id
-                    .serialize(&mut serializer)
-                    .context(SerializeFieldSnafu)?;
-                field.field.serialize(&mut serializer, &value)?;
-            }
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

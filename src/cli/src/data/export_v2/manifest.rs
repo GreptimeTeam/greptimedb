@@ -28,7 +28,7 @@ use crate::data::export_v2::error::{
     TimeParseInvalidFormatSnafu,
 };
 
-/// Manifest format version produced by the current exporter.
+/// Default standalone manifest version. Packed data snapshots use version 2.
 pub const MANIFEST_VERSION: u32 = 1;
 
 /// Manifest file name within snapshot directory.

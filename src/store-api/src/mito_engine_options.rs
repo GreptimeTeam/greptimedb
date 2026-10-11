@@ -29,8 +29,6 @@ pub const MERGE_MODE_KEY: &str = "merge_mode";
 pub const TTL_KEY: &str = "ttl";
 /// Option key for the per-table auto flush interval.
 pub const AUTO_FLUSH_INTERVAL_KEY: &str = "auto_flush_interval";
-/// Option key for snapshot read.
-pub const SNAPSHOT_READ: &str = "snapshot_read";
 /// Option key for compaction type.
 pub const COMPACTION_TYPE: &str = "compaction.type";
 /// Option key for forcing compaction options override.
