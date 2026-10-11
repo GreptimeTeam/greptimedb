@@ -4519,6 +4519,81 @@ async fn test_single_source_ranges_preserve_batches() {
 }
 
 #[tokio::test]
+async fn test_short_series_level_zero_merge_preserves_batches_and_latest_values() {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: true,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("memtable.type", "bulk")
+        .insert_option("max_row_group_row_count", "65536")
+        .build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    for (start, end, offset) in [(0, 12_000, 0), (6_000, 18_000, 100_000)] {
+        let rows = (start..end)
+            .map(|i| {
+                row(vec![
+                    ValueData::StringValue(format!("{i:05}")),
+                    ValueData::F64Value((i + offset) as f64),
+                    ValueData::TimestampMillisecondValue(0),
+                ])
+            })
+            .collect();
+        test_util::put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows,
+            },
+        )
+        .await;
+        test_util::flush_region(&engine, region_id, None).await;
+    }
+    let Scanner::Seq(scanner) = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap()
+    else {
+        panic!("expected a sequential scan");
+    };
+    assert_eq!(2, scanner.input().files.len());
+    for file in &scanner.input().files {
+        assert_eq!(0, file.meta_ref().level);
+        assert_eq!(12_000, file.meta_ref().num_series);
+    }
+    let batches = scanner
+        .scan_partition(&Default::default(), &ExecutionPlanMetricsSet::default(), 0)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert!(
+        batches.len() < 64,
+        "short series became {} batches",
+        batches.len()
+    );
+    assert_eq!(
+        (0..18_000)
+            .map(|i| if i < 6_000 {
+                i as f64
+            } else {
+                (i + 100_000) as f64
+            })
+            .collect::<Vec<_>>(),
+        scan_field_values(&batches),
+    );
+}
+
+#[tokio::test]
 async fn test_reset_state_discards_dynamic_field_pruning() {
     for (append_mode, expected_scanner_name) in [(false, "SeqScan"), (true, "UnorderedScan")] {
         let mut env = TestEnv::with_prefix(if append_mode {
