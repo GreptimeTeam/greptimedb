@@ -29,13 +29,14 @@ use store_api::storage::RegionId;
 use crate::compaction::CompactionOutput;
 use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::CompactionRegion;
+use crate::compaction::overlap::FileOverlapIndex;
 use crate::compaction::picker::{Picker, PickerOutput, get_expired_ssts};
 use crate::compaction::run::{
     Ranged, SortedRun, files_overlap, files_overlap_inclusive, find_sorted_runs,
     find_sorted_runs_by_time_range, merge_primary_key_ranges, primary_key_ranges_overlap,
 };
 use crate::error::{JoinSnafu, Result};
-use crate::sst::file::{FileHandle, Level, overlaps};
+use crate::sst::file::{FileHandle, Level, RegionFileId, overlaps};
 use crate::sst::primary_key::PrimaryKeyRangeMapper;
 use crate::sst::version::LevelMeta;
 
@@ -677,6 +678,7 @@ fn pick_l1_overlap_only(
 ) -> Vec<FileHandle> {
     let files = ordered_files(&sorted_runs);
     let mut best: Option<(CandidateScore, Vec<usize>)> = None;
+    let mut run_budget = None;
     for left in 0..files.len() {
         let mut interval = Candidate::default();
         let right_bound = left.saturating_add(*MAX_INPUT_FILES).min(files.len());
@@ -708,11 +710,27 @@ fn pick_l1_overlap_only(
                 .as_ref()
                 .is_none_or(|(best_score, _)| score.is_better_than(best_score))
             {
-                let inputs = participations
+                let inputs: Vec<_> = participations
                     .iter()
                     .enumerate()
                     .filter_map(|(offset, participates)| participates.then_some(left + offset))
                     .collect();
+                // Check a component once, only when a candidate could win. Its
+                // full run sizes prevent smaller slices from bypassing the budget.
+                let budget = run_budget.get_or_insert_with(|| {
+                    L1OverlapRunBudget::new(
+                        files.iter().map(|file| file.file.clone()).collect(),
+                        max_output_file_size.unwrap_or(0),
+                        mapper,
+                    )
+                });
+                let input_files = inputs
+                    .iter()
+                    .map(|&idx| files[idx].file.clone())
+                    .collect::<Vec<_>>();
+                if !budget.allows_candidate(&input_files) {
+                    continue;
+                }
                 best = Some((score, inputs));
             }
         }
@@ -725,6 +743,110 @@ fn pick_l1_overlap_only(
         .into_iter()
         .map(|idx| files[idx].file.clone())
         .collect()
+}
+
+/// Snapshot-local run budgets for the available L1 files in one TWCS window.
+/// Decisions cover complete overlap components, so neither another component
+/// nor an omitted part of the same run can subsidize a small rewrite candidate.
+struct L1OverlapRunBudget<'a> {
+    remaining: FileOverlapIndex<'a>,
+    allowed: HashMap<RegionFileId, bool>,
+    tolerance_bytes: u64,
+    mapper: &'a PrimaryKeyRangeMapper,
+}
+
+impl<'a> L1OverlapRunBudget<'a> {
+    fn new(
+        files: Vec<FileHandle>,
+        tolerance_bytes: u64,
+        mapper: &'a PrimaryKeyRangeMapper,
+    ) -> Self {
+        Self {
+            remaining: FileOverlapIndex::with_overlap(files, move |lhs, rhs| {
+                files_overlap_inclusive(lhs, rhs, mapper)
+            }),
+            allowed: HashMap::new(),
+            tolerance_bytes,
+            mapper,
+        }
+    }
+
+    fn allows_candidate(&mut self, files: &[FileHandle]) -> bool {
+        if !files.iter().all(|file| self.allows(file)) {
+            return false;
+        }
+
+        // Unselected peers can balance the full component, but cannot pay for
+        // a rewrite that does not actually merge their data.
+        let mut candidate_budget = Self::new(files.to_vec(), self.tolerance_bytes, self.mapper);
+        files.iter().all(|file| candidate_budget.allows(file))
+    }
+
+    fn allows(&mut self, file: &FileHandle) -> bool {
+        if let Some(allowed) = self.allowed.get(&file.file_id()) {
+            return *allowed;
+        }
+
+        self.remaining.remove(file.file_id());
+        let mut component = vec![file.clone()];
+        let mut cursor = 0;
+        while cursor < component.len() {
+            let neighbors = self.remaining.drain_overlaps(&component[cursor]);
+            component.extend(neighbors);
+            cursor += 1;
+        }
+
+        let allowed = has_balanced_overlap_runs(&mut component, self.tolerance_bytes, self.mapper);
+        for member in component {
+            self.allowed.insert(member.file_id(), allowed);
+        }
+        allowed
+    }
+}
+
+fn has_balanced_overlap_runs(
+    files: &mut [FileHandle],
+    tolerance_bytes: u64,
+    mapper: &PrimaryKeyRangeMapper,
+) -> bool {
+    files.sort_unstable_by(|lhs, rhs| {
+        let (lhs_start, lhs_end) = lhs.time_range();
+        let (rhs_start, rhs_end) = rhs.time_range();
+        lhs_start
+            .cmp(&rhs_start)
+            .then_with(|| rhs_end.cmp(&lhs_end))
+            .then_with(|| lhs.region_id().as_u64().cmp(&rhs.region_id().as_u64()))
+            .then_with(|| {
+                lhs.meta_ref()
+                    .file_id
+                    .as_bytes()
+                    .cmp(rhs.meta_ref().file_id.as_bytes())
+            })
+    });
+
+    // Rebuild PK-aware runs even if the large-window picker used time-only
+    // runs. Inclusive comparisons keep this grouping consistent with the
+    // component lookup, including files sharing a timestamp boundary.
+    let mut runs: Vec<Vec<&FileHandle>> = Vec::new();
+    for file in files.iter() {
+        if let Some(run) = runs.iter_mut().find(|run| {
+            run.iter()
+                .all(|other| !files_overlap_inclusive(file, other, mapper))
+        }) {
+            run.push(file);
+        } else {
+            runs.push(vec![file]);
+        }
+    }
+
+    let mut total_size = 0;
+    let mut largest_run_size = 0;
+    for run in runs {
+        let size: u64 = run.iter().map(|file| file.size()).sum();
+        total_size += size;
+        largest_run_size = largest_run_size.max(size);
+    }
+    largest_run_size <= (total_size - largest_run_size).saturating_add(tolerance_bytes)
 }
 
 #[cfg(test)]
@@ -3705,18 +3827,25 @@ mod tests {
                 &[2, 8][..],
             ),
             (
-                "E overlaps two A files separated in time order",
+                "two A files exceed E's run budget",
                 Some((b'b', b'c')),
                 5155,
+                &[1, 2][..],
+                &[][..],
+            ),
+            (
+                "sufficient E bytes allow two A files separated in time order",
+                Some((b'b', b'c')),
+                6000,
                 &[1, 2][..],
                 &[1, 2, 8][..],
             ),
             (
-                "unknown PK bounds keep all potential overlaps",
+                "unknown PK bounds include the whole dominant run in the budget",
                 None,
                 5155,
                 &[0, 1, 2, 3, 4, 5, 6, 7][..],
-                &[0, 1, 2, 3, 4, 5, 6, 7, 8][..],
+                &[][..],
             ),
         ] {
             let extra = new_file_handle_with_size_sequence_and_primary_key_range(
@@ -3838,6 +3967,252 @@ mod tests {
                 .map(FileHandle::file_id)
                 .collect::<HashSet<_>>()
         );
+    }
+
+    #[tokio::test]
+    async fn test_l1_overlap_only_limits_dominant_run_rewrites() {
+        let file_size = 512 * 1024 * 1024;
+        for (case, peer_size, max_output_size, should_pick) in [
+            (
+                "small peer cannot rewrite any slice of the large run",
+                file_size,
+                file_size,
+                false,
+            ),
+            (
+                "one byte below the run budget",
+                7 * file_size - 1,
+                file_size,
+                false,
+            ),
+            ("exact run budget boundary", 7 * file_size, file_size, true),
+            ("equal sized runs", 8 * file_size, file_size, true),
+            (
+                "file reduction keeps its own admission",
+                file_size,
+                2 * file_size,
+                true,
+            ),
+        ] {
+            let mut files = (0..8)
+                .map(|idx| {
+                    let key = b'a' + idx as u8;
+                    new_file_handle_with_size_sequence_and_primary_key_range(
+                        FileId::random(),
+                        idx,
+                        10_000,
+                        1,
+                        100,
+                        file_size,
+                        pk_range(&[key, b'0'], &[key, b'9']),
+                    )
+                })
+                .collect::<Vec<_>>();
+            files.push(new_file_handle_with_size_sequence_and_primary_key_range(
+                FileId::random(),
+                1_000,
+                9_000,
+                1,
+                100,
+                peer_size,
+                pk_range(b"a0", b"h9"),
+            ));
+            let expected = if should_pick {
+                files
+                    .iter()
+                    .map(FileHandle::file_id)
+                    .collect::<HashSet<_>>()
+            } else {
+                HashSet::new()
+            };
+            let picker = TwcsPicker {
+                trigger_file_num: 4,
+                active_window_l1_merge_trigger: 4,
+                inactive_window_trigger_file_num: 2,
+                inactive_window_l1_merge_trigger: 8,
+                time_window_seconds: Some(60),
+                max_output_file_size: Some(max_output_size),
+                append_mode: false,
+                max_background_tasks: Some(1),
+                time_range: None,
+            };
+
+            for active_window in [Some(60), None] {
+                let outputs = picker
+                    .build_output_with_time_range(
+                        RegionId::from_u64(0),
+                        assign_to_windows(files.iter(), 60),
+                        active_window,
+                        Some(60),
+                    )
+                    .await
+                    .unwrap();
+                let actual = outputs
+                    .iter()
+                    .flat_map(|output| output.inputs.iter().map(FileHandle::file_id))
+                    .collect::<HashSet<_>>();
+                assert_eq!(expected, actual, "{case}, active window: {active_window:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_l1_run_budgets_do_not_mix_disconnected_components() {
+        let file_size = 512 * 1024 * 1024;
+        let file = |start, min, max| {
+            new_file_handle_with_size_sequence_and_primary_key_range(
+                FileId::random(),
+                start,
+                10_000,
+                1,
+                100,
+                file_size,
+                pk_range(&[min, b'0'], &[max, b'9']),
+            )
+        };
+
+        // Each of these components has a 3 GiB run and a 512 MiB peer. Their
+        // opposite time order makes whole-window run totals look balanced.
+        let mut files = (0..6)
+            .map(|idx| file(idx, b'a' + idx as u8, b'a' + idx as u8))
+            .collect::<Vec<_>>();
+        files.push(file(6, b'a', b'f'));
+        files.push(file(7, b'm', b'r'));
+        files.extend((0..6).map(|idx| file(8 + idx, b'm' + idx as u8, b'm' + idx as u8)));
+
+        // The rejected components must not prevent a separate balanced pair
+        // from being selected, nor borrow this pair's bytes for admission.
+        let pair = [file(14, b'x', b'x'), file(15, b'x', b'x')];
+        let expected = pair.iter().map(FileHandle::file_id).collect::<HashSet<_>>();
+        files.extend(pair);
+        let (picked, _) = pick_l1_candidate_files(
+            files,
+            Some(file_size),
+            PickPhase::L1OverlapOnly,
+            &primary_key_mapper_for_test(),
+        );
+
+        assert_eq!(
+            expected,
+            picked
+                .iter()
+                .map(FileHandle::file_id)
+                .collect::<HashSet<_>>()
+        );
+    }
+
+    #[test]
+    fn test_l1_run_budget_does_not_borrow_unselected_peer_bytes() {
+        let file_size = 512 * 1024 * 1024;
+        let file = |start, min: &[u8], max: &[u8]| {
+            new_file_handle_with_size_sequence_and_primary_key_range(
+                FileId::random(),
+                start,
+                10_000,
+                1,
+                100,
+                file_size,
+                pk_range(min, max),
+            )
+        };
+        let mut files = (0..8)
+            .map(|idx| file(idx, &[b'a' + idx as u8], &[b'a' + idx as u8]))
+            .collect::<Vec<_>>();
+        files.push(file(8, b"a", b"h"));
+        let expected = files[6..=8]
+            .iter()
+            .map(FileHandle::file_id)
+            .collect::<HashSet<_>>();
+
+        // Another 4 GiB run balances the whole component, but lies outside
+        // the candidate search range. Its bytes must not subsidize A1..A8 + E.
+        let gap = *MAX_INPUT_FILES as i64;
+        files.extend((0..gap).map(|idx| {
+            let key = format!("z{idx:04}");
+            file(9 + idx, key.as_bytes(), key.as_bytes())
+        }));
+        files.extend(
+            (0..8).map(|idx| file(9 + gap + idx, &[b'a' + idx as u8], &[b'a' + idx as u8])),
+        );
+        let (picked, _) = pick_l1_candidate_files(
+            files,
+            Some(file_size),
+            PickPhase::L1OverlapOnly,
+            &primary_key_mapper_for_test(),
+        );
+
+        assert_eq!(
+            expected,
+            picked
+                .iter()
+                .map(FileHandle::file_id)
+                .collect::<HashSet<_>>()
+        );
+    }
+
+    #[test]
+    fn test_l1_run_budget_rebuilds_pk_runs_for_large_windows() {
+        let file_size = 512 * 1024 * 1024;
+        let mut files = (0..1024)
+            .map(|idx| {
+                let key = format!("{idx:04}");
+                new_file_handle_with_size_sequence_and_primary_key_range(
+                    FileId::random(),
+                    idx,
+                    10_000,
+                    1,
+                    100,
+                    file_size,
+                    pk_range(key.as_bytes(), key.as_bytes()),
+                )
+            })
+            .collect::<Vec<_>>();
+        files.push(new_file_handle_with_size_sequence_and_primary_key_range(
+            FileId::random(),
+            2_000,
+            9_000,
+            1,
+            100,
+            file_size,
+            pk_range(b"0000", b"1023"),
+        ));
+
+        // The picker switches to time-only runs at 1024 files. They must not
+        // disguise this single large PK-disjoint run as 1024 small runs.
+        let (picked, _) = pick_l1_candidate_files(
+            files,
+            Some(file_size),
+            PickPhase::L1OverlapOnly,
+            &primary_key_mapper_for_test(),
+        );
+        assert!(picked.is_empty());
+    }
+
+    #[test]
+    fn test_l1_run_budget_includes_touching_time_boundaries() {
+        let files = [(0, 10, 1024), (10, 20, 512), (11, 19, 512)]
+            .map(|(start, end, size)| {
+                new_file_handle_with_size_sequence_and_primary_key_range(
+                    FileId::random(),
+                    start,
+                    end,
+                    1,
+                    100,
+                    size,
+                    pk_range(b"a", b"z"),
+                )
+            })
+            .to_vec();
+        let (picked, _) = pick_l1_candidate_files(
+            files,
+            Some(512),
+            PickPhase::L1OverlapOnly,
+            &primary_key_mapper_for_test(),
+        );
+
+        // The last two files alone are balanced, but their component also
+        // contains the first file through the shared inclusive boundary.
+        assert!(picked.is_empty());
     }
 
     #[test]
