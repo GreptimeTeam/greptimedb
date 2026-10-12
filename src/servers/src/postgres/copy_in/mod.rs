@@ -408,7 +408,7 @@ impl PostgresServerHandlerInner {
     /// columns and stashes the per-connection copy state.
     pub(crate) async fn begin_copy_in(&self, stmt: CopyFromStdin) -> PgWireResult<Response> {
         // The batching-aware context routes copy-in flushes through the
-        // pending-rows batcher like SQL INSERTs when it is enabled for
+        // pending-rows batcher like SQL INSERT when it is enabled for
         // this connection.
         let query_ctx = self.new_query_context();
         let (catalog, schema, table) = resolve_table_name(&query_ctx, &stmt.table)?;
