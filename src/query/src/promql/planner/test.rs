@@ -11623,6 +11623,94 @@ async fn test_dropped_metric_name_checks_a_rewritten_input() {
     );
 }
 
+/// The match-group error names the marked identity `__name__`, resolved from the very field the
+/// group names.
+///
+/// The identity is field metadata, never a name: a marked field reports `__name__` however it is
+/// spelled and under whichever qualifier it lives, an ordinary field keeps its own name even when
+/// that is the identity's spelling, and a name that cannot be resolved to one field - here an
+/// unqualified name two relations carry - keeps its label instead of borrowing another field's
+/// role.
+#[test]
+fn test_match_group_labels_resolve_the_marked_field_of_the_column() {
+    let marked_name = format!("{PROMQL_METRIC_NAME_COLUMN}_");
+    let field = |marked: bool, name: &str| {
+        let field = Field::new(name, ArrowDataType::Utf8, true);
+        if marked {
+            field.with_metadata(HashMap::from([(
+                PROMQL_FIELD_ROLE_KEY.to_string(),
+                PROMQL_METRIC_NAME_ROLE.to_string(),
+            )]))
+        } else {
+            field
+        }
+    };
+    let left = TableReference::bare("left");
+    let right = TableReference::bare("right");
+    let taken_name = format!("{marked_name}_");
+    let schema = Arc::new(
+        DFSchema::new_with_metadata(
+            vec![
+                // The identity of one operand, next to the same spelling another operand uses
+                // as an ordinary label: the qualifier decides, never the name.
+                (
+                    Some(left.clone()),
+                    Arc::new(field(true, PROMQL_METRIC_NAME_COLUMN)),
+                ),
+                (
+                    Some(right.clone()),
+                    Arc::new(field(false, PROMQL_METRIC_NAME_COLUMN)),
+                ),
+                // The identity keeps its role under the suffixed name its usual spelling forced
+                // it into, next to an ordinary column of that spelling.
+                (Some(left.clone()), Arc::new(field(true, &marked_name))),
+                (Some(left.clone()), Arc::new(field(false, &taken_name))),
+                (Some(left.clone()), Arc::new(field(false, "host"))),
+            ],
+            HashMap::new(),
+        )
+        .unwrap(),
+    );
+
+    let label_of = |column: Column| {
+        let labels = vec![column.name.clone()];
+        PromPlanner::match_group_labels(&schema, &[DfExpr::Column(column)], labels)
+            .into_iter()
+            .next()
+            .unwrap()
+    };
+
+    for (column, expected) in [
+        // Each qualified field answers for itself, marked or not.
+        (
+            Column::new(Some(left.clone()), PROMQL_METRIC_NAME_COLUMN),
+            METRIC_NAME,
+        ),
+        (
+            Column::new(Some(right.clone()), PROMQL_METRIC_NAME_COLUMN),
+            PROMQL_METRIC_NAME_COLUMN,
+        ),
+        (
+            Column::new(Some(left.clone()), marked_name.as_str()),
+            METRIC_NAME,
+        ),
+        (
+            Column::new(Some(left.clone()), taken_name.as_str()),
+            taken_name.as_str(),
+        ),
+        (Column::new(Some(left.clone()), "host"), "host"),
+        // Two fields carry the name and neither is unqualified, so no field is inferred.
+        (
+            Column::new_unqualified(PROMQL_METRIC_NAME_COLUMN),
+            PROMQL_METRIC_NAME_COLUMN,
+        ),
+        // A name only one field carries resolves to that field, qualified or not.
+        (Column::new_unqualified(marked_name.as_str()), METRIC_NAME),
+    ] {
+        assert_eq!(label_of(column.clone()), expected, "{column}");
+    }
+}
+
 /// An explicit `on(...)`/`ignoring(...)`/`group_x(...)` label list reads the same semantic labels
 /// as every other label read: `__name__` names the marked identity, a label no operand carries
 /// matches like `on()`, and the physical name of the internal identity is not a label of any
