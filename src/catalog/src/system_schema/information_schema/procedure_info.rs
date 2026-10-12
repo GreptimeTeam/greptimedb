@@ -35,7 +35,10 @@ use store_api::storage::{ScanRequest, TableId};
 
 use crate::CatalogManager;
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
-use crate::system_schema::information_schema::{InformationTable, PROCEDURE_INFO, Predicates};
+use crate::system_schema::SystemTable;
+use crate::system_schema::information_schema::{
+    InformationSchemaTableScope, InformationTable, PROCEDURE_INFO, Predicates,
+};
 use crate::system_schema::utils;
 
 const PROCEDURE_ID: &str = "procedure_id";
@@ -97,6 +100,12 @@ impl InformationSchemaProcedureInfo {
 }
 
 impl InformationTable for InformationSchemaProcedureInfo {
+    fn scope(&self) -> InformationSchemaTableScope {
+        InformationSchemaTableScope::Global
+    }
+}
+
+impl SystemTable for InformationSchemaProcedureInfo {
     fn table_id(&self) -> TableId {
         INFORMATION_SCHEMA_PROCEDURE_INFO_TABLE_ID
     }
