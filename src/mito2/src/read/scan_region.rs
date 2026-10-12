@@ -28,7 +28,6 @@ use common_recordbatch::{QueryMemoryTracker, SendableRecordBatchStream};
 use common_telemetry::tracing::Instrument;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
-use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
 use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
 use datafusion_common::pruning::PruningStatistics;
@@ -244,8 +243,6 @@ pub(crate) struct ScanRegion {
     cache_strategy: CacheStrategy,
     /// Maximum number of SST files to scan concurrently.
     max_concurrent_scan_files: usize,
-    /// Memory pool shared by internal scan operators across all queries.
-    scan_memory_pool: Arc<dyn MemoryPool>,
     scan_memory_tracker: Option<QueryMemoryTracker>,
     /// Whether to enable the experimental two-phase metric series scan.
     experimental_series_scan_v2: bool,
@@ -285,7 +282,6 @@ impl ScanRegion {
             request,
             cache_strategy,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
-            scan_memory_pool: Arc::new(UnboundedMemoryPool::default()),
             scan_memory_tracker: None,
             experimental_series_scan_v2: false,
             ignore_range_index: false,
@@ -330,13 +326,6 @@ impl ScanRegion {
 
     pub(crate) fn with_scan_memory_tracker(mut self, tracker: QueryMemoryTracker) -> Self {
         self.scan_memory_tracker = Some(tracker);
-        self
-    }
-
-    /// Sets the memory pool shared by internal scan operators.
-    #[must_use]
-    pub(crate) fn with_scan_memory_pool(mut self, scan_memory_pool: Arc<dyn MemoryPool>) -> Self {
-        self.scan_memory_pool = scan_memory_pool;
         self
     }
 
@@ -590,7 +579,6 @@ impl ScanRegion {
             .with_bloom_filter_index_appliers(bloom_filter_appliers)
             .with_fulltext_index_appliers(fulltext_index_appliers)
             .with_max_concurrent_scan_files(self.max_concurrent_scan_files)
-            .with_scan_memory_pool(self.scan_memory_pool)
             .with_scan_memory_tracker(self.scan_memory_tracker)
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode)
@@ -954,9 +942,7 @@ pub struct ScanInput {
     ignore_file_not_found: bool,
     /// Maximum number of SST files to scan concurrently.
     pub(crate) max_concurrent_scan_files: usize,
-    /// Memory pool shared by internal scan operators across all queries.
-    pub(crate) scan_memory_pool: Arc<dyn MemoryPool>,
-    /// Shared query quota for projected SST row groups; absent during compaction.
+    /// Shared scan quota for projected SST row groups; absent during compaction.
     scan_memory_tracker: Option<QueryMemoryTracker>,
     /// Index appliers.
     inverted_index_appliers: [Option<InvertedIndexApplierRef>; 2],
@@ -1036,7 +1022,6 @@ impl ScanInput {
                 cache_strategy: CacheStrategy::Disabled,
                 ignore_file_not_found: false,
                 max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
-                scan_memory_pool: Arc::new(UnboundedMemoryPool::default()),
                 scan_memory_tracker: None,
                 inverted_index_appliers: [None, None],
                 bloom_filter_index_appliers: [None, None],
@@ -1291,13 +1276,6 @@ impl ScanInputBuilder {
 
     pub(crate) fn with_scan_memory_tracker(mut self, tracker: Option<QueryMemoryTracker>) -> Self {
         self.input.scan_memory_tracker = tracker;
-        self
-    }
-
-    /// Sets the memory pool shared by internal scan operators.
-    #[must_use]
-    pub(crate) fn with_scan_memory_pool(mut self, scan_memory_pool: Arc<dyn MemoryPool>) -> Self {
-        self.input.scan_memory_pool = scan_memory_pool;
         self
     }
 

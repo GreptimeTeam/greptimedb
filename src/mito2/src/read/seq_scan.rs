@@ -106,10 +106,9 @@ impl SeqScan {
     )]
     pub fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
         let metrics_set = ExecutionPlanMetricsSet::new();
+        let ctx = QueryScanContext::default();
         let streams = (0..self.properties.partitions.len())
-            .map(|partition: usize| {
-                self.scan_partition(&QueryScanContext::default(), &metrics_set, partition)
-            })
+            .map(|partition: usize| self.scan_partition(&ctx, &metrics_set, partition))
             .collect::<Result<Vec<_>, _>>()?;
 
         let aggr_stream = ChainedRecordBatchStream::new(streams).map_err(BoxedError::new)?;

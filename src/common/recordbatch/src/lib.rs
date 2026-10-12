@@ -55,7 +55,6 @@ pub use recordbatch::RecordBatch;
 use snafu::{IntoError, ResultExt, ensure};
 
 use crate::error::{ArrowComputeSnafu, NewDfRecordBatchSnafu};
-use crate::memory::MemoryBackend;
 pub use crate::memory::QueryMemoryReservation;
 
 pub trait RecordBatchStream: Stream<Item = Result<RecordBatch>> {
@@ -597,11 +596,11 @@ impl<S: Stream<Item = Result<RecordBatch>> + Unpin> Stream for RecordBatchStream
 }
 
 /// Memory tracker for RecordBatch streams and reader reservations. Clone to share
-/// the same limit across queries. The optional shared-pool backend also accounts
-/// for DataFusion consumers.
+/// the same limit across queries. Limited accounting rounds up to KB; unlimited
+/// accounting is byte-exact. DataFusion operators use the separate query runtime pool.
 #[derive(Clone)]
 pub struct QueryMemoryTracker {
-    manager: MemoryBackend,
+    manager: MemoryManager<CallbackMemoryMetrics>,
     metrics: CallbackMemoryMetrics,
     on_exhausted_policy: OnExhaustedPolicy,
 }
@@ -631,31 +630,27 @@ impl QueryMemoryTracker {
             on_update: None,
             on_exhausted: None,
             on_reject: None,
-            shared_pool: false,
         }
     }
 
     fn new_stream_tracker(&self) -> StreamMemoryTracker {
         StreamMemoryTracker {
             tracker: self.clone(),
-            guard: self.manager.reservation(),
+            guard: QueryMemoryReservation {
+                // A zero-byte acquisition always succeeds; this manager is never closed.
+                inner: self.manager.try_acquire(0).unwrap(),
+            },
             tracked_bytes: 0,
         }
     }
     /// Get the current memory usage in bytes.
     pub fn current(&self) -> usize {
-        self.manager.current()
+        self.manager.used_bytes() as usize
     }
 
     /// Returns the memory limit in bytes, or zero when unlimited.
     pub fn limit(&self) -> usize {
-        self.manager.limit()
-    }
-
-    /// Returns the shared pool for synchronous DataFusion consumers, when enabled.
-    /// These consumers fail immediately on exhaustion, even under the wait policy.
-    pub fn memory_pool(&self) -> Option<Arc<dyn datafusion::execution::memory_pool::MemoryPool>> {
-        self.manager.memory_pool()
+        self.manager.limit_bytes() as usize
     }
 
     /// Reserves bytes until the returned guard is dropped.
@@ -710,23 +705,15 @@ pub struct QueryMemoryTrackerBuilder {
     on_update: Option<UpdateCallback>,
     on_exhausted: Option<UnitCallback>,
     on_reject: Option<RejectCallback>,
-    shared_pool: bool,
 }
 
 impl QueryMemoryTrackerBuilder {
-    /// Shares a byte-granularity pool with RAII reservations and DataFusion consumers.
-    /// The default backend retains its existing kilobyte-aligned accounting.
-    pub fn with_shared_pool(mut self) -> Self {
-        self.shared_pool = true;
-        self
-    }
-
     /// Set a callback to be called whenever the usage changes successfully.
     /// The callback receives the new total usage in bytes.
     ///
     /// # Note
     /// The callback is called after both successful `track()` and stream drop.
-    /// Usage is byte-exact with the shared pool or unlimited mode; otherwise it is 1KB-aligned.
+    /// Usage is byte-exact in unlimited mode; otherwise it is 1KB-aligned.
     pub fn on_update<F>(mut self, on_update: F) -> Self
     where
         F: Fn(usize) + Send + Sync + 'static,
@@ -761,15 +748,11 @@ impl QueryMemoryTrackerBuilder {
     /// Build a [`QueryMemoryTracker`] from this builder.
     pub fn build(self) -> QueryMemoryTracker {
         let metrics = CallbackMemoryMetrics::new(self.on_update, self.on_exhausted, self.on_reject);
-        let manager = if self.shared_pool {
-            MemoryBackend::shared(self.limit, metrics.clone())
-        } else {
-            MemoryBackend::Manager(MemoryManager::with_granularity(
-                self.limit as u64,
-                PermitGranularity::Kilobyte,
-                metrics.clone(),
-            ))
-        };
+        let manager = MemoryManager::with_granularity(
+            self.limit as u64,
+            PermitGranularity::Kilobyte,
+            metrics.clone(),
+        );
 
         QueryMemoryTracker {
             manager,
@@ -1085,18 +1068,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shared_quota_for_readers_batches_and_merge_buffers() {
-        use datafusion::execution::memory_pool::MemoryConsumer;
+    async fn test_reader_reservation_wait_release_timeout_and_cancellation() {
+        let tracker = QueryMemoryTracker::builder(
+            2048,
+            OnExhaustedPolicy::Wait {
+                timeout: Duration::from_millis(20),
+            },
+        )
+        .build();
+        let first = tracker.reserve(1025).await.unwrap();
+        assert_eq!(2048, tracker.current());
+        let mut waiting = Box::pin(tracker.reserve(1));
+        assert!(futures::poll!(&mut waiting).is_pending());
+        drop(first);
+        let guard = waiting.await.unwrap();
+        assert_eq!(1024, tracker.current());
+        assert!(
+            tracker
+                .reserve(1025)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("timed out")
+        );
+        assert!(futures::poll!(Box::pin(tracker.reserve(2049))).is_ready());
+        let mut cancelled = Box::pin(tracker.reserve(1025));
+        assert!(futures::poll!(&mut cancelled).is_pending());
+        drop(cancelled);
+        drop(guard);
+        assert_eq!(0, tracker.current());
+        assert!(tracker.reserve(2048).await.is_ok());
+    }
 
+    #[tokio::test]
+    async fn test_reader_and_batch_reservations_share_scan_budget() {
         let batch = large_string_batch(512);
-        let batch_bytes = batch.logical_slice_memory_size();
-        let tracker = QueryMemoryTracker::builder(batch_bytes + 100, OnExhaustedPolicy::Fail)
-            .with_shared_pool()
-            .build();
-        let row_group = tracker.reserve(60).await.unwrap();
-        let pool = tracker.memory_pool().unwrap();
-        let merge = MemoryConsumer::new("merge").register(&pool);
-        merge.try_grow(40).unwrap();
+        let batch_bytes = aligned_tracked_bytes(batch.logical_slice_memory_size());
+        let tracker =
+            QueryMemoryTracker::builder(batch_bytes + 1024, OnExhaustedPolicy::Fail).build();
+        let reader = tracker.reserve(1).await.unwrap();
         let mut stream = MemoryTrackedStream::new(
             RecordBatches::try_new(batch.schema.clone(), vec![batch.clone(), batch])
                 .unwrap()
@@ -1106,58 +1116,16 @@ mod tests {
         stream.next().await.unwrap().unwrap();
         assert_eq!(tracker.limit(), tracker.current());
         assert!(tracker.reserve(1).await.is_err());
-        assert!(merge.try_grow(1).is_err());
         assert!(stream.next().await.unwrap().is_err());
-        assert_eq!(tracker.limit(), pool.reserved());
-        drop(row_group);
-        assert_eq!(batch_bytes + 40, tracker.current());
-        // Batch charges remain until stream drop, independently of the row-group lifetime.
+        drop(reader);
+        assert_eq!(batch_bytes, tracker.current());
         drop(stream);
-        assert_eq!(40, tracker.current());
-        let split = merge.split(15);
-        drop(merge);
-        assert_eq!(15, tracker.current());
-        drop(split);
         assert_eq!(0, tracker.current());
-    }
-
-    #[tokio::test]
-    async fn test_shared_quota_wait_release_timeout_and_cancellation() {
-        use datafusion::execution::memory_pool::MemoryConsumer;
-
-        let tracker = QueryMemoryTracker::builder(
-            100,
-            OnExhaustedPolicy::Wait {
-                timeout: Duration::from_millis(20),
-            },
-        )
-        .with_shared_pool()
-        .build();
-        let pool = tracker.memory_pool().unwrap();
-        let merge = MemoryConsumer::new("merge").register(&pool);
-        merge.try_grow(100).unwrap();
-        let mut waiting = Box::pin(tracker.reserve(70));
-        assert!(futures::poll!(&mut waiting).is_pending());
-        merge.shrink(70);
-        let guard = waiting.await.unwrap();
-        assert_eq!(100, tracker.current());
-        assert!(
-            tracker
-                .reserve(1)
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("timed out")
-        );
-        // Requests that can never fit must fail without entering the wait loop.
-        assert!(futures::poll!(Box::pin(tracker.reserve(101))).is_ready());
-        let mut cancelled = Box::pin(tracker.reserve(1));
-        assert!(futures::poll!(&mut cancelled).is_pending());
-        drop(cancelled);
+        let unlimited = QueryMemoryTracker::builder(0, OnExhaustedPolicy::Fail).build();
+        let guard = unlimited.reserve(17).await.unwrap();
+        assert_eq!(17, unlimited.current());
         drop(guard);
-        drop(merge);
-        assert_eq!(0, tracker.current());
-        assert!(tracker.reserve(100).await.is_ok());
+        assert_eq!(0, unlimited.current());
     }
 
     #[tokio::test]

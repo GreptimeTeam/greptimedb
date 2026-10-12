@@ -1493,9 +1493,15 @@ async fn test_series_scan_with_format(flat_format: bool) {
 async fn test_two_phase_series_scan() {
     for use_index in [false, true] {
         for use_range_index in [false, true] {
-            check_two_phase_series_scan(use_index, use_range_index, true).await;
+            for mode in [
+                crate::config::ScanMemoryMode::Basic,
+                crate::config::ScanMemoryMode::Extended,
+            ] {
+                check_two_phase_series_scan(use_index, use_range_index, true, mode).await;
+            }
         }
-        check_two_phase_series_scan(use_index, true, false).await;
+        check_two_phase_series_scan(use_index, true, false, crate::config::ScanMemoryMode::Basic)
+            .await;
     }
 }
 
@@ -1503,10 +1509,12 @@ async fn check_two_phase_series_scan(
     use_index: bool,
     use_range_index: bool,
     enable_range_index: bool,
+    scan_memory_mode: crate::config::ScanMemoryMode,
 ) {
     let mut env = TestEnv::with_prefix("test_two_phase_series_scan").await;
     let engine = env
         .create_engine(MitoConfig {
+            scan_memory_mode,
             experimental_series_scan_v2: true,
             experimental_enable_series_index: true,
             experimental_enable_range_index: enable_range_index,
@@ -1735,7 +1743,12 @@ async fn check_two_phase_series_scan(
         .unwrap();
 
     let metrics_set = ExecutionPlanMetricsSet::default();
-    let context = store_api::region_engine::QueryScanContext::default();
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1024 * 1024));
+    let context = store_api::region_engine::QueryScanContext {
+        memory_pool: pool.clone(),
+        ..Default::default()
+    };
     let partition_batches = try_join_all((0..3).map(|partition| {
         let stream = scanner
             .scan_partition(&context, &metrics_set, partition)
@@ -1794,6 +1807,40 @@ async fn check_two_phase_series_scan(
     assert_eq!(Some(&2), series_to_partition.get("b"));
     assert_eq!(Some(&2), series_to_partition.get("d"));
 
+    assert_eq!(0, pool.reserved());
+    // Existing query operators consume the same pool in either scan mode.
+    scanner.reset_state();
+    let other = MemoryConsumer::new("other-query-operator").register(&pool);
+    other.try_grow(1024 * 1024).unwrap();
+    let failed = try_join_all((0..3).map(|partition| {
+        let stream = scanner
+            .scan_partition(&context, &metrics_set, partition)
+            .unwrap();
+        async move { stream.try_collect::<Vec<_>>().await }
+    }))
+    .await;
+    assert!(failed.is_err());
+    other.free();
+    assert_eq!(0, pool.reserved());
+
+    // Exhausting the scan budget must fail even with an unbounded query pool.
+    scanner.reset_state();
+    let scan_tracker = &engine.inner.scan_memory_tracker;
+    let scan_guard = scan_tracker.reserve(scan_tracker.limit()).await.unwrap();
+    let fresh_context = store_api::region_engine::QueryScanContext::default();
+    let failed = try_join_all((0..3).map(|partition| {
+        let stream = scanner
+            .scan_partition(&fresh_context, &metrics_set, partition)
+            .unwrap();
+        async move { stream.try_collect::<Vec<_>>().await }
+    }))
+    .await;
+    assert!(failed.is_err());
+    drop(scan_guard);
+
+    // Keep the previous execution's pool exhausted while replay uses a fresh pool.
+    other.try_grow(1024 * 1024).unwrap();
+    let context = store_api::region_engine::QueryScanContext::default();
     scanner.reset_state();
     assert_eq!("two_phase", scanner.mode());
     assert_eq!(
@@ -1838,6 +1885,42 @@ async fn check_two_phase_series_scan(
     }
     replay_rows.sort();
     assert_eq!(actual_rows, replay_rows);
+
+    // Dropping every partition must let the shared distributor release its pool.
+    scanner.reset_state();
+    let cancelled_context = store_api::region_engine::QueryScanContext::default();
+    let cancelled_pool = Arc::downgrade(&cancelled_context.memory_pool);
+    let streams = (0..3)
+        .map(|partition| {
+            scanner
+                .scan_partition(&cancelled_context, &metrics_set, partition)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    drop(streams);
+    drop(cancelled_context);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while cancelled_pool.upgrade().is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    scanner.reset_state();
+    let direct_batches = scanner
+        .build_stream()
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(
+        actual_rows.len(),
+        direct_batches
+            .iter()
+            .map(|batch| batch.num_rows())
+            .sum::<usize>()
+    );
 
     // Exercise precise field/time filtering and candidate tag filtering on both paths.
     let filtered = engine

@@ -26,6 +26,7 @@ use common_error::ext::BoxedError;
 use common_recordbatch::adapter::RegionQueryStatCounters;
 use common_recordbatch::{EmptyRecordBatchStream, QueryMemoryTracker, SendableRecordBatchStream};
 use common_time::Timestamp;
+use datafusion_execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType, PhysicalExpr};
 use datatypes::schema::SchemaRef;
@@ -461,10 +462,23 @@ impl PrepareRequest {
 }
 
 /// Necessary context of the query for the scanner.
-#[derive(Clone, Default)]
+/// Direct callers should create one context per scan and reuse it across partitions.
+/// The default pool is unbounded; cloning the context shares its pool.
+#[derive(Clone)]
 pub struct QueryScanContext {
     /// Whether the query is EXPLAIN ANALYZE VERBOSE.
     pub explain_verbose: bool,
+    /// Executing node's query runtime pool, shared by all partitions of this scan.
+    pub memory_pool: Arc<dyn MemoryPool>,
+}
+
+impl Default for QueryScanContext {
+    fn default() -> Self {
+        Self {
+            explain_verbose: false,
+            memory_pool: Arc::new(UnboundedMemoryPool::default()),
+        }
+    }
 }
 
 /// A scanner that provides a way to scan the region concurrently.

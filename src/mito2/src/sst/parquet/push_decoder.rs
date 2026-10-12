@@ -436,14 +436,13 @@ mod tests {
             .iter()
             .map(|rg| rg.column(0).uncompressed_size() as usize)
             .collect();
-        let limit = *sizes.iter().max().unwrap();
+        let aligned = |bytes: usize| bytes.div_ceil(1024) * 1024;
+        let limit = aligned(*sizes.iter().max().unwrap());
         assert!(metadata.row_group(0).total_byte_size() as usize > limit);
         let projection = ProjectionMask::leaves(metadata.file_metadata().schema_descr(), [0]);
         let metadata =
             ArrowReaderMetadata::try_new(Arc::new(metadata), ArrowReaderOptions::new()).unwrap();
-        let tracker = QueryMemoryTracker::builder(limit, OnExhaustedPolicy::Fail)
-            .with_shared_pool()
-            .build();
+        let tracker = QueryMemoryTracker::builder(limit, OnExhaustedPolicy::Fail).build();
         let cache = CacheStrategy::EnableAll(Arc::new(
             crate::cache::CacheManager::builder()
                 .page_cache_size(1024 * 1024)
@@ -484,10 +483,10 @@ mod tests {
         for (row_group_idx, size) in sizes.iter().enumerate() {
             let mut first = build(row_group_idx, "memory.parquet", None);
             assert_eq!(1, first.next().await.unwrap().unwrap().num_rows());
-            assert_eq!(*size, tracker.current());
+            assert_eq!(aligned(*size), tracker.current());
             let mut competing = build(row_group_idx, "memory.parquet", None);
             assert!(competing.next().await.unwrap().is_err());
-            assert_eq!(*size, tracker.current());
+            assert_eq!(aligned(*size), tracker.current());
             // Reserve before decoding, even when the selection would require no page reads.
             let mut skipped = build(
                 row_group_idx,
@@ -497,7 +496,7 @@ mod tests {
                 ])),
             );
             assert!(skipped.next().await.unwrap().is_err());
-            assert_eq!(*size, tracker.current());
+            assert_eq!(aligned(*size), tracker.current());
             while first.next().await.transpose().unwrap().is_some() {}
             // Completed streams may remain alive without holding their quota.
             assert_eq!(0, tracker.current());

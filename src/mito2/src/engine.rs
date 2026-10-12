@@ -106,7 +106,6 @@ use common_recordbatch::{QueryMemoryTracker, SendableRecordBatchStream};
 use common_stat::get_total_memory_bytes;
 use common_telemetry::{debug, info, tracing, warn};
 use common_wal::options::WalOptions;
-use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
 use futures::future::{join_all, try_join_all};
 use futures::stream::{self, Stream, StreamExt};
 use object_store::manager::ObjectStoreManagerRef;
@@ -244,7 +243,6 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
         let scan_memory_tracker =
             QueryMemoryTracker::builder(scan_memory_limit, config.scan_memory_on_exhausted)
-                .with_shared_pool()
                 .on_update(|usage| {
                     SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
                 })
@@ -255,14 +253,12 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
                     SCAN_REQUESTS_REJECTED_TOTAL.inc();
                 })
                 .build();
-        let scan_memory_pool = scan_memory_pool(&scan_memory_tracker, config.scan_memory_mode)?;
 
         let inner = EngineInner {
             workers,
             config,
             wal_raw_entry_reader,
             scan_memory_tracker,
-            scan_memory_pool,
             region_hook,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
@@ -748,8 +744,6 @@ struct EngineInner {
     wal_raw_entry_reader: Arc<dyn RawEntryReader>,
     /// Memory tracker for table scans.
     scan_memory_tracker: QueryMemoryTracker,
-    /// Memory pool shared by internal scan operators across all queries.
-    scan_memory_pool: Arc<dyn MemoryPool>,
     /// The region hook (if any) registered via plugins; exposed for the GC worker
     /// to fire [`RegionHook::on_region_gc`].
     region_hook: Option<RegionHookRef>,
@@ -1164,7 +1158,6 @@ impl EngineInner {
         .with_ignore_range_index(!self.config.experimental_enable_range_index)
         .with_query_stat_counters(region.region_stats.query_stat_counters())
         .with_max_concurrent_scan_files(self.config.max_concurrent_scan_files)
-        .with_scan_memory_pool(self.scan_memory_pool.clone())
         .with_scan_memory_tracker(self.scan_memory_tracker.clone())
         .with_experimental_series_scan_v2(self.config.experimental_series_scan_v2)
         .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
@@ -1625,7 +1618,6 @@ impl MitoEngine {
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
         let scan_memory_tracker =
             QueryMemoryTracker::builder(scan_memory_limit, config.scan_memory_on_exhausted)
-                .with_shared_pool()
                 .on_update(|usage| {
                     SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
                 })
@@ -1636,7 +1628,6 @@ impl MitoEngine {
                     SCAN_REQUESTS_REJECTED_TOTAL.inc();
                 })
                 .build();
-        let scan_memory_pool = scan_memory_pool(&scan_memory_tracker, config.scan_memory_mode)?;
         Ok(MitoEngine {
             inner: Arc::new(EngineInner {
                 workers: WorkerGroup::start_for_test(
@@ -1655,7 +1646,6 @@ impl MitoEngine {
                 config,
                 wal_raw_entry_reader,
                 scan_memory_tracker,
-                scan_memory_pool,
                 region_hook: None,
                 #[cfg(feature = "enterprise")]
                 extension_range_provider_factory: None,
@@ -1669,26 +1659,9 @@ impl MitoEngine {
     }
 }
 
-fn scan_memory_pool(
-    tracker: &QueryMemoryTracker,
-    mode: ScanMemoryMode,
-) -> Result<Arc<dyn MemoryPool>> {
-    if mode == ScanMemoryMode::Extended {
-        tracker
-            .memory_pool()
-            .context(crate::error::UnexpectedSnafu {
-                reason: "Scan memory tracker must use the shared-pool backend",
-            })
-    } else {
-        Ok(Arc::new(UnboundedMemoryPool::default()))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
-
-    use datafusion::execution::memory_pool::MemoryConsumer;
 
     use super::*;
     use crate::sst::file::FileMeta;
@@ -1774,22 +1747,5 @@ mod tests {
             committed_sequence: None,
         };
         assert!(!is_valid_region_edit(&edit));
-    }
-
-    #[test]
-    fn test_scan_memory_pool_is_shared_across_consumers() {
-        let tracker =
-            QueryMemoryTracker::builder(100, common_memory_manager::OnExhaustedPolicy::Fail)
-                .with_shared_pool()
-                .build();
-        let pool = scan_memory_pool(&tracker, ScanMemoryMode::Extended).unwrap();
-        let cloned_pool = pool.clone();
-        let first = MemoryConsumer::new("first-scan").register(&pool);
-        let second = MemoryConsumer::new("second-scan").register(&cloned_pool);
-
-        first.try_grow(60).unwrap();
-        assert!(second.try_grow(50).is_err());
-        second.try_grow(40).unwrap();
-        assert_eq!(100, pool.reserved());
     }
 }

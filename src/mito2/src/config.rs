@@ -58,7 +58,7 @@ pub enum ScanMemoryMode {
     /// Count projected Parquet columns' uncompressed row-group sizes.
     #[default]
     Basic,
-    /// Also count cumulative streamed batches and series-merge buffers.
+    /// Also count cumulative streamed batches.
     Extended,
 }
 
@@ -191,7 +191,8 @@ pub struct MitoConfig {
     /// Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "50%").
     pub scan_memory_limit: MemoryLimit,
     /// Scan memory accounting: basic counts projected Parquet row groups;
-    /// extended also counts streamed batches and series-merge buffers.
+    /// extended also counts cumulative streamed batches. Limited reservations round up to KB.
+    /// Internal series merges use the query runtime pool in both modes.
     pub scan_memory_mode: ScanMemoryMode,
     /// Behavior when scan memory tracking cannot acquire memory from the budget.
     /// `wait` means `wait(10s)`, not unlimited waiting.
