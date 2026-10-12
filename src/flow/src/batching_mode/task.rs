@@ -2149,7 +2149,7 @@ impl BatchingTask {
                 .unwrap_or(self.config.batch_opts.experimental_max_filter_num_per_query);
             let expr = state.gen_scoped_filter_exprs(
                 &col_name,
-                Some(expire_lower_bound),
+                self.config.expire_after.map(|_| expire_lower_bound),
                 window_size,
                 window_cnt,
                 self.config.flow_id,
