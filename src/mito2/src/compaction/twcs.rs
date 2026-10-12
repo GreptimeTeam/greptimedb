@@ -3920,7 +3920,7 @@ mod tests {
 
     #[test]
     fn test_l1_file_reduction_still_packs_pk_disjoint_files() {
-        let files = [b'a', b'z']
+        let files = (*b"az")
             .map(|key| {
                 new_file_handle_with_size_sequence_and_primary_key_range(
                     FileId::random(),
