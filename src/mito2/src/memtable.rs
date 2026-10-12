@@ -64,6 +64,32 @@ pub use bulk::part::{
 #[cfg(any(test, feature = "test"))]
 pub use time_partition::filter_record_batch;
 
+/// Groups sequence intervals into ordered, disjoint components. A component must
+/// not be split during a partial merge: an excluded interval could contain an
+/// intermediate row version. Bounds may conservatively include removed rows.
+pub(crate) fn group_by_sequence<T>(
+    mut parts: Vec<T>,
+    bounds: impl Fn(&T) -> (SequenceNumber, SequenceNumber),
+) -> Vec<Vec<T>> {
+    parts.sort_by_key(&bounds);
+    let mut groups: Vec<Vec<T>> = Vec::new();
+    let mut group_max = 0;
+    for part in parts {
+        let (min, max) = bounds(&part);
+        match groups.last_mut() {
+            Some(group) if min <= group_max => {
+                group.push(part);
+                group_max = group_max.max(max);
+            }
+            _ => {
+                groups.push(vec![part]);
+                group_max = max;
+            }
+        }
+    }
+    groups
+}
+
 /// Id for memtables.
 ///
 /// Should be unique under the same region.

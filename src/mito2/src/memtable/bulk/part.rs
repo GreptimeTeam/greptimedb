@@ -15,6 +15,7 @@
 //! Bulk part encoder/decoder.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -425,6 +426,11 @@ impl UnorderedPart {
     /// Returns the total estimated uncompressed bytes across all parts.
     pub(super) fn estimated_bytes(&self) -> usize {
         self.total_bytes
+    }
+
+    /// Returns the sequence interval occupied by pending small writes.
+    pub(super) fn sequence_bounds(&self) -> Option<(SequenceNumber, SequenceNumber)> {
+        (!self.is_empty()).then_some((self.min_sequence, self.max_sequence))
     }
 
     /// Adds a BulkPart to this unordered collection.
@@ -1215,7 +1221,7 @@ impl EncodedBulkPart {
             num_rows: meta.num_rows,
             num_ranges: 1,
             max_sequence: meta.max_sequence,
-            min_sequence: 0,
+            min_sequence: meta.min_sequence,
             series_count: meta.num_series as usize,
         }
     }
@@ -1302,6 +1308,8 @@ pub struct BulkPartMeta {
     pub region_metadata: RegionMetadataRef,
     /// Number of series.
     pub num_series: u64,
+    /// Lower bound of input sequences, including rows removed by deduplication.
+    pub min_sequence: SequenceNumber,
     /// Maximum sequence number in part.
     pub max_sequence: u64,
 }
@@ -1360,7 +1368,7 @@ impl BulkPartEncoder {
         arrow_schema: SchemaRef,
         min_timestamp: i64,
         max_timestamp: i64,
-        max_sequence: u64,
+        sequence_bounds: RangeInclusive<SequenceNumber>,
         metrics: &mut BulkPartEncodeMetrics,
     ) -> Result<Option<EncodedBulkPart>> {
         let mut buf = Vec::with_capacity(4096);
@@ -1412,7 +1420,8 @@ impl BulkPartEncoder {
                 parquet_metadata,
                 region_metadata: self.metadata.clone(),
                 num_series,
-                max_sequence,
+                min_sequence: *sequence_bounds.start(),
+                max_sequence: *sequence_bounds.end(),
             },
             schema: arrow_schema,
         }))
@@ -1448,6 +1457,7 @@ impl BulkPartEncoder {
                 region_metadata: self.metadata.clone(),
                 num_series: part.estimated_series_count() as u64,
                 max_sequence: part.sequence,
+                min_sequence: part.min_sequence,
             },
             schema: arrow_schema,
         }))
@@ -1657,6 +1667,8 @@ pub struct MultiBulkPart {
     max_timestamp: i64,
     /// Min timestamp in part.
     min_timestamp: i64,
+    /// Lower bound of input sequences, including rows removed by deduplication.
+    min_sequence: SequenceNumber,
     /// Max sequence number in part.
     max_sequence: SequenceNumber,
     /// Number of series.
@@ -1680,6 +1692,7 @@ impl MultiBulkPart {
             total_rows: num_rows,
             max_timestamp: part.max_timestamp,
             min_timestamp: part.min_timestamp,
+            min_sequence: part.min_sequence,
             max_sequence: part.sequence,
             series_count,
             batch_stats,
@@ -1692,6 +1705,7 @@ impl MultiBulkPart {
     /// * `batches` - Ordered record batches
     /// * `min_timestamp` - Minimum timestamp across all batches
     /// * `max_timestamp` - Maximum timestamp across all batches
+    /// * `min_sequence` - Lower bound of input sequences
     /// * `max_sequence` - Maximum sequence number across all batches
     /// * `series_count` - Number of series in the batches
     /// * `metadata` - Region metadata for computing batch statistics
@@ -1702,6 +1716,7 @@ impl MultiBulkPart {
         batches: Vec<RecordBatch>,
         min_timestamp: i64,
         max_timestamp: i64,
+        min_sequence: SequenceNumber,
         max_sequence: SequenceNumber,
         series_count: usize,
         metadata: &RegionMetadata,
@@ -1716,6 +1731,7 @@ impl MultiBulkPart {
             total_rows,
             max_timestamp,
             min_timestamp,
+            min_sequence,
             max_sequence,
             series_count,
             batch_stats,
@@ -1739,6 +1755,11 @@ impl MultiBulkPart {
     /// Returns the maximum timestamp.
     pub fn max_timestamp(&self) -> i64 {
         self.max_timestamp
+    }
+
+    /// Returns the lower bound of input sequences.
+    pub fn min_sequence(&self) -> SequenceNumber {
+        self.min_sequence
     }
 
     /// Returns the maximum sequence number.
@@ -1831,7 +1852,7 @@ impl MultiBulkPart {
             num_rows: self.num_rows(),
             num_ranges: 1,
             max_sequence: self.max_sequence,
-            min_sequence: 0,
+            min_sequence: self.min_sequence,
             series_count: self.series_count,
         }
     }
@@ -3151,12 +3172,14 @@ mod tests {
         let mut all_batches = Vec::new();
         let mut min_ts = i64::MAX;
         let mut max_ts = i64::MIN;
+        let mut min_seq = u64::MAX;
         let mut max_seq = 0u64;
 
         for inputs in groups {
             let part = build_converted_bulk_part(inputs);
             min_ts = min_ts.min(part.min_timestamp);
             max_ts = max_ts.max(part.max_timestamp);
+            min_seq = min_seq.min(part.min_sequence);
             max_seq = max_seq.max(part.sequence);
             all_batches.push(part.batch);
         }
@@ -3165,6 +3188,7 @@ mod tests {
             all_batches,
             min_ts,
             max_ts,
+            min_seq,
             max_seq,
             groups.len(),
             &metadata,
