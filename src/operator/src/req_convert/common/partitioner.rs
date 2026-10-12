@@ -20,7 +20,7 @@ use api::v1::region::{
 };
 use api::v1::{ArrowIpc, PartitionExprVersion, Rows};
 use common_error::ext::BoxedError;
-use common_grpc::flight;
+use common_grpc::flight::{self, FlightDecoder};
 use datatypes::arrow::compute;
 use datatypes::arrow::record_batch::RecordBatch;
 use partition::PartitionRuleRef;
@@ -157,7 +157,7 @@ impl TablePartitioner {
                         bulk.body.context(error::UnexpectedSnafu {
                             violated: "Cannot reroute a bulk insert without Arrow IPC data",
                         })?;
-                    let batch = flight::FlightDecoder::try_from_schema_bytes(&ipc.schema)
+                    let batch = FlightDecoder::try_from_schema_bytes(&ipc.schema)
                         .and_then(|mut decoder| {
                             decoder.try_decode_record_batch(&ipc.data_header, &ipc.payload)
                         })
@@ -374,7 +374,7 @@ mod tests {
             .unwrap();
         let cache = cache::new_table_info_cache(
             "reroute_test_table_info".to_string(),
-            moka::future::Cache::new(16),
+            Cache::new(16),
             backend,
         );
         (manager, cache)
@@ -577,7 +577,7 @@ mod tests {
             let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = bulk.body else {
                 panic!("expected Arrow IPC")
             };
-            let batch = flight::FlightDecoder::try_from_schema_bytes(&ipc.schema)
+            let batch = FlightDecoder::try_from_schema_bytes(&ipc.schema)
                 .unwrap()
                 .try_decode_record_batch(&ipc.data_header, &ipc.payload)
                 .unwrap();

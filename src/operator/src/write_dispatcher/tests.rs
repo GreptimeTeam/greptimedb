@@ -467,7 +467,7 @@ async fn test_write_retry_refreshes_stale_route_and_sends_only_failed_region_to_
         for insert in &mut inserts.requests {
             insert.partition_expr_version = versions
                 [&RegionId::from_u64(insert.region_id).region_number()]
-                .map(|value| api::v1::PartitionExprVersion { value });
+                .map(|value| PartitionExprVersion { value });
         }
     }
     let response = dispatcher.dispatch(vec![request]).await.unwrap();

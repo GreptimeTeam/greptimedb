@@ -438,6 +438,7 @@ impl WriteDispatcher {
             .context(ExternalSnafu)?;
         self.dispatch_prepared(writes, histogram).await
     }
+
     async fn invalidate_routes(
         &self,
         regions: &[RegionId],
