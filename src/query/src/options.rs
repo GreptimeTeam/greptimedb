@@ -87,14 +87,26 @@ impl ConfigExtension for FactorizedJoinAggOptions {
 }
 
 impl ExtensionOptions for FactorizedJoinAggOptions {
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
-    fn cloned(&self) -> Box<dyn ExtensionOptions> { Box::new(self.clone()) }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+    fn cloned(&self) -> Box<dyn ExtensionOptions> {
+        Box::new(self.clone())
+    }
     fn set(&mut self, key: &str, value: &str) -> datafusion::error::Result<()> {
-        Err(datafusion::common::DataFusionError::NotImplemented(format!("FactorizedJoinAggOptions does not support set key: {key} with value: {value}")))
+        Err(datafusion::common::DataFusionError::NotImplemented(
+            format!("FactorizedJoinAggOptions does not support set key: {key} with value: {value}"),
+        ))
     }
     fn entries(&self) -> Vec<ConfigEntry> {
-        vec![ConfigEntry { key: "enabled".to_string(), value: Some(self.enabled.to_string()), description: "Enable experimental factorized join aggregation" }]
+        vec![ConfigEntry {
+            key: "enabled".to_string(),
+            value: Some(self.enabled.to_string()),
+            description: "Enable experimental factorized join aggregation",
+        }]
     }
 }
 
