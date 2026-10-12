@@ -381,9 +381,11 @@ TQL EXPLAIN (0, 10, '5s') {"otel.m"} and {"otel.m", "Host"="h1"};
 | plan_type_| plan_|
 +-+-+
 | logical_plan_| LeftSemi Join: otel.m.Host = otel.m.Host, otel.m.host = otel.m.host, otel.m.service.name = otel.m.service.name, otel.m.ts.time = otel.m.ts.time_|
-|_|_Aggregate: groupBy=[[otel.m.ts.time, otel.m.service.name, otel.m.Host, otel.m.host, otel.m.v.val]], aggr=[[]]_|
+|_|_Projection: otel.m.ts.time, otel.m.service.name, otel.m.Host, otel.m.host, otel.m.v.val_|
+|_|_Aggregate: groupBy=[[otel.m.ts.time, otel.m.service.name, otel.m.Host, otel.m.host, otel.m.v.val, __promql_metric_name]], aggr=[[]]_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| Distinct:_|
+|_|_Projection: otel.m.ts.time, otel.m.service.name, otel.m.Host, otel.m.host, otel.m.v.val, Utf8("otel.m") FieldMetadata { inner: {"greptime:promql:role": "metric_name"} } AS __promql_metric_name_|
 |_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts.time]_|
 |_|_PromSeriesDivide: tags=["service.name", "Host", "host"]_|
 |_|_Sort: otel.m.service.name ASC NULLS FIRST, otel.m.Host ASC NULLS FIRST, otel.m.host ASC NULLS FIRST, otel.m.ts.time ASC NULLS FIRST_|
@@ -396,7 +398,7 @@ TQL EXPLAIN (0, 10, '5s') {"otel.m"} and {"otel.m", "Host"="h1"};
 |_|_Sort: otel.m.service.name ASC NULLS FIRST, otel.m.Host ASC NULLS FIRST, otel.m.host ASC NULLS FIRST, otel.m.ts.time ASC NULLS FIRST_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| Filter: otel.m.Host = Utf8("h1") AND otel.m.ts.time >= TimestampMillisecond(-299999, None) AND otel.m.ts.time <= TimestampMillisecond(10000, None)_|
-|_|_TableScan: otel.m, partial_filters=[otel.m.Host = Utf8("h1"), otel.m.ts.time >= TimestampMillisecond(-299999, None), otel.m.ts.time <= TimestampMillisecond(10000, None)] |
+|_|_TableScan: otel.m, partial_filters=[otel.m.Host = Utf8("h1"), otel.m.ts.time >= TimestampMillisecond(-299999, None), otel.m.ts.time <= TimestampMillisecond(10000, None)]_|
 |_| ]]_|
 | physical_plan | HashJoinExec: mode=CollectLeft, join_type=RightSemi, on=[(Host@2, Host@2), (host@3, host@3), (service.name@1, service.name@1), (ts.time@0, ts.time@0)], NullsEqual: true_|
 |_|_CoalescePartitionsExec_|
@@ -406,9 +408,10 @@ TQL EXPLAIN (0, 10, '5s') {"otel.m"} and {"otel.m", "Host"="h1"};
 |_|_SortExec: expr=[service.name@1 ASC, Host@2 ASC, host@3 ASC, ts.time@0 ASC], preserve_REDACTED
 |_|_RepartitionExec: REDACTED
 |_|_MergeScanExec: REDACTED
-|_|_AggregateExec: mode=FinalPartitioned, gby=[ts.time@0 as ts.time, service.name@1 as service.name, Host@2 as Host, host@3 as host, v.val@4 as v.val], aggr=[]_|
+|_|_ProjectionExec: expr=[ts.time@0 as ts.time, service.name@1 as service.name, Host@2 as Host, host@3 as host, v.val@4 as v.val]_|
+|_|_AggregateExec: mode=FinalPartitioned, gby=[ts.time@0 as ts.time, service.name@1 as service.name, Host@2 as Host, host@3 as host, v.val@4 as v.val, __promql_metric_name@5 as __promql_metric_name], aggr=[] |
 |_|_RepartitionExec: REDACTED
-|_|_AggregateExec: mode=Partial, gby=[ts.time@0 as ts.time, service.name@1 as service.name, Host@2 as Host, host@3 as host, v.val@4 as v.val], aggr=[]_|
+|_|_AggregateExec: mode=Partial, gby=[ts.time@0 as ts.time, service.name@1 as service.name, Host@2 as Host, host@3 as host, v.val@4 as v.val, __promql_metric_name@5 as __promql_metric_name], aggr=[]_|
 |_|_RepartitionExec: REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
@@ -424,21 +427,24 @@ TQL EXPLAIN (0, 10, '5s') topk(1, {"otel.m"});
 | plan_type_| plan_|
 +-+-+
 | logical_plan_| Projection: otel.m.v.val, otel.m.service.name, otel.m.Host, otel.m.host, otel.m.ts.time_|
-|_|_Sort: otel.m.ts.time ASC NULLS LAST, row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW ASC NULLS LAST_|
-|_|_Filter: CAST(row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW AS Float64) <= Float64(1)_|
-|_|_WindowAggr: windowExpr=[[row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]_|
+|_|_Sort: otel.m.ts.time ASC NULLS LAST, row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST, __promql_metric_name DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW ASC NULLS LAST_|
+|_|_Filter: CAST(row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST, __promql_metric_name DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW AS Float64) <= Float64(1)_|
+|_|_Projection: otel.m.ts.time, otel.m.service.name, otel.m.Host, otel.m.host, otel.m.v.val, row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST, __promql_metric_name DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW_|
+|_|_WindowAggr: windowExpr=[[row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST, __promql_metric_name DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts.time]_|
+|_| Projection: otel.m.ts.time, otel.m.service.name, otel.m.Host, otel.m.host, otel.m.v.val, Utf8("otel.m") FieldMetadata { inner: {"greptime:promql:role": "metric_name"} } AS __promql_metric_name_|
+|_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts.time]_|
 |_|_PromSeriesDivide: tags=["service.name", "Host", "host"]_|
 |_|_Sort: otel.m.service.name ASC NULLS FIRST, otel.m.Host ASC NULLS FIRST, otel.m.host ASC NULLS FIRST, otel.m.ts.time ASC NULLS FIRST_|
 |_|_Filter: otel.m.ts.time >= TimestampMillisecond(-299999, None) AND otel.m.ts.time <= TimestampMillisecond(10000, None)_|
 |_|_TableScan: otel.m, partial_filters=[otel.m.ts.time >= TimestampMillisecond(-299999, None), otel.m.ts.time <= TimestampMillisecond(10000, None)]_|
 |_| ]]_|
 | physical_plan | ProjectionExec: expr=[v.val@4 as v.val, service.name@1 as service.name, Host@2 as Host, host@3 as host, ts.time@0 as ts.time]_|
-|_|_SortPreservingMergeExec: [ts.time@0 ASC NULLS LAST, row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@5 ASC NULLS LAST]_|
-|_|_FilterExec: CAST(row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@5 AS Float64) <= 1_|
-|_|_BoundedWindowAggExec: wdw=[row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: Field { "row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW": UInt64 }, frame: ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted] |
-|_|_SortExec: expr=[ts.time@0 ASC NULLS LAST, isnan(v.val@4) ASC, v.val@4 DESC, service.name@1 DESC, Host@2 DESC, host@3 DESC], preserve_REDACTED
+|_|_SortPreservingMergeExec: [ts.time@0 ASC NULLS LAST, row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST, __promql_metric_name DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@5 ASC NULLS LAST]_|
+|_|_FilterExec: CAST(row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST, __promql_metric_name DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@5 AS Float64) <= 1_|
+|_|_ProjectionExec: expr=[ts.time@0 as ts.time, service.name@1 as service.name, Host@2 as Host, host@3 as host, v.val@4 as v.val, row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST, __promql_metric_name DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@6 as row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST, __promql_metric_name DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW] |
+|_|_BoundedWindowAggExec: wdw=[row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST, __promql_metric_name DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: Field { "row_number() PARTITION BY [otel.m.ts.time] ORDER BY [isnan(otel.m.v.val) ASC NULLS FIRST, otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST, __promql_metric_name DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW": UInt64 }, frame: ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted]_|
+|_|_SortExec: expr=[ts.time@0 ASC NULLS LAST, isnan(v.val@4) ASC, v.val@4 DESC, service.name@1 DESC, Host@2 DESC, host@3 DESC, __promql_metric_name@5 DESC], preserve_REDACTED
 |_|_RepartitionExec: REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
@@ -457,8 +463,10 @@ TQL EXPLAIN (5, 10, '5s') sum by ("service.name") (increase({"otel.m"}[10s]));
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| Sort: otel.m.service.name ASC NULLS LAST, otel.m.ts.time ASC NULLS LAST_|
 |_|_Aggregate: groupBy=[[otel.m.service.name, otel.m.ts.time]], aggr=[[sum(prom_increase(ts.time_range,v.val,ts.time,Int64(10000)))]]_|
+|_|_Projection: otel.m.ts.time, prom_increase(ts.time_range,v.val,ts.time,Int64(10000)), otel.m.service.name, otel.m.Host, otel.m.host_|
 |_|_Filter: prom_increase(ts.time_range,v.val,ts.time,Int64(10000)) IS NOT NULL_|
-|_|_Projection: otel.m.ts.time, prom_increase(ts.time_range, v.val, otel.m.ts.time, Int64(10000)) AS prom_increase(ts.time_range,v.val,ts.time,Int64(10000)), otel.m.service.name, otel.m.Host, otel.m.host |
+|_|_Projection: otel.m.ts.time, prom_increase(ts.time_range, v.val, otel.m.ts.time, Int64(10000)) AS prom_increase(ts.time_range,v.val,ts.time,Int64(10000)), otel.m.service.name, otel.m.Host, otel.m.host, __promql_metric_name |
+|_|_Projection: otel.m.ts.time, otel.m.service.name, otel.m.Host, otel.m.host, v.val, ts.time_range, Utf8("otel.m") FieldMetadata { inner: {"greptime:promql:role": "metric_name"} } AS __promql_metric_name_|
 |_|_PromRangeManipulate: req range=[5000..10000], interval=[5000], eval range=[10000], time index=[ts.time], values=["v.val"]_|
 |_|_PromSeriesNormalize: offset=[0], time index=[ts.time], filter NaN: [true]_|
 |_|_PromSeriesDivide: tags=["service.name", "Host", "host"]_|
@@ -480,17 +488,28 @@ TQL EXPLAIN (0, 10, '5s') histogram_quantile(0.5, {"otel.h"});
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| logical_plan_| HistogramFold: le=le, field=v.val, quantile=0.5_|
+| logical_plan_| Projection: otel.h.ts.time, otel.h.service.name, otel.h.v.val_|
+|_|_Filter: prom_assert_unique_match_group(__promql_match_group_count, otel.h.service.name)_|
+|_|_WindowAggr: windowExpr=[[count(otel.h.ts.time) PARTITION BY [otel.h.service.name, otel.h.ts.time] ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING AS __promql_match_group_count]]_|
+|_|_Projection: otel.h.ts.time, otel.h.service.name, otel.h.v.val_|
+|_|_HistogramFold: le=le, field=v.val, quantile=0.5_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts.time]_|
+|_| Projection: otel.h.ts.time, otel.h.service.name, otel.h.le, otel.h.v.val, Utf8("otel.h") FieldMetadata { inner: {"greptime:promql:role": "metric_name"} } AS __promql_metric_name_|
+|_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts.time]_|
 |_|_PromSeriesDivide: tags=["service.name", "le"]_|
 |_|_Sort: otel.h.service.name ASC NULLS FIRST, otel.h.le ASC NULLS FIRST, otel.h.ts.time ASC NULLS FIRST_|
 |_|_Filter: otel.h.ts.time >= TimestampMillisecond(-299999, None) AND otel.h.ts.time <= TimestampMillisecond(10000, None)_|
-|_|_TableScan: otel.h, partial_filters=[otel.h.ts.time >= TimestampMillisecond(-299999, None), otel.h.ts.time <= TimestampMillisecond(10000, None)] |
+|_|_TableScan: otel.h, partial_filters=[otel.h.ts.time >= TimestampMillisecond(-299999, None), otel.h.ts.time <= TimestampMillisecond(10000, None)]_|
 |_| ]]_|
-| physical_plan | HistogramFoldExec: le=@2, field=@3, quantile=0.5_|
+| physical_plan | FilterExec: prom_assert_unique_match_group(__promql_match_group_count@3, service.name@1), projection=[ts.time@0, service.name@1, v.val@2]_|
+|_|_WindowAggExec: wdw=[__promql_match_group_count: Ok(Field { name: "__promql_match_group_count", data_type: Int64 }), frame: WindowFrame { units: Rows, start_bound: Preceding(UInt64(NULL)), end_bound: Following(UInt64(NULL)), is_causal: false }] |
+|_|_SortExec: expr=[service.name@1 ASC NULLS LAST, ts.time@0 ASC NULLS LAST], preserve_REDACTED
 |_|_RepartitionExec: REDACTED
-|_|_SortExec: expr=[service.name@1 ASC NULLS LAST, ts.time@0 ASC NULLS LAST, TRY_CAST(le@2 AS Float64) ASC NULLS LAST], preserve_REDACTED
+|_|_CoalescePartitionsExec_|
+|_|_ProjectionExec: expr=[ts.time@0 as ts.time, service.name@1 as service.name, v.val@2 as v.val]_|
+|_|_HistogramFoldExec: le=@2, field=@3, quantile=0.5_|
+|_|_RepartitionExec: REDACTED
+|_|_SortExec: expr=[service.name@1 ASC NULLS LAST, __promql_metric_name@4 ASC NULLS LAST, ts.time@0 ASC NULLS LAST, TRY_CAST(le@2 AS Float64) ASC NULLS LAST], preserve_REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
