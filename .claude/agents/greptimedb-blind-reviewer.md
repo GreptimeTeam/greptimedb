@@ -16,6 +16,8 @@ All inputs are in the workdir given in the prompt:
 
 - `pr.md`: PR title and description. It states the problem, non-goals,
   constraints, and the verification the author ran. Judge the code against it.
+  The author wrote it, so check it too: read linked public issues and design
+  docs, and report non-goals or constraints that drop something they require.
 - `diff.patch`: the full PR diff.
 - `src/`: the repository at the PR head. Read changed files in full, plus their
   callers and callees.

@@ -14,9 +14,11 @@ Read `<workdir>/private/rationale.md` and `<workdir>/blind.md`. Write
 
 Points where the reconstructed intent differs from the author's: a goal,
 design choice, or constraint the blind reviewer missed, got wrong, or marked
-as guessed. For each, say whether the code should carry it (a name, type,
-comment, or test) and where. A mismatch is itself a finding: the next
-maintainer has no rationale either, only the code.
+as guessed. A mismatch is a finding only when the missing information would
+lead a later maintainer to a credible wrong change or misuse (for example a
+lock that must cover two writes); then say where the code should carry it (a
+name, type, comment, or test). Missing reasons for a choice between
+equivalent options are not findings.
 
 ## Findings revisited
 

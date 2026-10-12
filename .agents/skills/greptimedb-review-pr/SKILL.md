@@ -54,10 +54,13 @@ has no GitHub credentials, then record its output.
 | Codex | `python3 $S blind-run --workdir <workdir> --agent codex` (writes `blind.md`) | `codex-exec` |
 | OpenCode | `python3 $S blind-run --workdir <workdir> --agent opencode` (writes `blind.md`; not yet verified) | `opencode-run` |
 
-`blind-run` strips every GitHub credential from the subprocess environment and
+`blind-run` strips every GitHub credential from the subprocess environment,
+does not load the agent's user configuration (and so its MCP servers), and
 first checks that the private repository is unreachable through `gh`, git over
 HTTPS, and git over SSH. If any of them still connects, it aborts. Network
-access stays on, so the reviewer can read public upstream code.
+access stays on, so the reviewer can read public upstream code. This keeps the
+reviewer from reading ahead; it is not a filesystem sandbox, so local session
+files on the reviewer's machine stay readable.
 
 If none of these can run, do the blind review yourself following the same
 instructions, reading only the workdir, and record it with `--isolation none`.
@@ -72,7 +75,8 @@ python3 $S record-blind --workdir <workdir> --isolation <mode>
 It requires non-empty `## Findings` and `## Reconstructed intent` sections and
 accepts one blind review per reviewer per head. In `full` mode it commits the
 review to the private repository; that commit is the record that the findings
-came before the rationale was read.
+came before the rationale was read. If the workdir is lost after recording,
+run `prepare` again and continue at Step 3.
 
 ## Step 3: Compare (full mode only)
 
@@ -81,7 +85,9 @@ python3 $S open --workdir <workdir>
 ```
 
 Then read `references/phase2-compare.md` and follow it. If `open` reports no
-rationale (for example an external contributor's PR), skip to Step 4.
+rationale (for example an external contributor's PR), skip to Step 4. If
+`rationale_head` differs from `reviewed_head`, the author republished for a
+newer head; say so in the comparison.
 
 ## Step 4: Draft inline comments
 

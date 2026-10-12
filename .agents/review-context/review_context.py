@@ -287,6 +287,8 @@ def compact_record(agent, record):
 
 def compact_session(path, agent, since):
     if agent == "opencode":
+        if since:
+            raise Abort("--since is not supported for OpenCode sessions; leave the session out instead")
         return
     kept = []
     with open(path, encoding="utf-8", errors="surrogateescape") as f:
@@ -535,7 +537,8 @@ def credential_free_env(workdir, agent):
     The blind reviewer may read public code (e.g. Prometheus) but must not
     reach the private repo. Every credential source gh and git consult is cut
     here; `assert_private_unreachable` verifies the result instead of trusting
-    this list.
+    this list. This keeps a well-behaved agent from reading ahead; it is not a
+    filesystem sandbox.
     """
     home = Path.home()
     fake_home = Path(workdir) / ".blind-home"
@@ -561,8 +564,9 @@ def credential_free_env(workdir, agent):
     if agent == "codex":
         env["CODEX_HOME"] = os.environ.get("CODEX_HOME", str(home / ".codex"))
     if agent == "opencode":
+        # Login lives in the data dir. The config dir stays in the empty fake
+        # home so user-configured MCP servers are not loaded.
         env["XDG_DATA_HOME"] = os.environ.get("XDG_DATA_HOME", str(home / ".local" / "share"))
-        env["XDG_CONFIG_HOME"] = os.environ.get("XDG_CONFIG_HOME", str(home / ".config"))
     return env
 
 
@@ -599,7 +603,10 @@ def cmd_blind_run(args):
     prompt = blind_prompt(workdir)
     if args.agent == "codex":
         run([
-            "codex", "exec", "--skip-git-repo-check", "-s", "workspace-write",
+            # The user config and ChatGPT app connectors add MCP tools (session
+            # search, GitHub) that can reach the private repo or local sessions.
+            "codex", "exec", "--ignore-user-config", "--disable", "apps",
+            "--skip-git-repo-check", "-s", "workspace-write",
             "-c", "sandbox_workspace_write.network_access=true",
             "-C", str(workdir), "-o", str(out), prompt,
         ], cwd=workdir, env=env, timeout=3600)
@@ -621,6 +628,8 @@ def cmd_record_blind(args):
     state = load_state(workdir)
     if state.get("opened_at"):
         raise Abort("the rationale was already opened in this workdir; a blind review can no longer be recorded")
+    if not (workdir / "blind.md").is_file():
+        raise Abort(f"write the blind review to {workdir / 'blind.md'} first")
     blind = (workdir / "blind.md").read_text(encoding="utf-8")
     check_blind(blind)
     content = (
@@ -637,14 +646,12 @@ def cmd_record_blind(args):
     rel = review_rel(state)
     pr_dir = f"{state['prefix']}/{state['pr']}"
     if private_raw(f"{pr_dir}/{rel}") is not None:
-        raise Abort(f"a blind review for this head is already recorded at {pr_dir}/{rel}")
+        raise Abort(f"a blind review for this head is already recorded at {pr_dir}/{rel}; continue with `open`")
     with PrivateCheckout(pr_dir) as repo:
         target = repo.path(rel)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         commit = repo.commit_and_push(f"greptimedb pr {state['pr']}: blind review by {state['login']}", [rel])
-    state["blind_commit"] = commit
-    save_state(workdir, state)
     print(json.dumps({"status": "recorded", "path": f"{PRIVATE}/{pr_dir}/{rel}", "commit": commit}))
 
 
@@ -654,18 +661,28 @@ def cmd_open(args):
     if state["mode"] != "full":
         raise Abort(f"no access to {PRIVATE}; this review stops after the blind phase")
     pr_dir = f"{state['prefix']}/{state['pr']}"
-    if not state.get("blind_commit") or private_raw(f"{pr_dir}/{review_rel(state)}") is None:
+    # The review recorded in the private repo is the gate, not local state, so
+    # re-running `prepare` for the same head can resume here.
+    review = private_raw(f"{pr_dir}/{review_rel(state)}")
+    if review is None:
         raise Abort("record the blind review for the current head first (`record-blind`)")
+    if not (workdir / "blind.md").exists():
+        (workdir / "blind.md").write_bytes(review)
     private = workdir / "private"
     private.mkdir(exist_ok=True)
     rationale = private_raw(f"{pr_dir}/rationale.md")
     files = [p[len(pr_dir) + 1:] for p in private_list(pr_dir)]
+    rationale_head = None
     if rationale is not None:
         (private / "rationale.md").write_bytes(rationale)
+        match = re.search(rb"^head: (\w+)$", rationale, re.M)
+        rationale_head = match.group(1).decode() if match else None
     state["opened_at"] = now()
     save_state(workdir, state)
     print(json.dumps({
         "rationale": str(private / "rationale.md") if rationale is not None else None,
+        "rationale_head": rationale_head,
+        "reviewed_head": state["head"],
         "files": [f for f in files if f != "rationale.md"],
     }, indent=2))
 
@@ -699,7 +716,7 @@ def cmd_record_compare(args):
         target.write_text(
             target.read_text(encoding="utf-8").rstrip()
             + f"\n\n# Phase 2: comparison with rationale\n\n"
-            f"Rationale opened at {state['opened_at']}, after blind-review commit {state['blind_commit'][:7]}.\n\n"
+            f"Rationale opened at {state['opened_at']}.\n\n"
             + compare + "\n",
             encoding="utf-8",
         )
