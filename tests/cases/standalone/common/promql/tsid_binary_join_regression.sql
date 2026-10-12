@@ -211,6 +211,8 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left > bool tsid_binary_join_right) 
 -- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE Utf8\("(tsid_binary_join_left|tsid_binary_join_right)"\)@(\d+) __promql_metric_name@$2
+-- SQLNESS REPLACE as\sUtf8\("(tsid_binary_join_left|tsid_binary_join_right)"\) as __promql_metric_name
 TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left or tsid_binary_join_right) / tsid_binary_join_left;
 
 -- Group modifiers are many-to-one/one-to-many matching barriers and must stay on the

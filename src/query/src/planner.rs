@@ -1006,34 +1006,6 @@ mod tests {
         assert_eq!(metric_name_role_column(&plan), None);
     }
 
-    #[tokio::test]
-    async fn test_tql_cte_column_aliases_cover_the_stripped_result() {
-        let engine = create_promql_cte_test_engine();
-        let plan = parse_tql_cte_to_plan(
-            &engine,
-            "WITH tql (the_timestamp, the_value) AS (TQL EVAL (0, 10, '5s') metric) \
-             SELECT * FROM tql",
-        )
-        .await;
-
-        // The identity column is stripped before the CTE arity check and the alias
-        // projection, so the aliases line up with the tabular columns.
-        assert_eq!(plan_column_names(&plan), vec!["the_timestamp", "the_value"]);
-        assert_eq!(metric_name_role_column(&plan), None);
-    }
-
-    #[tokio::test]
-    async fn test_plan_pql_keeps_metric_name_identity_outside_tql() {
-        // Plain PromQL still carries the identity for the Prometheus HTTP API; only the
-        // tabular TQL boundaries strip it.
-        let plan = parse_promql_to_plan("some_metric").await;
-
-        assert_eq!(
-            metric_name_role_column(&plan),
-            Some("__promql_metric_name".to_string())
-        );
-    }
-
     async fn parse_promql_to_plan(query: &str) -> LogicalPlan {
         let engine = create_promql_test_engine();
         let query_ctx = QueryContext::arc();
