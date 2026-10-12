@@ -1426,6 +1426,7 @@ struct ImportRequests {
 async fn import_http(
     instance: Arc<Instance>,
     older: bool,
+    packed: bool,
 ) -> (String, tokio::task::JoinHandle<()>, Arc<ImportRequests>) {
     use axum::response::IntoResponse;
     use std::sync::atomic::Ordering;
@@ -1446,6 +1447,12 @@ async fn import_http(
                     if request.uri().path() == "/v1/capabilities" {
                         observed.capabilities.fetch_add(1, Ordering::SeqCst);
                         if older {
+                            if packed {
+                                return axum::Json(serde_json::json!({
+                                    "metric_packed_import": 1
+                                }))
+                                .into_response();
+                            }
                             return axum::http::StatusCode::NOT_FOUND.into_response();
                         }
                     }
@@ -1529,6 +1536,11 @@ async fn packed_export_v2_cli_local_roundtrip() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn packed_import_v2_without_batch_ddl_roundtrip() {
+    metric_export_v2_cli_roundtrip(false, true, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn packed_export_v2_cli_s3_roundtrip() {
     if std::env::var("GT_S3_ENDPOINT_URL").is_ok_and(|e| !e.is_empty())
         && std::env::var("GT_S3_BUCKET").is_ok_and(|b| !b.is_empty())
@@ -1606,7 +1618,7 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
         &format!("CREATE VIEW \"{quoted_special}\" AS SELECT * FROM audit"),
     )
     .await;
-    if packed && !s3 {
+    if packed && !s3 && !older {
         for id in 0..128 {
             let name = format!("batch_{id:03}");
             sql(instance, &format!("CREATE TABLE {name} (host STRING PRIMARY KEY, val DOUBLE, ts TIMESTAMP TIME INDEX) ENGINE=metric WITH (on_physical_table='v2_a')")).await;
@@ -1630,7 +1642,7 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
             "CREATE TABLE bulk (host STRING PRIMARY KEY, payload STRING, ts TIMESTAMP TIME INDEX)",
         )
         .await;
-        for batch in 0..64 {
+        for batch in 0..96 {
             let rows = (0..64)
                 .map(|row| {
                     let payload = (0..128)
@@ -1813,7 +1825,7 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
                 .await
                 .unwrap()
                 .content_length()
-                > 5 * 1024 * 1024
+                > common_datasource::packed_writer::WRITE_BYTES as u64
         );
     }
     let mut preserved = Vec::new();
@@ -1923,7 +1935,7 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
         .await;
     }
     let (target_addr, target_server, requests) =
-        import_http(target.fe_instance().clone(), older).await;
+        import_http(target.fe_instance().clone(), older, packed).await;
     let state = destination.path().join("restore-state.json");
     let mut import = vec![
         "import-v2",
@@ -1959,7 +1971,11 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
         requests.capabilities.load(Ordering::SeqCst),
         if older { 1 } else { 2 }
     );
-    assert_eq!(requests.batches.load(Ordering::SeqCst) > 1, !older);
+    if older {
+        assert_eq!(requests.batches.load(Ordering::SeqCst), 0);
+    } else {
+        assert!(requests.batches.load(Ordering::SeqCst) > 1);
+    }
     assert!(!state.exists());
     for name in names {
         let source_table = table(instance, &name).await;
@@ -2003,7 +2019,7 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
                 .column_schemas()
         );
     }
-    if packed {
+    if packed && !older {
         let schema_uri = format!("{uri}/schema-only");
         let mut schema_args = vec![
             "export-v2",
@@ -2039,7 +2055,7 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
             .build()
             .await;
         let (schema_addr, schema_server, schema_requests) =
-            import_http(schema_target.fe_instance().clone(), false).await;
+            import_http(schema_target.fe_instance().clone(), false, false).await;
         schema_requests.fail_batch.store(false, Ordering::SeqCst);
         let schema_state = destination.path().join("schema-only-state.json");
         let mut schema_import = vec![
