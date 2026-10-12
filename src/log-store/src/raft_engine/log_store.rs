@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, hash_map};
 use std::fmt::{Debug, Formatter};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
 use async_stream::stream;
@@ -53,8 +53,12 @@ pub struct RaftEngineLogStore {
     sync_task: RepeatedTask<Error>,
 }
 
+/// Purges expired log files periodically.
+///
+/// Holds the engine weakly: the task runs on the global runtime, which outlives its owner, and
+/// a strong reference there would keep the engine (and its active log file) open until exit.
 pub struct PurgeExpiredFilesFunction {
-    pub engine: Arc<Engine>,
+    pub engine: Weak<Engine>,
 }
 
 #[async_trait::async_trait]
@@ -64,7 +68,10 @@ impl TaskFunction<Error> for PurgeExpiredFilesFunction {
     }
 
     async fn call(&mut self) -> Result<()> {
-        match self.engine.purge_expired_files().context(RaftEngineSnafu) {
+        let Some(engine) = self.engine.upgrade() else {
+            return Ok(());
+        };
+        match engine.purge_expired_files().context(RaftEngineSnafu) {
             Ok(res) => {
                 // TODO(hl): the retval of purge_expired_files indicates the namespaces need to be compact,
                 // which is useful when monitoring regions failed to flush it's memtable to SSTs.
@@ -87,14 +94,17 @@ impl TaskFunction<Error> for PurgeExpiredFilesFunction {
     }
 }
 
+/// Syncs the log files periodically. Holds the engine weakly, see [PurgeExpiredFilesFunction].
 pub struct SyncWalTaskFunction {
-    engine: Arc<Engine>,
+    engine: Weak<Engine>,
 }
 
 #[async_trait::async_trait]
 impl TaskFunction<Error> for SyncWalTaskFunction {
     async fn call(&mut self) -> std::result::Result<(), Error> {
-        let engine = self.engine.clone();
+        let Some(engine) = self.engine.upgrade() else {
+            return Ok(());
+        };
         if let Err(e) = tokio::task::spawn_blocking(move || engine.sync()).await {
             error!(e; "Failed to sync raft engine log files");
         };
@@ -107,8 +117,10 @@ impl TaskFunction<Error> for SyncWalTaskFunction {
 }
 
 impl SyncWalTaskFunction {
-    pub fn new(engine: Arc<Engine>) -> Self {
-        Self { engine }
+    pub fn new(engine: &Arc<Engine>) -> Self {
+        Self {
+            engine: Arc::downgrade(engine),
+        }
     }
 }
 
@@ -129,13 +141,13 @@ impl RaftEngineLogStore {
         let gc_task = RepeatedTask::new(
             config.purge_interval,
             Box::new(PurgeExpiredFilesFunction {
-                engine: engine.clone(),
+                engine: Arc::downgrade(&engine),
             }),
         );
 
         let sync_task = RepeatedTask::new(
             config.sync_period.unwrap_or(Duration::from_secs(5)),
-            Box::new(SyncWalTaskFunction::new(engine.clone())),
+            Box::new(SyncWalTaskFunction::new(&engine)),
         );
 
         let log_store = Self {

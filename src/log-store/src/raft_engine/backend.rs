@@ -90,7 +90,7 @@ impl RaftEngineBackend {
         let gc_task = RepeatedTask::new(
             config.purge_interval,
             Box::new(PurgeExpiredFilesFunction {
-                engine: engine.clone(),
+                engine: Arc::downgrade(&engine),
             }),
         );
         gc_task
@@ -146,11 +146,11 @@ impl TxnService for RaftEngineBackend {
         // outside "get" or "put" etc. It doesn't serve the purpose of mutating some Rust data, so
         // the variable is not "mut". Suppress the clippy warning because of this.
         #[allow(clippy::readonly_write_lock)]
-        let engine = self.engine.write().unwrap();
-        let engine = opened(&engine)?;
+        let guard = self.engine.write().unwrap();
+        let engine = opened(&guard)?;
 
         for cmp in compare {
-            let existing_value = engine_get(&engine, &cmp.key)?.map(|kv| kv.value);
+            let existing_value = engine_get(engine, &cmp.key)?.map(|kv| kv.value);
             if !cmp.compare_value(existing_value.as_ref()) {
                 succeeded = false;
                 break;
@@ -169,7 +169,7 @@ impl TxnService for RaftEngineBackend {
             }
 
             TxnOp::Get(key) => {
-                let value = engine_get(&engine, &key)?.map(|kv| kv.value);
+                let value = engine_get(engine, &key)?.map(|kv| kv.value);
                 let kvs = value
                     .map(|value| KeyValue { key, value })
                     .into_iter()
@@ -181,7 +181,7 @@ impl TxnService for RaftEngineBackend {
             }
 
             TxnOp::Delete(key) => {
-                let prev = engine_get(&engine, &key)?;
+                let prev = engine_get(engine, &key)?;
                 batch.delete(SYSTEM_NAMESPACE, key);
                 let deleted = if prev.is_some() { 1 } else { 0 };
                 Ok(TxnOpResponse::ResponseDelete(DeleteRangeResponse {
@@ -277,12 +277,12 @@ impl KvBackend for RaftEngineBackend {
         let mut prev = None;
         // Engine::write assures that one batch is written atomically. The read/write lock is
         // just to prevent race condition between put and txn.
-        let engine = self.engine.read().unwrap();
-        let engine = opened(&engine)?;
+        let guard = self.engine.read().unwrap();
+        let engine = opened(&guard)?;
         if prev_kv {
-            prev = engine_get(&engine, &key)?;
+            prev = engine_get(engine, &key)?;
         }
-        engine_put(&engine, key, value)?;
+        engine_put(engine, key, value)?;
         Ok(PutResponse { prev_kv: prev })
     }
 
@@ -296,10 +296,10 @@ impl KvBackend for RaftEngineBackend {
             vec![]
         };
 
-        let engine = self.engine.read().unwrap();
-        let engine = opened(&engine)?;
+        let guard = self.engine.read().unwrap();
+        let engine = opened(&guard)?;
         for kv in kvs {
-            if prev_kv && let Some(kv) = engine_get(&engine, &kv.key)? {
+            if prev_kv && let Some(kv) = engine_get(engine, &kv.key)? {
                 prev_kvs.push(kv);
             }
             batch
@@ -353,10 +353,10 @@ impl KvBackend for RaftEngineBackend {
         let mut prev_kvs = vec![];
         let mut deleted = 0;
 
-        let engine = self.engine.read().unwrap();
-        let engine = opened(&engine)?;
+        let guard = self.engine.read().unwrap();
+        let engine = opened(&guard)?;
         for kv in range_resp.kvs {
-            engine_delete(&engine, &kv.key)?;
+            engine_delete(engine, &kv.key)?;
             if prev_kv {
                 prev_kvs.push(kv);
             }
@@ -378,10 +378,10 @@ impl KvBackend for RaftEngineBackend {
             vec![]
         };
         let mut batch = LogBatch::with_capacity(keys.len());
-        let engine = self.engine.read().unwrap();
-        let engine = opened(&engine)?;
+        let guard = self.engine.read().unwrap();
+        let engine = opened(&guard)?;
         for key in keys {
-            if prev_kv && let Some(prev) = engine_get(&engine, &key)? {
+            if prev_kv && let Some(prev) = engine_get(engine, &key)? {
                 prev_kvs.push(prev);
             }
             batch.delete(SYSTEM_NAMESPACE, key);
@@ -403,14 +403,14 @@ impl KvBackend for RaftEngineBackend {
     }
 
     async fn delete(&self, key: &[u8], prev_kv: bool) -> Result<Option<KeyValue>, Self::Error> {
-        let engine = self.engine.read().unwrap();
-        let engine = opened(&engine)?;
+        let guard = self.engine.read().unwrap();
+        let engine = opened(&guard)?;
         let prev = if prev_kv {
-            engine_get(&engine, key)?
+            engine_get(engine, key)?
         } else {
             None
         };
-        engine_delete(&engine, key)?;
+        engine_delete(engine, key)?;
         Ok(prev)
     }
 }
@@ -498,6 +498,34 @@ mod tests {
         assert!(backend.get(b"key").await.is_err());
 
         // Closing released the engine, so the directory can be reopened with the data intact.
+        let reopened = build_kv_backend(dir.path().to_str().unwrap().to_string());
+        assert_eq!(
+            b"value".to_vec(),
+            reopened.get(b"key").await.unwrap().unwrap().value
+        );
+        reopened.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_drop_closes_active_log_file() {
+        let dir = create_temp_dir("raft-engine-kv-drop-test");
+        let backend = build_kv_backend(dir.path().to_str().unwrap().to_string());
+        backend
+            .put(PutRequest {
+                key: b"key".to_vec(),
+                value: b"value".to_vec(),
+                prev_kv: false,
+            })
+            .await
+            .unwrap();
+        let preallocated = log_files_len(dir.path()) >= PREALLOCATED_LEN;
+
+        // Callers that own the backend, like the CLI tools, close it by dropping it: the
+        // purge task on the global runtime must not keep the engine alive.
+        drop(backend);
+        if preallocated {
+            assert!(log_files_len(dir.path()) < PREALLOCATED_LEN);
+        }
         let reopened = build_kv_backend(dir.path().to_str().unwrap().to_string());
         assert_eq!(
             b"value".to_vec(),

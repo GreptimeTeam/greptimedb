@@ -308,14 +308,20 @@ impl DatanodeBuilder {
         self.try_build().await
     }
 
-    /// Builds the datanode and stops the object store log store if a later step fails.
+    /// Builds the datanode and stops the log stores it opened if a later step fails.
     async fn try_build(&mut self) -> Result<Datanode> {
         let result = self.build_inner().await;
-        if result.is_err()
-            && let Some(log_store) = &self.object_store_log_store
-            && let Err(err) = log_store.stop().await
-        {
-            warn!(err; "Failed to stop the object store log store after a failed build");
+        if result.is_err() {
+            if let Some(log_store) = &self.object_store_log_store
+                && let Err(err) = log_store.stop().await
+            {
+                warn!(err; "Failed to stop the object store log store after a failed build");
+            }
+            if let Some(log_store) = &self.raft_engine_log_store
+                && let Err(err) = log_store.stop().await
+            {
+                warn!(err; "Failed to stop the raft-engine log store after a failed build");
+            }
         }
         result
     }
@@ -1092,6 +1098,7 @@ mod tests {
     use common_test_util::temp_dir::{create_named_temp_file, create_temp_dir};
     use common_wal::config::DatanodeWalConfig;
     use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATION};
+    use common_wal::config::raft_engine::RaftEngineConfig;
     use log_store::ObjectStoreLogStore;
     use log_store::error::Error as LogStoreError;
     use meta_client::client::MetaClientBuilder;
@@ -1566,6 +1573,34 @@ mod tests {
 
         let log_store = builder.object_store_log_store.as_ref().unwrap();
         assert!(is_stopped(log_store).await);
+    }
+
+    #[tokio::test]
+    async fn test_failed_build_stops_raft_engine_log_store() {
+        common_telemetry::init_default_ut_logging();
+        let data_home = create_temp_dir("raft-engine-wal-failed-build");
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        // Regions registered in the metadata but missing on disk fail the region open
+        // that runs after the log store and the engines are built.
+        setup_table_datanode(&(kv_backend.clone() as _)).await;
+        let mut builder = datanode_builder(
+            data_home.path().to_str().unwrap(),
+            DatanodeWalConfig::RaftEngine(RaftEngineConfig::default()),
+            kv_backend,
+        );
+
+        assert!(builder.try_build().await.is_err());
+
+        let log_store = builder.raft_engine_log_store.as_ref().unwrap();
+        assert!(!log_store.started());
+        // The engine was released, so the WAL directory can be opened again.
+        let reopened = DatanodeBuilder::build_raft_engine_log_store(
+            data_home.path().to_str().unwrap(),
+            &RaftEngineConfig::default(),
+        )
+        .await
+        .unwrap();
+        reopened.stop().await.unwrap();
     }
 
     #[test]
