@@ -46,6 +46,7 @@ use query::metrics::terminal_recordbatch_metrics_from_plan_if_requested;
 use query::options::FlowQueryExtensions;
 use session::context::{Channel, QueryContextRef};
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
+use table::requests::AUTO_CREATE_TABLE_KEY;
 use table::table_name::TableName;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -254,8 +255,14 @@ impl FlightCraft for GreptimeRequestHandler {
 
         let limiter = extensions.get::<ServerMemoryLimiter>().cloned();
 
-        let query_ctx =
+        let mut query_ctx =
             context_auth::create_query_context_from_grpc_metadata(&headers, &extensions)?;
+        // Bulk streams use the same schema-on-write switch as row inserts.
+        for (key, value) in hint_headers::extract_hints(&headers) {
+            if key == AUTO_CREATE_TABLE_KEY {
+                Arc::make_mut(&mut query_ctx).set_extension(key, value);
+            }
+        }
         context_auth::check_auth(self.user_provider.clone(), &headers, query_ctx.clone()).await?;
 
         const MAX_PENDING_RESPONSES: usize = 32;
