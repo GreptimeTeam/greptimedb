@@ -87,6 +87,72 @@ const RECOVERY_CONCURRENCY: usize = 8;
 /// holds the trailer and the footer of an object with up to 1364 regions of
 /// 48 bytes each, so a second request for the footer is rare.
 const RECOVERY_TAIL_WINDOW: usize = 64 * 1024;
+/// Environment variables that override [`MAX_IN_FLIGHT_CREATES`],
+/// [`MAX_SEALED_BATCHES`] and [`RECOVERY_CONCURRENCY`] for benchmarks.
+const MAX_IN_FLIGHT_CREATES_ENV: &str = "GREPTIMEDB_OSWAL_MAX_IN_FLIGHT_CREATES";
+const MAX_SEALED_BATCHES_ENV: &str = "GREPTIMEDB_OSWAL_MAX_SEALED_BATCHES";
+const RECOVERY_CONCURRENCY_ENV: &str = "GREPTIMEDB_OSWAL_RECOVERY_CONCURRENCY";
+
+/// The pipeline depths of a store, read once at construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Depths {
+    max_in_flight_creates: usize,
+    max_sealed_batches: usize,
+    recovery_concurrency: usize,
+}
+
+impl Depths {
+    fn from_env() -> Result<Self> {
+        Self::parse(|name| std::env::var(name).ok())
+    }
+
+    /// Reads each depth from `var`, defaulting to its constant. Without its
+    /// own value the sealed batch limit follows the in-flight creates as the
+    /// constant does, raised to the minimum the admission rule needs: one
+    /// admission can seal two batches while every create slot is busy.
+    fn parse(var: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        let read = |name: &str| -> Result<Option<usize>> {
+            var(name)
+                .map(|value| {
+                    value
+                        .trim()
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|depth| *depth > 0)
+                        .with_context(|| InvalidWalObjectStoreSnafu {
+                            reason: format!("{name} must be a positive integer, got {value:?}"),
+                        })
+                })
+                .transpose()
+        };
+        let max_in_flight_creates =
+            read(MAX_IN_FLIGHT_CREATES_ENV)?.unwrap_or(MAX_IN_FLIGHT_CREATES);
+        let min_sealed_batches = max_in_flight_creates.saturating_add(2);
+        let max_sealed_batches = read(MAX_SEALED_BATCHES_ENV)?.unwrap_or_else(|| {
+            if max_in_flight_creates == MAX_IN_FLIGHT_CREATES {
+                MAX_SEALED_BATCHES
+            } else {
+                max_in_flight_creates
+                    .saturating_mul(2)
+                    .max(min_sealed_batches)
+            }
+        });
+        ensure!(
+            max_sealed_batches >= min_sealed_batches,
+            InvalidWalObjectStoreSnafu {
+                reason: format!(
+                    "{MAX_SEALED_BATCHES_ENV} {max_sealed_batches} is below \
+                     {MAX_IN_FLIGHT_CREATES_ENV} {max_in_flight_creates} plus 2"
+                ),
+            }
+        );
+        Ok(Self {
+            max_in_flight_creates,
+            max_sealed_batches,
+            recovery_concurrency: read(RECOVERY_CONCURRENCY_ENV)?.unwrap_or(RECOVERY_CONCURRENCY),
+        })
+    }
+}
 
 /// A log store over the immutable WAL objects under one prefix.
 ///
@@ -267,6 +333,8 @@ impl ObjectStoreLogStore {
                 reason: "max unpersisted age is zero",
             }
         );
+        let depths = Depths::from_env()?;
+        info!("Object store WAL under {prefix} uses {depths:?}");
         let recovery_started_at = Instant::now();
         let Recovered {
             mut catalog,
@@ -277,7 +345,7 @@ impl ObjectStoreLogStore {
             reclaim_boundary,
             unindexed,
             recovered_objects,
-        } = recover(io.as_ref()).await?;
+        } = recover(io.as_ref(), depths.recovery_concurrency).await?;
         // Every epoch is one above the sequence of the start object its
         // instance created, and every object is at or above its start object,
         // so an epoch above the next sequence names no instance that ran.
@@ -368,6 +436,8 @@ impl ObjectStoreLogStore {
             deletes: FuturesUnordered::new(),
             failed_deletes: HashSet::new(),
             flush_interval: config.flush_interval,
+            max_in_flight_creates: depths.max_in_flight_creates,
+            max_sealed_batches: depths.max_sealed_batches,
             #[cfg(any(test, feature = "testing"))]
             admitted_appends: admitted_appends_tx,
             #[cfg(any(test, feature = "testing"))]
@@ -1128,6 +1198,8 @@ struct Actor {
     /// Deletes that failed since the last collection started.
     failed_deletes: HashSet<u64>,
     flush_interval: Duration,
+    max_in_flight_creates: usize,
+    max_sealed_batches: usize,
     #[cfg(any(test, feature = "testing"))]
     admitted_appends: watch::Sender<usize>,
     #[cfg(any(test, feature = "testing"))]
@@ -1164,7 +1236,7 @@ impl Actor {
                 Some((object_seq, result)) = self.deletes.next(), if !self.deletes.is_empty() => {
                     self.on_delete_completed(object_seq, result);
                 }
-                Some((entries, response)) = self.append_rx.recv(), if self.stalled.is_none() && self.sealed.len() + 2 <= MAX_SEALED_BATCHES => {
+                Some((entries, response)) = self.append_rx.recv(), if self.stalled.is_none() && self.sealed.len() + 2 <= self.max_sealed_batches => {
                     self.handle_append(entries, response);
                 }
                 command = self.command_rx.recv() => match command {
@@ -1324,7 +1396,7 @@ impl Actor {
             self.ensure_create_in_flight();
             return;
         }
-        if self.sealed.len() + 2 > MAX_SEALED_BATCHES {
+        if self.sealed.len() + 2 > self.max_sealed_batches {
             return;
         }
         if let Some((entries, response)) = self.take_stalled() {
@@ -1425,7 +1497,7 @@ impl Actor {
         }
         let mut in_flight = self.creates.len();
         for batch in self.sealed.iter_mut() {
-            if in_flight >= MAX_IN_FLIGHT_CREATES {
+            if in_flight >= self.max_in_flight_creates {
                 break;
             }
             if !matches!(batch.state, CreateState::Pending) {
@@ -2236,9 +2308,9 @@ struct FetchedObject {
 /// at a time and indexed in sequence order, so the catalog checks the entry
 /// ranges of every object against its predecessors like a sequential replay.
 /// Only the objects on the chain [`select_chain`] picks are indexed.
-async fn recover(io: &dyn WalObjectIo) -> Result<Recovered> {
+async fn recover(io: &dyn WalObjectIo, concurrency: usize) -> Result<Recovered> {
     let objects = io.list().await?;
-    finish_recovery(fetch_footers(io, objects, RECOVERY_CONCURRENCY).await?)
+    finish_recovery(fetch_footers(io, objects, concurrency).await?)
 }
 
 /// Indexes the chain of the fetched objects. Objects off the chain, orphans
@@ -3147,7 +3219,7 @@ mod tests {
         populate(&object_store, 40, 5).await;
         let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
 
-        let recovered = recover(&io).await.unwrap();
+        let recovered = recover(&io, RECOVERY_CONCURRENCY).await.unwrap();
         let expected = recover_by_decoding(&io).await.unwrap();
 
         assert_eq!(40, catalog_contents(&recovered.catalog).len());
@@ -3301,7 +3373,7 @@ mod tests {
         let (trailer, _) = footer_of(&object_store.read(&wide.path).await.unwrap().to_vec());
         assert!(trailer.footer_len > RECOVERY_TAIL_WINDOW as u64);
 
-        let recovered = recover(io.as_ref()).await.unwrap();
+        let recovered = recover(io.as_ref(), RECOVERY_CONCURRENCY).await.unwrap();
         let expected = recover_by_decoding(io.as_ref()).await.unwrap();
         assert_same_recovery(&expected, &recovered);
         assert_eq!(WIDE_REGIONS as usize, recovered.durable_entry_ids.len());
@@ -3390,13 +3462,13 @@ mod tests {
         let _serialized = SERIALIZED.lock().await;
         let object_store = memory_store();
         let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
-        let recovered = recover(&io).await.unwrap();
+        let recovered = recover(&io, RECOVERY_CONCURRENCY).await.unwrap();
         assert_eq!(0, recovered.next_object_seq);
         assert!(recovered.durable_entry_ids.is_empty());
 
         put_object(&object_store, 2, region(1), &[1, id(5, 7)]).await;
         put_object(&object_store, 4, region(2), &[8]).await;
-        let recovered = recover(&io).await.unwrap();
+        let recovered = recover(&io, RECOVERY_CONCURRENCY).await.unwrap();
         assert_eq!(6, recovered.next_object_seq);
         assert_eq!(
             HashMap::from([(region(1), id(5, 7)), (region(2), 8)]),
@@ -5463,7 +5535,7 @@ mod tests {
             ..fixture_header(&io, 2).await
         };
         put_object_with_header(&io, orphan, &[]).await;
-        let recovered = recover(&io).await.unwrap();
+        let recovered = recover(&io, RECOVERY_CONCURRENCY).await.unwrap();
         assert_eq!(Some(0), recovered.tip.map(|tip| tip.object_seq));
         assert_eq!(3, recovered.next_object_seq);
     }
@@ -5633,7 +5705,7 @@ mod tests {
         let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
         put_fixture(&io, 0, &[]).await;
         // Open A recovers object 0 and pauses before its start object.
-        let recovered = recover(&io).await.unwrap();
+        let recovered = recover(&io, RECOVERY_CONCURRENCY).await.unwrap();
         // A late object of epoch 1 lands at sequence 2, across the gap at
         // sequence 1, and open B, which lists it, completes.
         put_object_with_header(&io, chain_header(2, 1, Some((0, 1))), &[]).await;
@@ -6568,6 +6640,60 @@ mod tests {
         store.stop().await.unwrap();
     }
 
+    #[test]
+    fn test_depths_default_to_the_constants_and_reject_bad_overrides() {
+        let parse = |vars: &[(&str, &str)]| {
+            let vars = vars
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect::<HashMap<_, _>>();
+            Depths::parse(|name| vars.get(name).cloned())
+        };
+        let depths = |creates, sealed, recovery| Depths {
+            max_in_flight_creates: creates,
+            max_sealed_batches: sealed,
+            recovery_concurrency: recovery,
+        };
+        assert_eq!(
+            depths(
+                MAX_IN_FLIGHT_CREATES,
+                MAX_SEALED_BATCHES,
+                RECOVERY_CONCURRENCY
+            ),
+            parse(&[]).unwrap()
+        );
+        assert_eq!(
+            depths(16, 32, 2),
+            parse(&[
+                (MAX_IN_FLIGHT_CREATES_ENV, "16"),
+                (RECOVERY_CONCURRENCY_ENV, " 2 ")
+            ])
+            .unwrap()
+        );
+        // The derived sealed batch limit never drops below the admission minimum.
+        assert_eq!(
+            depths(1, 3, RECOVERY_CONCURRENCY),
+            parse(&[(MAX_IN_FLIGHT_CREATES_ENV, "1")]).unwrap()
+        );
+        assert_eq!(
+            depths(4, 6, RECOVERY_CONCURRENCY),
+            parse(&[(MAX_SEALED_BATCHES_ENV, "6")]).unwrap()
+        );
+        for (name, value) in [
+            (MAX_IN_FLIGHT_CREATES_ENV, "0"),
+            (MAX_SEALED_BATCHES_ENV, "-1"),
+            (RECOVERY_CONCURRENCY_ENV, "eight"),
+            (MAX_SEALED_BATCHES_ENV, "5"),
+        ] {
+            let error = parse(&[(name, value)]).unwrap_err();
+            assert!(
+                matches!(error, Error::InvalidWalObjectStore { .. }),
+                "{name}={value}: {error:?}"
+            );
+            assert!(error.to_string().contains(name), "{error}");
+        }
+    }
+
     async fn recover_listed(io: &ObjectStoreIo, listed: Vec<ListedObject>) -> Result<Recovered> {
         finish_recovery(fetch_footers(io, listed, RECOVERY_CONCURRENCY).await?)
     }
@@ -6785,7 +6911,7 @@ mod tests {
             &[record(id(4, 1), "b")],
         )
         .await;
-        let recovered = recover(&io).await.unwrap();
+        let recovered = recover(&io, RECOVERY_CONCURRENCY).await.unwrap();
         assert_eq!(Some(4), recovered.tip.map(|tip| tip.object_seq));
         assert_eq!(4, recovered.reclaim_boundary);
         assert_eq!(vec![0, 1, 2, 3], recovered.unindexed);
