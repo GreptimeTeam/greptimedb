@@ -151,6 +151,9 @@ default_ratio = 1.0
 #+ tokio_console_addr = "127.0.0.1"
 
 [query]
+## Experimental opt-in for shape-based AVG/SUM join aggregation; default false.
+experimental_enable_factorized_join_agg = false
+
 ## Parallelism of the query engine for query sent by flownode.
 ## Default to 1, so it won't use too much cpu or memory
 parallelism = 1
