@@ -17,8 +17,19 @@
 //! A *codec* binds one COPY data format (text, CSV, binary, ...) to its
 //! implementation. Codecs are stateless strategies: they validate the
 //! options they accept at statement-parse time, describe which column
-//! types they can ingest, create a stateful [`RecordParser`] per stream,
-//! and convert parsed fields into typed values.
+//! types they can ingest, and create the stateful [`RecordParser`] per
+//! stream.
+//!
+//! # Parsing and conversion
+//!
+//! A [`RecordParser`] consumes raw `CopyData` bytes and emits complete,
+//! insertable rows: one [`ParsedRow`] (a vector of gRPC values) per
+//! record, in the order of the targeted columns. Parsers validate record
+//! shape (field counts) and convert field values themselves — the `text`
+//! family does so with the shared text-representation helpers in this
+//! module, while the `csv` codec delegates both splitting and typed
+//! conversion to arrow-csv's incremental decoder, the same engine used
+//! by `COPY ... FROM 'file.csv'`.
 //!
 //! # Options
 //!
@@ -53,42 +64,40 @@ use pgwire::error::PgWireResult;
 
 use super::{invalid_text_repr, unsupported};
 
-/// One parsed field of a record.
+/// A parsed, insertable row: one gRPC value per targeted column, in COPY
+/// field order. Parsers emit these directly — the `text` family converts
+/// with the helpers below, `csv` converts arrow batches with the shared
+/// `api::helper::vectors_to_rows`.
+pub(super) type ParsedRow = api::v1::Row;
+
+/// One parsed field of a text-family record.
 pub(super) enum Field {
     Null,
     Value(Vec<u8>),
 }
-
-pub(super) type Record = Vec<Field>;
 
 /// Incremental parser of one COPY FROM STDIN stream.
 ///
 /// The wire protocol delivers the payload as an arbitrary sequence of
 /// `CopyData` chunks; implementations must keep state across [`feed`]
 /// calls because records (and even single fields) may span chunk
-/// boundaries.
+/// boundaries. [`finish`] is called at `CopyDone`; a final record without
+/// a trailing record separator is accepted.
 pub(super) trait RecordParser: Send {
-    /// Feeds a chunk of `CopyData` bytes and returns all records completed
-    /// by this chunk.
-    fn feed(&mut self, data: &[u8]) -> PgWireResult<Vec<Record>>;
-    /// Parses the buffered tail at `CopyDone`; returns no record when the
+    /// Feeds a chunk of `CopyData` bytes and returns all complete rows.
+    fn feed(&mut self, data: &[u8]) -> PgWireResult<Vec<ParsedRow>>;
+    /// Parses the buffered tail at `CopyDone`; returns no row when the
     /// stream ended exactly at a record boundary.
-    fn finish(&mut self) -> PgWireResult<Vec<Record>>;
-    /// Whether the first completed record is a header to discard
-    /// (`WITH (HEADER)`).
-    fn skips_header(&self) -> bool {
-        false
-    }
+    fn finish(&mut self) -> PgWireResult<Vec<ParsedRow>>;
 }
 
 /// A COPY FROM STDIN data format implementation.
 ///
 /// Implementations are shared per statement (hence `Send + Sync`) and must
 /// be stateless; per-stream state belongs to the [`RecordParser`] they
-/// create. The default methods implement the behavior shared by the
-/// "text representation" formats (text, CSV): plain-value column types,
-/// and field conversion from the field's bytes. A format that carries
-/// typed values on the wire (e.g. binary) overrides them.
+/// create. The default `check_column_type` accepts the types whose
+/// PostgreSQL text representation the shared helpers below can parse; a
+/// codec with its own typed decoding (like `csv`) overrides it.
 pub(super) trait CopyInCodec: Send + Sync + std::fmt::Debug {
     /// The canonical format name, used in error messages.
     fn name(&self) -> &'static str;
@@ -102,17 +111,15 @@ pub(super) trait CopyInCodec: Send + Sync + std::fmt::Debug {
     fn check_column_type(&self, data_type: &ConcreteDataType) -> PgWireResult<()> {
         check_text_representable_type(data_type)
     }
-    /// Creates the stateful parser for one copy stream.
-    fn create_parser(&self) -> Box<dyn RecordParser + Send>;
-    /// Converts one parsed field into a gRPC value following the column
-    /// type.
-    fn convert_field(&self, column: &ColumnSchema, field: Field) -> PgWireResult<api::v1::Value> {
-        convert_text_field(column, field)
-    }
+    /// Creates the stateful parser for one copy stream over the targeted
+    /// columns (in COPY field order).
+    fn create_parser(&self, columns: &[ColumnSchema])
+    -> PgWireResult<Box<dyn RecordParser + Send>>;
 }
 
-/// Column types whose text representation can be parsed by the shared
-/// conversion below; the default [`CopyInCodec::check_column_type`].
+/// The default [`CopyInCodec::check_column_type`] for text-family
+/// formats: column types whose PostgreSQL text representation the
+/// helpers below can parse.
 fn check_text_representable_type(data_type: &ConcreteDataType) -> PgWireResult<()> {
     let supported = matches!(
         data_type,
@@ -143,9 +150,12 @@ fn check_text_representable_type(data_type: &ConcreteDataType) -> PgWireResult<(
     Ok(())
 }
 
-/// The default [`CopyInCodec::convert_field`]: interprets a field's bytes
-/// as the PostgreSQL text representation of the column's value.
-fn convert_text_field(column: &ColumnSchema, field: Field) -> PgWireResult<api::v1::Value> {
+/// Converts one text-format field into a gRPC value following the column
+/// type; shared by the text-family codecs.
+pub(super) fn convert_text_field(
+    column: &ColumnSchema,
+    field: Field,
+) -> PgWireResult<api::v1::Value> {
     let value = match field {
         Field::Null => GtValue::Null,
         Field::Value(bytes) => convert_text_value(&column.data_type, &bytes)?,
@@ -217,10 +227,11 @@ fn decode_hex(s: &str) -> std::result::Result<Vec<u8>, ()> {
     if !bytes.len().is_multiple_of(2) {
         return Err(());
     }
-    let mut out = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
-        let hi = (pair[0] as char).to_digit(16).ok_or(())?;
-        let lo = (pair[1] as char).to_digit(16).ok_or(())?;
+    let (pairs, _) = bytes.as_chunks::<2>();
+    let mut out = Vec::with_capacity(pairs.len());
+    for &[hi, lo] in pairs {
+        let hi = (hi as char).to_digit(16).ok_or(())?;
+        let lo = (lo as char).to_digit(16).ok_or(())?;
         out.push((hi * 16 + lo) as u8);
     }
     Ok(out)

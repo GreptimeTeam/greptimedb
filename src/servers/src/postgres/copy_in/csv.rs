@@ -12,18 +12,35 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The `csv` format, per RFC 4180 with PostgreSQL's COPY extensions:
-//! configurable delimiter, quote and escape characters, `\r\n` or `\n`
-//! record separators, an optional header row, and NULL represented by an
-//! unquoted field matching the `NULL` string (empty by default).
+//! The `csv` format.
+//!
+//! Parsing and typed conversion both reuse arrow-csv's incremental
+//! [`Decoder`](arrow::csv::reader::Decoder) — the same engine backing
+//! GreptimeDB's file-based `COPY ... FROM 'file.csv'` (see
+//! `common-datasource`'s `csv` file format) — so both COPY routes accept
+//! identical data. The decoder splits records (quoting, escaped quotes,
+//! custom delimiters, `\n`/`\r\n` separators, optional headers) and
+//! converts fields against the targeted columns' schema in one pass.
+//!
+//! Consequences of sharing the engine: JSON and Binary columns are
+//! rejected, timestamps must be date/time strings, and an empty field —
+//! quoted or not — is NULL.
 
 use std::sync::Arc;
 
-use pgwire::error::PgWireResult;
+use api::helper::vectors_to_rows;
+use arrow::csv::ReaderBuilder;
+use arrow::csv::reader::Decoder as CsvDecoder;
+use arrow_schema::ArrowError;
+use datatypes::data_type::DataType;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::{ColumnSchema, Schema as GreptimeSchema};
+use datatypes::vectors::Helper;
+use pgwire::error::{PgWireError, PgWireResult};
 
-use super::bad_copy_data;
-use super::codec::{CopyInCodec, Field, Record, RecordParser};
+use super::codec::{CopyInCodec, ParsedRow, RecordParser};
 use super::options::CopyOptionSet;
+use super::{COPY_IN_FLUSH_ROWS, bad_copy_data, invalid_text_repr, unsupported};
 
 /// The validated `csv` format configuration.
 #[derive(Debug)]
@@ -31,7 +48,6 @@ pub(super) struct CsvCodec {
     delimiter: u8,
     quote: u8,
     escape: u8,
-    null: Vec<u8>,
     header: bool,
 }
 
@@ -42,10 +58,16 @@ pub(super) fn build_csv_codec(mut options: CopyOptionSet) -> PgWireResult<Arc<dy
     // In PostgreSQL the default escape character for CSV is the quote
     // character itself (doubled quotes inside quoted fields).
     let escape = options.take_single_byte("ESCAPE")?.unwrap_or(quote);
-    let null = options
-        .take_string("NULL")?
-        .unwrap_or_default()
-        .into_bytes();
+    // An empty string is the default NULL marker (an empty field is NULL);
+    // a custom NULL string is not supported because arrow-csv's null
+    // matching does not distinguish quoted from unquoted fields.
+    if let Some(null) = options.take_string("NULL")?
+        && !null.is_empty()
+    {
+        return Err(unsupported(
+            "custom NULL string is not supported by format csv; an empty field is NULL",
+        ));
+    }
     let header = options.take_flag("HEADER")?.unwrap_or(false);
     options.reject_leftovers("csv")?;
     if delimiter == quote {
@@ -55,7 +77,6 @@ pub(super) fn build_csv_codec(mut options: CopyOptionSet) -> PgWireResult<Arc<dy
         delimiter,
         quote,
         escape,
-        null,
         header,
     }))
 }
@@ -65,249 +86,177 @@ impl CopyInCodec for CsvCodec {
         "csv"
     }
 
-    fn create_parser(&self) -> Box<dyn RecordParser + Send> {
-        Box::new(CsvRecordParser::new(
-            self.delimiter,
-            self.quote,
-            self.escape,
-            &self.null,
-            self.header,
-        ))
+    /// The column types arrow-csv can decode against.
+    fn check_column_type(&self, data_type: &ConcreteDataType) -> PgWireResult<()> {
+        let supported = matches!(
+            data_type,
+            ConcreteDataType::Boolean(_)
+                | ConcreteDataType::Int8(_)
+                | ConcreteDataType::Int16(_)
+                | ConcreteDataType::Int32(_)
+                | ConcreteDataType::Int64(_)
+                | ConcreteDataType::UInt8(_)
+                | ConcreteDataType::UInt16(_)
+                | ConcreteDataType::UInt32(_)
+                | ConcreteDataType::UInt64(_)
+                | ConcreteDataType::Float32(_)
+                | ConcreteDataType::Float64(_)
+                | ConcreteDataType::String(_)
+                | ConcreteDataType::Date(_)
+                | ConcreteDataType::Timestamp(_)
+                | ConcreteDataType::Decimal128(_)
+        );
+        if !supported {
+            return Err(unsupported(format!(
+                "column type \"{}\" is not supported by format csv",
+                data_type.name()
+            )));
+        }
+        Ok(())
+    }
+
+    fn create_parser(
+        &self,
+        columns: &[ColumnSchema],
+    ) -> PgWireResult<Box<dyn RecordParser + Send>> {
+        // Reuse the greptime schema's arrow projection for decoding.
+        let arrow_schema = GreptimeSchema::try_new(columns.to_vec())
+            .map_err(|e| unsupported(format!("invalid columns for format csv: {e}")))?
+            .arrow_schema()
+            .clone();
+        let mut builder = ReaderBuilder::new(arrow_schema)
+            .with_header(self.header)
+            .with_delimiter(self.delimiter)
+            .with_quote(self.quote)
+            .with_batch_size(COPY_IN_FLUSH_ROWS);
+        // An escape character equal to the quote is the doubled-quote
+        // default; csv-core handles that through quoting alone.
+        if self.escape != self.quote {
+            builder = builder.with_escape(self.escape);
+        }
+        Ok(Box::new(CsvRecordParser {
+            decoder: builder.build_decoder(),
+        }))
     }
 }
 
-/// Incremental parser for the CSV format, keeping state across `CopyData`
-/// chunk boundaries (quoted fields may contain newlines, and `\r\n` pairs
-/// may split across chunks).
+/// Incremental parser backed by arrow-csv's decoder.
 struct CsvRecordParser {
-    delimiter: u8,
-    quote: u8,
-    escape: u8,
-    null: Vec<u8>,
-    state: CsvState,
-    /// Completed fields of the current record.
-    fields: Vec<Field>,
-    /// Field currently being parsed.
-    current: Vec<u8>,
-    current_quoted: bool,
-    /// A byte deferred until the next chunk because its meaning depends on
-    /// its successor (`\r` of a possible `\r\n`, or an escape character).
-    carry: Option<u8>,
-    header: bool,
-}
-
-impl CsvRecordParser {
-    fn new(delimiter: u8, quote: u8, escape: u8, null: &[u8], header: bool) -> Self {
-        Self {
-            delimiter,
-            quote,
-            escape,
-            null: null.to_vec(),
-            state: CsvState::FieldStart,
-            fields: Vec::new(),
-            current: Vec::new(),
-            current_quoted: false,
-            carry: None,
-            header,
-        }
-    }
-
-    /// Treats `b` as a data byte in the current state; used for a carried
-    /// `\r` at end-of-stream that turns out to be literal data.
-    fn push_data(&mut self, b: u8) {
-        if self.state == CsvState::FieldStart {
-            self.state = CsvState::InUnquoted;
-        }
-        self.current.push(b);
-    }
-}
-
-#[derive(PartialEq, Eq)]
-enum CsvState {
-    FieldStart,
-    InUnquoted,
-    InQuoted,
-    QuoteInQuoted,
+    decoder: CsvDecoder,
 }
 
 impl RecordParser for CsvRecordParser {
-    fn skips_header(&self) -> bool {
-        self.header
-    }
-
-    fn feed(&mut self, data: &[u8]) -> PgWireResult<Vec<Record>> {
-        let mut records = Vec::new();
-        let mut buf;
-        let data: &[u8] = if let Some(b) = self.carry.take() {
-            buf = Vec::with_capacity(data.len() + 1);
-            buf.push(b);
-            buf.extend_from_slice(data);
-            &buf
-        } else {
-            data
-        };
-
-        let mut idx = 0;
-        while idx < data.len() {
-            let b = data[idx];
-            let next = data.get(idx + 1).copied();
-            match self.state {
-                CsvState::FieldStart => {
-                    if b == self.quote {
-                        self.state = CsvState::InQuoted;
-                        self.current_quoted = true;
-                        idx += 1;
-                    } else if b == self.delimiter {
-                        self.end_field();
-                        idx += 1;
-                    } else if is_record_end(b, next) {
-                        self.state = CsvState::FieldStart;
-                        records.push(self.end_record());
-                        idx += record_end_len(b);
-                    } else if is_incomplete_record_end(b, next) {
-                        self.carry = Some(b);
-                        break;
-                    } else {
-                        self.current.push(b);
-                        self.state = CsvState::InUnquoted;
-                        idx += 1;
-                    }
+    fn feed(&mut self, data: &[u8]) -> PgWireResult<Vec<ParsedRow>> {
+        let mut buf = data;
+        let mut rows = Vec::new();
+        loop {
+            // Decode until the input is consumed or a full batch is
+            // buffered. A record may end mid-buffer; its bytes stay in the
+            // decoder until more input (or the EOF signal) completes it.
+            while !buf.is_empty() {
+                let consumed = self.decoder.decode(buf).map_err(decode_error)?;
+                if consumed == 0 {
+                    break;
                 }
-                CsvState::InUnquoted => {
-                    if b == self.delimiter {
-                        self.end_field();
-                        self.state = CsvState::FieldStart;
-                        idx += 1;
-                    } else if is_record_end(b, next) {
-                        self.state = CsvState::FieldStart;
-                        records.push(self.end_record());
-                        idx += record_end_len(b);
-                    } else if is_incomplete_record_end(b, next) {
-                        self.carry = Some(b);
-                        break;
-                    } else {
-                        self.current.push(b);
-                        idx += 1;
-                    }
-                }
-                CsvState::InQuoted => {
-                    if self.escape != self.quote && b == self.escape {
-                        // The escape character escapes its successor.
-                        match next {
-                            Some(n) => {
-                                self.current.push(n);
-                                idx += 2;
-                            }
-                            None => {
-                                self.carry = Some(b);
-                                break;
-                            }
-                        }
-                    } else if b == self.quote {
-                        self.state = CsvState::QuoteInQuoted;
-                        idx += 1;
-                    } else {
-                        self.current.push(b);
-                        idx += 1;
-                    }
-                }
-                CsvState::QuoteInQuoted => {
-                    if b == self.quote && self.escape == self.quote {
-                        self.current.push(self.quote);
-                        self.state = CsvState::InQuoted;
-                        idx += 1;
-                    } else if b == self.delimiter {
-                        self.end_field();
-                        self.state = CsvState::FieldStart;
-                        idx += 1;
-                    } else if is_record_end(b, next) {
-                        self.state = CsvState::FieldStart;
-                        records.push(self.end_record());
-                        idx += record_end_len(b);
-                    } else if is_incomplete_record_end(b, next) {
-                        self.carry = Some(b);
-                        break;
-                    } else {
-                        return Err(bad_copy_data(
-                            "found unexpected data after a closing quote in CSV field",
-                        ));
-                    }
-                }
+                buf = &buf[consumed..];
             }
-        }
-        Ok(records)
-    }
-
-    fn finish(&mut self) -> PgWireResult<Vec<Record>> {
-        if let Some(b) = self.carry.take() {
-            // The deferred byte has no successor: a `\r` or escape character
-            // at end of stream is literal data.
-            match self.state {
-                CsvState::QuoteInQuoted => {
-                    return Err(bad_copy_data(
-                        "found unexpected data after a closing quote in CSV field",
-                    ));
-                }
-                CsvState::InQuoted | CsvState::InUnquoted | CsvState::FieldStart => {
-                    self.push_data(b);
-                }
+            // Flush complete records. `flush` fails without side effects
+            // when a record is still incomplete (the input ended
+            // mid-record); its bytes are kept for the next chunk or the
+            // EOF signal in `finish`.
+            match self.decoder.flush() {
+                Ok(Some(batch)) => rows.extend(flush_batch(&batch)?),
+                Ok(None) => return Ok(rows),
+                Err(error) if is_mid_record(&error) => return Ok(rows),
+                Err(error) => return Err(decode_error(error)),
             }
-        }
-        if matches!(self.state, CsvState::InQuoted) {
-            return Err(bad_copy_data("unterminated CSV quoted field"));
-        }
-        // A field is pending unless the stream ended exactly at a record
-        // boundary. A trailing delimiter also implies one (empty) field.
-        let has_pending_field = !self.fields.is_empty()
-            || !self.current.is_empty()
-            || self.current_quoted
-            || matches!(self.state, CsvState::InUnquoted | CsvState::QuoteInQuoted);
-        if has_pending_field {
-            self.end_field();
-        }
-        if !self.fields.is_empty() {
-            return Ok(vec![std::mem::take(&mut self.fields)]);
-        }
-        Ok(Vec::new())
-    }
-}
-
-/// `b` starts a record terminator (`\n` or the `\r` of a `\r\n` pair).
-fn is_record_end(b: u8, next: Option<u8>) -> bool {
-    b == b'\n' || (b == b'\r' && next == Some(b'\n'))
-}
-
-/// `b` may start a record terminator but its successor is unknown.
-fn is_incomplete_record_end(b: u8, next: Option<u8>) -> bool {
-    b == b'\r' && next.is_none()
-}
-
-fn record_end_len(b: u8) -> usize {
-    if b == b'\r' { 2 } else { 1 }
-}
-
-impl CsvRecordParser {
-    fn end_field(&mut self) {
-        let value = std::mem::take(&mut self.current);
-        let quoted = self.current_quoted;
-        self.current_quoted = false;
-        if !quoted && value == self.null {
-            self.fields.push(Field::Null);
-        } else {
-            self.fields.push(Field::Value(value));
+            if buf.is_empty() {
+                return Ok(rows);
+            }
+            // decode() returned 0 with input remaining: a full batch was
+            // flushed, continue with the rest of the input.
         }
     }
 
-    fn end_record(&mut self) -> Record {
-        self.end_field();
-        std::mem::take(&mut self.fields)
+    fn finish(&mut self) -> PgWireResult<Vec<ParsedRow>> {
+        // An empty decode signals EOF, finalizing a trailing record that
+        // lacks its record separator.
+        self.decoder.decode(&[]).map_err(decode_error)?;
+        let mut rows = Vec::new();
+        while let Some(batch) = self.decoder.flush().map_err(decode_error)? {
+            rows.extend(flush_batch(&batch)?);
+        }
+        Ok(rows)
+    }
+}
+
+/// Converts one decoded arrow batch into insertable rows with the shared
+/// [`vectors_to_rows`] helper.
+fn flush_batch(batch: &arrow::record_batch::RecordBatch) -> PgWireResult<Vec<ParsedRow>> {
+    let vectors = Helper::try_into_vectors(batch.columns())
+        .map_err(|e| bad_copy_data(format!("failed to convert decoded CSV batch: {e}")))?;
+    Ok(vectors_to_rows(vectors.iter(), batch.num_rows()))
+}
+
+/// Whether the error is arrow-csv reporting a record still in progress,
+/// which `flush` rejects (without side effects) until more input or the
+/// EOF signal completes the record.
+fn is_mid_record(error: &ArrowError) -> bool {
+    matches!(error, ArrowError::CsvError(m) if m.contains("part way through record"))
+}
+
+fn decode_error(error: ArrowError) -> PgWireError {
+    match &error {
+        ArrowError::CsvError(message) => {
+            bad_copy_data(format!("failed to parse CSV data: {message}"))
+        }
+        ArrowError::ParseError(message) | ArrowError::CastError(message) => {
+            invalid_text_repr(format!("failed to parse CSV data: {message}"))
+        }
+        _ => bad_copy_data(format!("failed to parse CSV data: {error}")),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use datatypes::schema::ColumnSchema;
+
     use super::*;
     use crate::postgres::copy_in::options::CopyOptionValue;
+
+    fn test_columns() -> Vec<ColumnSchema> {
+        vec![
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("val", ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ]
+    }
+
+    fn parser() -> Box<dyn RecordParser + Send> {
+        build_csv_codec(CopyOptionSet::default())
+            .unwrap()
+            .create_parser(&test_columns())
+            .unwrap()
+    }
+
+    fn string_at(row: &ParsedRow, index: usize) -> Option<String> {
+        row.values[index].value_data.as_ref().map(|v| match v {
+            api::v1::value::ValueData::StringValue(s) => s.clone(),
+            other => panic!("expected string, got {other:?}"),
+        })
+    }
+
+    fn rows_with(mut set: CopyOptionSet) -> Box<dyn RecordParser + Send> {
+        set.take_format().unwrap();
+        build_csv_codec(set)
+            .unwrap()
+            .create_parser(&test_columns())
+            .unwrap()
+    }
 
     #[test]
     fn test_build_defaults() {
@@ -316,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_rejects_delimiter_equal_quote() {
+    fn test_build_rejects_bad_options() {
         let mut set = CopyOptionSet::default();
         set.insert("delimiter".into(), CopyOptionValue::String("\"".into()))
             .unwrap();
@@ -325,123 +274,156 @@ mod tests {
             err.to_string()
                 .contains("DELIMITER must not be equal to QUOTE")
         );
-    }
 
-    #[test]
-    fn test_build_rejects_unknown_options() {
         let mut set = CopyOptionSet::default();
-        set.insert("format".into(), CopyOptionValue::Ident("csv".into()))
+        set.insert("null".into(), CopyOptionValue::String("NULL".into()))
             .unwrap();
-        // `format` is consumed by the registry before the builder runs, so
-        // simulate that.
+        assert!(
+            build_csv_codec(set)
+                .unwrap_err()
+                .to_string()
+                .contains("custom NULL string")
+        );
+
+        let mut set = CopyOptionSet::default();
         set.take_format().unwrap();
         set.insert("precision".into(), CopyOptionValue::Ident("ns".into()))
             .unwrap();
-        let err = build_csv_codec(set).unwrap_err();
-        assert!(err.to_string().contains("not supported by format csv"));
+        assert!(
+            build_csv_codec(set)
+                .unwrap_err()
+                .to_string()
+                .contains("not supported by format csv")
+        );
     }
 
-    fn csv_parser() -> CsvRecordParser {
-        CsvRecordParser::new(b',', b'"', b'"', b"", false)
+    #[test]
+    fn test_check_column_type() {
+        let codec = build_csv_codec(CopyOptionSet::default()).unwrap();
+        assert!(
+            codec
+                .check_column_type(&ConcreteDataType::json_datatype())
+                .is_err()
+        );
+        assert!(
+            codec
+                .check_column_type(&ConcreteDataType::binary_datatype())
+                .is_err()
+        );
+        assert!(
+            codec
+                .check_column_type(&ConcreteDataType::string_datatype())
+                .is_ok()
+        );
     }
 
     #[test]
     fn test_csv_parse_records() {
-        let mut parser = csv_parser();
-        let records = parser
-            .feed(b"a,b,\"multi\nline\",plain\"quote\n1,,x\n")
+        let mut parser = parser();
+        let rows = parser
+            .feed(
+                b"host1,1.5,2023-11-14 22:13:20\n\
+                  ,2.5,2023-11-14 22:13:21\n\
+                  \"quoted, comma\",3.5,2023-11-14 22:13:22\n",
+            )
             .unwrap();
-        assert_eq!(records.len(), 2);
-        assert!(matches!(&records[0][0], Field::Value(v) if v == b"a"));
-        assert!(matches!(&records[0][2], Field::Value(v) if v == b"multi\nline"));
-        // Unquoted empty field is NULL; an unquoted quote is plain data.
-        assert!(matches!(&records[1][1], Field::Null));
-        assert!(matches!(&records[0][3], Field::Value(v) if v == b"plain\"quote"));
+        assert_eq!(rows.len(), 3);
+        assert_eq!(string_at(&rows[0], 0), Some("host1".into()));
+        // An empty field is NULL.
+        assert_eq!(string_at(&rows[1], 0), None);
+        assert_eq!(string_at(&rows[2], 0), Some("quoted, comma".into()));
     }
 
     #[test]
     fn test_csv_escaped_quotes() {
-        let mut parser = csv_parser();
-        let records = parser.feed(b"\"say \"\"hi\"\"\"\n").unwrap();
-        assert!(matches!(&records[0][0], Field::Value(v) if v == b"say \"hi\""));
-    }
-
-    #[test]
-    fn test_csv_chunk_boundaries() {
-        let mut parser = csv_parser();
-        // Quoted field containing a newline, then a CRLF record separator
-        // split across chunks.
-        assert!(parser.feed(b"\"ab").unwrap().is_empty());
-        assert!(parser.feed(b"c\nd\",x").unwrap().is_empty());
-        let records = parser.feed(b"\r\nnext\r\n").unwrap();
-        assert_eq!(records.len(), 2);
-        assert!(matches!(&records[0][0], Field::Value(v) if v == b"abc\nd"));
-        assert!(matches!(&records[1][0], Field::Value(v) if v == b"next"));
-    }
-
-    #[test]
-    fn test_csv_lone_cr_is_data() {
-        let mut parser = csv_parser();
-        let records = parser.feed(b"a\rb\nc\r").unwrap();
-        assert_eq!(records.len(), 1);
-        assert!(matches!(&records[0][0], Field::Value(v) if v == b"a\rb"));
-        // Trailing lone `\r` becomes data of a final unterminated record.
-        let records = parser.finish().unwrap();
-        assert_eq!(records.len(), 1);
-        assert!(matches!(&records[0][0], Field::Value(v) if v == b"c\r"));
-    }
-
-    #[test]
-    fn test_csv_unterminated_quote() {
-        let mut parser = csv_parser();
-        parser.feed(b"\"abc").unwrap();
-        let err = match parser.finish() {
-            Ok(_) => panic!("expected parse error"),
-            Err(e) => e,
-        };
-        assert!(err.to_string().contains("unterminated"));
-    }
-
-    #[test]
-    fn test_csv_custom_null() {
-        let mut parser = CsvRecordParser::new(b',', b'"', b'"', b"NULL", false);
-        let records = parser.feed(b"NULL,\"NULL\"\n").unwrap();
-        assert!(matches!(&records[0][0], Field::Null));
-        assert!(matches!(&records[0][1], Field::Value(v) if v == b"NULL"));
+        let mut parser = parser();
+        let rows = parser
+            .feed(b"\"say \"\"hi\"\"\",1.0,2023-11-14 22:13:20\n")
+            .unwrap();
+        assert_eq!(string_at(&rows[0], 0), Some("say \"hi\"".into()));
     }
 
     #[test]
     fn test_csv_custom_escape() {
-        let mut parser = CsvRecordParser::new(b',', b'"', b'\\', b"", false);
-        let records = parser.feed(b"\"a\\\"b\",x\n").unwrap();
-        assert!(matches!(&records[0][0], Field::Value(v) if v == b"a\"b"));
-        assert!(matches!(&records[0][1], Field::Value(v) if v == b"x"));
+        let mut set = CopyOptionSet::default();
+        set.insert("escape".into(), CopyOptionValue::String("\\".into()))
+            .unwrap();
+        let mut parser = rows_with(set);
+        let rows = parser
+            .feed(b"\"a\\\"b\",1.0,2023-11-14 22:13:20\n")
+            .unwrap();
+        assert_eq!(string_at(&rows[0], 0), Some("a\"b".into()));
     }
 
     #[test]
-    fn test_csv_stray_data_after_quote() {
-        let mut parser = csv_parser();
-        let err = match parser.feed(b"\"ab\"c\n") {
-            Ok(_) => panic!("expected parse error"),
-            Err(e) => e,
-        };
-        assert!(err.to_string().contains("unexpected data"));
+    fn test_csv_quoted_newline_and_chunk_boundaries() {
+        let mut parser = parser();
+        // Split inside a quoted field containing a newline, and a CRLF
+        // record separator split across chunks.
+        assert!(parser.feed(b"\"multi").unwrap().is_empty());
+        assert!(
+            parser
+                .feed(b"line\nfield\",1.0,2023-11-14 22:13:20")
+                .unwrap()
+                .is_empty()
+        );
+        let rows = parser.feed(b"\r\nhost2,2.0,2023-11-14 22:13:21\n").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(string_at(&rows[0], 0), Some("multiline\nfield".into()));
+        assert_eq!(string_at(&rows[1], 0), Some("host2".into()));
+    }
+
+    #[test]
+    fn test_csv_header() {
+        let mut set = CopyOptionSet::default();
+        set.insert("header".into(), CopyOptionValue::Flag).unwrap();
+        let mut parser = rows_with(set);
+        let rows = parser
+            .feed(b"host,val,ts\nhost1,1.0,2023-11-14 22:13:20\n")
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(string_at(&rows[0], 0), Some("host1".into()));
+    }
+
+    #[test]
+    fn test_csv_trailing_record_without_newline() {
+        let mut parser = parser();
+        let fed = parser
+            .feed(b"host1,1.0,2023-11-14 22:13:20\nhost2,2.0,2023-11-14 22:13:21")
+            .unwrap();
+        // While the trailing record is pending, flush cannot emit the
+        // completed one either; both surface at the EOF signal.
+        assert!(fed.is_empty());
+        let rows = parser.finish().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(string_at(&rows[0], 0), Some("host1".into()));
+        assert_eq!(string_at(&rows[1], 0), Some("host2".into()));
     }
 
     #[test]
     fn test_csv_finish_at_record_boundary() {
-        let mut parser = csv_parser();
-        parser.feed(b"a,b\n").unwrap();
+        let mut parser = parser();
+        parser.feed(b"host1,1.0,2023-11-14 22:13:20\n").unwrap();
         assert!(parser.finish().unwrap().is_empty());
     }
 
     #[test]
-    fn test_csv_trailing_delimiter() {
-        let mut parser = csv_parser();
-        parser.feed(b"a,").unwrap();
-        let records = parser.finish().unwrap();
-        assert_eq!(records.len(), 1);
-        assert!(matches!(&records[0][0], Field::Value(v) if v == b"a"));
-        assert!(matches!(&records[0][1], Field::Null));
+    fn test_csv_errors() {
+        let mut p = parser();
+        let err = match p.feed(b"host1,1.0\n") {
+            Ok(_) => panic!("expected parse error"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("incorrect number of fields"),
+            "{err}"
+        );
+
+        let mut p = parser();
+        let err = match p.feed(b"host1,not_a_double,2023-11-14 22:13:20\n") {
+            Ok(_) => panic!("expected parse error"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("failed to parse"), "{err}");
     }
 }

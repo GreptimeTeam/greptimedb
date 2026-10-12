@@ -22,7 +22,7 @@ use std::sync::Arc;
 use pgwire::error::PgWireResult;
 
 use super::bad_copy_data;
-use super::codec::{CopyInCodec, Field, Record, RecordParser};
+use super::codec::{CopyInCodec, Field, ParsedRow, RecordParser, convert_text_field};
 use super::options::CopyOptionSet;
 
 /// The validated `text` format configuration.
@@ -48,12 +48,16 @@ impl CopyInCodec for TextCodec {
         "text"
     }
 
-    fn create_parser(&self) -> Box<dyn RecordParser + Send> {
-        Box::new(TextRecordParser {
+    fn create_parser(
+        &self,
+        columns: &[datatypes::schema::ColumnSchema],
+    ) -> PgWireResult<Box<dyn RecordParser + Send>> {
+        Ok(Box::new(TextRecordParser {
             delimiter: self.delimiter,
             null: self.null.clone(),
+            columns: columns.to_vec(),
             pending: Vec::new(),
-        })
+        }))
     }
 }
 
@@ -61,32 +65,57 @@ impl CopyInCodec for TextCodec {
 struct TextRecordParser {
     delimiter: u8,
     null: Vec<u8>,
+    /// Targeted columns, in COPY field order.
+    columns: Vec<datatypes::schema::ColumnSchema>,
     pending: Vec<u8>,
 }
 
 impl RecordParser for TextRecordParser {
-    fn feed(&mut self, data: &[u8]) -> PgWireResult<Vec<Record>> {
+    fn feed(&mut self, data: &[u8]) -> PgWireResult<Vec<ParsedRow>> {
         self.pending.extend_from_slice(data);
-        let mut records = Vec::new();
+        let mut rows = Vec::new();
         while let Some(pos) = self.pending.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = self.pending.drain(..=pos).collect();
             // The drained line always ends with the `\n` separator.
             let line = &line[..line.len() - 1];
-            records.push(parse_text_line(line, self.delimiter, &self.null)?);
+            rows.push(self.parse_text_line(line)?);
         }
-        Ok(records)
+        Ok(rows)
     }
 
-    fn finish(&mut self) -> PgWireResult<Vec<Record>> {
+    fn finish(&mut self) -> PgWireResult<Vec<ParsedRow>> {
         if self.pending.is_empty() {
             return Ok(Vec::new());
         }
         let line = std::mem::take(&mut self.pending);
-        Ok(vec![parse_text_line(&line, self.delimiter, &self.null)?])
+        Ok(vec![self.parse_text_line(&line)?])
     }
 }
 
-fn parse_text_line(line: &[u8], delimiter: u8, null: &[u8]) -> PgWireResult<Record> {
+impl TextRecordParser {
+    fn parse_text_line(&self, line: &[u8]) -> PgWireResult<ParsedRow> {
+        let fields = split_fields(line, self.delimiter, &self.null)?;
+        if fields.len() < self.columns.len() {
+            let missing = &self.columns[fields.len()];
+            return Err(bad_copy_data(format!(
+                "missing data for column \"{}\"",
+                missing.name
+            )));
+        } else if fields.len() > self.columns.len() {
+            return Err(bad_copy_data("extra data after last expected column"));
+        }
+        Ok(ParsedRow {
+            values: fields
+                .into_iter()
+                .zip(&self.columns)
+                .map(|(field, column)| convert_text_field(column, field))
+                .collect::<PgWireResult<Vec<_>>>()?,
+        })
+    }
+}
+
+/// Splits a text-format line into null-checked fields.
+fn split_fields(line: &[u8], delimiter: u8, null: &[u8]) -> PgWireResult<Vec<Field>> {
     split_raw_fields(line, delimiter)
         .into_iter()
         .map(|raw| {
@@ -169,16 +198,38 @@ fn unescape_text(raw: &[u8]) -> PgWireResult<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+
     use super::*;
     use crate::postgres::copy_in::options::CopyOptionValue;
 
-    fn default_options() -> CopyOptionSet {
-        CopyOptionSet::default()
+    /// Columns: (int32, string, string).
+    fn test_columns() -> Vec<ColumnSchema> {
+        vec![
+            ColumnSchema::new("a", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new("b", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("c", ConcreteDataType::string_datatype(), true),
+        ]
+    }
+
+    fn parser(columns: &[ColumnSchema]) -> Box<dyn RecordParser + Send> {
+        build_text_codec(CopyOptionSet::default())
+            .unwrap()
+            .create_parser(columns)
+            .unwrap()
+    }
+
+    fn string_of(row: &ParsedRow, index: usize) -> Option<String> {
+        row.values[index].value_data.as_ref().map(|v| match v {
+            api::v1::value::ValueData::StringValue(s) => s.clone(),
+            other => panic!("expected string, got {other:?}"),
+        })
     }
 
     #[test]
     fn test_build_defaults() {
-        let codec = build_text_codec(default_options()).unwrap();
+        let codec = build_text_codec(CopyOptionSet::default()).unwrap();
         assert_eq!(codec.name(), "text");
         assert!(format!("{codec:?}").contains("TextCodec"));
     }
@@ -190,13 +241,19 @@ mod tests {
             .unwrap();
         set.insert("delimiter".into(), CopyOptionValue::String("|".into()))
             .unwrap();
-        let codec = build_text_codec(set).unwrap();
-        let mut parser = codec.create_parser();
+        let columns = vec![
+            ColumnSchema::new("a", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("b", ConcreteDataType::string_datatype(), true),
+        ];
+        let mut parser = build_text_codec(set)
+            .unwrap()
+            .create_parser(&columns)
+            .unwrap();
         // Custom options flow into the parser: `nil` is NULL and `|` the
         // delimiter.
-        let records = parser.feed(b"a|nil\n").unwrap();
-        assert!(matches!(&records[0][0], Field::Value(v) if v == b"a"));
-        assert!(matches!(&records[0][1], Field::Null));
+        let rows = parser.feed(b"a|nil\n").unwrap();
+        assert_eq!(string_of(&rows[0], 0), Some("a".into()));
+        assert_eq!(string_of(&rows[0], 1), None);
     }
 
     #[test]
@@ -208,64 +265,97 @@ mod tests {
         assert!(err.to_string().contains("not supported by format text"));
     }
 
-    fn text_parser() -> TextRecordParser {
-        TextRecordParser {
-            delimiter: b'\t',
-            null: b"\\N".to_vec(),
-            pending: Vec::new(),
-        }
+    #[test]
+    fn test_text_parse_records() {
+        let mut parser = parser(&test_columns());
+        let rows = parser.feed(b"1\thello\t\\N\n2\two\\trld\t3\n").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].values[0].value_data,
+            Some(api::v1::value::ValueData::I32Value(1))
+        );
+        assert_eq!(string_of(&rows[0], 1), Some("hello".into()));
+        assert_eq!(string_of(&rows[1], 1), Some("wo\trld".into()));
     }
 
     #[test]
-    fn test_text_parse_records() {
-        let mut parser = text_parser();
-        let records = parser.feed(b"1\thello\t\\N\n2\two\\trld\t3\n").unwrap();
-        assert_eq!(records.len(), 2);
-        assert!(matches!(&records[0][0], Field::Value(v) if v == b"1"));
-        assert!(matches!(&records[0][2], Field::Null));
-        assert!(matches!(&records[1][1], Field::Value(v) if v == b"wo\trld"));
+    fn test_text_null_marker() {
+        let mut parser = parser(&test_columns());
+        let rows = parser.feed(b"1\t\\N\t\\N\n").unwrap();
+        assert_eq!(string_of(&rows[0], 1), None);
+        assert_eq!(string_of(&rows[0], 2), None);
     }
 
     #[test]
     fn test_text_parse_chunk_boundaries() {
-        let mut parser = text_parser();
+        let columns = vec![
+            ColumnSchema::new("a", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("b", ConcreteDataType::string_datatype(), true),
+        ];
+        let mut parser = parser(&columns);
         assert!(parser.feed(b"ab").unwrap().is_empty());
         assert!(parser.feed(b"c\td").unwrap().is_empty());
-        let records = parser.feed(b"e\n").unwrap();
-        assert_eq!(records.len(), 1);
-        assert!(matches!(&records[0][0], Field::Value(v) if v == b"abc"));
-        assert!(matches!(&records[0][1], Field::Value(v) if v == b"de"));
+        let rows = parser.feed(b"e\n").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(string_of(&rows[0], 0), Some("abc".into()));
+        assert_eq!(string_of(&rows[0], 1), Some("de".into()));
     }
 
     #[test]
     fn test_text_trailing_record_without_newline() {
-        let mut parser = text_parser();
+        let columns = vec![
+            ColumnSchema::new("a", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("b", ConcreteDataType::string_datatype(), true),
+        ];
+        let mut parser = parser(&columns);
         parser.feed(b"x\ty").unwrap();
-        let records = parser.finish().unwrap();
-        assert_eq!(records.len(), 1);
-        assert!(matches!(&records[0][0], Field::Value(v) if v == b"x"));
-        assert!(matches!(&records[0][1], Field::Value(v) if v == b"y"));
+        let rows = parser.finish().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(string_of(&rows[0], 0), Some("x".into()));
+        assert_eq!(string_of(&rows[0], 1), Some("y".into()));
     }
 
     #[test]
     fn test_text_octal_and_errors() {
-        let mut parser = text_parser();
-        let records = parser.feed(b"\\101\\102\n").unwrap();
-        assert!(matches!(&records[0][0], Field::Value(v) if v == b"AB"));
+        let columns = vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::string_datatype(),
+            true,
+        )];
+        let mut p = parser(&columns);
+        let rows = p.feed(b"\\101\\102\n").unwrap();
+        assert_eq!(string_of(&rows[0], 0), Some("AB".into()));
 
-        let mut parser = text_parser();
-        let err = match parser.feed(b"a\\z\n") {
+        let mut p = parser(&columns);
+        let err = match p.feed(b"a\\z\n") {
             Ok(_) => panic!("expected parse error"),
             Err(e) => e,
         };
         assert!(err.to_string().contains("invalid escape sequence"));
 
-        let mut parser = text_parser();
-        parser.feed(b"trailing\\").unwrap();
-        let err = match parser.finish() {
+        let mut p = parser(&columns);
+        p.feed(b"trailing\\").unwrap();
+        let err = match p.finish() {
             Ok(_) => panic!("expected parse error"),
             Err(e) => e,
         };
         assert!(err.to_string().contains("end-of-line backslash"));
+    }
+
+    #[test]
+    fn test_text_field_count_mismatch() {
+        let mut p = parser(&test_columns());
+        let err = match p.feed(b"1\thello\n") {
+            Ok(_) => panic!("expected parse error"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("missing data for column \"c\""));
+
+        let mut p = parser(&test_columns());
+        let err = match p.feed(b"1\thello\tx\textra\n") {
+            Ok(_) => panic!("expected parse error"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("extra data"));
     }
 }
