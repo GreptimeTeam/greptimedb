@@ -1234,6 +1234,7 @@ pub(crate) fn should_split_flat_batches_for_merge(
             let file = &stream_ctx.input.files[file_index];
             let file_meta = file.meta_ref();
             if file_meta.level == 0 {
+                // Short series can leave too many tiny batches retained by the merge.
                 if file_meta.num_series > 0 {
                     if !can_split_series(file_meta.num_rows, file_meta.num_series) {
                         return None;
