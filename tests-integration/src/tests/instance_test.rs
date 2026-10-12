@@ -259,6 +259,107 @@ WHERE greptime_timestamp = (
 }
 
 #[apply(both_instances_cases)]
+async fn test_metric_logical_scan_tag_order(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE f04_scan_phy (
+            host STRING PRIMARY KEY,
+            val DOUBLE,
+            ts TIMESTAMP TIME INDEX
+        ) ENGINE = metric WITH (physical_metric_table = 'true')"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE f04_scan_logical (
+            host STRING PRIMARY KEY,
+            val DOUBLE,
+            ts TIMESTAMP TIME INDEX
+        ) ENGINE = metric WITH (on_physical_table = 'f04_scan_phy')"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        "INSERT INTO f04_scan_logical (host, val, ts) VALUES \
+         ('a', 1, 0), ('b', 2, 0), ('c', 3, 0), ('d', 4, 0), \
+         ('e', 5, 0), ('f', 6, 0), ('g', 7, 0), ('h', 8, 0)",
+    )
+    .await;
+
+    // The ordered rows are compared exactly as printed. Sorting them before
+    // comparing (or comparing them unordered) would accept a scan that returns
+    // the physical table's tag order instead of the requested `host` order.
+    async fn ordered_rows(instance: &Arc<Instance>, sql: &str, parallelism: usize) -> String {
+        execute_sql_with_query_parallelism(instance, sql, parallelism)
+            .await
+            .data
+            .pretty_print()
+            .await
+    }
+
+    let all_hosts = "\
++------+---------------------+-----+
+| host | ts                  | val |
++------+---------------------+-----+
+| a    | 1970-01-01T00:00:00 | 1.0 |
+| b    | 1970-01-01T00:00:00 | 2.0 |
+| c    | 1970-01-01T00:00:00 | 3.0 |
+| d    | 1970-01-01T00:00:00 | 4.0 |
+| e    | 1970-01-01T00:00:00 | 5.0 |
+| f    | 1970-01-01T00:00:00 | 6.0 |
+| g    | 1970-01-01T00:00:00 | 7.0 |
+| h    | 1970-01-01T00:00:00 | 8.0 |
++------+---------------------+-----+";
+    let first_three_hosts = "\
++------+---------------------+-----+
+| host | ts                  | val |
++------+---------------------+-----+
+| a    | 1970-01-01T00:00:00 | 1.0 |
+| b    | 1970-01-01T00:00:00 | 2.0 |
+| c    | 1970-01-01T00:00:00 | 3.0 |
++------+---------------------+-----+";
+
+    let mut mismatches = Vec::new();
+    for parallelism in [1, 4] {
+        // `NULLS FIRST` also spells out the default ordering, so the first two
+        // queries must not be answered from a wrong tag order. The remaining
+        // `NULLS LAST` queries are controls that must keep the same order.
+        for (query, expected) in [
+            (
+                "SELECT host, ts, val FROM f04_scan_logical ORDER BY host NULLS FIRST",
+                all_hosts,
+            ),
+            (
+                "SELECT host, ts, val FROM f04_scan_logical ORDER BY host NULLS FIRST LIMIT 3",
+                first_three_hosts,
+            ),
+            (
+                "SELECT host, ts, val FROM f04_scan_logical ORDER BY host NULLS LAST",
+                all_hosts,
+            ),
+            (
+                "SELECT host, ts, val FROM f04_scan_logical ORDER BY host NULLS LAST LIMIT 3",
+                first_three_hosts,
+            ),
+        ] {
+            let actual = ordered_rows(&frontend, query, parallelism).await;
+            if actual.trim() != expected.trim() {
+                mismatches.push(format!(
+                    "query `{query}` with query_parallelism={parallelism} returned:\n{actual}"
+                ));
+            }
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "logical metric table rows are not ordered by host, expected `a`..`h`:\n{}",
+        mismatches.join("\n---\n")
+    );
+}
+
+#[apply(both_instances_cases)]
 async fn test_partitioned_merge_scan_left_join_repartitions(instance: Arc<dyn MockInstance>) {
     let frontend = instance.frontend();
     execute_sql(
