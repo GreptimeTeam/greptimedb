@@ -452,6 +452,60 @@ async fn test_group_by_tsid_and_time_preserves_rows(instance: Arc<dyn MockInstan
          VALUES ('2024-01-01 00:00:00', 1.5, 'a')",
     )
     .await;
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE audit_metric_logical_two (
+            ts TIMESTAMP(3) TIME INDEX,
+            val DOUBLE,
+            host STRING PRIMARY KEY
+        ) ENGINE = metric WITH ('on_physical_table' = 'audit_metric_phy')"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        "INSERT INTO audit_metric_logical_two (ts, val, host) \
+         VALUES ('2024-01-01 00:00:00', 2.5, 'a')",
+    )
+    .await;
+    for parallelism in [1, 4] {
+        let result = execute_sql_with_query_parallelism(
+            &frontend,
+            "SELECT __tsid, ts, count(*) AS n FROM audit_metric_phy GROUP BY __tsid, ts ORDER BY __tsid, ts",
+            parallelism,
+        )
+        .await
+        .data
+        .pretty_print()
+        .await;
+        assert_eq!(
+            result_rows(&result),
+            vec![
+                vec!["__tsid", "ts", "n"],
+                vec![
+                    result_rows(&result)[1][0].as_str(),
+                    "2024-01-01T00:00:00",
+                    "2"
+                ],
+            ],
+            "physical-table grouping must combine identical TSID/time across logical tables at parallelism={parallelism}:\n{result}"
+        );
+    }
+
+    for table in ["audit_metric_logical", "audit_metric_logical_two"] {
+        let logical = execute_sql(
+            &frontend,
+            &format!("SELECT host, val, ts FROM {table} ORDER BY ts"),
+        )
+        .await
+        .data
+        .pretty_print()
+        .await;
+        assert_eq!(
+            result_rows(&logical).len(),
+            2,
+            "logical reads remain correct: {logical}"
+        );
+    }
 
     let error = try_execute_sql(
         &frontend,

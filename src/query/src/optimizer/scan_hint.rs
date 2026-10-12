@@ -27,7 +27,9 @@ use datafusion_expr::{Expr, LogicalPlan, utils};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 use datatypes::arrow::datatypes::{DataType, TimeUnit as ArrowTimeUnit};
 use promql::extension_plan::{InstantManipulate, SeriesDivide, SeriesNormalize};
-use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+};
 use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
 
@@ -55,6 +57,27 @@ impl OptimizerRule for ScanHintRule {
     ) -> Result<Transformed<LogicalPlan>> {
         Self::optimize(plan)
     }
+}
+
+fn restricted_to_single_table_id(filters: &[Expr]) -> bool {
+    filters.iter().any(|filter| match filter {
+        Expr::BinaryExpr(binary) if binary.op == datafusion_expr::Operator::Eq => {
+            matches!(
+                (&*binary.left, &*binary.right),
+                (Expr::Column(column), Expr::Literal(_, _))
+                    if column.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+            ) || matches!(
+                (&*binary.left, &*binary.right),
+                (Expr::Literal(_, _), Expr::Column(column))
+                    if column.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+            )
+        }
+        Expr::InList(list) if list.list.len() == 1 => {
+            matches!(&*list.expr, Expr::Column(column) if column.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+                && matches!(list.list[0], Expr::Literal(_, _))
+        }
+        _ => false,
+    })
 }
 
 impl ScanHintRule {
@@ -101,7 +124,7 @@ impl ScanHintRule {
         // the shared catalog provider. This keeps order and aggregate hints
         // local as well as the new LastRow hint.
         let adapter = original.clone_for_scan();
-        Self::apply_hints(&adapter, rewriter);
+        Self::apply_hints(&adapter, rewriter, &table_scan.filters);
         if use_last_row {
             // Apply the instant-derived hint after the aggregate hint. Both
             // select LastRow today, and this ordering preserves the existing
@@ -147,16 +170,20 @@ impl ScanHintRule {
         true
     }
 
-    fn apply_hints(adapter: &DummyTableProvider, rewriter: &mut ScanHintRewriter) {
+    fn apply_hints(
+        adapter: &DummyTableProvider,
+        rewriter: &mut ScanHintRewriter,
+        filters: &[Expr],
+    ) {
         if let Some(order_expr) = &rewriter.order_expr {
-            Self::set_order_hint(adapter, order_expr);
+            Self::set_order_hint(adapter, order_expr, filters);
         }
         if let Some((group_by_cols, order_by_col)) = &rewriter.ts_row_selector {
             Self::set_time_series_row_selector_hint(adapter, group_by_cols, order_by_col);
         }
     }
 
-    fn set_order_hint(adapter: &DummyTableProvider, order_expr: &Vec<Sort>) {
+    fn set_order_hint(adapter: &DummyTableProvider, order_expr: &Vec<Sort>, filters: &[Expr]) {
         let mut opts = Vec::with_capacity(order_expr.len());
         for sort in order_expr {
             let name = match sort.expr.try_as_col() {
@@ -184,12 +211,10 @@ impl ScanHintRule {
             .filter_map(|s| s.expr.try_as_col())
             .collect::<Vec<_>>();
 
-        // Special-case metric engine: when the nearest sort requirement is `__tsid, <time index>`,
-        // we can safely enable per-series distribution hint so the region can use `SeriesScan`.
-        //
-        // This pattern is produced by promql planning when `__tsid` is available and is used as the
-        // series identifier (instead of expanding to all tag columns).
+        // `__tsid` is a series key only within one logical table. Require the logical
+        // table id predicate before using the compact TSID ordering/distribution.
         if sort_cols.len() == 2
+            && restricted_to_single_table_id(filters)
             && sort_cols[0].name == DATA_SCHEMA_TSID_COLUMN_NAME
             && sort_cols[1].name == time_index_name
             && region_metadata
@@ -1577,8 +1602,15 @@ mod test {
     fn set_order_hint_sets_per_series_distribution_for_tsid_sort() {
         let provider = Arc::new(mock_table_provider_with_tsid(RegionId::new(1, 1)));
         let table_source = Arc::new(DefaultTableSource::new(provider.clone()));
-        let plan = LogicalPlanBuilder::scan("t", table_source, None)
+        let LogicalPlan::TableScan(mut scan) = LogicalPlanBuilder::scan("t", table_source, None)
             .unwrap()
+            .build()
+            .unwrap()
+        else {
+            unreachable!();
+        };
+        scan.filters = vec![col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME).eq(lit(1))];
+        let plan = LogicalPlanBuilder::from(LogicalPlan::TableScan(scan))
             .sort(vec![
                 col(DATA_SCHEMA_TSID_COLUMN_NAME).sort(true, true),
                 col("ts").sort(true, true),

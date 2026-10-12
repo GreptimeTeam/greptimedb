@@ -42,6 +42,7 @@ use datafusion::physical_plan::{
 use datafusion_common::stats::Precision;
 use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::{ColumnStatistics, DataFusionError, Statistics};
+use datafusion_expr::Expr;
 use datafusion_physical_expr::expressions::{
     BinaryExpr, Column, DynamicFilterPhysicalExpr, is_null,
 };
@@ -51,7 +52,9 @@ use datafusion_physical_expr::{
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::compute::SortOptions;
 use futures::{Stream, StreamExt};
-use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+};
 use store_api::region_engine::{
     PartitionRange, PrepareRequest, QueryScanContext, RegionScannerRef,
 };
@@ -59,6 +62,27 @@ use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 
 use crate::table::metrics::StreamMetrics;
+
+fn restricted_to_single_table_id(filters: &[Expr]) -> bool {
+    filters.iter().any(|filter| match filter {
+        Expr::BinaryExpr(binary) if binary.op == Operator::Eq => {
+            matches!(
+                (&*binary.left, &*binary.right),
+                (Expr::Column(column), Expr::Literal(_, _))
+                    if column.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+            ) || matches!(
+                (&*binary.left, &*binary.right),
+                (Expr::Literal(_, _), Expr::Column(column))
+                    if column.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+            )
+        }
+        Expr::InList(list) if list.list.len() == 1 => {
+            matches!(&*list.expr, Expr::Column(column) if column.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+                && matches!(list.list[0], Expr::Literal(_, _))
+        }
+        _ => false,
+    })
+}
 
 /// The name of [`RegionScanExec`] plan node.
 pub const REGION_SCAN_EXEC_NAME: &str = "RegionScanExec";
@@ -177,6 +201,7 @@ impl RegionScanExec {
                 // Preserve metric TSID properties only for its reserved internal column,
                 // not a same-named user column.
                 if has_internal_tsid
+                    && restricted_to_single_table_id(&request.filters)
                     && let (Ok(tsid_col), Some(ts)) = (
                         Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema),
                         ts_col.clone(),
@@ -210,7 +235,9 @@ impl RegionScanExec {
         };
 
         let partitioning = match request.distribution {
-            Some(TimeSeriesDistribution::PerSeries) if has_internal_tsid => {
+            Some(TimeSeriesDistribution::PerSeries)
+                if has_internal_tsid && restricted_to_single_table_id(&request.filters) =>
+            {
                 match Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema) {
                     Ok(tsid) => Partitioning::Hash(vec![Arc::new(tsid) as _], num_output_partition),
                     // The reserved `__tsid` column is not part of the scan output, so
@@ -690,6 +717,7 @@ mod test {
     use datafusion::physical_plan::metrics::MetricValue;
     use datafusion::physical_plan::{StatisticsArgs, StatisticsContext};
     use datafusion::prelude::SessionContext;
+    use datafusion_expr::Expr;
     use datatypes::arrow::array::Array;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
@@ -1024,6 +1052,12 @@ mod test {
                 scanner,
                 ScanRequest {
                     distribution: Some(TimeSeriesDistribution::PerSeries),
+                    filters: vec![
+                        Expr::Column(datafusion_common::Column::new_unqualified(
+                            DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                        ))
+                        .eq(datafusion_expr::lit(1)),
+                    ],
                     ..Default::default()
                 },
                 None,
@@ -1039,6 +1073,55 @@ mod test {
                     ) as _],
                     1
                 )
+            );
+            let scanner = Box::new(RepeatableScanner {
+                batches: RecordBatches::try_new(schema.clone(), vec![]).unwrap(),
+                properties: ScannerProperties::default(),
+                metadata: metadata.clone(),
+                dynamic_filters: Arc::new(Mutex::new(Vec::new())),
+            });
+            let unrestricted = RegionScanExec::new(
+                scanner,
+                ScanRequest {
+                    distribution: Some(TimeSeriesDistribution::PerSeries),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                unrestricted.properties.output_partitioning(),
+                &Partitioning::Hash(
+                    vec![
+                        Arc::new(
+                            Column::new_with_schema(
+                                DATA_SCHEMA_TSID_COLUMN_NAME,
+                                &unrestricted.arrow_schema
+                            )
+                            .unwrap()
+                        ) as _,
+                        Arc::new(
+                            Column::new_with_schema("host", &unrestricted.arrow_schema).unwrap()
+                        ) as _,
+                    ],
+                    1,
+                )
+            );
+            let tsid_then_time = [DATA_SCHEMA_TSID_COLUMN_NAME, "ts"].map(|name| {
+                PhysicalSortExpr::new(
+                    Arc::new(Column::new_with_schema(name, &unrestricted.arrow_schema).unwrap()),
+                    SortOptions {
+                        descending: false,
+                        nulls_first: true,
+                    },
+                )
+            });
+            assert!(
+                !unrestricted
+                    .properties
+                    .equivalence_properties()
+                    .ordering_satisfy(tsid_then_time)
+                    .unwrap()
             );
             for names in [
                 vec![DATA_SCHEMA_TSID_COLUMN_NAME, "host", "ts"],
