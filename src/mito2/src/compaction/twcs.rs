@@ -683,9 +683,12 @@ fn pick_l1_file_reduction(
     max_output_file_size: Option<u64>,
     mapper: &PrimaryKeyRangeMapper,
 ) -> Vec<FileHandle> {
-    pick_count_first_where(sorted_runs, max_output_file_size, mapper, |candidate| {
-        is_balanced_candidate(candidate) && candidate.file_reduction(max_output_file_size) > 0
-    })
+    pick_l1_files(
+        sorted_runs,
+        max_output_file_size,
+        mapper,
+        PickPhase::L1FileReduction,
+    )
 }
 
 fn pick_l1_overlap_only(
@@ -693,6 +696,32 @@ fn pick_l1_overlap_only(
     max_output_file_size: Option<u64>,
     mapper: &PrimaryKeyRangeMapper,
 ) -> Vec<FileHandle> {
+    pick_l1_files(
+        sorted_runs,
+        max_output_file_size,
+        mapper,
+        PickPhase::L1OverlapOnly,
+    )
+}
+
+/// Both L1 phases consider overlap participants so filtering cannot hide a
+/// file-reducing candidate from the higher-priority phase. File reduction also
+/// keeps contiguous candidates, which can pack files without any overlap.
+fn pick_l1_files(
+    sorted_runs: Vec<SortedRun<FileHandle>>,
+    max_output_file_size: Option<u64>,
+    mapper: &PrimaryKeyRangeMapper,
+    phase: PickPhase,
+) -> Vec<FileHandle> {
+    let is_eligible = |candidate: &Candidate| {
+        candidate.num_files >= 2
+            && is_balanced_candidate(candidate)
+            && match phase {
+                PickPhase::L1FileReduction => candidate.file_reduction(max_output_file_size) > 0,
+                PickPhase::L1OverlapOnly => candidate.file_reduction(max_output_file_size) == 0,
+                PickPhase::HasL0 => false,
+            }
+    };
     let files = ordered_files(&sorted_runs);
     let mut best: Option<(CandidateScore, Vec<usize>)> = None;
     let mut run_budget = None;
@@ -707,18 +736,23 @@ fn pick_l1_overlap_only(
                 &mut participations,
                 mapper,
             );
+            if matches!(phase, PickPhase::L1FileReduction) && is_eligible(&interval) {
+                let score = interval.score(max_output_file_size);
+                if best
+                    .as_ref()
+                    .is_none_or(|(best_score, _)| score.is_better_than(best_score))
+                {
+                    best = Some((score, (left..=right).collect()));
+                }
+            }
             if interval.overlap_participants == 0 {
                 continue;
             }
 
-            // Keep the bounded time-interval search, but only rewrite files
-            // contributing to its overlap benefit. In particular, unrelated
-            // files must not make an otherwise unbalanced merge eligible.
+            // Only retained participants may contribute to balance and benefit.
             let candidate =
                 Candidate::from_overlap_participants(&files[left..=right], &participations);
-            if !is_balanced_candidate(&candidate)
-                || candidate.file_reduction(max_output_file_size) != 0
-            {
+            if !is_eligible(&candidate) {
                 continue;
             }
 
@@ -732,21 +766,23 @@ fn pick_l1_overlap_only(
                     .enumerate()
                     .filter_map(|(offset, participates)| participates.then_some(left + offset))
                     .collect();
-                // Check a component once, only when a candidate could win. Its
-                // full run sizes prevent smaller slices from bypassing the budget.
-                let budget = run_budget.get_or_insert_with(|| {
-                    L1OverlapRunBudget::new(
-                        files.iter().map(|file| file.file.clone()).collect(),
-                        max_output_file_size.unwrap_or(0),
-                        mapper,
-                    )
-                });
-                let input_files = inputs
-                    .iter()
-                    .map(|&idx| files[idx].file.clone())
-                    .collect::<Vec<_>>();
-                if !budget.allows_candidate(&input_files) {
-                    continue;
+                // Pure rewrites still need both run budgets. File-reducing
+                // candidates retain their existing balance-only admission.
+                if matches!(phase, PickPhase::L1OverlapOnly) {
+                    let budget = run_budget.get_or_insert_with(|| {
+                        L1OverlapRunBudget::new(
+                            files.iter().map(|file| file.file.clone()).collect(),
+                            max_output_file_size.unwrap_or(0),
+                            mapper,
+                        )
+                    });
+                    let input_files = inputs
+                        .iter()
+                        .map(|&idx| files[idx].file.clone())
+                        .collect::<Vec<_>>();
+                    if !budget.allows_candidate(&input_files) {
+                        continue;
+                    }
                 }
                 best = Some((score, inputs));
             }
@@ -3916,6 +3952,75 @@ mod tests {
                 assert_eq!(expected, actual, "{case}, active window: {active_window:?}");
             }
         }
+    }
+
+    #[rstest::rstest]
+    #[case::active_filtered(Some(0), false, 1000, &[0, 2])]
+    #[case::inactive_filtered(None, false, 1000, &[0, 2])]
+    #[case::older_reduction_before_newer_overlap(Some(1), true, 1000, &[0, 2])]
+    #[case::contiguous_has_more_reduction(Some(0), false, 90, &[0, 1, 2, 3])]
+    #[case::filtered_has_equal_reduction_with_less_io(Some(0), false, 600, &[0, 2])]
+    #[tokio::test]
+    async fn test_l1_file_reduction_considers_filtered_candidates(
+        #[case] active_window: Option<i64>,
+        #[case] newer_overlap_window: bool,
+        #[case] unrelated_size: u64,
+        #[case] expected_indices: &[usize],
+    ) {
+        // Only A/B overlap. With 1000-byte unrelated files between/after them,
+        // no contiguous interval reduces the file count, but A+B alone does.
+        let mut files = [
+            (b'a', 100),
+            (b'b', unrelated_size),
+            (b'a', 100),
+            (b'c', unrelated_size),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (key, size))| {
+            new_file_handle_with_size_sequence_and_primary_key_range(
+                FileId::random(),
+                idx as i64 * 100,
+                749,
+                1,
+                1,
+                size,
+                pk_range(&[key], &[key]),
+            )
+        })
+        .collect::<Vec<_>>();
+        let expected = expected_indices
+            .iter()
+            .map(|&idx| files[idx].file_id())
+            .collect::<Vec<_>>();
+        if newer_overlap_window {
+            // One slot: a filtered file-reducing pick must beat a newer pure
+            // rewrite, rather than being deferred to the overlap-only phase.
+            files.extend(priority_test_files(1, 1, 512, true));
+        }
+        let picker = TwcsPicker {
+            max_output_file_size: Some(512),
+            ..priority_test_picker(1)
+        };
+        let outputs = picker
+            .build_output_with_time_range(
+                RegionId::from_u64(0),
+                assign_to_windows(files.iter(), 1),
+                active_window,
+                Some(1),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(1, outputs.len());
+        assert_eq!(
+            expected,
+            outputs[0]
+                .inputs
+                .iter()
+                .map(FileHandle::file_id)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
