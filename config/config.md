@@ -141,6 +141,7 @@
 | `procedure.retry_delay` | String | `500ms` | Initial retry delay of procedures, increases exponentially |
 | `procedure.max_running_procedures` | Integer | `128` | Max running procedures.<br/>The maximum number of procedures that can be running at the same time.<br/>If the number of running procedures exceeds this limit, the procedure will be rejected. |
 | `query` | -- | -- | The query engine options. |
+| `query.experimental_enable_factorized_join_agg` | Bool | `false` | Experimental opt-in for shape-based AVG/SUM join aggregation; default false. |
 | `query.parallelism` | Integer | `0` | Parallelism of the query engine.<br/>Default to 0, which means the number of CPU cores. |
 | `query.memory_pool_size` | String | 0 | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit. Defaults to 0 (unlimited); this example sets it to `50%`.<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans. |
 | `query.experimental_memory_pool_policy` | String | `greedy` | Experimental memory pool allocation policy:<br/>- "greedy" (default): first-come-first-served allocation; preserves current behavior.<br/>- "fair": divides available memory among spillable operators and may spill earlier.<br/>Only effective when `memory_pool_size` is bounded (>0). |
@@ -385,6 +386,7 @@
 | `meta_client.metadata_cache_ttl` | String | `10m` | TTL of the metadata cache. |
 | `meta_client.metadata_cache_tti` | String | `5m` | -- |
 | `query` | -- | -- | The query engine options. |
+| `query.experimental_enable_factorized_join_agg` | Bool | `false` | Experimental opt-in for shape-based AVG/SUM join aggregation; default false. |
 | `query.parallelism` | Integer | `0` | Parallelism of the query engine.<br/>Default to 0, which means the number of CPU cores. |
 | `query.allow_query_fallback` | Bool | `false` | Whether to allow query fallback when push down optimize fails.<br/>Default to false, meaning when push down optimize failed, return error msg |
 | `query.memory_pool_size` | String | 0 | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "4GB", "8GB") or percentage of system memory (e.g., "30%").<br/>Setting it to 0 disables the limit. Defaults to 0 (unlimited); this example sets it to `50%`.<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans (only applies to datanodes). |
@@ -612,6 +614,7 @@
 | `wal.max_unpersisted_age` | String | `8s` | The age of the oldest unpersisted entry at which new appends stall until an upload completes, in `enqueued` mode.<br/>**It's only used when the provider is `experimental_object_store` and `ack_mode` is `enqueued`**. |
 | `wal.on_corrupted_segment` | String | `skip` | What a read does with a segment that still does not decode after a second fetch, because its checksum does not match or its content disagrees with its footer entry.<br/>- `skip`: the segment is skipped and recorded as a WAL hole of its region, a metric is incremented and a warning is logged; the other regions of the object are unaffected (the default).<br/>- `fail`: the read fails, so the region does not open.<br/>**It's only used when the provider is `experimental_object_store`**. |
 | `query` | -- | -- | The query engine options. |
+| `query.experimental_enable_factorized_join_agg` | Bool | `false` | Experimental opt-in for shape-based AVG/SUM join aggregation; default false. |
 | `query.parallelism` | Integer | `0` | Parallelism of the query engine.<br/>Default to 0, which means the number of CPU cores. |
 | `query.memory_pool_size` | String | 0 | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit. Defaults to 0 (unlimited); this example sets it to `50%`.<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans. |
 | `query.experimental_memory_pool_policy` | String | `greedy` | Experimental memory pool allocation policy:<br/>- "greedy" (default): first-come-first-served allocation; preserves current behavior.<br/>- "fair": divides available memory among spillable operators and may spill earlier.<br/>Only effective when `memory_pool_size` is bounded (>0). |
@@ -798,6 +801,7 @@
 | `tracing` | -- | -- | The tracing options. Only effect when compiled with `tokio-console` feature. |
 | `tracing.tokio_console_addr` | String | Unset | The tokio console address. |
 | `query` | -- | -- | -- |
+| `query.experimental_enable_factorized_join_agg` | Bool | `false` | Experimental opt-in for shape-based AVG/SUM join aggregation; default false. |
 | `query.parallelism` | Integer | `1` | Parallelism of the query engine for query sent by flownode.<br/>Default to 1, so it won't use too much cpu or memory |
 | `query.memory_pool_size` | String | 0 | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "1GB", "2GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit. Defaults to 0 (unlimited); this example sets it to `50%`.<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans. |
 | `query.experimental_memory_pool_policy` | String | `greedy` | Experimental memory pool allocation policy:<br/>- "greedy" (default): first-come-first-served allocation; preserves current behavior.<br/>- "fair": divides available memory among spillable operators and may spill earlier.<br/>Only effective when `memory_pool_size` is bounded (>0). |

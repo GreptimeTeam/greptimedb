@@ -63,8 +63,8 @@ use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_B
 use crate::optimizer::ExtensionAnalyzerRule;
 use crate::optimizer::const_normalization::ConstNormalizationRule;
 use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
-use crate::optimizer::count_nest_aggr::CountNestAggrRule;
 use crate::optimizer::count_join::CountJoinRewrite;
+use crate::optimizer::count_nest_aggr::CountNestAggrRule;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::enforce_sorting::EnforceSorting;
 use crate::optimizer::global_limit::EnsureGlobalLimitForFetch;
@@ -78,7 +78,9 @@ use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::transcribe_atat::TranscribeAtatRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::optimizer::windowed_sort::WindowedSortPhysicalRule;
-use crate::options::{FactorizedJoinAggOptions, QueryMemoryPoolPolicy, QueryOptions as QueryOptionsNew};
+use crate::options::{
+    FactorizedJoinAggOptions, QueryMemoryPoolPolicy, QueryOptions as QueryOptionsNew,
+};
 use crate::query_engine::DefaultSerializer;
 use crate::query_engine::options::QueryOptions;
 use crate::query_engine::runtime::{
@@ -156,7 +158,10 @@ impl QueryEngineState {
             session_config = session_config.with_target_partitions(options.parallelism);
         }
         if options.experimental_enable_factorized_join_agg {
-            session_config.options_mut().extensions.insert(FactorizedJoinAggOptions { enabled: true });
+            session_config
+                .options_mut()
+                .extensions
+                .insert(FactorizedJoinAggOptions { enabled: true });
         }
         if options.allow_query_fallback {
             session_config
@@ -686,7 +691,6 @@ impl MemoryPool for MetricsMemoryPool {
 
 #[cfg(test)]
 mod tests {
-    #[path = "state/ffx_count_tests.rs"]
     mod ffx_count_tests;
     use std::sync::atomic::{AtomicBool, Ordering};
 

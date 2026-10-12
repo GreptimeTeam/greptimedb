@@ -567,8 +567,15 @@ impl QueryEngine for DatafusionQueryEngine {
             }
         }
 
-        if query_ctx.configuration_parameter().experimental_enable_factorized_join_agg() {
-            state.config_mut().options_mut().extensions.insert(FactorizedJoinAggOptions { enabled: true });
+        if query_ctx
+            .configuration_parameter()
+            .experimental_enable_factorized_join_agg()
+        {
+            state
+                .config_mut()
+                .options_mut()
+                .extensions
+                .insert(FactorizedJoinAggOptions { enabled: true });
         }
 
         // configure execution options

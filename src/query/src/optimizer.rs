@@ -14,6 +14,7 @@
 
 pub mod const_normalization;
 pub mod constant_term;
+pub(crate) mod count_join;
 pub mod count_nest_aggr;
 pub mod count_wildcard;
 pub mod enforce_sorting;
