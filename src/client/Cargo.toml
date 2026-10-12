@@ -46,6 +46,3 @@ tokio.workspace = true
 tokio-stream = { workspace = true, features = ["net"] }
 tonic.workspace = true
 tonic-prost.workspace = true
-
-[dev-dependencies]
-serde.workspace = true

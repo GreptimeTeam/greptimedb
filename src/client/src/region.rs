@@ -666,19 +666,25 @@ mod tests {
 
     #[test]
     fn test_retry_hint_wire_compatibility() {
-        #[derive(serde::Deserialize)]
-        struct Fixture {
-            name: String,
-            wire_hint: Option<String>,
-            expected_hint: String,
-        }
-
-        let fixtures: Vec<Fixture> = serde_json::from_str(include_str!(
-            "../../../tests/compatibility/wire/write_retry/retry_hints.json"
-        ))
-        .unwrap();
-        assert_eq!(fixtures.len(), 5);
-        for fixture in fixtures {
+        for (name, wire_hint, expected_hint) in [
+            ("legacy_missing", None, RetryHint::NonRetryable),
+            ("legacy_retryable", Some("retryable"), RetryHint::Retryable),
+            (
+                "legacy_non_retryable",
+                Some("non_retryable"),
+                RetryHint::NonRetryable,
+            ),
+            (
+                "route_refresh",
+                Some("retry_after_route_refresh"),
+                RetryHint::RetryAfterRouteRefresh,
+            ),
+            (
+                "unknown_future_hint",
+                Some("future_retry_hint"),
+                RetryHint::NonRetryable,
+            ),
+        ] {
             let mut status = Status::failed_precondition("region unavailable");
             status.metadata_mut().insert(
                 common_error::GREPTIME_DB_HEADER_ERROR_CODE,
@@ -687,30 +693,19 @@ mod tests {
                     .parse()
                     .unwrap(),
             );
-            if let Some(hint) = fixture.wire_hint {
+            if let Some(hint) = wire_hint {
                 status.metadata_mut().insert(
                     common_error::GREPTIME_DB_HEADER_ERROR_RETRY_HINT,
                     hint.parse().unwrap(),
                 );
             }
             let error: error::Error = status.into();
-            assert_eq!(
-                error.retry_hint().as_str(),
-                fixture.expected_hint,
-                "{}",
-                fixture.name
-            );
-            assert_eq!(
-                error.status_code(),
-                StatusCode::RegionNotReady,
-                "{}",
-                fixture.name
-            );
+            assert_eq!(error.retry_hint(), expected_hint, "{name}");
+            assert_eq!(error.status_code(), StatusCode::RegionNotReady, "{name}");
             assert_eq!(
                 error.tonic_code(),
                 Some(tonic::Code::FailedPrecondition),
-                "{}",
-                fixture.name
+                "{name}"
             );
         }
     }

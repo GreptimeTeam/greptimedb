@@ -6,20 +6,13 @@ SQL restart tests are run via `cargo sqlness compat` and reuse the sqlness-runne
 
 ## Wire fixtures
 
-Frozen wire fixtures are exercised by the Rust tests that own their context
+Frozen protobuf fixtures are exercised by the Rust tests that own their context
 conversion, not by SQLness case discovery. The
 [legacy query-context fixture](wire/read_preference/README.md) checks omitted
 read-preference defaulting and unrelated metadata preservation:
 
 ```shell
 cargo nextest run -p session -E 'test(test_legacy_query_context_wire_defaults_to_leader)'
-```
-
-The [write-retry metadata fixture](wire/write_retry/README.md) checks legacy,
-route-refresh, missing, and unknown retry-hint decoding in the client:
-
-```shell
-cargo nextest run -p client -E 'test(test_retry_hint_wire_compatibility)'
 ```
 
 ## Quick Start

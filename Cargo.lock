@@ -2115,7 +2115,6 @@ dependencies = [
  "prost 0.14.1",
  "query",
  "rand 0.9.4",
- "serde",
  "serde_json",
  "snafu 0.8.6",
  "store-api",
