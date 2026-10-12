@@ -487,6 +487,14 @@ impl QueryContext {
             if crate::hints::is_reserved_extension_key(key) {
                 continue;
             }
+            // Older Frontends and Flownodes forward `query_parallelism=0` (their
+            // "use the server default" encoding) untouched inside the wire
+            // query context, so accept it as unset instead of failing the
+            // query on the Datanode side. The canonical
+            // `query.parallelism = 0` stays rejected.
+            if key.eq_ignore_ascii_case("query_parallelism") && value == "0" {
+                continue;
+            }
             if let Some((canonical, normalized)) =
                 crate::query_options::parse_query_option(key, value)?
             {
@@ -520,7 +528,16 @@ impl QueryContext {
         snapshot
             .extensions
             .retain(|key, _| crate::query_options::canonical_query_option_name(key).is_none());
+        // Older Datanodes only understand the legacy `query_parallelism` hint key, so
+        // mirror the canonical parallelism override for the wire format while keeping
+        // the canonical key for in-process consumers.
+        let legacy_parallelism = options
+            .get("query.parallelism")
+            .map(|parallelism| ("query_parallelism".to_string(), parallelism.clone()));
         snapshot.extensions.extend(options);
+        if let Some((key, value)) = legacy_parallelism {
+            snapshot.extensions.entry(key).or_insert(value);
+        }
         snapshot.query_options_snapshotted = true;
         Ok(snapshot)
     }
@@ -1171,5 +1188,55 @@ mod test {
             .set_extension("batching_enabled".to_string(), "true".to_string())
             .build();
         assert!(!ctx.batching_enabled());
+    }
+
+    #[test]
+    fn test_query_option_snapshot_mirrors_legacy_parallelism_key() {
+        // New frontends speak the canonical key, but older Datanodes only read
+        // the legacy `query_parallelism` hint; the wire snapshot carries both.
+        let ctx = QueryContextBuilder::default().build();
+        ctx.configuration_parameter()
+            .set_query_option("query.parallelism", "1")
+            .unwrap();
+        let snapshot = ctx.query_option_snapshot().unwrap();
+        let extensions = snapshot.extensions();
+        assert_eq!(
+            extensions.get("query.parallelism").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            extensions.get("query_parallelism").map(String::as_str),
+            Some("1")
+        );
+
+        // Without a parallelism override nothing is mirrored.
+        let ctx = QueryContextBuilder::default().build();
+        ctx.configuration_parameter()
+            .set_query_option("query.allow_query_fallback", "true")
+            .unwrap();
+        let snapshot = ctx.query_option_snapshot().unwrap();
+        assert!(!snapshot.extensions().contains_key("query_parallelism"));
+    }
+
+    #[test]
+    fn test_legacy_zero_parallelism_survives_wire_round_trip() {
+        // An old Frontend forwards `query_parallelism=0` untouched inside the
+        // wire query context; a new Datanode must restore it and treat the
+        // option as unset instead of rejecting the whole region query.
+        let mut ctx = QueryContextBuilder::default().build();
+        ctx.set_extension("query_parallelism", "0");
+        let wire: api::v1::QueryContext = (&ctx).into();
+        let restored = QueryContext::try_from(wire).unwrap();
+
+        let snapshot = restored.query_option_snapshot().unwrap();
+        assert!(
+            !snapshot.extensions().contains_key("query.parallelism"),
+            "legacy zero parallelism is treated as unset"
+        );
+
+        // The canonical key keeps strict validation.
+        let mut ctx = QueryContextBuilder::default().build();
+        ctx.set_extension("query.parallelism", "0");
+        assert!(ctx.query_option_snapshot().is_err());
     }
 }

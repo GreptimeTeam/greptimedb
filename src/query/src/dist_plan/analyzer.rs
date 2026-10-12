@@ -68,9 +68,12 @@ pub(crate) use utils::AliasMapping;
 /// Placeholder for other physical partition columns that are not in logical table
 const OTHER_PHY_PART_COL_PLACEHOLDER: &str = "__OTHER_PHYSICAL_PART_COLS_PLACEHOLDER__";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DistPlannerOptions {
     pub allow_query_fallback: bool,
+    /// The user explicitly set `datafusion.optimizer.filter_null_join_keys`;
+    /// when unset the pre-MergeScan pass keeps the historical default on.
+    pub explicit_filter_null_join_keys: bool,
 }
 
 impl ConfigExtension for DistPlannerOptions {
@@ -97,11 +100,18 @@ impl ExtensionOptions for DistPlannerOptions {
     }
 
     fn entries(&self) -> Vec<datafusion::config::ConfigEntry> {
-        vec![datafusion::config::ConfigEntry {
-            key: "allow_query_fallback".to_string(),
-            value: Some(self.allow_query_fallback.to_string()),
-            description: "Allow query fallback to fallback plan rewriter",
-        }]
+        vec![
+            datafusion::config::ConfigEntry {
+                key: "allow_query_fallback".to_string(),
+                value: Some(self.allow_query_fallback.to_string()),
+                description: "Allow query fallback to fallback plan rewriter",
+            },
+            datafusion::config::ConfigEntry {
+                key: "explicit_filter_null_join_keys".to_string(),
+                value: Some(self.explicit_filter_null_join_keys.to_string()),
+                description: "The user explicitly set datafusion.optimizer.filter_null_join_keys",
+            },
+        ]
     }
 }
 
@@ -119,8 +129,17 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         config: &ConfigOptions,
     ) -> datafusion_common::Result<LogicalPlan> {
         let mut config = config.clone();
-        // Aligned with the behavior in `datafusion_optimizer::OptimizerContext::new()`.
-        config.optimizer.filter_null_join_keys = true;
+        // The pre-MergeScan pass has always forced null-key join filtering on
+        // (mirroring `OptimizerContext::new()`), so keep that default here; an
+        // explicit `datafusion.optimizer.filter_null_join_keys` override from
+        // the session wins instead.
+        if !config
+            .extensions
+            .get::<DistPlannerOptions>()
+            .is_some_and(|o| o.explicit_filter_null_join_keys)
+        {
+            config.optimizer.filter_null_join_keys = true;
+        }
         let config = Arc::new(config);
         let opt = config.extensions.get::<DistPlannerOptions>();
         let allow_fallback = opt.map(|o| o.allow_query_fallback).unwrap_or(false);
