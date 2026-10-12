@@ -12,15 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Evidence that the `recursive_protection` feature of our pinned
-//! `datafusion-sql` fork is enabled and effective.
+//! Pins that planning a deep flat `UNION ALL` chain stays within the release
+//! worker stack size.
 //!
 //! Planning a flat `UNION ALL` chain recurses once per term in
 //! `set_expr_to_plan`, so a long chain can overflow a small thread stack; this
-//! is the planner-side crash reported in issue #9356. With
-//! `recursive_protection` enabled (workspace `Cargo.toml`), the planner grows
-//! the stack at its recursive entry points, so the statement below plans on a
-//! deliberately small thread stack that overflows without the feature.
+//! is the planner-side crash reported in issue #9356. The pinned DataFusion
+//! fork enables `recursive_protection` through the umbrella `datafusion`
+//! crate's default features, and the resulting checkpoints (see
+//! `datafusion/sql/src/stack.rs::maybe_grow`, used by `set_expr_to_plan` and
+//! `query_to_plan`) grow the stack at those recursive entry points, so the
+//! statement below plans even on a deliberately small thread stack. This test
+//! guards that behavior at the release stack size so the protection cannot
+//! silently disappear, e.g. across a pin change.
 
 use std::sync::Arc;
 
@@ -40,10 +44,11 @@ const BRANCHES: usize = 1000;
 /// Stack size of the planning thread — the same size as the release
 /// `global-worker` thread stacks.
 ///
-/// Chosen from measured debug-build thresholds (x86_64-pc-windows-gnu) so that
-/// both directions keep a wide margin: without `recursive_protection`, planning
-/// this chain overflows stacks up to 16 MiB (it only completes at 32 MiB),
-/// while with the feature it plans on stacks as small as 256 KiB.
+/// Chosen from measured debug-build thresholds (x86_64-pc-windows-gnu, in an
+/// isolated harness against `datafusion-sql` alone) so that both directions
+/// keep a wide margin: without `recursive_protection` requested, planning this
+/// chain overflows stacks up to 16 MiB (it only completes at 32 MiB), while
+/// with the feature it plans on stacks as small as 256 KiB.
 const PLANNING_STACK_SIZE: usize = 2 * 1024 * 1024;
 
 /// A context provider for statements that reference neither tables nor
