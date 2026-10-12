@@ -362,6 +362,19 @@ impl QueryEngineState {
                     allow_query_fallback: fallback == "true",
                 });
         }
+        // `datafusion.optimizer.filter_null_join_keys` historically defaults to
+        // enabled inside the pre-MergeScan pass; mark an explicit override so the
+        // analyzer can honor it while keeping the historical default otherwise.
+        if options
+            .get_key_value("datafusion.optimizer.filter_null_join_keys")
+            .is_some()
+        {
+            state
+                .config_mut()
+                .options_mut()
+                .extensions
+                .insert(crate::dist_plan::ExplicitNullJoinKeys { set: true });
+        }
         Ok(query_ctx)
     }
 
