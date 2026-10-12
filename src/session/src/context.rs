@@ -520,7 +520,16 @@ impl QueryContext {
         snapshot
             .extensions
             .retain(|key, _| crate::query_options::canonical_query_option_name(key).is_none());
+        // Older Datanodes only understand the legacy `query_parallelism` hint key, so
+        // mirror the canonical parallelism override for the wire format while keeping
+        // the canonical key for in-process consumers.
+        let legacy_parallelism = options
+            .get("query.parallelism")
+            .map(|parallelism| ("query_parallelism".to_string(), parallelism.clone()));
         snapshot.extensions.extend(options);
+        if let Some((key, value)) = legacy_parallelism {
+            snapshot.extensions.entry(key).or_insert(value);
+        }
         snapshot.query_options_snapshotted = true;
         Ok(snapshot)
     }
@@ -1171,5 +1180,33 @@ mod test {
             .set_extension("batching_enabled".to_string(), "true".to_string())
             .build();
         assert!(!ctx.batching_enabled());
+    }
+
+    #[test]
+    fn test_query_option_snapshot_mirrors_legacy_parallelism_key() {
+        // New frontends speak the canonical key, but older Datanodes only read
+        // the legacy `query_parallelism` hint; the wire snapshot carries both.
+        let ctx = QueryContextBuilder::default().build();
+        ctx.configuration_parameter()
+            .set_query_option("query.parallelism", "1")
+            .unwrap();
+        let snapshot = ctx.query_option_snapshot().unwrap();
+        let extensions = snapshot.extensions();
+        assert_eq!(
+            extensions.get("query.parallelism").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            extensions.get("query_parallelism").map(String::as_str),
+            Some("1")
+        );
+
+        // Without a parallelism override nothing is mirrored.
+        let ctx = QueryContextBuilder::default().build();
+        ctx.configuration_parameter()
+            .set_query_option("query.allow_query_fallback", "true")
+            .unwrap();
+        let snapshot = ctx.query_option_snapshot().unwrap();
+        assert!(!snapshot.extensions().contains_key("query_parallelism"));
     }
 }

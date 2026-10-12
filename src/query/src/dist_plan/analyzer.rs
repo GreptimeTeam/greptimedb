@@ -118,10 +118,7 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         plan: LogicalPlan,
         config: &ConfigOptions,
     ) -> datafusion_common::Result<LogicalPlan> {
-        let mut config = config.clone();
-        // Aligned with the behavior in `datafusion_optimizer::OptimizerContext::new()`.
-        config.optimizer.filter_null_join_keys = true;
-        let config = Arc::new(config);
+        let config = Arc::new(config.clone());
         let opt = config.extensions.get::<DistPlannerOptions>();
         let allow_fallback = opt.map(|o| o.allow_query_fallback).unwrap_or(false);
 
