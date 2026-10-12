@@ -23,7 +23,7 @@ use common_config::KvBackendConfig;
 use common_error::ext::BoxedError;
 use common_meta::error as meta_error;
 use common_meta::kv_backend::txn::{Txn, TxnOp, TxnOpResponse, TxnRequest, TxnResponse};
-use common_meta::kv_backend::{KvBackend, TxnService};
+use common_meta::kv_backend::{ClosableKvBackend, KvBackend, TxnService};
 use common_meta::rpc::KeyValue;
 use common_meta::rpc::store::{
     BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse, BatchPutRequest,
@@ -36,13 +36,14 @@ use raft_engine::{Config, Engine, LogBatch, ReadableSize, RecoveryMode};
 use snafu::{IntoError, OptionExt, ResultExt};
 
 use crate::error::{self, Error, IoSnafu, RaftEngineSnafu, StartWalTaskSnafu, StopWalTaskSnafu};
+use crate::raft_engine::close_engine;
 use crate::raft_engine::log_store::PurgeExpiredFilesFunction;
 
 pub(crate) const SYSTEM_NAMESPACE: u64 = 0;
 
 /// RaftEngine based [KvBackend] implementation.
 pub struct RaftEngineBackend {
-    /// `None` once the backend is closed, see [RaftEngineBackend::close].
+    /// `None` once the backend is closed, see [ClosableKvBackend::close].
     engine: RwLock<Option<Arc<Engine>>>,
     gc_task: RepeatedTask<Error>,
 }
@@ -101,23 +102,30 @@ impl RaftEngineBackend {
             gc_task,
         })
     }
+}
 
+/// raft-engine only trims the space it preallocated at the tail of the active log file when
+/// the [Engine] is dropped. This backend is shared by many components, some of which live in
+/// background tasks until the process exits, so without an explicit close the next start
+/// finds that tail and truncates it as a broken batch.
+#[async_trait::async_trait]
+impl ClosableKvBackend for RaftEngineBackend {
     /// Stops the purge task and closes the engine.
-    ///
-    /// raft-engine only trims the space it preallocated at the tail of the active log
-    /// file when the [Engine] is dropped. This backend is shared by many components,
-    /// some of which live in background tasks until the process exits, so without an
-    /// explicit close the next start finds that tail and truncates it as a broken batch.
-    pub async fn close(&self) -> error::Result<()> {
+    async fn close(&self) -> meta_error::Result<()> {
         self.gc_task
             .stop()
             .await
-            .context(StopWalTaskSnafu { name: "gc_task" })?;
+            .context(StopWalTaskSnafu { name: "gc_task" })
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)?;
         let engine = self.engine.write().unwrap().take();
-        if let Some(engine) = engine {
-            engine.sync().context(RaftEngineSnafu)?;
+        match engine {
+            Some(engine) => close_engine(engine)
+                .await
+                .map_err(BoxedError::new)
+                .context(meta_error::ExternalSnafu),
+            None => Ok(()),
         }
-        Ok(())
     }
 }
 
@@ -481,11 +489,21 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(log_files_len(dir.path()) >= PREALLOCATED_LEN);
+        let preallocated = log_files_len(dir.path()) >= PREALLOCATED_LEN;
 
         backend.close().await.unwrap();
-        assert!(log_files_len(dir.path()) < PREALLOCATED_LEN);
+        if preallocated {
+            assert!(log_files_len(dir.path()) < PREALLOCATED_LEN);
+        }
         assert!(backend.get(b"key").await.is_err());
+
+        // Closing released the engine, so the directory can be reopened with the data intact.
+        let reopened = build_kv_backend(dir.path().to_str().unwrap().to_string());
+        assert_eq!(
+            b"value".to_vec(),
+            reopened.get(b"key").await.unwrap().unwrap().value
+        );
+        reopened.close().await.unwrap();
     }
 
     #[tokio::test]

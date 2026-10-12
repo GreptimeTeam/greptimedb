@@ -12,6 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
+use raft_engine::Engine;
+use snafu::ResultExt;
+
+use crate::error::{JoinSnafu, RaftEngineSnafu, Result};
 use crate::raft_engine::protos::logstore::EntryImpl;
 
 mod backend;
@@ -26,6 +32,18 @@ use store_api::storage::RegionId;
 #[allow(renamed_and_removed_lints, mismatched_lifetime_syntaxes, unused_parens)]
 pub mod protos {
     include!(concat!(env!("OUT_DIR"), concat!("/", "protos/", "mod.rs")));
+}
+
+/// Syncs and drops `engine` on a blocking thread, as both block: dropping the last reference
+/// joins the engine's threads and trims and syncs the active log file, which is what closes it.
+pub(crate) async fn close_engine(engine: Arc<Engine>) -> Result<()> {
+    common_runtime::spawn_blocking_global(move || {
+        let synced = engine.sync().context(RaftEngineSnafu);
+        drop(engine);
+        synced
+    })
+    .await
+    .context(JoinSnafu)?
 }
 
 impl EntryImpl {
@@ -59,8 +77,8 @@ impl From<EntryImpl> for Entry {
 
 /// Total size of the raft-engine log files in `dir`.
 ///
-/// raft-engine preallocates the active log file ahead of the writes and only trims that
-/// tail when the engine is closed, so a closed engine leaves well under this much on disk.
+/// raft-engine preallocates the active log file ahead of the writes, where the platform and
+/// file system support it, and only trims that tail when the engine is closed.
 #[cfg(test)]
 pub(crate) fn log_files_len(dir: &std::path::Path) -> u64 {
     std::fs::read_dir(dir)

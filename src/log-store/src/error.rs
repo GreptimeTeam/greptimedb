@@ -85,6 +85,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to join a blocking task of the log store"))]
+    Join {
+        #[snafu(source)]
+        error: tokio::task::JoinError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Log store not started yet"))]
     IllegalState {
         #[snafu(implicit)]
@@ -498,6 +506,7 @@ impl ErrorExt for Error {
             | InvalidWalEntryRange { .. } => StatusCode::InvalidArguments,
             StartWalTask { .. }
             | StopWalTask { .. }
+            | Join { .. }
             | IllegalState { .. }
             | NoMaxValue { .. }
             | Cast { .. }

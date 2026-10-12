@@ -35,6 +35,7 @@ use crate::error::{
 };
 use crate::metrics;
 use crate::raft_engine::backend::SYSTEM_NAMESPACE;
+use crate::raft_engine::close_engine;
 use crate::raft_engine::protos::logstore::{EntryImpl, NamespaceImpl};
 
 const NAMESPACE_PREFIX: &str = "$sys/";
@@ -282,10 +283,10 @@ impl LogStore for RaftEngineLogStore {
         // With both tasks stopped, this is the last reference to the engine unless a
         // read stream is still draining; dropping it closes the active log file.
         let engine = self.engine.write().unwrap().take();
-        if let Some(engine) = engine {
-            engine.sync().context(RaftEngineSnafu)?;
+        match engine {
+            Some(engine) => close_engine(engine).await,
+            None => Ok(()),
         }
-        Ok(())
     }
 
     /// Appends a batch of entries to logstore. `RaftEngineLogStore` assures the atomicity of
@@ -695,18 +696,38 @@ mod tests {
             .append(EntryImpl::create(1, 1, "1".as_bytes().to_vec()).into())
             .await
             .unwrap();
-        assert!(log_files_len(dir.path()) >= PREALLOCATED_LEN);
+        let preallocated = log_files_len(dir.path()) >= PREALLOCATED_LEN;
 
         // The log store is still referenced, as regions do at shutdown: stop alone has
         // to close the engine so the preallocated tail is trimmed.
         logstore.stop().await.unwrap();
-        assert!(log_files_len(dir.path()) < PREALLOCATED_LEN);
+        if preallocated {
+            assert!(log_files_len(dir.path()) < PREALLOCATED_LEN);
+        }
         assert!(
             logstore
                 .append(EntryImpl::create(2, 1, "2".as_bytes().to_vec()).into())
                 .await
                 .is_err()
         );
+
+        // Stopping released the engine, so the directory can be reopened with the entry intact.
+        let reopened = RaftEngineLogStore::try_new(
+            dir.path().to_str().unwrap().to_string(),
+            &RaftEngineConfig::default(),
+        )
+        .await
+        .unwrap();
+        let entries = collect_entries(
+            reopened
+                .read(&Provider::raft_engine_provider(1), 1, None)
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(1, entries.len());
+        assert_eq!(1, entries[0].entry_id());
+        reopened.stop().await.unwrap();
     }
 
     #[tokio::test]
