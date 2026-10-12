@@ -227,7 +227,13 @@ impl ExtensionPlanner for DistExtensionPlanner {
             .config()
             .get_extension()
             .unwrap_or_else(QueryContext::arc);
-        let row_estimate = self.ordinary_scan_row_estimate(input_plan, &regions).await;
+        // Only estimate rows for the nested broadcast join; the default query path must not
+        // receive statistics that could flip JoinSelection (e.g. Partitioned → CollectLeft).
+        let row_estimate = if query_ctx.configuration_parameter().experimental_dist_join() {
+            self.ordinary_scan_row_estimate(input_plan, &regions).await
+        } else {
+            None
+        };
         let merge_scan_plan = MergeScanExec::new(
             session_state,
             table_name,
