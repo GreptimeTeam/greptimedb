@@ -20,7 +20,6 @@ use api::v1::HealthCheckRequest;
 use api::v1::flow::flow_client::FlowClient as PbFlowClient;
 use api::v1::health_check_client::HealthCheckClient;
 use api::v1::prometheus_gateway_client::PrometheusGatewayClient;
-use api::v1::region::region_client::RegionClient as PbRegionClient;
 use arrow_flight::flight_service_client::FlightServiceClient;
 use common_grpc::channel_manager::{
     ChannelConfig, ChannelManager, ClientTlsOption, load_client_tls_config,
@@ -526,23 +525,11 @@ impl Client {
         Ok(FlightClient { addr, client })
     }
 
-    pub(crate) fn raw_region_client(&self) -> Result<(String, PbRegionClient<Channel>)> {
+    pub(crate) fn raw_region_client(&self) -> Result<(String, tonic::client::Grpc<Channel>)> {
         let (addr, channel) = self.find_channel()?;
-        let client = PbRegionClient::new(channel)
-            .max_decoding_message_size(
-                self.inner
-                    .control_channel_manager
-                    .config()
-                    .max_recv_message_size
-                    .as_bytes() as usize,
-            )
-            .max_encoding_message_size(
-                self.inner
-                    .control_channel_manager
-                    .config()
-                    .max_send_message_size
-                    .as_bytes() as usize,
-            );
+        let client = tonic::client::Grpc::new(channel)
+            .max_decoding_message_size(self.max_grpc_recv_message_size())
+            .max_encoding_message_size(self.max_grpc_send_message_size());
         Ok((addr, client))
     }
 
