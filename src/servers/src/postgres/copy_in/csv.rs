@@ -38,7 +38,7 @@ use datatypes::schema::{ColumnSchema, Schema as GreptimeSchema};
 use datatypes::vectors::Helper;
 use pgwire::error::{PgWireError, PgWireResult};
 
-use super::codec::{CopyInCodec, ParsedRow, RecordParser};
+use super::codec::{CopyInCodec, ParsedRow, RecordParser, check_text_representable_type};
 use super::options::CopyOptionSet;
 use super::{COPY_IN_FLUSH_ROWS, bad_copy_data, invalid_text_repr, unsupported};
 
@@ -86,27 +86,14 @@ impl CopyInCodec for CsvCodec {
         "csv"
     }
 
-    /// The column types arrow-csv can decode against.
+    /// The default text-representable types minus Binary and Json, which
+    /// arrow-csv cannot decode.
     fn check_column_type(&self, data_type: &ConcreteDataType) -> PgWireResult<()> {
-        let supported = matches!(
+        check_text_representable_type(data_type)?;
+        if matches!(
             data_type,
-            ConcreteDataType::Boolean(_)
-                | ConcreteDataType::Int8(_)
-                | ConcreteDataType::Int16(_)
-                | ConcreteDataType::Int32(_)
-                | ConcreteDataType::Int64(_)
-                | ConcreteDataType::UInt8(_)
-                | ConcreteDataType::UInt16(_)
-                | ConcreteDataType::UInt32(_)
-                | ConcreteDataType::UInt64(_)
-                | ConcreteDataType::Float32(_)
-                | ConcreteDataType::Float64(_)
-                | ConcreteDataType::String(_)
-                | ConcreteDataType::Date(_)
-                | ConcreteDataType::Timestamp(_)
-                | ConcreteDataType::Decimal128(_)
-        );
-        if !supported {
+            ConcreteDataType::Binary(_) | ConcreteDataType::Json(_)
+        ) {
             return Err(unsupported(format!(
                 "column type \"{}\" is not supported by format csv",
                 data_type.name()

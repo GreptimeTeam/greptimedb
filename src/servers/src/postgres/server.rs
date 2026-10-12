@@ -45,7 +45,12 @@ pub struct PostgresServer {
 }
 
 impl PostgresServer {
-    /// Creates a new Postgres server with provided query_handler and async runtime
+    /// Creates a new Postgres server with provided query_handler and async runtime.
+    ///
+    /// `query_handler` and `copy_in_handler` are expected to be handles to
+    /// the same frontend instance (the SQL and COPY FROM STDIN facets of
+    /// one object); they are separate parameters only because they are
+    /// separate traits.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         query_handler: ServerSqlQueryHandlerRef,

@@ -134,7 +134,7 @@ pub(super) trait CopyInCodec: Send + Sync + std::fmt::Debug {
 /// Column types whose values have a text representation the helpers below
 /// can parse; the default [`CopyInCodec::check_column_type`] for formats
 /// that read values as text.
-fn check_text_representable_type(data_type: &ConcreteDataType) -> PgWireResult<()> {
+pub(super) fn check_text_representable_type(data_type: &ConcreteDataType) -> PgWireResult<()> {
     let supported = matches!(
         data_type,
         ConcreteDataType::Boolean(_)
@@ -231,25 +231,10 @@ fn utf8(bytes: &[u8]) -> PgWireResult<&str> {
 fn decode_bytea(bytes: &[u8]) -> PgWireResult<Vec<u8>> {
     if let Some(hex) = bytes.strip_prefix(b"\\x") {
         let hex = utf8(hex)?;
-        decode_hex(hex).map_err(|_| invalid_text_repr("invalid hexadecimal bytea value"))
+        hex::decode(hex).map_err(|_| invalid_text_repr("invalid hexadecimal bytea value"))
     } else {
         Ok(bytes.to_vec())
     }
-}
-
-fn decode_hex(s: &str) -> std::result::Result<Vec<u8>, ()> {
-    let bytes = s.as_bytes();
-    if !bytes.len().is_multiple_of(2) {
-        return Err(());
-    }
-    let (pairs, _) = bytes.as_chunks::<2>();
-    let mut out = Vec::with_capacity(pairs.len());
-    for &[hi, lo] in pairs {
-        let hi = (hi as char).to_digit(16).ok_or(())?;
-        let lo = (lo as char).to_digit(16).ok_or(())?;
-        out.push((hi * 16 + lo) as u8);
-    }
-    Ok(out)
 }
 
 #[cfg(test)]

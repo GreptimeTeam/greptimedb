@@ -343,18 +343,18 @@ fn resolve_columns(
     Ok(selected)
 }
 
+/// Derives a column's semantic type the same way the flow adapter does
+/// (`flow::adapter::util::column_schemas_to_proto`): the time-index flag
+/// for timestamps, primary-key membership for tags.
 fn semantic_type_of(table_info: &TableInfo, column: &ColumnSchema) -> PgWireResult<SemanticType> {
     let meta = &table_info.meta;
-    let schema = &meta.schema;
-    let index = schema.column_index_by_name(&column.name).ok_or_else(|| {
-        copy_in_error(
-            PgErrorCode::Ec42703,
-            format!("column \"{}\" not found in table schema", column.name),
-        )
-    })?;
-    if Some(index) == schema.timestamp_index() {
+    if column.is_time_index() {
         Ok(SemanticType::Timestamp)
-    } else if meta.primary_key_indices.contains(&index) {
+    } else if meta
+        .primary_key_indices
+        .iter()
+        .any(|&index| meta.schema.column_schemas()[index].name == column.name)
+    {
         Ok(SemanticType::Tag)
     } else {
         Ok(SemanticType::Field)
