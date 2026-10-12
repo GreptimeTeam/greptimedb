@@ -288,7 +288,23 @@ fn check_show_variables(query: &str) -> Option<Output> {
         if remainder.is_empty() {
             Some(show_variables("", ""))
         } else {
-            None
+            // Only let the named query-option forms through to the query handler;
+            // keep other MySQL filter syntax (`WHERE`, `LIKE` split across lines,
+            // unquoted LIKE patterns, ...) on the legacy compatibility result so
+            // variable-probing clients keep working.
+            let looks_like_option = remainder.split_whitespace().next().is_some_and(|token| {
+                let token = token.trim_end_matches(',');
+                token.starts_with("query.")
+                    || token.starts_with("datafusion.")
+                    || token.eq_ignore_ascii_case("query_parallelism")
+                    || token.eq_ignore_ascii_case("query_fallback")
+                    || token.eq_ignore_ascii_case("allow_query_fallback")
+            });
+            if looks_like_option {
+                None
+            } else {
+                Some(show_variables("", ""))
+            }
         }
     } else {
         None
@@ -632,6 +648,48 @@ mod test {
 |               |       |
 +---------------+-------+";
         test(query, expected);
+
+        // Non-option filter forms keep the legacy compatibility result instead of
+        // failing on the regular parser (`SHOW VARIABLES WHERE ...` used to work).
+        for query in [
+            "show variables where Variable_name = 'sql_mode'",
+            "show global variables where Variable_name='sql_mode'",
+            "show variables\nlike 'sql_mode'",
+            "show variables like sql_mode",
+            "show variables LIKE 'event_scheduler'",
+        ] {
+            test(query, expected);
+        }
+
+        // Named query options still reach the query handler for real values.
+        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
+        for query in [
+            "SHOW VARIABLES query.parallelism",
+            "SHOW GLOBAL VARIABLES datafusion.optimizer.prefer_hash_join",
+            "SHOW SESSION VARIABLES query.allow_query_fallback",
+            "SHOW VARIABLES query_parallelism",
+            "SHOW VARIABLES; SELECT 1",
+            "SHOW VARIABLES; /* comment */; SELECT 1",
+        ] {
+            assert!(
+                check(query, QueryContext::arc(), session.clone()).is_none(),
+                "{query} should reach the query handler"
+            );
+        }
+        for query in [
+            "SHOW VARIABLES",
+            "SHOW VARIABLES;",
+            "SHOW VARIABLES /* comment */",
+            "SHOW VARIABLES # comment",
+            "SHOW VARIABLES -- comment",
+            "SHOW GLOBAL VARIABLES",
+            "SHOW GLOBAL VARIABLES LIKE 'event_scheduler'",
+        ] {
+            assert!(
+                check(query, QueryContext::arc(), session.clone()).is_some(),
+                "{query} should retain federated compatibility handling"
+            );
+        }
 
         let query = "show variables like 'lower_case_table_names'";
         let expected = "\

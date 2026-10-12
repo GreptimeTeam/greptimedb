@@ -156,6 +156,10 @@ impl QueryEngineState {
         if options.parallelism > 0 {
             session_config = session_config.with_target_partitions(options.parallelism);
         }
+        // Preserve the historical GreptimeDB behavior of enabling null-key join
+        // filtering by default; the session default remains overridable through
+        // `datafusion.optimizer.filter_null_join_keys`.
+        session_config.options_mut().optimizer.filter_null_join_keys = true;
         if options.allow_query_fallback {
             session_config
                 .options_mut()
@@ -939,6 +943,15 @@ mod tests {
 
         assert!(provider.configure_called.load(Ordering::SeqCst));
         assert_eq!(7, state.session_state().config().target_partitions());
+        assert!(
+            state
+                .session_state()
+                .config()
+                .options()
+                .optimizer
+                .filter_null_join_keys,
+            "null-key join filtering stays enabled by default for compatibility"
+        );
         assert_eq!(
             SpillCompression::Zstd,
             state
