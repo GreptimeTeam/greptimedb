@@ -577,7 +577,7 @@ impl OpenDalStorage {
             .chunk(WRITE_BYTES)
             .concurrent(1)
             .await
-            .context(StorageOperationSnafu {
+            .with_context(|| StorageOperationSnafu {
                 operation: format!("open writer {}", path),
             })?;
         let data = object_store::Buffer::from(data);
@@ -593,7 +593,7 @@ impl OpenDalStorage {
         {
             common_telemetry::warn!(error; "Failed to abort snapshot metadata write");
         }
-        result.context(StorageOperationSnafu {
+        result.with_context(|| StorageOperationSnafu {
             operation: format!("write {}", path),
         })
     }
@@ -857,26 +857,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_metadata_writes_are_bounded_and_abort_on_failure() {
+    async fn snapshot_metadata_submissions_are_bounded_and_invoke_abort_on_failure() {
         use std::sync::Mutex;
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
-        use object_store::layers::mock::{Metadata, oio};
+        use object_store::layers::mock::{Metadata, ObservedWriter, WriterObservations, oio};
 
-        struct Observe {
+        struct FailWriter {
             inner: oio::Writer,
-            sizes: Arc<Mutex<Vec<usize>>>,
+            writes: usize,
             fail: Arc<AtomicUsize>,
-            aborted: Arc<AtomicBool>,
         }
-        impl oio::Write for Observe {
+        impl oio::Write for FailWriter {
             async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
-                let count = {
-                    let mut sizes = self.sizes.lock().unwrap();
-                    sizes.push(bytes.len());
-                    sizes.len()
-                };
-                if self.fail.load(Ordering::SeqCst) == 1 && count == 2 {
+                self.writes += 1;
+                if self.fail.load(Ordering::SeqCst) == 1 && self.writes == 2 {
                     return Err(object_store::Error::new(
                         ErrorKind::Unexpected,
                         "injected metadata write failure",
@@ -894,47 +889,46 @@ mod tests {
                 self.inner.close().await
             }
             async fn abort(&mut self) -> object_store::Result<()> {
-                self.aborted.store(true, Ordering::SeqCst);
                 self.inner.abort().await
             }
         }
 
         let dir = tempdir().unwrap();
         let mut storage = make_storage_with_rooted_fs(dir.path());
-        let sizes = Arc::new(Mutex::new(Vec::new()));
+        let observations = Arc::new(Mutex::new(WriterObservations::default()));
         let fail = Arc::new(AtomicUsize::new(0));
-        let aborted = Arc::new(AtomicBool::new(false));
         storage.object_store = storage.object_store.layer(
             MockLayerBuilder::default()
                 .writer_factory(Arc::new({
-                    let sizes = sizes.clone();
+                    let observations = observations.clone();
                     let fail = fail.clone();
-                    let aborted = aborted.clone();
                     move |_, _, inner| {
-                        Box::new(Observe {
-                            inner,
-                            sizes: sizes.clone(),
-                            fail: fail.clone(),
-                            aborted: aborted.clone(),
-                        })
+                        Box::new(ObservedWriter::new(
+                            Box::new(FailWriter {
+                                inner,
+                                writes: 0,
+                                fail: fail.clone(),
+                            }),
+                            observations.clone(),
+                        ))
                     }
                 }))
                 .build()
                 .unwrap(),
         );
         for length in [2 * WRITE_BYTES + 17, 1, 0] {
-            sizes.lock().unwrap().clear();
+            *observations.lock().unwrap() = WriterObservations::default();
             let data = vec![42; length];
             storage.write_file("metadata", data.clone()).await.unwrap();
             assert_eq!(storage.read_file("metadata").await.unwrap(), data);
-            let sizes = sizes.lock().unwrap();
-            assert_eq!(sizes.iter().sum::<usize>(), length);
-            assert!(sizes.iter().all(|size| *size <= WRITE_BYTES));
-            assert!(!aborted.load(Ordering::SeqCst));
+            let observed = observations.lock().unwrap();
+            assert_eq!(observed.write_sizes.iter().sum::<usize>(), length);
+            assert!(observed.write_sizes.iter().all(|size| *size <= WRITE_BYTES));
+            assert_eq!(observed.close_calls, 1);
+            assert_eq!(observed.abort_calls, 0);
         }
         for failure in [1, 2] {
-            sizes.lock().unwrap().clear();
-            aborted.store(false, Ordering::SeqCst);
+            *observations.lock().unwrap() = WriterObservations::default();
             fail.store(failure, Ordering::SeqCst);
             assert!(
                 storage
@@ -943,10 +937,12 @@ mod tests {
                     .is_err()
             );
             assert_eq!(
-                sizes.lock().unwrap().len(),
+                observations.lock().unwrap().write_sizes.len(),
                 if failure == 1 { 2 } else { 3 }
             );
-            assert!(aborted.load(Ordering::SeqCst));
+            let observed = observations.lock().unwrap();
+            assert_eq!(observed.close_calls, usize::from(failure == 2));
+            assert_eq!(observed.abort_calls, 1);
         }
     }
 

@@ -53,6 +53,7 @@ use store_api::metric_engine_consts::{
 use table::TableRef;
 use table::metadata::TableId;
 use table::table::adapter::DfTableProviderAdapter;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{self, InvalidLogicalTableExportSnafu, LogicalTableExportResourceSnafu, Result};
@@ -653,25 +654,12 @@ async fn expand_bounded_slice(
             .iter()
             .zip(schema.fields())
             .all(|(array, field)| array.data_type() == field.data_type())
-        && let Some(estimated) = bounded_batch_size(&batch, end - start, &[])?
+        && let Some(estimated) = estimate_batch_bytes_upper_bound(&batch, end - start, &[])?
         && estimated <= conversion
     {
         let reservation = retained.saturating_add(estimated.saturating_mul(4));
         let permit = budget.reserve(reservation, cancellation).await?;
-        let expanded = expand_export_batch(&batch.slice(start, end - start), schema)?;
-        ensure!(
-            expanded.get_array_memory_size() <= reservation,
-            LogicalTableExportResourceSnafu {
-                reason: "converted backing buffers exceed reservation"
-            }
-        );
-        return Ok((
-            Payload {
-                batch: expanded,
-                permit,
-            },
-            end - start,
-        ));
+        return convert_slice_payload(batch, schema, start, end - start, reservation, permit);
     }
     let input = batch.clone();
     let (len, estimated) = common_runtime::spawn_blocking_global(move || {
@@ -682,24 +670,34 @@ async fn expand_bounded_slice(
     let reservation = retained.saturating_add(estimated.saturating_mul(4));
     let permit = budget.reserve(reservation, cancellation).await?;
     common_runtime::spawn_blocking_global(move || {
-        let slice = batch.slice(start, len);
-        let expanded = expand_export_batch(&slice, schema)?;
-        ensure!(
-            expanded.get_array_memory_size() <= reservation,
-            LogicalTableExportResourceSnafu {
-                reason: "converted backing buffers exceed reservation"
-            }
-        );
-        Ok((
-            Payload {
-                batch: expanded,
-                permit,
-            },
-            len,
-        ))
+        convert_slice_payload(batch, schema, start, len, reservation, permit)
     })
     .await
     .context(error::JoinTaskSnafu)?
+}
+
+fn convert_slice_payload(
+    batch: RecordBatch,
+    schema: SchemaRef,
+    start: usize,
+    len: usize,
+    reservation: usize,
+    permit: OwnedSemaphorePermit,
+) -> Result<(Payload, usize)> {
+    let expanded = expand_export_batch(&batch.slice(start, len), schema)?;
+    ensure!(
+        expanded.get_array_memory_size() <= reservation,
+        LogicalTableExportResourceSnafu {
+            reason: "converted backing buffers exceed reservation"
+        }
+    );
+    Ok((
+        Payload {
+            batch: expanded,
+            permit,
+        },
+        len,
+    ))
 }
 
 /// Limits nested casts to selected children: Arrow's List cast otherwise expands
@@ -848,8 +846,9 @@ fn estimate_value_size(array: &dyn Array, row: usize) -> Result<usize> {
     Ok(bytes.saturating_add(16))
 }
 
-// Bound the work as well as the bytes so callers can use this on an async task.
-fn bounded_batch_size(
+/// Estimates a conservative byte upper bound with bounded work on an async task.
+/// `None` means this path cannot estimate the batch, not that it exceeds a budget.
+fn estimate_batch_bytes_upper_bound(
     batch: &RecordBatch,
     rows: usize,
     json_columns: &[usize],
@@ -890,7 +889,7 @@ pub(crate) fn rows_within_budget(
     json_columns: &[usize],
 ) -> Result<(usize, usize)> {
     if start < end
-        && let Some(bytes) = bounded_batch_size(batch, end - start, json_columns)?
+        && let Some(bytes) = estimate_batch_bytes_upper_bound(batch, end - start, json_columns)?
         && bytes <= budget
     {
         return Ok((end - start, bytes));

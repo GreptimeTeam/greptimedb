@@ -214,7 +214,7 @@ async fn dictionary_null_values_write_the_logical_parquet_schema() {
 }
 
 #[tokio::test]
-async fn compatible_dictionary_slices_share_backing_with_bounded_admission() {
+async fn dictionary_slices_share_backing_and_respect_budget() {
     let input = batch(vec![Some(1025); 8192], vec![Some("host"); 8192])
         .project(&[2, 3, 1])
         .unwrap();
@@ -271,7 +271,11 @@ fn dictionary_size_bound_limits_inline_work() {
         Arc::new(StringArray::from_iter_values(values.iter())),
     );
     let input = RecordBatch::try_from_iter([("host", Arc::new(dictionary) as ArrayRef)]).unwrap();
-    assert!(bounded_batch_size(&input, 2048, &[]).unwrap().is_none());
+    assert!(
+        estimate_batch_bytes_upper_bound(&input, 2048, &[])
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         rows_within_budget(&input, 0, 2048, 128, &[]).unwrap(),
         (3, 114)
