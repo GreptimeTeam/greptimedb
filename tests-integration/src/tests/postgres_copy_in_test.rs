@@ -155,7 +155,7 @@ async fn test_postgres_copy_in_error_keeps_table_clean() {
         err.as_db_error()
             .expect("expected db error")
             .message()
-            .contains("invalid input syntax"),
+            .contains("failed to parse"),
         "{err}"
     );
 

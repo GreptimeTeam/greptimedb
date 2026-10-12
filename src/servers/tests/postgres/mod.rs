@@ -1393,7 +1393,7 @@ async fn test_copy_in_bad_value() -> Result<()> {
         Err(e) => e,
     };
     let message = err.as_db_error().expect("expected db error").message();
-    assert!(message.contains("invalid input syntax"), "{message}");
+    assert!(message.contains("failed to parse"), "{message}");
     // The failed batch must not be written.
     assert!(handler.requests.lock().unwrap().is_empty());
 

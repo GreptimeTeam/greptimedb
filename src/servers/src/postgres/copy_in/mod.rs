@@ -206,14 +206,15 @@ fn resolve_table_name(
 /// Per-connection state of an in-progress COPY FROM STDIN.
 pub(crate) struct CopyInState {
     query_ctx: QueryContextRef,
-    /// Targeted columns in COPY field order.
-    columns: Vec<ColumnSchema>,
-    /// The gRPC column schemas matching `columns`, reused for every batch.
+    /// The gRPC column schemas of the targeted columns, reused for every
+    /// batch.
     grpc_schema: Vec<api::v1::ColumnSchema>,
     table_name: String,
-    codec: Arc<dyn CopyInCodec>,
     parser: Box<dyn RecordParser + Send>,
-    header_to_skip: bool,
+    /// The resolved codec's name, for logging.
+    codec_name: &'static str,
+    /// The wire format code of the resolved codec.
+    codec_format_code: i8,
     /// Parsed rows not yet flushed to the handler.
     rows: Vec<GrpcRow>,
     rows_written: u64,
@@ -240,8 +241,7 @@ impl CopyInState {
                 )));
             }
         }
-        let parser = codec.create_parser();
-        let header_to_skip = parser.skips_header();
+        let parser = codec.create_parser(&columns)?;
 
         let grpc_schema = columns
             .iter()
@@ -251,11 +251,10 @@ impl CopyInState {
         Ok(Self {
             query_ctx,
             grpc_schema,
-            columns,
             table_name,
-            codec,
             parser,
-            header_to_skip,
+            codec_name: codec.name(),
+            codec_format_code: codec.format_code(),
             rows: Vec::new(),
             rows_written: 0,
         })
@@ -263,48 +262,19 @@ impl CopyInState {
 
     /// The wire format code advertised to the client.
     pub(crate) fn format_code(&self) -> i8 {
-        self.codec.format_code()
-    }
-
-    fn handle_record(&mut self, record: codec::Record) -> PgWireResult<()> {
-        if self.header_to_skip {
-            self.header_to_skip = false;
-            return Ok(());
-        }
-
-        let expected = self.columns.len();
-        if record.len() < expected {
-            let missing = &self.columns[record.len()];
-            return Err(bad_copy_data(format!(
-                "missing data for column \"{}\"",
-                missing.name
-            )));
-        } else if record.len() > expected {
-            return Err(bad_copy_data("extra data after last expected column"));
-        }
-
-        let mut values = Vec::with_capacity(expected);
-        for (field, column) in record.into_iter().zip(&self.columns) {
-            values.push(self.codec.convert_field(column, field)?);
-        }
-        self.rows.push(GrpcRow { values });
-        Ok(())
+        self.codec_format_code
     }
 
     /// Feeds a `CopyData` chunk into the parser and buffers parsed rows.
     fn feed(&mut self, data: &[u8]) -> PgWireResult<()> {
-        for record in self.parser.feed(data)? {
-            self.handle_record(record)?;
-        }
+        self.rows.extend(self.parser.feed(data)?);
         Ok(())
     }
 
     /// Parses the buffered tail at `CopyDone`; a final record without a
     /// trailing newline is accepted.
     fn finish(&mut self) -> PgWireResult<()> {
-        for record in self.parser.finish()? {
-            self.handle_record(record)?;
-        }
+        self.rows.extend(self.parser.finish()?);
         Ok(())
     }
 
@@ -443,7 +413,7 @@ impl PostgresServerHandlerInner {
         let query_ctx = adjust_query_context(query_ctx, &catalog, &schema);
 
         let state = CopyInState::new(stmt.codec, stmt.columns, table_info, query_ctx, table)?;
-        let num_columns = state.columns.len();
+        let num_columns = state.grpc_schema.len();
         let format_code = state.format_code();
 
         *self.copy_in_state.lock().await = Some(state);
@@ -533,8 +503,7 @@ impl CopyHandler for PostgresServerHandlerInner {
         let rows_written = state.rows_written;
         info!(
             "PostgreSQL COPY FROM STDIN (format {}) finished: {} rows written",
-            state.codec.name(),
-            rows_written
+            state.codec_name, rows_written
         );
         client
             .send(PgWireBackendMessage::CommandComplete(
