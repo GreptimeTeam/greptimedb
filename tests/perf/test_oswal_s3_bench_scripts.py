@@ -59,11 +59,10 @@ class PlanTest(unittest.TestCase):
             "2-1-E", "2-1-D", "2-1-R", "2-8-E", "2-8-D", "2-8-R"])
         self.assertEqual(plan["generator_args"], ["--data-profile", "D"])
         self.assertEqual((plan["rows"], plan["batch_rows"], plan["data_profile"]), (2_000_000, 1000, "D"))
-        by_config = {c["config"]: c["wal"] for c in plan["cells"]}
-        self.assertEqual(by_config["R"], {"PROVIDER": "raft_engine", "SYNC_WRITE": "true", "DIR": "/wal"})
-        self.assertEqual(by_config["D"]["ACK_MODE"], "durable")
-        self.assertEqual(by_config["E"]["ACK_MODE"], "enqueued")
-        self.assertEqual(by_config["D"]["PROVIDER"], by_config["E"]["PROVIDER"])
+        self.assertEqual({c["config"]: c["wal"] for c in plan["cells"]}, {
+            "R": {"PROVIDER": "raft_engine", "SYNC_WRITE": "true", "DIR": "/wal"},
+            "D": {"PROVIDER": "experimental_object_store", "ACK_MODE": "durable"},
+            "E": {"PROVIDER": "experimental_object_store", "ACK_MODE": "enqueued"}})
 
     def test_smoke_overrides_rows_and_rounds(self):
         plan = bench.build_plan("8", "2000000", "1000", "2", smoke=True)
@@ -115,13 +114,8 @@ class SummaryTest(unittest.TestCase):
         self.assertAlmostEqual(summary.quantile(0.99, buckets), 0.128 + 0.128 * 49 / 50)
         self.assertAlmostEqual(summary.quantile(0.25, buckets), 0.064 + 0.064 * 25 / 50)
         self.assertIsNone(summary.quantile(0.5, []))
-        overflow = [(0.1, 1.0), (float("inf"), 4.0)]
-        self.assertEqual(summary.quantile(0.99, overflow), 0.1)
-
-    def test_parse_keeps_only_object_store_wal_families(self):
-        parsed = summary.parse_metrics(ACK_BUCKETS)
-        self.assertEqual(parsed["samples"]["created_objects_total"], 120)
-        self.assertNotIn("kafka_client_produce_elapsed_count", parsed["samples"])
+        self.assertEqual(summary.quantile(0.99, [(0.1, 1.0), (float("inf"), 4.0)]), 0.1)
+        self.assertNotIn("kafka_client_produce_elapsed_count", summary.parse_metrics(ACK_BUCKETS)["samples"])
 
     def write_cell(self, root, cell_id, rows_per_second, exit_code=0, metrics=""):
         round_number, concurrency, config = cell_id.split("-")
@@ -129,6 +123,7 @@ class SummaryTest(unittest.TestCase):
         (path / "greptimedb-1").mkdir(parents=True)
         (path / "cell.json").write_text(json.dumps({
             "id": cell_id, "round": int(round_number), "concurrency": int(concurrency), "config": config,
+            "wal": bench.WAL_CONFIGS[config], "metrics_scraped": True,
             "exit_code": exit_code, "wal_device": "/dev/nvme1n1", "version": "1.4.0", "load_wall_seconds": 61.0}))
         if exit_code == 0:
             (path / "greptimedb-1" / "load-result.json").write_text(json.dumps({
@@ -154,7 +149,23 @@ class SummaryTest(unittest.TestCase):
             d_cell = next(c for c in result["cells"] if c["id"] == "1-8-D")
             self.assertEqual(d_cell["creates_per_minute"], 120.0)
             self.assertEqual(d_cell["stalled_appends_total"], 3)
-            self.assertIn("| 1-8-D | 80 | 60.0 | 61.0 | 6,000 | 128.0 | 253.4 | 120 | 120.0 | 3 | 0 | — | — |", output)
+            self.assertIn("| 1-8-D | 80 | 60.0 | 61.0 | 6,000 | 128.0 | 253.4 | 120 | 120.0 | 3 | 0 | 0 | 0 |", output)
+            r_cell = next(c for c in result["cells"] if c["id"] == "1-8-R")
+            self.assertIsNone(r_cell["stalled_appends_total"])
+
+    def test_untouched_counters_are_zero_only_for_an_active_object_store_wal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            created = "greptime_logstore_object_store_wal_created_objects_total 40\n"
+            self.write_cell(root, "1-8-E", 90.0, metrics=created)
+            self.write_cell(root, "1-8-D", 80.0, metrics="")
+            cell_e, cell_d = (summary.load_cell(root / "cells" / i) for i in ("1-8-E", "1-8-D"))
+            self.assertEqual([cell_e[c] for c in summary.COUNTERS], [40, 0, 0, 0, 0])
+            self.assertEqual([cell_d[c] for c in summary.COUNTERS], [None] * 5)
+            recorded = json.loads((root / "cells" / "1-8-E" / "cell.json").read_text())
+            (root / "cells" / "1-8-E" / "cell.json").write_text(json.dumps(recorded | {"metrics_scraped": False}))
+            unscraped = summary.load_cell(root / "cells" / "1-8-E")
+            self.assertIsNone(unscraped["stalled_appends_total"])
 
     def test_a_planned_round_that_never_ran_leaves_the_ratio_undefined(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -204,15 +215,17 @@ esac
 FAKE_CURL = r"""#!/usr/bin/env bash
 printf '%s\n' "curl $*" >> "$FAKE_LOG"
 for arg in "$@"; do
-    [[ "$arg" != */metrics ]] || { printf '%s\n' 'greptime_logstore_object_store_wal_poisoned_total 1' 'other_total 2'; exit 0; }
+    [[ "$arg" != */metrics ]] || {
+        [[ "$FAKE_METRICS_RC" == 0 ]] || exit "$FAKE_METRICS_RC"
+        printf '%s\n' 'greptime_logstore_object_store_wal_poisoned_total 1' 'other_total 2'; exit 0;
+    }
 done
 """
 
 
-class CellLifecycleTest(unittest.TestCase):
-    """Drives the run script against fake docker and curl binaries."""
+class CellLifecycleTest(unittest.TestCase):  # the run script against fake docker and curl
 
-    def run_cells(self, root, load_rc):
+    def run_cells(self, root, load_rc, metrics_rc=0):
         bin_dir = root / "bin"
         bin_dir.mkdir()
         for name, body in (("docker", FAKE_DOCKER), ("curl", FAKE_CURL)):
@@ -224,7 +237,7 @@ class CellLifecycleTest(unittest.TestCase):
         (root / "results" / "plan.json").write_text(json.dumps(plan))
         env = os.environ | {
             "PATH": f"{bin_dir}:{os.environ['PATH']}", "FAKE_LOG": str(root / "fake.log"),
-            "FAKE_LOAD_RC": str(load_rc), "FAKE_ROWS": "6000", "PLAN": str(root / "results" / "plan.json"),
+            "FAKE_LOAD_RC": str(load_rc), "FAKE_METRICS_RC": str(metrics_rc), "FAKE_ROWS": "6000", "PLAN": str(root / "results" / "plan.json"),
             "RESULTS": str(root / "results"), "CORPUS_DIR": str(root / "corpus"), "OWNER": "o11ybench-oswal-1-1",
             "RUNTIME_IMAGE": "runtime@sha256:" + "b" * 64, "GREPTIMEDB_IMAGE": "greptimedb@sha256:" + "a" * 64,
             "RUN_PREFIX": "oswal-bench/1-1", "WAL_ROOT": str(root / "wal"), "S3_BUCKET": "bucket",
@@ -251,6 +264,19 @@ class CellLifecycleTest(unittest.TestCase):
             self.assertEqual(log.count("docker stop -t 120 fakecid"), 2)
             self.assertEqual(log.count("docker rm -fv fakecid"), 2)
 
+    def test_a_failed_scrape_fails_a_successful_load(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cells, _, log, _ = self.run_cells(root, load_rc=0, metrics_rc=22)
+            self.assertNotEqual(cells.returncode, 0)
+            for cell_id in ("1-8-D", "1-8-E"):
+                cell = root / "results" / "cells" / cell_id
+                recorded = json.loads((cell / "cell.json").read_text())
+                self.assertEqual((recorded["exit_code"], recorded["metrics_scraped"]), (4, False))
+                self.assertFalse((cell / "metrics.prom").exists())
+                self.assertFalse((cell / "metrics.all").exists())
+            self.assertEqual(log.count("docker rm -fv fakecid"), 2)
+
     def test_a_cell_passes_the_keys_by_name_and_records_a_redacted_config(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -267,7 +293,8 @@ class CellLifecycleTest(unittest.TestCase):
             self.assertIn("GREPTIMEDB_STANDALONE__WAL__ACK_MODE=durable", config)
             self.assertIn("GREPTIMEDB_STANDALONE__STORAGE__SECRET_ACCESS_KEY=<redacted>", config)
             recorded = json.loads((cell / "cell.json").read_text())
-            self.assertEqual((recorded["exit_code"], recorded["version"]), (0, "1.4.0-test"))
+            self.assertEqual((recorded["exit_code"], recorded["version"], recorded["metrics_scraped"]),
+                             (0, "1.4.0-test", True))
             self.assertEqual(recorded["wal_device"], "s3://bucket/oswal-bench/1-1/1-8-D/wal")
             # A leaked value makes scrub refuse the results.
             (cell / "leak.txt").write_text("fake-secret-value")

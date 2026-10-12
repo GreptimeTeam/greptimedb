@@ -168,9 +168,7 @@ jobs:
       env:
         AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
-      run: |
-        uv run greptimedb/.github/scripts/oswal-s3-bench.py probe \
-          --bucket "$S3_BUCKET" --region "$S3_REGION" --endpoint "$S3_ENDPOINT" --prefix "$RUN_PREFIX"
+      run: uv run greptimedb/.github/scripts/oswal-s3-bench.py probe --bucket "$S3_BUCKET" --region "$S3_REGION" --endpoint "$S3_ENDPOINT" --prefix "$RUN_PREFIX"
     - name: Put the Raft Engine WAL on the instance store
       run: bash greptimedb/.github/scripts/oswal-s3-bench-run.sh wal-disk "$WAL_ROOT" | tee "$RESULTS/wal-disk.txt"
     - name: Generate the dataset once
@@ -188,9 +186,7 @@ jobs:
       env:
         AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
-      run: |
-        uv run greptimedb/.github/scripts/oswal-s3-bench.py cleanup \
-          --bucket "$S3_BUCKET" --region "$S3_REGION" --endpoint "$S3_ENDPOINT" --prefix "$RUN_PREFIX"
+      run: uv run greptimedb/.github/scripts/oswal-s3-bench.py cleanup --bucket "$S3_BUCKET" --region "$S3_REGION" --endpoint "$S3_ENDPOINT" --prefix "$RUN_PREFIX"
     - name: Check the results hold no credentials
       if: always()
       env:

@@ -18,11 +18,7 @@
 # dependencies = ["boto3>=1.35,<2"]
 # ///
 
-"""Plan, image tag, run manifest and bucket helpers of the object store WAL S3 benchmark.
-
-`plan`, `tag` and `manifest` need only the standard library; `probe` and
-`cleanup` need boto3 and run under `uv run`.
-"""
+"""Helpers of the object store WAL S3 benchmark; only `probe` and `cleanup` need boto3 (`uv run`)."""
 
 from __future__ import annotations
 
@@ -175,22 +171,20 @@ def main() -> int:
     for name in ("concurrency", "rows", "batch-rows", "rounds"):
         plan.add_argument(f"--{name}", required=True)
     plan.add_argument("--smoke", choices=("true", "false"), required=True)
-    plan.add_argument("--timeout-minutes")
-    plan.add_argument("--ttl-hours")
-    plan.add_argument("--output")
+    for name in ("timeout-minutes", "ttl-hours", "output"):
+        plan.add_argument(f"--{name}")
     commands.add_parser("tag").add_argument("requested")
     regions = commands.add_parser("regions")
-    regions.add_argument("--bucket", required=True)
-    regions.add_argument("--runner", required=True)
+    for name in ("bucket", "runner"):
+        regions.add_argument(f"--{name}", required=True)
     manifest = commands.add_parser("manifest")
     for name in ("results", "runtime-image", "instance-type", "region", "prefix"):
         manifest.add_argument(f"--{name}", required=True)
     for name in ("probe", "cleanup"):
         bucket = commands.add_parser(name)
-        bucket.add_argument("--bucket", required=True)
-        bucket.add_argument("--region", required=True)
         bucket.add_argument("--endpoint", default="")
-        bucket.add_argument("--prefix", required=True)
+        for option in ("bucket", "region", "prefix"):
+            bucket.add_argument(f"--{option}", required=True)
     args = parser.parse_args()
     if args.command == "plan":
         if args.timeout_minutes or args.ttl_hours:

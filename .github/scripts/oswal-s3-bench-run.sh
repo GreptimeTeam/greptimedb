@@ -1,11 +1,5 @@
 #!/usr/bin/env bash
-# Host side of the object store WAL S3 benchmark (oswal-s3-bench.yml).
-#   check-runtime IMAGE  resolve the o11ybench runtime and check it carries the loader and generator
-#   pull                 pull the runtime and GreptimeDB images and record their metadata
-#   wal-disk DIR         mount the instance store at DIR when the host has one
-#   generate             generate the dataset once with the o11ybench runtime
-#   cells                run every cell of $PLAN, each on a fresh GreptimeDB container
-#   scrub                refuse results that contain a credential value
+# Host side of oswal-s3-bench.yml: one subcommand per step; each cell of $PLAN gets a fresh GreptimeDB.
 set -euo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -64,10 +58,10 @@ generate() {
 
 # Scrape once, after the load succeeded or failed, while the server still runs.
 scrape_metrics() {
-    if curl --noproxy '*' -fsS --max-time 30 http://127.0.0.1:4000/metrics > "$dir/metrics.all"; then
-        grep -E '^(# (HELP|TYPE) )?greptime_logstore_object_store_wal_' "$dir/metrics.all" > "$dir/metrics.prom" || true
-    fi
+    curl --noproxy '*' -fsS --max-time 30 http://127.0.0.1:4000/metrics > "$dir/metrics.all" || { rm -f "$dir/metrics.all"; return 1; }
+    grep -E '^(# (HELP|TYPE) )?greptime_logstore_object_store_wal_' "$dir/metrics.all" > "$dir/metrics.prom" || true
     rm -f "$dir/metrics.all"
+    metrics_scraped=true
 }
 
 finish() {
@@ -75,15 +69,16 @@ finish() {
     trap - EXIT
     set +e
     if [[ -n "$cid" ]]; then
-        scrape_metrics
+        # A load that succeeded without its metrics is not a measurement.
+        scrape_metrics || { echo "$id: metrics scrape failed" >&2; [[ $rc != 0 ]] || rc=4; }
         docker stop -t 120 "$cid" >/dev/null
         docker logs "$cid" > "$dir/server.log" 2>&1
         docker rm -fv "$cid" >/dev/null
     fi
     [[ -z "$wal_dir" ]] || sudo -n rm -rf "$wal_dir"
     jq -n --argjson spec "$spec" --arg device "$wal_device" --arg version "$version" \
-        --arg load_seconds "$load_seconds" --argjson exit_code "$rc" \
-        '$spec + {wal_device: $device, version: $version, exit_code: $exit_code,
+        --arg load_seconds "$load_seconds" --argjson exit_code "$rc" --argjson scraped "$metrics_scraped" \
+        '$spec + {wal_device: $device, version: $version, exit_code: $exit_code, metrics_scraped: $scraped,
           load_wall_seconds: ($load_seconds | tonumber? // null)}' > "$dir/cell.json"
     exit "$rc"
 }
@@ -92,10 +87,9 @@ finish() {
 # global because the EXIT trap runs after this function returns.
 cell() {
     : "${PLAN:?}" "${RESULTS:?}" "${CORPUS_DIR:?}" "${OWNER:?}" "${RUNTIME_IMAGE:?}" "${GREPTIMEDB_IMAGE:?}"
-    : "${RUN_PREFIX:?}" "${WAL_ROOT:?}" "${S3_BUCKET:?}" "${S3_REGION:?}"
-    : "${AWS_ACCESS_KEY_ID:?}" "${AWS_SECRET_ACCESS_KEY:?}"
-    spec=$1 cid= wal_dir= version= load_seconds=
-    local id concurrency name setting started ended
+    : "${RUN_PREFIX:?}" "${WAL_ROOT:?}" "${S3_BUCKET:?}" "${S3_REGION:?}" "${AWS_ACCESS_KEY_ID:?}" "${AWS_SECRET_ACCESS_KEY:?}"
+    spec=$1 cid= wal_dir= version= load_seconds= metrics_scraped=false id=
+    local concurrency name setting started ended
     id=$(jq -r .id <<< "$spec"); concurrency=$(jq -r .concurrency <<< "$spec")
     dir="$RESULTS/cells/$id"; name="$OWNER-$id"
     mkdir -p "$dir"

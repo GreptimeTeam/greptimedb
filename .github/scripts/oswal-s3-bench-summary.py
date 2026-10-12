@@ -64,8 +64,10 @@ def geomean(values: list) -> float | None:
     return math.exp(sum(map(math.log, values)) / len(values)) if values and all(v > 0 for v in values) else None
 
 
-def load_cell(path: Path) -> dict:
-    cell = json.loads((path / "cell.json").read_text())
+def load_cell(path: Path, spec: dict | None = None) -> dict:
+    """One cell's row; a planned cell that never recorded a result has no values, so no ratio uses its round."""
+    recorded = path / "cell.json"
+    cell = json.loads(recorded.read_text()) if recorded.exists() else spec | {"exit_code": None, "missing": True}
     result_path = path / "greptimedb-1" / "load-result.json"
     result = json.loads(result_path.read_text()) if result_path.exists() else {}
     metrics_path = path / "metrics.prom"
@@ -74,25 +76,22 @@ def load_cell(path: Path) -> dict:
     load_seconds = result.get("load_seconds")
     row = {
         "id": cell["id"], "round": cell["round"], "concurrency": cell["concurrency"],
-        "config": cell["config"], "exit_code": cell["exit_code"], "wal_device": cell["wal_device"],
+        "config": cell["config"], "exit_code": cell["exit_code"], "wal_device": cell.get("wal_device"),
+        "missing": cell.get("missing", False),
         "version": cell.get("version"), "load_wall_seconds": cell.get("load_wall_seconds"),
         "rows": result.get("count_after"), "load_seconds": load_seconds,
         "rows_per_second": result.get("rows_per_second") if cell["exit_code"] == 0 else None,
         "append_ack_p50_seconds": quantile(0.5, ack), "append_ack_p99_seconds": quantile(0.99, ack),
     }
+    # The counters register on their first event, so a scrape of an object store WAL
+    # that created objects omits the ones that never moved: those are zero, not unknown.
+    active = (cell.get("metrics_scraped") and cell.get("wal", {}).get("PROVIDER") == "experimental_object_store"
+              and metrics["samples"].get("created_objects_total"))
     for counter in COUNTERS:
-        row[counter] = metrics["samples"].get(counter)
+        row[counter] = metrics["samples"].get(counter, 0 if active else None)
     created = row["created_objects_total"]
     row["creates_per_minute"] = created * 60 / load_seconds if created is not None and load_seconds else None
     return row
-
-
-def missing_cell(spec: dict) -> dict:
-    """A planned cell that never recorded a result, so no ratio can use its round."""
-    row = {key: None for key in ("exit_code", "wal_device", "version", "load_wall_seconds", "rows",
-                                 "load_seconds", "rows_per_second", "append_ack_p50_seconds",
-                                 "append_ack_p99_seconds", "creates_per_minute", *COUNTERS)}
-    return row | {key: spec[key] for key in ("id", "round", "concurrency", "config")} | {"missing": True}
 
 
 def ratios(rows: list) -> list:
@@ -124,10 +123,8 @@ def render(run: dict, rows: list, pairs: list) -> str:
               "| Stalled | Poisoned | Create failures | Conflicts | WAL on |",
               "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |"]
     for r in rows:
-        if r.get("missing"):
-            cell = f"{r['id']} (not run)"
-        else:
-            cell = r["id"] if r["exit_code"] == 0 else f"{r['id']} (failed, exit {r['exit_code']})"
+        cell = f"{r['id']} (not run)" if r["missing"] else r["id"] if r["exit_code"] == 0 \
+            else f"{r['id']} (failed, exit {r['exit_code']})"
         lines.append(" | ".join([
             f"| {cell}", fmt(r["rows_per_second"]), fmt(r["load_seconds"], 1), fmt(r["load_wall_seconds"], 1),
             fmt(r["rows"]), fmt(r["append_ack_p50_seconds"], 1, 1000), fmt(r["append_ack_p99_seconds"], 1, 1000),
@@ -149,12 +146,12 @@ def main() -> None:
     run = json.loads(run_path.read_text()) if run_path.exists() else {}
     plan_path = args.root / "plan.json"
     planned = json.loads(plan_path.read_text())["cells"] if plan_path.exists() else []
-    cells = {path.name: load_cell(path) for path in (args.root / "cells").glob("*") if (path / "cell.json").exists()}
     # The plan, not what happened to run, defines the expected cells and rounds.
-    rows = [cells.get(spec["id"]) or missing_cell(spec) for spec in planned]
-    rows += [cells[i] for i in sorted(cells) if i not in {spec["id"] for spec in planned}]
+    rows = [load_cell(args.root / "cells" / spec["id"], spec) for spec in planned]
+    rows += [load_cell(path) for path in sorted((args.root / "cells").glob("*"))
+             if path.name not in {spec["id"] for spec in planned} and (path / "cell.json").exists()]
     pairs = ratios(rows)
-    missing = [r["id"] for r in rows if r.get("missing")]
+    missing = [r["id"] for r in rows if r["missing"]]
     (args.root / "summary.json").write_text(json.dumps(
         {"run": run, "planned_cells": len(planned), "missing_cells": missing, "cells": rows, "ratios": pairs},
         indent=2) + "\n")
