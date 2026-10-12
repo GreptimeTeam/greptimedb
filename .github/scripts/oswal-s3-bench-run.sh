@@ -1,14 +1,40 @@
 #!/usr/bin/env bash
 # Host side of the object store WAL S3 benchmark (oswal-s3-bench.yml).
-#   wal-disk DIR  mount the instance store at DIR when the host has one
-#   generate      generate the dataset once with the o11ybench runtime
-#   cells         run every cell of $PLAN, each on a fresh GreptimeDB container
+#   check-runtime IMAGE  resolve the o11ybench runtime and check it carries the loader and generator
+#   pull                 pull the runtime and GreptimeDB images and record their metadata
+#   wal-disk DIR         mount the instance store at DIR when the host has one
+#   generate             generate the dataset once with the o11ybench runtime
+#   cells                run every cell of $PLAN, each on a fresh GreptimeDB container
+#   scrub                refuse results that contain a credential value
 set -euo pipefail
 
-: "${PLAN:?}" "${RESULTS:?}" "${CORPUS_DIR:?}" "${OWNER:?}" "${RUNTIME_IMAGE:?}"
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
 # Same isolation as the o11ybench runtime's own docker run.
-runtime=(docker run --rm --user "$(id -u):$(id -g)" --label "o11ybench.owner=$OWNER"
-    --security-opt no-new-privileges --cap-drop ALL)
+runtime() {
+    docker run --rm --user "$(id -u):$(id -g)" --label "o11ybench.owner=$OWNER" \
+        --security-opt no-new-privileges --cap-drop ALL "$@"
+}
+
+check_runtime() {
+    local image=$1 resolved
+    [[ "$image" == public.ecr.aws/* ]] || { echo 'The runtime image must come from AWS ECR Public' >&2; return 1; }
+    bash "$here/pull-benchmark-image.sh" "$image"
+    resolved=$(docker image inspect "$image" | jq -er '.[0].RepoDigests[0]')
+    docker run --rm --entrypoint sh "$resolved" -c \
+        'test -f scripts/agent-observability/greptimedb.sh && test -f scripts/generate_agent_observations.py' \
+        || { echo 'The runtime image lacks the agent observability loader or generator' >&2; return 1; }
+    printf 'runtime_image=%s\n' "$resolved" >> "${GITHUB_OUTPUT:-/dev/stdout}"
+}
+
+pull_images() {
+    : "${RESULTS:?}" "${RUNTIME_IMAGE:?}" "${GREPTIMEDB_TAG:?}"
+    mkdir -p "$RESULTS/images"
+    bash "$here/pull-benchmark-image.sh" "$RUNTIME_IMAGE"
+    bash "$here/pull-benchmark-image.sh" "greptime/greptimedb:$GREPTIMEDB_TAG"
+    docker image inspect "$RUNTIME_IMAGE" > "$RESULTS/images/runtime.json"
+    docker image inspect "greptime/greptimedb:$GREPTIMEDB_TAG" > "$RESULTS/images/greptimedb.json"
+}
 
 wal_disk() {
     local root=$1 device
@@ -24,11 +50,11 @@ wal_disk() {
 }
 
 generate() {
-    local args
-    mapfile -t args < <(jq -r '.generator_args[]' "$PLAN")
+    : "${PLAN:?}" "${RESULTS:?}" "${CORPUS_DIR:?}" "${OWNER:?}" "${RUNTIME_IMAGE:?}"
+    local args=() arg
+    while IFS= read -r arg; do args+=("$arg"); done < <(jq -r '.generator_args[]' "$PLAN")
     mkdir -p "$CORPUS_DIR"
-    "${runtime[@]}" --name "$OWNER-generator" \
-        --mount "type=bind,src=$CORPUS_DIR,dst=/work/corpus" \
+    runtime --name "$OWNER-generator" --mount "type=bind,src=$CORPUS_DIR,dst=/work/corpus" \
         "$RUNTIME_IMAGE" scripts/generate_agent_observations.py "${args[@]}" \
         --output /work/corpus/agent_observations.jsonl \
         --summary-output /work/corpus/summary.json --evidence-output /work/corpus/evidence.json \
@@ -36,22 +62,50 @@ generate() {
     jq -e --argjson rows "$(jq .rows "$PLAN")" '.line_count == $rows' "$CORPUS_DIR/summary.json" >/dev/null
 }
 
-# One cell in its own process, so errexit holds inside it.
+# Scrape once, after the load succeeded or failed, while the server still runs.
+scrape_metrics() {
+    if curl --noproxy '*' -fsS --max-time 30 http://127.0.0.1:4000/metrics > "$dir/metrics.all"; then
+        grep -E '^(# (HELP|TYPE) )?greptime_logstore_object_store_wal_' "$dir/metrics.all" > "$dir/metrics.prom" || true
+    fi
+    rm -f "$dir/metrics.all"
+}
+
+finish() {
+    local rc=$?
+    trap - EXIT
+    set +e
+    if [[ -n "$cid" ]]; then
+        scrape_metrics
+        docker stop -t 120 "$cid" >/dev/null
+        docker logs "$cid" > "$dir/server.log" 2>&1
+        docker rm -fv "$cid" >/dev/null
+    fi
+    [[ -z "$wal_dir" ]] || sudo -n rm -rf "$wal_dir"
+    jq -n --argjson spec "$spec" --arg device "$wal_device" --arg version "$version" \
+        --arg load_seconds "$load_seconds" --argjson exit_code "$rc" \
+        '$spec + {wal_device: $device, version: $version, exit_code: $exit_code,
+          load_wall_seconds: ($load_seconds | tonumber? // null)}' > "$dir/cell.json"
+    exit "$rc"
+}
+
+# One cell in its own process, so errexit holds inside it. The cell's state is
+# global because the EXIT trap runs after this function returns.
 cell() {
-    : "${GREPTIMEDB_IMAGE:?}" "${RUN_PREFIX:?}" "${WAL_ROOT:?}" "${S3_BUCKET:?}" "${S3_REGION:?}"
+    : "${PLAN:?}" "${RESULTS:?}" "${CORPUS_DIR:?}" "${OWNER:?}" "${RUNTIME_IMAGE:?}" "${GREPTIMEDB_IMAGE:?}"
+    : "${RUN_PREFIX:?}" "${WAL_ROOT:?}" "${S3_BUCKET:?}" "${S3_REGION:?}"
     : "${AWS_ACCESS_KEY_ID:?}" "${AWS_SECRET_ACCESS_KEY:?}"
-    # Globals, not locals: the EXIT trap runs after this function returns.
     spec=$1 cid= wal_dir= version= load_seconds=
-    local concurrency config name
-    id=$(jq -r .id <<< "$spec"); concurrency=$(jq -r .concurrency <<< "$spec"); config=$(jq -r .config <<< "$spec")
+    local id concurrency name setting started ended
+    id=$(jq -r .id <<< "$spec"); concurrency=$(jq -r .concurrency <<< "$spec")
     dir="$RESULTS/cells/$id"; name="$OWNER-$id"
     mkdir -p "$dir"
-    # The prefix holds data/ and the WAL's default prefix wal/ side by side.
+    # The root holds data/ and the WAL's default prefix wal/ side by side.
     local settings=(STORAGE__TYPE=S3 "STORAGE__BUCKET=$S3_BUCKET" "STORAGE__REGION=$S3_REGION"
         "STORAGE__ROOT=$RUN_PREFIX/$id")
     [[ -z "${S3_CONTAINER_ENDPOINT:-}" ]] || settings+=("STORAGE__ENDPOINT=$S3_CONTAINER_ENDPOINT")
-    mapfile -t -O "${#settings[@]}" settings < <(jq -r '.wal | to_entries[] | "WAL__\(.key)=\(.value)"' <<< "$spec")
-    local docker_env=() mounts=() setting
+    while IFS= read -r setting; do settings+=("$setting"); done \
+        < <(jq -r '.wal | to_entries[] | "WAL__\(.key)=\(.value)"' <<< "$spec")
+    local docker_env=() mounts=()
     for setting in "${settings[@]}"; do
         docker_env+=(-e "GREPTIMEDB_STANDALONE__$setting")
         printf 'GREPTIMEDB_STANDALONE__%s\n' "$setting" >> "$dir/config.env"
@@ -68,26 +122,10 @@ cell() {
     else
         wal_device="s3://$S3_BUCKET/$RUN_PREFIX/$id/wal"
     fi
-    finish() {
-        local rc=$?
-        trap - EXIT
-        set +e
-        if [[ -n "$cid" ]]; then
-            docker stop -t 120 "$cid" >/dev/null
-            docker logs "$cid" > "$dir/server.log" 2>&1
-            docker rm -fv "$cid" >/dev/null
-        fi
-        [[ -z "$wal_dir" ]] || sudo -n rm -rf "$wal_dir"
-        jq -n --argjson spec "$spec" --arg device "$wal_device" --arg version "$version" \
-            --arg load_seconds "$load_seconds" --argjson exit_code "$rc" \
-            '$spec + {wal_device: $device, version: $version, exit_code: $exit_code,
-              load_wall_seconds: ($load_seconds | tonumber? // null)}' > "$dir/cell.json"
-        exit "$rc"
-    }
     trap finish EXIT
     cid=$(docker run -d --init --name "$name" --label "o11ybench.owner=$OWNER" \
         --add-host host.docker.internal:host-gateway \
-        -p 127.0.0.1:4000:4000 -p 127.0.0.1:4001:4001 "${docker_env[@]}" "${mounts[@]}" \
+        -p 127.0.0.1:4000:4000 -p 127.0.0.1:4001:4001 "${docker_env[@]}" ${mounts[@]+"${mounts[@]}"} \
         "$GREPTIMEDB_IMAGE" standalone start --http-addr=0.0.0.0:4000 --grpc-bind-addr=0.0.0.0:4001)
     local deadline=$((SECONDS + 300))
     until curl --noproxy '*' -fsS --max-time 5 http://127.0.0.1:4000/health >/dev/null 2>&1; do
@@ -97,10 +135,9 @@ cell() {
     done
     version=$(docker exec "$cid" greptime --version | sed -n 's/^version: //p')
     [[ -n "$version" ]]
-    local started ended
     started=$(date +%s.%N)
     # Only the load phase, run exactly as run-agent-observability.sh runs it.
-    "${runtime[@]}" --name "$name-load" --network host \
+    runtime --name "$name-load" --network host \
         --mount "type=bind,src=$CORPUS_DIR,dst=/work/corpus,readonly" --mount "type=bind,src=$dir,dst=/results" \
         -e GRPC_ENDPOINT=127.0.0.1:4001 -e "DATA_PROFILE=$(jq -r .data_profile "$PLAN")" -e RESULT_NAME=greptimedb-1 \
         -e "ENDPOINT=http://127.0.0.1:4000/v1/sql?db=public&format=greptimedb_v1" \
@@ -112,23 +149,34 @@ cell() {
     load_seconds=$(awk -v a="$started" -v b="$ended" 'BEGIN {printf "%.3f", b - a}')
     jq -e --argjson rows "$(jq .rows "$PLAN")" '.count_before == 0 and .count_after == $rows' \
         "$dir/greptimedb-1/load-result.json" >/dev/null
-    curl --noproxy '*' -fsS --max-time 30 http://127.0.0.1:4000/metrics > "$dir/metrics.all"
-    grep -E '^(# (HELP|TYPE) )?greptime_logstore_object_store_wal_' "$dir/metrics.all" > "$dir/metrics.prom" || true
-    rm "$dir/metrics.all"
+}
+
+scrub() {
+    : "${RESULTS:?}"
+    [[ -n "${AWS_ACCESS_KEY_ID:-}" && -n "${AWS_SECRET_ACCESS_KEY:-}" && -d "$RESULTS" ]] || return 0
+    if grep -rqF -e "$AWS_ACCESS_KEY_ID" -e "$AWS_SECRET_ACCESS_KEY" "$RESULTS"; then
+        echo '::error::A credential value appears in the results; removing them instead of uploading' >&2
+        rm -rf "$RESULTS"
+        return 1
+    fi
 }
 
 case "${1:-}" in
+    check-runtime) check_runtime "${2:?}" ;;
+    pull) pull_images ;;
     wal-disk) wal_disk "${2:?}" ;;
     generate) generate ;;
     cell) cell "${2:?}" ;;
     cells)
-        mapfile -t specs < <(jq -c '.cells[]' "$PLAN")
+        : "${PLAN:?}"
         failed=0
-        for spec in "${specs[@]}"; do
-            echo "::group::cell $(jq -r .id <<< "$spec")"
-            bash "${BASH_SOURCE[0]}" cell "$spec" || { echo "::error::cell $(jq -r .id <<< "$spec") failed"; failed=1; }
+        while IFS= read -r spec; do
+            id=$(jq -r .id <<< "$spec")
+            echo "::group::cell $id"
+            bash "${BASH_SOURCE[0]}" cell "$spec" < /dev/null || { echo "::error::cell $id failed"; failed=1; }
             echo '::endgroup::'
-        done
+        done < <(jq -c '.cells[]' "$PLAN")
         exit "$failed" ;;
-    *) echo "usage: $0 wal-disk DIR | generate | cells" >&2; exit 2 ;;
+    scrub) scrub ;;
+    *) echo "usage: $0 check-runtime IMAGE | pull | wal-disk DIR | generate | cells | scrub" >&2; exit 2 ;;
 esac

@@ -18,10 +18,10 @@
 # dependencies = ["boto3>=1.35,<2"]
 # ///
 
-"""Plan, image tag and bucket helpers of the object store WAL S3 benchmark.
+"""Plan, image tag, run manifest and bucket helpers of the object store WAL S3 benchmark.
 
-`plan` and `tag` need only the standard library; `probe` and `cleanup` need
-boto3 and run under `uv run`.
+`plan`, `tag` and `manifest` need only the standard library; `probe` and
+`cleanup` need boto3 and run under `uv run`.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ import re
 import sys
 import time
 import urllib.request
+from pathlib import Path
 
 SMOKE_ROWS = 50_000
 # The o11ybench data profiles; a matching row count generates the canonical dataset.
@@ -46,10 +47,11 @@ WAL_CONFIGS = {
 ORDERS = (("R", "D", "E"), ("E", "D", "R"))
 NIGHTLY = re.compile(r"v\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?-nightly-(\d{8})")
 TAG = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
+DIGEST = re.compile(r".+@sha256:[0-9a-f]{64}")
 
 
-def append_output(name: str, value: str) -> None:
-    if path := os.environ.get("GITHUB_OUTPUT"):
+def append_github(variable: str, name: str, value: str) -> None:
+    if path := os.environ.get(variable):
         with open(path, "a") as output:
             output.write(f"{name}={value}\n")
 
@@ -58,6 +60,30 @@ def positive(name: str, value: str, upper: int) -> int:
     if not re.fullmatch(r"[1-9][0-9]*", value) or int(value) > upper:
         raise ValueError(f"{name} must be an integer in 1..{upper}, got {value!r}")
     return int(value)
+
+
+def validate_budgets(timeout_minutes: str, ttl_hours: str) -> None:
+    timeout, ttl = positive("timeout", timeout_minutes, 360), positive("ttl", ttl_hours, 168)
+    # Provisioning, teardown and queueing need two hours beyond the benchmark job.
+    if ttl * 60 < timeout + 120:
+        raise ValueError(f"janitor TTL {ttl}h must cover the {timeout}-minute timeout plus 2 hours")
+
+
+def check_regions(bucket: str, runner: str) -> None:
+    if not bucket or bucket != runner:
+        raise ValueError(f"bucket region {bucket!r} differs from runner region {runner!r}; "
+                         "a cross-region bucket measures the WAN, not S3")
+
+
+def build_manifest(plan: dict, greptimedb_inspect: list, runtime_image: str,
+                   instance_type: str, region: str, prefix: str) -> dict:
+    image = next((d for d in greptimedb_inspect[0].get("RepoDigests") or [] if DIGEST.fullmatch(d)), None)
+    if image is None:
+        raise ValueError("the GreptimeDB image has no sha256 repository digest")
+    return {"smoke": plan["smoke"], "rows": plan["rows"], "rounds": plan["rounds"],
+            "concurrency": plan["concurrency"], "batch_rows": plan["batch_rows"],
+            "greptimedb_image": image, "runtime_image": runtime_image,
+            "instance_type": instance_type, "region": region, "prefix": prefix}
 
 
 def build_plan(concurrency: str, rows: str, batch_rows: str, rounds: str, smoke: bool) -> dict:
@@ -149,8 +175,16 @@ def main() -> int:
     for name in ("concurrency", "rows", "batch-rows", "rounds"):
         plan.add_argument(f"--{name}", required=True)
     plan.add_argument("--smoke", choices=("true", "false"), required=True)
+    plan.add_argument("--timeout-minutes")
+    plan.add_argument("--ttl-hours")
     plan.add_argument("--output")
     commands.add_parser("tag").add_argument("requested")
+    regions = commands.add_parser("regions")
+    regions.add_argument("--bucket", required=True)
+    regions.add_argument("--runner", required=True)
+    manifest = commands.add_parser("manifest")
+    for name in ("results", "runtime-image", "instance-type", "region", "prefix"):
+        manifest.add_argument(f"--{name}", required=True)
     for name in ("probe", "cleanup"):
         bucket = commands.add_parser(name)
         bucket.add_argument("--bucket", required=True)
@@ -159,6 +193,8 @@ def main() -> int:
         bucket.add_argument("--prefix", required=True)
     args = parser.parse_args()
     if args.command == "plan":
+        if args.timeout_minutes or args.ttl_hours:
+            validate_budgets(args.timeout_minutes or "", args.ttl_hours or "")
         result = build_plan(args.concurrency, args.rows, args.batch_rows, args.rounds, args.smoke == "true")
         if args.output:
             with open(args.output, "w") as output:
@@ -166,8 +202,19 @@ def main() -> int:
         print(f"{len(result['cells'])} cells, {result['rows']} rows, profile {result['data_profile']}")
     elif args.command == "tag":
         tag = resolve_tag(args.requested)
-        append_output("greptimedb_tag", tag)
+        append_github("GITHUB_OUTPUT", "greptimedb_tag", tag)
         print(f"GreptimeDB image tag: {tag}")
+    elif args.command == "regions":
+        check_regions(args.bucket, args.runner)
+        print(f"bucket and runner both in {args.runner}")
+    elif args.command == "manifest":
+        results = Path(args.results)
+        manifest = build_manifest(json.loads((results / "plan.json").read_text()),
+                                  json.loads((results / "images" / "greptimedb.json").read_text()),
+                                  args.runtime_image, args.instance_type, args.region, args.prefix)
+        (results / "run.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        append_github("GITHUB_ENV", "GREPTIMEDB_IMAGE", manifest["greptimedb_image"])
+        print(f"GreptimeDB image: {manifest['greptimedb_image']}")
     else:
         if not re.fullmatch(r"oswal-bench/[0-9]+-[0-9]+", args.prefix):
             raise ValueError(f"refusing a prefix outside oswal-bench/<run>: {args.prefix!r}")
@@ -176,4 +223,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except ValueError as error:
+        print(f"::error::{error}", file=sys.stderr)
+        sys.exit(1)

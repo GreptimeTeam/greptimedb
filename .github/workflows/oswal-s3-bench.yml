@@ -82,11 +82,12 @@ jobs:
       run: |
         python3 greptimedb/tests/perf/test_oswal_s3_bench_scripts.py
         python3 greptimedb/tests/perf/test_ci_runner_scripts.py
-    - name: Validate plan and image tag
+    - name: Validate plan, budgets and image tag
       id: plan
       run: |
         python3 greptimedb/.github/scripts/oswal-s3-bench.py plan --smoke "$SMOKE" \
-          --concurrency "$CONCURRENCY" --rows "$ROWS" --batch-rows "$BATCH_ROWS" --rounds "$ROUNDS"
+          --concurrency "$CONCURRENCY" --rows "$ROWS" --batch-rows "$BATCH_ROWS" --rounds "$ROUNDS" \
+          --timeout-minutes "$BENCHMARK_TIMEOUT_MINUTES" --ttl-hours "$JANITOR_TTL_HOURS"
         python3 greptimedb/.github/scripts/oswal-s3-bench.py tag "$GREPTIMEDB_TAG"
     - name: Resolve CI runner
       id: runner
@@ -95,27 +96,10 @@ jobs:
       env:
         BUCKET_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
         RUNNER_REGION: ${{ vars.EC2_RUNNER_REGION }}
-      run: |
-        [[ -n "$BUCKET_REGION" && "$BUCKET_REGION" == "$RUNNER_REGION" ]] || {
-          echo "::error::Bucket region '$BUCKET_REGION' differs from runner region '$RUNNER_REGION'; a cross-region bucket measures the WAN, not S3"
-          exit 1
-        }
-    - name: Validate budgets and runtime image
+      run: python3 greptimedb/.github/scripts/oswal-s3-bench.py regions --bucket "$BUCKET_REGION" --runner "$RUNNER_REGION"
+    - name: Check the runtime image
       id: runtime
-      run: |
-        set -euo pipefail
-        for value in "$BENCHMARK_TIMEOUT_MINUTES" "$JANITOR_TTL_HOURS"; do
-          [[ "$value" =~ ^[1-9][0-9]{0,3}$ ]] || { echo 'Budgets must be positive integers'; exit 1; }
-        done
-        ((BENCHMARK_TIMEOUT_MINUTES <= 360 && JANITOR_TTL_HOURS <= 168))
-        ((JANITOR_TTL_HOURS * 60 >= BENCHMARK_TIMEOUT_MINUTES + 120)) || { echo 'Janitor TTL must cover the timeout plus 2 hours'; exit 1; }
-        [[ "$RUNTIME_IMAGE" == public.ecr.aws/* ]]
-        bash greptimedb/.github/scripts/pull-benchmark-image.sh "$RUNTIME_IMAGE"
-        resolved=$(docker image inspect "$RUNTIME_IMAGE" | jq -er '.[0].RepoDigests[0]')
-        docker run --rm --entrypoint sh "$resolved" -c \
-          'test -f scripts/agent-observability/greptimedb.sh && test -f scripts/generate_agent_observations.py' \
-          || { echo 'Runtime image lacks the agent observability loader or generator'; exit 1; }
-        printf 'runtime_image=%s\n' "$resolved" >> "$GITHUB_OUTPUT"
+      run: bash greptimedb/.github/scripts/oswal-s3-bench-run.sh check-runtime "$RUNTIME_IMAGE"
   provision:
     needs: validate
     if: ${{ !inputs.smoke }}
@@ -185,20 +169,11 @@ jobs:
         docker compose -f greptimedb/tests-integration/fixtures/docker-compose.yml up -d --wait minio
     - name: Pull images and write the plan
       run: |
-        set -euo pipefail
-        mkdir -p "$RESULTS/images"
-        bash greptimedb/.github/scripts/pull-benchmark-image.sh "$RUNTIME_IMAGE"
-        bash greptimedb/.github/scripts/pull-benchmark-image.sh "greptime/greptimedb:$GREPTIMEDB_TAG"
-        docker image inspect "$RUNTIME_IMAGE" > "$RESULTS/images/runtime.json"
-        docker image inspect "greptime/greptimedb:$GREPTIMEDB_TAG" > "$RESULTS/images/greptimedb.json"
-        image=$(jq -er '.[0].RepoDigests[0] | select(test("@sha256:[a-f0-9]{64}$"))' "$RESULTS/images/greptimedb.json")
-        printf 'GREPTIMEDB_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
+        bash greptimedb/.github/scripts/oswal-s3-bench-run.sh pull
         python3 greptimedb/.github/scripts/oswal-s3-bench.py plan --smoke "$SMOKE" --output "$PLAN" \
           --concurrency "$CONCURRENCY" --rows "$ROWS" --batch-rows "$BATCH_ROWS" --rounds "$ROUNDS"
-        jq -n --slurpfile plan "$PLAN" --arg image "$image" --arg runtime "$RUNTIME_IMAGE" \
-          --arg instance_type "$INSTANCE_TYPE" --arg region "$S3_REGION" --arg prefix "$RUN_PREFIX" \
-          '{smoke: $plan[0].smoke, rows: $plan[0].rows, batch_rows: $plan[0].batch_rows, greptimedb_image: $image,
-            runtime_image: $runtime, instance_type: $instance_type, region: $region, prefix: $prefix}' > "$RESULTS/run.json"
+        python3 greptimedb/.github/scripts/oswal-s3-bench.py manifest --results "$RESULTS" \
+          --runtime-image "$RUNTIME_IMAGE" --instance-type "$INSTANCE_TYPE" --region "$S3_REGION" --prefix "$RUN_PREFIX"
     - name: Probe the bucket
       env:
         AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
@@ -231,14 +206,7 @@ jobs:
       env:
         AWS_ACCESS_KEY_ID: ${{ inputs.smoke && 'superpower_ci_user' || secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
         AWS_SECRET_ACCESS_KEY: ${{ inputs.smoke && 'superpower_password' || secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
-      run: |
-        mkdir -p "$RESULTS"
-        [[ -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" ]] || exit 0
-        if grep -rqF -e "$AWS_ACCESS_KEY_ID" -e "$AWS_SECRET_ACCESS_KEY" "$RESULTS"; then
-          echo '::error::A credential value appears in the results; not uploading them'
-          rm -rf "$RESULTS"
-          exit 1
-        fi
+      run: bash greptimedb/.github/scripts/oswal-s3-bench-run.sh scrub
     - name: Upload results (no corpus)
       if: always()
       uses: actions/upload-artifact@v4

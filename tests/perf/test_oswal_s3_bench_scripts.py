@@ -17,6 +17,7 @@
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -86,8 +87,25 @@ class PlanTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             bench.resolve_tag("bad tag")
 
-    def test_run_script_parses(self):
-        subprocess.run(["bash", "-n", str(SCRIPTS / "oswal-s3-bench-run.sh")], check=True)
+    def test_budgets_and_regions(self):
+        bench.validate_budgets("240", "8")
+        for timeout, ttl in (("360", "7"), ("0", "8"), ("361", "168"), ("240", "169")):
+            with self.subTest(timeout=timeout, ttl=ttl), self.assertRaises(ValueError):
+                bench.validate_budgets(timeout, ttl)
+        bench.check_regions("ap-southeast-1", "ap-southeast-1")
+        for bucket, runner in (("us-east-1", "ap-southeast-1"), ("", "")):
+            with self.subTest(bucket=bucket), self.assertRaisesRegex(ValueError, "cross-region"):
+                bench.check_regions(bucket, runner)
+
+    def test_manifest_takes_the_sha256_digest(self):
+        plan = bench.build_plan("1,8", "2000000", "1000", "2", smoke=False)
+        inspect = [{"RepoDigests": ["greptime/greptimedb@sha256:" + "a" * 64]}]
+        manifest = bench.build_manifest(plan, inspect, "runtime@sha256:" + "b" * 64, "c7id.2xlarge",
+                                        "ap-southeast-1", "oswal-bench/1-1")
+        self.assertEqual(manifest["greptimedb_image"], "greptime/greptimedb@sha256:" + "a" * 64)
+        self.assertEqual((manifest["rows"], manifest["rounds"], manifest["concurrency"]), (2_000_000, 2, [1, 8]))
+        with self.assertRaises(ValueError):
+            bench.build_manifest(plan, [{"RepoDigests": []}], "", "", "", "")
 
 
 class SummaryTest(unittest.TestCase):
@@ -138,6 +156,23 @@ class SummaryTest(unittest.TestCase):
             self.assertEqual(d_cell["stalled_appends_total"], 3)
             self.assertIn("| 1-8-D | 80 | 60.0 | 61.0 | 6,000 | 128.0 | 253.4 | 120 | 120.0 | 3 | 0 | — | — |", output)
 
+    def test_a_planned_round_that_never_ran_leaves_the_ratio_undefined(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = bench.build_plan("8", "6000", "1000", "2", smoke=False)
+            (root / "plan.json").write_text(json.dumps(plan))
+            for cell_id, speed in {"1-8-R": 100.0, "1-8-D": 80.0, "1-8-E": 90.0}.items():
+                self.write_cell(root, cell_id, speed)
+            output = subprocess.run([sys.executable, str(SCRIPTS / "oswal-s3-bench-summary.py"), "--root", str(root)],
+                                    check=True, capture_output=True, text=True).stdout
+            result = json.loads((root / "summary.json").read_text())
+            self.assertEqual(result["missing_cells"], ["2-8-E", "2-8-D", "2-8-R"])
+            self.assertEqual(result["planned_cells"], 6)
+            for ratio in result["ratios"]:
+                self.assertIsNone(ratio["geomean"])
+                self.assertIsNone(ratio["per_round"][1])
+            self.assertIn("2-8-D (not run)", output)
+
     def test_a_failed_cell_leaves_its_ratio_undefined(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -147,6 +182,99 @@ class SummaryTest(unittest.TestCase):
             ratio = next(r for r in summary.ratios(rows) if r["ratio"] == "D/R")
             self.assertEqual((ratio["per_round"], ratio["geomean"]), ([None], None))
             self.assertIn("1-1-D (failed, exit 1)", summary.render({}, rows, summary.ratios(rows)))
+
+
+FAKE_DOCKER = r"""#!/usr/bin/env bash
+printf '%s\n' "docker $*" >> "$FAKE_LOG"
+case "$1" in
+    run)
+        for arg in "$@"; do [[ "$arg" != -d ]] || { echo "keys=${GREPTIMEDB_STANDALONE__STORAGE__ACCESS_KEY_ID:+set}${GREPTIMEDB_STANDALONE__STORAGE__SECRET_ACCESS_KEY:+set}" >> "$FAKE_LOG"; echo fakecid; exit 0; }; done
+        for arg in "$@"; do
+            case "$arg" in type=bind,src=*,dst=/results) results=${arg#type=bind,src=}; results=${results%,dst=/results} ;; esac
+        done
+        [[ "$FAKE_LOAD_RC" == 0 ]] || exit "$FAKE_LOAD_RC"
+        mkdir -p "$results/greptimedb-1"
+        echo "{\"count_before\": 0, \"count_after\": $FAKE_ROWS, \"load_seconds\": 2, \"rows_per_second\": 3000}" \
+            > "$results/greptimedb-1/load-result.json" ;;
+    inspect) echo true ;;
+    exec) echo 'version: 1.4.0-test' ;;
+    logs) echo 'server log' ;;
+esac
+"""
+FAKE_CURL = r"""#!/usr/bin/env bash
+printf '%s\n' "curl $*" >> "$FAKE_LOG"
+for arg in "$@"; do
+    [[ "$arg" != */metrics ]] || { printf '%s\n' 'greptime_logstore_object_store_wal_poisoned_total 1' 'other_total 2'; exit 0; }
+done
+"""
+
+
+class CellLifecycleTest(unittest.TestCase):
+    """Drives the run script against fake docker and curl binaries."""
+
+    def run_cells(self, root, load_rc):
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        for name, body in (("docker", FAKE_DOCKER), ("curl", FAKE_CURL)):
+            (bin_dir / name).write_text(body)
+            (bin_dir / name).chmod(0o755)
+        plan = bench.build_plan("8", "6000", "1000", "1", smoke=False)
+        plan["cells"] = [cell for cell in plan["cells"] if cell["config"] != "R"]
+        (root / "results").mkdir()
+        (root / "results" / "plan.json").write_text(json.dumps(plan))
+        env = os.environ | {
+            "PATH": f"{bin_dir}:{os.environ['PATH']}", "FAKE_LOG": str(root / "fake.log"),
+            "FAKE_LOAD_RC": str(load_rc), "FAKE_ROWS": "6000", "PLAN": str(root / "results" / "plan.json"),
+            "RESULTS": str(root / "results"), "CORPUS_DIR": str(root / "corpus"), "OWNER": "o11ybench-oswal-1-1",
+            "RUNTIME_IMAGE": "runtime@sha256:" + "b" * 64, "GREPTIMEDB_IMAGE": "greptimedb@sha256:" + "a" * 64,
+            "RUN_PREFIX": "oswal-bench/1-1", "WAL_ROOT": str(root / "wal"), "S3_BUCKET": "bucket",
+            "S3_REGION": "ap-southeast-1", "AWS_ACCESS_KEY_ID": "AKIAFAKEKEY", "AWS_SECRET_ACCESS_KEY": "fake-secret-value",
+        }
+        script = str(SCRIPTS / "oswal-s3-bench-run.sh")
+        cells = subprocess.run(["bash", script, "cells"], env=env, capture_output=True, text=True, timeout=60)
+        scrub = subprocess.run(["bash", script, "scrub"], env=env, capture_output=True, text=True, timeout=60)
+        return cells, scrub, (root / "fake.log").read_text(), env
+
+    def test_a_failed_load_still_scrapes_metrics_and_removes_the_server(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cells, scrub, log, _ = self.run_cells(root, load_rc=3)
+            self.assertNotEqual(cells.returncode, 0)
+            self.assertEqual(scrub.returncode, 0, scrub.stderr)
+            for cell_id in ("1-8-D", "1-8-E"):
+                cell = root / "results" / "cells" / cell_id
+                self.assertEqual(json.loads((cell / "cell.json").read_text())["exit_code"], 3)
+                self.assertEqual((cell / "metrics.prom").read_text(),
+                                 "greptime_logstore_object_store_wal_poisoned_total 1\n")
+                self.assertFalse((cell / "metrics.all").exists())
+                self.assertEqual((cell / "server.log").read_text(), "server log\n")
+            self.assertEqual(log.count("docker stop -t 120 fakecid"), 2)
+            self.assertEqual(log.count("docker rm -fv fakecid"), 2)
+
+    def test_a_cell_passes_the_keys_by_name_and_records_a_redacted_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cells, scrub, log, env = self.run_cells(root, load_rc=0)
+            self.assertEqual(cells.returncode, 0, cells.stdout + cells.stderr)
+            self.assertEqual(scrub.returncode, 0, scrub.stderr)
+            self.assertNotIn("fake-secret-value", log)
+            self.assertNotIn("AKIAFAKEKEY", log)
+            self.assertEqual(log.count("keys=setset"), 2)
+            self.assertIn("-e GREPTIMEDB_STANDALONE__STORAGE__SECRET_ACCESS_KEY ", log)
+            cell = root / "results" / "cells" / "1-8-D"
+            config = (cell / "config.env").read_text().splitlines()
+            self.assertIn("GREPTIMEDB_STANDALONE__STORAGE__ROOT=oswal-bench/1-1/1-8-D", config)
+            self.assertIn("GREPTIMEDB_STANDALONE__WAL__ACK_MODE=durable", config)
+            self.assertIn("GREPTIMEDB_STANDALONE__STORAGE__SECRET_ACCESS_KEY=<redacted>", config)
+            recorded = json.loads((cell / "cell.json").read_text())
+            self.assertEqual((recorded["exit_code"], recorded["version"]), (0, "1.4.0-test"))
+            self.assertEqual(recorded["wal_device"], "s3://bucket/oswal-bench/1-1/1-8-D/wal")
+            # A leaked value makes scrub refuse the results.
+            (cell / "leak.txt").write_text("fake-secret-value")
+            leaked = subprocess.run(["bash", str(SCRIPTS / "oswal-s3-bench-run.sh"), "scrub"], env=env,
+                                    capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(leaked.returncode, 0)
+            self.assertFalse((root / "results").exists())
 
 
 if __name__ == "__main__":

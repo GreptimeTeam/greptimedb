@@ -87,6 +87,14 @@ def load_cell(path: Path) -> dict:
     return row
 
 
+def missing_cell(spec: dict) -> dict:
+    """A planned cell that never recorded a result, so no ratio can use its round."""
+    row = {key: None for key in ("exit_code", "wal_device", "version", "load_wall_seconds", "rows",
+                                 "load_seconds", "rows_per_second", "append_ack_p50_seconds",
+                                 "append_ack_p99_seconds", "creates_per_minute", *COUNTERS)}
+    return row | {key: spec[key] for key in ("id", "round", "concurrency", "config")} | {"missing": True}
+
+
 def ratios(rows: list) -> list:
     """D/R and E/R per round and their geometric mean over the rounds, per concurrency."""
     speed = {(r["round"], r["concurrency"], r["config"]): r["rows_per_second"] for r in rows}
@@ -110,18 +118,21 @@ def fmt(value, digits=0, scale=1.0) -> str:
 
 def render(run: dict, rows: list, pairs: list) -> str:
     lines = [f"## Object store WAL against S3 ({'smoke, MinIO' if run.get('smoke') else run.get('instance_type')})", ""]
-    lines += [f"GreptimeDB `{run.get('greptimedb_image')}` ({rows[0]['version'] if rows else '—'}); "
+    lines += [f"GreptimeDB `{run.get('greptimedb_image')}` ({next((r['version'] for r in rows if r['version']), '—')}); "
               f"{fmt(run.get('rows'))} rows in {run.get('batch_rows')}-row batches; bucket region {run.get('region')}.", ""]
     lines += ["| Cell | Rows/s | Load s | Wall s | Rows | Ack p50 ms | Ack p99 ms | Creates | Creates/min "
               "| Stalled | Poisoned | Create failures | Conflicts | WAL on |",
               "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |"]
     for r in rows:
-        cell = r["id"] if r["exit_code"] == 0 else f"{r['id']} (failed, exit {r['exit_code']})"
+        if r.get("missing"):
+            cell = f"{r['id']} (not run)"
+        else:
+            cell = r["id"] if r["exit_code"] == 0 else f"{r['id']} (failed, exit {r['exit_code']})"
         lines.append(" | ".join([
             f"| {cell}", fmt(r["rows_per_second"]), fmt(r["load_seconds"], 1), fmt(r["load_wall_seconds"], 1),
             fmt(r["rows"]), fmt(r["append_ack_p50_seconds"], 1, 1000), fmt(r["append_ack_p99_seconds"], 1, 1000),
             *(fmt(r[c]) for c in COUNTERS[:1]), fmt(r["creates_per_minute"], 1),
-            *(fmt(r[c]) for c in COUNTERS[1:]), f"`{r['wal_device']}` |"]))
+            *(fmt(r[c]) for c in COUNTERS[1:]), f"`{r['wal_device'] or '—'}` |"]))
     lines += ["", "| Concurrency | Ratio | Per round | Geometric mean |", "| ---: | --- | --- | ---: |"]
     for p in pairs:
         lines.append(f"| {p['concurrency']} | {p['ratio']} | {', '.join(fmt(v, 3) for v in p['per_round'])} "
@@ -137,11 +148,16 @@ def main() -> None:
     run_path = args.root / "run.json"
     run = json.loads(run_path.read_text()) if run_path.exists() else {}
     plan_path = args.root / "plan.json"
-    order = [cell["id"] for cell in json.loads(plan_path.read_text())["cells"]] if plan_path.exists() else []
+    planned = json.loads(plan_path.read_text())["cells"] if plan_path.exists() else []
     cells = {path.name: load_cell(path) for path in (args.root / "cells").glob("*") if (path / "cell.json").exists()}
-    rows = [cells[i] for i in order if i in cells] + [cells[i] for i in sorted(cells) if i not in order]
+    # The plan, not what happened to run, defines the expected cells and rounds.
+    rows = [cells.get(spec["id"]) or missing_cell(spec) for spec in planned]
+    rows += [cells[i] for i in sorted(cells) if i not in {spec["id"] for spec in planned}]
     pairs = ratios(rows)
-    (args.root / "summary.json").write_text(json.dumps({"run": run, "cells": rows, "ratios": pairs}, indent=2) + "\n")
+    missing = [r["id"] for r in rows if r.get("missing")]
+    (args.root / "summary.json").write_text(json.dumps(
+        {"run": run, "planned_cells": len(planned), "missing_cells": missing, "cells": rows, "ratios": pairs},
+        indent=2) + "\n")
     print(render(run, rows, pairs) if rows else "No benchmark cell completed.\n")
 
 
