@@ -42,7 +42,7 @@ use common_frontend::slow_query_event::SLOW_QUERY_TABLE_NAME;
 use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::datanode::REGION_STATS_HISTORY_TABLE_NAME;
-use common_meta::node_manager::{AffectedRows, NodeManagerRef};
+use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::ddl::TriggerReason;
 use common_query::Output;
@@ -83,9 +83,8 @@ use table::table_reference::TableReference;
 
 use crate::batcher::PendingRowsBatcher;
 use crate::error::{
-    CatalogSnafu, ColumnOptionsSnafu, CreatePartitionRulesSnafu, FindRegionLeaderSnafu,
-    InvalidInsertRequestSnafu, JoinTaskSnafu, RequestInsertsSnafu, Result, TableNotFoundSnafu,
-    WriteRejectedSnafu,
+    CatalogSnafu, ColumnOptionsSnafu, CreatePartitionRulesSnafu, InvalidInsertRequestSnafu,
+    RequestInsertsSnafu, Result, TableNotFoundSnafu, WriteRejectedSnafu,
 };
 use crate::expr_helper;
 use crate::region_req_factory::RegionRequestFactory;
@@ -95,11 +94,13 @@ use crate::req_convert::insert::{
     fill_reqs_with_impure_default, rows_to_record_batch,
 };
 use crate::statement::StatementExecutor;
+use crate::write_dispatcher::{WriteDispatcher, WriteDispatcherRef};
 
 pub struct Inserter {
     catalog_manager: CatalogManagerRef,
     pub(crate) partition_manager: PartitionRuleManagerRef,
     pub(crate) node_manager: NodeManagerRef,
+    pub(crate) write_dispatcher: WriteDispatcherRef,
     pub(crate) table_flownode_set_cache: TableFlownodeSetCacheRef,
     /// Server-side upper bound for auto table creation on write.
     /// When `false`, missing tables are never auto-created regardless of the
@@ -292,6 +293,7 @@ impl Inserter {
         cost
     }
 
+    /// Creates a row inserter with the default write dispatcher.
     pub fn new(
         catalog_manager: CatalogManagerRef,
         partition_manager: PartitionRuleManagerRef,
@@ -300,6 +302,10 @@ impl Inserter {
         auto_create_table: bool,
     ) -> Self {
         Self {
+            write_dispatcher: Arc::new(WriteDispatcher::new(
+                node_manager.clone(),
+                partition_manager.clone(),
+            )),
             catalog_manager,
             partition_manager,
             node_manager,
@@ -826,30 +832,14 @@ impl Inserter {
             has_instant_rows,
         )?;
 
-        // Write requests to datanode and wait for response
-        let write_tasks = self
-            .group_requests_by_peer(normal_requests)
-            .await?
-            .into_iter()
-            .map(|(peer, inserts)| {
-                let node_manager = self.node_manager.clone();
-                let request = request_factory.build_insert(inserts);
-                common_runtime::spawn_global(async move {
-                    node_manager
-                        .datanode(&peer)
-                        .await
-                        .handle(request)
-                        .await
-                        .context(RequestInsertsSnafu)
-                })
-            });
-        let results = future::try_join_all(write_tasks)
-            .await
-            .context(JoinTaskSnafu)?;
-        let affected_rows = results
-            .into_iter()
-            .map(|resp| resp.map(|r| r.affected_rows))
-            .sum::<Result<AffectedRows>>()?;
+        let dispatcher = self.write_dispatcher.clone();
+        let request = request_factory.build_insert(normal_requests);
+        let affected_rows =
+            common_runtime::spawn_global(async move { dispatcher.dispatch(vec![request]).await })
+                .await
+                .context(crate::error::JoinTaskSnafu)?
+                .context(RequestInsertsSnafu)?
+                .affected_rows;
         crate::metrics::DIST_INGEST_ROW_COUNT
             .with_label_values(&[ctx.get_db_string().as_str()])
             .inc_by(affected_rows as u64);
@@ -857,40 +847,6 @@ impl Inserter {
             OutputData::AffectedRows(affected_rows),
             OutputMeta::new_with_cost(write_cost as _),
         ))
-    }
-
-    async fn group_requests_by_peer(
-        &self,
-        requests: RegionInsertRequests,
-    ) -> Result<HashMap<Peer, RegionInsertRequests>> {
-        // group by region ids first to reduce repeatedly call `find_region_leader`
-        // TODO(discord9): determine if a addition clone is worth it
-        let mut requests_per_region: HashMap<RegionId, RegionInsertRequests> = HashMap::new();
-        for req in requests.requests {
-            let region_id = RegionId::from_u64(req.region_id);
-            requests_per_region
-                .entry(region_id)
-                .or_default()
-                .requests
-                .push(req);
-        }
-
-        let mut inserts: HashMap<Peer, RegionInsertRequests> = HashMap::new();
-
-        for (region_id, reqs) in requests_per_region {
-            let peer = self
-                .partition_manager
-                .find_region_leader(region_id)
-                .await
-                .context(FindRegionLeaderSnafu)?;
-            inserts
-                .entry(peer)
-                .or_default()
-                .requests
-                .extend(reqs.requests);
-        }
-
-        Ok(inserts)
     }
 
     /// Returns `Some(reason)` if the config or request hint disables automatic
@@ -1715,6 +1671,17 @@ impl Inserter {
                 Err(err)
             }
         }
+    }
+
+    /// Installs the shared dispatcher used by direct writes and batch flushes.
+    pub fn with_write_dispatcher(mut self, dispatcher: WriteDispatcherRef) -> Self {
+        self.write_dispatcher = dispatcher;
+        self
+    }
+
+    /// Returns the dispatcher shared with batching execution paths.
+    pub fn write_dispatcher(&self) -> &WriteDispatcherRef {
+        &self.write_dispatcher
     }
 
     pub fn node_manager(&self) -> &NodeManagerRef {
