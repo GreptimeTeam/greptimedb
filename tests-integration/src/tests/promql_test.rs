@@ -19,12 +19,12 @@ use api::v1::value::ValueData;
 use api::v1::{
     ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
 };
-use common_error::ext::ErrorExt;
-use common_error::status_code::StatusCode;
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use common_query::{Output, OutputData};
 use common_recordbatch::util::collect_batches;
-use datatypes::arrow::array::{Float64Array, Int64Array, StringArray, TimestampMillisecondArray};
+use datatypes::arrow::array::{
+    Array, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
+};
 use datatypes::arrow::compute::cast;
 use datatypes::arrow::datatypes::DataType;
 use frontend::instance::Instance;
@@ -1194,9 +1194,9 @@ async fn promql_stale_marker_excludes_series_across_flushes(instance: Arc<dyn Mo
 // * `ORDER BY ts DESC` really sorts by `host` (ordinary Mito table) or by `val`
 //   (metric logical table) and silently returns the wrong row order.
 // * `ORDER BY "scalar(val)" ASC` does not order by the scalar value at all.
-// * `LAG(...) OVER (ORDER BY ts DESC)` cannot be planned any more: the window
-//   needs `ts@0 DESC` while the pushed-down sort provides `host@0 DESC` /
-//   `val@0 DESC`, so planning fails with `StatusCode::PlanQuery` (code 3000).
+// * `LAG(...) OVER (ORDER BY ts DESC)` could not be planned before this fix:
+//   the window needed `ts@0 DESC` while the pushed-down sort provided
+//   `host@0 DESC` / `val@0 DESC`, so planning failed with code 3000.
 //
 // The controls below must keep passing: a bare selector keeps the `ts` order of
 // its input, and `ORDER BY ts DESC LIMIT 3` keeps the correct `TopK` above
@@ -1221,13 +1221,18 @@ const F06_ROWS_BY_TS_DESC_LIMIT_3: &[(i64, f64)] = &[(3000, 2.0), (2000, 3.0), (
 /// Truth of `ORDER BY "scalar(val)" ASC` over the F06 fixture.
 const F06_ROWS_BY_VALUE_ASC: &[(i64, f64)] = &[(1000, 1.0), (3000, 2.0), (2000, 3.0), (0, 4.0)];
 
+/// Truth of `LAG("scalar(val)") OVER (ORDER BY ts DESC)` over the F06 fixture:
+/// the row order, the scalar values and the lagged values `(ts_millis, val,
+/// prev)`. The window's first row has no predecessor, so its `prev` is `NULL`.
+const F06_ROWS_LAG_BY_TS_DESC: &[(i64, f64, Option<f64>)] = &[
+    (3000, 2.0, None),
+    (2000, 3.0, Some(2.0)),
+    (1000, 1.0, Some(3.0)),
+    (0, 4.0, Some(1.0)),
+];
+
 /// Output column of a `scalar()` TQL query; it has to be quoted in SQL.
 const F06_SCALAR_VALUE_COLUMN: &str = "scalar(val)";
-
-/// Message fragment DataFusion uses when a window's required input ordering is
-/// missing; it identifies the failure as the order-contract bug rather than an
-/// unrelated planning error.
-const F06_UNSATISFIED_ORDER_REQUIREMENT: &str = "does not satisfy order requirements";
 
 /// Ordinary Mito fixture. `host` stays the first column on purpose: the wrong
 /// push-down reuses output index `0` (`ts`) as input column `0` (`host`).
@@ -1369,19 +1374,49 @@ async fn f06_ordered_rows(
     rows
 }
 
-/// Runs an F06 query that is expected to fail and returns its status code with
-/// the error message.
-async fn f06_query_error(
+/// Runs the F06 `LAG` query and returns its rows in result order as
+/// `(ts_millis, val, prev)`; `prev` is `None` for the first row of the window.
+/// The rows are never sorted here.
+async fn f06_ordered_lag_rows(
     instance: &Arc<Instance>,
     sql: &str,
     parallelism: usize,
-) -> (StatusCode, String) {
+) -> Vec<(i64, f64, Option<f64>)> {
     let mut query_ctx = QueryContext::with_db_name(None);
     query_ctx.set_extension(QUERY_PARALLELISM_HINT, parallelism.to_string());
-    match instance.do_query(sql, Arc::new(query_ctx)).await.remove(0) {
-        Err(err) => (err.status_code(), err.output_msg()),
-        Ok(_) => panic!("F06: expected `{sql}` to fail (parallelism={parallelism})"),
+    let output = instance
+        .do_query(sql, Arc::new(query_ctx))
+        .await
+        .remove(0)
+        .unwrap_or_else(|err| panic!("F06: query failed: {err}\n{sql}"));
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("F06: expected a query result"),
+    };
+
+    let mut rows = Vec::new();
+    for batch in batches.iter() {
+        let ts = cast(
+            batch.column_by_name("ts").unwrap().as_ref(),
+            &DataType::Int64,
+        )
+        .unwrap();
+        let ts = ts.as_any().downcast_ref::<Int64Array>().unwrap();
+        let values = batch.column_by_name("val").unwrap();
+        let values = values.as_any().downcast_ref::<Float64Array>().unwrap();
+        let prevs = batch.column_by_name("prev").unwrap();
+        let prevs = prevs.as_any().downcast_ref::<Float64Array>().unwrap();
+        for row in 0..batch.num_rows() {
+            let prev = if prevs.is_null(row) {
+                None
+            } else {
+                Some(prevs.value(row))
+            };
+            rows.push((ts.value(row), values.value(row), prev));
+        }
     }
+    rows
 }
 
 /// Repro of the wrong sort push-down: `ORDER BY ts DESC` over `scalar()` is
@@ -1540,14 +1575,15 @@ async fn f06_selector_metric_table_order_by_ts_desc_control(instance: Arc<dyn Mo
     }
 }
 
-/// Repro of the planning failure caused by the same wrong push-down: the window
-/// needs `ts@0 DESC`, the pushed-down sort only provides `host@0 DESC`, so this
-/// query currently fails with code 3000.
+/// Repro of the planning failure that the wrong sort push-down used to cause:
+/// the window needs `ts@0 DESC`, the pushed-down sort only provided
+/// `host@0 DESC`, so this query failed with code 3000 while `ScalarCalculate`
+/// claimed `maintains_input_order`.
 ///
-/// Once `ScalarCalculate` stops claiming `maintains_input_order`, the query must
-/// succeed and return exactly `(3000, 2.0, NULL)`, `(2000, 3.0, 2.0)`,
-/// `(1000, 1.0, 3.0)`, `(0, 4.0, 1.0)`; this assertion then has to be replaced
-/// by that ordered-row check together with the fix.
+/// Now that the node stops claiming the input order, the window is planned
+/// above the correct sort and the query must return exactly
+/// `(3000, 2.0, NULL)`, `(2000, 3.0, 2.0)`, `(1000, 1.0, 3.0)`,
+/// `(0, 4.0, 1.0)`.
 #[apply(both_instances_cases)]
 async fn f06_scalar_ordinary_table_lag_order_by_ts_desc(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
@@ -1555,17 +1591,12 @@ async fn f06_scalar_ordinary_table_lag_order_by_ts_desc(instance: Arc<dyn MockIn
 
     let sql = f06_scalar_lag_order_by_ts_desc_sql(F06_ORDINARY_TABLE);
     for parallelism in [1, 4] {
-        let (code, message) = f06_query_error(&instance, &sql, parallelism).await;
+        let rows = f06_ordered_lag_rows(&instance, &sql, parallelism).await;
         assert_eq!(
-            code,
-            StatusCode::PlanQuery,
-            "F06: `LAG(...) OVER (ORDER BY ts DESC)` over scalar() must fail with a planning \
-             error while the sort push-down is wrong (parallelism={parallelism}): {message}"
-        );
-        assert!(
-            message.contains(F06_UNSATISFIED_ORDER_REQUIREMENT),
-            "F06: the planning error must be the missing `ts` order of the window input, not an \
-             unrelated planning failure (parallelism={parallelism}): {message}"
+            rows.as_slice(),
+            F06_ROWS_LAG_BY_TS_DESC,
+            "F06: `LAG(...) OVER (ORDER BY ts DESC)` over scalar() must return `ts`-descending \
+             rows with the lagged scalar values (parallelism={parallelism})\n{sql}"
         );
     }
 }
@@ -1579,17 +1610,12 @@ async fn f06_scalar_metric_table_lag_order_by_ts_desc(instance: Arc<dyn MockInst
 
     let sql = f06_scalar_lag_order_by_ts_desc_sql(F06_METRIC_TABLE);
     for parallelism in [1, 4] {
-        let (code, message) = f06_query_error(&instance, &sql, parallelism).await;
+        let rows = f06_ordered_lag_rows(&instance, &sql, parallelism).await;
         assert_eq!(
-            code,
-            StatusCode::PlanQuery,
-            "F06: `LAG(...) OVER (ORDER BY ts DESC)` over scalar() must fail with a planning \
-             error while the sort push-down is wrong (parallelism={parallelism}): {message}"
-        );
-        assert!(
-            message.contains(F06_UNSATISFIED_ORDER_REQUIREMENT),
-            "F06: the planning error must be the missing `ts` order of the window input, not an \
-             unrelated planning failure (parallelism={parallelism}): {message}"
+            rows.as_slice(),
+            F06_ROWS_LAG_BY_TS_DESC,
+            "F06: `LAG(...) OVER (ORDER BY ts DESC)` over scalar() must return `ts`-descending \
+             rows with the lagged scalar values (parallelism={parallelism})\n{sql}"
         );
     }
 }
