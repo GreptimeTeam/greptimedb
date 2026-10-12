@@ -201,10 +201,14 @@ impl PhysicalOptimizerRule for MatchesConstantTermOptimizer {
                     })?;
 
                     if new_pred.transformed {
-                        let exec = FilterExecBuilder::new(new_pred.data, filter.input().clone())
-                            .with_default_selectivity(filter.default_selectivity())
-                            .apply_projection_by_ref(filter.projection().as_ref())
-                            .and_then(|x| x.build())?;
+                        // `FilterExecBuilder::from(&FilterExec)` already carries over the
+                        // input, projection, default selectivity, batch size and fetch, so
+                        // only the predicate has to be replaced. Re-applying the projection
+                        // is not only pointless but wrong: `apply_projection` composes with
+                        // the projection copied from the builder.
+                        let exec = FilterExecBuilder::from(filter)
+                            .with_predicate(new_pred.data)
+                            .build()?;
                         return Ok(Transformed::yes(Arc::new(exec) as _));
                     }
                 }
