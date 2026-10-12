@@ -281,25 +281,34 @@ impl TwcsPicker {
         {
             return (vec![], false);
         }
-        let (inputs, found_runs) = if is_active_window {
+        let (inputs, found_runs, branch) = if is_active_window {
             match phase {
-                PickPhase::HasL0 if num_l0_files >= self.trigger_file_num => pick_candidate_files(
-                    l0_files,
-                    self.max_output_file_size,
-                    pick_count_first,
-                    primary_key_mapper,
-                ),
+                PickPhase::HasL0 if num_l0_files >= self.trigger_file_num => {
+                    let (inputs, runs) = pick_candidate_files(
+                        l0_files,
+                        self.max_output_file_size,
+                        pick_count_first,
+                        primary_key_mapper,
+                    );
+                    (inputs, runs, "active:pick_count_first")
+                }
                 PickPhase::L1FileReduction | PickPhase::L1OverlapOnly
                     if num_l1_files >= self.active_window_l1_merge_trigger =>
                 {
-                    pick_l1_candidate_files(
+                    let (inputs, runs) = pick_l1_candidate_files(
                         l1_files,
                         self.max_output_file_size,
                         phase,
                         primary_key_mapper,
-                    )
+                    );
+                    let branch = if matches!(phase, PickPhase::L1OverlapOnly) {
+                        "active:pick_l1_overlap_only"
+                    } else {
+                        "active:pick_l1_file_reduction"
+                    };
+                    (inputs, runs, branch)
                 }
-                _ => (vec![], 0),
+                _ => (vec![], 0, "active:trigger-not-met"),
             }
         } else {
             pick_inactive_window_files(
@@ -328,6 +337,7 @@ impl TwcsPicker {
                 region_id,
                 *window,
                 active_window,
+                branch,
                 found_runs,
                 files.files.len(),
                 self.max_output_file_size,
@@ -365,59 +375,66 @@ fn pick_inactive_window_files(
     l1_files: Vec<FileHandle>,
     pick: InactiveWindowPick<'_>,
     max_output_file_size: Option<u64>,
-) -> (Vec<FileHandle>, usize) {
+) -> (Vec<FileHandle>, usize, &'static str) {
     if !matches!(pick.phase, PickPhase::HasL0) {
         return if l1_files.len() >= pick.l1_file_num {
-            pick_l1_candidate_files(
+            let (inputs, found_runs) = pick_l1_candidate_files(
                 l1_files,
                 max_output_file_size,
                 pick.phase,
                 pick.primary_key_mapper,
-            )
+            );
+            let branch = if matches!(pick.phase, PickPhase::L1OverlapOnly) {
+                "inactive:pick_l1_overlap_only"
+            } else {
+                "inactive:pick_l1_file_reduction"
+            };
+            (inputs, found_runs, branch)
         } else {
-            (vec![], 0)
+            (vec![], 0, "inactive:l1-below-trigger")
         };
     }
 
     if l0_files.len() >= pick.l0_file_num {
-        let candidate = pick_candidate_files(
+        let (inputs, found_runs) = pick_candidate_files(
             l0_files.clone(),
             max_output_file_size,
             pick_count_first,
             pick.primary_key_mapper,
         );
-        if !candidate.0.is_empty() {
-            return candidate;
+        if !inputs.is_empty() {
+            return (inputs, found_runs, "inactive:pick_count_first");
         }
     }
 
-    let candidate = pick_candidate_files(
+    let (inputs, found_runs) = pick_candidate_files(
         l0_files.clone(),
         max_output_file_size,
         pick_count_first,
         pick.primary_key_mapper,
     );
-    if !candidate.0.is_empty() {
-        return candidate;
+    if !inputs.is_empty() {
+        return (inputs, found_runs, "inactive:pick_count_first");
     }
     let mut all_files = l0_files.clone();
     all_files.extend(l1_files);
-    let candidate = pick_candidate_files(
+    let (inputs, found_runs) = pick_candidate_files(
         all_files,
         max_output_file_size,
         pick_mixed_within_budget,
         pick.primary_key_mapper,
     );
-    if !candidate.0.is_empty() {
-        return candidate;
+    if !inputs.is_empty() {
+        return (inputs, found_runs, "inactive:pick_mixed_within_budget");
     }
 
-    pick_candidate_files(
+    let (inputs, found_runs) = pick_candidate_files(
         l0_files,
         max_output_file_size,
         pick_unbalanced_count_first,
         pick.primary_key_mapper,
-    )
+    );
+    (inputs, found_runs, "inactive:pick_unbalanced_count_first")
 }
 
 fn pick_l1_candidate_files(
@@ -996,6 +1013,7 @@ fn log_pick_result(
     region_id: RegionId,
     window: i64,
     active_window: Option<i64>,
+    branch: &str,
     found_runs: usize,
     file_num: usize,
     max_output_file_size: Option<u64>,
@@ -1023,12 +1041,13 @@ fn log_pick_result(
     let active_window_str = active_window.map(|s| Timestamp::new_second(s).to_iso8601_string());
     let max_output_file_size = max_output_file_size.map(|size| ReadableSize(size).to_string());
     info!(
-        "Region ({:?}) compaction pick result: current window: {}, active window: {:?}, \
+        "Region ({:?}) compaction pick result: current window: {}, active window: {:?}, branch: {}, \
             found runs: {}, file num: {}, max output file size: {:?}, filter deleted: {}, \
             input files: {:?}",
         region_id,
         window_str,
         active_window_str,
+        branch,
         found_runs,
         file_num,
         max_output_file_size,
@@ -2912,7 +2931,7 @@ mod tests {
             })
             .collect();
 
-        let (inputs, _) = pick_inactive_window_files(
+        let (inputs, _, _) = pick_inactive_window_files(
             l0_files,
             l1_files,
             InactiveWindowPick {
@@ -2943,7 +2962,7 @@ mod tests {
             })
             .collect();
 
-        let (inputs, _) = pick_inactive_window_files(
+        let (inputs, _, _) = pick_inactive_window_files(
             vec![],
             l1_files,
             InactiveWindowPick {
