@@ -532,6 +532,11 @@ impl CopyHandler for PostgresServerHandlerInner {
             ))
             .await?;
 
+        // Reset the copy state: the buffers are no longer needed and any
+        // stray CopyData now hits the protocol-violation error instead of
+        // a finished parser.
+        guard.take();
+
         // After a successful extended-protocol copy-in, pgwire leaves the
         // connection in `CopyInProgress(true)` and swallows the client's
         // terminating `Sync` message, so `ReadyForQuery` would never be
