@@ -77,12 +77,20 @@ struct TextRecordParser {
 impl RecordParser for TextRecordParser {
     fn feed(&mut self, data: &[u8]) -> PgWireResult<Vec<ParsedRow>> {
         self.pending.extend_from_slice(data);
-        let mut rows = Vec::new();
-        while let Some(pos) = self.pending.iter().position(|&b| b == b'\n') {
-            let line: Vec<u8> = self.pending.drain(..=pos).collect();
-            // The drained line always ends with the `\n` separator.
-            let line = &line[..line.len() - 1];
-            rows.push(self.parse_text_line(line)?);
+        // Take the longest complete prefix in a single drain; the remainder
+        // is an incomplete line kept for the next chunk. Draining per line
+        // would memmove the whole buffer once per record.
+        let Some(last) = self.pending.iter().rposition(|&b| b == b'\n') else {
+            return Ok(Vec::new());
+        };
+        let complete: Vec<u8> = self.pending.drain(..=last).collect();
+        let mut rows = Vec::with_capacity(complete.len() / 32 + 1);
+        let mut start = 0;
+        for (i, &b) in complete.iter().enumerate() {
+            if b == b'\n' {
+                rows.push(self.parse_text_line(&complete[start..i])?);
+                start = i + 1;
+            }
         }
         Ok(rows)
     }

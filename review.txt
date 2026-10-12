@@ -1,0 +1,179 @@
+# Review: PR #9297 — `COPY FROM STDIN` for postgres interface
+
+Branch: feat/postgres-copy-in (base: main, merge-base 29d5854e6a)
+
+Overall this is well-structured (clean codec split, good tests, pgwire state
+workaround is verified correct against pgwire 0.41's `CopyInProgress(true)`
+behavior). But there is **one blocking bug** and a **~640-line leanness
+opportunity** at the heart of the change.
+
+---
+
+## BLOCKING BUG: `promql_test` integration suite silently disabled
+
+`tests-integration/src/tests.rs`:
+
+```diff
+-mod promql_test;
++mod postgres_copy_in_test;
+```
+
+This **replaced** the module line instead of adding a new one —
+`promql_test.rs` (41KB of integration tests) no longer compiles or runs.
+Fix:
+
+```rust
+mod postgres_copy_in_test;
+mod promql_test;
+```
+
+---
+
+## Biggest leanness opportunity: `parse.rs` + `options.rs` (~640 lines) duplicate sqlparser
+
+The textual parser exists so the `WITH (...)` clause stays *open* to future
+non-Postgres options (e.g. a hypothetical `FORMAT influxdb_line, precision
+'ns'`). But note:
+
+- **sqlparser 0.62 fully parses every option this PR accepts.** `parse_copy`
+  handles `COPY tbl (cols) FROM STDIN [WITH] (FORMAT, DELIMITER, NULL,
+  HEADER, QUOTE, ESCAPE, FREEZE, ENCODING, ...)` — WITH optional, exactly
+  the PG grammar. The existing codebase already relies on this:
+  `check_copy_to_stdout` in `handler.rs` extracts the format from a
+  sqlparser-parsed `Statement::Copy` (see the existing
+  `test_check_copy_out_with_csv_format` test).
+- **The open-options capability is currently used by nothing.** Registered
+  formats are `text` (DELIMITER, NULL) and `csv` (DELIMITER, QUOTE, ESCAPE,
+  HEADER, NULL) — all inside sqlparser's `CopyOption` enum. The only
+  registered non-PG behavior is the `txt` alias, which survives as
+  `CopyOption::Format(Ident)` anyway.
+- **Multi-statement rejection comes for free**: parse the whole string once,
+  require exactly one statement that is `Copy { to: false, target: Stdin,
+  .. }`. That also deletes `is_copy_from_stdin` and the double-check in
+  `do_query`.
+
+Concretely, matching on the AST gives you table name, column list, and typed
+options (`Delimiter(char)`, `Header(bool)`, …) — `parse.rs` (373 lines)
+disappears, and `options.rs` (262 lines) shrinks to a small `&[CopyOption] →
+codec config` step, or the codecs match on `CopyOption` directly.
+
+Trade-off, stated honestly: if a future format needs an option sqlparser
+can't tokenize as a CopyOption, you'd reintroduce open parsing *then*. That
+re-introduction would be cheap precisely because `codec.rs`/`text.rs`/
+`csv.rs` are format-agnostic already. Keeping 640 lines of hand-rolled
+tokenizer machinery today for a hypothetical format is speculative
+generality — and it's the one part of this PR that doesn't reuse the
+codebase (sqlparser, the compatibility parser, and the existing COPY-TO
+precedent).
+
+If you keep the custom parser anyway, one bug-adjacent nit:
+`expect_ident(cursor, _what)` takes an unused `_what` param.
+
+---
+
+## Reuse opportunities in the codecs
+
+1. **gRPC column schema construction duplicates existing code almost
+   verbatim.** `mod.rs`'s `semantic_type_of` + `build_grpc_column_schema` is
+   functionally identical to
+   `flow::adapter::util::column_schemas_to_proto(column_schemas,
+   primary_keys)` (and `operator::expr_helper::column_schemas_to_defs`):
+   same `ColumnDataTypeWrapper::try_from(...).to_parts()`, same
+   Timestamp/Tag/Field derivation, same `options_from_column_schema`.
+   Suggest extracting one shared helper (e.g. into `api::helper`, next to
+   `vectors_to_rows`/`to_grpc_value` which you already reuse) and calling it
+   from both flow and copy-in — layering-correct and ~50 lines saved. At
+   minimum, use `ColumnSchema::is_time_index()` instead of re-deriving via
+   index lookups.
+
+2. **`decode_hex` in `codec.rs` reimplements hex decoding** — the `servers`
+   crate already depends on `hex` (`Cargo.toml:71`), and
+   `common_sql::convert::parse_hex_string` shows the established pattern.
+   `hex::decode` deletes ~20 lines.
+
+3. **`convert_text_value` substantially overlaps
+   `common_sql::convert::parse_string_to_value`** (currently `pub(crate)` —
+   would need to be made `pub`). The overlap covers numerics, bool, Date,
+   Timestamp (incl. the `from_str` → `i64` fallback), and Decimal128. Two
+   real differences to reconcile if you reuse it:
+   - common-sql honors a **session timezone** for date/timestamp parsing;
+     the PR hardcodes `None`. Reusing it with the `query_ctx` timezone is
+     both leaner *and* more correct — PG clients reasonably expect the
+     `TimeZone` GUC to apply.
+   - JSON/`\x`-hex bytea handling differs (the PR's `Value::Json` + `\x`
+     prefix is right for the row-insert path; keep those branches).
+
+4. **`CsvCodec::check_column_type` duplicates
+   `check_text_representable_type`** minus Binary/Json. Make csv's impl call
+   the default and additionally reject those two:
+
+   ```rust
+   fn check_column_type(&self, dt: &ConcreteDataType) -> PgWireResult<()> {
+       check_text_representable_type(dt)?; // or the trait default
+       ensure!(!matches!(dt, ConcreteDataType::Binary(_) | ConcreteDataType::Json(_)), ...);
+   }
+   ```
+
+---
+
+## Performance: `text.rs` `feed` is O(n^2) per chunk — at odds with the PR's stated goal
+
+```rust
+while let Some(pos) = self.pending.iter().position(|&b| b == b'\n') {
+    let line: Vec<u8> = self.pending.drain(..=pos).collect();
+```
+
+Each `drain(..=pos)` memmoves the entire remainder of the buffer. For a 64KB
+chunk of ~50-byte lines that's ~1300 drains x ~32KB average shift —
+hundreds of MB of memmove per chunk. Since the PR's motivation is *high
+ingestion rate*, fix it minimally: find the last `\n` once, split the
+complete prefix out in one pass, keep only the partial tail in `pending` —
+or better, scan the incoming `data` directly and only buffer the incomplete
+tail (no copy at all for chunk-aligned lines). The CSV path (arrow decoder)
+doesn't have this problem, which makes text the slow default format.
+
+Minor: `CopyInState.rows` could be `Vec::with_capacity(COPY_IN_FLUSH_ROWS)`.
+
+---
+
+## Smaller notes
+
+- `PostgresServer::new` now takes two `Arc`s that are both the frontend
+  `Instance` (`instance.clone(), instance.clone()` at all call sites).
+  Consider a single `CopyInHandlerRef: From<Instance>`-style constructor, or
+  document that the two handles are expected to be the same object — the
+  current shape invites divergence.
+- `RecordingCopyInHandler` in `tests/mod.rs` uses `std::sync::Mutex` and
+  `unwrap()`s in async trait impls — fine for a test double, no change
+  needed.
+- The `AwaitingSync` workaround in `on_copy_done` is correct — verified
+  pgwire 0.41's server loop swallows the terminating `Sync` in
+  `CopyInProgress(true)` and would otherwise never emit `ReadyForQuery`.
+  Good catch; the comment explains it well.
+- Unquoted identifiers keep their case in your parser (`COPY T FROM STDIN` →
+  table `"T"`), where PostgreSQL folds to lowercase. GreptimeDB's other
+  paths inherit whatever sqlparser does; worth a one-line decision comment
+  either way. (If you adopt the sqlparser approach above, you inherit the
+  codebase's existing behavior for free.)
+- `tests-integration/tests/sql.rs::test_postgres_copy_in_with_batching`
+  scrapes `dump_metrics()` text — consistent with existing tests, fine.
+
+---
+
+## Suggested changeset shape
+
+| Action | Lines saved (approx.) |
+|---|---|
+| Fix `mod promql_test;` regression | — (correctness) |
+| Parse via sqlparser `Statement::Copy` instead of `parse.rs`/`options.rs` | ~500–600 |
+| Share `column_schemas_to_proto`-style helper (move to `api::helper`) | ~50 |
+| `hex::decode` instead of hand-rolled `decode_hex` | ~20 |
+| csv `check_column_type` via shared default | ~25 |
+| Fix text `feed` O(n^2) (needed for the perf goal) | ~0, but important |
+
+Net: roughly a fifth of the changeset can go, with the remaining core (codec
+trait, text/csv parsers, pgwire glue, frontend trait) being genuinely
+necessary and well-built. The one judgment call is the open-`WITH` parser —
+my recommendation is to defer it until a format actually needs it; if you
+feel strongly about landing the framework now, at least fix the promql
+module regression and the text-format drain issue before merge.

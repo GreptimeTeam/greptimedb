@@ -32,6 +32,10 @@ use pgwire::error::PgWireResult;
 use super::options::{CopyOptionSet, CopyOptionValue};
 use super::{bad_copy_data, copy_in_must_run_alone_error};
 
+/// Identifier case is kept as written (`COPY T` addresses `T`), matching
+/// what sqlparser-based paths in this codebase do; PostgreSQL itself folds
+/// unquoted identifiers to lowercase.
+///
 /// A scanned `COPY tbl [(cols)] FROM STDIN [WITH (...)]` statement.
 #[derive(Debug)]
 pub(super) struct RawCopyFromStdin {
@@ -158,7 +162,7 @@ impl<'a> Tokens<'a> {
     }
 }
 
-fn expect_ident<'a>(cursor: &mut Tokens<'a>, _what: &str) -> Option<String> {
+fn expect_ident(cursor: &mut Tokens<'_>) -> Option<String> {
     match cursor.next() {
         Some(Token::Word(w)) => Some(w.value.clone()),
         _ => None,
@@ -166,10 +170,10 @@ fn expect_ident<'a>(cursor: &mut Tokens<'a>, _what: &str) -> Option<String> {
 }
 
 fn parse_object_name(cursor: &mut Tokens<'_>) -> Option<Vec<String>> {
-    let mut parts = vec![expect_ident(cursor, "a table name")?];
+    let mut parts = vec![expect_ident(cursor)?];
     while matches!(cursor.peek(), Some(Token::Period)) {
         cursor.next();
-        parts.push(expect_ident(cursor, "a name after '.'")?);
+        parts.push(expect_ident(cursor)?);
     }
     Some(parts)
 }
@@ -182,10 +186,10 @@ fn parse_column_list(cursor: &mut Tokens<'_>) -> Option<Vec<String>> {
         return Some(Vec::new());
     }
     cursor.next();
-    let mut columns = vec![expect_ident(cursor, "a column name")?];
+    let mut columns = vec![expect_ident(cursor)?];
     loop {
         match cursor.next() {
-            Some(Token::Comma) => columns.push(expect_ident(cursor, "a column name")?),
+            Some(Token::Comma) => columns.push(expect_ident(cursor)?),
             Some(Token::RParen) => break,
             _ => return None,
         }
