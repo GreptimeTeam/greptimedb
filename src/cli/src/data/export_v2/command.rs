@@ -23,7 +23,6 @@ use clap::{Parser, Subcommand};
 use common_error::ext::BoxedError;
 use common_telemetry::info;
 use serde_json::Value;
-use servers::http::GreptimeQueryOutput;
 use snafu::ResultExt;
 
 use crate::Tool;
