@@ -6101,13 +6101,7 @@ impl PromPlanner {
             .iter()
             .map(|label| (label.clone(), label.clone()))
             .collect::<Vec<_>>();
-        if force_empty_join
-            && !only_join_time_index
-            && modifier
-                .as_ref()
-                .and_then(|modifier| modifier.matching.as_ref())
-                .is_some()
-        {
+        if force_empty_join && !only_join_time_index {
             let mut selected = left_matched_tags
                 .iter()
                 .chain(&right_matched_tags)
@@ -6126,68 +6120,91 @@ impl PromPlanner {
                     }
                 }
             }
-            let mut occupied = left
-                .schema()
-                .fields()
-                .iter()
-                .chain(right.schema().fields().iter())
-                .map(|field| field.name().clone())
-                .collect::<HashSet<_>>();
-            let mut left_extra = Vec::new();
-            let mut right_extra = Vec::new();
-            let mut suffix = 0;
-            left_join_keys.clear();
-            right_join_keys.clear();
-
-            for label in selected {
-                let in_left = left_matched_tags.contains(&label);
-                let in_right = right_matched_tags.contains(&label);
-                let mut left_key = label.clone();
-                let mut right_key = label.clone();
-                if in_left != in_right {
-                    let (source, source_extra, missing_extra) = if in_left {
-                        (&left, &mut left_extra, &mut right_extra)
-                    } else {
-                        (&right, &mut right_extra, &mut left_extra)
-                    };
-                    let (qualifier, field) = source
-                        .schema()
-                        .iter()
-                        .find(|(_, field)| field.name() == &label)
-                        .with_context(|| ColumnNotFoundSnafu { col: label.clone() })?;
-                    let value_type = Self::string_value_data_type(field.data_type())
-                        .with_context(|| UnexpectedPlanExprSnafu {
-                            desc: format!("PromQL match label {label} must be a string"),
-                        })?
-                        .clone();
-                    let internal_name = loop {
-                        let name = format!("__promql_missing_match_{suffix}");
-                        suffix += 1;
-                        if occupied.insert(name.clone()) {
-                            break name;
+            // Value-based grouping can expose numeric columns as matching labels.
+            // An absent string label cannot equal a numeric value: retain the
+            // empty join instead of inventing a numeric default or casting it.
+            let missing_labels_are_strings =
+                selected
+                    .iter()
+                    .try_fold(true, |eligible, label| -> Result<bool> {
+                        let in_left = left_matched_tags.contains(label);
+                        let in_right = right_matched_tags.contains(label);
+                        if in_left == in_right {
+                            return Ok(eligible);
                         }
-                    };
-                    source_extra.push(Self::normalized_match_key_expr(
-                        &label,
-                        Some((qualifier.cloned(), field.data_type().clone())),
-                        &value_type,
-                        &internal_name,
-                    ));
-                    missing_extra.push(Self::normalized_match_key_expr(
-                        &label,
-                        None,
-                        &value_type,
-                        &internal_name,
-                    ));
-                    left_key = internal_name.clone();
-                    right_key = internal_name;
+                        let source = if in_left { &left } else { &right };
+                        let field = source
+                            .schema()
+                            .fields()
+                            .iter()
+                            .find(|field| field.name() == label)
+                            .with_context(|| ColumnNotFoundSnafu { col: label.clone() })?;
+                        Ok(eligible && Self::string_value_data_type(field.data_type()).is_some())
+                    })?;
+            if missing_labels_are_strings {
+                let mut occupied = left
+                    .schema()
+                    .fields()
+                    .iter()
+                    .chain(right.schema().fields().iter())
+                    .map(|field| field.name().clone())
+                    .collect::<HashSet<_>>();
+                let mut left_extra = Vec::new();
+                let mut right_extra = Vec::new();
+                let mut suffix = 0;
+                left_join_keys.clear();
+                right_join_keys.clear();
+
+                for label in selected {
+                    let in_left = left_matched_tags.contains(&label);
+                    let in_right = right_matched_tags.contains(&label);
+                    let mut left_key = label.clone();
+                    let mut right_key = label.clone();
+                    if in_left != in_right {
+                        let (source, source_extra, missing_extra) = if in_left {
+                            (&left, &mut left_extra, &mut right_extra)
+                        } else {
+                            (&right, &mut right_extra, &mut left_extra)
+                        };
+                        let (qualifier, field) = source
+                            .schema()
+                            .iter()
+                            .find(|(_, field)| field.name() == &label)
+                            .with_context(|| ColumnNotFoundSnafu { col: label.clone() })?;
+                        let value_type = Self::string_value_data_type(field.data_type())
+                            .with_context(|| UnexpectedPlanExprSnafu {
+                                desc: format!("PromQL match label {label} must be a string"),
+                            })?
+                            .clone();
+                        let internal_name = loop {
+                            let name = format!("__promql_missing_match_{suffix}");
+                            suffix += 1;
+                            if occupied.insert(name.clone()) {
+                                break name;
+                            }
+                        };
+                        source_extra.push(Self::normalized_match_key_expr(
+                            &label,
+                            Some((qualifier.cloned(), field.data_type().clone())),
+                            &value_type,
+                            &internal_name,
+                        ));
+                        missing_extra.push(Self::normalized_match_key_expr(
+                            &label,
+                            None,
+                            &value_type,
+                            &internal_name,
+                        ));
+                        left_key = internal_name.clone();
+                        right_key = internal_name;
+                    }
+                    left_join_keys.push((label.clone(), left_key));
+                    right_join_keys.push((label, right_key));
                 }
-                left_join_keys.push((label.clone(), left_key));
-                right_join_keys.push((label, right_key));
+                left = Self::project_internal_match_keys(left, left_extra)?;
+                right = Self::project_internal_match_keys(right, right_extra)?;
+                force_empty_join = false;
             }
-            left = Self::project_internal_match_keys(left, left_extra)?;
-            right = Self::project_internal_match_keys(right, right_extra)?;
-            force_empty_join = false;
         }
 
         // A join key that covers the whole tag set of a side already makes that side's match

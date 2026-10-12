@@ -49,6 +49,7 @@ impl MatchGroupViolation {
             } => 1,
             Self::ImplicitManyToOne => 2,
             Self::AmbiguousGroupLabels => 3,
+            Self::DuplicateLabelSet => 4,
         }
     }
 
@@ -62,6 +63,7 @@ impl MatchGroupViolation {
             }),
             2 => Ok(Self::ImplicitManyToOne),
             3 => Ok(Self::AmbiguousGroupLabels),
+            4 => Ok(Self::DuplicateLabelSet),
             _ => Err(DataFusionError::Execution(format!(
                 "invalid match group violation code: {code}"
             ))),
@@ -131,7 +133,7 @@ impl AssertUniqueMatchGroup {
 
     fn render_group(args: &[ColumnarValue], row: usize) -> DfResult<String> {
         let mut rendered = Vec::with_capacity(args.len() / 2);
-        for pair in args.chunks_exact(2) {
+        for pair in args.as_chunks::<2>().0 {
             let label = match Self::scalar_value(&pair[0])? {
                 ScalarValue::Utf8(Some(label)) => label,
                 value => {
@@ -233,14 +235,20 @@ mod tests {
     use super::*;
 
     fn invoke(counts: Vec<i64>, hosts: Vec<Option<&str>>) -> DfResult<ColumnarValue> {
+        invoke_with_violation(counts, hosts, MatchGroupViolation::ImplicitManyToOne)
+    }
+
+    fn invoke_with_violation(
+        counts: Vec<i64>,
+        hosts: Vec<Option<&str>>,
+        violation: MatchGroupViolation,
+    ) -> DfResult<ColumnarValue> {
         let udf = UniqueMatchGroup::scalar_udf();
         let number_rows = counts.len();
         udf.invoke_with_args(ScalarFunctionArgs {
             args: vec![
                 ColumnarValue::Array(Arc::new(Int64Array::from(counts))),
-                ColumnarValue::Scalar(ScalarValue::Int64(Some(
-                    MatchGroupViolation::ImplicitManyToOne.code(),
-                ))),
+                ColumnarValue::Scalar(ScalarValue::Int64(Some(violation.code()))),
                 ColumnarValue::Scalar(ScalarValue::Utf8(Some("host".to_string()))),
                 ColumnarValue::Array(Arc::new(StringArray::from(hosts))),
             ],
@@ -254,6 +262,47 @@ mod tests {
             return_field: Arc::new(Field::new("assert", DataType::Boolean, false)),
             config_options: Arc::new(Default::default()),
         })
+    }
+
+    #[test]
+    fn violation_codes_round_trip() {
+        for (code, violation) in [
+            (
+                0,
+                MatchGroupViolation::DuplicateOnOneSide {
+                    one_side_is_left: true,
+                },
+            ),
+            (
+                1,
+                MatchGroupViolation::DuplicateOnOneSide {
+                    one_side_is_left: false,
+                },
+            ),
+            (2, MatchGroupViolation::ImplicitManyToOne),
+            (3, MatchGroupViolation::AmbiguousGroupLabels),
+            (4, MatchGroupViolation::DuplicateLabelSet),
+        ] {
+            assert_eq!(violation.code(), code);
+            assert_eq!(MatchGroupViolation::from_code(code).unwrap(), violation);
+        }
+        for code in [-1, 5] {
+            assert!(MatchGroupViolation::from_code(code).is_err());
+        }
+    }
+
+    #[test]
+    fn duplicate_label_set_reports_promql_error() {
+        let error =
+            invoke_with_violation(vec![2], vec![None], MatchGroupViolation::DuplicateLabelSet)
+                .unwrap_err();
+        let DataFusionError::Execution(message) = error else {
+            panic!("expected an execution error, got {error}");
+        };
+        assert_eq!(
+            message,
+            "vector cannot contain metrics with the same labelset"
+        );
     }
 
     #[test]

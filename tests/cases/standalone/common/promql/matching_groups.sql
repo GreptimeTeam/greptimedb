@@ -69,6 +69,27 @@ TQL EVAL (0, 0, '1s') max by(host)(matching_groups_left{host=""} or matching_gro
 TQL EVAL (0, 0, '1s') max by(host)(matching_groups_no_host or matching_groups_left{host=""});
 DROP TABLE matching_groups_no_host;
 
+-- Default matching and ignoring() both treat absent tags as empty labels.
+CREATE TABLE matching_groups_default_left (
+  host STRING NULL, job STRING, ts TIMESTAMP(3) TIME INDEX, greptime_value DOUBLE,
+  PRIMARY KEY(host, job)
+);
+CREATE TABLE matching_groups_default_right (
+  "zone" STRING NULL, job STRING, ts TIMESTAMP(3) TIME INDEX, greptime_value DOUBLE,
+  PRIMARY KEY("zone", job)
+);
+INSERT INTO matching_groups_default_left VALUES (NULL, 'j', 0, 6);
+INSERT INTO matching_groups_default_right VALUES ('', 'j', 0, 3);
+TQL EVAL (0, 0, '1s') matching_groups_default_left / matching_groups_default_right;
+TQL EVAL (0, 0, '1s') matching_groups_default_left / ignoring() matching_groups_default_right;
+TQL EVAL (0, 0, '1s') matching_groups_default_right / matching_groups_default_left;
+TQL EVAL (0, 0, '1s') matching_groups_default_right / ignoring() matching_groups_default_left;
+-- Numeric value-grouping columns cannot match an absent string label.
+TQL EVAL (0, 0, '1s') max by(greptime_value)(matching_groups_default_left) / matching_groups_default_right;
+TQL EVAL (0, 0, '1s') max by(greptime_value)(matching_groups_default_left) / ignoring() matching_groups_default_right;
+DROP TABLE matching_groups_default_left;
+DROP TABLE matching_groups_default_right;
+
 -- One-to-one matching must reject normalized collisions on either side, even
 -- when the match key contains the complete tag set and only one other row matches.
 CREATE TABLE matching_groups_host_only_left (

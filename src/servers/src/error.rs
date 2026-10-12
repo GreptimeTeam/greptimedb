@@ -500,6 +500,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("vector cannot contain metrics with the same labelset"))]
+    DuplicatePrometheusLabelSet {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     // this error is used for custom error mapping
     // please do not delete it
     #[snafu(display("Other error"))]
@@ -853,6 +859,7 @@ impl ErrorExt for Error {
             Other { source, .. } => source.status_code(),
 
             UnexpectedResult { .. } => StatusCode::Unexpected,
+            DuplicatePrometheusLabelSet { .. } => StatusCode::EngineExecuteQuery,
 
             JoinTask { error, .. } => {
                 if error.is_cancelled() {

@@ -263,6 +263,27 @@ impl PromPlanner {
             return Ok(None);
         }
 
+        // Reuse each selector only after checking its normalized label set. Repeated
+        // references then share both the scan and its collision check.
+        for (idx, leaf) in planned_leaves.iter_mut().enumerate() {
+            if leaf.ctx.normalized_nullable_tags {
+                let join_keys = leaf
+                    .ctx
+                    .tag_columns
+                    .iter()
+                    .map(|label| (label.clone(), label.clone()))
+                    .collect::<Vec<_>>();
+                leaf.plan = Self::assert_unique_one_side(
+                    leaf.plan.clone(),
+                    &join_keys,
+                    &leaf.ctx.tag_columns,
+                    leaf.ctx.time_index_column.as_deref(),
+                    idx == 0,
+                    true,
+                )?;
+            }
+        }
+
         let mut input = planned_leaves[0].plan.clone();
         for right_idx in 1..planned_leaves.len() {
             input = self.join_binary_island_leaf(
@@ -279,10 +300,15 @@ impl PromPlanner {
             return Ok(None);
         }
 
+        let mut output_context = planned_leaves[0].ctx.clone();
+        output_context.normalized_nullable_tags |= planned_leaves
+            .iter()
+            .any(|leaf| leaf.ctx.normalized_nullable_tags);
+        output_context.use_tsid &= !output_context.normalized_nullable_tags;
         let plan = self.project_binary_island(
             input,
             &planned_leaves[0].alias,
-            &planned_leaves[0].ctx,
+            &output_context,
             field_exprs,
         )?;
         Ok(Some(plan))
@@ -291,7 +317,7 @@ impl PromPlanner {
     fn binary_island_join_contexts_supported(leaves: &[PlannedIslandLeaf]) -> bool {
         if leaves
             .iter()
-            .any(|leaf| leaf.ctx.time_index_column.is_none() || leaf.ctx.normalized_nullable_tags)
+            .any(|leaf| leaf.ctx.time_index_column.is_none())
         {
             return false;
         }
@@ -303,7 +329,10 @@ impl PromPlanner {
         let first_tags = leaves[0].ctx.tag_columns.iter().collect::<BTreeSet<_>>();
 
         leaves.iter().skip(1).all(|leaf| {
-            (Self::plan_has_tsid_column(&leaves[0].plan) && Self::plan_has_tsid_column(&leaf.plan))
+            (!leaves[0].ctx.normalized_nullable_tags
+                && !leaf.ctx.normalized_nullable_tags
+                && Self::plan_has_tsid_column(&leaves[0].plan)
+                && Self::plan_has_tsid_column(&leaf.plan))
                 || leaf.ctx.tag_columns.iter().collect::<BTreeSet<_>>() == first_tags
         })
     }

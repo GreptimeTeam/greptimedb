@@ -805,9 +805,9 @@ async fn build_test_table_provider_with_nullable_distinct_tags(
             .iter()
             .map(|tag| {
                 ColumnSchema::new(
-                (*tag).to_string(),
-                ConcreteDataType::string_datatype(),
-                nullable_tags,
+                    (*tag).to_string(),
+                    ConcreteDataType::string_datatype(),
+                    nullable_tags,
                 )
             })
             .collect::<Vec<_>>();
@@ -2534,8 +2534,7 @@ async fn at_modifier_rejects_unrepresentable_timestamp() {
     {
         let err = parser::parse("some_metric @ 1e16").unwrap_err();
         assert!(
-            err.to_string()
-                .contains("timestamp out of bounds for @ modifier"),
+            err.contains("timestamp out of bounds for @ modifier"),
             "{err}"
         );
     }
@@ -7562,6 +7561,85 @@ fn nullable_label_table(
     ))
 }
 
+#[tokio::test]
+async fn binary_island_reuses_normalized_selectors_with_collision_checks() {
+    for (query, selectors) in [("(a - b) / a", 2), ("(a + a) / a", 1)] {
+        let plan = nullable_label_query(
+            vec![
+                nullable_label_table("a", 2101, &[("host", &[None])], &[Some(6.0)]),
+                nullable_label_table("b", 2102, &[("host", &[Some("")])], &[Some(3.0)]),
+            ],
+            query,
+        )
+        .await;
+        let display = plan.display_indent().to_string();
+        assert_eq!(
+            display.matches("PromInstantManipulate").count(),
+            selectors,
+            "{display}"
+        );
+        assert_eq!(
+            display.matches("prom_assert_unique_match_group(").count(),
+            selectors,
+            "{display}"
+        );
+        let (_, batches) = execute(plan, &build_query_engine_state()).await;
+        assert_eq!(
+            batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+            1,
+            "{query}"
+        );
+        let value = batches
+            .iter()
+            .filter(|batch| batch.num_rows() != 0)
+            .flat_map(|batch| batch.columns())
+            .find_map(|column| column.as_any().downcast_ref::<Float64Array>())
+            .unwrap();
+        assert_eq!(
+            value.value(0),
+            if selectors == 2 { 0.5 } else { 2.0 },
+            "{query}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn binary_island_rejects_normalized_collisions_on_reused_leaves() {
+    for (query, side) in [
+        ("(a - b) / a", "left"),
+        ("(b - a) / b", "right"),
+        ("a / a", "left"),
+    ] {
+        let plan = nullable_label_query(
+            vec![
+                nullable_label_table(
+                    "a",
+                    2101,
+                    &[("host", &[None, Some("")])],
+                    &[Some(6.0), Some(12.0)],
+                ),
+                nullable_label_table("b", 2102, &[("host", &[Some("")])], &[Some(3.0)]),
+            ],
+            query,
+        )
+        .await;
+        let state = build_query_engine_state();
+        let (_, physical) = optimize_and_create_physical_plan(&state, plan).await;
+        let error = datafusion::physical_plan::collect(physical, state.session_state().task_ctx())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!("on the {side} hand-side")),
+            "{query}: {error}"
+        );
+        assert!(
+            error.contains("matching labels must be unique on one side"),
+            "{error}"
+        );
+    }
+}
+
 async fn nullable_label_query(tables: Vec<table::TableRef>, query: &str) -> LogicalPlan {
     let catalog = MemoryCatalogManager::with_default_setup();
     for table in tables {
@@ -7667,6 +7745,115 @@ async fn label_functions_normalize_empty_outputs_before_matching() {
             .find_map(|column| column.as_any().downcast_ref::<Float64Array>())
             .unwrap();
         assert_eq!(value.value(0), 2.0, "{query}");
+    }
+}
+
+#[tokio::test]
+async fn default_matching_equals_empty_ignoring_for_absent_labels() {
+    for (left_host, right_zone, expected_rows) in [
+        (None, Some(""), 1),
+        (Some(""), None, 1),
+        (Some("x"), Some(""), 0),
+        (None, Some("x"), 0),
+    ] {
+        for query in ["a / b", "a / ignoring() b", "b / a", "b / ignoring() a"] {
+            let plan = nullable_label_query(
+                vec![
+                    nullable_label_table(
+                        "a",
+                        2101,
+                        &[("host", &[left_host]), ("job", &[Some("j")])],
+                        &[Some(6.0)],
+                    ),
+                    nullable_label_table(
+                        "b",
+                        2102,
+                        &[("zone", &[right_zone]), ("job", &[Some("j")])],
+                        &[Some(3.0)],
+                    ),
+                ],
+                query,
+            )
+            .await;
+            let (_, batches) = execute(plan, &build_query_engine_state()).await;
+            assert_eq!(
+                batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+                expected_rows,
+                "{query}: {left_host:?}, {right_zone:?}"
+            );
+            if expected_rows != 0 {
+                let batch = batches.iter().find(|batch| batch.num_rows() != 0).unwrap();
+                let value = batch
+                    .columns()
+                    .iter()
+                    .find_map(|column| column.as_any().downcast_ref::<Float64Array>())
+                    .unwrap();
+                assert_eq!(
+                    value.value(0),
+                    if query.starts_with('a') { 2.0 } else { 0.5 },
+                    "{query}"
+                );
+            }
+        }
+    }
+    for (query, side) in [
+        ("a / b", "left"),
+        ("a / ignoring() b", "left"),
+        ("b / a", "right"),
+        ("b / ignoring() a", "right"),
+    ] {
+        let plan = nullable_label_query(
+            vec![
+                nullable_label_table(
+                    "a",
+                    2101,
+                    &[
+                        ("host", &[None, Some("")]),
+                        ("job", &[Some("j"), Some("j")]),
+                    ],
+                    &[Some(6.0), Some(12.0)],
+                ),
+                nullable_label_table(
+                    "b",
+                    2102,
+                    &[("zone", &[Some("")]), ("job", &[Some("j")])],
+                    &[Some(3.0)],
+                ),
+            ],
+            query,
+        )
+        .await;
+        let state = build_query_engine_state();
+        let (_, physical) = optimize_and_create_physical_plan(&state, plan).await;
+        let error = datafusion::physical_plan::collect(physical, state.session_state().task_ctx())
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!("on the {side} hand-side")),
+            "{query}: {error}"
+        );
+    }
+    for query in [
+        "max by(v)(a) / b",
+        "max by(v)(a) / ignoring() b",
+        "a / max by(v)(b)",
+        "a / ignoring() max by(v)(b)",
+    ] {
+        let plan = nullable_label_query(
+            vec![
+                nullable_label_table("a", 2101, &[("host", &[Some("")])], &[Some(0.0)]),
+                nullable_label_table("b", 2102, &[("host", &[Some("")])], &[Some(2.0)]),
+            ],
+            query,
+        )
+        .await;
+        let (_, batches) = execute(plan, &build_query_engine_state()).await;
+        assert_eq!(
+            batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+            0,
+            "{query}"
+        );
     }
 }
 

@@ -168,6 +168,7 @@ macro_rules! http_tests {
                 test_promql_over_non_millisecond_physical_tables,
                 test_prometheus_label_replace_response,
                 test_prometheus_empty_labels_response,
+                test_prometheus_normalized_label_matching_response,
                 test_prom_http_api,
                 test_prom_remote_compression_bomb_rejected,
                 test_prom_remote_write_decoded_body_charged,
@@ -1612,6 +1613,76 @@ pub async fn test_prometheus_empty_labels_response(store_type: StorageType) {
         );
     }
 
+    guard.remove_all().await;
+}
+
+pub async fn test_prometheus_normalized_label_matching_response(store_type: StorageType) {
+    let (app, mut guard) = setup_test_prom_app_with_frontend(
+        store_type,
+        "prometheus_normalized_label_matching_response",
+    )
+    .await;
+    let client = TestClient::new(app).await;
+    let sql = r#"
+        CREATE TABLE collision_labels (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING, PRIMARY KEY(host));
+        CREATE TABLE default_labels_a (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING, job STRING, PRIMARY KEY(host, job));
+        CREATE TABLE default_labels_b (ts TIMESTAMP TIME INDEX, val DOUBLE, "zone" STRING, job STRING, PRIMARY KEY("zone", job));
+        INSERT INTO collision_labels VALUES (0, 1.0, NULL), (0, 2.0, '');
+        INSERT INTO default_labels_a VALUES (0, 6.0, NULL, 'j');
+        INSERT INTO default_labels_b VALUES (0, 3.0, '', 'j');
+    "#;
+    let response = client
+        .get(&format!("/v1/sql?db=public&sql={}", encode(sql)))
+        .send()
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let setup = response.json::<GreptimedbV1Response>().await;
+    let expected = serde_json::from_value::<Vec<GreptimeQueryOutput>>(json!([
+        {"affectedrows": 0}, {"affectedrows": 0}, {"affectedrows": 0},
+        {"affectedrows": 2}, {"affectedrows": 1}, {"affectedrows": 1}
+    ]))
+    .unwrap();
+    assert_eq!(setup.output(), expected.as_slice());
+    for endpoint in [
+        "/v1/prometheus/api/v1/query?db=public&query=collision_labels&time=0",
+        "/v1/prometheus/api/v1/query_range?db=public&query=collision_labels&start=0&end=0&step=1",
+    ] {
+        let response = client.get(endpoint).send().await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response.json::<PrometheusJsonResponse>().await;
+        assert_eq!(body.status, "error");
+        assert_eq!(
+            body.error.as_deref(),
+            Some("vector cannot contain metrics with the same labelset")
+        );
+        assert!(body.data.is_none());
+    }
+    for (query, value) in [
+        ("default_labels_a / default_labels_b", "2.0"),
+        ("default_labels_a / ignoring() default_labels_b", "2.0"),
+        ("default_labels_b / default_labels_a", "0.5"),
+        ("default_labels_b / ignoring() default_labels_a", "0.5"),
+    ] {
+        let response = client
+            .get(&format!(
+                "/v1/prometheus/api/v1/query?db=public&query={}&time=0",
+                encode(query),
+            ))
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.json::<PrometheusJsonResponse>().await;
+        assert_eq!(body.status, "success");
+        assert_eq!(
+            body.data,
+            serde_json::from_value::<PrometheusResponse>(json!({
+                "resultType": "vector",
+                "result": [{"metric": {"job": "j"}, "value": [0.0, value]}]
+            }))
+            .unwrap(),
+            "{query}"
+        );
+    }
     guard.remove_all().await;
 }
 

@@ -14,7 +14,7 @@
 
 //! prom supply the prometheus HTTP API Server compliance
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::BuildHasher;
 use std::ops::Range;
 
@@ -53,8 +53,8 @@ use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{
-    ArrowSnafu, CollectRecordbatchSnafu, DataFusionSnafu, Result, UnexpectedResultSnafu,
-    status_code_to_http_status,
+    ArrowSnafu, CollectRecordbatchSnafu, DataFusionSnafu, DuplicatePrometheusLabelSetSnafu, Result,
+    UnexpectedResultSnafu, status_code_to_http_status,
 };
 use crate::http::header::{GREPTIME_DB_HEADER_METRICS, collect_plan_metrics};
 use crate::http::prometheus::{
@@ -66,6 +66,9 @@ use crate::http::prometheus::{
 struct PromSeriesSamples {
     values: Vec<(f64, PromSampleValue)>,
     histograms: Vec<(f64, PromNativeHistogram)>,
+    // Query batches need not be timestamp ordered. Check the original integer
+    // timestamp across both sample types before converting it to API seconds.
+    timestamps: HashSet<i64>,
 }
 
 /// A sample value of the Prometheus HTTP API JSON format.
@@ -572,6 +575,9 @@ fn merge_batch(
                 }
             };
             let samples = &mut buffer[entry_index];
+            if !samples.timestamps.insert(timestamp_column.value(row_index)) {
+                return DuplicatePrometheusLabelSetSnafu.fail();
+            }
             if let Some((timestamp_millis, histogram)) = histogram {
                 samples
                     .histograms
@@ -1654,6 +1660,86 @@ mod tests {
                 {"metric": {"__name__": "metric", "host": " "}, "value": [0.0, "4.0"]},
             ])
         );
+    }
+
+    #[tokio::test]
+    async fn normalized_label_collisions_reject_duplicate_timestamps() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new("histogram", native_histogram_value_type().clone(), true),
+        ]));
+        for (first_histogram, second_histogram) in
+            [(false, false), (true, true), (false, true), (true, false)]
+        {
+            let rows = [
+                (0, None, first_histogram),
+                (1000, None, false),
+                (0, Some(""), second_histogram),
+            ];
+            let make_batch = |indices: &[usize]| {
+                RecordBatch::new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(TimestampMillisecondVector::from_values(
+                            indices.iter().map(|&row| rows[row].0),
+                        )) as _,
+                        Arc::new(StringVector::from(
+                            indices.iter().map(|&row| rows[row].1).collect::<Vec<_>>(),
+                        )) as _,
+                        Arc::new(Float64Vector::from(
+                            indices
+                                .iter()
+                                .map(|&row| (!rows[row].2).then_some(1.0))
+                                .collect::<Vec<_>>(),
+                        )) as _,
+                        histogram_vector(
+                            &indices
+                                .iter()
+                                .map(|&row| rows[row].2.then(sample_histogram))
+                                .collect::<Vec<_>>(),
+                        ),
+                    ],
+                )
+                .unwrap()
+            };
+            for split_batches in [false, true] {
+                let batches = if split_batches {
+                    vec![make_batch(&[0, 1]), make_batch(&[2])]
+                } else {
+                    vec![make_batch(&[0, 1, 2])]
+                };
+                for result_type in [ValueType::Vector, ValueType::Matrix] {
+                    let records = RecordBatches::try_new(schema.clone(), batches.clone()).unwrap();
+                    let error =
+                        PrometheusJsonResponse::record_batches_to_data(records, None, result_type)
+                            .unwrap_err();
+                    assert_eq!(error.status_code(), StatusCode::EngineExecuteQuery);
+                    assert_eq!(
+                        error.output_msg(),
+                        "vector cannot contain metrics with the same labelset"
+                    );
+                    let records = RecordBatches::try_new(schema.clone(), batches.clone()).unwrap();
+                    let response = PrometheusJsonResponse::from_query_result(
+                        Ok(Output::new_with_stream(records.as_stream())),
+                        None,
+                        result_type,
+                        None,
+                    )
+                    .await;
+                    assert_eq!(response.status, "error");
+                    assert_eq!(
+                        response.error.as_deref(),
+                        Some("vector cannot contain metrics with the same labelset")
+                    );
+                }
+            }
+        }
     }
 
     #[test]
