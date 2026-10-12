@@ -103,31 +103,47 @@ struct Depths {
 
 impl Depths {
     fn from_env() -> Result<Self> {
-        Self::parse(|name| std::env::var(name).ok())
+        Self::parse(|name| std::env::var(name))
     }
 
     /// Reads each depth from `var`, defaulting to its constant. Without its
     /// own value the sealed batch limit follows the in-flight creates as the
     /// constant does, raised to the minimum the admission rule needs: one
     /// admission can seal two batches while every create slot is busy.
-    fn parse(var: impl Fn(&str) -> Option<String>) -> Result<Self> {
+    fn parse(
+        var: impl Fn(&str) -> std::result::Result<String, std::env::VarError>,
+    ) -> Result<Self> {
         let read = |name: &str| -> Result<Option<usize>> {
-            var(name)
-                .map(|value| {
-                    value
-                        .trim()
-                        .parse::<usize>()
-                        .ok()
-                        .filter(|depth| *depth > 0)
-                        .with_context(|| InvalidWalObjectStoreSnafu {
-                            reason: format!("{name} must be a positive integer, got {value:?}"),
-                        })
+            let value = match var(name) {
+                Ok(value) => value,
+                Err(std::env::VarError::NotPresent) => return Ok(None),
+                Err(error) => {
+                    return InvalidWalObjectStoreSnafu {
+                        reason: format!("{name} must be a positive integer: {error}"),
+                    }
+                    .fail();
+                }
+            };
+            value
+                .trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|depth| *depth > 0)
+                .map(Some)
+                .with_context(|| InvalidWalObjectStoreSnafu {
+                    reason: format!("{name} must be a positive integer, got {value:?}"),
                 })
-                .transpose()
         };
         let max_in_flight_creates =
             read(MAX_IN_FLIGHT_CREATES_ENV)?.unwrap_or(MAX_IN_FLIGHT_CREATES);
-        let min_sealed_batches = max_in_flight_creates.saturating_add(2);
+        let min_sealed_batches =
+            max_in_flight_creates
+                .checked_add(2)
+                .with_context(|| InvalidWalObjectStoreSnafu {
+                    reason: format!(
+                        "{MAX_IN_FLIGHT_CREATES_ENV} {max_in_flight_creates} leaves no room for 2 more sealed batches"
+                    ),
+                })?;
         let max_sealed_batches = read(MAX_SEALED_BATCHES_ENV)?.unwrap_or_else(|| {
             if max_in_flight_creates == MAX_IN_FLIGHT_CREATES {
                 MAX_SEALED_BATCHES
@@ -6647,7 +6663,11 @@ mod tests {
                 .iter()
                 .map(|(name, value)| (name.to_string(), value.to_string()))
                 .collect::<HashMap<_, _>>();
-            Depths::parse(|name| vars.get(name).cloned())
+            Depths::parse(|name| {
+                vars.get(name)
+                    .cloned()
+                    .ok_or(std::env::VarError::NotPresent)
+            })
         };
         let depths = |creates, sealed, recovery| Depths {
             max_in_flight_creates: creates,
@@ -6679,19 +6699,57 @@ mod tests {
             depths(4, 6, RECOVERY_CONCURRENCY),
             parse(&[(MAX_SEALED_BATCHES_ENV, "6")]).unwrap()
         );
-        for (name, value) in [
-            (MAX_IN_FLIGHT_CREATES_ENV, "0"),
-            (MAX_SEALED_BATCHES_ENV, "-1"),
-            (RECOVERY_CONCURRENCY_ENV, "eight"),
-            (MAX_SEALED_BATCHES_ENV, "5"),
+        let max = usize::MAX.to_string();
+        let below_max = (usize::MAX - 1).to_string();
+        for vars in [
+            &[(MAX_IN_FLIGHT_CREATES_ENV, "0")][..],
+            &[(MAX_SEALED_BATCHES_ENV, "-1")],
+            &[(RECOVERY_CONCURRENCY_ENV, "eight")],
+            &[(MAX_SEALED_BATCHES_ENV, "5")],
+            &[(MAX_IN_FLIGHT_CREATES_ENV, &max)],
+            &[
+                (MAX_IN_FLIGHT_CREATES_ENV, &max),
+                (MAX_SEALED_BATCHES_ENV, &max),
+            ],
+            &[
+                (MAX_IN_FLIGHT_CREATES_ENV, &below_max),
+                (MAX_SEALED_BATCHES_ENV, &max),
+            ],
         ] {
-            let error = parse(&[(name, value)]).unwrap_err();
+            let error = parse(vars).unwrap_err();
             assert!(
                 matches!(error, Error::InvalidWalObjectStore { .. }),
-                "{name}={value}: {error:?}"
+                "{vars:?}: {error:?}"
             );
-            assert!(error.to_string().contains(name), "{error}");
         }
+        for (vars, named) in [
+            (&[(MAX_SEALED_BATCHES_ENV, "5")][..], MAX_SEALED_BATCHES_ENV),
+            (
+                &[(RECOVERY_CONCURRENCY_ENV, "eight")],
+                RECOVERY_CONCURRENCY_ENV,
+            ),
+            (
+                &[(MAX_IN_FLIGHT_CREATES_ENV, &max)],
+                MAX_IN_FLIGHT_CREATES_ENV,
+            ),
+        ] {
+            let error = parse(vars).unwrap_err().to_string();
+            assert!(error.contains(named), "{error}");
+        }
+        // A value that is not Unicode is malformed, not absent.
+        let error = Depths::parse(|name| {
+            if name == RECOVERY_CONCURRENCY_ENV {
+                Err(std::env::VarError::NotUnicode("8".into()))
+            } else {
+                Err(std::env::VarError::NotPresent)
+            }
+        })
+        .unwrap_err();
+        assert!(
+            matches!(error, Error::InvalidWalObjectStore { .. })
+                && error.to_string().contains(RECOVERY_CONCURRENCY_ENV),
+            "{error:?}"
+        );
     }
 
     async fn recover_listed(io: &ObjectStoreIo, listed: Vec<ListedObject>) -> Result<Recovered> {
