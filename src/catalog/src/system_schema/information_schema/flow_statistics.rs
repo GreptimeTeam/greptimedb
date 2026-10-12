@@ -41,7 +41,8 @@ use store_api::storage::{ScanRequest, TableId};
 use crate::CatalogManager;
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, ListFlowsSnafu, Result};
 use crate::information_schema::{FLOW_STATISTICS, Predicates};
-use crate::system_schema::information_schema::InformationTable;
+use crate::system_schema::SystemTable;
+use crate::system_schema::information_schema::{InformationSchemaTableScope, InformationTable};
 use crate::system_schema::utils;
 
 const INIT_CAPACITY: usize = 42;
@@ -108,6 +109,12 @@ impl InformationSchemaFlowStatistics {
 }
 
 impl InformationTable for InformationSchemaFlowStatistics {
+    fn scope(&self) -> InformationSchemaTableScope {
+        InformationSchemaTableScope::Catalog
+    }
+}
+
+impl SystemTable for InformationSchemaFlowStatistics {
     fn table_id(&self) -> TableId {
         INFORMATION_SCHEMA_FLOW_STATISTICS_TABLE_ID
     }

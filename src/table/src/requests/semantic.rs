@@ -49,6 +49,11 @@ pub const SEMANTIC_PER_TABLE_INDEX_KEY: &str = "greptime.internal.semantic.per_t
 
 // ---- Common keys (all signals) ----
 
+/// Information-schema visibility: `catalog` for providers that filter rows to
+/// their catalog, or `global` for catalog-independent data. Only registered
+/// system-table metadata is trusted for authorization.
+pub const SEMANTIC_TABLE_SCOPE: &str = "greptime.semantic.table_scope";
+
 /// Signal kind: one of [`SIGNAL_TYPE_TRACE`] / [`SIGNAL_TYPE_LOG`] /
 /// [`SIGNAL_TYPE_METRIC`] / [`SIGNAL_TYPE_EVENT`].
 pub const SEMANTIC_SIGNAL_TYPE: &str = "greptime.semantic.signal_type";
@@ -154,6 +159,7 @@ pub const SEMANTIC_VALUE_MIXED: &str = "mixed";
 /// so an unknown key like `greptime.semantic.unknown_key` does not silently land
 /// in a table's options. Adding a key to the vocabulary means adding it here.
 pub const SEMANTIC_OPTION_KEYS: &[&str] = &[
+    SEMANTIC_TABLE_SCOPE,
     SEMANTIC_SIGNAL_TYPE,
     SEMANTIC_SOURCE,
     SEMANTIC_SOURCE_VERSION,
@@ -282,6 +288,7 @@ pub fn validate_semantic_option(key: &str, value: &str) -> bool {
         return !value.is_empty() && value.split(',').all(|column| !column.trim().is_empty());
     }
     match key {
+        SEMANTIC_TABLE_SCOPE => matches!(value, "catalog" | "global"),
         SEMANTIC_PIPELINE
         | SEMANTIC_SOURCE_VERSION
         | SEMANTIC_METRIC_UNIT
@@ -404,6 +411,11 @@ mod tests {
     #[test]
     fn test_validate_semantic_option() {
         // Enum keys reject out-of-domain values.
+        assert!(validate_semantic_option(SEMANTIC_TABLE_SCOPE, "catalog"));
+        assert!(validate_semantic_option(SEMANTIC_TABLE_SCOPE, "global"));
+        assert!(!validate_semantic_option(SEMANTIC_TABLE_SCOPE, "cluster"));
+        assert!(!validate_semantic_option(SEMANTIC_TABLE_SCOPE, "unknown"));
+        assert!(!validate_semantic_option(SEMANTIC_TABLE_SCOPE, ""));
         assert!(validate_semantic_option(SEMANTIC_SIGNAL_TYPE, "metric"));
         assert!(!validate_semantic_option(SEMANTIC_SIGNAL_TYPE, "spans"));
         assert!(validate_semantic_option(SEMANTIC_METRIC_TYPE, "counter"));

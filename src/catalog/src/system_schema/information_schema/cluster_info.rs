@@ -40,7 +40,10 @@ use store_api::storage::{ScanRequest, TableId};
 
 use crate::CatalogManager;
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
-use crate::system_schema::information_schema::{CLUSTER_INFO, InformationTable, Predicates};
+use crate::system_schema::SystemTable;
+use crate::system_schema::information_schema::{
+    CLUSTER_INFO, InformationSchemaTableScope, InformationTable, Predicates,
+};
 use crate::system_schema::utils;
 
 const PEER_TYPE_FRONTEND: &str = "FRONTEND";
@@ -139,6 +142,12 @@ impl InformationSchemaClusterInfo {
 }
 
 impl InformationTable for InformationSchemaClusterInfo {
+    fn scope(&self) -> InformationSchemaTableScope {
+        InformationSchemaTableScope::Global
+    }
+}
+
+impl SystemTable for InformationSchemaClusterInfo {
     fn table_id(&self) -> TableId {
         INFORMATION_SCHEMA_CLUSTER_INFO_TABLE_ID
     }

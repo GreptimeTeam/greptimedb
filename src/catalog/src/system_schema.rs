@@ -33,9 +33,8 @@ use snafu::ResultExt;
 use store_api::data_source::DataSource;
 use store_api::storage::ScanRequest;
 use table::error::{SchemaConversionSnafu, TablesRecordBatchSnafu};
-use table::metadata::{
-    FilterPushDownType, TableId, TableInfoBuilder, TableInfoRef, TableMetaBuilder, TableType,
-};
+use table::metadata::{FilterPushDownType, TableId, TableInfoBuilder, TableMetaBuilder, TableType};
+use table::requests::TableOptions;
 use table::{Table, TableRef};
 
 use crate::error::Result;
@@ -71,33 +70,44 @@ trait SystemSchemaProviderInner {
     fn schema_name() -> &'static str;
     fn build_table(&self, name: &str) -> Option<TableRef> {
         self.system_table(name).map(|table| {
-            let table_info = Self::table_info(self.catalog_name().to_string(), &table);
-            let filter_pushdown = FilterPushDownType::Inexact;
-            let data_source = Arc::new(SystemTableDataSource::new(table));
-            let table = Table::new(table_info, filter_pushdown, data_source);
-            Arc::new(table)
+            build_system_table(
+                self.catalog_name().to_string(),
+                Self::schema_name(),
+                table,
+                TableOptions::default(),
+            )
         })
     }
     fn system_table(&self, name: &str) -> Option<SystemTableRef>;
+}
 
-    fn table_info(catalog_name: String, table: &SystemTableRef) -> TableInfoRef {
-        let table_meta = TableMetaBuilder::empty()
-            .schema(table.schema())
-            .primary_key_indices(vec![])
-            .next_column_id(0)
-            .build()
-            .unwrap();
-        let table_info = TableInfoBuilder::default()
-            .table_id(table.table_id())
-            .name(table.table_name().to_string())
-            .catalog_name(catalog_name)
-            .schema_name(Self::schema_name().to_string())
-            .meta(table_meta)
-            .table_type(table.table_type())
-            .build()
-            .unwrap();
-        Arc::new(table_info)
-    }
+fn build_system_table(
+    catalog_name: String,
+    schema_name: &str,
+    table: SystemTableRef,
+    options: TableOptions,
+) -> TableRef {
+    let table_meta = TableMetaBuilder::empty()
+        .schema(table.schema())
+        .primary_key_indices(vec![])
+        .next_column_id(0)
+        .options(options)
+        .build()
+        .unwrap();
+    let table_info = TableInfoBuilder::default()
+        .table_id(table.table_id())
+        .name(table.table_name().to_string())
+        .catalog_name(catalog_name)
+        .schema_name(schema_name.to_string())
+        .meta(table_meta)
+        .table_type(table.table_type())
+        .build()
+        .unwrap();
+    Arc::new(Table::new(
+        Arc::new(table_info),
+        FilterPushDownType::Inexact,
+        Arc::new(SystemTableDataSource::new(table)),
+    ))
 }
 
 pub trait SystemTable {
