@@ -72,6 +72,7 @@ use sql::statements::{
     sql_data_type_to_concrete_data_type, value_to_sql_value,
 };
 use sql::util::extract_tables_from_query;
+use store_api::metric_engine_consts::{DATA_SCHEMA_TSID_COLUMN_NAME, METRIC_ENGINE_NAME};
 use store_api::mito_engine_options::{COMPACTION_OVERRIDE, COMPACTION_TYPE};
 use table::requests::{FILE_TABLE_META_KEY, TableOptions};
 use table::table_reference::TableReference;
@@ -506,6 +507,18 @@ pub fn validate_create_expr(create: &CreateTableExpr) -> Result<()> {
     }
 
     for column in &create.column_defs {
+        // verify the column name is not reserved by the metric engine. The metric
+        // engine owns `__tsid` on its physical tables, so a table on any other
+        // engine must not be able to declare it.
+        if create.engine != METRIC_ENGINE_NAME && column.name == DATA_SCHEMA_TSID_COLUMN_NAME {
+            return InvalidSqlSnafu {
+                err_msg: format!(
+                    "column name `{}` is reserved by the metric engine",
+                    column.name
+                ),
+            }
+            .fail();
+        }
         // verify do not contain interval type column issue #3235
         if is_interval_type(&column.data_type()) {
             return InvalidSqlSnafu {
@@ -1657,6 +1670,54 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
             };
             create_to_expr(&create_table, &QueryContext::arc()).unwrap_err();
         }
+    }
+
+    #[test]
+    fn test_tsid_column_is_reserved_by_metric_engine() {
+        let non_metric_cases = [
+            // default engine
+            "CREATE TABLE monitor (__tsid BIGINT, ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY);",
+            "CREATE TABLE monitor (__tsid BIGINT, ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY) ENGINE=mito;",
+        ];
+        for sql in non_metric_cases {
+            let stmt = ParserContext::create_with_dialect(
+                sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap()
+            .pop()
+            .unwrap();
+            let Statement::CreateTable(create_table) = stmt else {
+                unreachable!()
+            };
+            let err = create_to_expr(&create_table, &QueryContext::arc()).unwrap_err();
+            let crate::error::Error::InvalidSql { err_msg, .. } = err else {
+                panic!("{sql} must be rejected as invalid SQL, got {err}");
+            };
+            assert_eq!(
+                "column name `__tsid` is reserved by the metric engine", err_msg,
+                "{sql}"
+            );
+        }
+
+        // The metric engine owns `__tsid`, so its own tables keep accepting it.
+        let sql = "CREATE TABLE monitor (__tsid BIGINT, ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY) ENGINE=metric WITH ('physical_metric_table' = 'true');";
+        let stmt =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap()
+                .pop()
+                .unwrap();
+        let Statement::CreateTable(create_table) = stmt else {
+            unreachable!()
+        };
+        let expr = create_to_expr(&create_table, &QueryContext::arc()).unwrap();
+        assert_eq!(METRIC_ENGINE_NAME, expr.engine);
+        assert!(
+            expr.column_defs
+                .iter()
+                .any(|column| column.name == DATA_SCHEMA_TSID_COLUMN_NAME)
+        );
     }
 
     #[test]

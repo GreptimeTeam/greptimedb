@@ -258,14 +258,47 @@ WHERE greptime_timestamp = (
     );
 }
 
+/// The metric engine owns the internal `__tsid` column, so an ordinary table must
+/// not be able to declare it: the reserved name is rejected at CREATE TABLE time
+/// instead of silently changing how a `GROUP BY <sid>, <time index>` query is
+/// planned. Grouping by an ordinary column plus the time index must still preserve
+/// every row at every query parallelism.
 #[apply(both_instances_cases)]
 async fn test_group_by_tsid_and_time_preserves_rows(instance: Arc<dyn MockInstance>) {
     let frontend = instance.frontend();
 
+    for ddl in [
+        r#"CREATE TABLE audit_reserved (
+            __tsid BIGINT,
+            ts TIMESTAMP(3) TIME INDEX,
+            host STRING PRIMARY KEY
+        )"#,
+        r#"CREATE TABLE audit_reserved (
+            __tsid BIGINT,
+            ts TIMESTAMP(3) TIME INDEX,
+            host STRING PRIMARY KEY
+        ) ENGINE = mito"#,
+    ] {
+        let error = try_execute_sql(&frontend, ddl)
+            .await
+            .expect_err("an ordinary table must not declare `__tsid`");
+        let message = error.output_msg();
+        assert!(
+            message.contains("column name `__tsid` is reserved by the metric engine"),
+            "unexpected error for rejected CREATE TABLE: {message}"
+        );
+    }
+    assert!(
+        try_execute_sql(&frontend, "SELECT * FROM audit_reserved")
+            .await
+            .is_err(),
+        "a rejected CREATE TABLE must not create a table"
+    );
+
     execute_sql(
         &frontend,
         r#"CREATE TABLE audit_min (
-            __tsid BIGINT,
+            sid BIGINT,
             ts TIMESTAMP(3) TIME INDEX,
             host STRING PRIMARY KEY
         )"#,
@@ -292,7 +325,7 @@ async fn test_group_by_tsid_and_time_preserves_rows(instance: Arc<dyn MockInstan
     }
 
     let audit_query =
-        "SELECT __tsid, ts, count(*) AS n FROM audit_min GROUP BY __tsid, ts ORDER BY __tsid, ts";
+        "SELECT sid, ts, count(*) AS n FROM audit_min GROUP BY sid, ts ORDER BY sid, ts";
     for parallelism in [1, 4] {
         let result = execute_sql_with_query_parallelism(&frontend, audit_query, parallelism)
             .await
@@ -302,7 +335,7 @@ async fn test_group_by_tsid_and_time_preserves_rows(instance: Arc<dyn MockInstan
         assert_eq!(
             result_rows(&result),
             vec![
-                vec!["__tsid", "ts", "n"],
+                vec!["sid", "ts", "n"],
                 vec!["1", "1970-01-01T00:00:00", "2"],
             ],
             "unexpected audit_min result with query_parallelism={parallelism}:\\n{result}"
