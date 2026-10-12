@@ -14,9 +14,9 @@ on:
         type: string
         default: nightly
       instance_type:
-        description: EC2 instance type; the d of c7id gives a local NVMe instance store for the Raft Engine WAL
+        description: EC2 instance type in the bucket region; the d of c6id gives a local NVMe instance store for the Raft Engine WAL
         type: string
-        default: c7id.2xlarge
+        default: c6id.2xlarge
       concurrency:
         description: Comma-separated loader concurrency levels
         type: string

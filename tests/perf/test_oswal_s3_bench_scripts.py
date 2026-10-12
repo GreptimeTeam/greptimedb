@@ -99,7 +99,7 @@ class PlanTest(unittest.TestCase):
     def test_manifest_takes_the_sha256_digest(self):
         plan = bench.build_plan("1,8", "2000000", "1000", "2", smoke=False)
         inspect = [{"RepoDigests": ["greptime/greptimedb@sha256:" + "a" * 64]}]
-        manifest = bench.build_manifest(plan, inspect, "runtime@sha256:" + "b" * 64, "c7id.2xlarge",
+        manifest = bench.build_manifest(plan, inspect, "runtime@sha256:" + "b" * 64, "c6id.2xlarge",
                                         "ap-southeast-1", "oswal-bench/1-1")
         self.assertEqual(manifest["greptimedb_image"], "greptime/greptimedb@sha256:" + "a" * 64)
         self.assertEqual((manifest["rows"], manifest["rounds"], manifest["concurrency"]), (2_000_000, 2, [1, 8]))
@@ -135,7 +135,7 @@ class SummaryTest(unittest.TestCase):
             root = Path(directory)
             plan = bench.build_plan("8", "6000", "1000", "2", smoke=False)
             (root / "plan.json").write_text(json.dumps(plan))
-            (root / "run.json").write_text(json.dumps({"rows": 6000, "batch_rows": 1000, "instance_type": "c7id.2xlarge"}))
+            (root / "run.json").write_text(json.dumps({"rows": 6000, "batch_rows": 1000, "instance_type": "c6id.2xlarge"}))
             speeds = {"1-8-R": 100.0, "1-8-D": 80.0, "1-8-E": 90.0, "2-8-E": 99.0, "2-8-D": 50.0, "2-8-R": 110.0}
             for cell_id, speed in speeds.items():
                 self.write_cell(root, cell_id, speed, metrics=ACK_BUCKETS if cell_id.endswith("D") else "")
