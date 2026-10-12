@@ -9722,6 +9722,60 @@ async fn test_raw_selector_attaches_metric_name_identity() {
     }
 }
 
+/// An instant query whose root is a range selector returns the raw samples the selector read,
+/// and those samples keep the identity of the series they came from: the response layer reads
+/// `__name__` from the marked identity column alone, so without the marker
+/// `GET /v1/query?query=cv_metric[20s]` silently loses the metric name.
+#[tokio::test]
+async fn test_instant_range_selector_samples_attach_metric_name_identity() {
+    let state = build_query_engine_state();
+    for query in ["cv_metric[20s]", r#"{__name__="cv_metric"}[20s]"#] {
+        let plan = PromPlanner::stmt_to_plan(
+            build_count_values_table_provider().await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let marker = PromPlanner::metric_name_column(plan.schema())
+            .unwrap()
+            .unwrap_or_else(|| panic!("{query}: the range selector must attach its metric name"));
+        assert_eq!(marker.name, PROMQL_METRIC_NAME_COLUMN, "{query}");
+
+        let (_, batches) = execute(plan, &state).await;
+        assert_eq!(
+            metric_name_rows(&batches, &marker.name),
+            vec![
+                ("k0".to_string(), "cv_metric".to_string(), 1.0),
+                ("k1".to_string(), "cv_metric".to_string(), 2.0),
+                ("k2".to_string(), "cv_metric".to_string(), 1.0),
+            ],
+            "{query}"
+        );
+    }
+
+    // A metric that does not exist has an empty window, but the name the selector read is still
+    // known and is attached to the empty plan all the same.
+    let plan = PromPlanner::stmt_to_plan(
+        build_count_values_table_provider().await,
+        &operator_eval_stmt("nonexistent_metric[20s]"),
+        &state,
+    )
+    .await
+    .unwrap();
+    let marker = PromPlanner::metric_name_column(plan.schema())
+        .unwrap()
+        .expect("an empty metric must attach its metric name");
+    assert_eq!(marker.name, PROMQL_METRIC_NAME_COLUMN);
+    let (_, batches) = execute(plan, &state).await;
+    assert_eq!(
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        0,
+        "the empty metric has no sample"
+    );
+}
+
 #[tokio::test]
 async fn test_collision_metric_name_label_is_preserved() {
     let plan = PromPlanner::stmt_to_plan(

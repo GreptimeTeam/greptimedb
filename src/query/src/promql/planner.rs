@@ -469,6 +469,7 @@ impl PromPlanner {
             at,
         } = vs;
         let matchers = self.preprocess_label_matchers(matchers, name)?;
+        let metric_name = self.ctx.table_name.clone();
         ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
         self.ctx.range = Some(range.as_millis() as _);
         let offset_ms = match self.at_modifier_offset(at, offset)? {
@@ -476,12 +477,15 @@ impl PromPlanner {
             None => Self::offset_millis(offset),
         };
         if let Some(empty_plan) = self.setup_context().await? {
-            return Ok(empty_plan);
+            return self.attach_metric_name(empty_plan, metric_name.as_deref());
         }
         let plan = self
             .selector_to_series_normalize_plan(offset_ms, matchers, true)
             .await?;
-        self.millisecond_time_index_plan(plan)
+        let plan = self.millisecond_time_index_plan(plan)?;
+        // The raw samples of a range selector reach the query output as they are, so the metric
+        // name the selector read is part of the result identity, exactly as for a vector selector.
+        self.attach_metric_name(plan, metric_name.as_deref())
     }
 
     /// Casts a microsecond or nanosecond time index to milliseconds, the precision of every
