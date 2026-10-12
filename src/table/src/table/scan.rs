@@ -126,13 +126,26 @@ impl RegionScanExec {
         if scanner.properties().is_logical_region() {
             pk_names.sort_unstable();
         }
-        let pk_columns = pk_names
+        // A region emits rows ordered by its primary key columns and then by the time
+        // index column. A primary key column that is not projected is absent from the
+        // arrow schema, and it also breaks the ordering of every primary key column that
+        // follows it (e.g. the physical `__table_id`/`__tsid` prefix of a metric region
+        // when reading a logical table). Thus only the longest fully projected prefix of
+        // the primary key can describe the output ordering, and that prefix can be empty.
+        let projected_pk_prefix_len = pk_names
+            .iter()
+            .position(|name| Column::new_with_schema(name, &arrow_schema).is_err())
+            .unwrap_or(pk_names.len());
+        // Whether the projected prefix covers the whole row key.
+        let all_pk_projected = projected_pk_prefix_len == pk_names.len();
+        let projected_pk_names = &pk_names[..projected_pk_prefix_len];
+        let pk_columns = projected_pk_names
             .iter()
             .filter_map(
                 |col| Some(Arc::new(Column::new_with_schema(col, &arrow_schema).ok()?) as _),
             )
             .collect::<Vec<_>>();
-        let pk_sort_columns: Vec<PhysicalSortExpr> = pk_names
+        let pk_sort_columns: Vec<PhysicalSortExpr> = projected_pk_names
             .iter()
             .filter_map(|col| {
                 Some(PhysicalSortExpr::new(
@@ -165,7 +178,9 @@ impl RegionScanExec {
                 let mut orderings = Vec::with_capacity(2);
 
                 let mut pk_time_ordering = pk_sort_columns.clone();
-                if let Some(ts) = ts_col.clone() {
+                // The time index column extends the ordering only when the whole row key
+                // precedes it; otherwise rows of different series can interleave.
+                if all_pk_projected && let Some(ts) = ts_col.clone() {
                     pk_time_ordering.push(ts);
                 }
                 orderings.push(pk_time_ordering);
