@@ -36,7 +36,10 @@ use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, TableMetadataManagerSnafu,
     UpgradeWeakCatalogManagerRefSnafu,
 };
-use crate::system_schema::information_schema::{InformationTable, Predicates, SCHEMATA};
+use crate::system_schema::SystemTable;
+use crate::system_schema::information_schema::{
+    InformationSchemaTableScope, InformationTable, Predicates, SCHEMATA,
+};
 use crate::system_schema::utils;
 
 pub const CATALOG_NAME: &str = "catalog_name";
@@ -93,6 +96,12 @@ impl InformationSchemaSchemata {
 }
 
 impl InformationTable for InformationSchemaSchemata {
+    fn scope(&self) -> InformationSchemaTableScope {
+        InformationSchemaTableScope::Catalog
+    }
+}
+
+impl SystemTable for InformationSchemaSchemata {
     fn table_id(&self) -> TableId {
         INFORMATION_SCHEMA_SCHEMATA_TABLE_ID
     }

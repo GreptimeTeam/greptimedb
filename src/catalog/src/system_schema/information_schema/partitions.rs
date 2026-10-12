@@ -44,7 +44,10 @@ use crate::error::{
     Result, UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::kvbackend::KvBackendCatalogManager;
-use crate::system_schema::information_schema::{InformationTable, PARTITIONS, Predicates};
+use crate::system_schema::SystemTable;
+use crate::system_schema::information_schema::{
+    InformationSchemaTableScope, InformationTable, PARTITIONS, Predicates,
+};
 
 const TABLE_CATALOG: &str = "table_catalog";
 const TABLE_SCHEMA: &str = "table_schema";
@@ -167,6 +170,12 @@ impl InformationSchemaPartitions {
 }
 
 impl InformationTable for InformationSchemaPartitions {
+    fn scope(&self) -> InformationSchemaTableScope {
+        InformationSchemaTableScope::Catalog
+    }
+}
+
+impl SystemTable for InformationSchemaPartitions {
     fn table_id(&self) -> TableId {
         INFORMATION_SCHEMA_PARTITIONS_TABLE_ID
     }
