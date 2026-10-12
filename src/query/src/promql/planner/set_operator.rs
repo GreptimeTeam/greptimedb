@@ -737,13 +737,9 @@ impl PromPlanner {
         // The marked identity is not a label the default matching compares, and the whole set
         // operation keeps the left operand's columns and its identity.
         let left_tag_col_set =
-            Self::matching_tag_columns(&left_context, modifier, metric_name.as_deref())
-                .into_iter()
-                .collect::<HashSet<_>>();
+            Self::matching_tag_columns(&left_context, modifier, metric_name.as_deref());
         let right_tag_col_set =
-            Self::matching_tag_columns(&right_context, modifier, metric_name.as_deref())
-                .into_iter()
-                .collect::<HashSet<_>>();
+            Self::matching_tag_columns(&right_context, modifier, metric_name.as_deref());
         ensure!(
             left_tag_col_set == right_tag_col_set,
             CombineTableColumnMismatchSnafu {
