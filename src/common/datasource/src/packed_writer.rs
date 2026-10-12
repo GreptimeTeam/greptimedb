@@ -410,7 +410,9 @@ mod tests {
     use arrow::array::{ArrayRef, Int64Array, StringArray};
     use arrow::record_batch::RecordBatch;
     use futures::TryStreamExt;
-    use object_store::layers::mock::{Metadata, MockLayerBuilder, MockWriterFactory, oio};
+    use object_store::layers::mock::{
+        Metadata, MockLayerBuilder, MockWriterFactory, ObservedWriter, WriterObservations, oio,
+    };
     use parquet::arrow::ParquetRecordBatchStreamBuilder;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -424,10 +426,10 @@ mod tests {
         let store = object_store::secure_fs::SecureFsRoot::open(directory.path())
             .unwrap()
             .build_operator();
-        let sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observations = Arc::new(std::sync::Mutex::new(WriterObservations::default()));
         let factory: MockWriterFactory = Arc::new({
-            let sizes = sizes.clone();
-            move |_, _, writer| Box::new(Observe(writer, sizes.clone()))
+            let observations = observations.clone();
+            move |_, _, writer| Box::new(ObservedWriter::new(writer, observations.clone()))
         });
         let store = store.layer(
             MockLayerBuilder::default()
@@ -483,7 +485,14 @@ mod tests {
             .validate_membership(["table0", "table1", "table2"])
             .unwrap();
         assert_eq!(inventory.len(), 3);
-        assert!(sizes.lock().unwrap().iter().all(|n| *n <= WRITE_BYTES));
+        assert!(
+            observations
+                .lock()
+                .unwrap()
+                .write_sizes
+                .iter()
+                .all(|n| *n <= WRITE_BYTES)
+        );
         assert_eq!(
             index
                 .objects
@@ -540,27 +549,13 @@ mod tests {
         }
     }
 
-    struct Observe(oio::Writer, Arc<std::sync::Mutex<Vec<usize>>>);
-    impl oio::Write for Observe {
-        async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
-            self.1.lock().unwrap().push(bytes.len());
-            self.0.write(bytes).await
-        }
-        async fn close(&mut self) -> object_store::Result<Metadata> {
-            self.0.close().await
-        }
-        async fn abort(&mut self) -> object_store::Result<()> {
-            self.0.abort().await
-        }
-    }
-
     #[tokio::test]
     async fn rolls_at_table_boundary_and_aborts_standalone_at_part_limit() {
         let directory = common_test_util::temp_dir::create_temp_dir("packed-limit");
-        let sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observations = Arc::new(std::sync::Mutex::new(WriterObservations::default()));
         let factory: MockWriterFactory = Arc::new({
-            let sizes = sizes.clone();
-            move |_, _, writer| Box::new(Observe(writer, sizes.clone()))
+            let observations = observations.clone();
+            move |_, _, writer| Box::new(ObservedWriter::new(writer, observations.clone()))
         });
         let store = object_store::secure_fs::SecureFsRoot::open(directory.path())
             .unwrap()
@@ -605,7 +600,14 @@ mod tests {
                 .iter()
                 .all(|t| t.offset == 0 && t.length == 600)
         );
-        assert!(sizes.lock().unwrap().iter().all(|n| *n <= 512));
+        assert!(
+            observations
+                .lock()
+                .unwrap()
+                .write_sizes
+                .iter()
+                .all(|n| *n <= 512)
+        );
     }
 
     struct FailClose(oio::Writer);

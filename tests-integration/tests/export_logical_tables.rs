@@ -1558,7 +1558,7 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool) {
             "CREATE TABLE bulk (host STRING PRIMARY KEY, payload STRING, ts TIMESTAMP TIME INDEX)",
         )
         .await;
-        for batch in 0..64 {
+        for batch in 0..96 {
             let rows = (0..64)
                 .map(|row| {
                     let payload = (0..128)
@@ -1726,7 +1726,7 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool) {
                 .await
                 .unwrap()
                 .content_length()
-                > 5 * 1024 * 1024
+                > common_datasource::packed_writer::WRITE_BYTES as u64
         );
     }
     let mut preserved = Vec::new();
