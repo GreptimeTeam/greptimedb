@@ -1555,7 +1555,7 @@ impl Instance {
             other => other,
         };
         let output = Output { data, meta };
-        Ok(interceptor.post_execute(output, query_ctx)?)
+        interceptor.post_execute(output, query_ctx)
     }
 }
 
