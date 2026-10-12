@@ -105,7 +105,7 @@ pub struct CreateTable {
     pub partitions: Option<Partitions>,
 }
 
-/// Column definition in `CREATE TABLE` statement.
+/// Column definition in `CREATE TABLE` and `ALTER TABLE ADD COLUMN`.
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub struct Column {
     /// `ColumnDef` from `sqlparser::ast`
@@ -207,10 +207,9 @@ impl Display for Column {
             && let Some(dim) = vector_options.get(VECTOR_OPT_DIM)
         {
             write!(f, "{} VECTOR({})", self.column_def.name, dim)?;
-            return Ok(());
+        } else {
+            write!(f, "{} {}", self.column_def.name, self.column_def.data_type)?;
         }
-
-        write!(f, "{} {}", self.column_def.name, self.column_def.data_type)?;
         if let Some(options) = &self.extensions.json2_options {
             write!(f, "{options}")?;
         }

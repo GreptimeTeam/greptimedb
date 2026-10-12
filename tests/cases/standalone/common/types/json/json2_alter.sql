@@ -74,3 +74,30 @@ ORDER BY ts;
 ADMIN FLUSH_TABLE('application_logs');
 
 DROP TABLE application_logs;
+
+create table json2_alter_add_settings (
+    ts timestamp time index
+) with (
+    'append_mode' = 'true'
+);
+
+-- ADD COLUMN preserves JSON2 settings and type hints, including for existing rows.
+insert into json2_alter_add_settings values (1);
+alter table json2_alter_add_settings add column j json2(max_auto_expanded_paths = 100);
+
+alter table json2_alter_add_settings add column k json2(service string);
+
+alter table json2_alter_add_settings add column m json2(max_auto_expanded_paths = 0, nested.value bigint);
+
+show create table json2_alter_add_settings;
+
+insert into json2_alter_add_settings values
+    (2, '{"a":1}', '{"service":"api"}', '{"nested":{"value":42},"extra":true}');
+
+select ts, j, k.service, m.nested.value, m from json2_alter_add_settings order by ts;
+
+admin flush_table('json2_alter_add_settings');
+
+select ts, j, k.service, m.nested.value, m from json2_alter_add_settings order by ts;
+
+drop table json2_alter_add_settings;
