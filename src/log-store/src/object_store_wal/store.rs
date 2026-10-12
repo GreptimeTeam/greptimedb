@@ -8885,10 +8885,6 @@ mod tests {
             store.stop().await.unwrap();
         }
 
-        /// Four creates are in flight and a fifth batch waits for a slot when
-        /// `stop` begins: the fifth is dropped; objects 4 to 2 complete while
-        /// object 1 stays parked and nothing is acknowledged or indexed; then
-        /// object 1 releases the four acknowledgements in order.
         /// Round-trips a command through the actor once `stop` began, when
         /// the seal command is refused: the collection that `obsolete_all` of
         /// a region without entries requests is answered by the actor, and
@@ -8901,6 +8897,10 @@ mod tests {
                 .unwrap();
         }
 
+        /// Four creates are in flight and a fifth batch waits for a slot when
+        /// `stop` begins: the fifth is dropped; objects 4 to 2 complete while
+        /// object 1 stays parked and nothing is acknowledged or indexed; then
+        /// object 1 releases the four acknowledgements in order.
         async fn creates_succeed_after_stop_began() {
             let (store, io, mut parked) = open_parking_creates(memory_store(), &eager()).await;
             let before = Counters::sample();
