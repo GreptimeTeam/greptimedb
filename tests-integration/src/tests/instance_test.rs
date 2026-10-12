@@ -415,6 +415,125 @@ LEFT JOIN (SELECT k, count(*) n FROM join_repro WHERE kind = 'child' AND k < '8'
     }
 }
 
+/// Regression test for `MatchesConstantTermOptimizer` dropping `FilterExec`'s `fetch`.
+///
+/// On a single-partition plan the `LIMIT` is enforced by the `fetch` that the physical
+/// `LimitPushdown` rule leaves on the `FilterExec`, so a rule rebuilding that `FilterExec`
+/// has to carry the `fetch` over. While it does not, the limit is silently lifted for
+/// `matches_term` filters and
+/// `SELECT count(*) FROM (SELECT ts, msg FROM t WHERE matches_term(msg, 'foo') LIMIT 1) s`
+/// returns the number of matching rows (2) instead of 1.
+///
+/// `query_parallelism=4` is expected to stay correct, because the limit is then materialized
+/// above the scan instead of being delegated to the `FilterExec`; the test pins down that
+/// contrast. The metric-engine logical table covers the same filter on a shared physical
+/// region.
+///
+/// Both matching rows share `ts` and `msg`, so the limited output does not depend on the
+/// order in which the scan returns them.
+#[apply(both_instances_cases)]
+async fn test_matches_term_subquery_limit_count(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+
+    execute_sql(
+        &frontend,
+        r#"
+CREATE TABLE f07_mito_msgs (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY,
+    msg STRING,
+    val DOUBLE
+)
+ENGINE = mito
+"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"INSERT INTO f07_mito_msgs (ts, host, msg, val) VALUES
+    (0, 'host1', 'foo bar', 1.0),
+    (0, 'host2', 'foo bar', 2.0),
+    (0, 'host3', 'other baz', 3.0)"#,
+    )
+    .await;
+
+    execute_sql(
+        &frontend,
+        r#"
+CREATE TABLE f07_metric_phy (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE,
+    host STRING,
+    msg STRING,
+    PRIMARY KEY (host, msg)
+)
+ENGINE = metric
+WITH ('physical_metric_table' = '')
+"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"
+CREATE TABLE f07_metric_msgs (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE,
+    host STRING,
+    msg STRING,
+    PRIMARY KEY (host, msg)
+)
+ENGINE = metric
+WITH ('on_physical_table' = 'f07_metric_phy')
+"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"INSERT INTO f07_metric_msgs (ts, host, msg, val) VALUES
+    (0, 'host1', 'foo bar', 1.0),
+    (0, 'host2', 'foo bar', 2.0),
+    (0, 'host3', 'other baz', 3.0)"#,
+    )
+    .await;
+
+    for table in ["f07_mito_msgs", "f07_metric_msgs"] {
+        let limited = format!("SELECT ts, msg FROM {table} WHERE matches_term(msg, 'foo') LIMIT 1");
+        let count = format!("SELECT count(*) FROM ({limited}) s");
+
+        let limit_rows = execute_sql_with_query_parallelism(&frontend, &limited, 1)
+            .await
+            .data
+            .pretty_print()
+            .await;
+        assert_eq!(
+            limit_rows,
+            r#"+---------------------+---------+
+| ts                  | msg     |
++---------------------+---------+
+| 1970-01-01T00:00:00 | foo bar |
++---------------------+---------+"#,
+            "query_parallelism=1: `{limited}` must return exactly the single limited row"
+        );
+
+        for parallelism in [1, 4] {
+            let count_rows = execute_sql_with_query_parallelism(&frontend, &count, parallelism)
+                .await
+                .data
+                .pretty_print()
+                .await;
+            assert_eq!(
+                count_rows,
+                r#"+----------+
+| count(*) |
++----------+
+| 1        |
++----------+"#,
+                "query_parallelism={parallelism}: the LIMIT 1 of the subquery must cap `{count}` to one row"
+            );
+        }
+    }
+}
+
 #[apply(both_instances_cases)]
 async fn test_partitioned_merge_scan_semi_join_repartitions(instance: Arc<dyn MockInstance>) {
     let frontend = instance.frontend();
