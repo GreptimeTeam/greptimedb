@@ -321,40 +321,228 @@ async fn test_metric_logical_scan_tag_order(instance: Arc<dyn MockInstance>) {
 | c    | 1970-01-01T00:00:00 | 3.0 |
 +------+---------------------+-----+";
 
+    // `host` is NOT NULL, so `NULLS FIRST` and the SQL default `NULLS LAST` return the same
+    // rows. The `NULLS FIRST` queries spell out the ordering the scan used to claim, so the
+    // optimizer may drop the sort and expose a wrong tag order; the `NULLS LAST` queries
+    // keep the sort. Both are replayed in memory and after flushing the physical table.
     let mut mismatches = Vec::new();
-    for parallelism in [1, 4] {
-        // `NULLS FIRST` also spells out the default ordering, so the first two
-        // queries must not be answered from a wrong tag order. The remaining
-        // `NULLS LAST` queries are controls that must keep the same order.
-        for (query, expected) in [
-            (
-                "SELECT host, ts, val FROM f04_scan_logical ORDER BY host NULLS FIRST",
-                all_hosts,
-            ),
-            (
-                "SELECT host, ts, val FROM f04_scan_logical ORDER BY host NULLS FIRST LIMIT 3",
-                first_three_hosts,
-            ),
-            (
-                "SELECT host, ts, val FROM f04_scan_logical ORDER BY host NULLS LAST",
-                all_hosts,
-            ),
-            (
-                "SELECT host, ts, val FROM f04_scan_logical ORDER BY host NULLS LAST LIMIT 3",
-                first_three_hosts,
-            ),
-        ] {
-            let actual = ordered_rows(&frontend, query, parallelism).await;
-            if actual.trim() != expected.trim() {
-                mismatches.push(format!(
-                    "query `{query}` with query_parallelism={parallelism} returned:\n{actual}"
-                ));
+    for flushed in [false, true] {
+        if flushed {
+            execute_sql(&frontend, "ADMIN FLUSH_TABLE('f04_scan_phy')").await;
+        }
+        for parallelism in [1, 4] {
+            for (query, expected) in [
+                (
+                    "SELECT host, ts, val FROM f04_scan_logical ORDER BY host NULLS FIRST",
+                    all_hosts,
+                ),
+                (
+                    "SELECT host, ts, val FROM f04_scan_logical ORDER BY host NULLS FIRST LIMIT 3",
+                    first_three_hosts,
+                ),
+                (
+                    "SELECT host, ts, val FROM f04_scan_logical ORDER BY host NULLS LAST",
+                    all_hosts,
+                ),
+                (
+                    "SELECT host, ts, val FROM f04_scan_logical ORDER BY host NULLS LAST LIMIT 3",
+                    first_three_hosts,
+                ),
+            ] {
+                let actual = ordered_rows(&frontend, query, parallelism).await;
+                if actual.trim() != expected.trim() {
+                    mismatches.push(format!(
+                        "query `{query}` with query_parallelism={parallelism} flushed={flushed} \
+                         returned:\n{actual}"
+                    ));
+                }
             }
         }
     }
     assert!(
         mismatches.is_empty(),
         "logical metric table rows are not ordered by host, expected `a`..`h`:\n{}",
+        mismatches.join("\n---\n")
+    );
+}
+
+/// The uppercase tag `"A"` sorts before the physical `__table_id`/`__tsid` row key prefix
+/// by name, but it is not a prefix of the row key. A scan that claims it as ordering or
+/// partitioning lets the optimizer skip the sort or the repartition the query needs, so the
+/// per-host count comes back split across scan partitions in physical tsid order.
+#[apply(both_instances_cases)]
+async fn test_metric_logical_scan_uppercase_tag_order(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE f04_upper_phy (
+            "A" STRING,
+            marker STRING,
+            val DOUBLE,
+            ts TIMESTAMP TIME INDEX,
+            PRIMARY KEY ("A", marker)
+        ) ENGINE = metric WITH (physical_metric_table = 'true')"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE f04_upper_logical (
+            "A" STRING,
+            marker STRING,
+            val DOUBLE,
+            ts TIMESTAMP TIME INDEX,
+            PRIMARY KEY ("A", marker)
+        ) ENGINE = metric WITH (on_physical_table = 'f04_upper_phy')"#,
+    )
+    .await;
+
+    // 8 hosts x 4 markers x 2 timestamps = 64 rows. Every host spans four series, so a count
+    // computed per scan partition would return several rows per host with partial counts.
+    let mut rows = Vec::with_capacity(64);
+    for host in 0..8 {
+        for marker in ["a", "b", "c", "d"] {
+            for ts in [1000, 2000] {
+                rows.push(format!("('h{host}', '{marker}', {host}, {ts})"));
+            }
+        }
+    }
+    execute_sql(
+        &frontend,
+        &format!(
+            "INSERT INTO f04_upper_logical (\"A\", marker, val, ts) VALUES {}",
+            rows.join(", ")
+        ),
+    )
+    .await;
+
+    let expected = "\
++----+---+
+| A  | n |
++----+---+
+| h0 | 8 |
+| h1 | 8 |
+| h2 | 8 |
+| h3 | 8 |
+| h4 | 8 |
+| h5 | 8 |
+| h6 | 8 |
+| h7 | 8 |
++----+---+";
+
+    // The rows are compared exactly as printed: sorting them before comparing would accept
+    // a wrong count or a wrong row order. `NULLS FIRST` spells out the ordering the scan
+    // used to claim, so the optimizer may drop the sort; the default `NULLS LAST` keeps it
+    // and a failure there can only come from a wrong partitioning claim. Both orders are
+    // replayed in memory and after flushing the physical table.
+    let queries = [
+        "SELECT \"A\", count(*) AS n FROM f04_upper_logical GROUP BY \"A\" ORDER BY \"A\"",
+        "SELECT \"A\", count(*) AS n FROM f04_upper_logical GROUP BY \"A\" ORDER BY \"A\" NULLS FIRST",
+    ];
+
+    let mut mismatches = Vec::new();
+    for flushed in [false, true] {
+        if flushed {
+            execute_sql(&frontend, "ADMIN FLUSH_TABLE('f04_upper_phy')").await;
+        }
+        for parallelism in [1, 4] {
+            for query in queries {
+                let actual = execute_sql_with_query_parallelism(&frontend, query, parallelism)
+                    .await
+                    .data
+                    .pretty_print()
+                    .await;
+                if actual.trim() != expected.trim() {
+                    mismatches.push(format!(
+                        "query `{query}` with query_parallelism={parallelism} flushed={flushed} \
+                         returned:\n{actual}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "logical metric table must return one row of eight per host in `A` order:\n{}",
+        mismatches.join("\n---\n")
+    );
+}
+
+/// The small shape of the same problem: four rows and two groups. Each host has two series,
+/// so the count must not be computed per scan partition, and `ORDER BY "A"` pins the exact
+/// row order at query_parallelism 4 as well as at 1.
+#[apply(both_instances_cases)]
+async fn test_metric_logical_scan_small_group_count(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE f04_upper_min_phy (
+            "A" STRING,
+            marker STRING,
+            val DOUBLE,
+            ts TIMESTAMP TIME INDEX,
+            PRIMARY KEY ("A", marker)
+        ) ENGINE = metric WITH (physical_metric_table = 'true')"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE f04_upper_min_logical (
+            "A" STRING,
+            marker STRING,
+            val DOUBLE,
+            ts TIMESTAMP TIME INDEX,
+            PRIMARY KEY ("A", marker)
+        ) ENGINE = metric WITH (on_physical_table = 'f04_upper_min_phy')"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        "INSERT INTO f04_upper_min_logical (\"A\", marker, val, ts) VALUES \
+         ('h0', 'a', 1, 1000), ('h0', 'b', 2, 1000), \
+         ('h1', 'a', 3, 1000), ('h1', 'b', 4, 1000)",
+    )
+    .await;
+
+    let expected = "\
++----+---+
+| A  | n |
++----+---+
+| h0 | 2 |
+| h1 | 2 |
++----+---+";
+    // `NULLS FIRST` spells out the ordering the scan used to claim and is replayed next to
+    // the default `NULLS LAST` order, in memory and after flushing the physical table.
+    let queries = [
+        "SELECT \"A\", count(*) AS n FROM f04_upper_min_logical GROUP BY \"A\" ORDER BY \"A\"",
+        "SELECT \"A\", count(*) AS n FROM f04_upper_min_logical GROUP BY \"A\" ORDER BY \"A\" NULLS FIRST",
+    ];
+
+    let mut mismatches = Vec::new();
+    for flushed in [false, true] {
+        if flushed {
+            execute_sql(&frontend, "ADMIN FLUSH_TABLE('f04_upper_min_phy')").await;
+        }
+        for parallelism in [1, 4] {
+            for query in queries {
+                let actual = execute_sql_with_query_parallelism(&frontend, query, parallelism)
+                    .await
+                    .data
+                    .pretty_print()
+                    .await;
+                if actual.trim() != expected.trim() {
+                    mismatches.push(format!(
+                        "query `{query}` with query_parallelism={parallelism} flushed={flushed} \
+                         returned:\n{actual}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "small logical metric grouping must return [h0, 2] and [h1, 2]:\n{}",
         mismatches.join("\n---\n")
     );
 }
