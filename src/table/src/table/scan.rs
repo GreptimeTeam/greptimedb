@@ -1175,10 +1175,13 @@ mod test {
             } else {
                 Partitioning::UnknownPartitioning(2)
             };
-            assert_eq!(
-                plan.properties.partitioning, expected_partitioning,
-                "projection {projection:?}"
-            );
+            match (&plan.properties.partitioning, &expected_partitioning) {
+                (
+                    Partitioning::UnknownPartitioning(actual_count),
+                    Partitioning::UnknownPartitioning(expected_count),
+                ) => assert_eq!(actual_count, expected_count, "projection {projection:?}"),
+                (actual, expected) => assert_eq!(actual, expected, "projection {projection:?}"),
+            }
 
             for ordering in claimed {
                 assert!(
