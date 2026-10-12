@@ -2567,12 +2567,16 @@ pub async fn test_promql_over_non_millisecond_physical_tables(store_type: Storag
         .await;
     assert_eq!(res.status(), StatusCode::OK);
     let body = res.json::<PrometheusJsonResponse>().await;
+    // The samples are 1.0@1s and 2.0@2s, so the 1m window at t=2 holds both: avg is 1.5.
+    // `avg_over_time` changes the sample values, so it drops the metric-name identity
+    // like every other value-changing PromQL function (see Prometheus semantics);
+    // `__name__` is absent from the result.
     assert_eq!(
         body.data,
         serde_json::from_value::<PrometheusResponse>(json!({
             "resultType": "vector",
             "result": [{
-                "metric": {"__name__": "unit_gauge", "job": "demo"},
+                "metric": {"job": "demo"},
                 "value": [2.0, "1.5"]
             }]
         }))
