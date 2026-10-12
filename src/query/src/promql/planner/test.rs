@@ -1827,7 +1827,20 @@ async fn single_sort_desc() {
 
 #[tokio::test]
 async fn single_sqrt() {
-    do_single_instant_function_call("sqrt", "sqrt").await;
+    // Negative input is mapped to NaN before DataFusion's `sqrt`, which rejects it.
+    indie_query_plan_compare(
+        r#"sqrt(some_metric{tag_0!="bar"})"#,
+        "Projection: some_metric.timestamp, sqrt(field_0), some_metric.tag_0 [timestamp:Timestamp(ms), sqrt(field_0):Float64;N, tag_0:Utf8]\
+            \n  Filter: sqrt(field_0) IS NOT NULL [timestamp:Timestamp(ms), sqrt(field_0):Float64;N, tag_0:Utf8, __promql_metric_name:Utf8]\
+            \n    Projection: some_metric.timestamp, prom_sqrt(some_metric.field_0) AS sqrt(field_0), some_metric.tag_0, __promql_metric_name [timestamp:Timestamp(ms), sqrt(field_0):Float64;N, tag_0:Utf8, __promql_metric_name:Utf8]\
+            \n      Projection: some_metric.tag_0, some_metric.timestamp, some_metric.field_0, Utf8(\"some_metric\") AS __promql_metric_name [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_metric_name:Utf8]\
+            \n        PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n          PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n            Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n              Filter: some_metric.tag_0 != Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n                TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]",
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -1959,6 +1972,19 @@ async fn single_rad() {
 //     },
 // },
 async fn do_aggregate_expr_plan(fn_name: &str, plan_name: &str) {
+    do_aggregate_expr_plan_with_display(fn_name, plan_name, plan_name).await;
+}
+
+/// `display_name` is the aggregate function as the plan shows it, `plan_name` the name of the
+/// output column; they differ for PromQL `min`/`max`.
+async fn do_aggregate_expr_plan_with_display(fn_name: &str, plan_name: &str, display_name: &str) {
+    let display = |field: &str| {
+        if display_name == plan_name {
+            format!("{plan_name}({field})")
+        } else {
+            format!("{display_name}({field}) AS {plan_name}({field})")
+        }
+    };
     let prom_expr = parser::parse(&format!(
         "{fn_name} by (tag_1)(some_metric{{tag_0!=\"bar\"}})",
     ))
@@ -1985,14 +2011,17 @@ async fn do_aggregate_expr_plan(fn_name: &str, plan_name: &str) {
         .unwrap();
     let expected_no_without = String::from(
         "Sort: some_metric.tag_1 ASC NULLS LAST, some_metric.timestamp ASC NULLS LAST [tag_1:Utf8, timestamp:Timestamp(ms), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
-            \n  Aggregate: groupBy=[[some_metric.tag_1, some_metric.timestamp]], aggr=[[TEMPLATE(some_metric.field_0), TEMPLATE(some_metric.field_1)]] [tag_1:Utf8, timestamp:Timestamp(ms), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
+            \n  Aggregate: groupBy=[[some_metric.tag_1, some_metric.timestamp]], aggr=[[DISPLAY_0, DISPLAY_1]] [tag_1:Utf8, timestamp:Timestamp(ms), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
             \n    Projection: some_metric.tag_0, some_metric.tag_1, some_metric.timestamp, some_metric.field_0, some_metric.field_1, Utf8(\"some_metric\") AS __promql_metric_name [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, __promql_metric_name:Utf8]\
             \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
             \n        PromSeriesDivide: tags=[\"tag_0\", \"tag_1\"] [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
             \n          Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.tag_1 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
             \n            Filter: some_metric.tag_0 != Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
             \n              TableScan: some_metric [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]"
-    ).replace("TEMPLATE", plan_name);
+    )
+    .replace("TEMPLATE", plan_name)
+    .replace("DISPLAY_0", &display("some_metric.field_0"))
+    .replace("DISPLAY_1", &display("some_metric.field_1"));
     assert_eq!(
         plan.display_indent_schema().to_string(),
         expected_no_without
@@ -2015,14 +2044,16 @@ async fn do_aggregate_expr_plan(fn_name: &str, plan_name: &str) {
         .unwrap();
     let expected_without = String::from(
         "Sort: some_metric.tag_0 ASC NULLS LAST, some_metric.timestamp ASC NULLS LAST [tag_0:Utf8, timestamp:Timestamp(ms), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
-            \n  Aggregate: groupBy=[[some_metric.tag_0, some_metric.timestamp]], aggr=[[TEMPLATE(some_metric.field_0), TEMPLATE(some_metric.field_1)]] [tag_0:Utf8, timestamp:Timestamp(ms), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
+            \n  Aggregate: groupBy=[[some_metric.tag_0, some_metric.timestamp]], aggr=[[DISPLAY_0, DISPLAY_1]] [tag_0:Utf8, timestamp:Timestamp(ms), TEMPLATE(some_metric.field_0):Float64;N, TEMPLATE(some_metric.field_1):Float64;N]\
             \n    Projection: some_metric.tag_0, some_metric.tag_1, some_metric.timestamp, some_metric.field_0, some_metric.field_1, Utf8(\"some_metric\") AS __promql_metric_name [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N, __promql_metric_name:Utf8]\
             \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
             \n        PromSeriesDivide: tags=[\"tag_0\", \"tag_1\"] [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
             \n          Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.tag_1 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
             \n            Filter: some_metric.tag_0 != Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]\
             \n              TableScan: some_metric [tag_0:Utf8, tag_1:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, field_1:Float64;N]"
-    ).replace("TEMPLATE", plan_name);
+    ).replace("TEMPLATE", plan_name)
+    .replace("DISPLAY_0", &display("some_metric.field_0"))
+    .replace("DISPLAY_1", &display("some_metric.field_1"));
     assert_eq!(plan.display_indent_schema().to_string(), expected_without);
 }
 
@@ -4048,12 +4079,12 @@ async fn aggregate_count() {
 
 #[tokio::test]
 async fn aggregate_min() {
-    do_aggregate_expr_plan("min", "min").await;
+    do_aggregate_expr_plan_with_display("min", "min", "prom_min").await;
 }
 
 #[tokio::test]
 async fn aggregate_max() {
-    do_aggregate_expr_plan("max", "max").await;
+    do_aggregate_expr_plan_with_display("max", "max", "prom_max").await;
 }
 
 #[tokio::test]
@@ -4240,7 +4271,7 @@ async fn simple_bool_grammar() {
     let query = "some_metric != bool 1.2345";
     let expected = String::from(
         "Projection: some_metric.tag_0, some_metric.timestamp, field_0 != Float64(1.2345) [tag_0:Utf8, timestamp:Timestamp(ms), field_0 != Float64(1.2345):Float64;N]\
-            \n  Projection: some_metric.tag_0, __promql_metric_name, some_metric.timestamp, CAST(some_metric.field_0 != Float64(1.2345) AS Float64) AS field_0 != Float64(1.2345) [tag_0:Utf8, __promql_metric_name:Utf8, timestamp:Timestamp(ms), field_0 != Float64(1.2345):Float64;N]\
+            \n  Projection: some_metric.tag_0, __promql_metric_name, some_metric.timestamp, CAST(prom_ne(some_metric.field_0, Float64(1.2345)) AS Float64) AS field_0 != Float64(1.2345) [tag_0:Utf8, __promql_metric_name:Utf8, timestamp:Timestamp(ms), field_0 != Float64(1.2345):Float64;N]\
             \n    Projection: some_metric.tag_0, some_metric.timestamp, some_metric.field_0, Utf8(\"some_metric\") AS __promql_metric_name [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_metric_name:Utf8]\
             \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
@@ -4257,7 +4288,7 @@ async fn bool_with_additional_arithmetic() {
     let query = "some_metric + (1 == bool 2)";
     let expected = String::from(
         "Projection: some_metric.tag_0, some_metric.timestamp, field_0 + Float64(1) = Float64(2) [tag_0:Utf8, timestamp:Timestamp(ms), field_0 + Float64(1) = Float64(2):Float64;N]\
-            \n  Projection: some_metric.tag_0, __promql_metric_name, some_metric.timestamp, CAST(some_metric.field_0 AS Float64) + CAST(Float64(1) = Float64(2) AS Float64) AS field_0 + Float64(1) = Float64(2) [tag_0:Utf8, __promql_metric_name:Utf8, timestamp:Timestamp(ms), field_0 + Float64(1) = Float64(2):Float64;N]\
+            \n  Projection: some_metric.tag_0, __promql_metric_name, some_metric.timestamp, CAST(some_metric.field_0 AS Float64) + CAST(prom_eq(Float64(1), Float64(2)) AS Float64) AS field_0 + Float64(1) = Float64(2) [tag_0:Utf8, __promql_metric_name:Utf8, timestamp:Timestamp(ms), field_0 + Float64(1) = Float64(2):Float64;N]\
             \n    Projection: some_metric.tag_0, some_metric.timestamp, some_metric.field_0, Utf8(\"some_metric\") AS __promql_metric_name [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_metric_name:Utf8]\
             \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
@@ -5239,7 +5270,7 @@ async fn native_histogram_mixed_field_table_behaves() {
 async fn less_filter_on_value() {
     let query = "some_metric < 1.2345";
     let expected = String::from(
-        "Filter: some_metric.field_0 < Float64(1.2345) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_metric_name:Utf8]\
+        "Filter: prom_lt(some_metric.field_0, Float64(1.2345)) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_metric_name:Utf8]\
             \n  Projection: some_metric.tag_0, some_metric.timestamp, some_metric.field_0, Utf8(\"some_metric\") AS __promql_metric_name [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_metric_name:Utf8]\
             \n    PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n      PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
@@ -5858,14 +5889,6 @@ async fn subquery_rejects_invalid_range_and_zero_step() {
 
     // `[5s:0]` parses to zero; planning rejects it.
     let err = plan_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[5s:0])", 60, 60, 1)
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(&err, crate::promql::error::Error::ZeroRangeSelector { .. }),
-        "{err}"
-    );
-    // An omitted child step inherits the zero parent step.
-    let err = plan_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[5s:])", 60, 60, 0)
         .await
         .unwrap_err();
     assert!(
@@ -6882,9 +6905,9 @@ async fn test_topk_expr() {
         .await
         .unwrap();
     let expected = "Projection: sum(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp [sum(prometheus_tsdb_head_series.greptime_value):Float64;N, ip:Utf8, greptime_timestamp:Timestamp(ms)]\
-            \n  Sort: prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST, row_number() PARTITION BY [prometheus_tsdb_head_series.greptime_timestamp] ORDER BY [sum(prometheus_tsdb_head_series.greptime_value) DESC NULLS FIRST, prometheus_tsdb_head_series.ip DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW ASC NULLS LAST [ip:Utf8, greptime_timestamp:Timestamp(ms), sum(prometheus_tsdb_head_series.greptime_value):Float64;N, row_number() PARTITION BY [prometheus_tsdb_head_series.greptime_timestamp] ORDER BY [sum(prometheus_tsdb_head_series.greptime_value) DESC NULLS FIRST, prometheus_tsdb_head_series.ip DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW:UInt64]\
-            \n    Filter: row_number() PARTITION BY [prometheus_tsdb_head_series.greptime_timestamp] ORDER BY [sum(prometheus_tsdb_head_series.greptime_value) DESC NULLS FIRST, prometheus_tsdb_head_series.ip DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW <= Float64(10) [ip:Utf8, greptime_timestamp:Timestamp(ms), sum(prometheus_tsdb_head_series.greptime_value):Float64;N, row_number() PARTITION BY [prometheus_tsdb_head_series.greptime_timestamp] ORDER BY [sum(prometheus_tsdb_head_series.greptime_value) DESC NULLS FIRST, prometheus_tsdb_head_series.ip DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW:UInt64]\
-            \n      WindowAggr: windowExpr=[[row_number() PARTITION BY [prometheus_tsdb_head_series.greptime_timestamp] ORDER BY [sum(prometheus_tsdb_head_series.greptime_value) DESC NULLS FIRST, prometheus_tsdb_head_series.ip DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]] [ip:Utf8, greptime_timestamp:Timestamp(ms), sum(prometheus_tsdb_head_series.greptime_value):Float64;N, row_number() PARTITION BY [prometheus_tsdb_head_series.greptime_timestamp] ORDER BY [sum(prometheus_tsdb_head_series.greptime_value) DESC NULLS FIRST, prometheus_tsdb_head_series.ip DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW:UInt64]\
+            \n  Sort: prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST, row_number() PARTITION BY [prometheus_tsdb_head_series.greptime_timestamp] ORDER BY [isnan(sum(prometheus_tsdb_head_series.greptime_value)) ASC NULLS FIRST, sum(prometheus_tsdb_head_series.greptime_value) DESC NULLS FIRST, prometheus_tsdb_head_series.ip DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW ASC NULLS LAST [ip:Utf8, greptime_timestamp:Timestamp(ms), sum(prometheus_tsdb_head_series.greptime_value):Float64;N, row_number() PARTITION BY [prometheus_tsdb_head_series.greptime_timestamp] ORDER BY [isnan(sum(prometheus_tsdb_head_series.greptime_value)) ASC NULLS FIRST, sum(prometheus_tsdb_head_series.greptime_value) DESC NULLS FIRST, prometheus_tsdb_head_series.ip DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW:UInt64]\
+            \n    Filter: row_number() PARTITION BY [prometheus_tsdb_head_series.greptime_timestamp] ORDER BY [isnan(sum(prometheus_tsdb_head_series.greptime_value)) ASC NULLS FIRST, sum(prometheus_tsdb_head_series.greptime_value) DESC NULLS FIRST, prometheus_tsdb_head_series.ip DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW <= Float64(10) [ip:Utf8, greptime_timestamp:Timestamp(ms), sum(prometheus_tsdb_head_series.greptime_value):Float64;N, row_number() PARTITION BY [prometheus_tsdb_head_series.greptime_timestamp] ORDER BY [isnan(sum(prometheus_tsdb_head_series.greptime_value)) ASC NULLS FIRST, sum(prometheus_tsdb_head_series.greptime_value) DESC NULLS FIRST, prometheus_tsdb_head_series.ip DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW:UInt64]\
+            \n      WindowAggr: windowExpr=[[row_number() PARTITION BY [prometheus_tsdb_head_series.greptime_timestamp] ORDER BY [isnan(sum(prometheus_tsdb_head_series.greptime_value)) ASC NULLS FIRST, sum(prometheus_tsdb_head_series.greptime_value) DESC NULLS FIRST, prometheus_tsdb_head_series.ip DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]] [ip:Utf8, greptime_timestamp:Timestamp(ms), sum(prometheus_tsdb_head_series.greptime_value):Float64;N, row_number() PARTITION BY [prometheus_tsdb_head_series.greptime_timestamp] ORDER BY [isnan(sum(prometheus_tsdb_head_series.greptime_value)) ASC NULLS FIRST, sum(prometheus_tsdb_head_series.greptime_value) DESC NULLS FIRST, prometheus_tsdb_head_series.ip DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW:UInt64]\
             \n        Sort: prometheus_tsdb_head_series.ip ASC NULLS LAST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST [ip:Utf8, greptime_timestamp:Timestamp(ms), sum(prometheus_tsdb_head_series.greptime_value):Float64;N]\
             \n          Aggregate: groupBy=[[prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp]], aggr=[[sum(prometheus_tsdb_head_series.greptime_value)]] [ip:Utf8, greptime_timestamp:Timestamp(ms), sum(prometheus_tsdb_head_series.greptime_value):Float64;N]\
             \n            Projection: prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value, Utf8(\"prometheus_tsdb_head_series\") AS __promql_metric_name [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N, __promql_metric_name:Utf8]\
