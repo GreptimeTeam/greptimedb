@@ -14,6 +14,7 @@
 
 use std::collections::HashSet;
 
+use api::region::RegionResponse;
 use api::v1::flow::{DirtyWindowRequest, DirtyWindowRequests};
 use api::v1::region::{
     BulkInsertRequest, RegionRequest, RegionRequestHeader, bulk_insert_request, region_request,
@@ -245,7 +246,7 @@ impl Inserter {
             } else {
                 None
             };
-            let handle: common_runtime::JoinHandle<Result<api::region::RegionResponse>> =
+            let handle: common_runtime::JoinHandle<Result<RegionResponse>> =
                 common_runtime::spawn_global(async move {
                     let (header, payload) = if mask.select_all() {
                         // SAFETY: raw data must be present, we can avoid re-encoding.

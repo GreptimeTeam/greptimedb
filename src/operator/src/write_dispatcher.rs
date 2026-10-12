@@ -15,13 +15,13 @@
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::sync::Arc;
 
 use api::region::RegionResponse;
 use api::v1::region::{DeleteRequests, InsertRequests, RegionRequest, region_request::Body};
 use common_error::ext::BoxedError;
-use common_meta::error::{self, Result};
+use common_meta::error::{ExternalSnafu, Result, UnexpectedSnafu};
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router;
@@ -31,7 +31,7 @@ use prometheus::Histogram;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
-use crate::error as operator_error;
+use crate::error::{self, FindRegionLeaderSnafu, RequestRegionSnafu};
 
 /// Dispatches already partitioned insert, delete, and bulk requests to their peers.
 pub struct WriteDispatcher {
@@ -69,18 +69,18 @@ impl WriteDispatcher {
     pub(crate) async fn prepare(
         &self,
         requests: Vec<RegionRequest>,
-    ) -> operator_error::Result<Vec<(Peer, RegionRequest)>> {
+    ) -> error::Result<Vec<(Peer, RegionRequest)>> {
         let requests = requests.into_iter().map(split_request).collect::<Vec<_>>();
         let regions = requests
             .iter()
             .flatten()
             .map(write_region_id)
             .collect::<Result<Vec<_>>>()
-            .context(operator_error::RequestRegionSnafu)?;
+            .context(RequestRegionSnafu)?;
         let peers = self
             .resolve_peers(&regions)
             .await
-            .context(operator_error::FindRegionLeaderSnafu)?;
+            .context(FindRegionLeaderSnafu)?;
         let mut writes = Vec::new();
         // Preserve each original envelope and peer batching when retries are disabled.
         for requests in requests {
@@ -88,30 +88,28 @@ impl WriteDispatcher {
             for request in requests {
                 let peer = get_peer(
                     &peers,
-                    write_region_id(&request).context(operator_error::RequestRegionSnafu)?,
+                    write_region_id(&request).context(RequestRegionSnafu)?,
                 )
-                .context(operator_error::RequestRegionSnafu)?;
+                .context(RequestRegionSnafu)?;
                 match by_peer.entry(peer) {
-                    std::collections::hash_map::Entry::Vacant(entry) => {
+                    Entry::Vacant(entry) => {
                         entry.insert(request);
                     }
-                    std::collections::hash_map::Entry::Occupied(mut entry) => {
-                        match (&mut entry.get_mut().body, request.body) {
-                            (Some(Body::Inserts(existing)), Some(Body::Inserts(next))) => {
-                                existing.requests.extend(next.requests)
-                            }
-                            (Some(Body::Deletes(existing)), Some(Body::Deletes(next))) => {
-                                existing.requests.extend(next.requests)
-                            }
-                            _ => {
-                                return error::UnexpectedSnafu {
-                                    err_msg: "Cannot combine different write kinds",
-                                }
-                                .fail()
-                                .context(operator_error::RequestRegionSnafu);
-                            }
+                    Entry::Occupied(mut entry) => match (&mut entry.get_mut().body, request.body) {
+                        (Some(Body::Inserts(existing)), Some(Body::Inserts(next))) => {
+                            existing.requests.extend(next.requests)
                         }
-                    }
+                        (Some(Body::Deletes(existing)), Some(Body::Deletes(next))) => {
+                            existing.requests.extend(next.requests)
+                        }
+                        _ => {
+                            return UnexpectedSnafu {
+                                err_msg: "Cannot combine different write kinds",
+                            }
+                            .fail()
+                            .context(RequestRegionSnafu);
+                        }
+                    },
                 }
             }
             writes.extend(by_peer);
@@ -177,6 +175,7 @@ impl WriteDispatcher {
         }
         Ok(peers)
     }
+
     async fn dispatch_inner(
         &self,
         requests: Vec<RegionRequest>,
@@ -186,13 +185,13 @@ impl WriteDispatcher {
             .prepare(requests)
             .await
             .map_err(BoxedError::new)
-            .context(error::ExternalSnafu)?;
+            .context(ExternalSnafu)?;
         self.dispatch_prepared(writes, histogram).await
     }
 }
 
 fn get_peer(peers: &HashMap<RegionId, Peer>, region: RegionId) -> Result<Peer> {
-    peers.get(&region).cloned().context(error::UnexpectedSnafu {
+    peers.get(&region).cloned().context(UnexpectedSnafu {
         err_msg: "Planned write has no resolved peer",
     })
 }
@@ -249,7 +248,7 @@ fn write_region_id(request: &RegionRequest) -> Result<RegionId> {
         _ => None,
     };
     region_id.map(RegionId::from_u64).ok_or_else(|| {
-        error::UnexpectedSnafu {
+        UnexpectedSnafu {
             err_msg: "Expected a single-region write request",
         }
         .build()

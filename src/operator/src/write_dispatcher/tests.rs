@@ -31,16 +31,14 @@ use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache as meta_cache;
 use common_meta::ddl::test_util::datanode_handler::DatanodeWatcher;
 use common_meta::key::table_route::TableRouteValue;
-use common_meta::node_manager::{
-    Datanode, DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef,
-};
-use common_meta::test_util::MockDatanodeManager;
+use common_meta::test_util::{MockDatanodeHandler, MockDatanodeManager};
 use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
 use partition::manager::PartitionRuleManager;
 use tokio::sync::{Barrier, Notify};
 
 use super::*;
+use crate::error::Error;
 use crate::test_util;
 
 fn build_insert_request(regions: &[u32]) -> RegionRequest {
@@ -64,7 +62,7 @@ async fn test_resolve_peers_batches_logical_and_physical_regions() {
     let partition_manager = test_util::create_partition_rule_manager(backend.clone()).await;
     common_meta::key::TableMetadataManager::new(backend)
         .create_table_metadata(
-            crate::test_util::new_test_table_info(42, "dispatcher_logical", [1, 2, 3].into_iter()),
+            test_util::new_test_table_info(42, "dispatcher_logical", [1, 2, 3].into_iter()),
             TableRouteValue::logical(1),
             Default::default(),
         )
@@ -194,22 +192,12 @@ async fn test_dispatch_preserves_write_payloads_and_envelopes() {
         .prepare(vec![build_insert_request(&[1, 999])])
         .await
         .unwrap_err();
-    assert!(matches!(
-        error,
-        operator_error::Error::FindRegionLeader { .. }
-    ));
+    assert!(matches!(error, Error::FindRegionLeader { .. }));
     assert!(received.try_recv().is_err());
 }
 
-struct GatedNodeManager {
-    entered: Arc<Barrier>,
-    rejected: Arc<AtomicBool>,
-    completed: Arc<AtomicBool>,
-    release: Arc<Notify>,
-}
-
-struct GatedDatanode {
-    reject: bool,
+#[derive(Clone)]
+struct GatedDatanodeHandler {
     entered: Arc<Barrier>,
     rejected: Arc<AtomicBool>,
     completed: Arc<AtomicBool>,
@@ -217,32 +205,12 @@ struct GatedDatanode {
 }
 
 #[async_trait::async_trait]
-impl DatanodeManager for GatedNodeManager {
-    async fn datanode(&self, peer: &Peer) -> DatanodeRef {
-        Arc::new(GatedDatanode {
-            reject: peer.id == 1,
-            entered: self.entered.clone(),
-            rejected: self.rejected.clone(),
-            completed: self.completed.clone(),
-            release: self.release.clone(),
-        })
-    }
-}
-
-#[async_trait::async_trait]
-impl FlownodeManager for GatedNodeManager {
-    async fn flownode(&self, _peer: &Peer) -> FlownodeRef {
-        unimplemented!()
-    }
-}
-
-#[async_trait::async_trait]
-impl Datanode for GatedDatanode {
-    async fn handle(&self, _request: RegionRequest) -> Result<RegionResponse> {
+impl MockDatanodeHandler for GatedDatanodeHandler {
+    async fn handle(&self, peer: &Peer, _request: RegionRequest) -> Result<RegionResponse> {
         self.entered.wait().await;
-        if self.reject {
+        if peer.id == 1 {
             self.rejected.store(true, Ordering::SeqCst);
-            return error::UnexpectedSnafu {
+            return UnexpectedSnafu {
                 err_msg: "first region rejected",
             }
             .fail();
@@ -252,7 +220,11 @@ impl Datanode for GatedDatanode {
         Ok(RegionResponse::new(1))
     }
 
-    async fn handle_query(&self, _request: QueryRequest) -> Result<SendableRecordBatchStream> {
+    async fn handle_query(
+        &self,
+        _peer: &Peer,
+        _request: QueryRequest,
+    ) -> Result<SendableRecordBatchStream> {
         unimplemented!()
     }
 }
@@ -261,13 +233,16 @@ impl Datanode for GatedDatanode {
 async fn test_dispatch_sends_concurrently_and_waits_for_siblings_after_error() {
     let backend = test_util::prepare_mocked_backend().await;
     let partition_manager = test_util::create_partition_rule_manager(backend).await;
-    let nodes = Arc::new(GatedNodeManager {
+    let handler = GatedDatanodeHandler {
         entered: Arc::new(Barrier::new(2)),
         rejected: Arc::default(),
         completed: Arc::default(),
         release: Arc::default(),
-    });
-    let dispatcher = WriteDispatcher::new(nodes.clone(), partition_manager);
+    };
+    let dispatcher = WriteDispatcher::new(
+        Arc::new(MockDatanodeManager::new(handler.clone())),
+        partition_manager,
+    );
     let dispatch = dispatcher.dispatch(vec![build_insert_request(&[1, 2])]);
     tokio::pin!(dispatch);
     tokio::time::timeout(
@@ -277,7 +252,7 @@ async fn test_dispatch_sends_concurrently_and_waits_for_siblings_after_error() {
                 dispatch.as_mut().poll(cx).is_pending(),
                 "dispatch returned while a sibling remained blocked"
             );
-            if nodes.rejected.load(Ordering::SeqCst) {
+            if handler.rejected.load(Ordering::SeqCst) {
                 Poll::Ready(())
             } else {
                 Poll::Pending
@@ -286,23 +261,24 @@ async fn test_dispatch_sends_concurrently_and_waits_for_siblings_after_error() {
     )
     .await
     .expect("both region sends must reach the barrier concurrently");
-    assert!(!nodes.completed.load(Ordering::SeqCst));
-    nodes.release.notify_one();
+    assert!(!handler.completed.load(Ordering::SeqCst));
+    handler.release.notify_one();
     let error = tokio::time::timeout(Duration::from_secs(1), dispatch)
         .await
         .unwrap()
         .unwrap_err();
     assert!(error.to_string().contains("first region rejected"));
-    assert!(nodes.completed.load(Ordering::SeqCst));
+    assert!(handler.completed.load(Ordering::SeqCst));
 }
 
 #[tokio::test]
 async fn test_resolve_peers_cache_lookup_ablation() {
+    common_telemetry::init_default_ut_logging();
     let backend = test_util::prepare_mocked_backend().await;
     test_util::create_partition_rule_manager(backend.clone()).await;
     common_meta::key::TableMetadataManager::new(backend.clone())
         .create_table_metadata(
-            crate::test_util::new_test_table_info(42, "resolution_ablation", [1, 2, 3].into_iter()),
+            test_util::new_test_table_info(42, "resolution_ablation", [1, 2, 3].into_iter()),
             TableRouteValue::logical(1),
             Default::default(),
         )
@@ -363,7 +339,7 @@ async fn test_resolve_peers_cache_lookup_ablation() {
                 _ => unreachable!(),
             };
             assert_eq!(gets, expected_gets);
-            eprintln!(
+            common_telemetry::info!(
                 "route_resolution_ablation run={run} mode={mode} regions={} cache_gets={gets} elapsed_ns={}",
                 regions.len(),
                 elapsed.as_nanos()
