@@ -153,14 +153,12 @@ def probe(args) -> None:
 
 
 def cleanup(args) -> None:
+    # One DeleteObject per key: DeleteObjects needs a checksum header the MinIO fixture rejects.
     client, deleted = s3_client(args), 0
     for page in client.get_paginator("list_objects_v2").paginate(Bucket=args.bucket, Prefix=f"{args.prefix}/"):
-        keys = [{"Key": item["Key"]} for item in page.get("Contents", [])]
-        if keys:
-            result = client.delete_objects(Bucket=args.bucket, Delete={"Objects": keys, "Quiet": True})
-            if result.get("Errors"):
-                raise RuntimeError(f"delete failed for {len(result['Errors'])} objects")
-            deleted += len(keys)
+        for item in page.get("Contents", []):
+            client.delete_object(Bucket=args.bucket, Key=item["Key"])
+            deleted += 1
     print(f"deleted {deleted} objects under s3://{args.bucket}/{args.prefix}/")
 
 
