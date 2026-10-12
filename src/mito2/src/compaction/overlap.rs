@@ -16,20 +16,17 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use common_time::Timestamp;
-use store_api::metadata::{RegionMetadata, RegionMetadataRef};
+use store_api::metadata::RegionMetadata;
 
 use crate::compaction::run::primary_key_ranges_overlap;
 use crate::sst::file::{FileHandle, RegionFileId};
 use crate::sst::primary_key::PrimaryKeyRangeMapper;
 
-type FileOverlapPredicate<'a> = dyn Fn(&FileHandle, &FileHandle) -> bool + Send + Sync + 'a;
-
 /// Snapshot-local overlap candidates, ordered by start time. Each subtree stores
 /// its maximum active end. Removing visited files prunes dense internal overlaps.
 /// PK-disjoint files with overlapping times can still cost O(N) per query, so a
 /// complete closure has O(N²) worst-case time and O(N) auxiliary space.
-pub(crate) struct FileOverlapIndex<'a> {
-    overlaps: Box<FileOverlapPredicate<'a>>,
+pub(crate) struct FileOverlapIndex {
     /// Candidates in original snapshot order, retained after removal so their
     /// indices remain stable and drained matches can preserve merge input order.
     files: Vec<FileHandle>,
@@ -49,26 +46,16 @@ pub(crate) struct FileOverlapIndex<'a> {
     leaf_base: usize,
 }
 
-struct OverlapQuery<'a> {
+struct OverlapQuery<'a, F> {
     input: &'a FileHandle,
+    overlaps: &'a F,
     min_end: Timestamp,
     candidates_end: usize,
 }
 
-impl<'a> FileOverlapIndex<'a> {
-    pub(crate) fn new(files: Vec<FileHandle>, metadata: &'a RegionMetadataRef) -> Self {
-        let mapper = PrimaryKeyRangeMapper::new(metadata.clone());
-        Self::with_overlap(files, move |lhs, rhs| {
-            files_may_overlap(lhs, rhs, metadata, &mapper)
-        })
-    }
-
-    /// Keeps indexing independent of the caller's overlap policy: LastNonNull
-    /// requires conservative dependencies, while TWCS uses its mapped PK bounds.
-    pub(crate) fn with_overlap(
-        files: Vec<FileHandle>,
-        overlaps: impl Fn(&FileHandle, &FileHandle) -> bool + Send + Sync + 'a,
-    ) -> Self {
+impl FileOverlapIndex {
+    /// Builds a snapshot-local time index, independent of the overlap policy.
+    pub(crate) fn new(files: Vec<FileHandle>) -> Self {
         let mut by_start: Vec<_> = (0..files.len()).collect();
         by_start.sort_unstable_by_key(|&i| (files[i].time_range().0, i));
         // A single empty leaf also handles an empty snapshot.
@@ -83,7 +70,6 @@ impl<'a> FileOverlapIndex<'a> {
             max_ends[node] = max_ends[2 * node].max(max_ends[2 * node + 1]);
         }
         Self {
-            overlaps: Box::new(overlaps),
             files,
             by_start,
             positions,
@@ -106,9 +92,16 @@ impl<'a> FileOverlapIndex<'a> {
     /// Removes dependencies so expansion never enumerates visited files.
     /// Preserve snapshot order rather than exposing the index's time ordering
     /// to the merge reader (including its handling of equal-sequence rows).
-    pub(crate) fn drain_overlaps(&mut self, input: &FileHandle) -> Vec<FileHandle> {
+    ///
+    /// The predicate must reject disjoint time ranges, which the index prunes
+    /// before invoking it. Closure expansion must use one policy and schema
+    /// snapshot throughout, since visited files are removed from the index.
+    pub(crate) fn drain_overlaps<F>(&mut self, input: &FileHandle, overlaps: &F) -> Vec<FileHandle>
+    where
+        F: Fn(&FileHandle, &FileHandle) -> bool,
+    {
         let mut matches = Vec::new();
-        while let Some(i) = self.find_overlap(input) {
+        while let Some(i) = self.find_overlap(input, overlaps) {
             self.remove(self.files[i].file_id());
             matches.push(i);
         }
@@ -116,10 +109,14 @@ impl<'a> FileOverlapIndex<'a> {
         matches.into_iter().map(|i| self.files[i].clone()).collect()
     }
 
-    fn find_overlap(&self, input: &FileHandle) -> Option<usize> {
+    fn find_overlap<F>(&self, input: &FileHandle, overlaps: &F) -> Option<usize>
+    where
+        F: Fn(&FileHandle, &FileHandle) -> bool,
+    {
         let (start, end) = input.time_range();
         let query = OverlapQuery {
             input,
+            overlaps,
             min_end: start,
             candidates_end: self
                 .by_start
@@ -128,12 +125,15 @@ impl<'a> FileOverlapIndex<'a> {
         self.find_in_subtree(1, 0..self.leaf_base, &query)
     }
 
-    fn find_in_subtree(
+    fn find_in_subtree<F>(
         &self,
         node: usize,
         leaves: Range<usize>,
-        query: &OverlapQuery<'_>,
-    ) -> Option<usize> {
+        query: &OverlapQuery<'_, F>,
+    ) -> Option<usize>
+    where
+        F: Fn(&FileHandle, &FileHandle) -> bool,
+    {
         if leaves.start >= query.candidates_end
             || self.max_ends[node].is_none_or(|end| end < query.min_end)
         {
@@ -141,7 +141,7 @@ impl<'a> FileOverlapIndex<'a> {
         }
         if leaves.len() == 1 {
             let i = self.by_start[leaves.start];
-            return (self.overlaps)(query.input, &self.files[i]).then_some(i);
+            return (query.overlaps)(query.input, &self.files[i]).then_some(i);
         }
         let mid = leaves.start + leaves.len() / 2;
         self.find_in_subtree(2 * node, leaves.start..mid, query)
@@ -151,7 +151,7 @@ impl<'a> FileOverlapIndex<'a> {
 
 /// SST bounds are inclusive. Missing statistics, foreign encodings and schema
 /// evolution must not exclude a possible logical-key dependency.
-fn files_may_overlap(
+pub(crate) fn files_may_overlap(
     lhs: &FileHandle,
     rhs: &FileHandle,
     metadata: &RegionMetadata,
@@ -254,18 +254,23 @@ mod tests {
         let mut meta = lhs.meta_ref().clone();
         meta.region_id = 1.into();
         let rhs = FileHandle::new(meta, new_noop_file_purger());
-        let mut index = FileOverlapIndex::new(vec![lhs.clone(), rhs.clone()], &metadata);
+        let ranges = PrimaryKeyRangeMapper::new(metadata.clone());
+        let overlaps =
+            |lhs: &FileHandle, rhs: &FileHandle| files_may_overlap(lhs, rhs, &metadata, &ranges);
+        let mut index = FileOverlapIndex::new(vec![lhs.clone(), rhs.clone()]);
         index.remove(lhs.file_id());
-        let overlaps = index.drain_overlaps(&lhs);
-        assert_eq!(1, overlaps.len());
-        assert_eq!(rhs.file_id(), overlaps[0].file_id());
-        assert!(index.drain_overlaps(&lhs).is_empty());
+        let matches = index.drain_overlaps(&lhs, &overlaps);
+        assert_eq!(1, matches.len());
+        assert_eq!(rhs.file_id(), matches[0].file_id());
+        assert!(index.drain_overlaps(&lhs, &overlaps).is_empty());
     }
 
     #[test]
     fn test_index_matches_linear_scan_after_removals() {
         let metadata = primary_key_metadata_for_test();
         let ranges = PrimaryKeyRangeMapper::new(metadata.clone());
+        let overlaps =
+            |lhs: &FileHandle, rhs: &FileHandle| files_may_overlap(lhs, rhs, &metadata, &ranges);
         let mut rng = rand::rngs::StdRng::seed_from_u64(9146);
         for count in [0, 1, 7, 32, 127] {
             let files: Vec<_> = (0..count)
@@ -281,7 +286,7 @@ mod tests {
                     file(start, end, pk)
                 })
                 .collect();
-            let mut index = FileOverlapIndex::new(files.clone(), &metadata);
+            let mut index = FileOverlapIndex::new(files.clone());
             let mut removed = HashSet::new();
             for f in files.iter().step_by(3) {
                 index.remove(f.file_id());
@@ -299,7 +304,7 @@ mod tests {
                     .map(FileHandle::file_id)
                     .collect();
                 let actual: Vec<_> = index
-                    .drain_overlaps(&query)
+                    .drain_overlaps(&query, &overlaps)
                     .iter()
                     .map(FileHandle::file_id)
                     .collect();

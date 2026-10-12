@@ -766,7 +766,7 @@ fn pick_l1_overlap_only(
 /// Decisions cover complete overlap components, so neither another component
 /// nor an omitted part of the same run can subsidize a small rewrite candidate.
 struct L1OverlapRunBudget<'a> {
-    remaining: FileOverlapIndex<'a>,
+    remaining: FileOverlapIndex,
     allowed: HashMap<RegionFileId, bool>,
     tolerance_bytes: u64,
     mapper: &'a PrimaryKeyRangeMapper,
@@ -779,9 +779,7 @@ impl<'a> L1OverlapRunBudget<'a> {
         mapper: &'a PrimaryKeyRangeMapper,
     ) -> Self {
         Self {
-            remaining: FileOverlapIndex::with_overlap(files, move |lhs, rhs| {
-                files_overlap_inclusive(lhs, rhs, mapper)
-            }),
+            remaining: FileOverlapIndex::new(files),
             allowed: HashMap::new(),
             tolerance_bytes,
             mapper,
@@ -806,9 +804,11 @@ impl<'a> L1OverlapRunBudget<'a> {
 
         self.remaining.remove(file.file_id());
         let mut component = vec![file.clone()];
+        let mapper = self.mapper;
+        let overlaps = |lhs: &FileHandle, rhs: &FileHandle| files_overlap_inclusive(lhs, rhs, mapper);
         let mut cursor = 0;
         while cursor < component.len() {
-            let neighbors = self.remaining.drain_overlaps(&component[cursor]);
+            let neighbors = self.remaining.drain_overlaps(&component[cursor], &overlaps);
             component.extend(neighbors);
             cursor += 1;
         }
