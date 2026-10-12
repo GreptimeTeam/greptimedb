@@ -641,6 +641,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Region {} rejects writes while in staging", region_id))]
+    RejectWriteInStaging {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to compact region {}", region_id))]
     CompactRegion {
         region_id: RegionId,
@@ -1541,7 +1548,7 @@ impl ErrorExt for Error {
             RegionClosed { .. } => StatusCode::Cancelled,
             StaleCompactionExecution { .. } => StatusCode::Cancelled,
             RegionTruncated { .. } => StatusCode::Cancelled,
-            RejectWrite { .. } => StatusCode::StorageUnavailable,
+            RejectWrite { .. } | RejectWriteInStaging { .. } => StatusCode::StorageUnavailable,
             CompactRegion { source, .. } => source.status_code(),
             EditRegion { source, .. } => source.status_code(),
             CompatReader { .. } => StatusCode::Unexpected,
@@ -1641,13 +1648,14 @@ impl ErrorExt for Error {
         match self {
             PartitionExprVersionMismatch { .. }
             | RegionNotFound { .. }
-            | RejectWrite { .. }
+            | RejectWriteInStaging { .. }
             | RegionState {
                 state: RegionRoleState::Follower,
                 ..
             } => RetryHint::RetryAfterRouteRefresh,
             ReadParquet { .. }
             | WriteParquet { .. }
+            | RejectWrite { .. }
             | Download { .. }
             | Upload { .. }
             | RegionState { .. }
@@ -1761,18 +1769,25 @@ mod tests {
         }
         .build();
         assert_eq!(leader_error.retry_hint(), RetryHint::Retryable);
-        for (error, status) in [
+        for (error, status, hint) in [
             (
                 RejectWriteSnafu { region_id }.build(),
                 StatusCode::StorageUnavailable,
+                RetryHint::Retryable,
+            ),
+            (
+                RejectWriteInStagingSnafu { region_id }.build(),
+                StatusCode::StorageUnavailable,
+                RetryHint::RetryAfterRouteRefresh,
             ),
             (
                 RegionNotFoundSnafu { region_id }.build(),
                 StatusCode::RegionNotFound,
+                RetryHint::RetryAfterRouteRefresh,
             ),
         ] {
             assert_eq!(error.status_code(), status);
-            assert_eq!(error.retry_hint(), RetryHint::RetryAfterRouteRefresh);
+            assert_eq!(error.retry_hint(), hint);
         }
     }
 
