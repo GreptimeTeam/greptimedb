@@ -517,9 +517,10 @@ EXPLAIN SELECT a FROM ((SELECT a FROM t1) UNION ALL (SELECT a FROM t2)) u ORDER 
 |_|_TableScan: t2_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [a@0 ASC NULLS LAST]_|
+|_|_UnionExec_|
 |_|_SortExec: expr=[a@0 ASC NULLS LAST], preserve_partitioning=[true]_|
-|_|_InterleaveExec_|
 |_|_MergeScanExec: REDACTED
+|_|_SortExec: expr=[a@0 ASC NULLS LAST], preserve_partitioning=[true]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+

@@ -237,7 +237,6 @@ impl ExtensionPlanner for DistExtensionPlanner {
             self.region_query_handler.clone(),
             query_ctx,
             session.config().target_partitions(),
-            merge_scan.partition_cols().clone(),
             merge_scan.remote_dyn_filter_producer_id(),
             self.enable_per_region_metrics,
         )?;
@@ -932,8 +931,7 @@ mod tests {
         // The small build side can use the same table under another qualifier; only the
         // large-side predicate must decide which regions are selected.
         let build_plan =
-            MergeScanLogicalPlan::new(build_side_plan(&large_plan), false, Default::default())
-                .into_logical_plan();
+            MergeScanLogicalPlan::new(build_side_plan(&large_plan), false).into_logical_plan();
         let join_plan = LogicalPlanBuilder::from(build_plan)
             .join(
                 large_plan.clone(),

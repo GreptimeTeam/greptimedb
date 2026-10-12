@@ -220,11 +220,7 @@ impl SubstraitConsumer for MergeScanSubstraitConsumer<'_> {
 
         let input = self.decode_payload(merge_scan.input).await?;
 
-        // `PbMergeScan` lacks `partition_cols`; decoded plans lose this optimization and may repartition.
-        Ok(
-            MergeScanLogicalPlan::new(input, merge_scan.is_placeholder, Default::default())
-                .into_logical_plan(),
-        )
+        Ok(MergeScanLogicalPlan::new(input, merge_scan.is_placeholder).into_logical_plan())
     }
 
     // Keep child dispatch on this consumer; delegating the parent bypasses async MergeScan decoding.
@@ -724,7 +720,7 @@ mod tests {
             QueryOptions::default(),
         )
         .query_engine();
-        let plan = MergeScanLogicalPlan::new(numbers_scan(), true, Default::default())
+        let plan = MergeScanLogicalPlan::new(numbers_scan(), true)
             .with_remote_dyn_filter_producer_id(RemoteDynFilterProducerId::new(7))
             .into_logical_plan();
         let decoded = plan_decoder(engine.as_ref())
@@ -742,8 +738,6 @@ mod tests {
             .expect("Expect a MergeScan plan node");
         assert!(merge_scan.is_placeholder());
         assert_eq!(merge_scan.input().to_string(), numbers_scan().to_string());
-        // `PbMergeScan` doesn't carry `partition_cols`, so decoded nodes have an empty mapping.
-        assert!(merge_scan.partition_cols().is_empty());
         // `PbMergeScan` doesn't carry the remote dynamic filter producer id either: a decoded
         // boundary has none, and `MergeScanExec` fails open for it.
         assert_eq!(None, merge_scan.remote_dyn_filter_producer_id());
@@ -985,8 +979,7 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-            let plan =
-                MergeScanLogicalPlan::new(input, false, Default::default()).into_logical_plan();
+            let plan = MergeScanLogicalPlan::new(input, false).into_logical_plan();
 
             let bytes = DFLogicalSubstraitConvertor
                 .encode(&plan, DefaultSerializer)
@@ -1047,7 +1040,7 @@ mod tests {
     }
 
     fn merge_scan(input: LogicalPlan, is_placeholder: bool) -> LogicalPlan {
-        MergeScanLogicalPlan::new(input, is_placeholder, Default::default()).into_logical_plan()
+        MergeScanLogicalPlan::new(input, is_placeholder).into_logical_plan()
     }
 
     fn encode_plan(plan: &LogicalPlan) -> Bytes {
