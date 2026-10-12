@@ -1,0 +1,7 @@
+[
+  {"name": "legacy_missing", "wire_hint": null, "expected_hint": "non_retryable"},
+  {"name": "legacy_retryable", "wire_hint": "retryable", "expected_hint": "retryable"},
+  {"name": "legacy_non_retryable", "wire_hint": "non_retryable", "expected_hint": "non_retryable"},
+  {"name": "route_refresh", "wire_hint": "retry_after_route_refresh", "expected_hint": "retry_after_route_refresh"},
+  {"name": "unknown_future_hint", "wire_hint": "future_retry_hint", "expected_hint": "non_retryable"}
+]

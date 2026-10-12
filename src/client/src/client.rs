@@ -525,6 +525,7 @@ impl Client {
         Ok(FlightClient { addr, client })
     }
 
+    /// Creates the region gRPC transport with the configured message limits.
     pub(crate) fn raw_region_client(&self) -> Result<(String, tonic::client::Grpc<Channel>)> {
         let (addr, channel) = self.find_channel()?;
         let client = tonic::client::Grpc::new(channel)

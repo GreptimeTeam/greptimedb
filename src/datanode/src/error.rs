@@ -558,36 +558,38 @@ impl ErrorExt for Error {
     }
 
     fn retry_hint(&self) -> RetryHint {
-        use Error::*;
-
         match self {
-            RegionBusy { .. }
-            | RegionNotReady { .. }
-            | ConcurrentQueryLimiterClosed { .. }
-            | ConcurrentQueryLimiterTimeout { .. } => RetryHint::Retryable,
-            NewPlanDecoder { source, .. } | ExecuteLogicalPlan { source, .. } => {
+            Error::RegionNotReady { .. } | Error::RegionNotFound { .. } => {
+                RetryHint::RetryAfterRouteRefresh
+            }
+            Error::RegionBusy { .. }
+            | Error::ConcurrentQueryLimiterClosed { .. }
+            | Error::ConcurrentQueryLimiterTimeout { .. } => RetryHint::Retryable,
+            Error::NewPlanDecoder { source, .. } | Error::ExecuteLogicalPlan { source, .. } => {
                 source.retry_hint()
             }
-            HandleHeartbeatResponse { source, .. } | GetMetadata { source, .. } => {
+            Error::HandleHeartbeatResponse { source, .. } | Error::GetMetadata { source, .. } => {
                 source.retry_hint()
             }
-            DecodeLogicalPlan { source, .. } => source.retry_hint(),
-            Delete { source, .. } => source.retry_hint(),
-            AsyncTaskExecute { source, .. } => source.retry_hint(),
-            StartServer { source, .. } | ShutdownServer { source, .. } => source.retry_hint(),
-            OpenLogStore { source, .. } => source.retry_hint(),
-            MetaClientInit { source, .. } => source.retry_hint(),
-            HandleRegionRequest { source, .. }
-            | GetRegionMetadata { source, .. }
-            | HandleBatchOpenRequest { source, .. }
-            | HandleBatchDdlRequest { source, .. }
-            | StopRegionEngine { source, .. } => source.retry_hint(),
-            FindLogicalRegions { source, .. } => source.retry_hint(),
-            BuildMitoEngine { source, .. } => source.retry_hint(),
-            GcMitoEngine { source, .. } => source.retry_hint(),
-            BuildMetricEngine { source, .. } => source.retry_hint(),
-            ListStorageSsts { source, .. } => source.retry_hint(),
-            ObjectStore { source, .. } => source.retry_hint(),
+            Error::DecodeLogicalPlan { source, .. } => source.retry_hint(),
+            Error::Delete { source, .. } => source.retry_hint(),
+            Error::AsyncTaskExecute { source, .. } => source.retry_hint(),
+            Error::StartServer { source, .. } | Error::ShutdownServer { source, .. } => {
+                source.retry_hint()
+            }
+            Error::OpenLogStore { source, .. } => source.retry_hint(),
+            Error::MetaClientInit { source, .. } => source.retry_hint(),
+            Error::HandleRegionRequest { source, .. }
+            | Error::GetRegionMetadata { source, .. }
+            | Error::HandleBatchOpenRequest { source, .. }
+            | Error::HandleBatchDdlRequest { source, .. }
+            | Error::StopRegionEngine { source, .. } => source.retry_hint(),
+            Error::FindLogicalRegions { source, .. } => source.retry_hint(),
+            Error::BuildMitoEngine { source, .. } => source.retry_hint(),
+            Error::GcMitoEngine { source, .. } => source.retry_hint(),
+            Error::BuildMetricEngine { source, .. } => source.retry_hint(),
+            Error::ListStorageSsts { source, .. } => source.retry_hint(),
+            Error::ObjectStore { source, .. } => source.retry_hint(),
             _ => RetryHint::NonRetryable,
         }
     }
@@ -602,14 +604,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_region_state_hints_are_retryable() {
+    fn test_region_state_retry_hints() {
         let region_id = RegionId::new(1024, 1);
-
-        let err = RegionBusySnafu { region_id }.build();
-        assert_eq!(err.retry_hint(), RetryHint::Retryable);
-
-        let err = RegionNotReadySnafu { region_id }.build();
-        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+        for (error, status, hint) in [
+            (
+                RegionBusySnafu { region_id }.build(),
+                StatusCode::RegionBusy,
+                RetryHint::Retryable,
+            ),
+            (
+                RegionNotReadySnafu { region_id }.build(),
+                StatusCode::RegionNotReady,
+                RetryHint::RetryAfterRouteRefresh,
+            ),
+            (
+                RegionNotFoundSnafu { region_id }.build(),
+                StatusCode::RegionNotFound,
+                RetryHint::RetryAfterRouteRefresh,
+            ),
+        ] {
+            assert_eq!(error.status_code(), status);
+            assert_eq!(error.retry_hint(), hint);
+        }
     }
 
     #[test]

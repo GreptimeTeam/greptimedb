@@ -57,6 +57,7 @@ use crate::{Client, metrics};
 
 const FLIGHT_DO_GET_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Sends region operations through a configured gRPC client.
 #[derive(Debug)]
 pub struct RegionRequester {
     client: Client,
@@ -67,19 +68,7 @@ pub struct RegionRequester {
 #[async_trait]
 impl Datanode for RegionRequester {
     async fn handle(&self, request: RegionRequest) -> MetaResult<RegionResponse> {
-        self.handle_inner(request).await.map_err(|err| {
-            if err.should_retry() {
-                meta_error::Error::RetryLater {
-                    source: BoxedError::new(err),
-                    clean_poisons: false,
-                }
-            } else {
-                meta_error::Error::External {
-                    source: BoxedError::new(err),
-                    location: location!(),
-                }
-            }
-        })
+        self.handle_inner(request).await.map_err(Into::into)
     }
 
     async fn handle_query(&self, request: QueryRequest) -> MetaResult<SendableRecordBatchStream> {
@@ -148,6 +137,40 @@ impl RegionRequester {
         recordbatches_from_flight_message_stream(addr, flight_message_stream).await
     }
 
+    /// Sends an owned or shared request without deep-cloning its protobuf payload.
+    ///
+    /// Accepts both [`RegionRequest`] and [`Arc<RegionRequest>`]. Callers can retain a
+    /// shared request for another attempt; this method does not retry or determine
+    /// whether replaying the request is safe.
+    pub async fn handle<R>(&self, request: R) -> Result<RegionResponse>
+    where
+        R: Borrow<RegionRequest> + Send + Sync + 'static,
+    {
+        self.handle_inner(request).await
+    }
+
+    /// Sends a remote dynamic filter update to the region service.
+    pub async fn handle_remote_dyn_filter_update(
+        &self,
+        query_id: impl Into<String>,
+        update: RemoteDynFilterUpdate,
+    ) -> Result<RegionResponse> {
+        self.handle_inner(build_remote_dyn_filter_update_request(query_id, update))
+            .await
+    }
+
+    /// Unregisters a remote dynamic filter in the region service.
+    pub async fn handle_remote_dyn_filter_unregister(
+        &self,
+        query_id: impl Into<String>,
+        unregister: RemoteDynFilterUnregister,
+    ) -> Result<RegionResponse> {
+        self.handle_inner(build_remote_dyn_filter_unregister_request(
+            query_id, unregister,
+        ))
+        .await
+    }
+
     async fn handle_inner<R>(&self, request: R) -> Result<RegionResponse>
     where
         R: Borrow<RegionRequest> + Send + Sync + 'static,
@@ -156,7 +179,7 @@ impl RegionRequester {
             .borrow()
             .body
             .as_ref()
-            .with_context(|| MissingFieldSnafu { field: "body" })?;
+            .context(MissingFieldSnafu { field: "body" })?;
         let is_insert = matches!(
             request_body,
             region_request::Body::Inserts(_) | region_request::Body::BulkInsert(_)
@@ -212,38 +235,6 @@ impl RegionRequester {
         check_response_header(&response.header)?;
 
         Ok(RegionResponse::from_region_response(response))
-    }
-
-    /// Sends an owned or shared request without deep-cloning its protobuf payload.
-    ///
-    /// Accepts both [`RegionRequest`] and [`Arc<RegionRequest>`]. Callers can retain a
-    /// shared request for another attempt; this method does not retry or determine
-    /// whether replaying the request is safe.
-    pub async fn handle<R>(&self, request: R) -> Result<RegionResponse>
-    where
-        R: Borrow<RegionRequest> + Send + Sync + 'static,
-    {
-        self.handle_inner(request).await
-    }
-
-    pub async fn handle_remote_dyn_filter_update(
-        &self,
-        query_id: impl Into<String>,
-        update: RemoteDynFilterUpdate,
-    ) -> Result<RegionResponse> {
-        self.handle_inner(build_remote_dyn_filter_update_request(query_id, update))
-            .await
-    }
-
-    pub async fn handle_remote_dyn_filter_unregister(
-        &self,
-        query_id: impl Into<String>,
-        unregister: RemoteDynFilterUnregister,
-    ) -> Result<RegionResponse> {
-        self.handle_inner(build_remote_dyn_filter_unregister_request(
-            query_id, unregister,
-        ))
-        .await
     }
 }
 
@@ -433,7 +424,6 @@ mod tests {
     use api::v1::{
         ColumnDataType, ColumnSchema as PbColumnSchema, Row, Rows, Status as PbStatus, Value,
     };
-    use common_error::GREPTIME_DB_HEADER_ERROR_RETRY_HINT;
     use common_error::ext::RetryHint;
     use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
     use common_recordbatch::adapter::RecordBatchMetrics;
@@ -449,7 +439,7 @@ mod tests {
     use tonic::{Request, Response, Status};
 
     use super::*;
-    use crate::Error::{self, IllegalDatabaseResponse, Server};
+    use crate::Error;
 
     #[derive(Clone, Default)]
     struct RecordingRegionService {
@@ -651,7 +641,7 @@ mod tests {
         let server = RegionTestServer::start().await;
         let mut status = Status::unavailable("migrating");
         status.metadata_mut().insert(
-            GREPTIME_DB_HEADER_ERROR_RETRY_HINT,
+            common_error::GREPTIME_DB_HEADER_ERROR_RETRY_HINT,
             RetryHint::Retryable.as_str().parse().unwrap(),
         );
         server
@@ -674,14 +664,69 @@ mod tests {
         assert_eq!(&requests[1].0, shared.as_ref());
     }
 
+    #[test]
+    fn test_retry_hint_wire_compatibility() {
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            name: String,
+            wire_hint: Option<String>,
+            expected_hint: String,
+        }
+
+        let fixtures: Vec<Fixture> = serde_json::from_str(include_str!(
+            "../../../tests/compatibility/wire/write_retry/retry_hints.json"
+        ))
+        .unwrap();
+        assert_eq!(fixtures.len(), 5);
+        for fixture in fixtures {
+            let mut status = Status::failed_precondition("region unavailable");
+            status.metadata_mut().insert(
+                common_error::GREPTIME_DB_HEADER_ERROR_CODE,
+                (StatusCode::RegionNotReady as u32)
+                    .to_string()
+                    .parse()
+                    .unwrap(),
+            );
+            if let Some(hint) = fixture.wire_hint {
+                status.metadata_mut().insert(
+                    common_error::GREPTIME_DB_HEADER_ERROR_RETRY_HINT,
+                    hint.parse().unwrap(),
+                );
+            }
+            let error: error::Error = status.into();
+            assert_eq!(
+                error.retry_hint().as_str(),
+                fixture.expected_hint,
+                "{}",
+                fixture.name
+            );
+            assert_eq!(
+                error.status_code(),
+                StatusCode::RegionNotReady,
+                "{}",
+                fixture.name
+            );
+            assert_eq!(
+                error.tonic_code(),
+                Some(tonic::Code::FailedPrecondition),
+                "{}",
+                fixture.name
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_transport_error_parity_and_datanode_mapping() {
         let server = RegionTestServer::start().await;
         let requester = server.create_requester(ChannelConfig::default(), false, false);
-        for hint in [RetryHint::Retryable, RetryHint::NonRetryable] {
+        for hint in [
+            RetryHint::Retryable,
+            RetryHint::RetryAfterRouteRefresh,
+            RetryHint::NonRetryable,
+        ] {
             let mut status = Status::failed_precondition("region unavailable");
             status.metadata_mut().insert(
-                GREPTIME_DB_HEADER_ERROR_RETRY_HINT,
+                common_error::GREPTIME_DB_HEADER_ERROR_RETRY_HINT,
                 hint.as_str().parse().unwrap(),
             );
             status.metadata_mut().insert(
@@ -725,8 +770,9 @@ mod tests {
                 .await
                 .unwrap_err();
             assert_eq!(error.status_code(), StatusCode::RegionNotFound);
+            assert_eq!(error.retry_hint(), hint);
             match hint {
-                RetryHint::Retryable => assert!(matches!(
+                RetryHint::Retryable | RetryHint::RetryAfterRouteRefresh => assert!(matches!(
                     error,
                     meta_error::Error::RetryLater {
                         clean_poisons: false,
@@ -931,13 +977,13 @@ mod tests {
         let result = check_response_header(&None);
         assert!(matches!(
             result.unwrap_err(),
-            IllegalDatabaseResponse { .. }
+            Error::IllegalDatabaseResponse { .. }
         ));
 
         let result = check_response_header(&Some(ResponseHeader { status: None }));
         assert!(matches!(
             result.unwrap_err(),
-            IllegalDatabaseResponse { .. }
+            Error::IllegalDatabaseResponse { .. }
         ));
 
         let result = check_response_header(&Some(ResponseHeader {
@@ -956,7 +1002,7 @@ mod tests {
         }));
         assert!(matches!(
             result.unwrap_err(),
-            IllegalDatabaseResponse { .. }
+            Error::IllegalDatabaseResponse { .. }
         ));
 
         let result = check_response_header(&Some(ResponseHeader {
@@ -965,7 +1011,7 @@ mod tests {
                 err_msg: "blabla".to_string(),
             }),
         }));
-        let Server { code, msg, .. } = result.unwrap_err() else {
+        let Error::Server { code, msg, .. } = result.unwrap_err() else {
             unreachable!()
         };
         assert_eq!(code, StatusCode::Internal);

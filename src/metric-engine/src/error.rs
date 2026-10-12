@@ -483,30 +483,48 @@ impl ErrorExt for Error {
     }
 
     fn retry_hint(&self) -> RetryHint {
-        use Error::*;
-
         match self {
-            CreateMitoRegion { source, .. }
-            | OpenMitoRegion { source, .. }
-            | CleanUpMitoRegion { source, .. }
-            | BatchOpenMitoRegion { source, .. }
-            | BatchCatchupMitoRegion { source, .. }
-            | CloseMitoRegion { source, .. }
-            | MitoReadOperation { source, .. }
-            | MitoWriteOperation { source, .. }
-            | MitoFlushOperation { source, .. }
-            | MitoTruncateOperation { source, .. }
-            | MitoSyncOperation { source, .. }
-            | MitoEnterStagingOperation { source, .. }
-            | MitoCopyRegionFromOperation { source, .. }
-            | MitoEditRegion { source, .. } => source.retry_hint(),
+            Error::PhysicalRegionNotFound { .. } | Error::LogicalRegionNotFound { .. } => {
+                RetryHint::RetryAfterRouteRefresh
+            }
+            Error::CreateMitoRegion { source, .. }
+            | Error::OpenMitoRegion { source, .. }
+            | Error::CleanUpMitoRegion { source, .. }
+            | Error::BatchOpenMitoRegion { source, .. }
+            | Error::BatchCatchupMitoRegion { source, .. }
+            | Error::CloseMitoRegion { source, .. }
+            | Error::MitoReadOperation { source, .. }
+            | Error::MitoWriteOperation { source, .. }
+            | Error::MitoFlushOperation { source, .. }
+            | Error::MitoTruncateOperation { source, .. }
+            | Error::MitoSyncOperation { source, .. }
+            | Error::MitoEnterStagingOperation { source, .. }
+            | Error::MitoCopyRegionFromOperation { source, .. }
+            | Error::MitoEditRegion { source, .. } => source.retry_hint(),
 
-            EncodePrimaryKey { source, .. } => source.retry_hint(),
-            CollectRecordBatchStream { source, .. } => source.retry_hint(),
-            StartRepeatedTask { source, .. } => source.retry_hint(),
-            CacheGet { source, .. } => source.retry_hint(),
+            Error::EncodePrimaryKey { source, .. } => source.retry_hint(),
+            Error::CollectRecordBatchStream { source, .. } => source.retry_hint(),
+            Error::StartRepeatedTask { source, .. } => source.retry_hint(),
+            Error::CacheGet { source, .. } => source.retry_hint(),
 
             _ => RetryHint::NonRetryable,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_missing_region_retry_hints() {
+        let region_id = RegionId::new(1024, 1);
+        for error in [
+            PhysicalRegionNotFoundSnafu { region_id }.build(),
+            LogicalRegionNotFoundSnafu { region_id }.build(),
+        ] {
+            assert_eq!(error.status_code(), StatusCode::RegionNotFound);
+            assert_eq!(error.retry_hint(), RetryHint::RetryAfterRouteRefresh);
         }
     }
 }

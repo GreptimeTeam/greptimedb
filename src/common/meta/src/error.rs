@@ -1343,59 +1343,62 @@ impl ErrorExt for Error {
     }
 
     fn retry_hint(&self) -> RetryHint {
-        use Error::*;
-
         match self {
-            RetryLater { .. }
-            | GetLatestCacheRetryExceeded { .. }
-            | NoLeader { .. }
-            | ElectionNoLeader { .. }
-            | ElectionLeaderLeaseExpired { .. }
-            | ElectionLeaderLeaseChanged { .. } => RetryHint::Retryable,
-            ConnectEtcd { error, .. } | EtcdFailed { error, .. } | EtcdTxnFailed { error, .. } => {
-                retry_hint_from_etcd_error(error)
-            }
-            WriteObject { error, .. } | ReadObject { error, .. } => {
+            Error::RetryLater { source, .. } => match source.retry_hint() {
+                RetryHint::RetryAfterRouteRefresh => RetryHint::RetryAfterRouteRefresh,
+                RetryHint::Retryable | RetryHint::NonRetryable => RetryHint::Retryable,
+            },
+            Error::GetLatestCacheRetryExceeded { .. }
+            | Error::NoLeader { .. }
+            | Error::ElectionNoLeader { .. }
+            | Error::ElectionLeaderLeaseExpired { .. }
+            | Error::ElectionLeaderLeaseChanged { .. } => RetryHint::Retryable,
+            Error::ConnectEtcd { error, .. }
+            | Error::EtcdFailed { error, .. }
+            | Error::EtcdTxnFailed { error, .. } => retry_hint_from_etcd_error(error),
+            Error::WriteObject { error, .. } | Error::ReadObject { error, .. } => {
                 retry_hint_from_opendal_error(error)
             }
-            BuildKafkaClient { error, .. }
-            | BuildKafkaCtrlClient { error, .. }
-            | KafkaPartitionClient { error, .. }
-            | KafkaGetOffset { error, .. }
-            | ProduceRecord { error, .. }
-            | CreateKafkaWalTopic { error, .. } => rskafka_client_error_to_retry_hint(error),
-            SubmitProcedure { source, .. }
-            | QueryProcedure { source, .. }
-            | WaitProcedure { source, .. }
-            | StartProcedureManager { source, .. }
-            | StopProcedureManager { source, .. }
-            | RegisterProcedureLoader { source, .. }
-            | PutPoison { source, .. }
-            | ProcedureStateReceiver { source, .. } => source.retry_hint(),
-            External { source, .. }
-            | ResponseExceededSizeLimit { source, .. }
-            | OperateDatanode { source, .. }
-            | AbortProcedure { source, .. }
-            | RegisterRepartitionProcedureLoader { source, .. }
-            | CreateRepartitionProcedure { source, .. }
-            | PersistRepartitionGcRequirement { source, .. } => source.retry_hint(),
-            Table { source, .. } => source.retry_hint(),
-            ConvertAlterTableRequest { source, .. } => source.retry_hint(),
-            ConvertColumnDef { source, .. } => source.retry_hint(),
-            GetCache { source, .. } => source.retry_hint(),
+            Error::BuildKafkaClient { error, .. }
+            | Error::BuildKafkaCtrlClient { error, .. }
+            | Error::KafkaPartitionClient { error, .. }
+            | Error::KafkaGetOffset { error, .. }
+            | Error::ProduceRecord { error, .. }
+            | Error::CreateKafkaWalTopic { error, .. } => rskafka_client_error_to_retry_hint(error),
+            Error::SubmitProcedure { source, .. }
+            | Error::QueryProcedure { source, .. }
+            | Error::WaitProcedure { source, .. }
+            | Error::StartProcedureManager { source, .. }
+            | Error::StopProcedureManager { source, .. }
+            | Error::RegisterProcedureLoader { source, .. }
+            | Error::PutPoison { source, .. }
+            | Error::ProcedureStateReceiver { source, .. } => source.retry_hint(),
+            Error::External { source, .. }
+            | Error::ResponseExceededSizeLimit { source, .. }
+            | Error::OperateDatanode { source, .. }
+            | Error::AbortProcedure { source, .. }
+            | Error::RegisterRepartitionProcedureLoader { source, .. }
+            | Error::CreateRepartitionProcedure { source, .. }
+            | Error::PersistRepartitionGcRequirement { source, .. } => source.retry_hint(),
+            Error::Table { source, .. } => source.retry_hint(),
+            Error::ConvertAlterTableRequest { source, .. } => source.retry_hint(),
+            Error::ConvertColumnDef { source, .. } => source.retry_hint(),
+            Error::GetCache { source, .. } => source.retry_hint(),
             #[cfg(feature = "pg_kvbackend")]
-            PostgresExecution { error, .. } | PostgresTransaction { error, .. } => {
+            Error::PostgresExecution { error, .. } | Error::PostgresTransaction { error, .. } => {
                 retry_hint_from_postgres_error(error)
             }
             #[cfg(feature = "pg_kvbackend")]
-            GetPostgresClient { error, .. } => retry_hint_from_postgres_pool_error(error),
+            Error::GetPostgresClient { error, .. } => retry_hint_from_postgres_pool_error(error),
             #[cfg(feature = "mysql_kvbackend")]
-            MySqlExecution { error, .. }
-            | CreateMySqlPool { error, .. }
-            | AcquireMySqlClient { error, .. }
-            | MySqlTransaction { error, .. } => retry_hint_from_sqlx_error(error),
+            Error::MySqlExecution { error, .. }
+            | Error::CreateMySqlPool { error, .. }
+            | Error::AcquireMySqlClient { error, .. }
+            | Error::MySqlTransaction { error, .. } => retry_hint_from_sqlx_error(error),
             #[cfg(any(feature = "pg_kvbackend", feature = "mysql_kvbackend"))]
-            RdsTransactionRetryFailed { .. } | SqlExecutionTimeout { .. } => RetryHint::Retryable,
+            Error::RdsTransactionRetryFailed { .. } | Error::SqlExecutionTimeout { .. } => {
+                RetryHint::Retryable
+            }
             _ => RetryHint::NonRetryable,
         }
     }
