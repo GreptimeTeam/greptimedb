@@ -94,7 +94,8 @@ use sql::statements::create::{
 use sql::statements::statement::Statement;
 use sqlparser::ast::{Expr, Ident, UnaryOperator, Value as ParserValue};
 use store_api::metric_engine_consts::{
-    LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
+    DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
+    PHYSICAL_TABLE_METADATA_KEY,
 };
 use store_api::mito_engine_options::APPEND_MODE_KEY;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -625,6 +626,31 @@ impl StatementExecutor {
                 }
                 .fail()
             };
+        }
+
+        // The metric engine owns `__tsid` on its physical tables, so a table on any
+        // other engine must not be able to declare it. A physical metric table is
+        // exempt: `SHOW CREATE TABLE` renders it back with the internal columns and
+        // the physical-table option, and replaying that statement must keep working.
+        // This is checked after the catalog existence lookup above so `IF NOT EXISTS`
+        // stays a no-op for a legacy table that already stores the column.
+        let is_physical_metric_table = create_table.engine == METRIC_ENGINE_NAME
+            || create_table
+                .table_options
+                .contains_key(PHYSICAL_TABLE_METADATA_KEY);
+        if !is_physical_metric_table
+            && create_table
+                .column_defs
+                .iter()
+                .any(|column| column.name == DATA_SCHEMA_TSID_COLUMN_NAME)
+        {
+            return InvalidSqlSnafu {
+                err_msg: format!(
+                    "column name `{}` is reserved by the metric engine",
+                    DATA_SCHEMA_TSID_COLUMN_NAME
+                ),
+            }
+            .fail();
         }
 
         ensure!(
@@ -2571,6 +2597,29 @@ pub fn verify_alter(
         }) {
             return Ok(false);
         }
+        // The metric engine owns `__tsid` on its physical tables, so any other engine
+        // must not be able to add the reserved column. A physical metric table is
+        // exempt, because its stored engine may be `mito` while the physical-table
+        // option still marks it as owned by the metric engine. Legacy tables that
+        // already store it keep their writes: only a genuinely new `__tsid` column
+        // is rejected, and the all-`add_if_not_exists` no-op case returned above
+        // stays a no-op.
+        let is_physical_metric_table =
+            table_info.meta.engine == METRIC_ENGINE_NAME || table_info.is_physical_table();
+        if !is_physical_metric_table
+            && columns.iter().any(|column| {
+                column.column_schema.name == DATA_SCHEMA_TSID_COLUMN_NAME
+                    && !column_names.contains(&column.column_schema.name)
+            })
+        {
+            return InvalidSqlSnafu {
+                err_msg: format!(
+                    "column name `{}` is reserved by the metric engine",
+                    DATA_SCHEMA_TSID_COLUMN_NAME
+                ),
+            }
+            .fail();
+        }
     }
 
     let new_meta = table_info
@@ -3881,6 +3930,68 @@ WITH ('repartition.column.hint' = ' host ')",
             common_error::ext::ErrorExt::status_code(&err),
             common_error::status_code::StatusCode::InvalidArguments
         );
+    }
+
+    #[test]
+    fn test_verify_alter_legacy_tsid_column_keeps_writes() {
+        // A legacy mito table that already stores `__tsid` keeps its writes: an
+        // `ADD IF NOT EXISTS` no-op stays a no-op, and a mixed batch is rejected
+        // only because of the genuinely new column, not the existing one.
+        let expr = create_expr_from_sql(
+            "CREATE TABLE legacy (__tsid BIGINT, ts TIMESTAMP TIME INDEX, host STRING);",
+        );
+        let table_info = Arc::new(create_table_info(&expr, vec![]).unwrap());
+        let alter = |add_columns: Vec<api::v1::AddColumn>| AlterTableExpr {
+            catalog_name: "greptime".to_string(),
+            schema_name: "public".to_string(),
+            table_name: "legacy".to_string(),
+            kind: Some(Kind::AddColumns(api::v1::AddColumns { add_columns })),
+        };
+        let tsid_column = |add_if_not_exists| api::v1::AddColumn {
+            column_def: Some(api::v1::ColumnDef {
+                name: DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                data_type: api::v1::ColumnDataType::Int64 as i32,
+                is_nullable: false,
+                default_constraint: vec![],
+                semantic_type: api::v1::SemanticType::Tag as i32,
+                ..Default::default()
+            }),
+            location: None,
+            add_if_not_exists,
+        };
+        let extra_column = || api::v1::AddColumn {
+            column_def: Some(api::v1::ColumnDef {
+                name: "mem".to_string(),
+                data_type: api::v1::ColumnDataType::Float64 as i32,
+                is_nullable: true,
+                default_constraint: vec![],
+                semantic_type: api::v1::SemanticType::Field as i32,
+                ..Default::default()
+            }),
+            location: None,
+            add_if_not_exists: false,
+        };
+
+        // `ADD COLUMN IF NOT EXISTS __tsid` on the existing column is a no-op.
+        assert!(!verify_alter(1, table_info.clone(), alter(vec![tsid_column(true)])).unwrap());
+
+        // A mixed batch that re-declares the existing `__tsid` with `IF NOT
+        // EXISTS` plus a new column is accepted: the legacy column itself is not
+        // rejected, only genuinely new `__tsid` columns are.
+        assert!(
+            verify_alter(
+                1,
+                table_info.clone(),
+                alter(vec![tsid_column(true), extra_column()])
+            )
+            .unwrap()
+        );
+
+        // A plain re-add without `IF NOT EXISTS` still errors on the duplicate
+        // column name, so it is rejected before the reserved-name guard.
+        let err = verify_alter(1, table_info, alter(vec![tsid_column(false)])).unwrap_err();
+        let msg = common_error::ext::ErrorExt::output_msg(&err);
+        assert!(msg.contains("__tsid"), "{msg}");
     }
 
     #[test]

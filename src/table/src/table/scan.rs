@@ -211,10 +211,12 @@ impl RegionScanExec {
 
         let partitioning = match request.distribution {
             Some(TimeSeriesDistribution::PerSeries) if has_internal_tsid => {
-                let tsid = Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema)
-                    .ok()
-                    .map(|column| vec![Arc::new(column) as _]);
-                Partitioning::Hash(tsid.unwrap_or(pk_columns), num_output_partition)
+                match Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema) {
+                    Ok(tsid) => Partitioning::Hash(vec![Arc::new(tsid) as _], num_output_partition),
+                    // The reserved `__tsid` column is not part of the scan output, so
+                    // the per-series hash distribution cannot be claimed for it.
+                    Err(_) => Partitioning::UnknownPartitioning(num_output_partition),
+                }
             }
             Some(TimeSeriesDistribution::PerSeries) if pk_columns.len() == pk_names.len() => {
                 Partitioning::Hash(pk_columns.clone(), num_output_partition)
@@ -1015,7 +1017,7 @@ mod test {
             let scanner = Box::new(RepeatableScanner {
                 batches,
                 properties,
-                metadata,
+                metadata: metadata.clone(),
                 dynamic_filters: Arc::new(Mutex::new(Vec::new())),
             });
             let plan = RegionScanExec::new(
@@ -1058,6 +1060,45 @@ mod test {
                         .unwrap()
                 );
             }
+
+            // A scan that projects away the reserved `__tsid` column must not claim
+            // the per-series hash distribution: the hash column is absent from the
+            // scan output, and the remaining primary keys are incomplete. Match the
+            // variant and compare the count explicitly, because
+            // `Partitioning::UnknownPartitioning` never compares equal.
+            let projected_schema = Arc::new(Schema::new(vec![
+                ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+                ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+            ]));
+            let projected_batches = RecordBatches::try_new(projected_schema, vec![]).unwrap();
+            let scanner = Box::new(RepeatableScanner {
+                batches: projected_batches,
+                properties: ScannerProperties::new(vec![vec![], vec![], vec![]], false, 0),
+                metadata,
+                dynamic_filters: Arc::new(Mutex::new(Vec::new())),
+            });
+            let plan = RegionScanExec::new(
+                scanner,
+                ScanRequest {
+                    distribution: Some(TimeSeriesDistribution::PerSeries),
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+
+            let partitioning = plan.properties().output_partitioning();
+            let Partitioning::UnknownPartitioning(actual_count) = partitioning else {
+                panic!(
+                    "a scan without the projected `__tsid` column must not claim hash \
+                     partitioning, got {partitioning:?}"
+                );
+            };
+            assert_eq!(*actual_count, 3);
         }
     }
 
