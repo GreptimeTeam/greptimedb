@@ -483,29 +483,31 @@ impl ErrorExt for Error {
     }
 
     fn retry_hint(&self) -> RetryHint {
+        use Error::*;
+
         match self {
-            Error::PhysicalRegionNotFound { .. } | Error::LogicalRegionNotFound { .. } => {
+            PhysicalRegionNotFound { .. } | LogicalRegionNotFound { .. } => {
                 RetryHint::RetryAfterRouteRefresh
             }
-            Error::CreateMitoRegion { source, .. }
-            | Error::OpenMitoRegion { source, .. }
-            | Error::CleanUpMitoRegion { source, .. }
-            | Error::BatchOpenMitoRegion { source, .. }
-            | Error::BatchCatchupMitoRegion { source, .. }
-            | Error::CloseMitoRegion { source, .. }
-            | Error::MitoReadOperation { source, .. }
-            | Error::MitoWriteOperation { source, .. }
-            | Error::MitoFlushOperation { source, .. }
-            | Error::MitoTruncateOperation { source, .. }
-            | Error::MitoSyncOperation { source, .. }
-            | Error::MitoEnterStagingOperation { source, .. }
-            | Error::MitoCopyRegionFromOperation { source, .. }
-            | Error::MitoEditRegion { source, .. } => source.retry_hint(),
+            CreateMitoRegion { source, .. }
+            | OpenMitoRegion { source, .. }
+            | CleanUpMitoRegion { source, .. }
+            | BatchOpenMitoRegion { source, .. }
+            | BatchCatchupMitoRegion { source, .. }
+            | CloseMitoRegion { source, .. }
+            | MitoReadOperation { source, .. }
+            | MitoWriteOperation { source, .. }
+            | MitoFlushOperation { source, .. }
+            | MitoTruncateOperation { source, .. }
+            | MitoSyncOperation { source, .. }
+            | MitoEnterStagingOperation { source, .. }
+            | MitoCopyRegionFromOperation { source, .. }
+            | MitoEditRegion { source, .. } => source.retry_hint(),
 
-            Error::EncodePrimaryKey { source, .. } => source.retry_hint(),
-            Error::CollectRecordBatchStream { source, .. } => source.retry_hint(),
-            Error::StartRepeatedTask { source, .. } => source.retry_hint(),
-            Error::CacheGet { source, .. } => source.retry_hint(),
+            EncodePrimaryKey { source, .. } => source.retry_hint(),
+            CollectRecordBatchStream { source, .. } => source.retry_hint(),
+            StartRepeatedTask { source, .. } => source.retry_hint(),
+            CacheGet { source, .. } => source.retry_hint(),
 
             _ => RetryHint::NonRetryable,
         }

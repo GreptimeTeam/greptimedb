@@ -558,38 +558,36 @@ impl ErrorExt for Error {
     }
 
     fn retry_hint(&self) -> RetryHint {
+        use Error::*;
+
         match self {
-            Error::RegionNotReady { .. } | Error::RegionNotFound { .. } => {
-                RetryHint::RetryAfterRouteRefresh
-            }
-            Error::RegionBusy { .. }
-            | Error::ConcurrentQueryLimiterClosed { .. }
-            | Error::ConcurrentQueryLimiterTimeout { .. } => RetryHint::Retryable,
-            Error::NewPlanDecoder { source, .. } | Error::ExecuteLogicalPlan { source, .. } => {
+            RegionNotReady { .. } | RegionNotFound { .. } => RetryHint::RetryAfterRouteRefresh,
+            RegionBusy { .. }
+            | ConcurrentQueryLimiterClosed { .. }
+            | ConcurrentQueryLimiterTimeout { .. } => RetryHint::Retryable,
+            NewPlanDecoder { source, .. } | ExecuteLogicalPlan { source, .. } => {
                 source.retry_hint()
             }
-            Error::HandleHeartbeatResponse { source, .. } | Error::GetMetadata { source, .. } => {
+            HandleHeartbeatResponse { source, .. } | GetMetadata { source, .. } => {
                 source.retry_hint()
             }
-            Error::DecodeLogicalPlan { source, .. } => source.retry_hint(),
-            Error::Delete { source, .. } => source.retry_hint(),
-            Error::AsyncTaskExecute { source, .. } => source.retry_hint(),
-            Error::StartServer { source, .. } | Error::ShutdownServer { source, .. } => {
-                source.retry_hint()
-            }
-            Error::OpenLogStore { source, .. } => source.retry_hint(),
-            Error::MetaClientInit { source, .. } => source.retry_hint(),
-            Error::HandleRegionRequest { source, .. }
-            | Error::GetRegionMetadata { source, .. }
-            | Error::HandleBatchOpenRequest { source, .. }
-            | Error::HandleBatchDdlRequest { source, .. }
-            | Error::StopRegionEngine { source, .. } => source.retry_hint(),
-            Error::FindLogicalRegions { source, .. } => source.retry_hint(),
-            Error::BuildMitoEngine { source, .. } => source.retry_hint(),
-            Error::GcMitoEngine { source, .. } => source.retry_hint(),
-            Error::BuildMetricEngine { source, .. } => source.retry_hint(),
-            Error::ListStorageSsts { source, .. } => source.retry_hint(),
-            Error::ObjectStore { source, .. } => source.retry_hint(),
+            DecodeLogicalPlan { source, .. } => source.retry_hint(),
+            Delete { source, .. } => source.retry_hint(),
+            AsyncTaskExecute { source, .. } => source.retry_hint(),
+            StartServer { source, .. } | ShutdownServer { source, .. } => source.retry_hint(),
+            OpenLogStore { source, .. } => source.retry_hint(),
+            MetaClientInit { source, .. } => source.retry_hint(),
+            HandleRegionRequest { source, .. }
+            | GetRegionMetadata { source, .. }
+            | HandleBatchOpenRequest { source, .. }
+            | HandleBatchDdlRequest { source, .. }
+            | StopRegionEngine { source, .. } => source.retry_hint(),
+            FindLogicalRegions { source, .. } => source.retry_hint(),
+            BuildMitoEngine { source, .. } => source.retry_hint(),
+            GcMitoEngine { source, .. } => source.retry_hint(),
+            BuildMetricEngine { source, .. } => source.retry_hint(),
+            ListStorageSsts { source, .. } => source.retry_hint(),
+            ObjectStore { source, .. } => source.retry_hint(),
             _ => RetryHint::NonRetryable,
         }
     }

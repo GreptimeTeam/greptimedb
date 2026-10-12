@@ -1636,83 +1636,85 @@ impl ErrorExt for Error {
     }
 
     fn retry_hint(&self) -> RetryHint {
+        use Error::*;
+
         match self {
-            Error::PartitionExprVersionMismatch { .. }
-            | Error::RegionNotFound { .. }
-            | Error::RejectWrite { .. }
-            | Error::RegionState {
+            PartitionExprVersionMismatch { .. }
+            | RegionNotFound { .. }
+            | RejectWrite { .. }
+            | RegionState {
                 state: RegionRoleState::Follower,
                 ..
             } => RetryHint::RetryAfterRouteRefresh,
-            Error::ReadParquet { .. }
-            | Error::WriteParquet { .. }
-            | Error::Download { .. }
-            | Error::Upload { .. }
-            | Error::RegionState { .. }
-            | Error::UpdateManifest { .. }
-            | Error::RegionStopped { .. }
-            | Error::RegionBusy { .. }
-            | Error::ManualCompactionAlreadyRunning { .. }
-            | Error::FlushableRegionState { .. }
-            | Error::ManifestDeltaNotFound { .. } => RetryHint::Retryable,
+            ReadParquet { .. }
+            | WriteParquet { .. }
+            | Download { .. }
+            | Upload { .. }
+            | RegionState { .. }
+            | UpdateManifest { .. }
+            | RegionStopped { .. }
+            | RegionBusy { .. }
+            | ManualCompactionAlreadyRunning { .. }
+            | FlushableRegionState { .. }
+            | ManifestDeltaNotFound { .. } => RetryHint::Retryable,
 
-            Error::OpenDal { error, .. }
-            | Error::DeleteSsts { error, .. }
-            | Error::DeleteIndex { error, .. }
-            | Error::DeleteIndexes { error, .. } => retry_hint_from_opendal_error(error),
+            OpenDal { error, .. }
+            | DeleteSsts { error, .. }
+            | DeleteIndex { error, .. }
+            | DeleteIndexes { error, .. } => retry_hint_from_opendal_error(error),
 
-            Error::WriteWal { source, .. }
-            | Error::ReadWal { source, .. }
-            | Error::DeleteWal { source, .. }
-            | Error::WaitWalDurable { source, .. }
-            | Error::FetchManifests { source, .. }
-            | Error::External { source, .. } => source.retry_hint(),
+            WriteWal { source, .. }
+            | ReadWal { source, .. }
+            | DeleteWal { source, .. }
+            | WaitWalDurable { source, .. }
+            | FetchManifests { source, .. }
+            | External { source, .. } => source.retry_hint(),
 
-            Error::OpenRegion { source, .. }
-            | Error::WriteGroup { source, .. }
-            | Error::FlushRegion { source, .. }
-            | Error::BuildIndexAsync { source, .. }
-            | Error::CompactRegion { source, .. }
-            | Error::EditRegion { source, .. }
-            | Error::ScanSeries { source, .. }
-            | Error::PruneFile { source, .. } => source.retry_hint(),
+            OpenRegion { source, .. }
+            | WriteGroup { source, .. }
+            | FlushRegion { source, .. }
+            | BuildIndexAsync { source, .. }
+            | CompactRegion { source, .. }
+            | EditRegion { source, .. }
+            | ScanSeries { source, .. }
+            | PruneFile { source, .. } => source.retry_hint(),
 
-            Error::DataTypeMismatch { source, .. }
-            | Error::ConvertVector { source, .. }
-            | Error::ConvertValue { source, .. }
-            | Error::IndexOptions { source, .. }
-            | Error::CastVector { source, .. } => source.retry_hint(),
+            DataTypeMismatch { source, .. }
+            | ConvertVector { source, .. }
+            | ConvertValue { source, .. }
+            | IndexOptions { source, .. }
+            | CastVector { source, .. } => source.retry_hint(),
 
-            Error::BuildIndexApplier { source, .. }
-            | Error::PushIndexValue { source, .. }
-            | Error::ApplyInvertedIndex { source, .. }
-            | Error::IndexFinish { source, .. } => source.retry_hint(),
+            BuildIndexApplier { source, .. }
+            | PushIndexValue { source, .. }
+            | ApplyInvertedIndex { source, .. }
+            | IndexFinish { source, .. } => source.retry_hint(),
 
-            Error::ApplyBloomFilterIndex { source, .. }
-            | Error::PushBloomFilterValue { source, .. }
-            | Error::BloomFilterFinish { source, .. } => source.retry_hint(),
+            ApplyBloomFilterIndex { source, .. }
+            | PushBloomFilterValue { source, .. }
+            | BloomFilterFinish { source, .. } => source.retry_hint(),
 
-            Error::PuffinReadBlob { source, .. }
-            | Error::PuffinAddBlob { source, .. }
-            | Error::PuffinInitStager { source, .. }
-            | Error::PuffinBuildReader { source, .. }
-            | Error::PuffinPurgeStager { source, .. } => source.retry_hint(),
+            PuffinReadBlob { source, .. }
+            | PuffinAddBlob { source, .. }
+            | PuffinInitStager { source, .. }
+            | PuffinBuildReader { source, .. }
+            | PuffinPurgeStager { source, .. } => source.retry_hint(),
 
-            Error::CreateFulltextCreator { source, .. }
-            | Error::FulltextPushText { source, .. }
-            | Error::FulltextFinish { source, .. }
-            | Error::ApplyFulltextIndex { source, .. } => source.retry_hint(),
+            CreateFulltextCreator { source, .. }
+            | FulltextPushText { source, .. }
+            | FulltextFinish { source, .. }
+            | ApplyFulltextIndex { source, .. } => source.retry_hint(),
 
-            Error::InvalidRegionRequest { source, .. } => source.retry_hint(),
-            Error::InvalidPartitionExpr { source, .. } => source.retry_hint(),
-            Error::RecordBatch { source, .. } => source.retry_hint(),
-            Error::GetSchemaMetadata { source, .. } => source.retry_hint(),
-            Error::CompactionMemoryExhausted { source, .. } => source.retry_hint(),
-            Error::ConvertBulkWalEntry { source, .. } => source.retry_hint(),
-            Error::Encode { source, .. } | Error::Decode { source, .. } => source.retry_hint(),
+            InvalidRegionRequest { source, .. } => source.retry_hint(),
+            InvalidPartitionExpr { source, .. } => source.retry_hint(),
+            RecordBatch { source, .. } => source.retry_hint(),
+            GetSchemaMetadata { source, .. } => source.retry_hint(),
+            CompactionMemoryExhausted { source, .. } => source.retry_hint(),
+            ConvertBulkWalEntry { source, .. } => source.retry_hint(),
+            Encode { source, .. } | Decode { source, .. } => source.retry_hint(),
 
             #[cfg(feature = "enterprise")]
-            Error::ScanExternalRange { source, .. } => source.retry_hint(),
+            ScanExternalRange { source, .. } => source.retry_hint(),
 
             _ => RetryHint::NonRetryable,
         }
