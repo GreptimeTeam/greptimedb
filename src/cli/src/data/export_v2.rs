@@ -40,8 +40,7 @@
 //!
 //! `--pack-metric-data` enables shared Metric physical scans for Parquet
 //! and writes version-2 packed snapshots.
-//! Enable `experimental_metric_export = true` on the frontend or standalone server
-//! and use an endpoint whose frontends all support and enable this option.
+//! Use an endpoint whose frontends all support packed export.
 //! Resume reads the layout from the existing manifest.
 //! This requires the server packed-export capability; schema-only exports remain version 1.
 //! The command checks the server capability before modifying the snapshot.
