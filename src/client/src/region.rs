@@ -655,7 +655,7 @@ mod tests {
         let error = requester.handle(Arc::clone(&shared)).await.unwrap_err();
         assert_eq!(error.retry_hint(), RetryHint::Retryable);
         assert!(
-            matches!(error, error::Error::RegionServer { addr, code: tonic::Code::Unavailable, .. } if addr == server.addr)
+            matches!(error, Error::RegionServer { addr, code: tonic::Code::Unavailable, .. } if addr == server.addr)
         );
         requester.handle(Arc::clone(&shared)).await.unwrap();
         let requests = server.service.requests.lock().unwrap();
@@ -699,7 +699,7 @@ mod tests {
                     hint.parse().unwrap(),
                 );
             }
-            let error: error::Error = status.into();
+            let error: Error = status.into();
             assert_eq!(error.retry_hint(), expected_hint, "{name}");
             assert_eq!(error.status_code(), StatusCode::RegionNotReady, "{name}");
             assert_eq!(
@@ -743,7 +743,7 @@ mod tests {
             ))
             .await
             .unwrap();
-            let baseline: error::Error = baseline
+            let baseline: Error = baseline
                 .handle(build_insert_request())
                 .await
                 .unwrap_err()
@@ -792,11 +792,11 @@ mod tests {
         let shared = Arc::new(build_insert_request());
         assert!(matches!(
             requester.handle(Arc::clone(&shared)).await.unwrap_err(),
-            error::Error::IllegalDatabaseResponse { .. }
+            Error::IllegalDatabaseResponse { .. }
         ));
         assert!(matches!(
             requester.handle(shared).await.unwrap_err(),
-            error::Error::Server {
+            Error::Server {
                 code: StatusCode::RegionNotFound,
                 ..
             }
@@ -822,7 +822,7 @@ mod tests {
             .unwrap()
             .max_encoding_message_size(config.max_send_message_size.as_bytes() as usize)
             .max_decoding_message_size(config.max_recv_message_size.as_bytes() as usize);
-            let baseline: error::Error = baseline
+            let baseline: Error = baseline
                 .handle(build_insert_request())
                 .await
                 .unwrap_err()

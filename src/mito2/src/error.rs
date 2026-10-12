@@ -1734,6 +1734,7 @@ mod tests {
     use snafu::IntoError;
 
     use super::*;
+    use crate::region::RegionLeaderState;
 
     #[test]
     fn test_partition_version_mismatch_retry_hint() {
@@ -1750,7 +1751,7 @@ mod tests {
     #[test]
     fn test_region_state_retry_hint() {
         let region_id = RegionId::new(1, 1);
-        let writable = RegionRoleState::Leader(crate::region::RegionLeaderState::Writable);
+        let writable = RegionRoleState::Leader(RegionLeaderState::Writable);
         let follower_error = RegionStateSnafu {
             region_id,
             state: RegionRoleState::Follower,
