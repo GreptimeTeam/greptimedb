@@ -268,7 +268,7 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
         with tempfile.TemporaryDirectory() as directory:
             (Path(directory) / "lsblk").write_text("#!/usr/bin/env bash\necho '/dev/nvme0n1 Amazon Elastic Block Store'\n")
             (Path(directory) / "lsblk").chmod(0o755)
-            env = os.environ | {"PATH": f"{directory}:{os.environ['PATH']}", "SMOKE": "false"}
+            env = os.environ | {"PATH": f"{directory}:{os.environ['PATH']}", "SMOKE": "false", "RESULTS": directory}
             done = subprocess.run(["bash", str(SCRIPTS / "oswal-s3-bench-run.sh"), "wal-disk", f"{directory}/wal"],
                                   env=env, capture_output=True, text=True, timeout=60)
             self.assertNotEqual(done.returncode, 0)

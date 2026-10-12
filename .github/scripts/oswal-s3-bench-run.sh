@@ -31,6 +31,7 @@ pull_images() {
 }
 
 wal_disk() {
+    : "${RESULTS:?}"
     local root=$1 device
     device=$(lsblk -dnpo NAME,MODEL | awk '/Instance Storage/ {print $1; exit}')
     # Only a smoke run may keep the Raft Engine WAL on the root volume.
@@ -42,7 +43,7 @@ wal_disk() {
         sudo -n mount -o noatime "$device" "$root"
     fi
     sudo -n chown "$(id -u):$(id -g)" "$root"
-    findmnt -no SOURCE,FSTYPE -T "$root"
+    findmnt -no SOURCE,FSTYPE -T "$root" | tee "$RESULTS/wal-disk.txt"
 }
 
 generate() {
