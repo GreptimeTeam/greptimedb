@@ -823,6 +823,9 @@ impl<'a> L1OverlapRunBudget<'a> {
     }
 
     fn allows_candidate(&mut self, files: &[FileHandle]) -> bool {
+        // TODO(hl): Optimize full-window component discovery and run rebuilding.
+        // Both can take O(N^2) over the window's available L1 files; the
+        // MAX_INPUT_FILES limit only bounds the candidate-local check below.
         if !files.iter().all(|file| self.allows(file)) {
             return false;
         }
