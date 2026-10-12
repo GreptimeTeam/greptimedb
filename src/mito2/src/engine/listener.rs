@@ -583,12 +583,12 @@ impl EventListener for GateIndexBuildListener {
         info!("Region {} index build begin (gated)", region_file_id);
         self.begin_count.fetch_add(1, Ordering::Relaxed);
         self.begin_notify.notify_one();
-        // Block until the test releases the gate.
-        let _permit = self
-            .begin_blocker
+        // Consume the release so subsequent builds remain blocked.
+        self.begin_blocker
             .acquire()
             .await
-            .expect("gate semaphore should not be closed");
+            .expect("gate semaphore should not be closed")
+            .forget();
     }
 
     async fn on_index_build_finish(&self, region_file_id: RegionFileId) {

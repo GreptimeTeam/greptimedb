@@ -15,7 +15,9 @@
 use std::sync::Arc;
 
 use tests_integration::standalone::GreptimeDbStandaloneBuilder;
-use tests_integration::test_util::setup_authenticated_grpc_database;
+use tests_integration::test_util::{
+    setup_authenticated_grpc_database, test_event_recorder_options,
+};
 use uuid::Uuid;
 
 use crate::event_recorder_test_util::{
@@ -31,6 +33,7 @@ const PROCEDURE_ACTOR_PASSWORD: &str = "procedure_actor_pwd";
 async fn test_standalone_flow_ddl_events() {
     common_telemetry::init_default_ut_logging();
     let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_flow_ddl_events")
+        .with_event_recorder_options(test_event_recorder_options())
         .build()
         .await;
     let instance = standalone.fe_instance();

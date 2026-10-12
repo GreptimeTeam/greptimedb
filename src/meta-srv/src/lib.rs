@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(hash_set_entry)]
-#![feature(duration_constructors)]
-
 pub mod bootstrap;
 pub mod cache_invalidator;
 pub mod cluster;

@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::{Component, Path, PathBuf};
+
 use async_trait::async_trait;
 use clap::{Parser, Subcommand};
 use common_error::ext::BoxedError;
 use common_meta::snapshot::MetadataSnapshotManager;
-use object_store::{ObjectStore, services};
+use object_store::ObjectStore;
 
 use crate::Tool;
 use crate::common::{ObjectStoreConfig, StoreConfig, new_fs_object_store};
@@ -270,25 +272,44 @@ fn build_object_store_and_resolve_file_path(
     fs_root: &str,
     file_path: &str,
 ) -> Result<(ObjectStore, String), BoxedError> {
-    let object_store = object_store.build().map_err(BoxedError::new)?;
-    let object_store = match object_store {
-        Some(object_store) => object_store,
-        None => new_fs_object_store(fs_root)?,
-    };
+    if let Some(object_store) = object_store.build().map_err(BoxedError::new)? {
+        return Ok((object_store, file_path.to_string()));
+    }
 
-    let file_path = if object_store.info().scheme() == services::FS_SCHEME {
-        resolve_relative_path_with_current_dir(file_path).map_err(BoxedError::new)?
+    let absolute_path =
+        resolve_relative_path_with_current_dir(file_path).map_err(BoxedError::new)?;
+    let (root, key) = split_fs_snapshot_path(fs_root, &absolute_path);
+    Ok((new_fs_object_store(&root)?, key))
+}
+
+/// Separates a local absolute path into an operator root and a relative key.
+fn split_fs_snapshot_path(fs_root: &str, absolute_path: &str) -> (String, String) {
+    let path = Path::new(absolute_path);
+    // OpenDAL keys cannot contain a Windows drive/UNC prefix or a root directory.
+    // Keep the filesystem anchor in the operator root, not in the object key.
+    let anchor: PathBuf = path
+        .components()
+        .take_while(|c| matches!(c, Component::Prefix(_) | Component::RootDir))
+        .collect();
+    let key = path
+        .components()
+        .filter(|c| !matches!(c, Component::Prefix(_) | Component::RootDir))
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    // Preserve the existing custom-root semantics: cwd-resolved keys are rooted
+    // under --dir. The default root follows the input path's drive on Windows.
+    let root = if fs_root == "/" {
+        anchor.to_string_lossy()
     } else {
-        file_path.to_string()
+        fs_root.into()
     };
-
-    Ok((object_store, file_path))
+    (root.into_owned(), key)
 }
 
 #[cfg(test)]
 mod tests {
     use std::env;
-    use std::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -311,44 +332,159 @@ mod tests {
 
     #[tokio::test]
     async fn test_cmd_resolve_file_path() {
-        common_telemetry::init_default_ut_logging();
-        let cmd = RestoreCommand::parse_from([
-            "",
-            "--file_name",
-            "metadata_snapshot.metadata.fb",
-            "--backend",
-            "memory-store",
-            "--store-addrs",
-            "memory://",
-        ]);
-        let tool = cmd.build().await.unwrap();
         let current_dir = env::current_dir().unwrap();
-        let file_path = current_dir.join("metadata_snapshot.metadata.fb");
-        assert_eq!(tool.file_path, file_path.to_string_lossy().to_string());
+        for file_path in [
+            "metadata_snapshot.metadata.fb".to_string(),
+            current_dir
+                .join("metadata_snapshot.metadata.fb")
+                .display()
+                .to_string(),
+        ] {
+            let cmd = RestoreCommand::parse_from([
+                "",
+                "--file_name",
+                &file_path,
+                "--backend",
+                "memory-store",
+                "--store-addrs",
+                "memory://",
+            ]);
+            let tool = cmd.build().await.unwrap();
+            assert!(!Path::new(&tool.file_path).is_absolute());
+            assert!(
+                Path::new(&tool.file_path)
+                    .components()
+                    .all(|c| matches!(c, Component::Normal(_)))
+            );
+            let expected = current_dir
+                .components()
+                .filter_map(|c| match c {
+                    Component::Normal(part) => Some(part.to_str().unwrap()),
+                    _ => None,
+                })
+                .chain(["metadata_snapshot.metadata.fb"])
+                .collect::<Vec<_>>()
+                .join("/");
+            assert_eq!(tool.file_path, expected);
+        }
+    }
 
+    #[cfg(windows)]
+    #[test]
+    fn test_split_windows_snapshot_path() {
+        for (path, root, key) in [
+            (
+                r"C:\backup\snapshot.metadata.fb",
+                r"C:\",
+                "backup/snapshot.metadata.fb",
+            ),
+            (
+                r"D:\备份 dir\snapshot.metadata.fb",
+                r"D:\",
+                "备份 dir/snapshot.metadata.fb",
+            ),
+            (
+                r"\\server\share\backup\snapshot.metadata.fb",
+                r"\\server\share\",
+                "backup/snapshot.metadata.fb",
+            ),
+            (
+                r"\\?\C:\backup\snapshot.metadata.fb",
+                r"\\?\C:\",
+                "backup/snapshot.metadata.fb",
+            ),
+        ] {
+            assert_eq!(
+                split_fs_snapshot_path("/", path),
+                (root.to_string(), key.to_string())
+            );
+            assert_eq!(
+                split_fs_snapshot_path(r"D:\root", path),
+                (r"D:\root".to_string(), key.to_string())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fs_snapshot_paths() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        for name in ["snapshot.metadata.fb", "nested dir/快照.metadata.fb"] {
+            let path = temp_dir.path().join(name);
+            let (store, key) = build_object_store_and_resolve_file_path(
+                ObjectStoreConfig::default(),
+                "/",
+                path.to_str().unwrap(),
+            )
+            .unwrap();
+            assert!(!path.exists());
+            store.write(&key, "snapshot").await.unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"snapshot");
+            assert_eq!(store.read(&key).await.unwrap().to_bytes(), &b"snapshot"[..]);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fs_snapshot_custom_root() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let (store, key) = build_object_store_and_resolve_file_path(
+            ObjectStoreConfig::default(),
+            temp_dir.path().to_str().unwrap(),
+            "snapshot.metadata.fb",
+        )
+        .unwrap();
+        let current_dir = env::current_dir().unwrap();
+        let expected = current_dir
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(part) => Some(part.to_str().unwrap()),
+                _ => None,
+            })
+            .chain(["snapshot.metadata.fb"])
+            .collect::<Vec<_>>()
+            .join("/");
+        assert_eq!(key, expected);
+        store.write(&key, "snapshot").await.unwrap();
+        assert_eq!(
+            std::fs::read(temp_dir.path().join(expected)).unwrap(),
+            b"snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fs_snapshot_rejects_parent_traversal() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("../snapshot.metadata.fb");
+        let (store, key) = build_object_store_and_resolve_file_path(
+            ObjectStoreConfig::default(),
+            "/",
+            path.to_str().unwrap(),
+        )
+        .unwrap();
+        assert!(key.split('/').any(|part| part == ".."));
+        let err = store.write(&key, "snapshot").await.unwrap_err();
+        assert_eq!(err.kind(), object_store::ErrorKind::NotFound);
+        assert!(err.to_string().contains("path escapes the configured root"));
+    }
+
+    #[test]
+    fn test_remote_snapshot_key_unchanged() {
         let cmd = RestoreCommand::parse_from([
             "",
-            "--file_name",
-            "metadata_snapshot.metadata.fb",
             "--backend",
             "memory-store",
             "--store-addrs",
             "memory://",
+            "--s3",
+            "--s3-bucket",
+            "snapshots",
+            "--s3-region",
+            "us-east-1",
         ]);
-        let tool = cmd.build().await.unwrap();
-        assert_eq!(tool.file_path, file_path.to_string_lossy().to_string());
-
-        let cmd = RestoreCommand::parse_from([
-            "",
-            "--file_name",
-            "metadata_snapshot.metadata.fb",
-            "--backend",
-            "memory-store",
-            "--store-addrs",
-            "memory://",
-        ]);
-        let tool = cmd.build().await.unwrap();
-        assert_eq!(tool.file_path, file_path.to_string_lossy().to_string());
+        let key = "nested/snapshot.metadata.fb";
+        let (store, resolved) =
+            build_object_store_and_resolve_file_path(cmd.object_store, "/ignored", key).unwrap();
+        assert_eq!(store.info().scheme(), object_store::services::S3_SCHEME);
+        assert_eq!(resolved, key);
     }
 
     async fn setup_backup_file(object_store: ObjectStore, file_path: &str) {

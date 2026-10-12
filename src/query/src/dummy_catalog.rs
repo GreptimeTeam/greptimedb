@@ -31,15 +31,14 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion_common::DataFusionError;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datatypes::arrow::datatypes::SchemaRef;
+use datatypes::data_type::DataType;
 use datatypes::types::json_type::JsonNativeType;
 use futures::stream::BoxStream;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngineRef;
-use store_api::storage::{
-    RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector, VectorSearchRequest,
-};
+use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
 use table::TableRef;
 use table::metadata::{TableId, TableInfoRef};
 use table::table::adapter::{dictionary_encode_string_columns, supports_pk_dictionary_encoding};
@@ -211,7 +210,13 @@ impl TableProvider for DummyTableProvider {
             .iter()
             .map(|e| {
                 // Simple filter on primary key columns are precisely evaluated.
-                if let Some(simple_filter) = SimpleFilterEvaluator::try_new(e) {
+                if let Some(simple_filter) =
+                    SimpleFilterEvaluator::try_new_with_column_type(e, &|name| {
+                        self.metadata
+                            .column_by_name(name)
+                            .map(|column| column.column_schema.data_type.as_arrow_type())
+                    })
+                {
                     if self
                         .metadata
                         .column_by_name(simple_filter.column_name())
@@ -279,14 +284,6 @@ impl DummyTableProvider {
             scan_request: Arc::new(Mutex::new(self.scan_request.lock().unwrap().clone())),
             ..self.clone()
         }
-    }
-
-    pub fn with_vector_search_hint(&self, hint: VectorSearchRequest) {
-        self.scan_request.lock().unwrap().vector_search = Some(hint);
-    }
-
-    pub fn get_vector_search_hint(&self) -> Option<VectorSearchRequest> {
-        self.scan_request.lock().unwrap().vector_search.clone()
     }
 
     pub fn with_sequence(&self, sequence: u64) {
@@ -655,6 +652,37 @@ mod tests {
         FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE,
         FLOW_RETURN_REGION_SEQ, FLOW_SINK_TABLE_ID,
     };
+
+    #[test]
+    fn test_nullable_label_filter_pushdown() {
+        use datafusion_expr::{Cast, col, lit};
+        use datatypes::arrow::datatypes::DataType as ArrowDataType;
+
+        let provider = crate::optimizer::test_util::mock_table_provider(RegionId::new(1, 1));
+        let cast_label = Expr::Cast(Cast::new(Box::new(col("k0")), ArrowDataType::Utf8));
+        let cast_field = Expr::Cast(Cast::new(Box::new(col("v0")), ArrowDataType::Utf8));
+        let filters = [
+            col("k0").is_null().or(col("k0").not_eq(lit("lo"))),
+            col("k0").is_null().or(cast_label.not_eq(lit("lo"))),
+            col("k0").is_null().or(col("v0").not_eq(lit(1.0))),
+            cast_field.eq(lit("1")),
+            col("k0").in_list(vec![lit(""), lit("lo")], false),
+            col("k0").in_list(vec![lit(""), lit("lo")], true),
+        ];
+        assert_eq!(
+            provider
+                .supports_filters_pushdown(&filters.iter().collect::<Vec<_>>())
+                .unwrap(),
+            vec![
+                TableProviderFilterPushDown::Exact,
+                TableProviderFilterPushDown::Exact,
+                TableProviderFilterPushDown::Inexact,
+                TableProviderFilterPushDown::Inexact,
+                TableProviderFilterPushDown::Inexact,
+                TableProviderFilterPushDown::Inexact,
+            ]
+        );
+    }
 
     fn test_region_id() -> RegionId {
         RegionId::new(1024, 1)

@@ -22,9 +22,10 @@ use catalog::kvbackend::KvBackendCatalogManager;
 use catalog::process_manager::ProcessManagerRef;
 use catalog::system_schema::semantic_graph::EntityGraphProviderRef;
 use common_base::Plugins;
+use common_batcher::request_limiter::RequestLimiter;
 use common_datasource::object_store::LocalFileAccess;
 use common_event_recorder::{EventRecorderImpl, EventRecorderRef};
-use common_meta::cache::{LayeredCacheRegistryRef, TableRouteCacheRef};
+use common_meta::cache::{LayeredCacheRegistryRef, TableFlownodeSetCacheRef, TableRouteCacheRef};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
 use common_meta::key::TableMetadataManager;
 use common_meta::key::flow::FlowMetadataManager;
@@ -32,6 +33,7 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::procedure_executor::ProcedureExecutorRef;
 use dashmap::DashMap;
+use operator::batcher::PendingRowsBatcher;
 use operator::delete::Deleter;
 use operator::flow::FlowServiceOperator;
 use operator::insert::Inserter;
@@ -49,6 +51,8 @@ use partition::manager::PartitionRuleManager;
 use pipeline::pipeline_operator::PipelineOperator;
 use query::QueryEngineFactory;
 use query::region_query::RegionQueryHandlerFactoryRef;
+use servers::batcher::table::TablePendingRowsBatcher;
+use servers::batcher::{BatchingProtocol, pending_rows_batch_sync_enabled};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, DataFusionSnafu, ExternalSnafu, Result};
@@ -57,7 +61,9 @@ use crate::frontend::FrontendOptions;
 use crate::heartbeat::frontend_peer_addr;
 use crate::instance::Instance;
 use crate::instance::entity_graph::EntityGraphProviderImpl;
+use crate::instance::otlp::TraceAuxCache;
 use crate::instance::region_query::FrontendRegionQueryHandler;
+use crate::service_config::BatcherOptions;
 
 /// The frontend [`Instance`] builder.
 pub struct FrontendBuilder {
@@ -215,20 +221,49 @@ impl FrontendBuilder {
                 FrontendRegionQueryHandler::arc(partition_manager.clone(), node_manager.clone())
             };
 
-        let table_flownode_cache =
-            self.layered_cache_registry
-                .get()
-                .context(error::CacheRequiredSnafu {
-                    name: TABLE_FLOWNODE_SET_CACHE_NAME,
-                })?;
+        let table_flownode_cache: TableFlownodeSetCacheRef = self
+            .layered_cache_registry
+            .get()
+            .context(error::CacheRequiredSnafu {
+                name: TABLE_FLOWNODE_SET_CACHE_NAME,
+            })?;
 
-        let inserter = Arc::new(Inserter::new(
-            self.catalog_manager.clone(),
-            partition_manager.clone(),
-            node_manager.clone(),
-            table_flownode_cache,
-            self.options.auto_create_table,
-        ));
+        let create_inserter = || {
+            Inserter::new(
+                self.catalog_manager.clone(),
+                partition_manager.clone(),
+                node_manager.clone(),
+                table_flownode_cache.clone(),
+                self.options.auto_create_table,
+            )
+        };
+        // The execution-only inserter owns no batchers, avoiding an Arc cycle.
+        let bulk_inserter = Arc::new(create_inserter());
+        let build_batcher = |options: &BatcherOptions| -> Option<Arc<dyn PendingRowsBatcher>> {
+            if !options.pending_rows_batching_enabled()
+                || (self.options.prom_store.with_metric_engine
+                    && options
+                        .protocols
+                        .iter()
+                        .all(|protocol| *protocol == BatchingProtocol::Prom))
+            {
+                return None;
+            }
+            TablePendingRowsBatcher::try_new(
+                options.pending_rows_flush_interval,
+                options.max_batch_rows,
+                options.max_concurrent_flushes,
+                options.worker_channel_capacity,
+                options.max_inflight_requests,
+                options.flow_notification_queue_capacity,
+                bulk_inserter.clone(),
+            )
+            .map(|batcher| batcher as Arc<dyn PendingRowsBatcher>)
+        };
+        let inserter = Arc::new(
+            create_inserter()
+                .with_pending_rows_batcher(build_batcher(self.options.table_batcher_options())),
+        );
         let deleter = Arc::new(Deleter::new(
             self.catalog_manager.clone(),
             partition_manager.clone(),
@@ -348,11 +383,23 @@ impl FrontendBuilder {
                 self.options.event_recorder.ttl,
             )),
             self.options.event_recorder.event_types.clone(),
+            self.options.event_recorder.flush_interval,
         ));
         admin_event_recorder.install(&event_recorder);
 
+        let batcher_options = self.options.table_batcher_options();
+        let trace_aux_limiter = if batcher_options.pending_rows_batching_enabled()
+            && !pending_rows_batch_sync_enabled()
+        {
+            RequestLimiter::try_new(batcher_options.max_inflight_requests)
+        } else {
+            None
+        };
+
         Ok(Instance {
+            logical_batcher: Default::default(),
             frontend_peer_addr,
+            experimental_metric_export: self.options.experimental_metric_export,
             catalog_manager: self.catalog_manager,
             pipeline_operator,
             statement_executor,
@@ -364,10 +411,12 @@ impl FrontendBuilder {
             event_recorder,
             slow_query_recorder,
             process_manager,
-            otlp_metrics_table_legacy_cache: DashMap::new(),
+            otlp_metrics_table_legacy_cache: Arc::new(DashMap::new()),
             slow_query_options: self.options.slow_query.clone(),
             influxdb_default_merge_mode: self.options.influxdb.default_merge_mode,
             trace_ingest_chunk_size: self.options.otlp.trace_ingest_chunk_size,
+            trace_aux_cache: TraceAuxCache::new(self.options.otlp.trace_aux_cache_size.as_bytes()),
+            trace_aux_limiter,
             otlp_resource_info: self.options.otlp.experimental_enable_resource_info,
             suspend: Arc::new(AtomicBool::new(false)),
         })

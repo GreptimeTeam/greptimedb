@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::helper::encode_json_value;
 use api::v1::helper::row;
@@ -27,6 +28,7 @@ use common_error::status_code::StatusCode;
 use common_recordbatch::{DfRecordBatch, RecordBatches};
 use common_test_util::flight::encode_to_flight_data;
 use common_time::Timestamp;
+use datafusion::physical_plan::VerboseDisplay;
 use datafusion::physical_plan::expressions::{
     BinaryExpr, Column, DynamicFilterPhysicalExpr, lit as physical_lit,
 };
@@ -37,7 +39,8 @@ use datatypes::arrow::array::{
     ArrayRef, AsArray, Float64Array, StringArray, TimestampMillisecondArray,
 };
 use datatypes::arrow::datatypes::{
-    DataType, Field, Float64Type, Schema, TimeUnit, TimestampMillisecondType, UInt64Type,
+    DataType, Field, Float64Type, Schema, TimeUnit, TimestampMillisecondType, UInt32Type,
+    UInt64Type,
 };
 use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
 use datatypes::json::JsonSettings;
@@ -53,7 +56,7 @@ use store_api::metric_engine_consts::PRIMARY_KEY_ENCODING;
 use store_api::region_engine::{PrepareRequest, RegionEngine, RegionScanner};
 use store_api::region_request::{
     AlterKind, RegionAlterRequest, RegionBulkInsertsRequest, RegionCompactRequest,
-    RegionPutRequest, RegionRequest, SetRegionOption,
+    RegionOpenRequest, RegionPutRequest, RegionRequest, SetRegionOption,
 };
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{
@@ -69,6 +72,215 @@ use crate::sst::file::{FileHandle, FileMeta};
 use crate::test_util;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 use crate::test_util::{CreateRequestBuilder, TestEnv, reopen_region};
+
+#[tokio::test]
+async fn test_nullable_label_filters_in_memtables_and_ssts() {
+    use datafusion_expr::{BinaryExpr as LogicalBinaryExpr, Cast, Expr};
+
+    for (flat, memtable) in [(false, "time_series"), (true, "bulk")] {
+        let mut env = TestEnv::new().await;
+        let engine = env
+            .create_engine(MitoConfig {
+                default_flat_format: flat,
+                ..Default::default()
+            })
+            .await;
+        let region_id = RegionId::new(1, 1);
+        let request = CreateRequestBuilder::new()
+            .insert_option("memtable.type", memtable)
+            .build();
+        let schema = test_util::rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        let rows = [None, Some(""), Some("tmpfs"), Some("ext4")]
+            .into_iter()
+            .enumerate()
+            .map(|(i, label)| {
+                let mut row = row(vec![
+                    ValueData::StringValue(String::new()),
+                    ValueData::F64Value(i as f64),
+                    ValueData::TimestampMillisecondValue(i as i64),
+                ]);
+                row.values[0].value_data = label.map(|v| ValueData::StringValue(v.into()));
+                row
+            })
+            .collect();
+        test_util::put_rows(&engine, region_id, Rows { schema, rows }).await;
+        for flushed in [false, true] {
+            if flushed {
+                test_util::flush_region(&engine, region_id, None).await;
+            }
+            let mut cases = Vec::new();
+            for (op, literal, include_null, expected) in [
+                (Operator::NotEq, "tmpfs", true, vec![0, 1, 3]),
+                (
+                    Operator::RegexNotMatch,
+                    "^(?:tmpfs|vfat)$",
+                    true,
+                    vec![0, 1, 3],
+                ),
+                (Operator::Eq, "", true, vec![0, 1]),
+                (Operator::NotEq, "", false, vec![2, 3]),
+                (Operator::RegexMatch, "^(?:ext4)$", false, vec![3]),
+            ] {
+                for cast in [false, true] {
+                    let column = if cast {
+                        Expr::Cast(Cast::new(Box::new(col("tag_0")), DataType::Utf8))
+                    } else {
+                        col("tag_0")
+                    };
+                    let comparison = Expr::BinaryExpr(LogicalBinaryExpr::new(
+                        Box::new(column),
+                        op,
+                        Box::new(lit(literal)),
+                    ));
+                    let filter = if include_null {
+                        col("tag_0").is_null().or(comparison)
+                    } else {
+                        comparison
+                    };
+                    cases.push((filter, expected.clone()));
+                }
+            }
+            let column = col("tag_0");
+            cases.extend([
+                (column.clone().is_null(), vec![0]),
+                (column.clone().is_not_null(), vec![1, 2, 3]),
+                (
+                    column
+                        .clone()
+                        .is_null()
+                        .or(column.clone().not_eq(lit("tmpfs")))
+                        .and(column.clone().is_null().or(column.clone().not_eq(lit("")))),
+                    vec![0, 3],
+                ),
+                (
+                    column.clone().eq(lit("ext4")).or(column.eq(lit("tmpfs"))),
+                    vec![2, 3],
+                ),
+            ]);
+            for (filter, expected) in cases {
+                let stream = engine
+                    .scan_to_stream(
+                        region_id,
+                        ScanRequest {
+                            filters: vec![filter.clone()],
+                            distribution: flat.then_some(TimeSeriesDistribution::PerSeries),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                let batches = RecordBatches::try_collect(stream).await.unwrap();
+                let mut actual = Vec::new();
+                for batch in batches.iter() {
+                    let ts = batch
+                        .column_by_name("ts")
+                        .unwrap()
+                        .as_primitive::<TimestampMillisecondType>();
+                    actual.extend(ts.values().iter().copied());
+                }
+                actual.sort_unstable();
+                assert_eq!(actual, expected, "flat={flat}, flushed={flushed}, {filter}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_compound_time_filters_before_last_row() {
+    for (flat, memtable) in [
+        (false, "time_series"),
+        (true, "time_series"),
+        (true, "bulk"),
+    ] {
+        let mut env = TestEnv::new().await;
+        let engine = env
+            .create_engine(MitoConfig {
+                default_flat_format: flat,
+                ..Default::default()
+            })
+            .await;
+        let region_id = RegionId::new(1, 1);
+        let request = CreateRequestBuilder::new()
+            .insert_option("memtable.type", memtable)
+            .build();
+        let schema = test_util::rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        let rows = (0..5)
+            .map(|i| {
+                row(vec![
+                    ValueData::StringValue("series".into()),
+                    ValueData::F64Value(i as f64),
+                    ValueData::TimestampMillisecondValue(i),
+                ])
+            })
+            .collect();
+        test_util::put_rows(&engine, region_id, Rows { schema, rows }).await;
+        let ts = |value| lit(ScalarValue::TimestampMillisecond(Some(value), None));
+        let cases = [
+            (col("ts").eq(ts(1)).or(col("ts").eq(ts(3))), vec![1, 3]),
+            (col("ts").gt_eq(ts(1)).and(col("ts").lt(ts(3))), vec![1, 2]),
+            (col("ts").is_null().or(col("ts").lt(ts(2))), vec![0, 1]),
+        ];
+        for flushed in [false, true] {
+            if flushed {
+                test_util::flush_region(&engine, region_id, None).await;
+            }
+            for (filter, expected) in &cases {
+                for selector in [
+                    None,
+                    Some(TimeSeriesRowSelector::LastRow { after_merge: false }),
+                    Some(TimeSeriesRowSelector::LastRow { after_merge: true }),
+                ] {
+                    let stream = engine
+                        .scan_to_stream(
+                            region_id,
+                            ScanRequest {
+                                filters: vec![
+                                    col("tag_0").is_null().or(col("tag_0").eq(lit("series"))),
+                                    filter.clone(),
+                                ],
+                                distribution: flat.then_some(TimeSeriesDistribution::PerSeries),
+                                series_row_selector: selector,
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    let batches = RecordBatches::try_collect(stream).await.unwrap();
+                    let mut actual = Vec::new();
+                    for batch in batches.iter() {
+                        actual.extend(
+                            batch
+                                .column_by_name("ts")
+                                .unwrap()
+                                .as_primitive::<TimestampMillisecondType>()
+                                .values()
+                                .iter()
+                                .copied(),
+                        );
+                    }
+                    actual.sort_unstable();
+                    let expected = if selector.is_some() {
+                        expected.last().copied().into_iter().collect::<Vec<_>>()
+                    } else {
+                        expected.clone()
+                    };
+                    assert_eq!(
+                        actual, expected,
+                        "flat={flat}, memtable={memtable}, flushed={flushed}, selector={selector:?}, {filter}"
+                    );
+                }
+            }
+        }
+    }
+}
 
 #[tokio::test]
 async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResult<()> {
@@ -1229,10 +1441,25 @@ async fn test_series_scan_with_format(flat_format: bool) {
 
 #[tokio::test]
 async fn test_two_phase_series_scan() {
+    for use_index in [false, true] {
+        for use_range_index in [false, true] {
+            check_two_phase_series_scan(use_index, use_range_index, true).await;
+        }
+        check_two_phase_series_scan(use_index, true, false).await;
+    }
+}
+
+async fn check_two_phase_series_scan(
+    use_index: bool,
+    use_range_index: bool,
+    enable_range_index: bool,
+) {
     let mut env = TestEnv::with_prefix("test_two_phase_series_scan").await;
     let engine = env
         .create_engine(MitoConfig {
             experimental_series_scan_v2: true,
+            experimental_enable_series_index: true,
+            experimental_enable_range_index: enable_range_index,
             ..Default::default()
         })
         .await;
@@ -1310,12 +1537,113 @@ async fn test_two_phase_series_scan() {
         .await
         .unwrap();
     test_util::flush_region(&engine, region_id, None).await;
+    if use_index || use_range_index {
+        use datatypes::arrow::array::{BinaryArray, UInt8Array, UInt64Array};
+
+        use crate::series_index::{
+            SeriesIndexEntry, SeriesIndexFileHandle, SeriesIndexVersion, SeriesIndexWriter,
+            SeriesIndexWriterOptions, series_index_channel, series_index_path,
+        };
+
+        let region = engine.find_region(region_id).unwrap();
+        let store = region.series_index_store.clone().unwrap();
+        let sequence = region.flushed_sequence();
+        let entry = SeriesIndexEntry {
+            file_size: 0,
+            index_uuid: FileId::random(),
+            bucket_start: Timestamp::new_millisecond(0),
+            bucket_end: Timestamp::new_millisecond(2001),
+            source_file_ids: Vec::new(),
+            min_file_sequence: sequence,
+            max_file_sequence: sequence,
+            compaction_window_secs: 1,
+            window_sequences: Default::default(),
+        };
+        let keys = [
+            (10, 0, "a", "x"),
+            (10, u64::MAX, "b", "y"),
+            (20, 0, "c", "z"),
+        ]
+        .map(|(table, tsid, a, b)| new_sparse_primary_key(&[a, b], &metadata, table, tsid));
+        let batch = DfRecordBatch::try_from_iter(vec![
+            (
+                "ts",
+                Arc::new(TimestampMillisecondArray::from(vec![1000; 3])) as ArrayRef,
+            ),
+            (
+                "__primary_key",
+                Arc::new(BinaryArray::from_iter_values(&keys)),
+            ),
+            ("__sequence", Arc::new(UInt64Array::from_value(sequence, 3))),
+            ("__op_type", Arc::new(UInt8Array::from_value(0, 3))),
+        ])
+        .unwrap();
+        let mut index_version = SeriesIndexVersion::default();
+        if use_index {
+            let path = series_index_path(region_id, entry.index_uuid);
+            let mut writer = SeriesIndexWriter::try_new(
+                metadata.clone(),
+                store.clone(),
+                &path,
+                SeriesIndexWriterOptions::default(),
+                None,
+            )
+            .await
+            .unwrap();
+            writer.write(&batch).await.unwrap();
+            writer.finish().await.unwrap();
+            let (purger, _receiver) = series_index_channel(store.clone());
+            let handle = SeriesIndexFileHandle::new(region_id, entry.clone(), purger);
+            index_version
+                .series_indexes
+                .insert(entry.index_uuid, handle);
+        }
+        if use_range_index {
+            use crate::sst::range_index::{
+                SstRangeIndexWriter, SstRangeIndexWriterOptions, range_index_path,
+            };
+            let version = region.version();
+            let file = version
+                .ssts
+                .levels()
+                .iter()
+                .flat_map(|level| level.files.values())
+                .next()
+                .unwrap();
+            assert_eq!(1, file.meta_ref().num_row_groups);
+            let file_id = file.file_id().file_id();
+            let mut writer = SstRangeIndexWriter::try_new(
+                metadata.clone(),
+                store,
+                &range_index_path(region_id, file_id),
+                SstRangeIndexWriterOptions::default(),
+            )
+            .await
+            .unwrap();
+            writer.write(0, &batch).await.unwrap();
+            writer.finish().await.unwrap();
+            index_version.range_indexes.insert(
+                file_id,
+                crate::series_index::RangeIndexEntry {
+                    file_id,
+                    file_size: 0,
+                },
+            );
+        }
+        region
+            .series_index_version_control
+            .publish(Arc::new(index_version));
+    }
+    // A newer SST remains uncovered; the remaining writes stay in memory.
+    engine
+        .handle_request(region_id, put(rows(&[(10, 0, "a", "x", 11, 1000)])))
+        .await
+        .unwrap();
+    test_util::flush_region(&engine, region_id, None).await;
     engine
         .handle_request(
             region_id,
             put(rows(&[
-                // Replaces the flushed row for this series and timestamp.
-                (10, 0, "a", "x", 11, 1000),
                 (10, 0, "a", "x", 12, 2000),
                 (10, u64::MAX, "b", "y", 21, 2000),
                 (20, u64::MAX, "d", "w", 40, 1000),
@@ -1366,6 +1694,12 @@ async fn test_two_phase_series_scan() {
     }))
     .await
     .unwrap();
+
+    let index_files = metrics_set
+        .clone_inner()
+        .sum_by_name("candidate_index_files")
+        .map_or(0, |value| value.as_usize());
+    assert_eq!(usize::from(use_index), index_files);
 
     let mut series_to_partition = BTreeMap::new();
     let mut actual_rows = Vec::new();
@@ -1454,6 +1788,98 @@ async fn test_two_phase_series_scan() {
     }
     replay_rows.sort();
     assert_eq!(actual_rows, replay_rows);
+
+    // Exercise precise field/time filtering and candidate tag filtering on both paths.
+    let filtered = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                projection: Some(vec![2, 4, 5]),
+                filters: vec![
+                    col("tag_0").eq(lit("a")),
+                    col("field_0").eq(lit(11_u64)),
+                    col("ts").eq(lit(ScalarValue::TimestampMillisecond(Some(1000), None))),
+                ],
+                distribution: Some(TimeSeriesDistribution::PerSeries),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = filtered
+        .scan()
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(
+        1,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+    );
+
+    if use_range_index {
+        // Enabled queries must read the cataloged index; disabled queries must
+        // succeed even when that file is unavailable.
+        let region = engine.find_region(region_id).unwrap();
+        let version = region.series_index_version_control.current();
+        let file_id = *version.range_indexes.keys().next().unwrap();
+        region
+            .series_index_store
+            .as_ref()
+            .unwrap()
+            .delete(&crate::sst::range_index::range_index_path(
+                region_id, file_id,
+            ))
+            .await
+            .unwrap();
+        let scanner = engine
+            .scanner(
+                region_id,
+                ScanRequest {
+                    distribution: Some(TimeSeriesDistribution::PerSeries),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        if enable_range_index {
+            if let Ok(stream) = scanner.scan().await {
+                assert!(stream.try_collect::<Vec<_>>().await.is_err());
+            }
+        } else {
+            let batches = scanner
+                .scan()
+                .await
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            let mut rows = Vec::new();
+            for batch in batches {
+                let tags = batch.column_by_name("tag_0").unwrap();
+                let fields = batch
+                    .column_by_name("field_0")
+                    .unwrap()
+                    .as_primitive::<UInt64Type>();
+                let timestamps = batch
+                    .column_by_name("ts")
+                    .unwrap()
+                    .as_primitive::<TimestampMillisecondType>();
+                for row in 0..batch.num_rows() {
+                    rows.push((
+                        datatypes::arrow_array::string_array_value_at_index(tags, row)
+                            .unwrap()
+                            .to_string(),
+                        fields.value(row),
+                        timestamps.value(row),
+                    ));
+                }
+            }
+            rows.sort();
+            assert_eq!(actual_rows, rows);
+        }
+    }
 }
 
 /// Scans all partitions in round-robin fashion and returns rows sorted by (tag, ts).
@@ -2565,13 +2991,21 @@ fn build_bulk_insert_request(
 
 #[tokio::test]
 async fn test_bulk_skip_wal_recovery() {
-    check_bulk_skip_wal_recovery(false, false).await;
-    check_bulk_skip_wal_recovery(false, true).await;
-    check_bulk_skip_wal_recovery(true, false).await;
-    check_bulk_skip_wal_recovery(true, true).await;
+    check_bulk_skip_wal_recovery(false, false, false).await;
+    check_bulk_skip_wal_recovery(false, true, false).await;
+    check_bulk_skip_wal_recovery(true, false, false).await;
+    check_bulk_skip_wal_recovery(true, true, false).await;
 }
 
-async fn check_bulk_skip_wal_recovery(skip_wal: bool, flush: bool) {
+#[tokio::test]
+async fn test_bulk_skip_wal_close_recovery() {
+    check_bulk_skip_wal_recovery(false, false, true).await;
+    check_bulk_skip_wal_recovery(false, true, true).await;
+    check_bulk_skip_wal_recovery(true, false, true).await;
+    check_bulk_skip_wal_recovery(true, true, true).await;
+}
+
+async fn check_bulk_skip_wal_recovery(skip_wal: bool, flush: bool, close: bool) {
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
     let region_id = RegionId::new(1, 1);
@@ -2622,7 +3056,41 @@ async fn check_bulk_skip_wal_recovery(skip_wal: bool, flush: bool) {
             u64::from(!skip_wal)
         );
     }
-    reopen_region(&engine, region_id, table_dir, false, HashMap::new()).await;
+    let engine = if close {
+        reopen_region(&engine, region_id, table_dir, false, HashMap::new()).await;
+        assert_eq!(
+            region.version().flushed_sequence,
+            if flush || skip_wal { 4 } else { 0 }
+        );
+        engine
+    } else {
+        // Stopping the engine directly exercises recovery without close-time flush.
+        let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Open(RegionOpenRequest {
+                    engine: String::new(),
+                    table_dir,
+                    path_type: store_api::region_request::PathType::Bare,
+                    options: HashMap::new(),
+                    skip_wal_replay: false,
+                    checkpoint: None,
+                    requirements: Default::default(),
+                }),
+            )
+            .await
+            .unwrap();
+        engine
+    };
+    assert!(
+        !engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .memtables
+            .has_skip_wal_writes()
+    );
     let stream = engine
         .scan_to_stream(region_id, ScanRequest::default())
         .await
@@ -2634,7 +3102,7 @@ async fn check_bulk_skip_wal_recovery(skip_wal: bool, flush: bool) {
             .iter()
             .map(|b| b.num_rows())
             .sum::<usize>(),
-        if skip_wal && !flush { 0 } else { 4 }
+        if skip_wal && !flush && !close { 0 } else { 4 }
     );
 }
 
@@ -3431,9 +3899,8 @@ async fn test_exact_sequence_read_pk_format_compaction_multiple_inputs() {
     );
 }
 
-/// Exact sequence-range reads through the active production `PerSeries` series
-/// scan path: row-level filtering must hold across the flushed SST and the
-/// memtable regardless of the requested time-series distribution.
+/// Exact sequence-range reads through the legacy `PerSeries` path: row-level
+/// filtering must hold across the flushed SST and the memtable.
 #[tokio::test]
 async fn test_exact_sequence_read_series_scan_per_series() {
     let mut env = TestEnv::with_prefix("test_exact_sequence_read_series_scan_per_series").await;
@@ -3487,21 +3954,459 @@ async fn test_exact_sequence_read_series_scan_per_series() {
         batches.pretty_print().unwrap()
     };
 
-    let result = scan_exact_series(Some(2), Some(6)).await;
-    let mut rows = result
-        .lines()
-        .filter(|l| l.starts_with("| ") && !l.starts_with("| tag_0 "))
-        .collect::<Vec<_>>();
-    rows.sort_unstable();
+    for (min, max) in [(Some(2), Some(6)), (Some(0), Some(2))] {
+        let result = scan_exact_series(min, max).await;
+        let mut rows = result
+            .lines()
+            .filter(|l| l.starts_with("| ") && !l.starts_with("| tag_0 "))
+            .collect::<Vec<_>>();
+        rows.sort_unstable();
+        let expected = if min == Some(2) {
+            vec![
+                "| 2     | 2.0     | 1970-01-01T00:00:02 |",
+                "| 3     | 3.0     | 1970-01-01T00:00:03 |",
+                "| 4     | 4.0     | 1970-01-01T00:00:04 |",
+                "| 5     | 5.0     | 1970-01-01T00:00:05 |",
+            ]
+        } else {
+            vec![
+                "| 0     | 0.0     | 1970-01-01T00:00:00 |",
+                "| 1     | 1.0     | 1970-01-01T00:00:01 |",
+            ]
+        };
+        assert_eq!(
+            expected, rows,
+            "unexpected set for ({min:?}, {max:?}]:\n{result}"
+        );
+    }
+}
+
+async fn build_sparse_exact_metric_engine(
+    prefix: &str,
+    experimental_series_scan_v2: bool,
+    range_result_cache_size: ReadableSize,
+) -> (TestEnv, crate::engine::MitoEngine, RegionId) {
+    let mut env = TestEnv::with_prefix(prefix).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_series_scan_v2,
+            range_result_cache_size,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let metadata = Arc::new(sst_region_metadata_with_encoding(
+        PrimaryKeyEncoding::Sparse,
+    ));
+    let mut request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .insert_option("preserve_row_sequence", "true")
+        .build();
+    request.column_metadatas = metadata.column_metadatas.clone();
+    request.primary_key = metadata.primary_key.clone();
+    request
+        .options
+        .insert(PRIMARY_KEY_ENCODING.to_string(), "sparse".to_string());
+    request
+        .options
+        .insert("memtable.type".to_string(), "bulk".to_string());
+    request
+        .options
+        .insert("sst_format".to_string(), "flat".to_string());
+    let full_row_schema = test_util::rows_schema(&request);
+    let mut encoded_primary_key_schema = full_row_schema[0].clone();
+    encoded_primary_key_schema.column_name = PRIMARY_KEY_COLUMN_NAME.to_string();
+    encoded_primary_key_schema.datatype = ColumnDataType::Binary.into();
+    encoded_primary_key_schema.semantic_type = SemanticType::Tag.into();
+    let row_schema = vec![
+        encoded_primary_key_schema,
+        full_row_schema[5].clone(),
+        full_row_schema[4].clone(),
+    ];
+
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let rows = |values: &[(u32, u64, &str, &str, u64, i64)]| Rows {
+        schema: row_schema.clone(),
+        rows: values
+            .iter()
+            .map(|(table_id, tsid, tag_0, tag_1, field, ts)| {
+                row(vec![
+                    ValueData::BinaryValue(new_sparse_primary_key(
+                        &[*tag_0, *tag_1],
+                        &metadata,
+                        *table_id,
+                        *tsid,
+                    )),
+                    ValueData::TimestampMillisecondValue(*ts),
+                    ValueData::U64Value(*field),
+                ])
+            })
+            .collect(),
+    };
+    let put = |rows| {
+        RegionRequest::Put(RegionPutRequest {
+            skip_wal: false,
+            rows,
+            hint: Some(WriteHint {
+                primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
+            }),
+            partition_expr_version: None,
+        })
+    };
+
+    // Older SST: sequences 1 and 2.
+    engine
+        .handle_request(
+            region_id,
+            put(rows(&[
+                (10, 0, "a", "x", 10, 1000),
+                (20, 0, "c", "z", 30, 1000),
+            ])),
+        )
+        .await
+        .unwrap();
+    test_util::flush_region(&engine, region_id, None).await;
+    // Newer SST: sequences 3 and 4.
+    engine
+        .handle_request(
+            region_id,
+            put(rows(&[
+                (10, 0, "a", "x", 11, 2000),
+                (10, u64::MAX, "b", "y", 20, 1000),
+            ])),
+        )
+        .await
+        .unwrap();
+    test_util::flush_region(&engine, region_id, None).await;
+    // Memtable: sequences 5 and 6.
+    engine
+        .handle_request(
+            region_id,
+            put(rows(&[
+                (10, 0, "a", "x", 12, 3000),
+                (20, u64::MAX, "d", "w", 40, 1000),
+            ])),
+        )
+        .await
+        .unwrap();
+
+    (env, engine, region_id)
+}
+
+fn canonical_sparse_rows(batches: &RecordBatches) -> Vec<(u32, u64, String, String, u64, i64)> {
+    let schema = batches.schema();
+    // Verify the complete output schema before looking at batches so empty
+    // scans are checked too.
+    assert_eq!(6, schema.num_columns());
+    assert_eq!(
+        vec!["__table_id", "__tsid", "tag_0", "tag_1", "field_0", "ts"],
+        (0..schema.num_columns())
+            .map(|index| schema.column_name_by_index(index))
+            .collect::<Vec<_>>(),
+    );
+
+    let mut rows = Vec::new();
+    for batch in batches.iter() {
+        let table_id = batch
+            .column_by_name("__table_id")
+            .unwrap()
+            .as_primitive::<UInt32Type>();
+        let tsid = batch
+            .column_by_name("__tsid")
+            .unwrap()
+            .as_primitive::<UInt64Type>();
+        let tag_0 = batch.column_by_name("tag_0").unwrap();
+        let tag_1 = batch.column_by_name("tag_1").unwrap();
+        let field = batch
+            .column_by_name("field_0")
+            .unwrap()
+            .as_primitive::<UInt64Type>();
+        let ts = batch
+            .column_by_name("ts")
+            .unwrap()
+            .as_primitive::<TimestampMillisecondType>();
+        for row in 0..batch.num_rows() {
+            rows.push((
+                table_id.value(row),
+                tsid.value(row),
+                datatypes::arrow_array::string_array_value_at_index(tag_0, row)
+                    .unwrap()
+                    .to_string(),
+                datatypes::arrow_array::string_array_value_at_index(tag_1, row)
+                    .unwrap()
+                    .to_string(),
+                field.value(row),
+                ts.value(row),
+            ));
+        }
+    }
+    rows.sort();
+    rows
+}
+
+async fn scan_sparse_exact_metric(
+    engine: &crate::engine::MitoEngine,
+    region_id: RegionId,
+    min: Option<u64>,
+    max: Option<u64>,
+    selector: Option<TimeSeriesRowSelector>,
+    expected_mode: &str,
+) -> (
+    datatypes::schema::SchemaRef,
+    Vec<(u32, u64, String, String, u64, i64)>,
+) {
+    let scanner = engine
+        .scanner(
+            region_id,
+            ScanRequest {
+                memtable_min_sequence: min,
+                memtable_max_sequence: max,
+                exact_sequence_range: min.is_some(),
+                distribution: Some(TimeSeriesDistribution::PerSeries),
+                // A tag predicate is required for range-result-cache eligibility.
+                // It selects every fixture row while keeping cache keys comparable.
+                filters: vec![col("tag_0").gt_eq(lit(ScalarValue::Utf8(Some("a".to_string()))))],
+                series_row_selector: selector,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let Scanner::Series(scanner) = scanner else {
+        panic!("sparse metric scan must use SeriesScan");
+    };
+    assert_eq!(expected_mode, scanner.mode());
+    let batches = RecordBatches::try_collect(scanner.build_stream().await.unwrap())
+        .await
+        .unwrap();
+    let schema = batches.schema();
+    (schema, canonical_sparse_rows(&batches))
+}
+
+/// Exact sparse-metric reads must use two-phase scanning and preserve the same
+/// complete rows as the legacy series scanner at every sequence boundary.
+#[tokio::test]
+async fn test_two_phase_sparse_metric_exact_sequence_cases() {
+    let (_two_phase_env, two_phase, two_phase_region) = build_sparse_exact_metric_engine(
+        "test_two_phase_sparse_metric_exact_sequence_cases_two_phase",
+        true,
+        ReadableSize::mb(0),
+    )
+    .await;
+    let (_legacy_env, legacy, legacy_region) = build_sparse_exact_metric_engine(
+        "test_two_phase_sparse_metric_exact_sequence_cases_legacy",
+        false,
+        ReadableSize::mb(0),
+    )
+    .await;
+
+    let cases = [
+        // (min, max], selector, expected canonical rows.
+        (
+            "boundaries_and_newer_sst_outside",
+            Some(0),
+            Some(2),
+            None,
+            vec![("a", "x", 10, 1000), ("c", "z", 30, 1000)],
+        ),
+        (
+            "lower_boundary_excluded_upper_boundary_included",
+            Some(2),
+            Some(4),
+            None,
+            vec![("a", "x", 11, 2000), ("b", "y", 20, 1000)],
+        ),
+        // Candidates are present in the memtable but all are outside (4, 4].
+        (
+            "candidate_outside_only_empty",
+            Some(4),
+            Some(4),
+            None,
+            vec![],
+        ),
+        // One delta spans the older SST, newer SST, and memtable.
+        (
+            "mixed_sst_mem_no_dropped_rows",
+            Some(1),
+            Some(5),
+            None,
+            vec![
+                ("a", "x", 11, 2000),
+                ("a", "x", 12, 3000),
+                ("b", "y", 20, 1000),
+                ("c", "z", 30, 1000),
+            ],
+        ),
+        // Selector is applied after the exact filter: a's newer seq 5 row is
+        // excluded, so its seq 3 row survives as the last selected row.
+        (
+            "last_row_selector_excludes_newer_sequence",
+            Some(0),
+            Some(4),
+            Some(TimeSeriesRowSelector::LastRow { after_merge: false }),
+            vec![
+                ("a", "x", 11, 2000),
+                ("b", "y", 20, 1000),
+                ("c", "z", 30, 1000),
+            ],
+        ),
+    ];
+
+    for (name, min, max, selector, expected) in cases {
+        let expected = expected
+            .into_iter()
+            .map(|(tag_0, tag_1, field, ts)| {
+                let (table_id, tsid) = match tag_0 {
+                    "a" => (10, 0),
+                    "b" => (10, u64::MAX),
+                    "c" => (20, 0),
+                    "d" => (20, u64::MAX),
+                    _ => unreachable!("unknown fixture series: {tag_0}"),
+                };
+                (
+                    table_id,
+                    tsid,
+                    tag_0.to_string(),
+                    tag_1.to_string(),
+                    field,
+                    ts,
+                )
+            })
+            .collect::<Vec<_>>();
+        let (two_phase_schema, two_phase_rows) = scan_sparse_exact_metric(
+            &two_phase,
+            two_phase_region,
+            min,
+            max,
+            selector,
+            "two_phase",
+        )
+        .await;
+        let (legacy_schema, legacy_rows) =
+            scan_sparse_exact_metric(&legacy, legacy_region, min, max, selector, "legacy").await;
+        assert_eq!(expected, two_phase_rows, "two-phase {name}");
+        assert_eq!(expected, legacy_rows, "legacy {name}");
+        assert_eq!(
+            two_phase_schema, legacy_schema,
+            "schema mismatch for {name}"
+        );
+    }
+}
+
+/// A warmed two-phase exact scan must hit the existing range-result cache; a
+/// second upper bound over the same files and an unbounded scan must not reuse
+/// its rows.
+#[tokio::test]
+async fn test_two_phase_sparse_metric_exact_sequence_cache_isolation() {
+    let (_env, engine, region_id) = build_sparse_exact_metric_engine(
+        "test_two_phase_sparse_metric_exact_sequence_cache_isolation",
+        true,
+        ReadableSize::mb(64),
+    )
+    .await;
+    // Make the fixture file-only so the two-phase candidate and data ranges are cacheable.
+    test_util::flush_region(&engine, region_id, None).await;
+
+    let restrictive = ScanRequest {
+        memtable_min_sequence: Some(0),
+        memtable_max_sequence: Some(4),
+        exact_sequence_range: true,
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        filters: vec![col("tag_0").gt_eq(lit(ScalarValue::Utf8(Some("a".to_string()))))],
+        ..Default::default()
+    };
+    let scan = |request| async {
+        let scanner = engine.scanner(region_id, request).await.unwrap();
+        let Scanner::Series(scanner) = scanner else {
+            panic!("sparse metric scan must use SeriesScan");
+        };
+        assert_eq!("two_phase", scanner.mode());
+        assert_eq!(1, scanner.properties().num_partitions());
+        let batches = RecordBatches::try_collect(scanner.build_stream().await.unwrap())
+            .await
+            .unwrap();
+        (
+            canonical_sparse_rows(&batches),
+            format!("{}", VerboseDisplay(scanner)),
+        )
+    };
+
+    let (cold, _) = scan(restrictive.clone()).await;
+    // Cache insertion is performed by the range stream's async concat task.
+    // Wait for the SeriesReader's data-stage entry, rather than treating a
+    // candidate-stage cache hit as evidence that the reader replayed its data.
+    let warm = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let (rows, verbose) = scan(restrictive.clone()).await;
+            // The single output partition is 0; the candidate distributor uses
+            // synthetic partition 1. Only a partition-0 hit proves data replay.
+            let data_metrics = verbose
+                .split("\"partition\":0, \"metrics\":")
+                .nth(1)
+                .and_then(|metrics| metrics.split("\"partition\":").next())
+                .expect("missing two-phase data-reader metrics");
+            if data_metrics.contains("\"range_cache_hit\":") {
+                return rows;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("series-data range cache did not complete and replay within timeout");
+    assert_eq!(cold, warm);
+
     assert_eq!(
         vec![
-            "| 2     | 2.0     | 1970-01-01T00:00:02 |",
-            "| 3     | 3.0     | 1970-01-01T00:00:03 |",
-            "| 4     | 4.0     | 1970-01-01T00:00:04 |",
-            "| 5     | 5.0     | 1970-01-01T00:00:05 |",
+            (10, 0, "a".to_string(), "x".to_string(), 10, 1000),
+            (10, 0, "a".to_string(), "x".to_string(), 11, 2000),
+            (10, u64::MAX, "b".to_string(), "y".to_string(), 20, 1000),
+            (20, 0, "c".to_string(), "z".to_string(), 30, 1000),
         ],
-        rows,
-        "unexpected set for (2, 6] on PerSeries path:\n{result}"
+        cold,
+        "unexpected restrictive exact rows"
+    );
+
+    // (0, 5] selects the same three flushed files as (0, 4] but its output
+    // includes a's sequence-5 row, so it must not reuse the restrictive rows.
+    let (different_upper, _) = scan(ScanRequest {
+        memtable_max_sequence: Some(5),
+        ..restrictive.clone()
+    })
+    .await;
+    assert_eq!(
+        vec![
+            (10, 0, "a".to_string(), "x".to_string(), 10, 1000),
+            (10, 0, "a".to_string(), "x".to_string(), 11, 2000),
+            (10, 0, "a".to_string(), "x".to_string(), 12, 3000),
+            (10, u64::MAX, "b".to_string(), "y".to_string(), 20, 1000),
+            (20, 0, "c".to_string(), "z".to_string(), 30, 1000),
+        ],
+        different_upper,
+        "different upper bound reused restrictive rows"
+    );
+
+    let (unbounded, _) = scan(ScanRequest {
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        filters: restrictive.filters.clone(),
+        ..Default::default()
+    })
+    .await;
+    assert_eq!(
+        vec![
+            (10, 0, "a".to_string(), "x".to_string(), 10, 1000),
+            (10, 0, "a".to_string(), "x".to_string(), 11, 2000),
+            (10, 0, "a".to_string(), "x".to_string(), 12, 3000),
+            (10, u64::MAX, "b".to_string(), "y".to_string(), 20, 1000),
+            (20, 0, "c".to_string(), "z".to_string(), 30, 1000),
+            (20, u64::MAX, "d".to_string(), "w".to_string(), 40, 1000),
+        ],
+        unbounded,
+        "unbounded scan reused exact rows"
     );
 }
 
@@ -3590,6 +4495,143 @@ async fn test_range_cache_key_separates_sequence_ranges() {
         vec!["| 3     | 3.0     | 1970-01-01T00:00:03 |"],
         second,
         "different (C, H] shared a range-cache entry"
+    );
+}
+
+#[tokio::test]
+async fn test_single_source_ranges_preserve_batches() {
+    for (file_count, row_group_size) in [(1, 64), (1, 16), (2, 16)] {
+        let mut env = TestEnv::new().await;
+        let engine = env
+            .create_engine(MitoConfig {
+                default_flat_format: true,
+                ..Default::default()
+            })
+            .await;
+        let region_id = RegionId::new(1, 1);
+        let request = CreateRequestBuilder::new()
+            .insert_option("memtable.type", "bulk")
+            .insert_option("max_row_group_row_count", &row_group_size.to_string())
+            .build();
+        let schema = test_util::rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        let rows_per_file = 64 / file_count;
+        for file in 0..file_count {
+            test_util::put_rows(
+                &engine,
+                region_id,
+                Rows {
+                    schema: schema.clone(),
+                    rows: test_util::build_rows(file * rows_per_file, (file + 1) * rows_per_file),
+                },
+            )
+            .await;
+            test_util::flush_region(&engine, region_id, None).await;
+        }
+        let Scanner::Seq(scanner) = engine
+            .scanner(region_id, ScanRequest::default())
+            .await
+            .unwrap()
+        else {
+            panic!("expected a sequential scan");
+        };
+        assert_eq!(file_count, scanner.input().files.len());
+        assert_eq!(
+            64 / row_group_size,
+            scanner.properties().partitions[0].len()
+        );
+        let stream = scanner
+            .scan_partition(&Default::default(), &ExecutionPlanMetricsSet::default(), 0)
+            .unwrap();
+        let batches = stream.try_collect::<Vec<_>>().await.unwrap();
+        assert_eq!(
+            vec![row_group_size; 64 / row_group_size],
+            batches
+                .iter()
+                .map(|batch| batch.num_rows())
+                .collect::<Vec<_>>()
+        );
+        let mut values = scan_field_values(&batches);
+        values.sort_by(f64::total_cmp);
+        assert_eq!((0..64).map(|i| i as f64).collect::<Vec<_>>(), values);
+    }
+}
+
+#[tokio::test]
+async fn test_short_series_level_zero_merge_preserves_batches_and_latest_values() {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: true,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("memtable.type", "bulk")
+        .insert_option("max_row_group_row_count", "65536")
+        .build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    for (start, end, offset) in [(0, 12_000, 0), (6_000, 18_000, 100_000)] {
+        let rows = (start..end)
+            .map(|i| {
+                row(vec![
+                    ValueData::StringValue(format!("{i:05}")),
+                    ValueData::F64Value((i + offset) as f64),
+                    ValueData::TimestampMillisecondValue(0),
+                ])
+            })
+            .collect();
+        test_util::put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows,
+            },
+        )
+        .await;
+        test_util::flush_region(&engine, region_id, None).await;
+    }
+    let Scanner::Seq(scanner) = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap()
+    else {
+        panic!("expected a sequential scan");
+    };
+    assert_eq!(2, scanner.input().files.len());
+    for file in &scanner.input().files {
+        assert_eq!(0, file.meta_ref().level);
+        assert_eq!(12_000, file.meta_ref().num_series);
+    }
+    let batches = scanner
+        .scan_partition(&Default::default(), &ExecutionPlanMetricsSet::default(), 0)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert!(
+        batches.len() < 64,
+        "short series became {} batches",
+        batches.len()
+    );
+    assert_eq!(
+        (0..18_000)
+            .map(|i| if i < 6_000 {
+                i as f64
+            } else {
+                (i + 100_000) as f64
+            })
+            .collect::<Vec<_>>(),
+        scan_field_values(&batches),
     );
 }
 

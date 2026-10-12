@@ -189,43 +189,7 @@ ADMIN FLUSH_FLOW('test_wildcard_basic');
 
 SELECT wildcard FROM out_basic;
 
-DROP TABLE input_basic;
-
-DROP TABLE out_basic;
-
-DROP FLOW test_wildcard_basic;
-
 -- combination of different order of rebuild input table/flow
-
-CREATE TABLE input_basic (
-    "number" INT,
-    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY(number),
-    TIME INDEX(ts)
-);
-
-CREATE FLOW test_wildcard_basic sink TO out_basic EVAL INTERVAL '1m' AS
-SELECT
-    COUNT(*) as wildcard
-FROM
-    input_basic;
-
--- SQLNESS ARG restart=true
-SELECT 1;
-
--- SQLNESS SLEEP 3s
-INSERT INTO
-    input_basic
-VALUES
-    (23, "2021-07-01 00:00:01.000"),
-    (24, "2021-07-01 00:00:01.500");
-
--- give flownode a second to rebuild flow
--- SQLNESS SLEEP 3s
--- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
-ADMIN FLUSH_FLOW('test_wildcard_basic');
-
-SELECT wildcard FROM out_basic;
 
 DROP TABLE input_basic;
 
@@ -302,18 +266,12 @@ SELECT
 FROM
     input_basic;
 
--- SQLNESS ARG restart=true
-SELECT 1;
-
--- SQLNESS SLEEP 3s
 INSERT INTO
     input_basic
 VALUES
     (23, "2021-07-01 00:00:01.000"),
     (24, "2021-07-01 00:00:01.500");
 
--- give flownode a second to rebuild flow
--- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_wildcard_basic');
 

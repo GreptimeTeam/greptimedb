@@ -26,15 +26,13 @@ use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 
 use crate::arrow_array::{binary_array_value, string_array_value};
-use crate::data_type::ConcreteDataType;
+use crate::data_type::{ConcreteDataType, DataType as _};
 use crate::error::{
     AlignJsonArraySnafu, ArrowComputeSnafu, InvalidJsonSnafu, InvalidJsonbSnafu, Result,
 };
 use crate::extension::json::{JSON2_REMAINDER_FIELD_NAME, json2_remainder_field};
-use crate::json::JsonSettings;
-use crate::json::value::{decode_json_variant, encode_serde_json_as_jsonb};
-use crate::prelude::{DataType as _, Value as GreptimeValue};
-use crate::value::{ListValue, StructValue};
+use crate::json::value::decode_json_variant;
+use crate::json::{JsonSettings, TypeHintMismatchPolicy, coerce_json_value_to_type};
 use crate::vectors::MutableVector;
 use crate::vectors::json::builder::{JsonVectorBuilder, json2_physical_data_type};
 use crate::vectors::json::variant::variant_to_json_values;
@@ -124,6 +122,23 @@ impl JsonArray<'_> {
         logical_settings: &JsonSettings,
         target_layout: &JsonSettings,
     ) -> Result<ArrayRef> {
+        self.rewrite_to_v2_with_type_hint_mismatch_policy(
+            field,
+            logical_settings,
+            target_layout,
+            TypeHintMismatchPolicy::Reject,
+        )
+    }
+
+    /// Rewrites a JSON2 array to the specified v2 physical layout using the
+    /// given type hint mismatch policy.
+    pub fn rewrite_to_v2_with_type_hint_mismatch_policy(
+        &self,
+        field: &Field,
+        logical_settings: &JsonSettings,
+        target_layout: &JsonSettings,
+        policy: TypeHintMismatchPolicy,
+    ) -> Result<ArrayRef> {
         let is_v2 = json2_remainder_field(field)?.is_some();
         if is_v2 && self.inner.data_type() == &json2_physical_data_type(target_layout) {
             return Ok(self.inner.clone());
@@ -141,7 +156,8 @@ impl JsonArray<'_> {
             if value.is_null() {
                 builder.push_null();
             } else {
-                let value = logical_settings.encode(value)?;
+                let value =
+                    logical_settings.encode_with_type_hint_mismatch_policy(value, policy)?;
                 builder.try_push_value_ref(&value.as_value_ref())?;
             }
         }
@@ -319,85 +335,10 @@ fn project_json_values(values: Vec<Value>, to_type: &DataType) -> Result<ArrayRe
     let concrete_type = ConcreteDataType::from_arrow_type(to_type);
     let mut builder = concrete_type.create_mutable_vector(values.len());
     for value in values {
-        let value = project_json_value_to_type(value, &concrete_type)?;
+        let value = coerce_json_value_to_type(value, &concrete_type);
         builder.try_push_value_ref(&value.as_value_ref())?;
     }
     Ok(builder.to_vector().to_arrow_array())
-}
-
-fn project_json_value_to_type(value: Value, to_type: &ConcreteDataType) -> Result<GreptimeValue> {
-    if value.is_null() {
-        return Ok(GreptimeValue::Null);
-    }
-
-    if to_type.is_string() {
-        let value = match value {
-            Value::String(value) => value,
-            value => value.to_string(),
-        };
-        return Ok(GreptimeValue::String(value.into()));
-    }
-
-    if matches!(to_type, ConcreteDataType::Binary(_)) {
-        return Ok(GreptimeValue::Binary(
-            encode_serde_json_as_jsonb(value).into(),
-        ));
-    }
-
-    if let Some(struct_type) = to_type.as_struct() {
-        let Value::Object(mut object) = value else {
-            return Ok(GreptimeValue::Null);
-        };
-        let values = struct_type
-            .fields()
-            .iter()
-            .map(|field| {
-                object
-                    .remove(field.name())
-                    .map(|value| project_json_value_to_type(value, field.data_type()))
-                    .transpose()
-                    .map(|value| value.unwrap_or(GreptimeValue::Null))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        return Ok(GreptimeValue::Struct(StructValue::new(
-            values,
-            struct_type.clone(),
-        )));
-    }
-
-    if let Some(list_type) = to_type.as_list() {
-        let Value::Array(values) = value else {
-            return Ok(GreptimeValue::Null);
-        };
-        let item_type = list_type.item_type().clone();
-        let values = values
-            .into_iter()
-            .map(|value| project_json_value_to_type(value, &item_type))
-            .collect::<Result<Vec<_>>>()?;
-        return Ok(GreptimeValue::List(ListValue::new(
-            values,
-            Arc::new(item_type),
-        )));
-    }
-
-    let value = match value {
-        Value::Bool(value) => GreptimeValue::Boolean(value),
-        Value::Number(value) => {
-            if let Some(value) = value.as_i64() {
-                GreptimeValue::Int64(value)
-            } else if let Some(value) = value.as_u64() {
-                GreptimeValue::UInt64(value)
-            } else if let Some(value) = value.as_f64() {
-                GreptimeValue::Float64(value.into())
-            } else {
-                GreptimeValue::Null
-            }
-        }
-        Value::String(value) => GreptimeValue::String(value.into()),
-        Value::Array(_) | Value::Object(_) => GreptimeValue::Null,
-        Value::Null => GreptimeValue::Null,
-    };
-    Ok(to_type.try_cast(value).unwrap_or(GreptimeValue::Null))
 }
 
 impl<'a> From<&'a ArrayRef> for JsonArray<'a> {
@@ -701,8 +642,6 @@ mod test {
             vec![JsonTypeHint {
                 path: vec!["kind".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
-                nullable: true,
-                default_constraint: None,
                 inverted_index: false,
             }],
             Some(0),

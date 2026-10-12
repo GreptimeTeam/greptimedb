@@ -19,23 +19,29 @@
 //! exclusively by the export attempt. Completion and cleanup of closed files
 //! belong to the caller's chunk protocol, not individual file completion.
 
+pub(crate) mod writers;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-use arrow::array::{Array, AsArray, UInt32Array};
-use arrow::compute::cast;
+use arrow::array::{Array, ArrayRef, AsArray, ListArray, StructArray, UInt32Array};
+use arrow::buffer::OffsetBuffer;
+use arrow::compute::{cast, take};
 use arrow::datatypes::{DataType, SchemaRef};
 use arrow::downcast_dictionary_array;
 use arrow::record_batch::RecordBatch;
 use common_datasource::object_store::build_backend_for_write;
-use common_datasource::parquet_writer::{ParquetFileWriter, ParquetWriterLimits};
+use common_datasource::packed_writer::{PackedTableWriter, PackedWriterRef};
+use common_datasource::parquet_writer::{
+    ParquetCreationPolicy, ParquetFileWriter, ParquetWriterLimits,
+};
 use common_meta::key::table_route::{TableRouteManager, TableRouteValue};
 use common_query::OutputData;
 use common_recordbatch::SendableRecordBatchStream;
 use common_time::range::TimestampRange;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::TableReference as DfTableReference;
-use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, col};
+use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, col, lit};
 use futures::StreamExt;
 use object_store::ObjectStore;
 use session::context::QueryContextRef;
@@ -47,10 +53,13 @@ use store_api::metric_engine_consts::{
 use table::TableRef;
 use table::metadata::TableId;
 use table::table::adapter::DfTableProviderAdapter;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{self, InvalidLogicalTableExportSnafu, LogicalTableExportResourceSnafu, Result};
 use crate::statement::StatementExecutor;
+use crate::statement::database_copy::DatabaseExportFile;
+use crate::statement::export_logical_tables::writers::{ExportWriteBudget, Payload, TableWriters};
 
 /// Export preprocessing and per-file limits. Query memory and spill remain
 /// governed by the query engine.
@@ -71,7 +80,7 @@ impl Default for LogicalTableExportLimits {
             input_batch_bytes: 64 * 1024 * 1024,
             conversion_bytes: 1024 * 1024,
             writer: ParquetWriterLimits {
-                row_group_rows: 8192,
+                row_group_rows: 1024 * 1024,
                 flush_threshold_bytes: 8 * 1024 * 1024,
                 max_row_groups: 4096,
             },
@@ -100,8 +109,9 @@ pub struct LogicalTableExport {
     logical_tables: BTreeMap<TableId, LogicalTableProjection>,
 }
 
-struct LogicalTableProjection {
+pub(crate) struct LogicalTableProjection {
     name: String,
+    output: DatabaseExportFile,
     schema: SchemaRef,
     projection: Vec<usize>,
 }
@@ -110,6 +120,14 @@ impl LogicalTableExport {
     /// Capture schemas from selected Metric table references.
     /// Export validates their physical-table association against table routes.
     pub fn try_new(physical: TableRef, tables: &[TableRef]) -> Result<Self> {
+        Self::try_new_in_directory(physical, tables, "")
+    }
+
+    pub(crate) fn try_new_in_directory(
+        physical: TableRef,
+        tables: &[TableRef],
+        directory: &str,
+    ) -> Result<Self> {
         let physical_info = physical.table_info();
         ensure!(
             physical_info.meta.engine == METRIC_ENGINE_NAME
@@ -134,12 +152,6 @@ impl LogicalTableExport {
         for table in tables {
             let info = table.table_info();
             let name = &info.name;
-            ensure!(
-                !name.contains('/') && !name.contains('\\'),
-                InvalidLogicalTableExportSnafu {
-                    reason: "logical table names must not contain path separators"
-                }
-            );
             ensure!(
                 info.catalog_name == physical_info.catalog_name
                     && info.schema_name == physical_info.schema_name
@@ -188,6 +200,7 @@ impl LogicalTableExport {
                         info.table_id(),
                         LogicalTableProjection {
                             name: name.clone(),
+                            output: DatabaseExportFile::new(directory, name, ".parquet")?,
                             schema,
                             projection: indices,
                         }
@@ -216,6 +229,10 @@ impl LogicalTableExport {
         })
     }
 
+    pub(crate) fn output_files(&self) -> impl Iterator<Item = &DatabaseExportFile> {
+        self.logical_tables.values().map(|table| &table.output)
+    }
+
     async fn validate_table_routes(&self, manager: &TableRouteManager) -> Result<()> {
         let table_ids = self.logical_tables.keys().copied().collect::<Vec<_>>();
         let routes = manager
@@ -239,7 +256,7 @@ impl LogicalTableExport {
 
     fn build_plan(&self, time_range: Option<&TimestampRange>) -> Result<LogicalPlan> {
         let info = self.physical_table.table_info();
-        let filters = self
+        let mut filters = self
             .physical_table
             .schema()
             .timestamp_column()
@@ -248,6 +265,11 @@ impl LogicalTableExport {
             })
             .into_iter()
             .collect::<Vec<_>>();
+        if self.logical_tables.len() == 1
+            && let Some((&id, _)) = self.logical_tables.first_key_value()
+        {
+            filters.push(col(TABLE_ID).eq(lit(id)));
+        }
         let source = Arc::new(DefaultTableSource::new(Arc::new(
             DfTableProviderAdapter::new(self.physical_table.clone()),
         )));
@@ -267,11 +289,13 @@ impl LogicalTableExport {
                 .filter(filter)
                 .context(error::BuildDfLogicalPlanSnafu)?;
         }
-        builder
-            .sort(vec![col(TABLE_ID).sort(true, false)])
-            .context(error::BuildDfLogicalPlanSnafu)?
-            .build()
-            .context(error::BuildDfLogicalPlanSnafu)
+        // A single selected table has a constant routing key after filtering.
+        if self.logical_tables.len() > 1 {
+            builder = builder
+                .sort(vec![col(TABLE_ID).sort(true, false)])
+                .context(error::BuildDfLogicalPlanSnafu)?;
+        }
+        builder.build().context(error::BuildDfLogicalPlanSnafu)
     }
 }
 
@@ -300,6 +324,33 @@ impl StatementExecutor {
         cancellation: &CancellationToken,
         query_ctx: QueryContextRef,
     ) -> Result<LogicalTableExportSummary> {
+        self.export_logical_tables_managed(
+            unit,
+            directory,
+            connection,
+            time_range,
+            limits,
+            &cancellation.child_token(),
+            query_ctx,
+            ExportWriteBudget::new(1),
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn export_logical_tables_managed(
+        &self,
+        unit: &LogicalTableExport,
+        directory: &str,
+        connection: &HashMap<String, String>,
+        time_range: Option<&TimestampRange>,
+        limits: LogicalTableExportLimits,
+        cancellation: &CancellationToken,
+        query_ctx: QueryContextRef,
+        budget: Arc<ExportWriteBudget>,
+        packed: Option<PackedWriterRef>,
+    ) -> Result<LogicalTableExportSummary> {
         limits.validate()?;
         let (store, stream) = tokio::select! {
             biased;
@@ -318,10 +369,11 @@ impl StatementExecutor {
                 Ok((store, stream))
             } => result?,
         };
-        export_stream(unit, stream, &store, limits, cancellation).await
+        export_stream_managed(unit, stream, &store, limits, cancellation, budget, packed).await
     }
 }
 
+#[cfg(test)]
 async fn export_stream(
     unit: &LogicalTableExport,
     stream: SendableRecordBatchStream,
@@ -329,19 +381,45 @@ async fn export_stream(
     limits: LogicalTableExportLimits,
     cancellation: &CancellationToken,
 ) -> Result<LogicalTableExportSummary> {
-    let mut active = None;
-    let result = write_tables(unit, stream, store, limits, cancellation, &mut active).await;
-    if result.is_err()
-        && let Some(writer) = active
-        && let Err(cleanup_error) = writer
-            .writer
-            .abort()
-            .await
-            .map_err(|error| map_writer_error(error, &writer.path))
-    {
-        common_telemetry::warn!(cleanup_error; "Failed to clean up incomplete Metric export file");
-    }
-    result
+    export_stream_managed(
+        unit,
+        stream,
+        store,
+        limits,
+        &cancellation.child_token(),
+        ExportWriteBudget::new(1),
+        None,
+    )
+    .await
+}
+
+async fn export_stream_managed(
+    unit: &LogicalTableExport,
+    stream: SendableRecordBatchStream,
+    store: &ObjectStore,
+    limits: LogicalTableExportLimits,
+    cancellation: &CancellationToken,
+    budget: Arc<ExportWriteBudget>,
+    packed: Option<PackedWriterRef>,
+) -> Result<LogicalTableExportSummary> {
+    let mut writers = TableWriters::new(budget.clone());
+    writers.packed = packed;
+    let result = write_tables(
+        unit,
+        stream,
+        store,
+        limits,
+        cancellation,
+        &mut writers,
+        &budget,
+    )
+    .await;
+    let (summary, result) = match result {
+        Ok(summary) => (summary, Ok(())),
+        Err(error) => (LogicalTableExportSummary::default(), Err(error)),
+    };
+    writers.drain(result, cancellation).await?;
+    Ok(summary)
 }
 
 fn check_cancelled(cancellation: &CancellationToken) -> Result<()> {
@@ -358,7 +436,8 @@ async fn write_tables(
     store: &ObjectStore,
     limits: LogicalTableExportLimits,
     cancellation: &CancellationToken,
-    active: &mut Option<ActiveWriter>,
+    writers: &mut TableWriters,
+    budget: &ExportWriteBudget,
 ) -> Result<LogicalTableExportSummary> {
     let id_index =
         stream
@@ -416,22 +495,19 @@ async fn write_tables(
             while end < batch.num_rows() && ids.value(end) == id {
                 end += 1;
             }
-            if active.as_ref().is_some_and(|writer| writer.table_id != id) {
-                finish_active(active, cancellation).await?;
+            if writers.table_id().is_some_and(|last| last != id) {
+                writers.close_input();
             }
             check_cancelled(cancellation)?;
             if let Some(file) = unit.logical_tables.get(&id) {
-                if active.is_none() {
-                    *active = Some(ActiveWriter::open(id, file, store, limits).await?);
+                if writers.table_id().is_none() {
+                    writers.open(id, file, store, limits, cancellation).await?;
                     written.insert(id);
                     summary.files += 1;
                 }
                 let projected = batch
                     .project(&file.projection)
                     .context(error::ProjectSchemaSnafu)?;
-                let writer = active.as_mut().context(error::UnexpectedSnafu {
-                    violated: "missing logical writer",
-                })?;
                 let mut offset = start;
                 while offset < end {
                     let (expanded, consumed) = expand_bounded_slice(
@@ -440,15 +516,12 @@ async fn write_tables(
                         offset,
                         end,
                         limits.conversion_bytes,
+                        budget,
+                        cancellation,
                     )
                     .await?;
                     check_cancelled(cancellation)?;
-                    // Do not drop an in-flight file operation before cleanup.
-                    writer
-                        .writer
-                        .write(expanded, Some(cancellation))
-                        .await
-                        .map_err(|error| map_writer_error(error, &writer.path))?;
+                    writers.send(expanded, cancellation).await?;
                     check_cancelled(cancellation)?;
                     offset += consumed;
                     summary.rows += consumed;
@@ -459,12 +532,12 @@ async fn write_tables(
             start = end;
         }
     }
-    finish_active(active, cancellation).await?;
+    writers.close_input();
     for (&id, file) in &unit.logical_tables {
         if !written.contains(&id) {
             check_cancelled(cancellation)?;
-            *active = Some(ActiveWriter::open(id, file, store, limits).await?);
-            finish_active(active, cancellation).await?;
+            writers.open(id, file, store, limits, cancellation).await?;
+            writers.close_input();
             summary.files += 1;
         }
     }
@@ -473,59 +546,65 @@ async fn write_tables(
 }
 
 struct ActiveWriter {
-    table_id: u32,
     path: String,
     writer: ParquetFileWriter,
 }
 
 impl ActiveWriter {
-    async fn open(
+    fn open_packed(
+        table: &LogicalTableProjection,
         id: u32,
+        store: &ObjectStore,
+        limits: LogicalTableExportLimits,
+        shared: PackedWriterRef,
+    ) -> Result<Self> {
+        let path = format!("table-{id}.parquet");
+        let packed = PackedTableWriter::new(shared, table.name.clone(), id, false);
+        let writer = ParquetFileWriter::open_packed(
+            table.schema.clone(),
+            store.clone(),
+            &path,
+            Some(limits.writer),
+            packed,
+        )
+        .map_err(|e| map_writer_error(e, &path))?;
+        Ok(Self { path, writer })
+    }
+
+    async fn open(
         table: &LogicalTableProjection,
         store: &ObjectStore,
         limits: LogicalTableExportLimits,
     ) -> Result<Self> {
-        let path = format!("{}.parquet", table.name);
-        ensure!(
-            !store
-                .exists(&path)
-                .await
-                .context(error::ReadObjectSnafu { path: &path })?,
-            InvalidLogicalTableExportSnafu {
-                reason: format!("output already exists: {path}")
-            }
-        );
-        let writer = ParquetFileWriter::open(
+        let path = table.output.path.clone();
+        let conditional = store.info().capability().write_with_if_not_exists;
+        if !conditional {
+            ensure!(
+                !store
+                    .exists(&path)
+                    .await
+                    .context(error::ReadObjectSnafu { path: &path })?,
+                InvalidLogicalTableExportSnafu {
+                    reason: format!("output already exists: {path}")
+                }
+            );
+        }
+        let writer = ParquetFileWriter::open_with_creation(
             table.schema.clone(),
             store.clone(),
             &path,
             1,
             Some(limits.writer),
+            if conditional {
+                ParquetCreationPolicy::IfNotExists
+            } else {
+                ParquetCreationPolicy::Overwrite
+            },
         )
         .await
         .map_err(|error| map_writer_error(error, &path))?;
-        Ok(Self {
-            table_id: id,
-            path,
-            writer,
-        })
+        Ok(Self { path, writer })
     }
-}
-
-async fn finish_active(
-    active: &mut Option<ActiveWriter>,
-    cancellation: &CancellationToken,
-) -> Result<()> {
-    if let Some(writer) = active.as_mut() {
-        writer
-            .writer
-            .finish(Some(cancellation))
-            .await
-            .map_err(|error| map_writer_error(error, &writer.path))?;
-        check_cancelled(cancellation)?;
-        *active = None;
-    }
-    Ok(())
 }
 
 async fn expand_bounded_slice(
@@ -533,25 +612,162 @@ async fn expand_bounded_slice(
     schema: SchemaRef,
     start: usize,
     end: usize,
-    budget: usize,
-) -> Result<(RecordBatch, usize)> {
-    common_runtime::spawn_blocking_global(move || {
-        let len = rows_within_budget(&batch, start, end, budget)?;
-        let slice = batch.slice(start, len);
-        let arrays = slice
+    requested: usize,
+    budget: &ExportWriteBudget,
+    cancellation: &CancellationToken,
+) -> Result<(Payload, usize)> {
+    let (conversion, retained) = ExportWriteBudget::conversion_budget(
+        batch.get_array_memory_size(),
+        batch.num_columns(),
+        requested,
+    )?;
+    // Parquet accepts compatible string dictionaries without expanding their values.
+    let fields = schema
+        .fields()
+        .iter()
+        .zip(batch.columns())
+        .map(|(field, array)| {
+            if let DataType::Dictionary(_, value) = array.data_type()
+                && value.as_ref() == field.data_type()
+                && matches!(value.as_ref(), DataType::Utf8 | DataType::LargeUtf8)
+            {
+                Arc::new(
+                    field
+                        .as_ref()
+                        .clone()
+                        .with_data_type(array.data_type().clone()),
+                )
+            } else {
+                field.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    let schema = Arc::new(arrow::datatypes::Schema::new_with_metadata(
+        fields,
+        schema.metadata().clone(),
+    ));
+    // Sharing compatible arrays needs no CPU conversion. Keep the size check on
+    // this task only when its dictionary inspection is bounded.
+    if start < end
+        && batch
             .columns()
             .iter()
             .zip(schema.fields())
-            .map(|(array, field)| cast(array, field.data_type()).context(error::ComputeArrowSnafu))
-            .collect::<Result<Vec<_>>>()?;
-        let expanded = RecordBatch::try_new(schema, arrays).context(error::ComputeArrowSnafu)?;
-        Ok((expanded, len))
+            .all(|(array, field)| array.data_type() == field.data_type())
+        && let Some(estimated) = estimate_batch_bytes_upper_bound(&batch, end - start, &[])?
+        && estimated <= conversion
+    {
+        let reservation = retained.saturating_add(estimated.saturating_mul(4));
+        let permit = budget.reserve(reservation, cancellation).await?;
+        return convert_slice_payload(batch, schema, start, end - start, reservation, permit);
+    }
+    let input = batch.clone();
+    let (len, estimated) = common_runtime::spawn_blocking_global(move || {
+        rows_within_budget(&input, start, end, conversion, &[])
+    })
+    .await
+    .context(error::JoinTaskSnafu)??;
+    let reservation = retained.saturating_add(estimated.saturating_mul(4));
+    let permit = budget.reserve(reservation, cancellation).await?;
+    common_runtime::spawn_blocking_global(move || {
+        convert_slice_payload(batch, schema, start, len, reservation, permit)
     })
     .await
     .context(error::JoinTaskSnafu)?
 }
 
-fn map_writer_error(source: common_datasource::error::Error, path: &str) -> error::Error {
+fn convert_slice_payload(
+    batch: RecordBatch,
+    schema: SchemaRef,
+    start: usize,
+    len: usize,
+    reservation: usize,
+    permit: OwnedSemaphorePermit,
+) -> Result<(Payload, usize)> {
+    let expanded = expand_export_batch(&batch.slice(start, len), schema)?;
+    ensure!(
+        expanded.get_array_memory_size() <= reservation,
+        LogicalTableExportResourceSnafu {
+            reason: "converted backing buffers exceed reservation"
+        }
+    );
+    Ok((
+        Payload {
+            batch: expanded,
+            permit,
+        },
+        len,
+    ))
+}
+
+/// Limits nested casts to selected children: Arrow's List cast otherwise expands
+/// the entire values array, even when the parent has been sliced.
+pub(crate) fn expand_export_batch(batch: &RecordBatch, schema: SchemaRef) -> Result<RecordBatch> {
+    let arrays = batch
+        .columns()
+        .iter()
+        .zip(schema.fields())
+        .map(|(array, field)| expand_export_array(array, field.data_type()))
+        .collect::<Result<Vec<_>>>()?;
+    RecordBatch::try_new(schema, arrays).context(error::ComputeArrowSnafu)
+}
+
+fn expand_export_array(array: &ArrayRef, target: &DataType) -> Result<ArrayRef> {
+    if array.data_type() == target {
+        return Ok(array.clone());
+    }
+    match (array.data_type(), target) {
+        (DataType::Dictionary(_, _), _) => {
+            downcast_dictionary_array! {
+                array => {
+                    // Select dictionary entries before recursively converting nested values.
+                    let selected = take(array.values().as_ref(), array.keys(), None)
+                        .context(error::ComputeArrowSnafu)?;
+                    expand_export_array(&selected, target)
+                },
+                _ => error::UnexpectedSnafu { violated: "invalid dictionary array" }.fail(),
+            }
+        }
+        (DataType::List(_), DataType::List(field)) => {
+            let list = array.as_list::<i32>();
+            let offsets = list.value_offsets();
+            let start = offsets[0];
+            let end = offsets[list.len()];
+            let values = list.values().slice(start as usize, (end - start) as usize);
+            let values = expand_export_array(&values, field.data_type())?;
+            let offsets = OffsetBuffer::new(
+                offsets
+                    .iter()
+                    .map(|offset| offset - start)
+                    .collect::<Vec<_>>()
+                    .into(),
+            );
+            Ok(Arc::new(
+                ListArray::try_new(field.clone(), offsets, values, list.nulls().cloned())
+                    .context(error::ComputeArrowSnafu)?,
+            ))
+        }
+        (DataType::Struct(_), DataType::Struct(fields)) => {
+            let array = array.as_struct();
+            let columns = array
+                .columns()
+                .iter()
+                .zip(fields)
+                .map(|(array, field)| expand_export_array(array, field.data_type()))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Arc::new(
+                StructArray::try_new(fields.clone(), columns, array.nulls().cloned())
+                    .context(error::ComputeArrowSnafu)?,
+            ))
+        }
+        _ => cast(array, target).context(error::ComputeArrowSnafu),
+    }
+}
+
+pub(crate) fn map_writer_error(
+    source: common_datasource::error::Error,
+    path: &str,
+) -> error::Error {
     match source {
         common_datasource::error::Error::ParquetWriteCancelled {} => {
             error::LogicalTableExportCancelledSnafu.build()
@@ -565,6 +781,12 @@ fn map_writer_error(source: common_datasource::error::Error, path: &str) -> erro
         common_datasource::error::Error::ParquetWriterResource { reason } => {
             LogicalTableExportResourceSnafu { reason }.build()
         }
+        common_datasource::error::Error::WriteObject { error, .. }
+            if error.kind() == object_store::ErrorKind::ConditionNotMatch =>
+        {
+            let reason = format!("output already exists: {path}");
+            InvalidLogicalTableExportSnafu { reason }.build()
+        }
         source => error::WriteStreamToFileSnafu { path }.into_error(source),
     }
 }
@@ -572,7 +794,7 @@ fn map_writer_error(source: common_datasource::error::Error, path: &str) -> erro
 // Count only selected logical values before dictionary expansion, including nested
 // histogram lists/structs. Offset and validity overhead is charged per value.
 fn estimate_value_size(array: &dyn Array, row: usize) -> Result<usize> {
-    if array.is_null(row) {
+    if array.is_null(row) && !matches!(array.data_type(), DataType::Struct(_) | DataType::List(_)) {
         return Ok(32);
     }
     let bytes = match array.data_type() {
@@ -580,8 +802,10 @@ fn estimate_value_size(array: &dyn Array, row: usize) -> Result<usize> {
         DataType::Null => 0,
         DataType::Utf8 => array.as_string::<i32>().value(row).len(),
         DataType::LargeUtf8 => array.as_string::<i64>().value(row).len(),
+        DataType::Utf8View => array.as_string_view().value(row).len(),
         DataType::Binary => array.as_binary::<i32>().value(row).len(),
         DataType::LargeBinary => array.as_binary::<i64>().value(row).len(),
+        DataType::BinaryView => array.as_binary_view().value(row).len(),
         DataType::Struct(_) => {
             array
                 .as_struct()
@@ -622,18 +846,72 @@ fn estimate_value_size(array: &dyn Array, row: usize) -> Result<usize> {
     Ok(bytes.saturating_add(16))
 }
 
-fn rows_within_budget(
+/// Estimates a conservative byte upper bound with bounded work on an async task.
+/// `None` means this path cannot estimate the batch, not that it exceeds a budget.
+fn estimate_batch_bytes_upper_bound(
+    batch: &RecordBatch,
+    rows: usize,
+    json_columns: &[usize],
+) -> Result<Option<usize>> {
+    let mut dictionary_values = 1024usize;
+    let mut max_row_bytes = 0usize;
+    for (index, array) in batch.columns().iter().enumerate() {
+        let size = if let Some(width) = array.data_type().primitive_width() {
+            (width + 16).max(32)
+        } else if let Some(dictionary) = array.as_any_dictionary_opt()
+            && dictionary.values().len() < rows
+            && dictionary.values().len() <= dictionary_values
+            && matches!(
+                dictionary.values().data_type(),
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+            )
+        {
+            let values = dictionary.values();
+            dictionary_values -= values.len();
+            let max = (0..values.len()).try_fold(0usize, |max, row| {
+                Ok::<_, error::Error>(max.max(estimate_value_size(values.as_ref(), row)?))
+            })?;
+            max.saturating_add(16).max(32)
+        } else {
+            return Ok(None);
+        };
+        let expansion = if json_columns.contains(&index) { 8 } else { 1 };
+        max_row_bytes = max_row_bytes.saturating_add(size.saturating_mul(expansion));
+    }
+    Ok(max_row_bytes.checked_mul(rows))
+}
+
+pub(crate) fn rows_within_budget(
     batch: &RecordBatch,
     start: usize,
     end: usize,
     budget: usize,
-) -> Result<usize> {
+    json_columns: &[usize],
+) -> Result<(usize, usize)> {
+    if start < end
+        && let Some(bytes) = estimate_batch_bytes_upper_bound(batch, end - start, json_columns)?
+        && bytes <= budget
+    {
+        return Ok((end - start, bytes));
+    }
     let mut bytes = 0usize;
     let mut row = start;
     while row < end {
-        let row_bytes = batch.columns().iter().try_fold(0usize, |sum, array| {
-            Ok::<_, error::Error>(sum.saturating_add(estimate_value_size(array.as_ref(), row)?))
-        })?;
+        let row_bytes =
+            batch
+                .columns()
+                .iter()
+                .enumerate()
+                .try_fold(0usize, |sum, (index, array)| {
+                    // JSON escaping and number formatting only expand JSON values.
+                    let expansion = if json_columns.contains(&index) && !array.is_null(row) {
+                        8
+                    } else {
+                        1
+                    };
+                    let size = estimate_value_size(array.as_ref(), row)?;
+                    Ok::<_, error::Error>(sum.saturating_add(size.saturating_mul(expansion)))
+                })?;
         if row_bytes > budget.saturating_sub(bytes) {
             break;
         }
@@ -646,7 +924,7 @@ fn rows_within_budget(
             reason: "one expanded logical row exceeds conversion byte budget"
         }
     );
-    Ok(row - start)
+    Ok((row - start, bytes))
 }
 
 #[cfg(test)]

@@ -38,6 +38,7 @@ pub struct PostgresServer {
     make_handler: Arc<MakePostgresServerHandler>,
     tls_server_config: Arc<ReloadableTlsServerConfig>,
     keep_alive_secs: u64,
+    batching_enabled: bool,
     bind_addr: Option<SocketAddr>,
     process_manager: Option<ProcessManagerRef>,
 }
@@ -66,9 +67,16 @@ impl PostgresServer {
             make_handler,
             tls_server_config,
             keep_alive_secs,
+            batching_enabled: false,
             bind_addr: None,
             process_manager,
         }
+    }
+
+    /// Enables ordinary-table batching for connections accepted by this server.
+    pub fn with_batching_enabled(mut self, enabled: bool) -> Self {
+        self.batching_enabled = enabled;
+        self
     }
 
     fn accept(
@@ -77,6 +85,7 @@ impl PostgresServer {
         accepting_stream: AbortableStream,
     ) -> impl Future<Output = ()> + use<> {
         let handler_maker = self.make_handler.clone();
+        let batching_enabled = self.batching_enabled;
         let tls_server_config = self.tls_server_config.clone();
         let process_manager = self.process_manager.clone();
         accepting_stream.for_each(move |tcp_stream| {
@@ -102,7 +111,8 @@ impl PostgresServer {
 
                         let _handle = io_runtime.spawn(async move {
                             crate::metrics::METRIC_POSTGRES_CONNECTIONS.inc();
-                            let pg_handler = Arc::new(handler_maker.make(addr, process_id));
+                            let pg_handler =
+                                Arc::new(handler_maker.make(addr, process_id, batching_enabled));
                             let r =
                                 process_socket(io_stream, tls_acceptor.clone(), pg_handler).await;
                             crate::metrics::METRIC_POSTGRES_CONNECTIONS.dec();

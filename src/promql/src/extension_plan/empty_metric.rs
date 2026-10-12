@@ -40,7 +40,7 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream, StatisticsArgs,
 };
 use datafusion::physical_planner::PhysicalPlanner;
-use datafusion::prelude::{Expr, col, lit};
+use datafusion::prelude::{Expr, ident, lit};
 use datafusion_expr::LogicalPlanBuilder;
 use datatypes::arrow::array::TimestampMillisecondArray;
 use datatypes::arrow::datatypes::SchemaRef;
@@ -409,7 +409,7 @@ fn build_ts_only_schema(column_name: &str) -> DFSchema {
 pub fn build_special_time_expr(time_index_column_name: &str) -> Expr {
     let input_schema = build_ts_only_schema(time_index_column_name);
     // safety: should not failed (UT covers this)
-    col(time_index_column_name)
+    ident(time_index_column_name)
         .cast_to(&DataType::Int64, &input_schema)
         .unwrap()
         .cast_to(&DataType::Float64, &input_schema)

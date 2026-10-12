@@ -131,6 +131,11 @@ impl TaskState {
         &self.checkpoints
     }
 
+    /// Read the live dirty-window queue without exposing TaskState internals to execution owners.
+    pub fn dirty_time_windows(&self) -> &DirtyTimeWindows {
+        &self.dirty_time_windows
+    }
+
     /// Returns the in-progress fenced repair, if the task is repairing dirty
     /// windows under a frozen full-snapshot high watermark.
     pub fn pending_fenced_repair(&self) -> Option<&FencedRepair> {
@@ -203,6 +208,25 @@ impl TaskState {
         self.pending_fenced_repair.as_ref()
     }
 
+    /// Start repairing explicit bounded windows under a frozen high `H`.
+    ///
+    /// The caller supplies the complete repair scope. Live dirty windows are
+    /// left unchanged so signals received after `H` remain separate.
+    pub fn start_fenced_repair_windows(
+        &mut self,
+        high: BTreeMap<u64, u64>,
+        windows: Vec<(Timestamp, Timestamp)>,
+    ) {
+        let mut pending_windows = self.dirty_time_windows.clone();
+        pending_windows.clean();
+        pending_windows.add_windows(windows);
+        self.pending_fenced_repair = Some(FencedRepair {
+            high,
+            pending_windows,
+        });
+        self.checkpoint_mode = CheckpointMode::FullSnapshot;
+    }
+
     /// Finish the fenced repair and promote the frozen high watermark to the
     /// checkpoint map. Incremental-disabled flows stay in FullSnapshot mode.
     pub fn finish_fenced_repair(&mut self) -> Option<BTreeMap<u64, u64>> {
@@ -254,22 +278,18 @@ impl TaskState {
         task_ctx: Option<&BatchingTask>,
     ) -> Result<Option<FilterExprInfo>, Error> {
         if let Some(repair) = self.pending_fenced_repair.as_mut() {
-            let expr = repair.pending_windows.gen_filter_exprs(
+            // Fenced windows are an explicit frozen repair scope. They must not
+            // be pruned by the moving live-data expiration boundary, and an
+            // empty repair must remain active until its high watermark is
+            // explicitly finished.
+            return repair.pending_windows.gen_filter_exprs(
                 col_name,
-                expire_lower_bound,
+                None,
                 window_size,
                 window_cnt,
                 flow_id,
                 task_ctx,
-            )?;
-            if expr.is_some() || !repair.pending_windows.is_empty() {
-                return Ok(expr);
-            }
-
-            // All pending repair windows may have expired during merge. Clear
-            // the empty repair so this call can fall back to live dirty windows
-            // instead of routing future executions to an empty queue forever.
-            self.pending_fenced_repair = None;
+            );
         }
 
         self.dirty_time_windows.gen_filter_exprs(
@@ -543,6 +563,15 @@ impl DirtyTimeWindows {
             // never shrinks an already-known dirty range with the same start.
             (Some(end), None) | (None, Some(end)) => Some(end),
             (None, None) => None,
+        }
+    }
+
+    /// Detach all dirty windows while retaining this queue's configured limits.
+    pub(crate) fn detach(&mut self) -> Self {
+        Self {
+            windows: std::mem::take(&mut self.windows),
+            max_filter_num_per_query: self.max_filter_num_per_query,
+            time_window_merge_threshold: self.time_window_merge_threshold,
         }
     }
 
@@ -1377,6 +1406,108 @@ mod test {
         assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
         assert!(state.pending_fenced_repair().is_none());
         assert_eq!(state.dirty_time_windows.len(), 2);
+    }
+
+    #[test]
+    fn test_explicit_fenced_repair_windows_keep_live_windows_separate() {
+        let mut state = state_with_past_update(Duration::from_secs(1));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(1_000)));
+        let high = BTreeMap::from([(1, 10)]);
+        state.start_fenced_repair_windows(
+            high.clone(),
+            vec![(Timestamp::new_second(10), Timestamp::new_second(15))],
+        );
+
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert_eq!(state.pending_fenced_repair().unwrap().high(), &high);
+        assert_eq!(
+            state
+                .pending_fenced_repair()
+                .unwrap()
+                .pending_windows()
+                .len(),
+            1
+        );
+        assert_eq!(state.dirty_time_windows.len(), 1);
+
+        let filter = state
+            .gen_scoped_filter_exprs(
+                "ts",
+                Some(Timestamp::new_second(100)),
+                chrono::Duration::seconds(5),
+                1,
+                1,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            filter.time_ranges,
+            vec![(Timestamp::new_second(10), Timestamp::new_second(15))]
+        );
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(20), Some(Timestamp::new_second(25)));
+        state.restore_scoped_windows(&filter);
+
+        assert_eq!(
+            state
+                .pending_fenced_repair()
+                .unwrap()
+                .pending_windows()
+                .len(),
+            1
+        );
+        assert_eq!(state.dirty_time_windows.len(), 2);
+    }
+
+    #[test]
+    fn test_explicit_fenced_repair_keeps_empty_high_and_old_windows() {
+        let mut state = state_with_past_update(Duration::from_secs(1));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(1_000)));
+        let high = BTreeMap::from([(1, 10)]);
+        state.start_fenced_repair_windows(high.clone(), Vec::new());
+
+        assert!(
+            state
+                .gen_scoped_filter_exprs(
+                    "ts",
+                    Some(Timestamp::new_second(100)),
+                    chrono::Duration::seconds(5),
+                    1,
+                    1,
+                    None,
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(state.pending_fenced_repair().unwrap().high(), &high);
+        assert_eq!(state.dirty_time_windows.len(), 1);
+        assert_eq!(state.finish_fenced_repair(), Some(high));
+
+        state.start_fenced_repair_windows(
+            BTreeMap::from([(1, 11)]),
+            vec![(Timestamp::new_second(-20), Timestamp::new_second(-15))],
+        );
+        let filter = state
+            .gen_scoped_filter_exprs(
+                "ts",
+                Some(Timestamp::new_second(100)),
+                chrono::Duration::seconds(5),
+                1,
+                1,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            filter.time_ranges,
+            vec![(Timestamp::new_second(-20), Timestamp::new_second(-15))]
+        );
     }
 
     #[test]

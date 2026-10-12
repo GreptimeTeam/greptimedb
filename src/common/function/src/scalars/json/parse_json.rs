@@ -67,7 +67,7 @@ impl Function for ParseJsonFunction {
             let s = json_strings.is_valid(i).then(|| json_strings.value(i));
             let result = s
                 .map(|s| {
-                    jsonb::parse_value(s.as_bytes())
+                    jsonb::parse_value_standard_mode(s.as_bytes())
                         .map(|x| x.to_vec())
                         .map_err(|e| DataFusionError::Execution(format!("cannot parse '{s}': {e}")))
                 })

@@ -8,7 +8,7 @@ CREATE TABLE json2_list_index (
 );
 
 INSERT INTO json2_list_index VALUES
-    (1, 'host1', '{"l":[[10,11],["a","b"]],"o":{"l":[{"inner":{"l":[1,2,3]}},{"inner":{"l":["x","y","z"]},"casekey":"normalized","UPPER":"quoted","a.b":"dotted"}]}}'),
+    (1, 'host1', '{"a.b":"root-dotted","l":[[10,11],["a","b"]],"o":{"l":[{"inner":{"l":[1,2,3]}},{"inner":{"l":["x","y","z"]},"casekey":"normalized","UPPER":"quoted","a.b":"dotted"}]}}'),
     (2, 'host2', '{"l":[[20],[21,22,23]],"o":{"l":[{"inner":{"l":[4,5,6]}},{"inner":{"l":[7,8]}}]}}'),
     (3, 'host3', '{"l":[null,[30]],"o":{"l":[null,{"inner":{"l":[true,false,null]}}]}}');
 
@@ -42,8 +42,24 @@ SELECT ts,
 FROM json2_list_index
 ORDER BY ts;
 
+SELECT ts, j."a.b" AS root_dotted_key
+FROM json2_list_index
+ORDER BY ts;
+
 SELECT ts, j.l[0][0]::DOUBLE * 2 AS calculated
 FROM json2_list_index
 ORDER BY ts;
+
+SELECT ts,
+       json_get(j, '$."a.b"') AS quoted_path,
+       json_get(j, '$["a.b"]') AS bracket_path,
+       json_get(j, '$.o.l[1]."a.b"') AS nested_path
+FROM json2_list_index
+ORDER BY ts;
+
+-- Invalid paths must fail planning instead of falling back to Variant.
+SELECT json_get(j, '$.o[')::BIGINT FROM json2_list_index;
+
+SELECT json_get(j, '$.missing')::BIGINT FROM json2_list_index ORDER BY ts;
 
 DROP TABLE json2_list_index;

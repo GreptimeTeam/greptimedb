@@ -25,12 +25,11 @@ use common_error::{
 use common_macro::stack_trace_debug;
 use common_telemetry::common_error::ext::ErrorExt;
 use common_telemetry::common_error::status_code::StatusCode;
-use snafu::{Location, ResultExt, Snafu};
+use snafu::{Location, Snafu};
 use tonic::codegen::http::HeaderValue;
 use tonic::metadata::MetadataMap;
 
 use crate::FlowId;
-use crate::expr::EvalError;
 
 /// This error is used to represent all possible errors that can occur in the flow module.
 #[derive(Snafu)]
@@ -101,14 +100,6 @@ pub enum Error {
         location: Location,
     },
 
-    /// TODO(discord9): add detailed location of column
-    #[snafu(display("Failed to eval stream"))]
-    Eval {
-        source: EvalError,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Table not found: {name}"))]
     TableNotFound {
         name: String,
@@ -161,13 +152,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Not implement in flow: {reason}"))]
-    NotImplemented {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Flow plan error: {reason}"))]
     Plan {
         reason: String,
@@ -177,13 +161,6 @@ pub enum Error {
 
     #[snafu(display("Unsupported: {reason}"))]
     Unsupported {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Unsupported temporal filter: {reason}"))]
-    UnsupportedTemporalFilter {
         reason: String,
         #[snafu(implicit)]
         location: Location,
@@ -330,8 +307,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Self::Eval { .. }
-            | Self::JoinTask { .. }
+            Self::JoinTask { .. }
             | Self::Datafusion { .. }
             | Self::InsertIntoFlow { .. }
             | Self::NoAvailableFrontend { .. }
@@ -349,9 +325,7 @@ impl ErrorExt for Error {
             Self::Unexpected { .. }
             | Self::SyncCheckTask { .. }
             | Self::IllegalCheckTaskState { .. } => StatusCode::Unexpected,
-            Self::NotImplemented { .. }
-            | Self::UnsupportedTemporalFilter { .. }
-            | Self::Unsupported { .. } => StatusCode::Unsupported,
+            Self::Unsupported { .. } => StatusCode::Unsupported,
             Self::External { source, .. } => source.status_code(),
             Self::Internal { .. } | Self::CacheRequired { .. } => StatusCode::Internal,
             Self::StartServer { source, .. } | Self::ShutdownServer { source, .. } => {
@@ -405,9 +379,3 @@ impl ErrorExt for Error {
 }
 
 define_into_tonic_status!(Error);
-
-impl From<EvalError> for Error {
-    fn from(e: EvalError) -> Self {
-        Err::<(), _>(e).context(EvalSnafu).unwrap_err()
-    }
-}

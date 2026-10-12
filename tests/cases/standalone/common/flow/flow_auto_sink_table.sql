@@ -47,10 +47,7 @@ FROM
     numbers_input_basic
 GROUP BY
     ts;
--- SQLNESS ARG restart=true
-SELECT 1;
 
--- SQLNESS SLEEP 3s
 SHOW CREATE TABLE out_num_cnt_basic;
 
 -- SQLNESS ARG restart=true

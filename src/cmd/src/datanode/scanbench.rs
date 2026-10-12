@@ -27,6 +27,8 @@ use common_meta::cache::{new_schema_cache, new_table_schema_cache};
 use common_meta::key::SchemaMetadataManager;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_wal::config::DatanodeWalConfig;
+use common_wal::config::kafka::DatanodeKafkaConfig;
+use common_wal::config::raft_engine::RaftEngineConfig;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::logical_expr::{BinaryExpr, Expr as DfExpr, ExprSchemable, Operator};
 use datafusion_common::tree_node::{Transformed, TreeNodeRewriter};
@@ -694,6 +696,33 @@ fn mock_schema_metadata_manager() -> Arc<SchemaMetadataManager> {
     Arc::new(SchemaMetadataManager::new(table_schema_cache, schema_cache))
 }
 
+/// The log store scanbench opens for a WAL config.
+#[derive(Debug, PartialEq)]
+enum ScanbenchLogStore<'a> {
+    RaftEngine(&'a RaftEngineConfig),
+    Kafka(&'a DatanodeKafkaConfig),
+    Noop,
+}
+
+/// Selects the log store for the WAL config. WAL providers that scanbench cannot
+/// build are rejected instead of falling back to the Noop log store.
+fn select_log_store(
+    wal_config: &DatanodeWalConfig,
+    enable_wal: bool,
+) -> error::Result<ScanbenchLogStore<'_>> {
+    match wal_config {
+        DatanodeWalConfig::RaftEngine(config) if enable_wal => {
+            Ok(ScanbenchLogStore::RaftEngine(config))
+        }
+        DatanodeWalConfig::Kafka(config) if enable_wal => Ok(ScanbenchLogStore::Kafka(config)),
+        DatanodeWalConfig::ObjectStore(_) if enable_wal => error::IllegalConfigSnafu {
+            msg: "object store WAL is not wired into scanbench yet; disable WAL or use another provider",
+        }
+        .fail(),
+        _ => Ok(ScanbenchLogStore::Noop),
+    }
+}
+
 impl ScanbenchCommand {
     async fn load_scan_config_set(&self) -> error::Result<ScanConfigSet> {
         match (&self.scan_config, &self.scan_configs) {
@@ -783,8 +812,8 @@ impl ScanbenchCommand {
             partition_expr_fetcher,
         };
 
-        let engine = match &wal_config {
-            DatanodeWalConfig::RaftEngine(raft_engine_config) if self.enable_wal => {
+        let engine = match select_log_store(&wal_config, self.enable_wal)? {
+            ScanbenchLogStore::RaftEngine(raft_engine_config) => {
                 let data_home = normalize_dir(&store_cfg.data_home);
                 let wal_dir = match &raft_engine_config.dir {
                     Some(dir) => dir.clone(),
@@ -805,7 +834,7 @@ impl ScanbenchCommand {
                 println!("{} Using RaftEngine WAL", "✓".green());
                 components.build(log_store).await?
             }
-            DatanodeWalConfig::Kafka(kafka_config) if self.enable_wal => {
+            ScanbenchLogStore::Kafka(kafka_config) => {
                 let log_store = Arc::new(
                     KafkaLogStore::try_new(kafka_config, None)
                         .await
@@ -815,7 +844,7 @@ impl ScanbenchCommand {
                 println!("{} Using Kafka WAL", "✓".green());
                 components.build(log_store).await?
             }
-            _ => {
+            ScanbenchLogStore::Noop => {
                 let log_store = Arc::new(NoopLogStore);
                 println!(
                     "{} Using NoopLogStore (enable_wal={})",
@@ -1307,6 +1336,8 @@ impl ScanbenchCommand {
 
 #[cfg(test)]
 mod tests {
+    use common_wal::config::DatanodeWalConfig;
+    use common_wal::config::object_store::ObjectStoreWalConfig;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use sqlparser::ast::{BinaryOperator, Expr};
@@ -1317,10 +1348,35 @@ mod tests {
 
     use super::{
         BenchmarkMetadata, BenchmarkResultSummary, NormalizedScanConfig, PartitionResult,
-        ScanConfig, ScanRunResult, ScanbenchResult, resolve_filters, resolve_projection,
-        validate_scan_config_suite, write_result_file,
+        ScanConfig, ScanRunResult, ScanbenchLogStore, ScanbenchResult, resolve_filters,
+        resolve_projection, select_log_store, validate_scan_config_suite, write_result_file,
     };
     use crate::error;
+
+    #[test]
+    fn test_select_log_store() {
+        let object_store = DatanodeWalConfig::ObjectStore(ObjectStoreWalConfig::default());
+        let err = select_log_store(&object_store, true).unwrap_err();
+        assert!(matches!(err, error::Error::IllegalConfig { .. }));
+        assert_eq!(
+            ScanbenchLogStore::Noop,
+            select_log_store(&object_store, false).unwrap()
+        );
+
+        assert_eq!(
+            ScanbenchLogStore::Noop,
+            select_log_store(&DatanodeWalConfig::Noop, true).unwrap()
+        );
+        let raft_engine = DatanodeWalConfig::default();
+        assert!(matches!(
+            select_log_store(&raft_engine, true).unwrap(),
+            ScanbenchLogStore::RaftEngine(_)
+        ));
+        assert_eq!(
+            ScanbenchLogStore::Noop,
+            select_log_store(&raft_engine, false).unwrap()
+        );
+    }
 
     #[test]
     fn test_parse_scan_config_projection_names() {

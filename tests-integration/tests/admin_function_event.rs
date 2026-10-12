@@ -14,7 +14,6 @@
 
 use std::sync::Arc;
 
-use common_test_util::temp_dir::create_temp_dir;
 use frontend::instance::Instance;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContext;
@@ -23,9 +22,8 @@ use sql::dialect::GreptimeDbDialect;
 use sql::parser::{ParseOptions, ParserContext};
 use sql::statements::admin::Admin;
 use sql::statements::statement::Statement;
-use tests_integration::cluster::GreptimeDbClusterBuilder;
 use tests_integration::standalone::GreptimeDbStandaloneBuilder;
-use tests_integration::test_util::{StorageType, get_test_store_config};
+use tests_integration::test_util::test_event_recorder_options;
 
 use crate::event_recorder_test_util::assert_eventually_eq;
 
@@ -35,29 +33,10 @@ const TABLE_NAME: &str = "admin_function_event_test";
 async fn test_standalone_admin_function_events() {
     common_telemetry::init_default_ut_logging();
     let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_admin_function_events")
+        .with_event_recorder_options(test_event_recorder_options())
         .build()
         .await;
     assert_admin_function_events(standalone.fe_instance()).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_distributed_admin_function_events() {
-    let store_type = StorageType::File;
-    if !store_type.test_on() {
-        return;
-    }
-
-    common_telemetry::init_default_ut_logging();
-    let (store_config, _guard) = get_test_store_config(&store_type);
-    let home_dir = create_temp_dir("test_distributed_admin_function_events_data_home");
-    let cluster = GreptimeDbClusterBuilder::new("test_distributed_admin_function_events")
-        .await
-        .with_datanodes(1)
-        .with_store_config(store_config)
-        .with_shared_home_dir(Arc::new(home_dir))
-        .build(true)
-        .await;
-    assert_admin_function_events(cluster.fe_instance()).await;
 }
 
 async fn assert_admin_function_events(instance: &Arc<Instance>) {

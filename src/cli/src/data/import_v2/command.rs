@@ -27,15 +27,15 @@ use snafu::{OptionExt, ResultExt};
 use crate::Tool;
 use crate::common::ObjectStoreConfig;
 use crate::data::export_v2::data::{build_copy_source, execute_copy_database_from};
-use crate::data::export_v2::manifest::{ChunkMeta, ChunkStatus, DataFormat, MANIFEST_VERSION};
+use crate::data::export_v2::manifest::{ChunkMeta, ChunkStatus, DataFormat};
 use crate::data::import_v2::coordinator::{
     ImportResumeConfig, ImportTaskExecutor, build_import_tasks, chunk_has_schema_files,
     import_with_resume_session_with_progress, prepare_import_resume,
 };
 use crate::data::import_v2::error::{
     ChunkImportFailedSnafu, EmptyChunkManifestSnafu, ImportStatePathUnavailableSnafu,
-    IncompleteSnapshotSnafu, ManifestVersionMismatchSnafu, MissingChunkDataSnafu, Result,
-    SchemaNotInSnapshotSnafu, SnapshotStorageSnafu,
+    IncompleteSnapshotSnafu, MissingChunkDataSnafu, Result, SchemaNotInSnapshotSnafu,
+    SnapshotStorageSnafu,
 };
 use crate::data::import_v2::executor::{DdlExecutor, DdlStatement};
 use crate::data::import_v2::state::{ImportTaskKey, default_state_path};
@@ -219,14 +219,22 @@ impl Import {
             manifest.snapshot_id, manifest.version, manifest.schema_only
         );
 
-        // Check version compatibility
-        if manifest.version != MANIFEST_VERSION {
-            return ManifestVersionMismatchSnafu {
-                expected: MANIFEST_VERSION,
-                found: manifest.version,
-            }
-            .fail();
-        }
+        manifest.validate_layout().map_err(|reason| {
+            crate::data::import_v2::error::InvalidPackedSnapshotSnafu { reason }.build()
+        })?;
+        let capabilities = if manifest.is_packed() {
+            let capabilities = self
+                .database_client
+                .capabilities()
+                .await
+                .context(crate::data::import_v2::error::DatabaseSnafu)?;
+            capabilities
+                .require("metric_packed_import")
+                .context(crate::data::import_v2::error::DatabaseSnafu)?;
+            Some(capabilities)
+        } else {
+            None
+        };
 
         info!("Snapshot contains {} schema(s)", manifest.schemas.len());
 
@@ -251,6 +259,15 @@ impl Import {
             Vec::new()
         };
 
+        if manifest.is_packed() {
+            crate::data::import_v2::packed::validate_snapshot(
+                self.storage.as_ref(),
+                &manifest,
+                &schemas_to_import,
+            )
+            .await?;
+        }
+
         // 4. Dry-run mode: print DDL and exit
         if self.dry_run {
             info!("Dry-run mode - DDL statements to execute:");
@@ -268,6 +285,15 @@ impl Import {
             }
             return Ok(());
         }
+
+        let capabilities = match capabilities {
+            Some(capabilities) => capabilities,
+            None => self
+                .database_client
+                .capabilities()
+                .await
+                .context(crate::data::import_v2::error::DatabaseSnafu)?,
+        };
 
         let mut resume_session = if !data_tasks.is_empty() {
             let state_path = resolve_state_path(
@@ -306,7 +332,9 @@ impl Import {
             false
         } else {
             let executor = DdlExecutor::new(&self.database_client);
-            executor.execute_strict(&ddl_statements).await?;
+            executor
+                .execute_strict(&ddl_statements, capabilities.supports("metric_batch_ddl"))
+                .await?;
             if let Some(session) = resume_session.as_mut() {
                 session.mark_ddl_completed().await?;
             }
@@ -317,6 +345,7 @@ impl Import {
             let executor = CopyDatabaseImportTaskExecutor {
                 import: self,
                 format: manifest.format,
+                packed: manifest.is_packed(),
             };
             let progress = build_progress_reporter(self.progress);
             import_with_resume_session_with_progress(resume_session, &executor, progress.as_ref())
@@ -345,9 +374,7 @@ impl Import {
                 .await
                 .context(SnapshotStorageSnafu)?;
             statements.extend(
-                parse_ddl_statements(&content)
-                    .into_iter()
-                    .map(|sql| ddl_statement_for_schema(schema, sql)),
+                iter_ddl_statements(&content).map(|sql| ddl_statement_for_schema(schema, sql)),
             );
         }
 
@@ -358,6 +385,7 @@ impl Import {
 struct CopyDatabaseImportTaskExecutor<'a> {
     import: &'a Import,
     format: DataFormat,
+    packed: bool,
 }
 
 #[async_trait]
@@ -380,6 +408,7 @@ impl ImportTaskExecutor for CopyDatabaseImportTaskExecutor<'_> {
             &task.schema,
             &source,
             self.format,
+            self.packed,
         )
         .await
         .context(ChunkImportFailedSnafu {
@@ -389,90 +418,92 @@ impl ImportTaskExecutor for CopyDatabaseImportTaskExecutor<'_> {
     }
 }
 
+#[cfg(test)]
 fn parse_ddl_statements(content: &str) -> Vec<String> {
-    let mut statements = Vec::new();
-    let mut current = String::new();
+    iter_ddl_statements(content).collect()
+}
+
+pub(crate) fn iter_ddl_statements(content: &str) -> impl Iterator<Item = String> + '_ {
     let mut chars = content.chars().peekable();
     let mut in_single_quote = false;
     let mut in_double_quote = false;
     let mut in_line_comment = false;
     let mut in_block_comment = false;
 
-    while let Some(ch) = chars.next() {
-        if in_line_comment {
-            if ch == '\n' {
-                in_line_comment = false;
-                current.push('\n');
-            }
-            continue;
-        }
-
-        if in_block_comment {
-            if ch == '*' && chars.peek() == Some(&'/') {
-                chars.next();
-                in_block_comment = false;
-            }
-            continue;
-        }
-
-        if in_single_quote {
-            current.push(ch);
-            if ch == '\'' {
-                if chars.peek() == Some(&'\'') {
-                    current.push(chars.next().expect("peeked quote must exist"));
-                } else {
-                    in_single_quote = false;
+    std::iter::from_fn(move || {
+        let mut current = String::new();
+        while let Some(ch) = chars.next() {
+            if in_line_comment {
+                if ch == '\n' {
+                    in_line_comment = false;
+                    current.push('\n');
                 }
+                continue;
             }
-            continue;
-        }
 
-        if in_double_quote {
-            current.push(ch);
-            if ch == '"' {
-                if chars.peek() == Some(&'"') {
-                    current.push(chars.next().expect("peeked quote must exist"));
-                } else {
-                    in_double_quote = false;
+            if in_block_comment {
+                if ch == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    in_block_comment = false;
                 }
+                continue;
             }
-            continue;
-        }
 
-        match ch {
-            '-' if chars.peek() == Some(&'-') => {
-                chars.next();
-                in_line_comment = true;
-            }
-            '/' if chars.peek() == Some(&'*') => {
-                chars.next();
-                in_block_comment = true;
-            }
-            '\'' => {
-                in_single_quote = true;
+            if in_single_quote {
                 current.push(ch);
-            }
-            '"' => {
-                in_double_quote = true;
-                current.push(ch);
-            }
-            ';' => {
-                let statement = current.trim();
-                if !statement.is_empty() {
-                    statements.push(statement.to_string());
+                if ch == '\'' {
+                    if chars.peek() == Some(&'\'') {
+                        current.push(chars.next().expect("peeked quote must exist"));
+                    } else {
+                        in_single_quote = false;
+                    }
                 }
-                current.clear();
+                continue;
             }
-            _ => current.push(ch),
+
+            if in_double_quote {
+                current.push(ch);
+                if ch == '"' {
+                    if chars.peek() == Some(&'"') {
+                        current.push(chars.next().expect("peeked quote must exist"));
+                    } else {
+                        in_double_quote = false;
+                    }
+                }
+                continue;
+            }
+
+            match ch {
+                '-' if chars.peek() == Some(&'-') => {
+                    chars.next();
+                    in_line_comment = true;
+                }
+                '/' if chars.peek() == Some(&'*') => {
+                    chars.next();
+                    in_block_comment = true;
+                }
+                '\'' => {
+                    in_single_quote = true;
+                    current.push(ch);
+                }
+                '"' => {
+                    in_double_quote = true;
+                    current.push(ch);
+                }
+                ';' => {
+                    let statement = current.trim();
+                    if !statement.is_empty() {
+                        return Some(statement.to_string());
+                    }
+                    current.clear();
+                }
+                _ => current.push(ch),
+            }
         }
-    }
 
-    let statement = current.trim();
-    if !statement.is_empty() {
-        statements.push(statement.to_string());
-    }
-
-    statements
+        let statement = current.trim();
+        (!statement.is_empty()).then(|| statement.to_string())
+    })
 }
 
 fn ddl_statement_for_schema(schema: &str, sql: String) -> DdlStatement {
@@ -684,6 +715,13 @@ mod tests {
             Ok(self.manifest.clone())
         }
 
+        async fn file_size(
+            &self,
+            _path: &str,
+        ) -> crate::data::export_v2::error::Result<Option<u64>> {
+            unimplemented!("not needed in import_v2::command tests")
+        }
+
         async fn write_manifest(
             &self,
             _manifest: &Manifest,
@@ -729,6 +767,55 @@ mod tests {
         async fn delete_snapshot(&self) -> crate::data::export_v2::error::Result<()> {
             unimplemented!("not needed in import_v2::command tests")
         }
+    }
+
+    #[tokio::test]
+    async fn packed_capability_failure_precedes_ddl_reads_and_state_writes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            let n = socket.read(&mut request).await.unwrap();
+            assert!(String::from_utf8_lossy(&request[..n]).starts_with("GET /v1/capabilities "));
+            socket
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                )
+                .await
+                .unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("state.json");
+        let mut manifest = Manifest::new_schema_only("greptime".into(), vec!["public".into()]);
+        manifest.version = 2;
+        manifest.data_layout = Some("metric-parquet-packs".into());
+        let import = Import {
+            catalog: "greptime".into(),
+            schemas: None,
+            dry_run: false,
+            progress: ProgressMode::default(),
+            task_parallelism: 1,
+            state_path: Some(state_path.clone()),
+            snapshot_uri: "file:///unused".into(),
+            storage_config: Default::default(),
+            storage: Box::new(StubStorage {
+                manifest,
+                files_by_prefix: Default::default(),
+            }),
+            database_client: DatabaseClient::new(
+                address.to_string(),
+                "greptime".into(),
+                None,
+                std::time::Duration::from_secs(5),
+                None,
+                true,
+            ),
+        };
+        assert!(import.run().await.is_err());
+        assert!(!state_path.exists());
+        server.await.unwrap();
     }
 
     fn parse_command(extra: &[&str]) -> ImportV2Command {

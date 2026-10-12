@@ -38,7 +38,7 @@ pub const DEFAULT_BACKOFF_CONFIG: BackoffConfig = BackoffConfig {
 };
 
 /// Default interval for auto WAL pruning.
-pub const DEFAULT_AUTO_PRUNE_INTERVAL: Duration = Duration::from_mins(30);
+pub const DEFAULT_AUTO_PRUNE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 /// Default mode for auto WAL pruning.
 pub const DEFAULT_AUTO_PRUNE_LOGICAL_DELETE: bool = false;
 /// Default limit for concurrent auto pruning tasks.

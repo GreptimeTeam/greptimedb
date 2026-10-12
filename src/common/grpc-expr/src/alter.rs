@@ -24,21 +24,23 @@ use api::v1::{
     SkippingIndexType as PbSkippingIndexType, column_def,
 };
 use common_query::AddColumnLocation;
+use datatypes::json::{JsonSettings, JsonTypeHint};
+use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SkippingIndexOptions};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use table::metadata::{TableId, TableMeta};
 use table::requests::{
     AddColumnRequest, AlterKind, AlterTableRequest, AnnotationFamily, ModifyColumnTypeRequest,
-    SetDefaultRequest, SetIndexOption, UnsetIndexOption,
+    SetDefaultRequest, SetIndexOption, SetJsonSettingsRequest, UnsetIndexOption,
 };
 
 use crate::error::{
     self, ColumnNotFoundSnafu, InvalidColumnDefSnafu, InvalidIndexOptionSnafu,
-    InvalidSetFulltextOptionRequestSnafu, InvalidSetSkippingIndexOptionRequestSnafu,
-    InvalidSetTableOptionRequestSnafu, InvalidUnsetTableOptionRequestSnafu,
-    MissingAlterIndexOptionSnafu, MissingFieldSnafu, MissingTableMetaSnafu,
-    MissingTimestampColumnSnafu, Result, UnknownLocationTypeSnafu,
+    InvalidJsonSettingsSnafu, InvalidSetFulltextOptionRequestSnafu,
+    InvalidSetSkippingIndexOptionRequestSnafu, InvalidSetTableOptionRequestSnafu,
+    InvalidUnsetTableOptionRequestSnafu, MissingAlterIndexOptionSnafu, MissingFieldSnafu,
+    MissingTableMetaSnafu, MissingTimestampColumnSnafu, Result, UnknownLocationTypeSnafu,
 };
 
 const LOCATION_TYPE_FIRST: i32 = LocationType::First as i32;
@@ -54,6 +56,34 @@ fn annotation_family_of_keys<'a>(
     table::requests::validate_annotation_keys(keys).map_err(|err| {
         error::InvalidTableOptionRequestSnafu {
             err_msg: err.to_string(),
+        }
+        .build()
+    })
+}
+
+fn json_settings_from_proto(settings: api::v1::JsonSettings) -> Result<JsonSettings> {
+    let type_hints = settings
+        .type_hints
+        .into_iter()
+        .map(|hint| {
+            let data_type = ConcreteDataType::from(
+                ColumnDataTypeWrapper::try_new(hint.data_type, hint.datatype_extension)
+                    .context(error::ColumnDataTypeSnafu)?,
+            );
+
+            Ok(JsonTypeHint {
+                path: hint.path,
+                data_type,
+                // Index configuration is not supported yet, so this is temporarily
+                // hardcoded to false.
+                inverted_index: false,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    JsonSettings::try_new(type_hints, settings.max_auto_expanded_paths).map_err(|err| {
+        InvalidJsonSettingsSnafu {
+            err: err.to_string(),
         }
         .build()
     })
@@ -187,6 +217,17 @@ pub fn alter_expr_to_request(
 
             AlterKind::ModifyColumnTypes {
                 columns: modify_column_type_requests,
+            }
+        }
+        Kind::SetJsonSettings(set_json_settings) => {
+            let settings = set_json_settings
+                .settings
+                .context(MissingFieldSnafu { field: "settings" })?;
+            AlterKind::SetJsonSettings {
+                request: SetJsonSettingsRequest {
+                    column_name: set_json_settings.column_name,
+                    settings: json_settings_from_proto(settings)?,
+                },
             }
         }
         Kind::DropColumns(DropColumns { drop_columns }) => AlterKind::DropColumns {

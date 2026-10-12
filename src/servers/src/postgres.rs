@@ -80,6 +80,7 @@ pub struct PostgresServerHandlerInner {
     force_tls: bool,
     param_provider: Arc<GreptimeDBStartupParameters>,
 
+    batching_enabled: bool,
     session: Arc<Session>,
     query_parser: Arc<DefaultQueryParser>,
 }
@@ -114,7 +115,12 @@ impl PgWireServerHandlers for PostgresServerHandler {
 }
 
 impl MakePostgresServerHandler {
-    fn make(&self, addr: Option<SocketAddr>, process_id: u32) -> PostgresServerHandler {
+    fn make(
+        &self,
+        addr: Option<SocketAddr>,
+        process_id: u32,
+        batching_enabled: bool,
+    ) -> PostgresServerHandler {
         let session = Arc::new(Session::new(
             addr,
             Channel::Postgres,
@@ -127,6 +133,7 @@ impl MakePostgresServerHandler {
             force_tls: self.force_tls,
             param_provider: self.param_provider.clone(),
 
+            batching_enabled,
             session: session.clone(),
             query_parser: Arc::new(DefaultQueryParser::new(self.query_handler.clone(), session)),
         };

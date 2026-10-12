@@ -25,17 +25,12 @@ use crate::data::export_v2::manifest::ChunkStatus;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Invalid packed snapshot: {reason}"))]
+    InvalidPackedSnapshot { reason: String },
+
     #[snafu(display("Snapshot not found at '{}'", uri))]
     SnapshotNotFound {
         uri: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Manifest version mismatch: expected {}, found {}", expected, found))]
-    ManifestVersionMismatch {
-        expected: u32,
-        found: u32,
         #[snafu(implicit)]
         location: Location,
     },
@@ -190,9 +185,9 @@ impl ErrorExt for Error {
         match self {
             Error::SnapshotNotFound { .. }
             | Error::SchemaNotInSnapshot { .. }
-            | Error::ManifestVersionMismatch { .. }
             | Error::IncompleteSnapshot { .. }
             | Error::EmptyChunkManifest { .. }
+            | Error::InvalidPackedSnapshot { .. }
             | Error::MissingChunkData { .. } => StatusCode::InvalidArguments,
             Error::ImportStatePathUnavailable { .. }
             | Error::ImportStateUnknownTask { .. }

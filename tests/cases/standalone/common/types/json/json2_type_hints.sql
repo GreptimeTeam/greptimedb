@@ -1,10 +1,10 @@
 CREATE TABLE json2_type_hints (
     ts TIMESTAMP TIME INDEX,
     j JSON2 (
-        user.age BIGINT NOT NULL DEFAULT 18,
-        user.name STRING DEFAULT 'unknown',
-        user.active BOOLEAN NULL,
-        score DOUBLE NULL DEFAULT 1.5
+        user.age BIGINT,
+        user.name STRING,
+        user.active BOOLEAN,
+        score DOUBLE
     )
 ) WITH (
     'append_mode' = 'true'
@@ -29,40 +29,10 @@ ORDER BY ts;
 INSERT INTO json2_type_hints
 VALUES (4, '{"user":{"age":"bad"}}');
 
-CREATE TABLE json2_type_hints_required (
-    ts TIMESTAMP TIME INDEX,
-    j JSON2 (
-        user.age BIGINT NOT NULL
-    )
-) WITH (
-    'append_mode' = 'true'
-);
-
-INSERT INTO json2_type_hints_required
-VALUES (1, '{}');
-
 CREATE TABLE json2_type_hints_timestamp (
     ts TIMESTAMP TIME INDEX,
     j JSON2 (
         event_time TIMESTAMP
-    )
-);
-
-CREATE TABLE json2_default_null_ok (
-    ts TIMESTAMP TIME INDEX,
-    j JSON2 (
-        a BIGINT NULL DEFAULT NULL
-    )
-) WITH (
-    'append_mode' = 'true'
-);
-
-DROP TABLE json2_default_null_ok;
-
-CREATE TABLE json2_default_null_check (
-    ts TIMESTAMP TIME INDEX,
-    j JSON2 (
-        a BIGINT NOT NULL DEFAULT NULL
     )
 );
 
@@ -88,6 +58,49 @@ CREATE TABLE json2_type_hint_depth_51 (
 
 DROP TABLE json2_type_hints;
 
-DROP TABLE json2_type_hints_required;
-
 DROP TABLE json2_type_hint_depth_50;
+
+-- Type hints reject unsupported types and aliases.
+CREATE TABLE json2_hint_int8 (ts TIMESTAMP TIME INDEX, j JSON2 (value INT8));
+
+CREATE TABLE json2_hint_tinyint (ts TIMESTAMP TIME INDEX, j JSON2 (value TINYINT));
+
+CREATE TABLE json2_hint_uint8 (ts TIMESTAMP TIME INDEX, j JSON2 (value UINT8));
+
+CREATE TABLE json2_hint_float (ts TIMESTAMP TIME INDEX, j JSON2 (value FLOAT));
+
+CREATE TABLE json2_hint_text (ts TIMESTAMP TIME INDEX, j JSON2 (value TEXT));
+
+CREATE TABLE json2_hint_unsigned (
+    ts TIMESTAMP TIME INDEX,
+    j JSON2 (value BIGINT UNSIGNED)
+) WITH ('append_mode' = 'true');
+
+INSERT INTO json2_hint_unsigned VALUES (1, '{"value":18446744073709551615}');
+
+SELECT j.value FROM json2_hint_unsigned;
+
+ALTER TABLE json2_hint_unsigned MODIFY COLUMN j JSON2 (value INT8);
+
+DROP TABLE json2_hint_unsigned;
+
+-- These aliases preserve the exact type and are displayed using canonical names.
+CREATE TABLE json2_hint_aliases (
+    ts TIMESTAMP TIME INDEX,
+    j JSON2 (i INT64, u UINT64, f FLOAT64)
+) WITH ('append_mode' = 'true');
+
+SHOW CREATE TABLE json2_hint_aliases;
+
+INSERT INTO json2_hint_aliases VALUES
+    (1, '{"i":-9223372036854775808,"u":18446744073709551615,"f":1.5}');
+
+SELECT j.i AS i, j.u AS u, j.f AS f FROM json2_hint_aliases;
+
+ALTER TABLE json2_hint_aliases MODIFY COLUMN j JSON2 (i INT64, u UINT64, f FLOAT64);
+
+SHOW CREATE TABLE json2_hint_aliases;
+
+SELECT j.i AS i, j.u AS u, j.f AS f FROM json2_hint_aliases;
+
+DROP TABLE json2_hint_aliases;

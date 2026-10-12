@@ -84,6 +84,10 @@ fn merge_region_statistic(
         query_scanned_bytes: data_stat.query_scanned_bytes,
         data_topic_latest_entry_id: data_stat.data_topic_latest_entry_id,
         metadata_topic_latest_entry_id: metadata_stat.metadata_topic_latest_entry_id,
+        // Metadata rows are written at timestamp 0, so merging their bounds would
+        // pin every metric region's minimum to the epoch.
+        min_timestamp: data_stat.min_timestamp,
+        max_timestamp: data_stat.max_timestamp,
     }
 }
 
@@ -120,6 +124,8 @@ pub(crate) fn encode_manifest_info_to_extensions(
 #[cfg(test)]
 mod tests {
 
+    use common_time::Timestamp;
+
     use super::*;
 
     #[test]
@@ -142,6 +148,76 @@ mod tests {
         let region_id = RegionId::with_group_and_seq(1, 243, 2);
         let expected_region_id = RegionId::with_group_and_seq(1, METRIC_DATA_REGION_GROUP, 2);
         assert_eq!(to_data_region_id(region_id), expected_region_id);
+    }
+
+    #[test]
+    fn merge_region_statistic_ignores_metadata_timestamps() {
+        // Metadata rows are written at timestamp 0; folding them in would report
+        // 1970 as the minimum for a region holding only modern samples.
+        let metadata_stat = RegionStatistic {
+            min_timestamp: Some(Timestamp::new_millisecond(0)),
+            max_timestamp: Some(Timestamp::new_millisecond(0)),
+            ..Default::default()
+        };
+        let data_stat = RegionStatistic {
+            min_timestamp: Some(Timestamp::new_millisecond(1_700_000_000_000)),
+            max_timestamp: Some(Timestamp::new_millisecond(1_700_000_001_000)),
+            ..Default::default()
+        };
+
+        let statistic = merge_region_statistic(&metadata_stat, &data_stat);
+
+        assert_eq!(
+            statistic.min_timestamp,
+            Some(Timestamp::new_millisecond(1_700_000_000_000))
+        );
+        assert_eq!(
+            statistic.max_timestamp,
+            Some(Timestamp::new_millisecond(1_700_000_001_000))
+        );
+    }
+
+    #[test]
+    fn merge_region_statistic_reports_no_range_for_an_empty_data_region() {
+        // Metadata present but no samples: the region has no data to bound, so
+        // both ends must stay NULL rather than collapsing onto the epoch.
+        let metadata_stat = RegionStatistic {
+            min_timestamp: Some(Timestamp::new_millisecond(0)),
+            max_timestamp: Some(Timestamp::new_millisecond(0)),
+            ..Default::default()
+        };
+
+        let statistic = merge_region_statistic(&metadata_stat, &RegionStatistic::default());
+
+        assert_eq!(statistic.min_timestamp, None);
+        assert_eq!(statistic.max_timestamp, None);
+    }
+
+    #[test]
+    fn merge_region_statistic_keeps_pre_epoch_samples() {
+        // Samples entirely before 1970 must not have their maximum pulled up to
+        // the metadata timestamp.
+        let metadata_stat = RegionStatistic {
+            min_timestamp: Some(Timestamp::new_millisecond(0)),
+            max_timestamp: Some(Timestamp::new_millisecond(0)),
+            ..Default::default()
+        };
+        let data_stat = RegionStatistic {
+            min_timestamp: Some(Timestamp::new_millisecond(-2_000)),
+            max_timestamp: Some(Timestamp::new_millisecond(-1_000)),
+            ..Default::default()
+        };
+
+        let statistic = merge_region_statistic(&metadata_stat, &data_stat);
+
+        assert_eq!(
+            statistic.min_timestamp,
+            Some(Timestamp::new_millisecond(-2_000))
+        );
+        assert_eq!(
+            statistic.max_timestamp,
+            Some(Timestamp::new_millisecond(-1_000))
+        );
     }
 
     #[test]

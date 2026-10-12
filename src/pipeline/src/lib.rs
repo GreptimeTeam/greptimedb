@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(string_from_utf8_lossy_owned)]
-
 mod dispatcher;
 pub mod error;
 mod etl;
@@ -33,8 +31,9 @@ pub use etl::{
 };
 pub use manager::{
     GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME, GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME,
-    IdentityTimeIndex, PipelineContext, PipelineDefinition, PipelineInfo, PipelineRef,
-    PipelineTableRef, PipelineVersion, PipelineWay, SelectInfo, pipeline_operator, table, util,
+    GREPTIME_INTERNAL_TRACE_PIPELINE_V2_NAME, IdentityTimeIndex, PipelineContext,
+    PipelineDefinition, PipelineInfo, PipelineRef, PipelineTableRef, PipelineVersion, PipelineWay,
+    SelectInfo, pipeline_operator, table, util,
 };
 pub use options::PipelineOptions;
 

@@ -334,6 +334,21 @@ impl SchemaManager {
 
         Box::pin(stream)
     }
+
+    /// Returns schema names and values belonging to the target `catalog`.
+    /// Legacy `null` values are returned as [`SchemaNameValue::default()`].
+    pub fn schemas(&self, catalog: &str) -> BoxStream<'static, Result<(String, SchemaNameValue)>> {
+        let start_key = SchemaNameKey::range_start_key(catalog);
+        let req = RangeRequest::new().with_prefix(start_key.as_bytes());
+
+        let stream = PaginationStream::new(self.kv_backend.clone(), req, DEFAULT_PAGE_SIZE, |kv| {
+            let value = SchemaNameValue::try_from_raw_value(&kv.value)?.unwrap_or_default();
+            Ok((schema_decoder(kv)?, value))
+        })
+        .into_stream();
+
+        Box::pin(stream)
+    }
 }
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Deserialize, Serialize)]
@@ -358,12 +373,124 @@ mod tests {
 
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
+    use futures::TryStreamExt;
     use store_api::mito_engine_options::{
         TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_TRIGGER_FILE_NUM,
     };
 
     use super::*;
+    use crate::kv_backend::KvBackend;
     use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::rpc::store::PutRequest;
+
+    #[tokio::test]
+    async fn test_schemas() {
+        let manager = SchemaManager::new(Arc::new(MemoryKvBackend::default()));
+        assert!(
+            manager
+                .schemas("catalog")
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let mut expected = BTreeMap::new();
+        for i in 0..=DEFAULT_PAGE_SIZE {
+            let name = format!("schema_{i}");
+            let value = if i == 0 {
+                SchemaNameValue::default()
+            } else {
+                SchemaNameValue {
+                    ttl: Some(Duration::from_secs(i as u64).into()),
+                    extra_options: BTreeMap::from([("foo".to_string(), i.to_string())]),
+                    create_procedure_id: Some(format!("procedure_{i}")),
+                }
+            };
+            manager
+                .create(
+                    SchemaNameKey::new("catalog", &name),
+                    Some(value.clone()),
+                    false,
+                )
+                .await
+                .unwrap();
+            expected.insert(name, value);
+        }
+        manager
+            .create(SchemaNameKey::new("catalog_other", "schema"), None, false)
+            .await
+            .unwrap();
+
+        let schemas = manager
+            .schemas("catalog")
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(schemas, expected.into_iter().collect::<Vec<_>>());
+        assert_eq!(
+            manager
+                .schema_names("catalog")
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap(),
+            schemas
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_schemas_legacy_and_invalid_values() {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let manager = SchemaManager::new(kv_backend.clone());
+        let key = SchemaNameKey::new("catalog", "schema").to_bytes();
+
+        for (raw, expected) in [
+            (b"null".as_slice(), SchemaNameValue::default()),
+            (
+                br#"{"ttl":"10s"}"#.as_slice(),
+                SchemaNameValue {
+                    ttl: Some(Duration::from_secs(10).into()),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            kv_backend
+                .put(PutRequest::new().with_key(key.clone()).with_value(raw))
+                .await
+                .unwrap();
+            assert_eq!(
+                manager
+                    .schemas("catalog")
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .unwrap(),
+                vec![("schema".to_string(), expected)]
+            );
+        }
+
+        kv_backend
+            .put(PutRequest::new().with_key(key).with_value(b"invalid"))
+            .await
+            .unwrap();
+        assert!(
+            manager
+                .schemas("catalog")
+                .try_collect::<Vec<_>>()
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            manager
+                .schema_names("catalog")
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap(),
+            vec!["schema".to_string()]
+        );
+    }
 
     #[test]
     fn test_display_schema_value() {

@@ -77,7 +77,6 @@ fn content_type_to_string(content_type: Option<&TypedHeader<ContentType>>) -> St
 #[derive(Clone)]
 pub struct OtlpState {
     pub with_metric_engine: bool,
-    pub experimental_enable_exponential_histogram: bool,
     pub handler: OpenTelemetryProtocolHandlerRef,
 }
 
@@ -108,7 +107,6 @@ pub async fn metrics(
 
     let OtlpState {
         with_metric_engine,
-        experimental_enable_exponential_histogram,
         handler,
     } = state;
 
@@ -117,7 +115,6 @@ pub async fn metrics(
         resource_attrs: http_opts.resource_attrs,
         promote_scope_attrs: http_opts.promote_scope_attrs,
         with_metric_engine,
-        experimental_enable_exponential_histogram,
         // set by the frontend from its config
         is_legacy: false,
         resource_info: false,

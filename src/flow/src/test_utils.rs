@@ -22,57 +22,12 @@ use datatypes::schema::Schema;
 use datatypes::timestamp::TimestampMillisecond;
 use datatypes::vectors::{TimestampMillisecondVectorBuilder, VectorRef};
 use itertools::Itertools;
-use prost::Message;
 use query::QueryEngine;
 use query::options::QueryOptions;
-use query::parser::QueryLanguageParser;
-use query::query_engine::DefaultSerializer;
-use session::context::QueryContext;
 /// note here we are using the `substrait_proto_df` crate from the `substrait` module and
 /// rename it to `substrait_proto`
-use substrait::substrait_proto_df as substrait_proto;
-use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
-use substrait_proto::proto;
 use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
 use table::test_util::MemTable;
-
-use crate::adapter::FlownodeContext;
-use crate::adapter::node_context::IdToNameMap;
-use crate::adapter::table_source::test::FlowDummyTableSource;
-use crate::df_optimizer::apply_df_optimizer;
-use crate::expr::GlobalId;
-use crate::transform::register_function_to_query_engine;
-
-pub fn create_test_ctx() -> FlownodeContext {
-    let mut tri_map = IdToNameMap::new();
-    {
-        let gid = GlobalId::User(0);
-        let name = [
-            "greptime".to_string(),
-            "public".to_string(),
-            "numbers".to_string(),
-        ];
-        tri_map.insert(Some(name.clone()), Some(1024), gid);
-    }
-
-    {
-        let gid = GlobalId::User(1);
-        let name = [
-            "greptime".to_string(),
-            "public".to_string(),
-            "numbers_with_ts".to_string(),
-        ];
-        tri_map.insert(Some(name.clone()), Some(1025), gid);
-    }
-
-    let dummy_source = FlowDummyTableSource::default();
-
-    let mut ctx = FlownodeContext::new(Box::new(dummy_source));
-    ctx.table_repr = tri_map;
-    ctx.query_context = Some(Arc::new(QueryContext::with("greptime", "public")));
-
-    ctx
-}
 
 pub fn create_test_query_engine() -> Arc<dyn QueryEngine> {
     let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
@@ -158,28 +113,7 @@ pub fn create_test_query_engine() -> Arc<dyn QueryEngine> {
     );
 
     let engine = factory.query_engine();
-    register_function_to_query_engine(&engine);
 
     assert_eq!("datafusion", engine.name());
     engine
-}
-
-pub async fn sql_to_substrait(engine: Arc<dyn QueryEngine>, sql: &str) -> proto::Plan {
-    // let engine = create_test_query_engine();
-    let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
-    let plan = engine
-        .planner()
-        .plan(&stmt, QueryContext::arc())
-        .await
-        .unwrap();
-    let plan = apply_df_optimizer(plan, &QueryContext::arc())
-        .await
-        .unwrap();
-
-    // encode then decode so to rely on the impl of conversion from logical plan to substrait plan
-    let bytes = DFLogicalSubstraitConvertor {}
-        .encode(&plan, DefaultSerializer)
-        .unwrap();
-
-    proto::Plan::decode(bytes).unwrap()
 }

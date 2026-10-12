@@ -20,6 +20,7 @@ use std::time::Instant;
 
 use api::helper::{
     ColumnDataTypeWrapper, is_column_type_value_eq, is_semantic_type_eq, proto_value_type,
+    proto_value_type_match,
 };
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{ColumnDataType, ColumnSchema, OpType, Rows, SemanticType, Value, WriteHint};
@@ -470,15 +471,6 @@ pub(crate) fn validate_proto_value(
     }
 
     Ok(())
-}
-
-fn proto_value_type_match(column_type: ColumnDataType, value_type: ColumnDataType) -> bool {
-    match (column_type, value_type) {
-        (ct, vt) if ct == vt => true,
-        (ColumnDataType::Vector, ColumnDataType::Binary) => true,
-        (ColumnDataType::Json, ColumnDataType::Binary) => true,
-        _ => false,
-    }
 }
 
 /// Oneshot output result sender.

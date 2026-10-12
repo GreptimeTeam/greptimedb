@@ -21,7 +21,6 @@ use common_telemetry::warn;
 use futures::TryStreamExt;
 use object_store::ObjectStore;
 use snafu::{OptionExt, ensure};
-use store_api::storage::FileId;
 
 use crate::error::{Result, UnexpectedSnafu};
 use crate::read::BoxedRecordBatchStream;
@@ -34,7 +33,7 @@ use crate::region::MitoRegionRef;
 use crate::region::version::VersionRef;
 use crate::series_index::bucket::SeriesBucket;
 use crate::series_index::catalog::{
-    SeriesIndexEntry, range_index_path, series_index_path, series_metadata,
+    RangeIndexEntry, SeriesIndexEntry, range_index_path, series_index_path, series_metadata,
 };
 use crate::series_index::purger::{IndexFilePurger, IndexFileType, file_operation};
 use crate::series_index::version::SeriesIndexFileHandle;
@@ -68,7 +67,7 @@ pub(crate) async fn build_range_index(
     region: &MitoRegionRef,
     version: &VersionRef,
     file: FileHandle,
-) -> Result<Option<FileId>> {
+) -> Result<Option<RangeIndexEntry>> {
     let file_id = file.file_id().file_id();
     let Some((context, mut selection)) = reader_input(region, file).await? else {
         return Ok(None);
@@ -116,9 +115,12 @@ pub(crate) async fn build_range_index(
         }
         return Err(error);
     }
-    writer.finish().await?;
+    let metrics = writer.finish().await?;
     file_operation(IndexFileType::Range, "build", "success");
-    Ok(Some(file_id))
+    Ok(Some(RangeIndexEntry {
+        file_id,
+        file_size: metrics.output_bytes,
+    }))
 }
 
 /// Builds only the series index. Callers build needed range indexes separately.
@@ -200,11 +202,14 @@ pub(crate) async fn build_series_index(
         }
         return Err(error);
     }
-    writer.finish().await?;
+    let metrics = writer.finish().await?;
     file_operation(IndexFileType::Series, "build", "success");
     Ok(SeriesIndexFileHandle::new(
         region.region_id,
-        entry.clone(),
+        SeriesIndexEntry {
+            file_size: metrics.output_bytes,
+            ..entry.clone()
+        },
         purger.clone(),
     ))
 }
@@ -275,10 +280,19 @@ mod tests {
         let mut range_bytes = HashMap::new();
         if build_ranges {
             for file in files {
-                let id = build_range_index(&store, &region, &version, file.clone())
+                let completed = build_range_index(&store, &region, &version, file.clone())
                     .await
                     .unwrap()
                     .unwrap();
+                let id = completed.file_id;
+                assert_eq!(
+                    completed.file_size,
+                    store
+                        .stat(&range_index_path(region.region_id, id))
+                        .await
+                        .unwrap()
+                        .content_length()
+                );
                 range_bytes.insert(
                     id,
                     store
@@ -314,7 +328,21 @@ mod tests {
             assert!(result.is_err());
         } else {
             let handle = result.unwrap();
-            assert_eq!(handle.entry(), &entry);
+            assert_eq!(
+                handle.entry().file_size,
+                store
+                    .stat(&series_index_path(region.region_id, entry.index_uuid))
+                    .await
+                    .unwrap()
+                    .content_length()
+            );
+            assert_eq!(
+                handle.entry(),
+                &SeriesIndexEntry {
+                    file_size: handle.entry().file_size,
+                    ..entry.clone()
+                }
+            );
             assert!(
                 store
                     .exists(&series_index_path(region.region_id, entry.index_uuid))
@@ -504,12 +532,13 @@ mod tests {
         let mut completed = Vec::new();
         let result: Result<Option<SeriesIndexFileHandle>> = async {
             for file in files {
-                let Some(id) = build_range_index(&store, &region, &version, file.clone()).await?
+                let Some(entry) =
+                    build_range_index(&store, &region, &version, file.clone()).await?
                 else {
                     // Defer series construction if a needed range is not ready.
                     return Ok(None);
                 };
-                completed.push(id);
+                completed.push(entry.file_id);
             }
             build_series_index(&store, &region, &version, &bucket, &entry, &purger)
                 .await

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::fmt::Debug;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use derive_builder::Builder;
 pub use oio::*;
@@ -96,6 +96,7 @@ impl Service for MockService {
     type Lister = oio::Lister;
     type Deleter = oio::Deleter;
     type Copier = oio::Copier;
+    type Composer = oio::Composer;
 
     fn info(&self) -> opendal::raw::ServiceInfo {
         self.inner.info()
@@ -165,7 +166,6 @@ impl Service for MockService {
         from: &str,
         to: &str,
         args: OpCopy,
-        opts: opendal::raw::OpCopier,
     ) -> Result<Self::Copier> {
         if let Some(result) = self
             .copy_interceptor
@@ -176,7 +176,16 @@ impl Service for MockService {
             return Ok(Box::new(oio::OneShotCopier::completed()) as oio::Copier);
         }
 
-        self.inner.copy(ctx, from, to, args, opts)
+        self.inner.copy(ctx, from, to, args)
+    }
+
+    fn compose(
+        &self,
+        ctx: &OperationContext,
+        to: &str,
+        args: opendal::raw::OpCompose,
+    ) -> Result<Self::Composer> {
+        self.inner.compose(ctx, to, args)
     }
 
     async fn rename(
@@ -213,6 +222,50 @@ impl oio::Read for MockReader {
 
     async fn read(&self, range: opendal::BytesRange) -> Result<(opendal::raw::RpRead, Buffer)> {
         self.inner.read(range).await
+    }
+}
+
+/// Writer calls observed before forwarding, including calls that fail.
+#[derive(Debug, Default)]
+pub struct WriterObservations {
+    pub write_sizes: Vec<usize>,
+    pub close_calls: usize,
+    pub abort_calls: usize,
+}
+
+/// Records calls without changing the inner writer's completion or abort semantics.
+pub struct ObservedWriter {
+    inner: oio::Writer,
+    observations: Arc<Mutex<WriterObservations>>,
+}
+
+impl ObservedWriter {
+    pub fn new(inner: oio::Writer, observations: Arc<Mutex<WriterObservations>>) -> Self {
+        Self {
+            inner,
+            observations,
+        }
+    }
+}
+
+impl oio::Write for ObservedWriter {
+    async fn write(&mut self, bytes: Buffer) -> Result<()> {
+        self.observations
+            .lock()
+            .unwrap()
+            .write_sizes
+            .push(bytes.len());
+        self.inner.write(bytes).await
+    }
+
+    async fn close(&mut self) -> Result<Metadata> {
+        self.observations.lock().unwrap().close_calls += 1;
+        self.inner.close().await
+    }
+
+    async fn abort(&mut self) -> Result<()> {
+        self.observations.lock().unwrap().abort_calls += 1;
+        self.inner.abort().await
     }
 }
 

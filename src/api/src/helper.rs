@@ -87,6 +87,28 @@ impl ColumnDataTypeWrapper {
     }
 }
 
+/// Returns the time unit if `datatype` is a timestamp type.
+pub fn timestamp_unit(datatype: ColumnDataType) -> Option<TimeUnit> {
+    match datatype {
+        ColumnDataType::TimestampSecond => Some(TimeUnit::Second),
+        ColumnDataType::TimestampMillisecond => Some(TimeUnit::Millisecond),
+        ColumnDataType::TimestampMicrosecond => Some(TimeUnit::Microsecond),
+        ColumnDataType::TimestampNanosecond => Some(TimeUnit::Nanosecond),
+        _ => None,
+    }
+}
+
+/// Returns the timestamp [ColumnDataType] for the given time unit.
+/// This is the inverse of [timestamp_unit].
+pub fn timestamp_datatype(unit: TimeUnit) -> ColumnDataType {
+    match unit {
+        TimeUnit::Second => ColumnDataType::TimestampSecond,
+        TimeUnit::Millisecond => ColumnDataType::TimestampMillisecond,
+        TimeUnit::Microsecond => ColumnDataType::TimestampMicrosecond,
+        TimeUnit::Nanosecond => ColumnDataType::TimestampNanosecond,
+    }
+}
+
 impl From<ColumnDataTypeWrapper> for ConcreteDataType {
     fn from(datatype_wrapper: ColumnDataTypeWrapper) -> Self {
         match datatype_wrapper.datatype {
@@ -1033,6 +1055,17 @@ pub fn proto_value_type(value: &v1::Value) -> Option<ColumnDataType> {
     Some(value_type)
 }
 
+/// Checks protobuf value types using the write-path compatibility rules.
+/// Binary values also represent JSON and vector columns.
+pub fn proto_value_type_match(column_type: ColumnDataType, value_type: ColumnDataType) -> bool {
+    match (column_type, value_type) {
+        (ct, vt) if ct == vt => true,
+        (ColumnDataType::Vector, ColumnDataType::Binary) => true,
+        (ColumnDataType::Json, ColumnDataType::Binary) => true,
+        _ => false,
+    }
+}
+
 pub fn vectors_to_rows<'a>(
     columns: impl Iterator<Item = &'a VectorRef>,
     row_count: usize,
@@ -1203,6 +1236,21 @@ mod tests {
 
     use super::*;
     use crate::v1::Column;
+
+    #[test]
+    fn test_timestamp_unit_roundtrip() {
+        for unit in [
+            TimeUnit::Second,
+            TimeUnit::Millisecond,
+            TimeUnit::Microsecond,
+            TimeUnit::Nanosecond,
+        ] {
+            assert_eq!(timestamp_unit(timestamp_datatype(unit)), Some(unit));
+        }
+        // Non-timestamp types have no time unit.
+        assert_eq!(timestamp_unit(ColumnDataType::String), None);
+        assert_eq!(timestamp_unit(ColumnDataType::Datetime), None);
+    }
 
     #[test]
     fn test_values_with_capacity() {
@@ -2084,5 +2132,19 @@ mod tests {
         );
         let value = decode_json_value(&proto);
         assert_eq!(json.as_ref(), value);
+    }
+
+    #[test]
+    fn test_proto_value_type_match() {
+        for (column, value, expected) in [
+            (ColumnDataType::Int32, ColumnDataType::Int32, true),
+            (ColumnDataType::Json, ColumnDataType::Binary, true),
+            (ColumnDataType::Vector, ColumnDataType::Binary, true),
+            (ColumnDataType::Float64, ColumnDataType::List, false),
+            (ColumnDataType::Float64, ColumnDataType::Struct, false),
+            (ColumnDataType::Binary, ColumnDataType::Json, false),
+        ] {
+            assert_eq!(expected, proto_value_type_match(column, value));
+        }
     }
 }

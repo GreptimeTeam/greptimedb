@@ -26,6 +26,11 @@ use crate::function::{Function, extract_args};
 macro_rules! json_is {
     ($name:ident, $json_type:ident, $doc:expr) => {
         paste::paste! {
+            json_is!($name, $doc, jsonb::RawJsonb::[<is_ $json_type>]);
+        }
+    };
+    ($name:ident, $doc:expr, $check:path) => {
+        paste::paste! {
             #[derive(Clone, Debug)]
             pub(crate) struct $name {
                 signature: Signature,
@@ -72,7 +77,7 @@ macro_rules! json_is {
                         let json = jsons.is_valid(i).then(|| jsons.value(i));
                         let result = match json {
                             Some(json) => {
-                                Some(jsonb::[<is_ $json_type>](json))
+                                Some($check(&jsonb::RawJsonb::new(json)).map_err(|e| datafusion_common::DataFusionError::Execution(e.to_string()))?)
                             }
                             _ => None,
                         };
@@ -92,6 +97,16 @@ macro_rules! json_is {
     };
 }
 
+// `RawJsonb::is_i64` also accepts integral floats in jsonb 0.5. Preserve the
+// SQL type predicate: 1.0 is a float even when it can be converted to i64.
+fn is_jsonb_integer(value: &jsonb::RawJsonb<'_>) -> Result<bool, jsonb::Error> {
+    Ok(match value.as_number()? {
+        Some(jsonb::Number::Int64(_)) => true,
+        Some(jsonb::Number::UInt64(value)) => i64::try_from(value).is_ok(),
+        _ => false,
+    })
+}
+
 json_is!(JsonIsNull, null, "Checks if the input JSONB is null");
 json_is!(
     JsonIsBool,
@@ -100,8 +115,8 @@ json_is!(
 );
 json_is!(
     JsonIsInt,
-    i64,
-    "Checks if the input JSONB is a integer type JSON value"
+    "Checks if the input JSONB is an integer type JSON value",
+    is_jsonb_integer
 );
 json_is!(
     JsonIsFloat,

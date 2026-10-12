@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::num::NonZeroU64;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use api::v1::SemanticType;
@@ -29,10 +29,12 @@ use common_telemetry::tracing::Instrument;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
 use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
+use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::physical_plan::expressions::DynamicFilterPhysicalExpr;
 use datafusion_common::pruning::PruningStatistics;
-use datafusion_common::{Column, ScalarValue};
+use datafusion_common::{Column, ScalarValue, ToDFSchema};
 use datafusion_expr::Expr;
+use datafusion_expr::simplify::SimplifyContext;
 use datafusion_expr::utils::expr_to_columns;
 use datatypes::arrow::array::{ArrayRef, BooleanArray, UInt64Array};
 use datatypes::extension::json::is_json2_extension_type;
@@ -57,8 +59,8 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheStrategy;
 use crate::config::DEFAULT_MAX_CONCURRENT_SCAN_FILES;
 use crate::error::{
-    InvalidPartitionExprSnafu, InvalidRequestSnafu, RegionSequenceDomainBrokenSnafu, Result,
-    SequenceRangeUnsupportedSnafu,
+    EvalPartitionFilterSnafu, InvalidPartitionExprSnafu, InvalidRequestSnafu,
+    RegionSequenceDomainBrokenSnafu, Result, SequenceRangeUnsupportedSnafu,
 };
 #[cfg(feature = "enterprise")]
 use crate::extension::{BoxedExtensionRange, BoxedExtensionRangeProvider};
@@ -76,6 +78,7 @@ use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{BoxedRecordBatchStream, RecordBatch};
 use crate::region::options::MergeMode;
 use crate::region::version::VersionRef;
+use crate::series_index::SeriesIndexReadContext;
 use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::{
     BloomFilterIndexApplierBuilder, BloomFilterIndexApplierRef,
@@ -84,14 +87,10 @@ use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
-#[cfg(feature = "vector_index")]
-use crate::sst::index::vector_index::applier::{VectorIndexApplier, VectorIndexApplierRef};
 use crate::sst::parquet::Json2RewriteTargets;
 use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::reader::ReaderMetrics;
-
-#[cfg(feature = "vector_index")]
-const VECTOR_INDEX_OVERFETCH_MULTIPLIER: usize = 2;
+use crate::sst::primary_key::PrimaryKeyRangeMapper;
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
 pub(crate) enum Scanner {
@@ -235,6 +234,8 @@ impl Scanner {
 pub(crate) struct ScanRegion {
     /// Version of the region at scan.
     version: VersionRef,
+    /// Pinned index snapshot and its storage for candidate discovery.
+    series_index: Option<SeriesIndexReadContext>,
     /// Access layer of the region.
     access_layer: AccessLayerRef,
     /// Scan request.
@@ -247,6 +248,8 @@ pub(crate) struct ScanRegion {
     scan_memory_pool: Arc<dyn MemoryPool>,
     /// Whether to enable the experimental two-phase metric series scan.
     experimental_series_scan_v2: bool,
+    /// Whether to ignore range indexes during scans.
+    ignore_range_index: bool,
     /// Whether to ignore inverted index.
     ignore_inverted_index: bool,
     /// Whether to ignore fulltext index.
@@ -276,12 +279,14 @@ impl ScanRegion {
     ) -> ScanRegion {
         ScanRegion {
             version,
+            series_index: None,
             access_layer,
             request,
             cache_strategy,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             scan_memory_pool: Arc::new(UnboundedMemoryPool::default()),
             experimental_series_scan_v2: false,
+            ignore_range_index: false,
             ignore_inverted_index: false,
             ignore_fulltext_index: false,
             ignore_bloom_filter: false,
@@ -292,6 +297,16 @@ impl ScanRegion {
             #[cfg(feature = "enterprise")]
             extension_range_provider: None,
         }
+    }
+
+    /// Pins the series-index snapshot used by candidate discovery.
+    #[must_use]
+    pub(crate) fn with_series_index(
+        mut self,
+        series_index: Option<SeriesIndexReadContext>,
+    ) -> Self {
+        self.series_index = series_index;
+        self
     }
 
     /// Sets counters that should receive query-load metrics.
@@ -322,6 +337,13 @@ impl ScanRegion {
     #[must_use]
     pub(crate) fn with_experimental_series_scan_v2(mut self, enabled: bool) -> Self {
         self.experimental_series_scan_v2 = enabled;
+        self
+    }
+
+    /// Sets whether to ignore range indexes during scans.
+    #[must_use]
+    pub(crate) fn with_ignore_range_index(mut self, ignore: bool) -> Self {
+        self.ignore_range_index = ignore;
         self
     }
 
@@ -547,22 +569,15 @@ impl ScanRegion {
             self.build_fulltext_index_applier(&non_field_filters),
             self.build_fulltext_index_applier(&field_filters),
         ];
-        #[cfg(feature = "vector_index")]
-        let vector_index_applier = self.build_vector_index_applier();
-        #[cfg(feature = "vector_index")]
-        let vector_index_k = self.request.vector_search.as_ref().map(|search| {
-            if self.request.filters.is_empty() {
-                search.k
-            } else {
-                search.k.saturating_mul(VECTOR_INDEX_OVERFETCH_MULTIPLIER)
-            }
-        });
 
         let input = ScanInput::builder(self.access_layer, mapper)
+            .with_series_index(self.series_index)
+            .with_ignore_range_index(self.ignore_range_index)
             .with_time_range(Some(time_range))
             .with_predicate(predicate)
             .with_memtables(mem_range_builders)
             .with_files(files)
+            .with_primary_key_mapper(self.version.ssts.primary_key_mapper())
             .with_cache(self.cache_strategy)
             .with_inverted_index_appliers(inverted_index_appliers)
             .with_bloom_filter_index_appliers(bloom_filter_appliers)
@@ -586,11 +601,6 @@ impl ScanRegion {
             )
             .with_sequence_range(sequence_range)
             .with_query_stat_counters(self.query_stat_counters);
-        #[cfg(feature = "vector_index")]
-        let input = input
-            .with_vector_index_applier(vector_index_applier)
-            .with_vector_index_k(vector_index_k);
-
         #[cfg(feature = "enterprise")]
         let input = if !self.request.skip_sst_files
             && let Some(provider) = self.extension_range_provider
@@ -878,31 +888,6 @@ impl ScanRegion {
         .flatten()
         .map(Arc::new)
     }
-
-    /// Build the vector index applier from vector search request.
-    #[cfg(feature = "vector_index")]
-    fn build_vector_index_applier(&self) -> Option<VectorIndexApplierRef> {
-        let vector_search = self.request.vector_search.as_ref()?;
-
-        let file_cache = self.cache_strategy.write_cache().map(|w| w.file_cache());
-        let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
-        let vector_index_cache = self.cache_strategy.vector_index_cache().cloned();
-
-        let applier = VectorIndexApplier::new(
-            self.access_layer.table_dir().to_string(),
-            self.access_layer.path_type(),
-            self.access_layer.object_store().clone(),
-            self.access_layer.puffin_manager_factory().clone(),
-            vector_search.column_id,
-            vector_search.query_vector.clone(),
-            vector_search.metric,
-        )
-        .with_file_cache(file_cache)
-        .with_puffin_metadata_cache(puffin_metadata_cache)
-        .with_vector_index_cache(vector_index_cache);
-
-        Some(Arc::new(applier))
-    }
 }
 
 /// Returns true if the time range of a SST `file` matches the `predicate`.
@@ -927,6 +912,10 @@ fn time_range_covers_file(time_range: Option<&TimestampRange>, file: &FileHandle
 
 /// Common input for different scanners.
 pub struct ScanInput {
+    /// Pinned series-index snapshot and its storage, when configured.
+    pub(crate) series_index: Option<SeriesIndexReadContext>,
+    /// Whether to ignore range indexes while retaining series-index candidate discovery.
+    ignore_range_index: bool,
     /// Region SST access layer.
     access_layer: AccessLayerRef,
     /// Maps projected Batches to RecordBatches.
@@ -947,6 +936,8 @@ pub struct ScanInput {
     pub(crate) memtables: Vec<MemRangeBuilder>,
     /// Handles to SST files to scan.
     pub(crate) files: Vec<FileHandle>,
+    /// Shares the pinned schema's encoded defaults across parallel range readers.
+    primary_key_mapper: OnceLock<Arc<PrimaryKeyRangeMapper>>,
     /// Scan-wide hint for rows in an execution batch.
     batch_size: usize,
     /// Cache.
@@ -961,12 +952,6 @@ pub struct ScanInput {
     inverted_index_appliers: [Option<InvertedIndexApplierRef>; 2],
     bloom_filter_index_appliers: [Option<BloomFilterIndexApplierRef>; 2],
     fulltext_index_appliers: [Option<FulltextIndexApplierRef>; 2],
-    /// Vector index applier for KNN search.
-    #[cfg(feature = "vector_index")]
-    pub(crate) vector_index_applier: Option<VectorIndexApplierRef>,
-    /// Over-fetched k for vector index scan.
-    #[cfg(feature = "vector_index")]
-    pub(crate) vector_index_k: Option<usize>,
     /// Start time of the query.
     pub(crate) query_start: Option<Instant>,
     /// The region is using append mode.
@@ -1025,6 +1010,8 @@ impl ScanInput {
     ) -> ScanInputBuilder {
         ScanInputBuilder {
             input: ScanInput {
+                series_index: None,
+                ignore_range_index: false,
                 access_layer,
                 read_cols: mapper.read_columns().clone(),
                 mapper: Arc::new(mapper),
@@ -1034,6 +1021,7 @@ impl ScanInput {
                 region_partition_expr: None,
                 memtables: Vec::new(),
                 files: Vec::new(),
+                primary_key_mapper: OnceLock::new(),
                 batch_size: crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
                 cache_strategy: CacheStrategy::Disabled,
                 ignore_file_not_found: false,
@@ -1042,10 +1030,6 @@ impl ScanInput {
                 inverted_index_appliers: [None, None],
                 bloom_filter_index_appliers: [None, None],
                 fulltext_index_appliers: [None, None],
-                #[cfg(feature = "vector_index")]
-                vector_index_applier: None,
-                #[cfg(feature = "vector_index")]
-                vector_index_k: None,
                 query_start: None,
                 append_mode: false,
                 filter_deleted: true,
@@ -1069,6 +1053,12 @@ impl ScanInput {
         self.batch_size
     }
 
+    /// Interprets file statistics using this scan's pinned schema.
+    pub(crate) fn primary_key_mapper(&self) -> &PrimaryKeyRangeMapper {
+        self.primary_key_mapper
+            .get_or_init(|| Arc::new(PrimaryKeyRangeMapper::new(self.region_metadata().clone())))
+    }
+
     /// Returns the range implied by the range-cache time filters.
     pub(crate) fn implied_time_range(&self) -> Option<&TimestampRange> {
         self.scan_analysis
@@ -1089,6 +1079,28 @@ impl ScanInput {
 }
 
 impl ScanInputBuilder {
+    fn with_primary_key_mapper(mut self, mapper: Arc<PrimaryKeyRangeMapper>) -> Self {
+        self.input.primary_key_mapper = OnceLock::from(mapper);
+        self
+    }
+
+    /// Sets whether to ignore range indexes during scans.
+    #[must_use]
+    pub(crate) fn with_ignore_range_index(mut self, ignore: bool) -> Self {
+        self.input.ignore_range_index = ignore;
+        self
+    }
+
+    /// Sets the pinned series-index context for candidate discovery.
+    #[must_use]
+    pub(crate) fn with_series_index(
+        mut self,
+        series_index: Option<SeriesIndexReadContext>,
+    ) -> Self {
+        self.input.series_index = series_index;
+        self
+    }
+
     /// Sets time range filter for time index.
     #[must_use]
     pub(crate) fn with_time_range(mut self, time_range: Option<TimestampRange>) -> Self {
@@ -1297,25 +1309,6 @@ impl ScanInputBuilder {
         appliers: [Option<FulltextIndexApplierRef>; 2],
     ) -> Self {
         self.input.fulltext_index_appliers = appliers;
-        self
-    }
-
-    /// Sets vector index applier for KNN search.
-    #[cfg(feature = "vector_index")]
-    #[must_use]
-    pub(crate) fn with_vector_index_applier(
-        mut self,
-        applier: Option<VectorIndexApplierRef>,
-    ) -> Self {
-        self.input.vector_index_applier = applier;
-        self
-    }
-
-    /// Sets over-fetched k for vector index scan.
-    #[cfg(feature = "vector_index")]
-    #[must_use]
-    pub(crate) fn with_vector_index_k(mut self, k: Option<usize>) -> Self {
-        self.input.vector_index_k = k;
         self
     }
 
@@ -1549,6 +1542,11 @@ impl ScanInput {
         let reader = self
             .access_layer
             .read_sst(file.clone())
+            .series_index(
+                self.series_index
+                    .clone()
+                    .filter(|_| !self.ignore_range_index),
+            )
             .predicate(predicate)
             .projection(Some(self.read_cols.clone()))
             .json2_rewrite_targets(self.json2_rewrite_targets.clone())
@@ -1560,13 +1558,6 @@ impl ScanInput {
         let reader = if !self.compaction && may_build_selective_row_selection {
             reader.deferred_optional_page_index()
         } else {
-            reader
-        };
-        #[cfg(feature = "vector_index")]
-        let reader = {
-            let mut reader = reader;
-            reader =
-                reader.vector_index_applier(self.vector_index_applier.clone(), self.vector_index_k);
             reader
         };
         let res = reader
@@ -1674,7 +1665,15 @@ impl ScanInput {
                     };
                     match maybe_batch {
                         Some(Ok(batch)) => {
-                            let _ = sender.send(Ok(batch)).await;
+                            // The receiver is gone when the query is cancelled or finishes early,
+                            // so stop reading the source.
+                            if let Err(e) = sender.send(Ok(batch)).await {
+                                debug!(
+                                    "Stop parallel scan task, receiver dropped, region_id: {}, error: {}",
+                                    region_id, e
+                                );
+                                break;
+                            }
                         }
                         Some(Err(e)) => {
                             let _ = sender.send(Err(e)).await;
@@ -2127,10 +2126,6 @@ impl StreamContext {
                         write!(f, ", \"dyn_filters\": {:?}", dyn_filters)?;
                     }
                 }
-                #[cfg(feature = "vector_index")]
-                if let Some(vector_index_k) = self.input.vector_index_k {
-                    write!(f, ", \"vector_index_k\": {}", vector_index_k)?;
-                }
                 if !self.input.files.is_empty() {
                     write!(f, ", \"files\": ")?;
                     f.debug_list()
@@ -2204,6 +2199,22 @@ impl PredicateGroup {
                     expr: expr_json.clone(),
                 })?;
 
+            // Persisted partition bounds retain their original types after schema changes.
+            let schema = metadata
+                .schema
+                .arrow_schema()
+                .clone()
+                .to_dfschema_ref()
+                .context(EvalPartitionFilterSnafu)?;
+            let simplifier = ExprSimplifier::new(
+                SimplifyContext::builder()
+                    .with_schema(schema.clone())
+                    .build(),
+            );
+            let logical_expr = simplifier
+                .coerce(logical_expr, &schema)
+                .and_then(|expr| simplifier.simplify(expr))
+                .context(EvalPartitionFilterSnafu)?;
             combined_exprs.push(logical_expr);
             region_partition_expr = Some(expr);
         }
@@ -2344,6 +2355,75 @@ mod tests {
                     .build(),
             )))
             .with_files(vec![file])
+    }
+
+    #[test]
+    fn test_partition_time_filter_after_unit_widening() {
+        use datatypes::arrow::array::TimestampMicrosecondArray;
+
+        let bound = Value::Timestamp(Timestamp::new_millisecond(1));
+        for (expr, expected) in [
+            (
+                partition_col("ts").lt(bound.clone()),
+                vec![true, false, false],
+            ),
+            (partition_col("ts").gt_eq(bound), vec![false, true, true]),
+        ] {
+            let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+            builder.push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_microsecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 0,
+            });
+            builder.primary_key(vec![]);
+            builder.partition_expr_json(Some(expr.as_json_str().unwrap()));
+            let metadata = builder.build().unwrap();
+            let group = PredicateGroup::new(&metadata, &[]).unwrap();
+            let filters = group.time_filters().unwrap();
+            let input: ArrayRef = Arc::new(TimestampMicrosecondArray::from(vec![999, 1000, 1001]));
+            assert_eq!(filters.len(), 1);
+            assert_eq!(
+                filters[0].evaluate_array(&input).unwrap(),
+                datafusion_common::arrow::buffer::BooleanBuffer::from(expected),
+            );
+        }
+    }
+
+    #[test]
+    fn test_partition_time_filter_overflow_after_unit_widening() {
+        // Year 3000 fits milliseconds but overflows nanoseconds.
+        let bound = Value::Timestamp(Timestamp::new_millisecond(32_503_680_000_000));
+        let expr = partition_col("ts").lt(bound);
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        builder.push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 0,
+        });
+        builder.primary_key(vec![]);
+        builder.partition_expr_json(Some(expr.as_json_str().unwrap()));
+        let metadata = builder.build().unwrap();
+
+        let error = PredicateGroup::new(&metadata, &[])
+            .err()
+            .expect("an overflowing partition bound must fail scan construction");
+        let crate::error::Error::EvalPartitionFilter { error, .. } = error else {
+            panic!("unexpected error: {error:?}");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("converted value exceeds the representable i64 range"),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -2808,12 +2888,12 @@ mod tests {
             })
             .primary_key(vec![0]);
         let metadata = Arc::new(builder.build().unwrap());
-        let mutable = Arc::new(crate::memtable::time_partition::TimePartitions::new(
+        let mutable = crate::memtable::time_partition::TimePartitions::new(
             metadata.clone(),
             Arc::new(crate::test_util::memtable_util::EmptyMemtableBuilder::default()),
             0,
             None,
-        ));
+        );
         let version = Arc::new(
             crate::region::version::VersionBuilder::new(metadata.clone(), mutable).build(),
         );
@@ -3087,12 +3167,12 @@ mod tests {
             ..Default::default()
         };
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
-        let mutable = Arc::new(crate::memtable::time_partition::TimePartitions::new(
+        let mutable = crate::memtable::time_partition::TimePartitions::new(
             metadata.clone(),
             Arc::new(crate::test_util::memtable_util::EmptyMemtableBuilder::default()),
             0,
             None,
-        ));
+        );
         let version = Arc::new(
             crate::region::version::VersionBuilder::new(metadata, mutable)
                 .options(crate::region::options::RegionOptions {
@@ -3127,12 +3207,12 @@ mod tests {
             ..Default::default()
         };
         let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
-        let mutable = Arc::new(crate::memtable::time_partition::TimePartitions::new(
+        let mutable = crate::memtable::time_partition::TimePartitions::new(
             metadata.clone(),
             Arc::new(crate::test_util::memtable_util::EmptyMemtableBuilder::default()),
             0,
             None,
-        ));
+        );
         let target_region_id = metadata.region_id;
 
         // Files at or below the cursor are excluded. Among the remaining files,
@@ -3144,23 +3224,25 @@ mod tests {
             (None, false, true, false),
             (None, true, true, true),
         ] {
-            let version =
-                crate::region::version::VersionBuilder::new(metadata.clone(), mutable.clone())
-                    .options(crate::region::options::RegionOptions {
-                        preserve_row_sequence: true,
-                        ..Default::default()
-                    })
-                    .add_files(
-                        new_noop_file_purger(),
-                        [FileMeta {
-                            region_id: target_region_id,
-                            sequence,
-                            preserve_row_sequence: marked,
-                            ..Default::default()
-                        }]
-                        .into_iter(),
-                    )
-                    .build();
+            let version = crate::region::version::VersionBuilder::new(
+                metadata.clone(),
+                mutable.new_with_part_duration(None, None),
+            )
+            .options(crate::region::options::RegionOptions {
+                preserve_row_sequence: true,
+                ..Default::default()
+            })
+            .add_files(
+                new_noop_file_purger(),
+                [FileMeta {
+                    region_id: target_region_id,
+                    sequence,
+                    preserve_row_sequence: marked,
+                    ..Default::default()
+                }]
+                .into_iter(),
+            )
+            .build();
             let (files, range) = exact_sequence_range(&request, &version).unwrap();
             assert_eq!(expected_files, !files.is_empty());
             assert_eq!(expected_range, range.is_some());
@@ -3175,24 +3257,26 @@ mod tests {
             (None, true, 1, true),
         ] {
             let file_id = store_api::storage::FileId::random();
-            let version =
-                crate::region::version::VersionBuilder::new(metadata.clone(), mutable.clone())
-                    .options(crate::region::options::RegionOptions {
-                        preserve_row_sequence: true,
-                        ..Default::default()
-                    })
-                    .add_files(
-                        new_noop_file_purger(),
-                        [FileMeta {
-                            region_id: RegionId::new(1, 2),
-                            file_id,
-                            sequence,
-                            preserve_row_sequence: marked,
-                            ..Default::default()
-                        }]
-                        .into_iter(),
-                    )
-                    .build();
+            let version = crate::region::version::VersionBuilder::new(
+                metadata.clone(),
+                mutable.new_with_part_duration(None, None),
+            )
+            .options(crate::region::options::RegionOptions {
+                preserve_row_sequence: true,
+                ..Default::default()
+            })
+            .add_files(
+                new_noop_file_purger(),
+                [FileMeta {
+                    region_id: RegionId::new(1, 2),
+                    file_id,
+                    sequence,
+                    preserve_row_sequence: marked,
+                    ..Default::default()
+                }]
+                .into_iter(),
+            )
+            .build();
             let result = exact_sequence_range(&request, &version);
             if expected_error {
                 assert!(result.is_err());
@@ -3224,5 +3308,60 @@ mod tests {
             )
             .build();
         assert!(exact_sequence_range(&request, &version).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_parallel_flat_source_stops_after_receiver_dropped() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use datatypes::arrow::array::Int64Array;
+
+        const SOURCE_BATCHES: usize = 10_000;
+
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let env = SchedulerEnv::new().await;
+        let input = ScanInput::builder(env.access_layer.clone(), mapper).build();
+
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "v",
+            ArrowDataType::Int64,
+            false,
+        )]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1]))]).unwrap();
+        let pulled = Arc::new(AtomicUsize::new(0));
+        let mut released = Vec::new();
+        let sources = (0..2)
+            .map(|_| {
+                let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+                released.push(release_rx);
+                let batch = batch.clone();
+                let pulled = pulled.clone();
+                futures::stream::iter(0..SOURCE_BATCHES)
+                    .map(move |_| {
+                        // Dropped together with the source stream.
+                        let _ = &release_tx;
+                        pulled.fetch_add(1, Ordering::Relaxed);
+                        Ok(batch.clone())
+                    })
+                    .boxed()
+            })
+            .collect();
+
+        let streams = input
+            .create_parallel_flat_sources(sources, Arc::new(Semaphore::new(2)), 1)
+            .unwrap();
+        drop(streams);
+
+        for release_rx in released {
+            tokio::time::timeout(std::time::Duration::from_secs(10), release_rx)
+                .await
+                .unwrap()
+                .unwrap_err();
+        }
+        // Each task may have read a few batches ahead into its channel before the
+        // receiver went away, but must not drain the rest of its source.
+        assert!(pulled.load(Ordering::Relaxed) < 100);
     }
 }

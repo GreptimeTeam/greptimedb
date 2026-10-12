@@ -2,11 +2,13 @@ name: Check Dependencies
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - main
 
 jobs:
   check-dependencies:
+    if: ${{ github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
 
     steps:

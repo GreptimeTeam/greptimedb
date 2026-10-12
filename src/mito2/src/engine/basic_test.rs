@@ -24,6 +24,7 @@ use common_base::readable_size::ReadableSize;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
+use common_time::Timestamp;
 use common_wal::options::WAL_OPTIONS_KEY;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -809,6 +810,93 @@ async fn test_region_usage_with_format(flat_format: bool) {
 }
 
 #[tokio::test]
+async fn test_region_usage_time_range() {
+    test_region_usage_time_range_with_format(false).await;
+    test_region_usage_time_range_with_format(true).await;
+}
+
+async fn test_region_usage_time_range_with_format(flat_format: bool) {
+    let mut env = TestEnv::with_prefix("region_usage_time_range").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+
+    // An empty region has nothing to bound.
+    let region_stat = region.region_statistic();
+    assert_eq!(region_stat.min_timestamp, None);
+    assert_eq!(region_stat.max_timestamp, None);
+
+    // Unflushed data lives only in the memtable, so the range must come from there.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows_for_key("a", 10, 20, 0),
+        },
+    )
+    .await;
+
+    let region_stat = region.region_statistic();
+    assert_eq!(
+        region_stat.min_timestamp,
+        Some(Timestamp::new_millisecond(10_000))
+    );
+    assert_eq!(
+        region_stat.max_timestamp,
+        Some(Timestamp::new_millisecond(19_000))
+    );
+
+    // After a flush the same range is served by the SST instead.
+    flush_region(&engine, region_id, None).await;
+
+    let region_stat = region.region_statistic();
+    assert_eq!(
+        region_stat.min_timestamp,
+        Some(Timestamp::new_millisecond(10_000))
+    );
+    assert_eq!(
+        region_stat.max_timestamp,
+        Some(Timestamp::new_millisecond(19_000))
+    );
+
+    // A later write lands in the memtable below the SST range: the minimum must
+    // come from the memtable and the maximum from the SST, so a merge that drops
+    // either side is caught.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows_for_key("b", 0, 5, 0),
+        },
+    )
+    .await;
+
+    let region_stat = region.region_statistic();
+    assert_eq!(
+        region_stat.min_timestamp,
+        Some(Timestamp::new_millisecond(0))
+    );
+    assert_eq!(
+        region_stat.max_timestamp,
+        Some(Timestamp::new_millisecond(19_000))
+    );
+}
+
+#[tokio::test]
 async fn test_engine_with_write_cache() {
     test_engine_with_write_cache_with_format(false).await;
     test_engine_with_write_cache_with_format(true).await;
@@ -1412,7 +1500,10 @@ async fn check_request_skip_wal_recovery(flat_format: bool, skip_wal: bool) {
     let before = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(before.iter().map(|b| b.num_rows()).sum::<usize>(), 4);
 
-    reopen_region(&engine, region_id, table_dir, false, HashMap::new()).await;
+    // Stop the engine directly, without region close, to exercise WAL-only recovery.
+    let engine =
+        restart_without_region_close(&mut env, engine, flat_format, region_id, table_dir).await;
+
     let stream = engine
         .scan_to_stream(region_id, ScanRequest::default())
         .await
@@ -1537,7 +1628,7 @@ async fn check_request_skip_wal_mixed_batch_recovery(
     skip_wal: bool,
     flush_before_reopen: bool,
 ) {
-    use crate::region_write_ctx::RegionWriteCtx;
+    use crate::region_write_ctx::{RegionWriteCtx, WriteSource};
     use crate::request::OptionOutputTx;
     use crate::test_util::LogStoreImpl;
     use crate::wal::Wal;
@@ -1569,6 +1660,7 @@ async fn check_request_skip_wal_mixed_batch_recovery(
         &region.version_control,
         region.provider.clone(),
         None,
+        WriteSource::Request,
     );
     let mut receivers = Vec::with_capacity(4);
     for (index, (skip, timestamp)) in [(false, 0), (skip_wal, 0), (false, 0), (skip_wal, 1)]
@@ -1604,8 +1696,7 @@ async fn check_request_skip_wal_mixed_batch_recovery(
     ctx.add_wal_entry(&mut writer).unwrap();
     let response = writer.write_to_wal().await.unwrap();
     assert_eq!(response.last_entry_ids.get(&region_id), Some(&1));
-    ctx.write_memtable().await;
-    ctx.publish_sequence_and_entry_id();
+    ctx.write_memtables().await;
     drop(ctx);
     for rx in receivers {
         assert_eq!(rx.await.unwrap().unwrap(), 2);
@@ -1663,9 +1754,13 @@ async fn check_request_skip_wal_mixed_batch_recovery(
         );
     }
 
-    // A no-flush close discards memtables. Only WAL-backed rows recover
-    // unless an explicit flush has already persisted all requests.
-    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    // Bypass region close so only WAL-backed rows recover unless the explicit
+    // flush above persisted all requests.
+    let engine =
+        restart_without_region_close(&mut env, engine, flat_format, region_id, table_dir).await;
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
     let loses_skipped_rows = skip_wal && !flush_before_reopen;
     let mut expected_values = if loses_skipped_rows {
         vec![(0, 20.0), (1000, 1.0), (3000, 21.0)]
@@ -1741,4 +1836,39 @@ async fn request_skip_wal_values(engine: &MitoEngine, region_id: RegionId) -> Ve
         .collect::<Vec<_>>();
     values.sort_unstable_by_key(|(timestamp, _)| *timestamp);
     values
+}
+
+/// Restarts workers without closing regions, preserving WAL-only recovery coverage.
+async fn restart_without_region_close(
+    env: &mut TestEnv,
+    engine: MitoEngine,
+    flat_format: bool,
+    region_id: RegionId,
+    table_dir: String,
+) -> MitoEngine {
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir,
+                options: HashMap::new(),
+                skip_wal_replay: false,
+                path_type: PathType::Bare,
+                checkpoint: None,
+                requirements: Default::default(),
+            }),
+        )
+        .await
+        .unwrap();
+    engine
 }

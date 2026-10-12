@@ -21,6 +21,20 @@ use std::sync::Arc;
 use serde::{Deserialize, Deserializer, Serializer};
 use snafu::{FromString, Snafu};
 
+/// Returns the root cause of an error's source chain, i.e. the last error
+/// reachable via [`std::error::Error::source`]. For an error without any
+/// source the error itself is returned.
+///
+/// Mirrors `err.sources().last().unwrap()` (unstable `error_iter`, which
+/// yields the error itself followed by its sources).
+fn error_chain_root(err: &dyn std::error::Error) -> &dyn std::error::Error {
+    let mut root = err;
+    while let Some(source) = root.source() {
+        root = source;
+    }
+    root
+}
+
 use crate::status_code::StatusCode;
 
 /// Describes whether an error instance is safe and useful to retry.
@@ -148,7 +162,7 @@ pub trait ErrorExt: StackError {
             _ => {
                 let error = self.last();
                 if let Some(external_error) = error.source() {
-                    let external_root = external_error.sources().last().unwrap();
+                    let external_root = error_chain_root(external_error);
 
                     if error.transparent() {
                         format!("{external_root}")
@@ -169,7 +183,7 @@ pub trait ErrorExt: StackError {
     {
         let error = self.last();
         if let Some(external_error) = error.source() {
-            let external_root = external_error.sources().last().unwrap();
+            let external_root = error_chain_root(external_error);
             Some(external_root)
         } else {
             None

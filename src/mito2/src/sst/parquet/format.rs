@@ -921,7 +921,8 @@ mod tests {
     use super::*;
     use crate::error::InvalidMetadataSnafu;
     use crate::sst::parquet::flat_format::{
-        FlatReadFormat, FlatWriteFormat, sequence_column_index, sst_column_id_indices,
+        FlatReadFormat, FlatWriteFormat, decode_primary_keys, sequence_column_index,
+        sst_column_id_indices,
     };
     use crate::sst::{
         FlatSchemaOptions, OP_TYPE_PARQUET_FIELD_ID, PRIMARY_KEY_PARQUET_FIELD_ID,
@@ -1806,6 +1807,123 @@ mod tests {
         // Test conversion with sparse encoding and skip convert.
         let result = format.convert_batch(record_batch.clone(), None).unwrap();
         assert_eq!(record_batch, result);
+    }
+
+    #[test]
+    fn test_sparse_tag_materialization_matches_full_decode_on_slices() {
+        let metadata = build_test_sparse_region_metadata();
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        let long = "中文\0abcdefgh".repeat(8);
+        let mut encoded = Vec::new();
+        for (table_id, tsid, tags) in [
+            (u32::MAX, u64::MAX, vec![(1, long.as_str()), (3, "tail")]),
+            (7, 0, vec![(3, "标签"), (1, "")]),
+            (0, 31, vec![]),
+            (42, 999, vec![(1, "s"), (9, "outside metadata")]),
+        ] {
+            let mut pk = Vec::new();
+            codec.encode_internal(table_id, tsid, &mut pk).unwrap();
+            codec
+                .encode_raw_tag_value(tags.iter().map(|(id, tag)| (*id, tag.as_bytes())), &mut pk)
+                .unwrap();
+            encoded.push(pk);
+        }
+        // Distinguish an omitted tag from an explicitly encoded NULL.
+        encoded[2].extend_from_slice(&3_u32.to_be_bytes());
+        encoded[2].push(0);
+        encoded.push(encoded[0].clone());
+        // Unreferenced dictionary values must never be decoded.
+        encoded.push(b"invalid unused key".to_vec());
+        let dictionary_values = BinaryArray::from_iter_values(encoded.iter());
+        let pk = DictionaryArray::<UInt32Type>::new(
+            UInt32Array::from(vec![0, 0, 1, 2, 4, 3, 0, 0]),
+            Arc::new(dictionary_values),
+        );
+        let batch = RecordBatch::try_new(
+            build_test_arrow_schema(),
+            vec![
+                Arc::new(Int64Array::from_iter_values(0..8)),
+                Arc::new(Int64Array::from_iter_values(10..18)),
+                Arc::new(TimestampMillisecondArray::from_iter_values(0..8)),
+                Arc::new(pk),
+                Arc::new(UInt64Array::from(vec![TEST_SEQUENCE; 8])),
+                Arc::new(UInt8Array::from(vec![TEST_OP_TYPE; 8])),
+            ],
+        )
+        .unwrap();
+        let columns: Vec<_> = metadata
+            .primary_key_columns()
+            .map(|column| (column.column_id, column.column_schema.data_type.clone()))
+            .collect();
+        let format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
+            None,
+            "test",
+            false,
+        )
+        .unwrap();
+
+        // Explicit run mappings form an oracle independent of the new run collector.
+        for (offset, len, runs, row_to_run) in [
+            (0, 8, vec![0, 1, 2, 4, 3, 0], vec![0, 0, 1, 2, 3, 4, 5, 5]),
+            (1, 6, vec![0, 1, 2, 4, 3, 0], vec![0, 1, 2, 3, 4, 5]),
+            (0, 2, vec![0], vec![0, 0]),
+            (4, 1, vec![4], vec![0]),
+            (3, 0, vec![], vec![]),
+        ] {
+            let input = batch.slice(offset, len);
+            let decoded: Vec<_> = runs
+                .iter()
+                .map(|&key| codec.decode(&encoded[key]).unwrap().into_sparse())
+                .collect();
+            let indices = UInt32Array::from(row_to_run);
+            let expected: Vec<ArrayRef> = columns
+                .iter()
+                .map(|(id, ty)| {
+                    let mut builder = ty.create_mutable_vector(decoded.len());
+                    for pk in &decoded {
+                        builder.push_value_ref(&pk.get_or_null(*id).as_value_ref());
+                    }
+                    let values = builder.to_vector().to_arrow_array();
+                    if ty.is_string() {
+                        Arc::new(DictionaryArray::new(indices.clone(), values)) as ArrayRef
+                    } else {
+                        datatypes::arrow::compute::take(&values, &indices, None).unwrap()
+                    }
+                })
+                .collect();
+
+            let mut lazy = decode_primary_keys(&codec, &input).unwrap();
+            for order in [vec![0, 1, 2, 3], vec![3, 2, 1, 0], vec![3, 2, 3]] {
+                let requested: Vec<_> = order.iter().map(|&idx| columns[idx].clone()).collect();
+                let arrays = lazy.get_sparse_tag_columns(&requested).unwrap();
+                assert_eq!(arrays.len(), requested.len());
+                for (&idx, array) in order.iter().zip(arrays) {
+                    let single = lazy
+                        .get_tag_column(columns[idx].0, None, &columns[idx].1)
+                        .unwrap();
+                    assert_eq!(array.to_data(), expected[idx].to_data());
+                    assert_eq!(single.to_data(), expected[idx].to_data());
+                }
+            }
+            let mut expected_columns = expected;
+            expected_columns.extend_from_slice(input.columns());
+            let expected_batch = RecordBatch::try_new(
+                to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default()),
+                expected_columns,
+            )
+            .unwrap();
+            let actual = format.convert_batch(input, None).unwrap();
+            assert_eq!(actual.schema(), expected_batch.schema());
+            for (actual, expected) in actual.columns().iter().zip(expected_batch.columns()) {
+                assert_eq!(
+                    actual.to_data(),
+                    expected.to_data(),
+                    "offset={offset}, len={len}"
+                );
+            }
+        }
     }
 
     #[test]

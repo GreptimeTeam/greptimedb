@@ -20,13 +20,18 @@ use common_error::ext::BoxedError;
 use common_meta::datanode::RegionStat;
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::{DfSendableRecordBatchStream, RecordBatch, SendableRecordBatchStream};
+use common_time::timestamp::TimeUnit;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter as DfRecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::PartitionStream as DfPartitionStream;
 use datatypes::prelude::{ConcreteDataType, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
+use datatypes::timestamp::TimestampMillisecond;
 use datatypes::value::Value;
-use datatypes::vectors::{StringVectorBuilder, UInt32VectorBuilder, UInt64VectorBuilder};
+use datatypes::vectors::{
+    StringVectorBuilder, TimestampMillisecondVectorBuilder, UInt32VectorBuilder,
+    UInt64VectorBuilder,
+};
 use snafu::ResultExt;
 use store_api::storage::{ScanRequest, TableId};
 
@@ -51,6 +56,8 @@ const SST_NUM: &str = "sst_num";
 const INDEX_SIZE: &str = "index_size";
 const ENGINE: &str = "engine";
 const REGION_ROLE: &str = "region_role";
+const MIN_TIMESTAMP: &str = "min_timestamp";
+const MAX_TIMESTAMP: &str = "max_timestamp";
 
 const INIT_CAPACITY: usize = 42;
 
@@ -109,6 +116,16 @@ impl InformationSchemaRegionStatistics {
             ColumnSchema::new(INDEX_SIZE, ConcreteDataType::uint64_datatype(), true),
             ColumnSchema::new(ENGINE, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new(REGION_ROLE, ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(
+                MIN_TIMESTAMP,
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                true,
+            ),
+            ColumnSchema::new(
+                MAX_TIMESTAMP,
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                true,
+            ),
         ]))
     }
 
@@ -175,6 +192,8 @@ struct InformationSchemaRegionStatisticsBuilder {
     index_sizes: UInt64VectorBuilder,
     engines: StringVectorBuilder,
     region_roles: StringVectorBuilder,
+    min_timestamps: TimestampMillisecondVectorBuilder,
+    max_timestamps: TimestampMillisecondVectorBuilder,
 }
 
 impl InformationSchemaRegionStatisticsBuilder {
@@ -197,6 +216,8 @@ impl InformationSchemaRegionStatisticsBuilder {
             index_sizes: UInt64VectorBuilder::with_capacity(INIT_CAPACITY),
             engines: StringVectorBuilder::with_capacity(INIT_CAPACITY),
             region_roles: StringVectorBuilder::with_capacity(INIT_CAPACITY),
+            min_timestamps: TimestampMillisecondVectorBuilder::with_capacity(INIT_CAPACITY),
+            max_timestamps: TimestampMillisecondVectorBuilder::with_capacity(INIT_CAPACITY),
         }
     }
 
@@ -261,6 +282,20 @@ impl InformationSchemaRegionStatisticsBuilder {
         self.index_sizes.push(Some(region_stat.index_size));
         self.engines.push(Some(&region_stat.engine));
         self.region_roles.push(Some(&region_stat.role.to_string()));
+        // Floor the min and ceil the max so the window stays a superset: a narrower
+        // one would hide regions from a time-bounded lookup.
+        self.min_timestamps.push(
+            region_stat
+                .min_timestamp
+                .and_then(|ts| ts.convert_to(TimeUnit::Millisecond))
+                .map(TimestampMillisecond),
+        );
+        self.max_timestamps.push(
+            region_stat
+                .max_timestamp
+                .and_then(|ts| ts.convert_to_ceil(TimeUnit::Millisecond))
+                .map(TimestampMillisecond),
+        );
     }
 
     fn finish(&mut self) -> Result<RecordBatch> {
@@ -280,6 +315,8 @@ impl InformationSchemaRegionStatisticsBuilder {
             Arc::new(self.index_sizes.finish()),
             Arc::new(self.engines.finish()),
             Arc::new(self.region_roles.finish()),
+            Arc::new(self.min_timestamps.finish()),
+            Arc::new(self.max_timestamps.finish()),
         ];
 
         RecordBatch::new(self.schema.clone(), columns).context(CreateRecordBatchSnafu)

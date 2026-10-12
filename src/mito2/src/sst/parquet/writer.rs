@@ -62,11 +62,11 @@ use crate::sst::parquet::flat_format::{
 };
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyWriteFormat};
 use crate::sst::parquet::{
-    PARQUET_METADATA_KEY, SstInfo, WriteOptions, apply_float_field_encoding,
+    COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo, WriteOptions,
+    apply_float_field_encoding,
 };
 use crate::sst::{
-    DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator,
-    maybe_wrap_schema,
+    DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator, maybe_wrap_schema,
 };
 
 /// Converts a flat RecordBatch for writing to parquet.
@@ -181,7 +181,11 @@ pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathPro
 
 pub trait WriterFactory {
     type Writer: AsyncWrite + Send + Unpin;
-    fn create(&mut self, file_path: &str) -> impl Future<Output = Result<Self::Writer>>;
+    fn create(
+        &mut self,
+        file_path: &str,
+        write_buffer_size: usize,
+    ) -> impl Future<Output = Result<Self::Writer>>;
 }
 
 pub struct ObjectStoreWriterFactory {
@@ -191,10 +195,10 @@ pub struct ObjectStoreWriterFactory {
 impl WriterFactory for ObjectStoreWriterFactory {
     type Writer = Compat<FuturesAsyncWriter>;
 
-    async fn create(&mut self, file_path: &str) -> Result<Self::Writer> {
+    async fn create(&mut self, file_path: &str, write_buffer_size: usize) -> Result<Self::Writer> {
         self.object_store
             .writer_with(file_path)
-            .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
+            .chunk(write_buffer_size)
             .concurrent(DEFAULT_WRITE_CONCURRENCY)
             .await
             .map(|v| v.into_futures_async_write().compat_write())
@@ -541,7 +545,7 @@ where
                 .set_compression(Compression::ZSTD(ZstdLevel::default()))
                 .set_encoding(Encoding::PLAIN)
                 .set_max_row_group_row_count(Some(opts.row_group_size))
-                .set_column_index_truncate_length(None)
+                .set_column_index_truncate_length(COLUMN_INDEX_TRUNCATE_LENGTH)
                 .set_statistics_truncate_length(None);
             let ts_col = ColumnPath::new(vec![
                 self.metadata.time_index_column().column_schema.name.clone(),
@@ -566,7 +570,9 @@ where
                 self.current_file,
             ));
             let writer = SizeAwareWriter::new(
-                self.writer_factory.create(&sst_file_path).await?,
+                self.writer_factory
+                    .create(&sst_file_path, opts.write_buffer_size.as_bytes() as usize)
+                    .await?,
                 self.bytes_written.clone(),
             );
             let arrow_writer =

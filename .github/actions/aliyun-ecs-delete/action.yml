@@ -1,0 +1,37 @@
+name: Delete Aliyun ECS runner
+description: Reuse the ephemeral runner lifecycle, including existing janitor ownership
+  tags.
+inputs:
+  access-key-id:
+    description: Aliyun access key ID
+    required: true
+  access-key-secret:
+    description: Aliyun access key secret
+    required: true
+  github-token:
+    description: Token authorized to register and remove repository runners
+    required: true
+  region-id:
+    description: ECS region
+    required: true
+  instance-id:
+    description: Instance ID returned by create
+    required: true
+  runner-name:
+    description: Runner name returned by create
+    required: true
+runs:
+  using: composite
+  steps:
+  - uses: astral-sh/setup-uv@v6
+  - id: teardown
+    shell: bash
+    env:
+      ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ inputs.access-key-id }}
+      ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ inputs.access-key-secret }}
+      GH_PERSONAL_ACCESS_TOKEN: ${{ inputs.github-token }}
+      ALIYUN_ECS_REGION_ID: ${{ inputs.region-id }}
+      QUERY_REGRESSION_ECS_INSTANCE_ID: ${{ inputs.instance-id }}
+      QUERY_REGRESSION_ECS_RUNNER_NAME: ${{ inputs.runner-name }}
+      ACTION_PATH: ${{ github.action_path }}
+    run: uv run "$ACTION_PATH/../../scripts/aliyun-ecs-runner-teardown.py"

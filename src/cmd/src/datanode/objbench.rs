@@ -200,7 +200,6 @@ impl ObjbenchCommand {
             metadata: region_meta,
             source,
             cache_manager,
-            storage: None,
             max_sequence: None,
             sst_write_format: FormatType::PrimaryKey,
             index_options: Default::default(),
@@ -209,8 +208,6 @@ impl ObjbenchCommand {
             fulltext_index_config,
             bloom_filter_index_config: MitoConfig::default().bloom_filter_index,
             preserve_row_sequence: false,
-            #[cfg(feature = "vector_index")]
-            vector_index_config: Default::default(),
         };
 
         // Write SST

@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use api::helper::{ColumnDataTypeWrapper, to_grpc_value};
 use api::v1::bulk_wal_entry::Body;
-use api::v1::{ArrowIpc, BulkWalEntry, Mutation, OpType};
+use api::v1::{ArrowIpc, BulkWalEntry, Mutation, OpType, SemanticType};
 use bytes::Bytes;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_recordbatch::DfRecordBatch as RecordBatch;
@@ -39,7 +39,7 @@ use datatypes::arrow::datatypes::{
     DataType as ArrowDataType, Field, Schema, SchemaRef, TimeUnit, UInt32Type,
 };
 use datatypes::data_type::DataType;
-use datatypes::extension::json::is_json2_extension_type;
+use datatypes::extension::json::align_schema_with_json_array;
 use datatypes::prelude::{MutableVector, Vector};
 use datatypes::value::ValueRef;
 use datatypes::vectors::Helper;
@@ -71,7 +71,9 @@ use crate::sst::SeriesEstimator;
 use crate::sst::index::IndexOutput;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder};
-use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo, apply_float_field_encoding};
+use crate::sst::parquet::{
+    COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo, apply_float_field_encoding,
+};
 
 const INIT_DICT_VALUE_CAPACITY: usize = 8;
 
@@ -81,7 +83,12 @@ pub struct BulkPart {
     pub batch: RecordBatch,
     pub max_timestamp: i64,
     pub min_timestamp: i64,
+    /// Uniform sequence for external bulk writes, or the maximum row sequence
+    /// for parts produced by [`BulkPartConverter`]. Rows need not share it.
     pub sequence: u64,
+    /// Lower bound of row sequences. Slices may inherit a lower bound from
+    /// their parent part rather than recomputing an exact minimum.
+    pub min_sequence: SequenceNumber,
     pub timestamp_index: usize,
     pub raw_data: Option<ArrowIpc>,
 }
@@ -102,6 +109,9 @@ impl TryFrom<BulkWalEntry> for BulkPart {
                     max_timestamp: value.max_ts,
                     min_timestamp: value.min_ts,
                     sequence: value.sequence,
+                    // Bulk WAL entries represent uniform-sequence external writes.
+                    // Row mutations reconstruct their bounds through BulkPartConverter.
+                    min_sequence: value.sequence,
                     timestamp_index: value.timestamp_index as usize,
                     raw_data: Some(ipc),
                 })
@@ -184,6 +194,7 @@ impl BulkPart {
             num_rows: self.num_rows(),
             num_ranges: 1,
             max_sequence: self.sequence,
+            min_sequence: self.min_sequence,
             series_count: self.estimated_series_count(),
         }
     }
@@ -209,6 +220,12 @@ impl BulkPart {
         // Finds columns that need to be filled
         let mut columns_to_fill = Vec::new();
         for column_meta in &region_metadata.column_metadatas {
+            // Sparse bulk batches already carry tags in the encoded primary key.
+            if region_metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse
+                && column_meta.semantic_type == SemanticType::Tag
+            {
+                continue;
+            }
             // TODO(yingwen): Returns error if it is impure default after we support filling
             // bulk insert request in the frontend
             if !batch_columns.contains(column_meta.column_schema.name.as_str()) {
@@ -354,6 +371,8 @@ pub struct UnorderedPart {
     max_timestamp: i64,
     /// Maximum sequence number across all parts.
     max_sequence: u64,
+    /// Minimum sequence lower bound across all parts.
+    min_sequence: SequenceNumber,
     /// Row count threshold for accepting parts (default: 1024).
     threshold: usize,
     /// Row count threshold for compacting (default: 4096).
@@ -376,6 +395,7 @@ impl UnorderedPart {
             min_timestamp: i64::MAX,
             max_timestamp: i64::MIN,
             max_sequence: 0,
+            min_sequence: SequenceNumber::MAX,
             threshold: 1024,
             compact_threshold: 4096,
         }
@@ -423,6 +443,7 @@ impl UnorderedPart {
         self.min_timestamp = self.min_timestamp.min(part.min_timestamp);
         self.max_timestamp = self.max_timestamp.max(part.max_timestamp);
         self.max_sequence = self.max_sequence.max(part.sequence);
+        self.min_sequence = self.min_sequence.min(part.min_sequence);
         self.parts.push(part);
     }
 
@@ -496,6 +517,7 @@ impl UnorderedPart {
             max_timestamp: self.max_timestamp,
             min_timestamp: self.min_timestamp,
             sequence: self.max_sequence,
+            min_sequence: self.min_sequence,
             timestamp_index,
             raw_data: None,
         }))
@@ -509,6 +531,7 @@ impl UnorderedPart {
         self.min_timestamp = i64::MAX;
         self.max_timestamp = i64::MIN;
         self.max_sequence = 0;
+        self.min_sequence = SequenceNumber::MAX;
     }
 }
 
@@ -580,6 +603,8 @@ pub struct BulkPartConverter {
     min_ts: i64,
     /// Max sequence number.
     max_sequence: SequenceNumber,
+    /// Min sequence number.
+    min_sequence: SequenceNumber,
 }
 
 impl BulkPartConverter {
@@ -617,6 +642,7 @@ impl BulkPartConverter {
             min_ts: i64::MAX,
             max_ts: i64::MIN,
             max_sequence: SequenceNumber::MIN,
+            min_sequence: SequenceNumber::MAX,
         }
     }
 
@@ -695,6 +721,7 @@ impl BulkPartConverter {
         self.min_ts = self.min_ts.min(ts);
         self.max_ts = self.max_ts.max(ts);
         self.max_sequence = self.max_sequence.max(kv.sequence());
+        self.min_sequence = self.min_sequence.min(kv.sequence());
 
         Ok(())
     }
@@ -735,30 +762,11 @@ impl BulkPartConverter {
             max_timestamp: self.max_ts,
             min_timestamp: self.min_ts,
             sequence: self.max_sequence,
+            min_sequence: self.min_sequence,
             timestamp_index,
             raw_data: None,
         })
     }
-}
-
-fn align_schema_with_json_array(schema: SchemaRef, columns: &[ArrayRef]) -> SchemaRef {
-    if schema.fields().iter().all(|f| !is_json2_extension_type(f)) {
-        return schema;
-    }
-
-    let mut fields = Vec::with_capacity(schema.fields().len());
-    for (field, array) in schema.fields().iter().zip(columns) {
-        if !is_json2_extension_type(field) {
-            fields.push(field.clone());
-            continue;
-        }
-
-        let mut field = field.as_ref().clone();
-        field.set_data_type(array.data_type().clone());
-        fields.push(Arc::new(field));
-    }
-
-    Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
 }
 
 fn new_primary_key_column_builders(
@@ -1142,6 +1150,7 @@ pub fn convert_bulk_part(
         max_timestamp: part.max_timestamp,
         min_timestamp: part.min_timestamp,
         sequence: part.sequence,
+        min_sequence: part.sequence,
         timestamp_index: new_timestamp_index,
         raw_data: None,
     }))
@@ -1195,6 +1204,7 @@ impl EncodedBulkPart {
             num_rows: meta.num_rows,
             num_ranges: 1,
             max_sequence: meta.max_sequence,
+            min_sequence: 0,
             series_count: meta.num_series as usize,
         }
     }
@@ -1326,7 +1336,7 @@ impl BulkPartEncoder {
             .set_write_batch_size(row_group_size)
             .set_max_row_group_row_count(Some(row_group_size))
             .set_compression(Compression::ZSTD(ZstdLevel::default()))
-            .set_column_index_truncate_length(None)
+            .set_column_index_truncate_length(COLUMN_INDEX_TRUNCATE_LENGTH)
             .set_statistics_truncate_length(None);
         props = apply_float_field_encoding(props, &metadata, float_field_encoding);
         let writer_props = Some(props.build());
@@ -1817,6 +1827,7 @@ impl MultiBulkPart {
             num_rows: self.num_rows(),
             num_ranges: 1,
             max_sequence: self.max_sequence,
+            min_sequence: 0,
             series_count: self.series_count,
         }
     }
@@ -1992,6 +2003,7 @@ mod tests {
             max_timestamp: 0,
             min_timestamp: 0,
             sequence: 0,
+            min_sequence: 0,
             timestamp_index: 0,
             raw_data: None,
         };
@@ -2700,6 +2712,7 @@ mod tests {
             max_timestamp: 0,
             min_timestamp: 0,
             sequence: 0,
+            min_sequence: 0,
             timestamp_index: 0,
             raw_data: None,
         };
@@ -2745,6 +2758,7 @@ mod tests {
             max_timestamp: 2000,
             min_timestamp: 1000,
             sequence: 5,
+            min_sequence: 5,
             timestamp_index: 4,
             raw_data: None,
         };
@@ -2769,6 +2783,7 @@ mod tests {
         assert_eq!(converted.max_timestamp, 2000);
         assert_eq!(converted.min_timestamp, 1000);
         assert_eq!(converted.sequence, 5);
+        assert_eq!(converted.min_sequence, 5);
 
         let schema = converted.batch.schema();
         let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -2837,6 +2852,7 @@ mod tests {
             max_timestamp: 2000,
             min_timestamp: 1000,
             sequence: 3,
+            min_sequence: 3,
             timestamp_index: 4,
             raw_data: None,
         };
@@ -2950,6 +2966,7 @@ mod tests {
             max_timestamp: 2000,
             min_timestamp: 1000,
             sequence: 7,
+            min_sequence: 7,
             timestamp_index: 3,
             raw_data: None,
         };
@@ -3030,6 +3047,7 @@ mod tests {
             max_timestamp: 4000,
             min_timestamp: 1000,
             sequence: 10,
+            min_sequence: 10,
             timestamp_index: 4,
             raw_data: None,
         };
@@ -3083,6 +3101,44 @@ mod tests {
             converter.append_key_values(&kv).unwrap();
         }
         converter.convert().unwrap()
+    }
+
+    #[test]
+    fn test_min_sequence_survives_slicing_and_unordered_part_reuse() {
+        let metadata = metadata_for_test();
+        let make_part = |sequence| {
+            build_converted_bulk_part(&[MutationInput {
+                k0: "a",
+                k1: 0,
+                timestamps: &[2000, 1000],
+                v1: &[Some(1.0), Some(2.0)],
+                sequence,
+            }])
+        };
+        let original = make_part(100);
+        let sliced = crate::memtable::time_partition::filter_record_batch(&original, 1000, 1001)
+            .unwrap()
+            .unwrap();
+        // The remaining row has sequence 101. Inheriting 100 is conservative
+        // and avoids rescanning the sequence column after each partition split.
+        assert_eq!(1, sliced.num_rows());
+        assert_eq!(100, sliced.min_sequence);
+        assert_eq!(101, sliced.sequence);
+
+        let mut unordered = UnorderedPart::new();
+        unordered.push(sliced.clone());
+        unordered.push(make_part(10));
+        let merged = unordered.to_bulk_part(&metadata).unwrap().unwrap();
+        assert_eq!(3, merged.num_rows());
+        assert_eq!(10, merged.min_sequence);
+        assert_eq!(101, merged.sequence);
+        assert_eq!(10, merged.to_memtable_stats(&metadata).min_sequence);
+
+        unordered.clear();
+        unordered.push(sliced);
+        let reused = unordered.to_bulk_part(&metadata).unwrap().unwrap();
+        assert_eq!(1, reused.num_rows());
+        assert_eq!(100, reused.min_sequence);
     }
 
     /// Helper to create a MultiBulkPart where each group becomes a separate batch.
@@ -3231,6 +3287,7 @@ mod tests {
             max_timestamp: 2000,
             min_timestamp: 1000,
             sequence: 5,
+            min_sequence: 5,
             timestamp_index: 3,
             raw_data: Some(ArrowIpc {
                 schema: schema_bytes,
@@ -3249,6 +3306,7 @@ mod tests {
         // The WAL entry round trip keeps the filled column.
         let entry = BulkWalEntry::try_from(&part).unwrap();
         let replayed = BulkPart::try_from(entry).unwrap();
+        assert_eq!(part.sequence, replayed.min_sequence);
         assert_eq!(2, replayed.num_rows());
         assert!(replayed.batch.column_by_name("v1").is_some());
     }

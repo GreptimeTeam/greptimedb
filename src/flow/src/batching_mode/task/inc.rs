@@ -18,6 +18,7 @@ use common_error::ext::BoxedError;
 use common_telemetry::debug;
 use common_telemetry::tracing::warn;
 use datafusion_expr::{DmlStatement, LogicalPlan};
+use query::QueryEngineRef;
 use query::options::{
     FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
     FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE, FLOW_SINK_TABLE_ID,
@@ -119,6 +120,7 @@ impl BatchingTask {
     /// incremental safe without a rewrite, so they return `Some(original_plan)`.
     pub(super) async fn prepare_plan_for_incremental(
         &self,
+        engine: &QueryEngineRef,
         plan: &LogicalPlan,
     ) -> Result<Option<LogicalPlan>, Error> {
         let is_incremental_sql = {
@@ -219,6 +221,7 @@ impl BatchingTask {
         let rewritten_inner = match rewrite_incremental_aggregate_with_sink_merge(
             &inner_plan,
             &analysis,
+            engine,
             sink_table,
             &self.config.sink_table_name,
             None,

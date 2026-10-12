@@ -45,7 +45,6 @@ ORDER BY
 +-----+
 +-----+
 
--- SQLNESS SLEEP 2s
 ADMIN flush_table('test_ttl');
 
 +-------------------------------+

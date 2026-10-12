@@ -4,9 +4,6 @@ node_id = 14
 
 ## flow engine options.
 [flow]
-## The number of flow worker in flownode.
-## Not setting(or set to 0) this value will use the number of CPU cores divided by 2.
-#+num_workers=0
 [flow.batching_mode]
 ## The default batching engine query timeout is 10 minutes.
 #+query_timeout="600s"
@@ -47,12 +44,16 @@ node_id = 14
 
 ## The gRPC server options.
 [grpc]
-## The address to bind the gRPC server.
+## The address to bind the gRPC server. Defaults to `127.0.0.1:3004`; this example sets it to `127.0.0.1:6800`.
+## @toml2docs:none-default="127.0.0.1:3004"
 bind_addr = "127.0.0.1:6800"
-## The address advertised to the metasrv,
-## and used for connections from outside the host
+## The address advertised to the metasrv, and used for connections from outside the host.
+## If left empty or unset, the server will automatically use the IP address of the first network interface
+## on the host, with the same port number as the one specified in `grpc.bind_addr`.
+## @toml2docs:none-default
 server_addr = "127.0.0.1:6800"
-## The number of server worker threads.
+## The number of server worker threads. Defaults to 8; this example sets it to 2.
+## @toml2docs:none-default="8"
 runtime_size = 2
 ## The maximum receive message size for gRPC server.
 max_recv_message_size = "512MB"
@@ -156,9 +157,10 @@ parallelism = 1
 
 ## Memory pool size for query execution operators (aggregation, sorting, join).
 ## Supports absolute size (e.g., "1GB", "2GB") or percentage of system memory (e.g., "20%").
-## Setting it to 0 disables the limit (unbounded, default behavior).
+## Setting it to 0 disables the limit. Defaults to 0 (unlimited); this example sets it to `50%`.
 ## When this limit is reached, queries will fail with ResourceExhausted error.
 ## NOTE: This does NOT limit memory used by table scans.
+## @toml2docs:none-default="0"
 memory_pool_size = "50%"
 
 ## Experimental memory pool allocation policy:

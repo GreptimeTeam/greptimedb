@@ -29,6 +29,7 @@ use frontend::error::Error;
 use frontend::instance::Instance;
 use operator::error::Error as OperatorError;
 use query::datafusion::QUERY_PARALLELISM_HINT;
+use query::options::QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN;
 use rstest::rstest;
 use rstest_reuse::apply;
 use servers::error as server_error;
@@ -258,6 +259,408 @@ WHERE greptime_timestamp = (
 }
 
 #[apply(both_instances_cases)]
+async fn test_partitioned_merge_scan_left_join_repartitions(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+    execute_sql(
+        &frontend,
+        r#"
+CREATE TABLE join_repro (
+    k STRING,
+    kind STRING,
+    v DOUBLE,
+    ts TIMESTAMP NOT NULL,
+    TIME INDEX (ts)
+)
+PARTITION ON COLUMNS (k) (
+    k < '1',
+    k >= '1' AND k < '2',
+    k >= '2' AND k < '3',
+    k >= '3' AND k < '4',
+    k >= '4' AND k < '5',
+    k >= '5' AND k < '6',
+    k >= '6' AND k < '7',
+    k >= '7' AND k < '8',
+    k >= '8' AND k < '9',
+    k >= '9' AND k < 'a',
+    k >= 'a' AND k < 'b',
+    k >= 'b' AND k < 'c',
+    k >= 'c' AND k < 'd',
+    k >= 'd' AND k < 'e',
+    k >= 'e' AND k < 'f',
+    k >= 'f'
+)
+ENGINE = mito
+WITH (append_mode = 'true')
+"#,
+    )
+    .await;
+
+    let mut rows = Vec::new();
+    for key in [
+        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'z',
+    ] {
+        rows.push(format!("('{key}', 'root', 1.0, '2024-01-01 00:00:00')"));
+        if key != 'z' {
+            for _ in 0..3 {
+                rows.push(format!("('{key}', 'child', 1.0, '2024-01-01 00:00:00')"));
+            }
+        }
+    }
+    execute_sql(
+        &frontend,
+        &format!("INSERT INTO join_repro VALUES {}", rows.join(",")),
+    )
+    .await;
+
+    let aggregate_sql = r#"SELECT count(*) roots, count(c.n) roots_with_children, sum(c.n) children
+FROM (SELECT k FROM join_repro WHERE kind = 'root') r
+LEFT JOIN (SELECT k, count(*) n FROM join_repro WHERE kind = 'child' GROUP BY k) c ON c.k = r.k"#;
+    for parallelism in [16, 8] {
+        let output = execute_sql_with_query_parallelism(&frontend, aggregate_sql, parallelism)
+            .await
+            .data
+            .pretty_print()
+            .await;
+        assert_eq!(
+            output,
+            "+-------+---------------------+----------+\n| roots | roots_with_children | children |\n+-------+---------------------+----------+\n| 17    | 16                  | 48       |\n+-------+---------------------+----------+"
+        );
+
+        let explain = execute_sql_with_query_parallelism(
+            &frontend,
+            &format!("EXPLAIN {aggregate_sql}"),
+            parallelism,
+        )
+        .await
+        .data
+        .pretty_print()
+        .await;
+        assert!(
+            explain.contains("HashJoinExec: mode=Partitioned"),
+            "query_parallelism={parallelism} should use a partitioned hash join; explain:\n{explain}"
+        );
+        assert!(
+            explain.contains("RepartitionExec: partitioning=Hash([k@0]"),
+            "query_parallelism={parallelism} should repartition on the join key; explain:\n{explain}"
+        );
+
+        let ordered_sql = r#"SELECT r.k, c.n
+FROM (SELECT k FROM join_repro WHERE kind = 'root') r
+LEFT JOIN (SELECT k, count(*) n FROM join_repro WHERE kind = 'child' GROUP BY k) c ON c.k = r.k
+ORDER BY r.k"#;
+        let ordered = execute_sql_with_query_parallelism(&frontend, ordered_sql, parallelism)
+            .await
+            .data
+            .pretty_print()
+            .await;
+        assert_eq!(
+            ordered,
+            r#"+---+---+
+| k | n |
++---+---+
+| 0 | 3 |
+| 1 | 3 |
+| 2 | 3 |
+| 3 | 3 |
+| 4 | 3 |
+| 5 | 3 |
+| 6 | 3 |
+| 7 | 3 |
+| 8 | 3 |
+| 9 | 3 |
+| a | 3 |
+| b | 3 |
+| c | 3 |
+| d | 3 |
+| e | 3 |
+| f | 3 |
+| z |   |
++---+---+"#
+        );
+
+        let pruned_sql = r#"SELECT count(*) roots, count(c.n) roots_with_children, sum(c.n) children
+FROM (SELECT k FROM join_repro WHERE kind = 'root' AND k >= '1' AND k < '9') r
+LEFT JOIN (SELECT k, count(*) n FROM join_repro WHERE kind = 'child' AND k < '8' GROUP BY k) c ON c.k = r.k"#;
+        let pruned = execute_sql_with_query_parallelism(&frontend, pruned_sql, parallelism)
+            .await
+            .data
+            .pretty_print()
+            .await;
+        assert_eq!(
+            pruned,
+            "+-------+---------------------+----------+\n| roots | roots_with_children | children |\n+-------+---------------------+----------+\n| 8     | 7                   | 21       |\n+-------+---------------------+----------+"
+        );
+
+        let pruned_explain = execute_sql_with_query_parallelism(
+            &frontend,
+            &format!("EXPLAIN {pruned_sql}"),
+            parallelism,
+        )
+        .await
+        .data
+        .pretty_print()
+        .await;
+        assert!(
+            pruned_explain.contains("HashJoinExec: mode=Partitioned"),
+            "query_parallelism={parallelism} pruned join should remain partitioned; explain:\n{pruned_explain}"
+        );
+        let hash_repartition_lines = pruned_explain
+            .lines()
+            .filter(|line| line.contains("RepartitionExec: partitioning=Hash([k@0]"))
+            .count();
+        assert_eq!(
+            hash_repartition_lines, 2,
+            "query_parallelism={parallelism} pruned join should repartition both inputs on k; explain:\n{pruned_explain}"
+        );
+    }
+}
+
+/// Regression test for `MatchesConstantTermOptimizer` dropping `FilterExec`'s `fetch`.
+///
+/// On a single-partition plan the `LIMIT` is enforced by the `fetch` that the physical
+/// `LimitPushdown` rule leaves on the `FilterExec`, so a rule rebuilding that `FilterExec`
+/// has to carry the `fetch` over. While it does not, the limit is silently lifted for
+/// `matches_term` filters and
+/// `SELECT count(*) FROM (SELECT ts, msg FROM t WHERE matches_term(msg, 'foo') LIMIT 1) s`
+/// returns the number of matching rows (2) instead of 1.
+///
+/// `query_parallelism=4` is expected to stay correct, because the limit is then materialized
+/// above the scan instead of being delegated to the `FilterExec`; the test pins down that
+/// contrast. The metric-engine logical table covers the same filter on a shared physical
+/// region.
+///
+/// Both matching rows share `ts` and `msg`, so the limited output does not depend on the
+/// order in which the scan returns them.
+#[apply(both_instances_cases)]
+async fn test_matches_term_subquery_limit_count(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+
+    execute_sql(
+        &frontend,
+        r#"
+CREATE TABLE f07_mito_msgs (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY,
+    msg STRING,
+    val DOUBLE
+)
+ENGINE = mito
+"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"INSERT INTO f07_mito_msgs (ts, host, msg, val) VALUES
+    (0, 'host1', 'foo bar', 1.0),
+    (0, 'host2', 'foo bar', 2.0),
+    (0, 'host3', 'other baz', 3.0)"#,
+    )
+    .await;
+
+    execute_sql(
+        &frontend,
+        r#"
+CREATE TABLE f07_metric_phy (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE,
+    host STRING,
+    msg STRING,
+    PRIMARY KEY (host, msg)
+)
+ENGINE = metric
+WITH ('physical_metric_table' = '')
+"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"
+CREATE TABLE f07_metric_msgs (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE,
+    host STRING,
+    msg STRING,
+    PRIMARY KEY (host, msg)
+)
+ENGINE = metric
+WITH ('on_physical_table' = 'f07_metric_phy')
+"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"INSERT INTO f07_metric_msgs (ts, host, msg, val) VALUES
+    (0, 'host1', 'foo bar', 1.0),
+    (0, 'host2', 'foo bar', 2.0),
+    (0, 'host3', 'other baz', 3.0)"#,
+    )
+    .await;
+
+    for table in ["f07_mito_msgs", "f07_metric_msgs"] {
+        let limited = format!("SELECT ts, msg FROM {table} WHERE matches_term(msg, 'foo') LIMIT 1");
+        let count = format!("SELECT count(*) FROM ({limited}) s");
+
+        let limit_rows = execute_sql_with_query_parallelism(&frontend, &limited, 1)
+            .await
+            .data
+            .pretty_print()
+            .await;
+        assert_eq!(
+            limit_rows,
+            r#"+---------------------+---------+
+| ts                  | msg     |
++---------------------+---------+
+| 1970-01-01T00:00:00 | foo bar |
++---------------------+---------+"#,
+            "query_parallelism=1: `{limited}` must return exactly the single limited row"
+        );
+
+        for parallelism in [1, 4] {
+            let count_rows = execute_sql_with_query_parallelism(&frontend, &count, parallelism)
+                .await
+                .data
+                .pretty_print()
+                .await;
+            assert_eq!(
+                count_rows,
+                r#"+----------+
+| count(*) |
++----------+
+| 1        |
++----------+"#,
+                "query_parallelism={parallelism}: the LIMIT 1 of the subquery must cap `{count}` to one row"
+            );
+        }
+    }
+}
+
+#[apply(both_instances_cases)]
+async fn test_partitioned_merge_scan_semi_join_repartitions(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+    execute_sql(
+        &frontend,
+        r#"
+CREATE TABLE semi_join_repro (
+    ts TIMESTAMP TIME INDEX,
+    key_id INT,
+    is_match BOOLEAN,
+    PRIMARY KEY (key_id)
+)
+PARTITION ON COLUMNS (key_id) (
+    key_id < 10,
+    key_id >= 10 AND key_id < 20,
+    key_id >= 20 AND key_id < 30,
+    key_id >= 30
+)
+ENGINE = mito
+"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"INSERT INTO semi_join_repro VALUES
+('2026-10-09 00:00:00', 1, false),
+('2026-10-09 00:00:01', 1, true),
+('2026-10-09 00:00:00', 11, false),
+('2026-10-09 00:00:01', 11, true),
+('2026-10-09 00:00:00', 21, false),
+('2026-10-09 00:00:01', 21, true),
+('2026-10-09 00:00:00', 31, false),
+('2026-10-09 00:00:01', 31, true)"#,
+    )
+    .await;
+
+    let query = r#"SELECT t.key_id, MIN(t.ts) AS first_ts
+FROM semi_join_repro t
+WHERE t.key_id IN (
+    SELECT s.key_id FROM semi_join_repro s WHERE s.is_match = true
+)
+GROUP BY t.key_id
+ORDER BY t.key_id"#;
+    let mut query_ctx = QueryContext::with_db_name(None);
+    query_ctx.set_extension(QUERY_PARALLELISM_HINT, "2");
+    query_ctx.set_extension(QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN, "true");
+    let query_ctx = Arc::new(query_ctx);
+    let output = execute_sql_with(&frontend, query, query_ctx.clone())
+        .await
+        .data
+        .pretty_print()
+        .await;
+    let expected = r#"+--------+---------------------+
+| key_id | first_ts            |
++--------+---------------------+
+| 1      | 2026-10-09T00:00:00 |
+| 11     | 2026-10-09T00:00:00 |
+| 21     | 2026-10-09T00:00:00 |
+| 31     | 2026-10-09T00:00:00 |
++--------+---------------------+"#;
+    assert_eq!(output, expected);
+
+    let explain = execute_sql_with(&frontend, &format!("EXPLAIN {query}"), query_ctx.clone())
+        .await
+        .data
+        .pretty_print()
+        .await;
+    assert!(
+        explain.contains("HashJoinExec: mode=Partitioned, join_type=LeftSemi"),
+        "parallel IN query should use a partitioned left-semi join; explain:\n{explain}"
+    );
+    assert!(
+        explain.contains("RepartitionExec: partitioning=Hash([key_id@1], 2)")
+            && explain.contains("RepartitionExec: partitioning=Hash([key_id@0], 2)"),
+        "parallel left-semi join should repartition both inputs on key_id; explain:\n{explain}"
+    );
+
+    let analyze_explain = execute_sql_with(
+        &frontend,
+        &format!("EXPLAIN ANALYZE VERBOSE {query}"),
+        query_ctx.clone(),
+    )
+    .await
+    .data
+    .pretty_print()
+    .await;
+    let has_remote_dyn_filter = |explain: &str| {
+        explain.lines().any(|line| {
+            line.contains("SeqScan: region=")
+                && line.contains("\"dyn_filters\"")
+                && line.contains("DynamicFilter")
+        })
+    };
+    assert!(
+        has_remote_dyn_filter(&analyze_explain),
+        "expected remote region SeqScan dyn_filters to include DynamicFilter; explain:\n{analyze_explain}"
+    );
+
+    let mut query_ctx_without_rdf = QueryContext::with_db_name(None);
+    query_ctx_without_rdf.set_extension(QUERY_PARALLELISM_HINT, "2");
+    query_ctx_without_rdf.set_extension(QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN, "false");
+    let query_ctx_without_rdf = Arc::new(query_ctx_without_rdf);
+    let output_without_rdf = execute_sql_with(&frontend, query, query_ctx_without_rdf.clone())
+        .await
+        .data
+        .pretty_print()
+        .await;
+    assert_eq!(output_without_rdf, expected);
+
+    let analyze_explain_without_rdf = execute_sql_with(
+        &frontend,
+        &format!("EXPLAIN ANALYZE VERBOSE {query}"),
+        query_ctx_without_rdf,
+    )
+    .await
+    .data
+    .pretty_print()
+    .await;
+    assert!(
+        !analyze_explain_without_rdf
+            .lines()
+            .any(|line| line.contains("SeqScan: region=") && line.contains("\"dyn_filters\"")),
+        "expected no region SeqScan dyn_filters line when remote dynamic filter pushdown is disabled; explain:\n{analyze_explain_without_rdf}"
+    );
+}
+
+#[apply(both_instances_cases)]
 async fn test_show_create_table(instance: Arc<dyn MockInstance>) {
     let frontend = instance.frontend();
     let sql = if instance.is_distributed_mode() {
@@ -323,6 +726,57 @@ PARTITION ON COLUMNS (n) (
     };
 
     check_output_stream(output, expected).await;
+}
+
+#[apply(both_instances_cases)]
+async fn test_database_ingest_rate_limit_not_inherited(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+    execute_sql(
+        &frontend,
+        "CREATE DATABASE limited WITH ('ingest_rows_rate_limit'='1000', 'skip_wal'='true')",
+    )
+    .await;
+    let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, "limited"));
+
+    for (name, sql) in [
+        ("source", "CREATE TABLE source (ts TIMESTAMP TIME INDEX)"),
+        ("copy", "CREATE TABLE copy LIKE source"),
+    ] {
+        execute_sql_with(&frontend, sql, ctx.clone()).await;
+        let table = frontend
+            .catalog_manager()
+            .table(DEFAULT_CATALOG_NAME, "limited", name, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let options = &table.table_info().meta.options;
+        assert!(!options.extra_options.contains_key("ingest_rows_rate_limit"));
+        assert!(options.skip_wal);
+
+        let output =
+            execute_sql_with(&frontend, &format!("SHOW CREATE TABLE {name}"), ctx.clone()).await;
+        let OutputData::RecordBatches(batches) = output.data else {
+            unreachable!()
+        };
+        let batch = batches.iter().next().unwrap();
+        let ddl = batch
+            .column_by_name("Create Table")
+            .unwrap()
+            .as_string::<i32>()
+            .value(0);
+        assert!(!ddl.contains("ingest_rows_rate_limit"));
+        execute_sql_with(&frontend, &format!("DROP TABLE {name}"), ctx.clone()).await;
+        execute_sql_with(&frontend, ddl, ctx.clone()).await;
+    }
+
+    let output = execute_sql(&frontend, "SHOW CREATE DATABASE limited").await;
+    assert!(
+        output
+            .data
+            .pretty_print()
+            .await
+            .contains("ingest_rows_rate_limit")
+    );
 }
 
 #[apply(standalone_instance_case)]
@@ -2145,47 +2599,6 @@ async fn test_delete(instance: Arc<dyn MockInstance>) {
 }
 
 #[apply(both_instances_cases)]
-async fn test_execute_copy_to_s3(instance: Arc<dyn MockInstance>) {
-    if let Ok(bucket) = env::var("GT_S3_BUCKET")
-        && !bucket.is_empty()
-    {
-        let instance = instance.frontend();
-
-        // setups
-        assert!(matches!(execute_sql(
-                &instance,
-                "create table demo(host string, cpu double, memory double, ts timestamp time index);",
-            )
-            .await.data, OutputData::AffectedRows(0)));
-
-        let output = execute_sql(
-            &instance,
-            r#"insert into demo(host, cpu, memory, ts) values
-                            ('host1', 66.6, 1024, 1655276557000),
-                            ('host2', 88.8,  333.3, 1655276558000)
-                            "#,
-        )
-        .await
-        .data;
-        assert!(matches!(output, OutputData::AffectedRows(2)));
-        let key_id = env::var("GT_S3_ACCESS_KEY_ID").unwrap();
-        let key = env::var("GT_S3_ACCESS_KEY").unwrap();
-        let region = env::var("GT_S3_REGION").unwrap();
-
-        let root = uuid::Uuid::new_v4().to_string();
-
-        // exports
-        let copy_to_stmt = format!(
-            "Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')",
-            bucket, root, key_id, key, region
-        );
-
-        let output = execute_sql(&instance, &copy_to_stmt).await.data;
-        assert!(matches!(output, OutputData::AffectedRows(2)));
-    }
-}
-
-#[apply(both_instances_cases)]
 async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
     common_telemetry::init_default_ut_logging();
     if let Ok(bucket) = env::var("GT_S3_BUCKET")
@@ -2217,9 +2630,21 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
         let key = env::var("GT_S3_ACCESS_KEY").unwrap();
         let region = env::var("GT_S3_REGION").unwrap();
 
+        let mut connection = format!(
+            "ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}'",
+            key_id, key, region
+        );
+        // Honors an S3-compatible endpoint (MinIO in CI) so the test does not
+        // fall back to resolving the bucket against real AWS.
+        if let Ok(endpoint) = env::var("GT_S3_ENDPOINT_URL")
+            && !endpoint.is_empty()
+        {
+            connection = format!("{},ENDPOINT='{}'", connection, endpoint);
+        }
+
         let copy_to_stmt = format!(
-            "Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')",
-            bucket, root, key_id, key, region
+            "Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION ({})",
+            bucket, root, connection
         );
 
         let output = execute_sql(&instance, &copy_to_stmt).await.data;
@@ -2264,10 +2689,7 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
                     .data,
                     OutputData::AffectedRows(0)
                 ));
-            let sql = format!(
-                "{} CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')",
-                test.sql, key_id, key, region,
-            );
+            let sql = format!("{} CONNECTION ({})", test.sql, connection);
             let output = execute_sql(&instance, &sql).await.data;
             assert!(matches!(output, OutputData::AffectedRows(2)));
 
@@ -2286,50 +2708,6 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
 +-------+------+--------+---------------------+";
             check_output_stream(output, expected).await;
         }
-    }
-}
-
-#[apply(both_instances_cases)]
-async fn test_execute_copy_to_oss(instance: Arc<dyn MockInstance>) {
-    if let Ok(bucket) = env::var("GT_OSS_BUCKET")
-        && !bucket.is_empty()
-    {
-        let instance = instance.frontend();
-
-        assert!(matches!(
-            execute_sql(
-                &instance,
-                "create table demo(host string, cpu double, memory double, ts timestamp time index);",
-            )
-            .await
-            .data,
-            OutputData::AffectedRows(0)
-        ));
-
-        let output = execute_sql(
-            &instance,
-            r#"insert into demo(host, cpu, memory, ts) values
-                            ('host1', 66.6, 1024, 1655276557000),
-                            ('host2', 88.8,  333.3, 1655276558000)
-                            "#,
-        )
-        .await
-        .data;
-        assert!(matches!(output, OutputData::AffectedRows(2)));
-
-        let key_id = env::var("GT_OSS_ACCESS_KEY_ID").unwrap();
-        let key = env::var("GT_OSS_ACCESS_KEY").unwrap();
-        let endpoint = env::var("GT_OSS_ENDPOINT").unwrap();
-
-        let root = uuid::Uuid::new_v4().to_string();
-
-        let copy_to_stmt = format!(
-            "Copy demo TO 'oss://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',ACCESS_KEY_SECRET='{}',ENDPOINT='{}')",
-            bucket, root, key_id, key, endpoint
-        );
-
-        let output = execute_sql(&instance, &copy_to_stmt).await.data;
-        assert!(matches!(output, OutputData::AffectedRows(2)));
     }
 }
 
@@ -2440,54 +2818,6 @@ async fn test_execute_copy_from_oss(instance: Arc<dyn MockInstance>) {
 }
 
 #[apply(both_instances_cases)]
-async fn test_execute_copy_to_gcs(instance: Arc<dyn MockInstance>) {
-    if let (Ok(bucket), Ok(scope), Ok(credential)) = (
-        env::var("GT_GCS_BUCKET"),
-        env::var("GT_GCS_SCOPE"),
-        env::var("GT_GCS_CREDENTIAL"),
-    ) && !bucket.is_empty()
-    {
-        let endpoint = env::var("GT_GCS_ENDPOINT").unwrap_or_default();
-        let instance = instance.frontend();
-
-        assert!(matches!(
-            execute_sql(
-                &instance,
-                "create table demo(host string, cpu double, memory double, ts timestamp time index);",
-            )
-            .await
-            .data,
-            OutputData::AffectedRows(0)
-        ));
-
-        let output = execute_sql(
-            &instance,
-            r#"insert into demo(host, cpu, memory, ts) values
-                            ('host1', 66.6, 1024, 1655276557000),
-                            ('host2', 88.8,  333.3, 1655276558000)
-                            "#,
-        )
-        .await
-        .data;
-        assert!(matches!(output, OutputData::AffectedRows(2)));
-
-        let root = uuid::Uuid::new_v4().to_string();
-        let mut connection = format!("SCOPE='{}',CREDENTIAL='{}'", scope, credential);
-        if !endpoint.is_empty() {
-            connection = format!("{},ENDPOINT='{}'", connection, endpoint);
-        }
-
-        let copy_to_stmt = format!(
-            "Copy demo TO 'gcs://{}/{}/export/demo.parquet' CONNECTION ({})",
-            bucket, root, connection
-        );
-
-        let output = execute_sql(&instance, &copy_to_stmt).await.data;
-        assert!(matches!(output, OutputData::AffectedRows(2)));
-    }
-}
-
-#[apply(both_instances_cases)]
 async fn test_execute_copy_from_gcs(instance: Arc<dyn MockInstance>) {
     common_telemetry::init_default_ut_logging();
     if let (Ok(bucket), Ok(scope), Ok(credential)) = (
@@ -2592,50 +2922,6 @@ async fn test_execute_copy_from_gcs(instance: Arc<dyn MockInstance>) {
 +-------+------+--------+---------------------+";
             check_output_stream(output, expected).await;
         }
-    }
-}
-
-#[apply(both_instances_cases)]
-async fn test_execute_copy_to_azblob(instance: Arc<dyn MockInstance>) {
-    if let (Ok(container), Ok(account_name), Ok(account_key), Ok(endpoint)) = (
-        env::var("GT_AZBLOB_CONTAINER"),
-        env::var("GT_AZBLOB_ACCOUNT_NAME"),
-        env::var("GT_AZBLOB_ACCOUNT_KEY"),
-        env::var("GT_AZBLOB_ENDPOINT"),
-    ) && !container.is_empty()
-    {
-        let instance = instance.frontend();
-
-        assert!(matches!(
-            execute_sql(
-                &instance,
-                "create table demo(host string, cpu double, memory double, ts timestamp time index);",
-            )
-            .await
-            .data,
-            OutputData::AffectedRows(0)
-        ));
-
-        let output = execute_sql(
-            &instance,
-            r#"insert into demo(host, cpu, memory, ts) values
-                            ('host1', 66.6, 1024, 1655276557000),
-                            ('host2', 88.8,  333.3, 1655276558000)
-                            "#,
-        )
-        .await
-        .data;
-        assert!(matches!(output, OutputData::AffectedRows(2)));
-
-        let root = uuid::Uuid::new_v4().to_string();
-
-        let copy_to_stmt = format!(
-            "Copy demo TO 'azblob://{}/{}/export/demo.parquet' CONNECTION (ACCOUNT_NAME='{}',ACCOUNT_KEY='{}',ENDPOINT='{}')",
-            container, root, account_name, account_key, endpoint
-        );
-
-        let output = execute_sql(&instance, &copy_to_stmt).await.data;
-        assert!(matches!(output, OutputData::AffectedRows(2)));
     }
 }
 
@@ -2765,7 +3051,7 @@ async fn test_execute_copy_from_orc_with_cast(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(
         &instance,
-        &format!("copy demo from '{}' WITH(FORMAT='orc');", &filepath),
+        &format!("copy demo from '{}' WITH(FORMAT='orc');", filepath),
     )
     .await
     .data;
@@ -2804,7 +3090,7 @@ async fn test_execute_copy_from_orc(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(
         &instance,
-        &format!("copy demo from '{}' WITH(FORMAT='orc');", &filepath),
+        &format!("copy demo from '{}' WITH(FORMAT='orc');", filepath),
     )
     .await
     .data;
@@ -2841,7 +3127,7 @@ async fn test_cast_type_issue_1594(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(
         &instance,
-        &format!("copy tsbs_cpu from '{}' WITH(FORMAT='csv');", &filepath),
+        &format!("copy tsbs_cpu from '{}' WITH(FORMAT='csv');", filepath),
     )
     .await;
 
@@ -2879,7 +3165,7 @@ async fn test_copy_from_csv_skip_bad_records(instance: Arc<dyn MockInstance>) {
         &instance,
         &format!(
             "copy csv_skip_bad_records from '{}' WITH(FORMAT='csv', skip_bad_records='true');",
-            &filepath
+            filepath
         ),
     )
     .await
@@ -3428,4 +3714,167 @@ CREATE TABLE b (
 |       | )                                 |
 +-------+-----------------------------------+"#;
     check_output_stream(output, expected).await;
+}
+
+#[rstest]
+#[case::mito(false)]
+#[case::batched_metric(true)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_histogram_ingestion_storage_lifecycle(#[case] metric_engine: bool) {
+    use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
+    use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram, Sample};
+    use axum::body::{Body, to_bytes};
+    use http::Request;
+    use prost::Message;
+    use servers::http::{HttpOptions, HttpServerBuilder};
+    use servers::prom_remote_write::v2::test_util as remote_write_v2;
+    use servers::prom_remote_write::validation::PromValidationMode;
+    use servers::prom_store::snappy_compress;
+    use tower::ServiceExt;
+
+    use crate::cluster::GreptimeDbClusterBuilder;
+    use crate::test_util::build_test_prom_server;
+    use crate::tests::test_util::{MockInstanceBuilder, RebuildableMockInstance, TestContext};
+
+    common_telemetry::init_default_ut_logging();
+    let builder = MockInstanceBuilder::Distributed(
+        GreptimeDbClusterBuilder::new(&format!("histogram_lifecycle_{metric_engine}"))
+            .await
+            .with_datanodes(3),
+    );
+    let mut context = TestContext::new(builder).await;
+    let make_router = |frontend: Arc<Instance>| {
+        let builder = if metric_engine {
+            build_test_prom_server(frontend.clone(), true, None)
+        } else {
+            HttpServerBuilder::new(HttpOptions::default())
+                .with_sql_handler(frontend.clone())
+                .with_prometheus_handler(frontend.clone())
+                .with_prom_handler(
+                    frontend.clone(),
+                    None,
+                    false,
+                    PromValidationMode::Strict,
+                    None,
+                )
+        };
+        let server = builder.build();
+        server.build(server.make_app()).unwrap()
+    };
+    let snapshot = |frontend: Arc<Instance>| async move {
+        let mut result = Vec::new();
+        for table in ["lifecycle_sample", "lifecycle_histogram"] {
+            let output = execute_sql(
+                &frontend,
+                &format!("select * from {table} order by greptime_timestamp"),
+            )
+            .await;
+            let OutputData::Stream(stream) = output.data else {
+                panic!("expected query stream")
+            };
+            result.push(
+                util::collect_batches(stream)
+                    .await
+                    .unwrap()
+                    .pretty_print()
+                    .unwrap(),
+            );
+        }
+        result
+    };
+    let mut router = make_router(context.frontend());
+    for round in 0..2 {
+        let timestamp = 1_000 + round * 10_000;
+        let mut labels = vec![("__name__", "lifecycle_histogram"), ("job", "api")];
+        if round == 1 {
+            // Exercise schema evolution after the first SST already exists.
+            labels.push(("zone", "east"));
+        }
+        let sample = remote_write_v2::request_with_labels_and_samples(
+            vec![("__name__", "lifecycle_sample"), ("job", "api")],
+            vec![Sample {
+                value: 42.0,
+                timestamp,
+                ..Default::default()
+            }],
+        );
+        let histograms = remote_write_v2::request_with_labels_and_histograms(
+            labels,
+            vec![Histogram {
+                timestamp,
+                start_timestamp: 500,
+                count: Some(Count::CountInt(9_007_199_254_740_993)),
+                zero_count: Some(ZeroCount::ZeroCountInt(1)),
+                zero_threshold: 0.001,
+                sum: 12.5,
+                positive_spans: vec![BucketSpan {
+                    offset: 0,
+                    length: 1,
+                }],
+                positive_deltas: vec![9_007_199_254_740_992],
+                ..Default::default()
+            }],
+        );
+        // Create the scalar table first, then add histogram storage to its physical table.
+        for request in [sample, histograms] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::post("/v1/prometheus/write")
+                        .header("Content-Encoding", "snappy")
+                        .header(
+                            "Content-Type",
+                            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                        )
+                        .body(Body::from(
+                            snappy_compress(&request.encode_to_vec()).unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                204,
+                "{:?}",
+                to_bytes(response.into_body(), usize::MAX).await.unwrap()
+            );
+        }
+
+        let expected = snapshot(context.frontend()).await;
+        assert!(expected[1].contains("9007199254740993"), "{}", expected[1]);
+        // Rebuild before flushing, including after adding fields to the physical
+        // schema: recovery must retain the columns filled into bulk writes.
+        drop(router);
+        context.rebuild().await;
+        router = make_router(context.frontend());
+        assert_eq!(snapshot(context.frontend()).await, expected, "WAL recovery");
+        let storage_tables = if metric_engine {
+            vec!["greptime_physical_table"]
+        } else {
+            vec!["lifecycle_sample", "lifecycle_histogram"]
+        };
+        for table in &storage_tables {
+            execute_sql(
+                &context.frontend(),
+                &format!("admin flush_table('{table}')"),
+            )
+            .await;
+        }
+        assert_eq!(snapshot(context.frontend()).await, expected, "SST read");
+        if round == 1 {
+            for table in &storage_tables {
+                execute_sql(
+                    &context.frontend(),
+                    &format!("admin compact_table('{table}', 'strict_window', 'window=3600')"),
+                )
+                .await;
+            }
+            assert_eq!(snapshot(context.frontend()).await, expected, "compaction");
+            drop(router);
+            context.rebuild().await;
+            router = make_router(context.frontend());
+            assert_eq!(snapshot(context.frontend()).await, expected, "SST reopen");
+        }
+    }
 }

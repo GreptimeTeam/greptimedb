@@ -44,7 +44,7 @@ pub struct VirtualDstCandidate {
 }
 
 /// One implicit entity declaration: of a whitelisted Prometheus or OTel info
-/// metric, or of a trace-v1 table's flattened resource attributes.
+/// metric, or of a Trace V1/V2 table's resource attributes.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImplicitEntity {

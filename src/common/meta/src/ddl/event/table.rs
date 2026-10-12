@@ -193,6 +193,7 @@ pub(crate) fn alter_table_kind_name(kind: &AlterTableKind) -> Option<&'static st
         AlterTableKind::DropColumns(_) => Some("drop_columns"),
         AlterTableKind::RenameTable(_) => Some("rename_table"),
         AlterTableKind::ModifyColumnTypes(_) => Some("modify_column_types"),
+        AlterTableKind::SetJsonSettings(_) => Some("set_json_settings"),
         AlterTableKind::SetTableOptions(_) => Some("set_table_options"),
         AlterTableKind::UnsetTableOptions(_) => Some("unset_table_options"),
         AlterTableKind::SetIndex(_) => Some("set_index"),

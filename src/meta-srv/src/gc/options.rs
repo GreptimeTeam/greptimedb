@@ -38,7 +38,7 @@ impl Default for SoftDropGcOptions {
     fn default() -> Self {
         Self {
             enable: false,
-            retention: Duration::from_days(7),
+            retention: Duration::from_secs(7 * 86400),
         }
     }
 }
@@ -242,7 +242,7 @@ mod tests {
 
         assert!(!options.experimental_soft_drop.enable);
         assert_eq!(
-            Duration::from_days(7),
+            Duration::from_secs(7 * 86400),
             options.experimental_soft_drop.retention
         );
     }
@@ -254,7 +254,7 @@ mod tests {
             enable: true,
             experimental_soft_drop: SoftDropGcOptions {
                 enable: true,
-                retention: Duration::from_days(1),
+                retention: Duration::from_secs(86400),
             },
             ..Default::default()
         };
@@ -269,7 +269,7 @@ mod tests {
             enable: true,
             experimental_soft_drop: SoftDropGcOptions {
                 enable: true,
-                retention: Duration::from_days(1),
+                retention: Duration::from_secs(86400),
             },
             ..Default::default()
         };
@@ -284,7 +284,7 @@ mod tests {
         let options = GcSchedulerOptions {
             experimental_soft_drop: SoftDropGcOptions {
                 enable: true,
-                retention: Duration::from_days(1),
+                retention: Duration::from_secs(86400),
             },
             ..Default::default()
         };

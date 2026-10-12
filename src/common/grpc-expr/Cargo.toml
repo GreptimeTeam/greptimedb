@@ -9,7 +9,6 @@ workspace = true
 
 [dependencies]
 api.workspace = true
-common-base.workspace = true
 common-catalog.workspace = true
 common-error.workspace = true
 common-macro.workspace = true
@@ -21,6 +20,3 @@ prost.workspace = true
 snafu.workspace = true
 store-api.workspace = true
 table.workspace = true
-
-[dev-dependencies]
-paste.workspace = true

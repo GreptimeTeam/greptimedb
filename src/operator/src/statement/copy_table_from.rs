@@ -374,6 +374,105 @@ impl StatementExecutor {
         }
     }
 
+    /// Imports one indexed stream with the ordinary COPY schema mapping and inserter.
+    pub(crate) async fn copy_indexed_parquet<
+        R: datafusion::parquet::arrow::async_reader::AsyncFileReader + Send + Unpin + 'static,
+    >(
+        &self,
+        reader: R,
+        table: table::TableRef,
+        expected_rows: u64,
+        pending: &mut crate::statement::import_packed::PendingPackedInserts,
+        cancellation: &tokio_util::sync::CancellationToken,
+        query_ctx: QueryContextRef,
+    ) -> Result<()> {
+        let builder = tokio::select! {
+            _ = cancellation.cancelled() => return error::PackedImportCancelledSnafu.fail(),
+            result = ParquetRecordBatchStreamBuilder::new(reader) => result.context(error::ReadParquetMetadataSnafu)?,
+        };
+        let table_schema = table.schema().arrow_schema().clone();
+        let (file_projection, table_projection, _) =
+            generated_schema_projection_and_compatible_file_schema(builder.schema(), &table_schema);
+        let file_schema = Arc::new(
+            builder
+                .schema()
+                .project(&file_projection)
+                .context(error::ProjectSchemaSnafu)?,
+        );
+        let target_schema = Arc::new(
+            table_schema
+                .project(&table_projection)
+                .context(error::ProjectSchemaSnafu)?,
+        );
+        ensure_schema_compatible(&file_schema, &target_schema)?;
+        let stream = builder
+            .with_batch_size(DEFAULT_BATCH_SIZE)
+            .build()
+            .context(error::BuildParquetRecordBatchStreamSnafu)?;
+        let mut stream = Box::pin(RecordBatchStreamTypeAdapter::new(
+            target_schema.clone(),
+            stream,
+            Some(file_projection),
+        ));
+        let info = table.table_info();
+        let mut rows = 0u64;
+        loop {
+            pending.before_decode().await?;
+            if cancellation.is_cancelled() {
+                return error::PackedImportCancelledSnafu.fail();
+            }
+            let batch = tokio::select! {
+                _ = cancellation.cancelled() => return error::PackedImportCancelledSnafu.fail(),
+                batch = stream.next() => batch,
+            };
+            let Some(batch) = batch else {
+                break;
+            };
+            let batch = batch.context(error::ReadDfRecordBatchSnafu)?;
+            rows += batch.num_rows() as u64;
+            if rows > expected_rows {
+                return error::InvalidCopyParameterSnafu {
+                    key: "row_count",
+                    value: expected_rows.to_string(),
+                }
+                .fail();
+            }
+            let vectors = Helper::try_into_vectors(batch.columns()).context(IntoVectorsSnafu)?;
+            let retained_bytes = vectors.iter().map(|v| v.memory_size()).sum::<usize>();
+            let columns_values = target_schema
+                .fields()
+                .iter()
+                .map(|f| f.name().clone())
+                .zip(vectors)
+                .collect();
+            let bytes = retained_bytes.max(batch.get_array_memory_size());
+            let inserter = self.inserter.clone();
+            let request = InsertRequest {
+                catalog_name: info.catalog_name.clone(),
+                schema_name: info.schema_name.clone(),
+                table_name: info.name.clone(),
+                columns_values,
+                skip_wal: query_ctx.skip_wal(),
+            };
+            let ctx = query_ctx.clone();
+            pending
+                .admit(
+                    bytes,
+                    async move { inserter.handle_table_insert(request, ctx).await },
+                    cancellation,
+                )
+                .await?;
+        }
+        if rows != expected_rows {
+            return error::InvalidCopyParameterSnafu {
+                key: "row_count",
+                value: expected_rows.to_string(),
+            }
+            .fail();
+        }
+        Ok(())
+    }
+
     #[tracing::instrument(skip_all)]
     pub async fn copy_table_from(
         &self,

@@ -15,7 +15,9 @@
 mod buckets;
 pub mod compactor;
 mod json2;
+mod last_non_null;
 pub mod memory_manager;
+mod overlap;
 pub mod picker;
 mod reader;
 pub mod run;

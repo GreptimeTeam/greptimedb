@@ -37,7 +37,7 @@ use datafusion::physical_plan::filter_pushdown::{
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
-    RecordBatchStream as DfRecordBatchStream, apply_expression_roots,
+    RecordBatchStream as DfRecordBatchStream, StatisticsArgs, apply_expression_roots,
 };
 use datafusion_common::stats::Precision;
 use datafusion_common::tree_node::TreeNodeRecursion;
@@ -144,8 +144,8 @@ impl RegionScanExec {
                 ))
             })
             .collect::<Vec<_>>();
-        let ts_col: Option<PhysicalSortExpr> = try {
-            PhysicalSortExpr::new(
+        let ts_col: Option<PhysicalSortExpr> = (|| {
+            Some(PhysicalSortExpr::new(
                 Arc::new(
                     Column::new_with_schema(
                         &metadata.time_index_column().column_schema.name,
@@ -157,8 +157,8 @@ impl RegionScanExec {
                     descending: false,
                     nulls_first: true,
                 },
-            )
-        };
+            ))
+        })();
 
         let eq_props = match request.distribution {
             Some(TimeSeriesDistribution::PerSeries) => {
@@ -213,7 +213,10 @@ impl RegionScanExec {
                     Ok(tsid_col) => {
                         Partitioning::Hash(vec![Arc::new(tsid_col) as _], num_output_partition)
                     }
-                    Err(_) => Partitioning::Hash(pk_columns.clone(), num_output_partition),
+                    Err(_) if pk_columns.len() == pk_names.len() => {
+                        Partitioning::Hash(pk_columns.clone(), num_output_partition)
+                    }
+                    Err(_) => Partitioning::UnknownPartitioning(num_output_partition),
                 }
             }
             Some(TimeSeriesDistribution::TimeWindowed) | None => {
@@ -491,8 +494,12 @@ impl ExecutionPlan for RegionScanExec {
         Ok(self)
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> DfResult<Arc<Statistics>> {
-        if partition.is_some() || !self.append_mode {
+    fn statistics_from_inputs(
+        &self,
+        _input_stats: &[Arc<Statistics>],
+        args: &StatisticsArgs,
+    ) -> DfResult<Arc<Statistics>> {
+        if args.partition().is_some() || !self.append_mode {
             return Ok(Arc::new(Statistics::new_unknown(self.schema().as_ref())));
         }
 
@@ -679,6 +686,7 @@ mod test {
         ChildFilterPushdownResult, ChildPushdownResult,
     };
     use datafusion::physical_plan::metrics::MetricValue;
+    use datafusion::physical_plan::{StatisticsArgs, StatisticsContext};
     use datafusion::prelude::SessionContext;
     use datatypes::arrow::array::Array;
     use datatypes::data_type::ConcreteDataType;
@@ -689,7 +697,7 @@ mod test {
     use store_api::region_engine::{
         PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties, SinglePartitionScanner,
     };
-    use store_api::storage::RegionId;
+    use store_api::storage::{RegionId, TimeSeriesDistribution};
 
     use super::*;
 
@@ -853,7 +861,99 @@ mod test {
     }
 
     #[test]
-    #[allow(deprecated)]
+    fn test_per_series_partitioning_requires_all_primary_keys() {
+        let full_schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("marker", ConcreteDataType::int32_datatype(), false),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ]));
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1234, 5683));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "marker",
+                    ConcreteDataType::int32_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "host",
+                    ConcreteDataType::string_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 3,
+            })
+            .primary_key(vec![1, 2]);
+        let metadata = Arc::new(builder.build().unwrap());
+
+        for (schema, expected) in [
+            (
+                full_schema.clone(),
+                Partitioning::Hash(
+                    vec![
+                        Arc::new(
+                            Column::new_with_schema("marker", full_schema.arrow_schema()).unwrap(),
+                        ) as _,
+                        Arc::new(
+                            Column::new_with_schema("host", full_schema.arrow_schema()).unwrap(),
+                        ) as _,
+                    ],
+                    2,
+                ),
+            ),
+            (
+                Arc::new(Schema::new(vec![
+                    ColumnSchema::new("marker", ConcreteDataType::int32_datatype(), false),
+                    ColumnSchema::new(
+                        "ts",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                ])),
+                Partitioning::UnknownPartitioning(2),
+            ),
+        ] {
+            let batches = RecordBatches::try_new(schema, vec![]).unwrap();
+            let scanner = Box::new(RepeatableScanner {
+                batches,
+                properties: ScannerProperties::new(vec![vec![], vec![]], false, 0),
+                metadata: metadata.clone(),
+                dynamic_filters: Arc::new(Mutex::new(Vec::new())),
+            });
+            let request = ScanRequest {
+                distribution: Some(TimeSeriesDistribution::PerSeries),
+                ..Default::default()
+            };
+            let plan = RegionScanExec::new(scanner, request, None).unwrap();
+            let actual = plan.properties().output_partitioning();
+            match (&actual, &expected) {
+                (
+                    Partitioning::UnknownPartitioning(actual_count),
+                    Partitioning::UnknownPartitioning(expected_count),
+                ) => assert_eq!(actual_count, expected_count),
+                _ => assert_eq!(actual, &expected),
+            }
+        }
+    }
+
+    #[test]
     fn test_count_statistics_require_exact_source_rows() {
         for (append_mode, exact, expected) in [
             (true, false, Precision::Absent),
@@ -871,9 +971,18 @@ mod test {
                 dynamic_filters: Arc::new(Mutex::new(Vec::new())),
             });
             let plan = RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap();
-            assert_eq!(plan.partition_statistics(None).unwrap().num_rows, expected);
             assert_eq!(
-                plan.partition_statistics(Some(0)).unwrap().num_rows,
+                StatisticsContext::new()
+                    .compute(&plan, &StatisticsArgs::new())
+                    .unwrap()
+                    .num_rows,
+                expected,
+            );
+            assert_eq!(
+                StatisticsContext::new()
+                    .compute(&plan, &StatisticsArgs::new().with_partition(Some(0)))
+                    .unwrap()
+                    .num_rows,
                 Precision::Absent,
             );
         }

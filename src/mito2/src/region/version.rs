@@ -32,7 +32,7 @@ use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::error::Result;
 use crate::manifest::action::{RegionEdit, TruncateKind};
-use crate::memtable::time_partition::{TimePartitions, TimePartitionsRef};
+use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::version::{MemtableVersion, MemtableVersionRef};
 use crate::memtable::{MemtableBuilderRef, MemtableId};
 use crate::region::options::RegionOptions;
@@ -319,13 +319,13 @@ impl VersionControl {
         version: &Version,
         metadata: RegionMetadataRef,
         memtable_builder: MemtableBuilderRef,
-    ) -> TimePartitionsRef {
-        Arc::new(TimePartitions::new(
+    ) -> TimePartitions {
+        TimePartitions::new(
             metadata,
             memtable_builder,
             version.memtables.mutable.next_memtable_id(),
             Some(version.memtables.mutable.part_duration()),
-        ))
+        )
     }
 }
 
@@ -402,11 +402,11 @@ pub(crate) struct VersionBuilder {
 
 impl VersionBuilder {
     /// Returns a new builder.
-    pub(crate) fn new(metadata: RegionMetadataRef, mutable: TimePartitionsRef) -> Self {
+    pub(crate) fn new(metadata: RegionMetadataRef, mutable: TimePartitions) -> Self {
         VersionBuilder {
-            metadata,
+            metadata: metadata.clone(),
             memtables: Arc::new(MemtableVersion::new(mutable)),
-            ssts: Arc::new(SstVersion::new()),
+            ssts: Arc::new(SstVersion::new(metadata)),
             flushed_entry_id: 0,
             flushed_sequence: 0,
             truncated_entry_id: None,
@@ -437,6 +437,9 @@ impl VersionBuilder {
 
     /// Sets metadata.
     pub(crate) fn metadata(mut self, metadata: RegionMetadataRef) -> Self {
+        if !Arc::ptr_eq(&self.metadata, &metadata) {
+            Arc::make_mut(&mut self.ssts).set_metadata(metadata.clone());
+        }
         self.metadata = metadata;
         self
     }
@@ -525,7 +528,7 @@ impl VersionBuilder {
 
     /// Clear all files in the builder.
     pub(crate) fn clear_files(mut self) -> Self {
-        self.ssts = Arc::new(SstVersion::new());
+        self.ssts = Arc::new(SstVersion::new(self.metadata.clone()));
         self
     }
 

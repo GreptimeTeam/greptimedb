@@ -58,7 +58,6 @@ common-telemetry.workspace = true
 common-time.workspace = true
 common-version = { workspace = true, features = ["codec"] }
 csv = "1.3"
-dashmap.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
@@ -72,6 +71,7 @@ headers = "0.4"
 hex.workspace = true
 hostname = "0.3"
 http.workspace = true
+http-body = "1"
 humantime.workspace = true
 humantime-serde.workspace = true
 hyper = { workspace = true, features = ["full"] }
@@ -82,6 +82,8 @@ jsonb.workspace = true
 lazy_static.workspace = true
 log-query.workspace = true
 loki-proto.workspace = true
+meter-core.workspace = true
+meter-macros.workspace = true
 metric-engine.workspace = true
 mime_guess = "2.0"
 mysql_common = "0.38"
@@ -89,14 +91,14 @@ notify.workspace = true
 object-pool = "0.5"
 once_cell.workspace = true
 # Wait for https://github.com/databendlabs/opensrv/pull/81
-opensrv-mysql = { git = "https://github.com/GreptimeTeam/opensrv", rev = "f3135e5f00401e06075cf241c0cc26489e45b20a" }
+opensrv-mysql = { git = "https://github.com/GreptimeTeam/opensrv", rev = "1f3d88ccaafb5721be6cfcc3ccbca48642426119" }
 opentelemetry-proto.workspace = true
 operator.workspace = true
 otel-arrow-rust.workspace = true
 parking_lot.workspace = true
 partition.workspace = true
-pg_interval = "0.5"
-pgwire = { version = "0.40", default-features = false, features = [
+pg_interval = "0.6"
+pgwire = { version = "0.41", default-features = false, features = [
     "server-api-aws-lc-rs",
     "pg-ext-types",
 ] }
@@ -121,7 +123,6 @@ serde.workspace = true
 serde_json.workspace = true
 session.workspace = true
 simd-json.workspace = true
-simdutf8 = "0.1"
 smallvec.workspace = true
 snafu.workspace = true
 snap = "1"
@@ -140,7 +141,6 @@ tonic-web = "0.14"
 tower = { workspace = true, features = ["full"] }
 tower-http = { version = "0.6", features = ["full"] }
 tracing.workspace = true
-tracing-opentelemetry.workspace = true
 urlencoding = "2.1"
 uuid.workspace = true
 vrl.workspace = true
@@ -154,6 +154,7 @@ auth = { workspace = true, features = ["testing"] }
 catalog = { workspace = true, features = ["testing"] }
 client = { workspace = true, features = ["testing"] }
 common-base.workspace = true
+common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 criterion = "0.5"
 json5 = "0.4"
@@ -161,11 +162,12 @@ moka.workspace = true
 mysql_async = { version = "0.37", default-features = false, features = [
     "default-rustls",
 ] }
+operator = { workspace = true, features = ["testing"] }
 permutation = "0.4"
 rand.workspace = true
 serde_json.workspace = true
 servers = { workspace = true, features = ["testing"] }
-session = { workspace = true, features = ["testing"] }
+simdutf8 = "0.1"
 table.workspace = true
 tempfile = "3.0.0"
 tokio = { workspace = true, features = ["test-util"] }

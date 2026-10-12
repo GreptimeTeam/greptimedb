@@ -1,0 +1,29 @@
+name: AWS EC2 Runner Janitor
+
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.EC2_RUNNER_REGION }}
+      - uses: astral-sh/setup-uv@v6
+      - name: Sweep expired CI instances and unregister runners
+        env:
+          AWS_REGION: ${{ vars.EC2_RUNNER_REGION }}
+          GH_PERSONAL_ACCESS_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+        run: uv run .github/scripts/aws-ec2-runner-teardown.py --sweep

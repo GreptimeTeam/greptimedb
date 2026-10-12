@@ -188,7 +188,7 @@ impl Inner {
         }
 
         error::NextSequenceSnafu {
-            err_msg: format!("{}.next()", &self.name),
+            err_msg: format!("{}.next()", self.name),
         }
         .fail()
     }
@@ -264,7 +264,7 @@ impl Inner {
         }
 
         error::NextSequenceSnafu {
-            err_msg: format!("{}.next_range()", &self.name),
+            err_msg: format!("{}.next_range()", self.name),
         }
         .fail()
     }

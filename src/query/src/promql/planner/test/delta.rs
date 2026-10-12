@@ -475,7 +475,7 @@ async fn delta_mixed_ranges_drop_and_float_ranges_sum() {
             );
             let state = build_query_engine_state();
             let (mut exprs, _) = planner
-                .create_function_expr(&call.func, vec![], input.schema(), &state)
+                .create_function_expr(&call.func, vec![], input.schema(), &state, None)
                 .unwrap();
             exprs.insert(0, planner.create_time_index_column_expr().unwrap());
             let plan = LogicalPlanBuilder::from(input)
@@ -524,7 +524,7 @@ async fn delta_mixed_ranges_drop_and_float_ranges_sum() {
 }
 
 #[tokio::test]
-async fn temporality_matchers_treat_null_as_absent() {
+async fn matchers_read_absent_labels_as_empty() {
     let marker = OTLP_AGGREGATION_TEMPORALITY_LABEL;
     let schema = Arc::new(ArrowSchema::new(vec![Field::new(
         marker,
@@ -535,6 +535,7 @@ async fn temporality_matchers_treat_null_as_absent() {
         schema.clone(),
         vec![Arc::new(StringArray::from(vec![
             None,
+            Some(""),
             Some(GREPTIME_TEMPORALITY_DELTA),
         ]))],
     )
@@ -542,10 +543,19 @@ async fn temporality_matchers_treat_null_as_absent() {
     let table = Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap());
 
     for (matcher, expected) in [
-        (r#"="""#, vec![None]),
-        (r#"!="delta""#, vec![None]),
-        (r#"=~".*""#, vec![None, Some(GREPTIME_TEMPORALITY_DELTA)]),
-        (r#"!~"delta""#, vec![None]),
+        (r#"="""#, vec![None, Some("")]),
+        (r#"!="delta""#, vec![None, Some("")]),
+        (
+            r#"=~".*""#,
+            vec![None, Some(""), Some(GREPTIME_TEMPORALITY_DELTA)],
+        ),
+        (r#"!~"delta""#, vec![None, Some("")]),
+        (r#"!="""#, vec![Some(GREPTIME_TEMPORALITY_DELTA)]),
+        (
+            r#"=~"delta|""#,
+            vec![None, Some(""), Some(GREPTIME_TEMPORALITY_DELTA)],
+        ),
+        (r#"!~"delta|""#, vec![]),
         (r#"="delta""#, vec![Some(GREPTIME_TEMPORALITY_DELTA)]),
     ] {
         let query = format!(r#"metric{{{marker}{matcher}}}"#);
@@ -558,10 +568,10 @@ async fn temporality_matchers_treat_null_as_absent() {
         };
         let expressions = PromPlanner::matchers_to_expr(selector.matchers, scan.schema()).unwrap();
         let display = expressions.iter().map(ToString::to_string).join(" AND ");
-        if matcher == r#"="delta""# {
-            assert!(!display.contains("coalesce"), "{display}");
+        if [r#"="delta""#, r#"!="""#, r#"!~"delta|""#].contains(&matcher) {
+            assert!(!display.contains("IS NULL"), "{display}");
         } else if !expressions.is_empty() {
-            assert!(display.contains("coalesce"), "{display}");
+            assert!(display.contains("IS NULL"), "{display}");
         }
         let plan = if let Some(filter) = conjunction(expressions) {
             LogicalPlanBuilder::from(scan)
@@ -596,31 +606,82 @@ async fn temporality_matchers_treat_null_as_absent() {
         );
     }
 
-    let ordinary_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+    // The rule is about NULL, not about the marker: any nullable label column
+    // can be NULL where the series does not carry the label. A non-nullable one
+    // has nothing to normalize.
+    for (nullable, wants_null_filter) in [(true, true), (false, false)] {
+        let ordinary_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "label",
+            ArrowDataType::Utf8,
+            nullable,
+        )]));
+        let ordinary_scan = LogicalPlanBuilder::scan(
+            "ordinary_labels",
+            provider_as_source(Arc::new(
+                MemTable::try_new(ordinary_schema, vec![vec![]]).unwrap(),
+            )),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let PromExpr::VectorSelector(selector) =
+            parser::parse(r#"metric{label!="delta"}"#).unwrap()
+        else {
+            unreachable!()
+        };
+        let expressions = PromPlanner::matchers_to_expr(selector.matchers, ordinary_scan.schema())
+            .unwrap()
+            .iter()
+            .map(ToString::to_string)
+            .join(" AND ");
+        assert_eq!(
+            wants_null_filter,
+            expressions.contains("IS NULL"),
+            "nullable={nullable}: {expressions}"
+        );
+    }
+
+    // The other way a label goes absent is having no column for it at all. The
+    // literal standing in for the label has to be usable as a predicate.
+    let schema = Arc::new(ArrowSchema::new(vec![Field::new(
         "label",
         ArrowDataType::Utf8,
         true,
     )]));
-    let ordinary_scan = LogicalPlanBuilder::scan(
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(StringArray::from(vec![Some("value")]))],
+    )
+    .unwrap();
+    let scan = LogicalPlanBuilder::scan(
         "ordinary_labels",
         provider_as_source(Arc::new(
-            MemTable::try_new(ordinary_schema, vec![vec![]]).unwrap(),
+            MemTable::try_new(schema, vec![vec![batch]]).unwrap(),
         )),
         None,
     )
     .unwrap()
     .build()
     .unwrap();
-    let PromExpr::VectorSelector(selector) = parser::parse(r#"metric{label!="delta"}"#).unwrap()
+    let PromExpr::VectorSelector(selector) = parser::parse(r#"metric{absent!="delta"}"#).unwrap()
     else {
         unreachable!()
     };
-    let expressions = PromPlanner::matchers_to_expr(selector.matchers, ordinary_scan.schema())
+    let expressions = PromPlanner::matchers_to_expr(selector.matchers, scan.schema()).unwrap();
+    assert_eq!(
+        r#"Utf8("") != Utf8("delta")"#,
+        expressions.iter().map(ToString::to_string).join(" AND ")
+    );
+
+    let plan = LogicalPlanBuilder::from(scan)
+        .filter(conjunction(expressions).unwrap())
         .unwrap()
-        .iter()
-        .map(ToString::to_string)
-        .join(" AND ");
-    assert!(!expressions.contains("coalesce"), "{expressions}");
+        .build()
+        .unwrap();
+    let (_, batches) = execute(plan, &build_query_engine_state()).await;
+    let rows = batches.iter().map(|batch| batch.num_rows()).sum::<usize>();
+    assert_eq!(1, rows);
 }
 
 #[tokio::test]
@@ -1051,12 +1112,12 @@ async fn delta_offsets_survive_optimized_plan_serialization() {
         (
             "timestamp positive offset",
             r#"timestamp(delta_metric{series="cumulative"} offset 60s)"#,
-            120.0,
+            60.0,
         ),
         (
             "timestamp negative offset",
             r#"timestamp(delta_metric{series="cumulative"} offset -60s)"#,
-            120.0,
+            180.0,
         ),
         (
             "range positive offset",

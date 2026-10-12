@@ -208,7 +208,7 @@ mod tests {
     use session::context::QueryContext;
     use store_api::mito_engine_options::MERGE_MODE_KEY;
 
-    use super::*;
+    use crate::instance::influxdb::*;
     use crate::service_config::influxdb::InfluxdbMergeMode;
 
     #[test]

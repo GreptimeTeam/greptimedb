@@ -15,6 +15,7 @@
 #![recursion_limit = "256"]
 
 mod admin_function_event;
+mod build_series_index;
 mod database_ddl_event;
 mod dict_groupby_sst;
 mod event_recorder_test_util;
@@ -38,6 +39,7 @@ mod repartition_event;
 mod repartition_expr_version;
 mod export_logical_tables;
 mod mysql;
+mod object_store_wal;
 mod reconciliation_event;
 mod view_ddl_event;
 mod wal_prune_event;
@@ -52,6 +54,17 @@ fn both_deployment_cases(#[case] distributed: bool) {}
 grpc_tests!(File, S3, S3WithCache, Oss, Azblob, Gcs);
 
 http_tests!(File, S3, S3WithCache, Oss, Azblob, Gcs);
+
+http_local_tests!(
+    test_health_api,
+    test_status_api,
+    test_metrics_api,
+    test_splunk_health,
+    test_splunk_health_is_public,
+    test_dynamic_tracer_toggle,
+    test_dashboard_path,
+    test_test_pipeline_api,
+);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_http_auth_from_standalone_user_provider_config() {

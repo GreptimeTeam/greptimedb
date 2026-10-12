@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::mem;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
@@ -22,27 +23,33 @@ use api::v1::{
     RowInsertRequest, RowInsertRequests, Rows, Value,
 };
 use client::Output;
+use common_batcher::request_limiter::RequestLimiter;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_meta::rpc::ddl::TriggerReason;
+use common_query::WriteCompletion;
 use common_telemetry::{debug, warn};
 use datatypes::prelude::ConcreteDataType;
+use moka::sync::Cache;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use pipeline::{GreptimePipelineParams, PipelineWay};
+use pipeline::PipelineWay;
+use prometheus::IntCounter;
 use servers::error::{self, Result as ServerResult};
 use servers::otlp;
 use servers::otlp::coerce::{coerce_value_data, is_supported_trace_coercion, trace_value_datatype};
 use servers::otlp::trace::span::{TraceSpan, TraceSpanGroup};
 use servers::otlp::trace::v1::{TraceBatchSchema, TraceBinaryType, TraceRetryColumns};
 use servers::otlp::trace::{SERVICE_NAME_COLUMN, TraceAuxData};
-use servers::query_handler::{PipelineHandlerRef, TraceIngestOutcome};
+use servers::query_handler::TraceIngestOutcome;
 use session::context::QueryContextRef;
 use snafu::{IntoError, ResultExt};
 use table::requests::{
     SEMANTIC_ENTITY_SERVICE_ID, SEMANTIC_PIPELINE, SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE,
     SEMANTIC_TRACE_CONVENTIONS, SEMANTIC_VALUE_MIXED, SEMANTIC_VALUE_UNKNOWN, SIGNAL_TYPE_TRACE,
-    SOURCE_OPENTELEMETRY, TABLE_DATA_MODEL_TRACE_V1,
+    SOURCE_OPENTELEMETRY, TABLE_DATA_MODEL_TRACE_V1, TABLE_DATA_MODEL_TRACE_V2,
 };
+use table::table_name::TableName;
+use tokio::sync::OwnedSemaphorePermit;
 
 use crate::instance::Instance;
 use crate::instance::otlp::trace_semconv::trace_semconv_fixed_type;
@@ -52,7 +59,147 @@ use crate::instance::otlp::trace_types::{
     is_trace_reconcile_candidate_type, prepare_trace_column_rewrites, push_observed_trace_type,
     truncate_for_diagnostics,
 };
-use crate::metrics::{OTLP_TRACES_FAILURE_COUNT, OTLP_TRACES_ROWS};
+use crate::metrics::{
+    OTLP_TRACE_AUX_CACHE_HIT, OTLP_TRACE_AUX_CACHE_MISS, OTLP_TRACES_FAILURE_COUNT,
+    OTLP_TRACES_ROWS,
+};
+
+/// Confirmed auxiliary writes, shared across requests and instance clones.
+///
+/// ponytail: these tables are ingestion-managed; add invalidation if external
+/// mutations must be supported without restarting every serving frontend.
+#[derive(Clone)]
+pub(crate) struct TraceAuxCache {
+    entries: Cache<TraceAuxCacheKey, ()>,
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct TraceAuxCacheKey {
+    table: Arc<TableName>,
+    entry: TraceAuxEntry,
+}
+
+impl TraceAuxCacheKey {
+    /// Estimated key memory, excluding cache and allocator overhead.
+    fn size(&self) -> usize {
+        let entry_size = match &self.entry {
+            TraceAuxEntry::Service(service) => service.capacity(),
+            TraceAuxEntry::Operation(service, span, kind) => {
+                service.capacity() + span.capacity() + kind.capacity()
+            }
+        };
+        // Charge the shared table name per entry to keep the estimate conservative.
+        mem::size_of::<Self>()
+            + mem::size_of::<TableName>()
+            + self.table.catalog_name.capacity()
+            + self.table.schema_name.capacity()
+            + self.table.table_name.capacity()
+            + entry_size
+    }
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+enum TraceAuxEntry {
+    Service(String),
+    Operation(String, String, String),
+}
+
+impl TraceAuxCache {
+    /// Creates a cache with an estimated byte budget; zero disables caching.
+    pub(crate) fn new(max_size: u64) -> Self {
+        Self {
+            entries: Cache::builder()
+                .max_capacity(max_size)
+                .weigher(|key: &TraceAuxCacheKey, _: &()| {
+                    u32::try_from(key.size()).unwrap_or(u32::MAX)
+                })
+                .build(),
+        }
+    }
+
+    /// Removes confirmed writes and returns keys to remember after insertion.
+    /// Only the first cache check in a request supplies metrics.
+    fn filter(
+        &self,
+        table: TableName,
+        aux_data: &mut TraceAuxData,
+        metrics: Option<(&IntCounter, &IntCounter)>,
+    ) -> Vec<TraceAuxCacheKey> {
+        let lookups = aux_data.services.len() + aux_data.operations.len();
+        let table = Arc::new(table);
+        let mut pending = Vec::new();
+        let mut retain = |entry| {
+            let key = TraceAuxCacheKey {
+                table: table.clone(),
+                entry,
+            };
+            if self.entries.get(&key).is_some() {
+                false
+            } else {
+                pending.push(key);
+                true
+            }
+        };
+        aux_data
+            .services
+            .retain(|service| retain(TraceAuxEntry::Service(service.clone())));
+        aux_data.operations.retain(|(service, span, kind)| {
+            retain(TraceAuxEntry::Operation(
+                service.clone(),
+                span.clone(),
+                kind.clone(),
+            ))
+        });
+        if let Some((hits, misses)) = metrics {
+            hits.inc_by((lookups - pending.len()) as u64);
+            misses.inc_by(pending.len() as u64);
+        }
+        pending
+    }
+
+    fn record(&self, keys: Vec<TraceAuxCacheKey>) {
+        for key in keys {
+            self.entries.insert(key, ());
+        }
+    }
+
+    /// Reserves background capacity only for misses, without holding a cache lock.
+    async fn acquire_for_misses(
+        &self,
+        limiter: &RequestLimiter,
+        table: TableName,
+        mut aux_data: TraceAuxData,
+        metrics: (&IntCounter, &IntCounter),
+    ) -> ServerResult<Option<Arc<OwnedSemaphorePermit>>> {
+        self.filter(table.clone(), &mut aux_data, Some(metrics));
+        if aux_data.is_empty() {
+            return Ok(None);
+        }
+        let permit = limiter
+            .acquire()
+            .await
+            .map_err(|_| error::BatcherChannelClosedSnafu.build())?;
+        // Another request may have confirmed these entries while admission waited.
+        self.filter(table, &mut aux_data, None);
+        Ok((!aux_data.is_empty()).then_some(permit))
+    }
+}
+
+/// Merge converted V2 rows only when their fixed schemas agree.
+fn merge_trace_v2_rows(rows: &mut Rows, batch: Rows) -> ServerResult<()> {
+    if rows.schema.is_empty() {
+        rows.schema = batch.schema;
+    } else {
+        snafu::ensure!(
+            rows.schema == batch.schema,
+            error::InternalSnafu {
+                err_msg: "Trace V2 schema mismatch while merging spans",
+            }
+        );
+    }
+    rows.rows.extend(batch.rows);
+    Ok(())
+}
 
 const TRACE_FAILURE_MESSAGE_LIMIT: usize = 4;
 
@@ -79,18 +226,56 @@ impl ChunkFailureReaction {
 
 /// Shared dependencies and request metadata used while ingesting trace chunks.
 struct TraceChunkIngestContext<'a> {
-    pipeline_handler: PipelineHandlerRef,
     pipeline: &'a PipelineWay,
-    pipeline_params: &'a GreptimePipelineParams,
     table_name: &'a str,
-    is_trace_v1_model: bool,
 }
 
 /// Accumulates trace outcomes, auxiliary rows, and bounded failure details.
 struct TraceIngestState {
+    needs_aux_write: bool,
     aux_data: TraceAuxData,
+    pending_aux_data: Vec<(TraceAuxData, Vec<WriteCompletion>)>,
     outcome: TraceIngestOutcome,
     failure_messages: TraceFailureMessages,
+}
+
+impl TraceIngestState {
+    fn add_aux_data(&mut self, aux_data: TraceAuxData, completions: Vec<WriteCompletion>) {
+        if completions.is_empty() {
+            self.aux_data.services.extend(aux_data.services);
+            self.aux_data.operations.extend(aux_data.operations);
+        } else if !aux_data.is_empty() {
+            self.pending_aux_data.push((aux_data, completions));
+        }
+    }
+}
+
+/// Keeps confirmed chunks even if another chunk fails or loses its completion sender.
+async fn confirmed_trace_aux_data(
+    pending: Vec<(TraceAuxData, Vec<WriteCompletion>)>,
+) -> TraceAuxData {
+    let results = futures::future::join_all(pending.into_iter().map(
+        |(aux_data, completions)| async move {
+            for completion in completions {
+                completion.wait().await?;
+            }
+            Ok::<_, BoxedError>(aux_data)
+        },
+    ))
+    .await;
+    let mut confirmed = TraceAuxData::default();
+    for result in results {
+        match result {
+            Ok(aux_data) => {
+                confirmed.services.extend(aux_data.services);
+                confirmed.operations.extend(aux_data.operations);
+            }
+            Err(err) => {
+                warn!(err; "Skipping auxiliary trace rows after asynchronous main write failure")
+            }
+        }
+    }
+    confirmed
 }
 
 /// Bounded, deduplicated failure details for one trace request.
@@ -855,18 +1040,46 @@ impl TraceColumnRequestSchema {
 impl Instance {
     /// Ingest OTLP trace spans with chunk-level writes and span-level fallback on
     /// deterministic chunk failures.
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn ingest_trace_spans(
         &self,
-        pipeline_handler: PipelineHandlerRef,
         pipeline: &PipelineWay,
-        pipeline_params: &GreptimePipelineParams,
         table_name: String,
         groups: Vec<TraceSpanGroup>,
         conventions: &str,
         ctx: QueryContextRef,
     ) -> ServerResult<TraceIngestOutcome> {
+        let aux_limiter = self
+            .trace_aux_limiter
+            .as_ref()
+            .filter(|_| ctx.batching_enabled());
+        // Reserve once per request, before any main chunks are submitted. Main
+        // batcher permits remain independent so multi-chunk requests can progress.
+        let aux_permit = if let Some(limiter) = aux_limiter {
+            let mut aux_data = TraceAuxData::default();
+            for span in groups.iter().flat_map(|group| &group.spans) {
+                aux_data.observe_span(span);
+            }
+            self.trace_aux_cache
+                .acquire_for_misses(
+                    limiter,
+                    TableName::new(ctx.current_catalog(), ctx.current_schema(), &table_name),
+                    aux_data,
+                    (&OTLP_TRACE_AUX_CACHE_HIT, &OTLP_TRACE_AUX_CACHE_MISS),
+                )
+                .await?
+        } else {
+            None
+        };
+        // Requests without auxiliary admission first check the cache when preparing writes.
+        let aux_cache_metrics = aux_limiter
+            .is_none()
+            .then_some((&*OTLP_TRACE_AUX_CACHE_HIT, &*OTLP_TRACE_AUX_CACHE_MISS));
         let is_trace_v1_model = matches!(pipeline, PipelineWay::OtlpTraceDirectV1);
+        let data_model = match pipeline {
+            PipelineWay::OtlpTraceDirectV1 => Some(TABLE_DATA_MODEL_TRACE_V1),
+            PipelineWay::OtlpTraceDirectV2 => Some(TABLE_DATA_MODEL_TRACE_V2),
+            _ => None,
+        };
 
         // Only the main span table gets the identity; the derived `_services` /
         // `_operations` lookup tables keep the unstamped `ctx`.
@@ -877,22 +1090,37 @@ impl Instance {
             // `service_name` is a tag column in both trace models, so the main span
             // table declares the logical `service` entity (Layer 1 auto-stamp).
             c.set_extension(SEMANTIC_ENTITY_SERVICE_ID, SERVICE_NAME_COLUMN);
-            if is_trace_v1_model {
-                c.set_extension(SEMANTIC_PIPELINE, TABLE_DATA_MODEL_TRACE_V1);
+            if let Some(data_model) = data_model {
+                c.set_extension(SEMANTIC_PIPELINE, data_model);
                 c.set_extension(SEMANTIC_TRACE_CONVENTIONS, conventions);
             }
             Arc::new(c)
         };
 
+        if data_model.is_some()
+            && let Some(table) = self
+                .catalog_manager
+                .table(
+                    ctx.current_catalog(),
+                    &ctx.current_schema(),
+                    &table_name,
+                    None,
+                )
+                .await?
+        {
+            operator::insert::validate_trace_table_model(&table.table_info(), &main_ctx)?;
+        }
+
         let ingest_ctx = TraceChunkIngestContext {
-            pipeline_handler,
             pipeline,
-            pipeline_params,
             table_name: &table_name,
-            is_trace_v1_model,
         };
         let mut ingest_state = TraceIngestState {
+            // Confirmed hits stay satisfied for this request even if evicted
+            // later: cache eviction does not delete the stored lookup rows.
+            needs_aux_write: aux_limiter.is_none() || aux_permit.is_some(),
             aux_data: TraceAuxData::default(),
+            pending_aux_data: Vec::new(),
             outcome: TraceIngestOutcome::default(),
             failure_messages: TraceFailureMessages::default(),
         };
@@ -962,20 +1190,64 @@ impl Instance {
 
         OTLP_TRACES_ROWS.inc_by(ingest_state.outcome.accepted_spans as u64);
 
+        if !ingest_state.pending_aux_data.is_empty() {
+            let pending = std::mem::take(&mut ingest_state.pending_aux_data);
+            let instance = self.clone();
+            let pipeline = match pipeline {
+                PipelineWay::OtlpTraceDirectV1 => PipelineWay::OtlpTraceDirectV1,
+                PipelineWay::OtlpTraceDirectV2 => PipelineWay::OtlpTraceDirectV2,
+                _ => PipelineWay::OtlpTraceDirectV0,
+            };
+            let table_name = table_name.clone();
+            let ctx = ctx.clone();
+            common_runtime::spawn_ingest(async move {
+                let _permit = aux_permit;
+                let aux_data = confirmed_trace_aux_data(pending).await;
+                let result: ServerResult<()> = async {
+                    let (requests, keys) = instance.prepare_trace_aux_write(
+                        aux_data,
+                        &pipeline,
+                        &table_name,
+                        &ctx,
+                        aux_cache_metrics,
+                    )?;
+                    if !requests.inserts.is_empty() {
+                        instance
+                            .insert_trace_aux_requests(requests, keys, &pipeline, ctx)
+                            .await?;
+                    }
+                    Ok(())
+                }
+                .await;
+                if let Err(err) = result {
+                    OTLP_TRACES_FAILURE_COUNT
+                        .with_label_values(&["aux_table_update_failed"])
+                        .inc();
+                    warn!(table_name, err = ?err, "Failed to write auxiliary trace rows after asynchronous main write");
+                }
+            });
+        }
+
         if !ingest_state.aux_data.is_empty() {
-            // Auxiliary trace tables are derived from spans whose main-table
-            // writes are already confirmed, so they never create new accepted
-            // spans and they do not affect rejected span counts.
-            let aux_requests = otlp::trace::to_grpc_insert_requests_for_aux_tables(
+            // Auxiliary trace tables are derived from accepted spans, so they
+            // never create new accepted spans or affect rejected span counts.
+            let aux_requests = self.prepare_trace_aux_write(
                 std::mem::take(&mut ingest_state.aux_data),
                 ingest_ctx.pipeline,
                 ingest_ctx.table_name,
+                &ctx,
+                aux_cache_metrics,
             );
 
             match aux_requests {
-                Ok((aux_requests, _)) if !aux_requests.inserts.is_empty() => {
+                Ok((aux_requests, pending_aux_keys)) if !aux_requests.inserts.is_empty() => {
                     match self
-                        .insert_trace_requests(aux_requests, ingest_ctx.is_trace_v1_model, ctx)
+                        .insert_trace_aux_requests(
+                            aux_requests,
+                            pending_aux_keys,
+                            ingest_ctx.pipeline,
+                            ctx,
+                        )
                         .await
                     {
                         Ok(output) => {
@@ -1050,28 +1322,142 @@ impl Instance {
         Ok(ingest_state.outcome)
     }
 
+    fn prepare_trace_aux_write(
+        &self,
+        mut aux_data: TraceAuxData,
+        pipeline: &PipelineWay,
+        table_name: &str,
+        ctx: &QueryContextRef,
+        metrics: Option<(&IntCounter, &IntCounter)>,
+    ) -> ServerResult<(RowInsertRequests, Vec<TraceAuxCacheKey>)> {
+        let keys = self.trace_aux_cache.filter(
+            TableName::new(ctx.current_catalog(), ctx.current_schema(), table_name),
+            &mut aux_data,
+            metrics,
+        );
+        if aux_data.is_empty() {
+            return Ok((RowInsertRequests::default(), keys));
+        }
+        let (mut requests, _) =
+            otlp::trace::to_grpc_insert_requests_for_aux_tables(aux_data, pipeline, table_name)?;
+        // Remove fully cached tables before v1 reconciliation performs catalog lookups.
+        requests.inserts.retain(|request| {
+            request
+                .rows
+                .as_ref()
+                .is_some_and(|rows| !rows.rows.is_empty())
+        });
+        Ok((requests, keys))
+    }
+
+    /// Checks deferred cache population without confusing visible rows with completion.
+    #[cfg(feature = "testing")]
+    pub fn trace_aux_data_cached_for_test(
+        &self,
+        table_name: &str,
+        mut aux_data: TraceAuxData,
+        ctx: &QueryContextRef,
+    ) -> bool {
+        self.trace_aux_cache
+            .filter(
+                TableName::new(ctx.current_catalog(), ctx.current_schema(), table_name),
+                &mut aux_data,
+                None,
+            )
+            .is_empty()
+    }
+
+    async fn insert_trace_aux_requests(
+        &self,
+        requests: RowInsertRequests,
+        keys: Vec<TraceAuxCacheKey>,
+        pipeline: &PipelineWay,
+        ctx: QueryContextRef,
+    ) -> ServerResult<Output> {
+        // Cache entries require a completed write, even when main spans use
+        // batching with early acknowledgement.
+        let mut aux_ctx = ctx.fork();
+        aux_ctx.set_batching_enabled(false);
+        let output = self
+            .insert_trace_requests(requests, pipeline, Arc::new(aux_ctx))
+            .await?;
+        // ponytail: cache skip_wal writes too. After datanode data loss, lookup
+        // rows may stay missing until eviction/restart; require durable writes
+        // before caching if that limitation becomes unacceptable.
+        self.trace_aux_cache.record(keys);
+        Ok(output)
+    }
+
     /// Ingest one owned trace chunk so successful spans can be moved into the
     /// accepted set without extra cloning.
     async fn ingest_trace_chunk(
         &self,
         ingest_ctx: &TraceChunkIngestContext<'_>,
-        chunk: Vec<TraceSpan>,
+        mut chunk: Vec<TraceSpan>,
         ctx: QueryContextRef,
         ingest_state: &mut TraceIngestState,
     ) -> ServerResult<()> {
         // Try the fast path first so healthy batches keep their original
         // throughput and write amplification stays low.
-        let (requests, chunk_rows) = otlp::trace::to_grpc_insert_requests_from_spans(
-            &chunk,
-            ingest_ctx.pipeline,
-            ingest_ctx.pipeline_params,
-            ingest_ctx.table_name,
-            &ctx,
-            ingest_ctx.pipeline_handler.clone(),
-        )?;
+        let convert = |spans: &[TraceSpan]| {
+            otlp::trace::to_grpc_insert_requests_from_spans(
+                spans,
+                ingest_ctx.pipeline,
+                ingest_ctx.table_name,
+            )
+        };
+        let (requests, chunk_rows) = match convert(&chunk) {
+            Ok(x) => x,
+            Err(_) if matches!(ingest_ctx.pipeline, PipelineWay::OtlpTraceDirectV2) => {
+                let mut rows = Rows {
+                    rows: Vec::with_capacity(chunk.len()),
+                    ..Default::default()
+                };
+
+                for span in std::mem::take(&mut chunk) {
+                    let result = convert(std::slice::from_ref(&span));
+                    match result {
+                        Ok((requests, _)) => {
+                            // V2 must always emit the same table and fixed column order.
+                            for batch in requests.inserts.into_iter().filter_map(|r| r.rows) {
+                                merge_trace_v2_rows(&mut rows, batch)?;
+                            }
+                            chunk.push(span);
+                        }
+                        Err(err) => {
+                            ingest_state.outcome.rejected_spans += 1;
+
+                            let (cause, shown_cause) = Self::trace_failure_cause(&err);
+                            Self::push_trace_failure_message(
+                                &mut ingest_state.failure_messages,
+                                "span_rejected",
+                                &cause,
+                                format!(
+                                    "Rejected span {}:{}: {}",
+                                    span.trace_id, span.span_id, shown_cause
+                                ),
+                            );
+                        }
+                    }
+                }
+
+                if rows.rows.is_empty() {
+                    return Ok(());
+                }
+                let chunk_rows = rows.rows.len();
+                let requests = RowInsertRequests {
+                    inserts: vec![RowInsertRequest {
+                        table_name: ingest_ctx.table_name.to_string(),
+                        rows: Some(rows),
+                    }],
+                };
+                (requests, chunk_rows)
+            }
+            Err(e) => return Err(e),
+        };
 
         let output = match self
-            .insert_trace_requests(requests, ingest_ctx.is_trace_v1_model, ctx)
+            .insert_trace_requests(requests, ingest_ctx.pipeline, ctx)
             .await
         {
             Ok(output) => output,
@@ -1093,8 +1479,12 @@ impl Instance {
 
         Self::add_trace_write_cost(&mut ingest_state.outcome, output.meta.cost);
         ingest_state.outcome.accepted_spans += chunk_rows;
-        for span in &chunk {
-            ingest_state.aux_data.observe_span(span);
+        if ingest_state.needs_aux_write {
+            let mut aux_data = TraceAuxData::default();
+            for span in &chunk {
+                aux_data.observe_span(span);
+            }
+            ingest_state.add_aux_data(aux_data, output.meta.write_completions);
         }
 
         Ok(())
@@ -1271,7 +1661,11 @@ impl Instance {
 
         Self::add_trace_write_cost(&mut ingest_state.outcome, output.meta.cost);
         ingest_state.outcome.accepted_spans += span_count;
-        retry.add_to_aux_data(&mut ingest_state.aux_data);
+        if ingest_state.needs_aux_write {
+            let mut aux_data = TraceAuxData::default();
+            retry.add_to_aux_data(&mut aux_data);
+            ingest_state.add_aux_data(aux_data, output.meta.write_completions);
+        }
 
         Ok(())
     }
@@ -1354,7 +1748,11 @@ impl Instance {
 
             Self::add_trace_write_cost(&mut ingest_state.outcome, output.meta.cost);
             ingest_state.outcome.accepted_spans += 1;
-            span.add_to_aux_data(&mut ingest_state.aux_data);
+            if ingest_state.needs_aux_write {
+                let mut aux_data = TraceAuxData::default();
+                span.add_to_aux_data(&mut aux_data);
+                ingest_state.add_aux_data(aux_data, output.meta.write_completions);
+            }
         }
 
         Ok(())
@@ -1364,12 +1762,17 @@ impl Instance {
     async fn insert_trace_requests(
         &self,
         mut requests: RowInsertRequests,
-        is_trace_v1_model: bool,
+        pipeline: &PipelineWay,
         ctx: QueryContextRef,
     ) -> ServerResult<Output> {
-        if is_trace_v1_model {
+        if matches!(pipeline, PipelineWay::OtlpTraceDirectV1) {
             self.reconcile_trace_column_types(&mut requests, &ctx)
                 .await?;
+        }
+        if matches!(
+            pipeline,
+            PipelineWay::OtlpTraceDirectV1 | PipelineWay::OtlpTraceDirectV2
+        ) {
             self.handle_trace_inserts(requests, ctx)
                 .await
                 .map_err(BoxedError::new)
@@ -1394,6 +1797,9 @@ impl Instance {
             .catalog_manager
             .table(catalog, &schema, table_name, None)
             .await?;
+        if let Some(table) = &table {
+            operator::insert::validate_trace_table_model(&table.table_info(), ctx)?;
+        }
         let table_schema = table.as_ref().map(|table| table.schema());
         let exclusions = request_schema.incompatible_schema_observations(table_schema.as_deref());
         if !exclusions.is_empty() {

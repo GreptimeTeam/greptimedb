@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::sync::Arc;
 
 use common_datasource::file_format::Format;
 use common_error::define_into_tonic_status;
@@ -85,6 +86,15 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Invalid database export: {reason}"))]
+    InvalidDatabaseExport { reason: String },
+
+    #[snafu(display("Database export cancelled"))]
+    DatabaseExportCancelled {},
+
+    #[snafu(display("Packed import cancelled"))]
+    PackedImportCancelled {},
+
     #[snafu(display("Invalid logical table export: {reason}"))]
     InvalidLogicalTableExport { reason: String },
 
@@ -101,11 +111,26 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to flush pending batch: {source}"))]
+    BatchFlush {
+        source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("external error"))]
     External {
         #[snafu(implicit)]
         location: Location,
         source: BoxedError,
+    },
+
+    #[snafu(display("Write rejected: {error}"))]
+    WriteRejected {
+        #[snafu(source)]
+        error: meter_core::collect::WriteRejected,
+        #[snafu(implicit)]
+        location: Location,
     },
 
     #[snafu(display("Failed to insert data"))]
@@ -1051,6 +1076,8 @@ impl ErrorExt for Error {
             | Error::DescribeStatement { source, .. } => source.status_code(),
             Error::AlterExprToRequest { source, .. } => source.status_code(),
             Error::External { source, .. } => source.status_code(),
+            Error::BatchFlush { source, .. } => source.status_code(),
+            Error::WriteRejected { .. } => StatusCode::RateLimited,
             Error::FindTablePartitionRule { source, .. }
             | Error::SplitInsert { source, .. }
             | Error::SplitDelete { source, .. }
@@ -1080,6 +1107,10 @@ impl ErrorExt for Error {
             Error::InvalidTimeIndexType { .. } | Error::InvalidTimezone { .. } => {
                 StatusCode::InvalidArguments
             }
+            Error::InvalidDatabaseExport { .. } => StatusCode::InvalidArguments,
+            Error::DatabaseExportCancelled { .. } | Error::PackedImportCancelled { .. } => {
+                StatusCode::Cancelled
+            }
             Error::InvalidLogicalTableExport { .. } => StatusCode::InvalidArguments,
             Error::LogicalTableExportResource { .. } => StatusCode::Suspended,
             Error::LogicalTableExportCancelled { .. } => StatusCode::Cancelled,
@@ -1105,7 +1136,7 @@ impl ErrorExt for Error {
     fn retry_hint(&self) -> RetryHint {
         match self {
             Error::ReadObject { error, .. } => retry_hint_from_opendal_error(error),
-            Error::ReadParquetMetadata { .. } => RetryHint::Retryable,
+            Error::ReadParquetMetadata { .. } | Error::WriteRejected { .. } => RetryHint::Retryable,
             Error::InvalidateTableCache { source, .. }
             | Error::ExecuteDdl { source, .. }
             | Error::RequestInserts { source, .. }
@@ -1156,6 +1187,7 @@ impl ErrorExt for Error {
             Error::Catalog { source, .. } => source.retry_hint(),
             Error::SubstraitCodec { source, .. } => source.retry_hint(),
             Error::External { source, .. } => source.retry_hint(),
+            Error::BatchFlush { source, .. } => source.retry_hint(),
             Error::BuildRecordBatch { source, .. } => source.retry_hint(),
             Error::DecodeFlightData { source, .. } => source.retry_hint(),
             Error::SqlCommon { source, .. } => source.retry_hint(),
@@ -1183,7 +1215,7 @@ define_into_tonic_status!(Error);
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::error::*;
 
     #[test]
     fn admin_function_preserves_external_error_metadata() {

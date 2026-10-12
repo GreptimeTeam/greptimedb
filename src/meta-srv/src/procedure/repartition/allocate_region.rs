@@ -184,7 +184,12 @@ impl ExecutePlan {
                     region_wal_options
                         .get(&route.region.id.region_number())
                         .is_none_or(|option| {
-                            matches!(option, WalOptions::RaftEngine | WalOptions::Kafka(_))
+                            matches!(
+                                option,
+                                WalOptions::RaftEngine
+                                    | WalOptions::Kafka(_)
+                                    | WalOptions::ObjectStore(_)
+                            )
                         })
                 })
         } else {
@@ -450,7 +455,9 @@ mod tests {
     use common_meta::test_util::MockDatanodeManager;
     use common_procedure::{ContextProvider, ProcedureId, ProcedureState};
     use common_procedure_test::MockContextProvider;
-    use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
+    use common_wal::options::{
+        KafkaWalOptions, ObjectStoreWalOptions, WAL_OPTIONS_KEY, WalOptions,
+    };
     use store_api::mito_engine_options::SKIP_WAL_KEY;
     use store_api::storage::RegionId;
     use tokio::sync::{mpsc, watch};
@@ -914,7 +921,9 @@ mod tests {
                 topic: "new-topic".to_string(),
                 initial_pruned_entry_id: Some(0),
             }),
-            None | Some(WalOptions::RaftEngine) => WalOptions::RaftEngine,
+            None | Some(WalOptions::RaftEngine) | Some(WalOptions::ObjectStore(_)) => {
+                WalOptions::RaftEngine
+            }
         };
         assert_eq!(expected, new_wal_options);
         let route = ctx.get_table_route_value().await.unwrap();
@@ -944,6 +953,14 @@ mod tests {
         check_execute_plan_skip_wal_provider(Some(WalOptions::Kafka(KafkaWalOptions::new(
             "existing-topic".to_string(),
         ))))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_execute_plan_treats_object_store_as_real_wal_provider_for_skipped_table() {
+        check_execute_plan_skip_wal_provider(Some(WalOptions::ObjectStore(
+            ObjectStoreWalOptions::new("wal".to_string()),
+        )))
         .await;
     }
 

@@ -492,7 +492,9 @@ impl TryFrom<&ArrowDataType> for ConcreteDataType {
             ArrowDataType::Decimal128(precision, scale) => {
                 ConcreteDataType::decimal128_datatype(*precision, *scale)
             }
-            ArrowDataType::Struct(fields) => ConcreteDataType::Struct(StructType::from(fields)),
+            ArrowDataType::Struct(fields) => {
+                ConcreteDataType::Struct(StructType::try_from_arrow_fields(fields)?)
+            }
             ArrowDataType::Float16
             | ArrowDataType::Date64
             | ArrowDataType::FixedSizeBinary(_)

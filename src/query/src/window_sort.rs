@@ -807,7 +807,7 @@ fn find_slice_from_range(
                         .map_err(|e| DataFusionError::External(Box::new(e) as _))
                 })
         })
-        .try_collect::<_, Vec<_>, _>()?;
+        .collect::<std::result::Result<Vec<_>, _>>()?;
 
     let (min_val, max_val) = (typed_sorted_range[0].clone(), typed_sorted_range[1].clone());
 
@@ -2682,7 +2682,10 @@ mod test {
             let exec_stream = exec.execute(0, Arc::new(TaskContext::default())).unwrap();
 
             let real_output = exec_stream.collect::<Vec<_>>().await;
-            let real_output: Vec<_> = real_output.into_iter().try_collect().unwrap();
+            let real_output: Vec<_> = real_output
+                .into_iter()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
             real_output
         }
     }

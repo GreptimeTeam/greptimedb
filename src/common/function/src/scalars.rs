@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "ai_functions")]
+pub(crate) mod ai;
 pub mod anomaly;
 pub(crate) mod date;
 pub mod expression;
@@ -25,6 +27,7 @@ pub mod primary_key;
 pub(crate) mod string;
 pub mod vector;
 
+pub(crate) mod avg_calc;
 pub(crate) mod hll_count;
 pub mod ip;
 #[cfg(test)]

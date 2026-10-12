@@ -1060,22 +1060,16 @@ mod tests {
                 JsonTypeHint {
                     path: vec!["kind".to_string()],
                     data_type: ConcreteDataType::string_datatype(),
-                    nullable: true,
-                    default_constraint: None,
                     inverted_index: false,
                 },
                 JsonTypeHint {
                     path: vec!["commit".to_string(), "operation".to_string()],
                     data_type: ConcreteDataType::string_datatype(),
-                    nullable: true,
-                    default_constraint: None,
                     inverted_index: false,
                 },
                 JsonTypeHint {
                     path: vec!["time_us".to_string()],
                     data_type: ConcreteDataType::int64_datatype(),
-                    nullable: true,
-                    default_constraint: None,
                     inverted_index: false,
                 },
             ],
@@ -1171,8 +1165,6 @@ mod tests {
             vec![JsonTypeHint {
                 path: vec!["hint".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
-                nullable: true,
-                default_constraint: None,
                 inverted_index: false,
             }],
             Some(2),
@@ -1338,8 +1330,6 @@ mod tests {
             vec![JsonTypeHint {
                 path: vec!["nested".to_string(), "hinted".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
-                nullable: true,
-                default_constraint: None,
                 inverted_index: false,
             }],
             Some(8),

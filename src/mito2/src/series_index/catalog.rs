@@ -54,8 +54,14 @@ pub(crate) struct WindowSequence {
 }
 
 /// Self-describing coverage stored in a series-index Parquet footer.
+///
+/// A published entry must include every series from every SST in the region
+/// contained by its bucket and inclusive file-sequence interval. Query planning
+/// relies on this complete-coverage contract, not on `source_file_ids`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SeriesIndexEntry {
+    /// Completed size in the catalog; zero in the footer written before completion.
+    pub(crate) file_size: u64,
     pub(crate) index_uuid: FileId,
     /// Inclusive bucket start.
     pub(crate) bucket_start: Timestamp,
@@ -76,6 +82,30 @@ pub(crate) struct SeriesIndexEntry {
     pub(crate) window_sequences: BTreeMap<i64, WindowSequence>,
 }
 
+impl SeriesIndexEntry {
+    /// Whether this index completely covers an SST in the query's sequence domain.
+    pub(crate) fn covers_file(
+        &self,
+        file: &crate::sst::file::FileMeta,
+        region_id: RegionId,
+    ) -> bool {
+        file.region_id == region_id
+            && file.time_range.0 <= file.time_range.1
+            && self.bucket_start <= file.time_range.0
+            && file.time_range.1 < self.bucket_end
+            && file.sequence.is_some_and(|sequence| {
+                self.min_file_sequence <= sequence.get() && sequence.get() <= self.max_file_sequence
+            })
+    }
+}
+
+/// A completed per-SST range index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct RangeIndexEntry {
+    pub(crate) file_id: FileId,
+    pub(crate) file_size: u64,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct SeriesIndexCatalog {
     pub(crate) indexes: Vec<SeriesIndexEntry>,
@@ -83,7 +113,7 @@ pub(crate) struct SeriesIndexCatalog {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct RangeIndexCatalog {
-    pub(crate) indexes: Vec<FileId>,
+    pub(crate) indexes: Vec<RangeIndexEntry>,
 }
 
 pub(crate) fn range_catalog_path(region_id: RegionId) -> String {
@@ -164,9 +194,12 @@ pub(crate) async fn load_version_control(
     let series = load_catalog::<SeriesIndexCatalog>(store, &series_catalog_path(region_id))
         .await
         .unwrap_or_default();
-    // TODO: Handle catalog entries whose index files are missing from storage.
     let version = SeriesIndexVersion::new(
-        range.indexes.into_iter().collect(),
+        range
+            .indexes
+            .into_iter()
+            .map(|entry| (entry.file_id, entry))
+            .collect(),
         series
             .indexes
             .into_iter()
@@ -195,9 +228,9 @@ mod tests {
     use store_api::storage::{FileId, RegionId};
 
     use crate::series_index::catalog::{
-        RangeIndexCatalog, SeriesIndexCatalog, SeriesIndexEntry, WindowSequence, load_catalog,
-        load_version_control, range_catalog_path, series_catalog_path, series_metadata,
-        store_catalog,
+        RangeIndexCatalog, RangeIndexEntry, SeriesIndexCatalog, SeriesIndexEntry, WindowSequence,
+        load_catalog, load_version_control, range_catalog_path, series_catalog_path,
+        series_metadata, store_catalog,
     };
     use crate::series_index::purger::series_index_channel;
 
@@ -225,6 +258,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn coverage_uses_exclusive_time_end_and_inclusive_file_sequences() {
+        let region_id = RegionId::new(1, 1);
+        let entry = SeriesIndexEntry {
+            file_size: 0,
+            index_uuid: FileId::random(),
+            bucket_start: Timestamp::new_second(1),
+            bucket_end: Timestamp::new_second(2),
+            source_file_ids: Vec::new(),
+            min_file_sequence: 2,
+            max_file_sequence: 4,
+            compaction_window_secs: 1,
+            window_sequences: BTreeMap::new(),
+        };
+        for (start, end, sequence, own_region, covered) in [
+            (1000, 1999, 2, true, true),
+            (1000, 1999, 4, true, true),
+            (999, 1999, 3, true, false),
+            (1000, 2000, 3, true, false),
+            (1000, 1999, 1, true, false),
+            (1000, 1999, 5, true, false),
+            (1000, 1999, 0, true, false),
+            (1000, 1999, 3, false, false),
+        ] {
+            let file = crate::sst::file::FileMeta {
+                region_id: if own_region {
+                    region_id
+                } else {
+                    RegionId::new(2, 1)
+                },
+                time_range: (
+                    Timestamp::new_millisecond(start),
+                    Timestamp::new_millisecond(end),
+                ),
+                sequence: std::num::NonZeroU64::new(sequence),
+                ..Default::default()
+            };
+            assert_eq!(covered, entry.covers_file(&file, region_id), "{file:?}");
+        }
+    }
+
     #[tokio::test]
     async fn test_load_catalog_defaults_on_missing_invalid_or_unreadable_catalog() {
         let store = ObjectStore::new(Memory::default()).unwrap();
@@ -243,7 +317,10 @@ mod tests {
             .write(
                 &range_catalog_path(region_id),
                 serde_json::to_vec(&RangeIndexCatalog {
-                    indexes: vec![file_id],
+                    indexes: vec![RangeIndexEntry {
+                        file_id,
+                        file_size: 1,
+                    }],
                 })
                 .unwrap(),
             )
@@ -254,7 +331,8 @@ mod tests {
             .await
             .unwrap();
         let control = load_version_control(&store, region_id, &purger).await;
-        assert!(control.current().range_indexes.contains(&file_id));
+        assert_eq!(1, control.current().range_indexes.len());
+        assert_eq!(1, control.current().range_indexes[&file_id].file_size);
         assert!(control.current().series_indexes.is_empty());
         let layer = MockLayerBuilder::default()
             .reader_factory(Arc::new(|_, _, _| Box::new(FailingCatalogReader)))
@@ -281,6 +359,7 @@ mod tests {
         let store = ObjectStore::new(Memory::default()).unwrap();
         let region_id = RegionId::new(1, 1);
         let entry = SeriesIndexEntry {
+            file_size: 0,
             index_uuid: FileId::random(),
             bucket_start: Timestamp::new_second(0),
             bucket_end: Timestamp::new_second(100),

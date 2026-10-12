@@ -14,6 +14,18 @@ INSERT INTO build_index_restart_test VALUES
 
 Affected Rows: 5
 
+SELECT * FROM build_index_restart_test;
+
++-------------------------+------------------------------------------------+
+| ts                      | msg                                            |
++-------------------------+------------------------------------------------+
+| 1970-01-01T00:00:00.001 | The quick brown fox jumps over the lazy dog    |
+| 1970-01-01T00:00:00.002 | The quick brown fox jumps over the lazy cat    |
+| 1970-01-01T00:00:00.003 | The quick brown fox jumps over the lazy mouse  |
+| 1970-01-01T00:00:00.004 | The quick brown fox jumps over the lazy rabbit |
+| 1970-01-01T00:00:00.005 | The quick brown fox jumps over the lazy turtle |
++-------------------------+------------------------------------------------+
+
 ADMIN FLUSH_TABLE('build_index_restart_test');
 
 +-----------------------------------------------+
@@ -31,6 +43,21 @@ SHOW INDEX FROM build_index_restart_test;
 +--------------------------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
 | build_index_restart_test | 1          | TIME INDEX | 1            | ts          | A         |             |          |        |      | TIME       |         |               | YES     |            |
 +--------------------------+------------+------------+--------------+-------------+-----------+-------------+----------+--------+------+------------+---------+---------------+---------+------------+
+
+-- Index size is 0 before the fulltext index is built
+SELECT index_size FROM INFORMATION_SCHEMA.REGION_STATISTICS
+WHERE table_id = (
+    SELECT table_id
+    FROM information_schema.tables
+    WHERE table_schema = 'public'
+      AND table_name = 'build_index_restart_test'
+);
+
++------------+
+| index_size |
++------------+
+| 0          |
++------------+
 
 -- No physical fulltext index metadata yet.
 -- ssts_index_meta.index_type uses physical backend names (fulltext_bloom/fulltext_tantivy),
@@ -107,6 +134,21 @@ AND index_type LIKE 'fulltext%';
 +---------------------------+
 | 1                         |
 +---------------------------+
+
+-- Fulltext index size is reported after the build
+SELECT index_size FROM INFORMATION_SCHEMA.REGION_STATISTICS
+WHERE table_id = (
+    SELECT table_id
+    FROM information_schema.tables
+    WHERE table_schema = 'public'
+      AND table_name = 'build_index_restart_test'
+);
+
++------------+
+| index_size |
++------------+
+| 318        |
++------------+
 
 -- SQLNESS ARG restart=true
 -- After restart, verify fulltext query still works

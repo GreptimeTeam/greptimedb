@@ -219,4 +219,6 @@ CREATE TABLE native_time_sec (ts TIMESTAMP(0) TIME INDEX, val DOUBLE);
 INSERT INTO native_time_sec VALUES (0, 10), (1, 11), (2, 12);
 TQL EVAL (1, 1, '1s', '1s') native_time_sec offset 500ms;
 TQL EVAL (1, 1, '1s', '1s') native_time_sec offset -500ms;
+-- `timestamp()` reports the timestamp of the selected sample (1s), without the offset applied.
+TQL EVAL (1, 1, '1s', '1s') timestamp(native_time_sec offset -500ms);
 DROP TABLE native_time_sec;

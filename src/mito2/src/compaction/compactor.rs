@@ -30,7 +30,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::access_layer::{
     AccessLayer, AccessLayerRef, Metrics, OperationType, SstWriteRequest, WriteType,
@@ -47,7 +47,7 @@ use crate::error::{
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
-use crate::region::options::RegionOptions;
+use crate::region::options::{MergeMode, RegionOptions};
 use crate::region::version::VersionRef;
 use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
 use crate::schedule::scheduler::LocalScheduler;
@@ -73,6 +73,10 @@ pub struct CompactionVersion {
     pub(crate) options: RegionOptions,
     /// SSTs of the region.
     pub(crate) ssts: SstVersionRef,
+    /// Lower bound of pending memtable sequences from the same Version as `ssts`.
+    /// None means no barrier; Some(0) conservatively represents an unknown bound.
+    /// Keep only the value so background compaction cannot pin flushed memtables.
+    pub(crate) memtable_min_sequence: Option<SequenceNumber>,
     /// Inferred compaction time window.
     pub(crate) compaction_time_window: Option<Duration>,
 }
@@ -83,6 +87,11 @@ impl From<VersionRef> for CompactionVersion {
             metadata: value.metadata.clone(),
             options: value.options.clone(),
             ssts: value.ssts.clone(),
+            memtable_min_sequence: if value.options.merge_mode() == MergeMode::LastNonNull {
+                value.memtables.min_sequence()
+            } else {
+                None
+            },
             compaction_time_window: value.compaction_time_window,
         }
     }
@@ -199,12 +208,15 @@ pub async fn open_compaction_region(
     };
 
     let current_version = {
-        let mut ssts = SstVersion::new();
+        let mut ssts = SstVersion::new(region_metadata.clone());
         ssts.add_files(file_purger.clone(), manifest.files.values().cloned());
         CompactionVersion {
             metadata: region_metadata.clone(),
             options: req.region_options.clone(),
             ssts: Arc::new(ssts),
+            // Remote execution uses an already picked output. A manifest-only
+            // opener cannot prove that a new LastNonNull pick is memtable-safe.
+            memtable_min_sequence: Some(0),
             compaction_time_window: manifest.compaction_time_window,
         }
     };
@@ -449,7 +461,6 @@ impl SstMerger for DefaultSstMerger {
         write_opts: WriteOptions,
     ) -> Result<(Vec<FileMeta>, Vec<SstInfo>)> {
         let region_id = compaction_region.region_id;
-        let storage = compaction_region.region_options.storage.clone();
         let index_options = compaction_region
             .current_version
             .options
@@ -467,8 +478,6 @@ impl SstMerger for DefaultSstMerger {
         let inverted_index_config = compaction_region.engine_config.inverted_index.clone();
         let fulltext_index_config = compaction_region.engine_config.fulltext_index.clone();
         let bloom_filter_index_config = compaction_region.engine_config.bloom_filter_index.clone();
-        #[cfg(feature = "vector_index")]
-        let vector_index_config = compaction_region.engine_config.vector_index.clone();
 
         let input_file_names = output
             .inputs
@@ -498,7 +507,6 @@ impl SstMerger for DefaultSstMerger {
                     metadata: region_metadata.clone(),
                     source,
                     cache_manager: compaction_region.cache_manager.clone(),
-                    storage,
                     // Readers resolve file overrides before merge/dedup. Replacing
                     // their effective sequences here could promote old rows above
                     // versions in SSTs that were not part of this merge.
@@ -514,8 +522,6 @@ impl SstMerger for DefaultSstMerger {
                     inverted_index_config,
                     fulltext_index_config,
                     bloom_filter_index_config,
-                    #[cfg(feature = "vector_index")]
-                    vector_index_config,
                 },
                 &write_opts,
                 &mut metrics,
@@ -1158,9 +1164,10 @@ mod tests {
             access_layer: env.access_layer.clone(),
             manifest_ctx,
             current_version: CompactionVersion {
-                metadata,
+                metadata: metadata.clone(),
                 options: RegionOptions::default(),
-                ssts: Arc::new(SstVersion::new()),
+                ssts: Arc::new(SstVersion::new(metadata)),
+                memtable_min_sequence: None,
                 compaction_time_window: None,
             },
             file_purger: None,

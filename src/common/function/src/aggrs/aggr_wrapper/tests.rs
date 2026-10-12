@@ -27,8 +27,11 @@ use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
+use datafusion::functions_aggregate::approx_percentile_cont::approx_percentile_cont_udaf;
+use datafusion::functions_aggregate::array_agg::array_agg_udaf;
 use datafusion::functions_aggregate::average::avg_udaf;
 use datafusion::functions_aggregate::count::count_udaf;
+use datafusion::functions_aggregate::nth_value::nth_value_udaf;
 use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion::optimizer::AnalyzerRule;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
@@ -1289,6 +1292,40 @@ async fn test_udaf_correct_eval_result() {
             order_by: vec![],
             null_treatment: None,
         },
+        // The ordering state of `array_agg` nests the ORDER BY fields in `List(Struct(..))`.
+        TestCase {
+            func: array_agg_udaf(),
+            input_schema: Arc::new(arrow_schema::Schema::new(vec![
+                Field::new("number", DataType::Float64, true),
+                Field::new(
+                    "ts",
+                    DataType::Timestamp(arrow_schema::TimeUnit::Millisecond, None),
+                    false,
+                ),
+            ])),
+            args: vec![Expr::Column(Column::new_unqualified("number"))],
+            input: vec![
+                Arc::new(Float64Array::from(vec![Some(3.), Some(1.), Some(2.)])),
+                Arc::new(TimestampMillisecondArray::from(vec![3000, 1000, 2000])),
+            ],
+            expected_output: Some(ScalarValue::List(ScalarValue::new_list_nullable(
+                &[
+                    ScalarValue::Float64(Some(1.)),
+                    ScalarValue::Float64(Some(2.)),
+                    ScalarValue::Float64(Some(3.)),
+                ],
+                &DataType::Float64,
+            ))),
+            expected_fn: None,
+            distinct: false,
+            filter: None,
+            order_by: vec![SortExpr::new(
+                Expr::Column(Column::new_unqualified("ts")),
+                true,
+                true,
+            )],
+            null_treatment: None,
+        },
         // TODO(discord9): udd_merge/hll_merge/geo_path/quantile_aggr tests
     ];
     let test_table_ref = TableReference::bare("TestTable");
@@ -1395,4 +1432,90 @@ async fn execute_phy_plan(
         batches.push(batch?);
     }
     Ok(batches)
+}
+
+#[test]
+fn test_state_struct_array_rejects_mismatched_state() {
+    let fields = Fields::from(vec![Field::new("sum", DataType::Int64, true)]);
+    let arrays: Vec<ArrayRef> = vec![Arc::new(Float64Array::from(vec![1.0]))];
+    let err = state_struct_array(&fields, arrays).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("State field `sum` expects type Int64, but the accumulator produced Float64"),
+        "{err}"
+    );
+}
+
+#[test]
+fn test_state_struct_array_keeps_child_order() {
+    let int_field = |name: &str| Field::new(name, DataType::Int64, true);
+    // Same child types, names crossed: children must stay in place, not be matched by name.
+    let produced = StructArray::from(vec![
+        (
+            Arc::new(int_field("a")),
+            Arc::new(Int64Array::from(vec![10])) as ArrayRef,
+        ),
+        (
+            Arc::new(int_field("b")),
+            Arc::new(Int64Array::from(vec![20])) as ArrayRef,
+        ),
+    ]);
+    let declared = Fields::from(vec![Field::new(
+        "state",
+        DataType::Struct(Fields::from(vec![int_field("b"), int_field("a")])),
+        true,
+    )]);
+
+    let state = state_struct_array(&declared, vec![Arc::new(produced)]).unwrap();
+    let state = state.column(0).as_struct();
+    assert_eq!(
+        state
+            .column_by_name("b")
+            .unwrap()
+            .as_primitive::<arrow::datatypes::Int64Type>()
+            .value(0),
+        10
+    );
+    assert_eq!(
+        state
+            .column_by_name("a")
+            .unwrap()
+            .as_primitive::<arrow::datatypes::Int64Type>()
+            .value(0),
+        20
+    );
+}
+
+#[test]
+fn test_hard_ordered_aggr_not_steppable() {
+    let order_by = vec![SortExpr::new(
+        Expr::Column(Column::new_unqualified("ts")),
+        true,
+        true,
+    )];
+    let aggr = |func: Arc<AggregateUDF>, args: Vec<Expr>| {
+        Expr::AggregateFunction(AggregateFunction::new_udf(
+            func,
+            args,
+            false,
+            None,
+            order_by.clone(),
+            None,
+        ))
+    };
+    let number = Expr::Column(Column::new_unqualified("number"));
+
+    assert!(!is_all_aggr_exprs_steppable(&[aggr(
+        nth_value_udaf(),
+        vec![number.clone(), lit(2i64)],
+    )]));
+    assert!(is_all_aggr_exprs_steppable(&[aggr(
+        array_agg_udaf(),
+        vec![number.clone()]
+    )]));
+    // WITHIN GROUP (ORDER BY number)
+    assert!(is_all_aggr_exprs_steppable(&[aggr(
+        approx_percentile_cont_udaf(),
+        vec![number, lit(0.5f64)]
+    )]));
 }

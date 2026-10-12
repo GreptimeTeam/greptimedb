@@ -74,11 +74,12 @@ impl BloomFilterFulltextIndexCreator {
 #[async_trait]
 impl FulltextIndexCreator for BloomFilterFulltextIndexCreator {
     async fn push_text(&mut self, text: &str) -> Result<()> {
-        let tokens = self.analyzer.analyze_text(text)?;
+        let mut token_buf = Vec::new();
+        let hashes = self.analyzer.analyze_text_hashes(text, &mut token_buf);
         self.inner
             .as_mut()
             .context(AbortedSnafu)?
-            .push_row_elems(tokens)
+            .push_row_hashes(hashes)
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;

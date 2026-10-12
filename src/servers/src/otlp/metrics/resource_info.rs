@@ -30,7 +30,6 @@ use otel_arrow_rust::proto::opentelemetry::common::v1::KeyValue;
 use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
     AggregationTemporality, ResourceMetrics, metric,
 };
-use session::protocol_ctx::OtlpMetricCtx;
 
 use crate::error::Result;
 use crate::otlp::metrics::{
@@ -90,12 +89,7 @@ pub struct ResourceInfoData {
 
 impl ResourceInfoData {
     /// Takes the raw attributes, before the promote filter runs on them.
-    pub fn observe(
-        &mut self,
-        raw_attrs: &[KeyValue],
-        resource: &ResourceMetrics,
-        metric_ctx: &OtlpMetricCtx,
-    ) {
+    pub fn observe(&mut self, raw_attrs: &[KeyValue], resource: &ResourceMetrics) {
         let mut tags = Vec::with_capacity(MAX_PROJECTED_TAGS);
         let ServiceIdentity { job, instance } = service_identity(raw_attrs);
         if let Some(job) = job {
@@ -119,7 +113,7 @@ impl ResourceInfoData {
         tags.sort_unstable();
 
         let mut observed: BTreeMap<i64, i64> = BTreeMap::new();
-        for_each_encoded_time(resource, metric_ctx, |ts| {
+        for_each_encoded_time(resource, |ts| {
             let window = ts - ts.rem_euclid(SEMANTIC_GRAPH_WINDOW_NANOS);
             observed
                 .entry(window)
@@ -176,11 +170,7 @@ impl ResourceInfoData {
 /// Visits the times of the data points the encoder writes rows for, so a
 /// resource is described exactly where it is measured rather than wherever
 /// its request happens to reach.
-fn for_each_encoded_time(
-    resource: &ResourceMetrics,
-    metric_ctx: &OtlpMetricCtx,
-    mut visit: impl FnMut(i64),
-) {
+fn for_each_encoded_time(resource: &ResourceMetrics, mut visit: impl FnMut(i64)) {
     fn visit_all(points: impl Iterator<Item = u64>, visit: &mut impl FnMut(i64)) {
         for ts in points {
             visit(ts as i64);
@@ -214,7 +204,7 @@ fn for_each_encoded_time(
                     visit_all(s.data_points.iter().map(|p| p.time_unix_nano), &mut visit)
                 }
                 Some(metric::Data::ExponentialHistogram(h))
-                    if exponential_histogram_gate(h, metric_ctx).is_ok() =>
+                    if exponential_histogram_gate(h).is_ok() =>
                 {
                     for point in &h.data_points {
                         if let Ok((_, ts)) = exponential_histogram_value(point) {
@@ -285,7 +275,7 @@ mod tests {
             kv("k8s.node.name", "node-a"),
             kv("os.type", "linux"),
         ];
-        data.observe(&attrs, &gauge_at(&[100, 50]), &OtlpMetricCtx::default());
+        data.observe(&attrs, &gauge_at(&[100, 50]));
         assert_eq!(data.rows.len(), 1);
         let (tags, windows) = data.rows.iter().next().unwrap();
         assert_eq!(windows.values().copied().collect::<Vec<_>>(), vec![100]);
@@ -298,19 +288,11 @@ mod tests {
                 .all(|(k, _)| k != "os.type" && k != "service.instance.id")
         );
 
-        data.observe(
-            &[kv("host.id", "h-2")],
-            &gauge_at(&[10]),
-            &OtlpMetricCtx::default(),
-        );
+        data.observe(&[kv("host.id", "h-2")], &gauge_at(&[10]));
         assert_eq!(data.rows.len(), 2);
 
         let mut empty = ResourceInfoData::default();
-        empty.observe(
-            &[kv("os.type", "linux")],
-            &gauge_at(&[100]),
-            &OtlpMetricCtx::default(),
-        );
+        empty.observe(&[kv("os.type", "linux")], &gauge_at(&[100]));
         assert!(empty.into_row_insert_requests().unwrap().is_none());
     }
 
@@ -322,7 +304,6 @@ mod tests {
         data.observe(
             &[kv("service.name", "api")],
             &gauge_at(&[window + 1, window + 2, 3 * window + 7]),
-            &OtlpMetricCtx::default(),
         );
 
         let windows = data.rows.values().next().unwrap();
@@ -352,20 +333,13 @@ mod tests {
             }],
             ..Default::default()
         };
-        let enabled = OtlpMetricCtx {
-            experimental_enable_exponential_histogram: true,
-            ..Default::default()
-        };
-
-        for (resource, ctx) in [
-            (
-                exponential(AggregationTemporality::Cumulative),
-                OtlpMetricCtx::default(),
-            ),
-            (exponential(AggregationTemporality::Delta), enabled),
+        for temporality in [
+            AggregationTemporality::Delta,
+            AggregationTemporality::Unspecified,
         ] {
+            let resource = exponential(temporality);
             let mut data = ResourceInfoData::default();
-            data.observe(&[kv("service.name", "api")], &resource, &ctx);
+            data.observe(&[kv("service.name", "api")], &resource);
             assert!(data.into_row_insert_requests().unwrap().is_none());
         }
     }
@@ -377,7 +351,6 @@ mod tests {
         data.observe(
             &[kv("service.name", "api"), kv("host.id", "h-1")],
             &gauge_at(&[1_700_000_000_123_456_789]),
-            &OtlpMetricCtx::default(),
         );
         let requests = data.into_row_insert_requests().unwrap().unwrap();
         assert_eq!(requests.inserts.len(), 1);

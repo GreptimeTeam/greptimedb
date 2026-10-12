@@ -32,7 +32,8 @@ Two modes:
   runner by name. Both steps are idempotent and best-effort; a missing
   instance or runner is not an error.
 - Sweep (scheduled janitor): delete every instance tagged as managed by
-  query-regression CI whose creation time is older than the given TTL, and
+  query-regression CI whose creation time is older than its tagged TTL (or
+  the given fallback TTL for untagged instances), and
   deregister the matching runners. This is the safety net for runs whose
   teardown job never executed.
 """
@@ -45,6 +46,8 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from runner_utils import deregister_runner
 
 # Reuse the GitHub API client, runner lookup, and tag constants from the
 # provision script.
@@ -72,16 +75,31 @@ def parse_creation_time(value: str) -> datetime:
 
 
 def expired_instance_names(
-    instances: list[tuple[str, str, str]], now: datetime, ttl: timedelta
+    instances: list[tuple[str, str, str, str | None]], now: datetime, ttl: timedelta
 ) -> list[tuple[str, str]]:
     """Pick (instance_id, instance_name) pairs whose creation is older than ttl.
 
-    `instances` items are (instance_id, instance_name, creation_time).
+    `instances` items are (instance_id, instance_name, creation_time, tagged_ttl_hours).
     """
     expired = []
-    for instance_id, instance_name, creation_time in instances:
+    for instance_id, instance_name, creation_time, tagged_ttl in instances:
+        instance_ttl = ttl
+        if tagged_ttl is not None:
+            try:
+                hours = int(tagged_ttl)
+                if not 1 <= hours <= 168:
+                    raise ValueError("TTL outside 1..168 hours")
+                instance_ttl = timedelta(hours=hours)
+            except (TypeError, ValueError):
+                # Never fall back to a shorter TTL and kill a live tagged runner.
+                print(
+                    f"Skipping {instance_id}: invalid {provision.TTL_TAG_KEY}={tagged_ttl!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                continue
         age = now - parse_creation_time(creation_time)
-        if age >= ttl:
+        if age >= instance_ttl:
             expired.append((instance_id, instance_name))
     return expired
 
@@ -143,31 +161,20 @@ def delete_instance(client, instance_id: str, region_id: str | None = None) -> b
             return False
 
 
-def deregister_runner(token: str, repo: str, runner_name: str) -> bool:
-    runner = provision.find_runner_by_name(token, repo, runner_name)
-    if runner is None:
-        print(f"Runner {runner_name} is not registered", flush=True)
-        return True
-    try:
-        provision.github_api(token, "DELETE", f"/repos/{repo}/actions/runners/{runner['id']}")
-        print(f"Deregistered runner {runner_name} (id {runner['id']})", flush=True)
-        return True
-    except Exception as error:  # noqa: BLE001
-        print(f"Failed to deregister runner {runner_name}: {error}", flush=True)
-        return False
-
-
-def list_managed_instances(client, region_id: str) -> list[tuple[str, str, str]]:
+def list_managed_instances(
+    client, region_id: str
+) -> list[tuple[str, str, str, str | None]]:
     from alibabacloud_ecs20140526 import models as ecs_models
 
-    result: list[tuple[str, str, str]] = []
+    result: list[tuple[str, str, str, str | None]] = []
     next_token = None
     while True:
         request = ecs_models.DescribeInstancesRequest(
             region_id=region_id,
             tag=[
                 ecs_models.DescribeInstancesRequestTag(
-                    key=provision.MANAGED_BY_TAG_KEY, value=provision.MANAGED_BY_TAG_VALUE
+                    key=provision.MANAGED_BY_TAG_KEY,
+                    value=provision.MANAGED_BY_TAG_VALUE,
                 )
             ],
             max_results=100,
@@ -175,7 +182,19 @@ def list_managed_instances(client, region_id: str) -> list[tuple[str, str, str]]
         )
         response = client.describe_instances(request)
         for instance in response.body.instances.instance:
-            result.append((instance.instance_id, instance.instance_name, instance.creation_time))
+            tags = (instance.tags.tag or []) if instance.tags else []
+            tagged_ttl = next(
+                (tag.tag_value for tag in tags if tag.tag_key == provision.TTL_TAG_KEY),
+                None,
+            )
+            result.append(
+                (
+                    instance.instance_id,
+                    instance.instance_name,
+                    instance.creation_time,
+                    tagged_ttl,
+                )
+            )
         next_token = response.body.next_token
         if not next_token:
             return result
@@ -187,7 +206,10 @@ def sweep(client, region_id: str, repo: str, github_token: str, ttl: timedelta) 
     expired = expired_instance_names(instances, datetime.now(timezone.utc), ttl)
     ok = True
     for instance_id, instance_name in expired:
-        print(f"Instance {instance_id} ({instance_name}) exceeds TTL {ttl}; deleting", flush=True)
+        print(
+            f"Instance {instance_id} ({instance_name}) exceeds its configured TTL; deleting",
+            flush=True,
+        )
         # Runner names mirror instance names by construction in the provision
         # script (both are qreg-ecs-<run_id>).
         ok &= delete_instance(client, instance_id, region_id)

@@ -37,7 +37,7 @@ use datafusion::physical_plan::{
     PhysicalExpr, PlanProperties, RecordBatchStream, SendableRecordBatchStream, Statistics,
     StatisticsArgs,
 };
-use datafusion_expr::col;
+use datafusion_expr::ident;
 use datatypes::arrow::compute;
 use datatypes::timestamp::timestamp_array_to_primitive;
 use futures::{Stream, StreamExt, ready};
@@ -46,6 +46,7 @@ use prost::Message;
 use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
+use crate::extension_plan::range_manipulate::{Nanoseconds, ScanNanoseconds, narrow_scan};
 use crate::extension_plan::series_divide::SeriesDivide;
 use crate::extension_plan::{
     METRIC_NUM_SERIES, Millisecond, is_prometheus_stale_sample, local_offset,
@@ -140,8 +141,8 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
             return vec![];
         }
 
-        let mut exprs = vec![col(&self.time_index_column)];
-        exprs.extend(self.staleness_field_columns().map(col));
+        let mut exprs = vec![ident(&self.time_index_column)];
+        exprs.extend(self.staleness_field_columns().map(ident));
         exprs
     }
 
@@ -691,6 +692,7 @@ impl InstantManipulateStream {
         let (timestamps, _) = timestamp_array_to_primitive(ts_column).ok_or_else(|| {
             DataFusionError::Execution("Time index column is not a timestamp".into())
         })?;
+        let timestamp_null_count = timestamps.null_count();
         let timestamps = timestamps.values();
         let len = timestamps.len();
         // Shift the native-tick timeline in i128 before comparing samples. Doing
@@ -735,28 +737,77 @@ impl InstantManipulateStream {
         let estimated_points = estimated_points as usize;
         let aligned_start = aligned_start as i64;
         let aligned_end = aligned_end as i64;
-        let mut take_indices = Vec::with_capacity(estimated_points);
-        let mut aligned_ts = Vec::with_capacity(estimated_points);
-        let mut cursor = 0;
-        for expected_ms in (aligned_start..=aligned_end).step_by(self.interval as usize) {
-            let expected = (expected_ms as i128) * 1_000_000;
+        // Narrow `i64` nanoseconds whenever the batch fits them, exact `i128` otherwise.
+        let narrow = (timestamp_null_count == 0)
+            .then(|| {
+                narrow_scan(
+                    self.time_unit,
+                    self.offset,
+                    self.lookback_delta,
+                    timestamps,
+                    aligned_start,
+                    aligned_end,
+                )
+            })
+            .flatten();
+        if let Some(scan) = &narrow {
+            debug_assert_eq!(i64::try_from(first_ns), Ok(scan.shift(timestamps[0])));
+            debug_assert_eq!(i64::try_from(last_ns), Ok(scan.shift(timestamps[len - 1])));
+        }
+        let (take_indices, aligned_ts) = match narrow {
+            Some(scan) => self.scan_instants::<i64>(
+                timestamps,
+                aligned_start,
+                aligned_end,
+                &scan,
+                estimated_points,
+                &is_stale,
+            ),
+            None => self.scan_instants::<i128>(
+                timestamps,
+                aligned_start,
+                aligned_end,
+                &ScanNanoseconds::<i128>::wide(self.time_unit, self.offset, self.lookback_delta),
+                estimated_points,
+                &is_stale,
+            ),
+        };
+        self.take_record_batch_optional(input, take_indices, aligned_ts)
+    }
+
+    /// Chooses the sample of every aligned evaluation instant, in `Ns` nanoseconds.
+    ///
+    /// Keeps the first row among exact timestamp ties and the latest preceding row
+    /// otherwise; zero lookback admits only exact samples. Staleness is tested after
+    /// choosing: a selected stale marker suppresses this evaluation rather than
+    /// falling back to an older finite value.
+    fn scan_instants<Ns: Nanoseconds>(
+        &self,
+        timestamps: &[i64],
+        start: Millisecond,
+        end: Millisecond,
+        scan: &ScanNanoseconds<Ns>,
+        capacity: usize,
+        is_stale: impl Fn(usize) -> bool,
+    ) -> (Vec<u64>, Vec<Millisecond>) {
+        let len = timestamps.len();
+        let mut cursor = 0usize;
+        let mut take_indices = Vec::with_capacity(capacity);
+        let mut aligned_ts = Vec::with_capacity(capacity);
+        for expected_ms in (start..=end).step_by(self.interval as usize) {
+            let expected = scan.instant(expected_ms);
             let mut exact_candidate = None;
-            while cursor < len && to_nanoseconds(timestamps[cursor]) <= expected {
-                if to_nanoseconds(timestamps[cursor]) == expected && exact_candidate.is_none() {
+            while cursor < len && scan.shift(timestamps[cursor]) <= expected {
+                if scan.shift(timestamps[cursor]) == expected && exact_candidate.is_none() {
                     exact_candidate = Some(cursor);
                 }
                 cursor += 1;
             }
-            // Keep the first row among exact timestamp ties; otherwise use the
-            // latest preceding row. Zero lookback admits only exact samples.
-            // Test staleness after choosing: a selected stale marker suppresses
-            // this evaluation rather than falling back to an older finite value.
             let Some(candidate) = exact_candidate.or_else(|| cursor.checked_sub(1)) else {
                 continue;
             };
-            let candidate_ts = to_nanoseconds(timestamps[candidate]);
-            let lower = expected - (self.lookback_delta as i128) * 1_000_000;
-            if (candidate_ts == expected || candidate_ts > lower)
+            let candidate_ts = scan.shift(timestamps[candidate]);
+            if (candidate_ts == expected || candidate_ts > scan.window_start(expected))
                 && candidate_ts <= expected
                 && !is_stale(candidate)
             {
@@ -764,7 +815,7 @@ impl InstantManipulateStream {
                 aligned_ts.push(expected_ms);
             }
         }
-        self.take_record_batch_optional(input, take_indices, aligned_ts)
+        (take_indices, aligned_ts)
     }
 
     /// Helper function to apply "take" on record batch.
@@ -1773,6 +1824,81 @@ mod test {
             true,
         )
         .await;
+    }
+
+    #[test]
+    fn nullable_interior_timestamp_matches_wide_scan() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIME_INDEX_COLUMN,
+                DataType::Timestamp(TimeUnit::Second, None),
+                true,
+            ),
+            Field::new("value", DataType::Float64, false),
+        ]));
+        let timestamps = [0, i64::MAX, 1];
+        let array = TimestampSecondArray::new(
+            timestamps.to_vec().into(),
+            Some(NullBuffer::from(vec![false, false, true])),
+        );
+        let input = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(array),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+        let stream = InstantManipulateStream {
+            offset: 0,
+            start: 0,
+            end: 1_000,
+            lookback_delta: 1_000,
+            interval: 1_000,
+            time_index: 0,
+            time_unit: TimeUnit::Second,
+            field_indices: [Some(1), None],
+            tsid_index: None,
+            reuse_tsid_column: false,
+            schema: Arc::new(Schema::new(vec![
+                Field::new(
+                    TIME_INDEX_COLUMN,
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                ),
+                Field::new("value", DataType::Float64, false),
+            ])),
+            input: Box::pin(
+                datafusion::physical_plan::memory::MemoryStream::try_new(vec![], schema, None)
+                    .unwrap(),
+            ),
+            metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+            num_series: Count::new(),
+        };
+
+        let output = stream.manipulate(input).unwrap();
+        let output_timestamps = output
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        let output_values = output
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let wide = stream.scan_instants::<i128>(
+            &timestamps,
+            0,
+            1_000,
+            &ScanNanoseconds::<i128>::wide(TimeUnit::Second, 0, 1_000),
+            2,
+            |_| false,
+        );
+        assert_eq!(output_timestamps.values(), &[0]);
+        assert_eq!(output_values.values(), &[1.0]);
+        assert_eq!(wide, (vec![0], vec![0]));
+        assert_eq!(wide.1, output_timestamps.values().to_vec());
     }
 
     #[test]

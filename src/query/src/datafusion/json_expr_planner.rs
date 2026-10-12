@@ -15,10 +15,14 @@
 use std::sync::{Arc, LazyLock};
 
 use arrow_schema::Field;
-use common_function::scalars::json::json_get::JsonGetWithType;
+use arrow_schema::extension::ExtensionType;
+use common_function::scalars::json::json_get::{JsonGetWithType, parse_json_get_path};
 use common_function::scalars::udf::create_udf;
 use datafusion_common::arrow::datatypes::DataType;
-use datafusion_common::{Column, DFSchema, DataFusionError, Result, ScalarValue, TableReference};
+use datafusion_common::{
+    Column, DFSchema, DataFusionError, ExprSchema, Result, ScalarValue, TableReference,
+    plan_datafusion_err,
+};
 use datafusion_expr::expr::{BinaryExpr, ScalarFunction};
 use datafusion_expr::planner::{
     ExprPlanner, PlannerResult, RawAggregateExpr, RawBinaryExpr, RawFieldAccessExpr, RawScalarExpr,
@@ -28,22 +32,28 @@ use datafusion_expr::type_coercion::functions::{UDFCoercionExt, fields_with_udf}
 use datafusion_expr::{
     Expr, ExprSchemable, GetFieldAccess, Operator, ScalarUDF, WindowFunctionDefinition,
 };
-use datatypes::extension::json::is_json2_extension_type;
+use datatypes::extension::json::{
+    Json2ExtensionType, is_json2_extension_type, parse_legacy_json2_settings,
+};
+use datatypes::types::json_type::JsonNativeType;
+use jsonb::jsonpath::Path;
 use sqlparser::ast::BinaryOperator;
 
 /// Rewrites JSON-aware SQL expressions into DataFusion expressions.
 ///
-/// This planner handles three cases:
+/// This planner handles the following cases:
 /// - Rewrites compound identifiers on JSON extension columns into `json_get` function.
-///   For example, `select a.b.c` => `select json_get(a, "b.c")`.
+///   For example, `select a.b.c` => `select json_get(a, '$.b.c')`.
 /// - Extends a JSON path with list indexes and fields following an index.
-///   For example, `select a.b[0].c` => `select json_get(a, "b[0][\"c\"]")`.
+///   For example, `select a.b[0].c` => `select json_get(a, '$.b[0].c')`.
+/// - Applies JSON2 path type hints to both compound identifiers and explicit `json_get` calls
+///   before inferring types from their enclosing expressions.
 /// - Pushes an "expected type" argument into the `json_get` function when it participates in a
 ///   binary operator. So that `json_get` knows the wanted data type when dealing with variant
 ///   JSON values.
 ///   For example, `select json_get(a, "b.c") + 1` => `select json_get(a, "b.c", NULL::Int64) + 1`.
 /// - Infers the expected type from scalar, aggregate, and window function signatures.
-///   For example, `select abs(a.b.c)` => `select abs(json_get(a, "b.c", NULL::Float64))`.
+///   For example, `select abs(a.b.c)` => `select abs(json_get(a, '$.b.c', NULL::Float64))`.
 #[derive(Debug)]
 pub(crate) struct JsonExprPlanner;
 
@@ -85,9 +95,9 @@ impl ExprPlanner for JsonExprPlanner {
     /// Extends the path of an untyped `json_get` with one field access.
     ///
     /// For `j.o.l[1].inner.l[2]`, `plan_compound_identifier` first produces
-    /// `json_get(j, "o.l")`. DataFusion then calls this method successively
+    /// `json_get(j, '$.o.l')`. DataFusion then calls this method successively
     /// with a list index, two named fields, and another list index, producing
-    /// the final path `o.l[1]["inner"]["l"][2]`.
+    /// the final path `$.o.l[1].inner.l[2]`.
     fn plan_field_access(
         &self,
         mut expr: RawFieldAccessExpr,
@@ -107,12 +117,7 @@ impl ExprPlanner for JsonExprPlanner {
                 let Some(name) = name.try_as_str().flatten() else {
                     return Ok(PlannerResult::Original(expr));
                 };
-                // Encode the field name as a JSON string before embedding it in the
-                // bracket accessor. This preserves dots as literal field-name characters
-                // and escapes quotes, backslashes, and control characters correctly.
-                let name = serde_json::to_string(name)
-                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                format!("[{name}]")
+                format!(".{}", json_path_field(name)?)
             }
             GetFieldAccess::ListRange { .. } => return Ok(PlannerResult::Original(expr)),
         };
@@ -141,15 +146,20 @@ impl ExprPlanner for JsonExprPlanner {
             LazyLock::new(|| Arc::new(create_udf(Arc::new(JsonGetWithType::default()))));
 
         let json_get = JSON_GET_UDF.clone();
-        let path = nested_names.join(".");
+        let mut path = "$".to_string();
+        for name in nested_names {
+            path.push('.');
+            path.push_str(&json_path_field(name)?);
+        }
+
+        let mut args = vec![
+            Expr::Column(Column::from((qualifier, field))),
+            Expr::Literal(ScalarValue::Utf8(Some(path)), None),
+        ];
+        apply_json_type_hint(field, nested_names, &mut args)?;
+
         Ok(PlannerResult::Planned(Expr::ScalarFunction(
-            ScalarFunction::new_udf(
-                json_get,
-                vec![
-                    Expr::Column(Column::from((qualifier, field))),
-                    Expr::Literal(ScalarValue::Utf8(Some(path)), None),
-                ],
-            ),
+            ScalarFunction::new_udf(json_get, args),
         )))
     }
 
@@ -157,7 +167,27 @@ impl ExprPlanner for JsonExprPlanner {
     ///
     /// `Original` carries the possibly modified raw expression to subsequent planners and then
     /// DataFusion's default function construction. Returning `Planned` would short-circuit both.
-    fn plan_scalar(&self, mut expr: RawScalarExpr) -> Result<PlannerResult<RawScalarExpr>> {
+    fn plan_scalar(
+        &self,
+        mut expr: RawScalarExpr,
+        schema: &DFSchema,
+    ) -> Result<PlannerResult<RawScalarExpr>> {
+        if expr.func.name().eq_ignore_ascii_case(JsonGetWithType::NAME) && expr.args.len() == 2 {
+            let field = match &expr.args[0] {
+                // Resolving an unqualified column may require JOIN USING information unavailable
+                // in this schema. Skip hint injection if lookup fails and let DataFusion resolve
+                // the column or report the error later.
+                Expr::Column(column) => schema.field_from_column(column).ok().cloned(),
+                // Outer references carry their field metadata from the outer query's schema.
+                Expr::OuterReferenceColumn(field, _) => Some(Arc::clone(field)),
+                _ => None,
+            };
+            if let Some(field) = field
+                && let Some(path) = json_get_object_path(&expr.args[1])
+            {
+                apply_json_type_hint(&field, &path, &mut expr.args)?;
+            }
+        }
         push_function_arg_types(expr.func.as_ref(), &mut expr.args)?;
         Ok(PlannerResult::Original(expr))
     }
@@ -182,6 +212,77 @@ impl ExprPlanner for JsonExprPlanner {
             }
         }
         Ok(PlannerResult::Original(expr))
+    }
+}
+
+/// Sets the native read type for an exact hinted object path. Both SQL syntaxes use this before
+/// an enclosing expression can infer a type or push down a cast.
+fn apply_json_type_hint(field: &Field, path: &[String], args: &mut Vec<Expr>) -> Result<()> {
+    if !is_json2_extension_type(field) || args.len() != 2 {
+        return Ok(());
+    }
+    if let Some(json_type) = json_type_hint(field, path)? {
+        args.push(Expr::Literal(
+            ScalarValue::try_new_null(&json_type.as_arrow_type())?,
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// Resolves `json_get`'s second argument expression (the path) to object field names for type hint
+/// lookup. For example, the string literal `'$.user.age'` resolves to `["user", "age"]`.
+///
+/// Returns `None` for non-string literals, non-literal expressions, invalid JSONPaths, or paths
+/// containing array indexes, wildcards, or filters.
+/// Returning `None` only skips hint injection; the original `json_get` expression is preserved.
+fn json_get_object_path(expr: &Expr) -> Option<Vec<String>> {
+    let path = expr.as_literal()?.try_as_str().flatten()?;
+    // Invalid paths skip hint lookup here. Later planning still validates the path and reports
+    // the error, preserving the existing JSONPath error behavior.
+    let json_path = parse_json_get_path(path).ok()?;
+    let mut names = Vec::new();
+    for segment in json_path.paths {
+        match segment {
+            Path::Root => {}
+            Path::DotField(name) | Path::ColonField(name) | Path::ObjectField(name) => {
+                names.push(name.into_owned());
+            }
+            // Array indexes, wildcards and filters do not identify a hinted object path.
+            _ => return None,
+        }
+    }
+    Some(names)
+}
+
+/// Returns the configured native type for an exact JSON2 object path.
+fn json_type_hint(field: &Field, path: &[String]) -> Result<Option<JsonNativeType>> {
+    let settings = if field.extension_type_name() == Some(Json2ExtensionType::NAME) {
+        let extension = field
+            .try_extension_type::<Json2ExtensionType>()
+            .map_err(|e| plan_datafusion_err!("invalid JSON2 extension metadata: {e}"))?;
+        Some(extension.metadata().json_settings().clone())
+    } else {
+        parse_legacy_json2_settings(field.metadata())
+            .map_err(|e| plan_datafusion_err!("invalid JSON2 extension metadata: {e}"))?
+    };
+
+    Ok(settings.and_then(|settings| {
+        settings
+            .type_hints()
+            .iter()
+            .find(|hint| hint.path == path)
+            .map(|hint| JsonNativeType::from(&hint.data_type))
+    }))
+}
+
+/// Quotes field names containing JSONPath punctuation, preserving literal keys.
+fn json_path_field(name: &str) -> Result<String> {
+    if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        Ok(name.to_string())
+    } else {
+        // Reuse serde_json's string escaping.
+        serde_json::to_string(name).map_err(|e| DataFusionError::External(Box::new(e)))
     }
 }
 
@@ -413,7 +514,9 @@ mod tests {
     use datafusion_expr::WindowFrame;
     use datafusion_functions::core::coalesce;
     use datafusion_functions::math::{abs, power};
-    use datatypes::extension::json::Json2ExtensionType;
+    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+    use datatypes::json::{JsonSettings, JsonTypeHint};
+    use datatypes::prelude::ConcreteDataType;
 
     use super::*;
 
@@ -538,7 +641,7 @@ mod tests {
         assert_eq!(
             func.args[1],
             Expr::Literal(
-                ScalarValue::Utf8(Some("list[0][\"a.b\"]".to_string())),
+                ScalarValue::Utf8(Some(r#"list[0]."a.b""#.to_string())),
                 None
             )
         );
@@ -568,11 +671,48 @@ mod tests {
                 );
                 assert_eq!(
                     func.args[1],
-                    Expr::Literal(ScalarValue::Utf8(Some("payload.cpu".to_string())), None)
+                    Expr::Literal(ScalarValue::Utf8(Some("$.payload.cpu".to_string())), None)
                 );
             }
             other => panic!("expected json_get scalar function, got {other:?}"),
         }
+
+        for (key, path) in [
+            ("http.status_code", r#"$."http.status_code""#),
+            ("a\"b", r#"$."a\"b""#),
+            ("a\\b", r#"$."a\\b""#),
+        ] {
+            let planned = planner.plan_compound_identifier(
+                &Field::new("labels", DataType::Struct(Fields::empty()), true)
+                    .with_extension_type(Json2ExtensionType::default()),
+                Some(&qualifier),
+                &[key.to_string()],
+            )?;
+            let PlannerResult::Planned(Expr::ScalarFunction(func)) = planned else {
+                unreachable!()
+            };
+            assert_eq!(
+                func.args[1],
+                Expr::Literal(ScalarValue::Utf8(Some(path.to_string())), None)
+            );
+        }
+
+        let PlannerResult::Planned(Expr::ScalarFunction(func)) = planner.plan_compound_identifier(
+            &Field::new("labels", DataType::Struct(Fields::empty()), true)
+                .with_extension_type(Json2ExtensionType::default()),
+            Some(&qualifier),
+            &["resource".to_string(), "http.status_code".to_string()],
+        )?
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            func.args[1],
+            Expr::Literal(
+                ScalarValue::Utf8(Some(r#"$.resource."http.status_code""#.to_string())),
+                None
+            )
+        );
 
         let original = planner.plan_compound_identifier(
             &Field::new("plain", DataType::Utf8, true),
@@ -592,14 +732,170 @@ mod tests {
     }
 
     #[test]
+    fn test_plan_compound_identifier_applies_json2_type_hint() -> Result<()> {
+        let settings = JsonSettings::try_new(
+            vec![JsonTypeHint {
+                path: vec!["payload".to_string(), "cpu".to_string()],
+                data_type: ConcreteDataType::int64_datatype(),
+                inverted_index: false,
+            }],
+            None,
+        )
+        .unwrap();
+        let field = Field::new("labels", DataType::Struct(Fields::empty()), true)
+            .with_extension_type(Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+                settings,
+            ))));
+
+        let PlannerResult::Planned(Expr::ScalarFunction(func)) = JsonExprPlanner
+            .plan_compound_identifier(
+                &field,
+                Some(&TableReference::bare("events")),
+                &["payload".to_string(), "cpu".to_string()],
+            )?
+        else {
+            unreachable!()
+        };
+
+        assert_eq!(
+            Some(DataType::Int64),
+            extract_json_get_type(&Expr::ScalarFunction(func))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_plan_json_get_applies_type_hint() -> Result<()> {
+        let settings = JsonSettings::try_new(
+            vec![
+                JsonTypeHint {
+                    path: vec!["payload".to_string(), "cpu".to_string()],
+                    data_type: ConcreteDataType::int64_datatype(),
+                    inverted_index: false,
+                },
+                JsonTypeHint {
+                    path: vec!["payload.cpu".to_string()],
+                    data_type: ConcreteDataType::string_datatype(),
+                    inverted_index: false,
+                },
+            ],
+            None,
+        )
+        .unwrap();
+        let field = Field::new("j", DataType::Struct(Fields::empty()), true).with_extension_type(
+            Json2ExtensionType::new(Arc::new(JsonMetadata::new(settings))),
+        );
+        let relation = TableReference::bare("events");
+        let schema = DFSchema::new_with_metadata(
+            vec![
+                (Some(relation.clone()), Arc::new(field.clone())),
+                (
+                    Some(TableReference::bare("other")),
+                    Arc::new(Field::new("j", DataType::Binary, true)),
+                ),
+            ],
+            Default::default(),
+        )?;
+        let base = Expr::Column(Column::new(Some(relation.clone()), "j"));
+
+        for (path, names, expected) in [
+            ("payload.cpu", vec!["payload", "cpu"], Some(DataType::Int64)),
+            (
+                "$.payload.cpu",
+                vec!["payload", "cpu"],
+                Some(DataType::Int64),
+            ),
+            (
+                r#"$."payload.cpu""#,
+                vec!["payload.cpu"],
+                Some(DataType::Utf8View),
+            ),
+            ("missing", vec!["missing"], None),
+        ] {
+            let Expr::ScalarFunction(function) = json_get_expr(base.clone(), path) else {
+                unreachable!();
+            };
+            let PlannerResult::Original(scalar) = JsonExprPlanner.plan_scalar(
+                RawScalarExpr {
+                    func: function.func,
+                    args: function.args,
+                },
+                &schema,
+            )?
+            else {
+                unreachable!();
+            };
+            let direct = Expr::ScalarFunction(ScalarFunction::new_udf(scalar.func, scalar.args));
+            let names = names.into_iter().map(String::from).collect::<Vec<_>>();
+            let PlannerResult::Planned(dotted) =
+                JsonExprPlanner.plan_compound_identifier(&field, Some(&relation), &names)?
+            else {
+                unreachable!();
+            };
+            assert_eq!(expected, extract_json_get_type(&direct), "{path}");
+            assert_eq!(
+                extract_json_get_type(&dotted),
+                extract_json_get_type(&direct)
+            );
+
+            // Outer function inference must not replace a declared hint.
+            if expected.is_some() {
+                let PlannerResult::Original(outer) = JsonExprPlanner.plan_scalar(
+                    RawScalarExpr {
+                        func: coalesce(),
+                        args: vec![
+                            direct.clone(),
+                            Expr::Literal(ScalarValue::Float64(Some(1.0)), None),
+                        ],
+                    },
+                    &schema,
+                )?
+                else {
+                    unreachable!();
+                };
+                assert_eq!(direct, outer.args[0]);
+            }
+        }
+
+        // Non-object paths cannot match an object type hint. A different table's unhinted
+        // column must not inherit the same-named JSON2 column's hints either.
+        for (base, path) in [
+            (base.clone(), "$"),
+            (base.clone(), "$.payload.*"),
+            (base.clone(), "$.payload.cpu[0]"),
+            (base.clone(), "$.payload["),
+            (Expr::Column(Column::new(Some("other"), "j")), "payload.cpu"),
+        ] {
+            let Expr::ScalarFunction(function) = json_get_expr(base, path) else {
+                unreachable!();
+            };
+            let PlannerResult::Original(scalar) = JsonExprPlanner.plan_scalar(
+                RawScalarExpr {
+                    func: function.func,
+                    args: function.args,
+                },
+                &schema,
+            )?
+            else {
+                unreachable!();
+            };
+            assert_eq!(2, scalar.args.len(), "{path}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_plan_functions() -> Result<()> {
         let planner = JsonExprPlanner;
         let json_get = || json_get_expr(Expr::Column(Column::new_unqualified("j")), "a.b");
 
-        let PlannerResult::Original(scalar) = planner.plan_scalar(RawScalarExpr {
-            func: abs(),
-            args: vec![json_get()],
-        })?
+        let PlannerResult::Original(scalar) = planner.plan_scalar(
+            RawScalarExpr {
+                func: abs(),
+                args: vec![json_get()],
+            },
+            &DFSchema::empty(),
+        )?
         else {
             unreachable!();
         };
@@ -608,13 +904,16 @@ mod tests {
             extract_json_get_type(&scalar.args[0])
         );
 
-        let PlannerResult::Original(scalar) = planner.plan_scalar(RawScalarExpr {
-            func: power(),
-            args: vec![
-                json_get(),
-                Expr::Column(Column::new_unqualified("exponent")),
-            ],
-        })?
+        let PlannerResult::Original(scalar) = planner.plan_scalar(
+            RawScalarExpr {
+                func: power(),
+                args: vec![
+                    json_get(),
+                    Expr::Column(Column::new_unqualified("exponent")),
+                ],
+            },
+            &DFSchema::empty(),
+        )?
         else {
             unreachable!();
         };
@@ -679,10 +978,13 @@ mod tests {
         let mut typed = json_get();
         push_json_get_type_arg(&mut typed, &DataType::Float64)?;
 
-        let PlannerResult::Original(scalar) = planner.plan_scalar(RawScalarExpr {
-            func: coalesce(),
-            args: vec![json_get(), typed],
-        })?
+        let PlannerResult::Original(scalar) = planner.plan_scalar(
+            RawScalarExpr {
+                func: coalesce(),
+                args: vec![json_get(), typed],
+            },
+            &DFSchema::empty(),
+        )?
         else {
             unreachable!();
         };

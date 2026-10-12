@@ -10,11 +10,22 @@ INSERT INTO build_index_restart_test VALUES
 (4,"The quick brown fox jumps over the lazy rabbit"), 
 (5,"The quick brown fox jumps over the lazy turtle");
 
+SELECT * FROM build_index_restart_test;
+
 ADMIN FLUSH_TABLE('build_index_restart_test');
 
 -- SQLNESS SLEEP 1s
 -- No fulltext index yet
 SHOW INDEX FROM build_index_restart_test;
+
+-- Index size is 0 before the fulltext index is built
+SELECT index_size FROM INFORMATION_SCHEMA.REGION_STATISTICS
+WHERE table_id = (
+    SELECT table_id
+    FROM information_schema.tables
+    WHERE table_schema = 'public'
+      AND table_name = 'build_index_restart_test'
+);
 
 -- No physical fulltext index metadata yet.
 -- ssts_index_meta.index_type uses physical backend names (fulltext_bloom/fulltext_tantivy),
@@ -54,6 +65,15 @@ WHERE table_id = (
       AND table_name = 'build_index_restart_test'
 )
 AND index_type LIKE 'fulltext%';
+
+-- Fulltext index size is reported after the build
+SELECT index_size FROM INFORMATION_SCHEMA.REGION_STATISTICS
+WHERE table_id = (
+    SELECT table_id
+    FROM information_schema.tables
+    WHERE table_schema = 'public'
+      AND table_name = 'build_index_restart_test'
+);
 
 -- SQLNESS ARG restart=true
 -- After restart, verify fulltext query still works

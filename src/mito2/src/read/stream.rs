@@ -43,7 +43,6 @@ pub type ScanBatchStream = BoxStream<'static, Result<ScanBatch>>;
 pub(crate) struct ConvertBatchStream {
     inner: ScanBatchStream,
     projection_mapper: Arc<FlatProjectionMapper>,
-    #[allow(dead_code)]
     cache_strategy: CacheStrategy,
     partition_metrics: PartitionMetrics,
     pending: VecDeque<RecordBatch>,

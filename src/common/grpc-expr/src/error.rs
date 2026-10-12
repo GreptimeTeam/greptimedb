@@ -73,6 +73,13 @@ pub enum Error {
         source: api::error::Error,
     },
 
+    #[snafu(display("Invalid JSON settings: {}", err))]
+    InvalidJsonSettings {
+        err: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unknown location type: {}", location_type))]
     UnknownLocationType {
         location_type: i32,
@@ -188,6 +195,7 @@ impl ErrorExt for Error {
             | Error::MissingTimestampColumn { .. } => StatusCode::InvalidArguments,
             Error::MissingField { .. } => StatusCode::InvalidArguments,
             Error::InvalidColumnDef { source, .. } => source.status_code(),
+            Error::InvalidJsonSettings { .. } => StatusCode::InvalidArguments,
             Error::UnknownLocationType { .. } => StatusCode::InvalidArguments,
 
             Error::UnknownColumnDataType { .. } | Error::InvalidFulltextIndexColumnType { .. } => {

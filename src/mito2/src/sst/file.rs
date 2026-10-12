@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use base64::prelude::{BASE64_STANDARD, Engine};
 use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
-use common_telemetry::{debug, error};
+use common_telemetry::{debug, error, warn};
 use common_time::Timestamp;
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
@@ -39,6 +39,7 @@ use crate::cache::file_cache::{FileType, IndexKey};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::location;
 use crate::sst::parquet::SstInfo;
+use crate::sst::primary_key::PrimaryKeyRangeMapper;
 
 /// Custom serde functions for Bytes fields serialized as base64 strings.
 fn serialize_bytes_option<S>(bytes: &Option<Bytes>, serializer: S) -> Result<S::Ok, S::Error>
@@ -297,20 +298,33 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Formats a debug field with a custom closure, as a stable replacement for
+/// the unstable `DebugStruct::field_with`.
+struct DebugFmt<F: Fn(&mut Formatter<'_>) -> fmt::Result>(F);
+
+impl<F: Fn(&mut Formatter<'_>) -> fmt::Result> std::fmt::Debug for DebugFmt<F> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        (self.0)(f)
+    }
+}
+
 impl Debug for FileMeta {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let mut debug_struct = f.debug_struct("FileMeta");
         debug_struct
             .field("region_id", &self.region_id)
-            .field_with("file_id", |f| write!(f, "{} ", self.file_id))
-            .field_with("time_range", |f| {
-                write!(
-                    f,
-                    "({}, {}) ",
-                    self.time_range.0.to_iso8601_string(),
-                    self.time_range.1.to_iso8601_string()
-                )
-            })
+            .field("file_id", &DebugFmt(|f| write!(f, "{} ", self.file_id)))
+            .field(
+                "time_range",
+                &DebugFmt(|f| {
+                    write!(
+                        f,
+                        "({}, {}) ",
+                        self.time_range.0.to_iso8601_string(),
+                        self.time_range.1.to_iso8601_string()
+                    )
+                }),
+            )
             .field("level", &self.level)
             .field("file_size", &ReadableSize(self.file_size))
             .field(
@@ -326,14 +340,17 @@ impl Debug for FileMeta {
         debug_struct
             .field("num_rows", &self.num_rows)
             .field("num_row_groups", &self.num_row_groups)
-            .field_with("sequence", |f| match self.sequence {
-                None => {
-                    write!(f, "None")
-                }
-                Some(seq) => {
-                    write!(f, "{}", seq)
-                }
-            })
+            .field(
+                "sequence",
+                &DebugFmt(|f| match self.sequence {
+                    None => {
+                        write!(f, "None")
+                    }
+                    Some(seq) => {
+                        write!(f, "{}", seq)
+                    }
+                }),
+            )
             .field("partition_expr", &self.partition_expr)
             .field("num_series", &self.num_series);
         if self.primary_key_min.is_some() || self.primary_key_max.is_some() {
@@ -360,8 +377,7 @@ pub enum IndexType {
     FulltextIndex,
     /// Bloom Filter index
     BloomFilterIndex,
-    /// Vector index (HNSW).
-    #[cfg(feature = "vector_index")]
+    /// Retained for manifests written with the removed experimental vector index.
     VectorIndex,
 }
 
@@ -423,12 +439,6 @@ impl FileMeta {
     pub fn bloom_filter_index_available(&self) -> bool {
         self.available_indexes
             .contains(&IndexType::BloomFilterIndex)
-    }
-
-    /// Returns true if the file has a vector index.
-    #[cfg(feature = "vector_index")]
-    pub fn vector_index_available(&self) -> bool {
-        self.available_indexes.contains(&IndexType::VectorIndex)
     }
 
     pub fn index_file_size(&self) -> u64 {
@@ -497,6 +507,7 @@ impl fmt::Debug for FileHandle {
 }
 
 impl FileHandle {
+    /// Creates a handle sharing the file's physical state and original statistics.
     pub fn new(meta: FileMeta, file_purger: FilePurgerRef) -> FileHandle {
         let pk_range = meta.primary_key_range();
         FileHandle {
@@ -612,12 +623,100 @@ impl FileHandle {
         self.inner.deleted.load(Ordering::Relaxed)
     }
 
-    pub fn primary_key_range(&self) -> Option<(Bytes, Bytes)> {
-        self.inner.primary_key_range.read().unwrap().clone()
+    /// Returns bounds aligned to the caller's pinned schema, before any comparison
+    /// or aggregation. Unknown and invalid statistics cannot exclude possible data.
+    pub(crate) fn primary_key_range(
+        &self,
+        mapper: &PrimaryKeyRangeMapper,
+    ) -> Option<(Bytes, Bytes)> {
+        debug_assert_eq!(self.region_id().table_id(), mapper.region_id().table_id());
+        if let Some(range) = self
+            .inner
+            .primary_key_range
+            .read()
+            .unwrap()
+            .aligned(mapper.schema_version())
+        {
+            return range.clone();
+        }
+        // Recheck under the write lock: another snapshot may have replaced the cached schema.
+        let aligned = self.inner.primary_key_range.write().unwrap().align(mapper);
+        match aligned {
+            Ok(range) => range,
+            Err(err) => {
+                warn!(err; "Invalid SST primary key range; using unknown bounds, region: {}, file: {}, schema version: {}",
+                    self.region_id(), self.file_id(), mapper.schema_version());
+                None
+            }
+        }
+    }
+
+    /// Returns original statistics for metadata hydration, never schema-aligned bounds.
+    pub fn raw_primary_key_range(&self) -> Option<(Bytes, Bytes)> {
+        self.inner.primary_key_range.read().unwrap().raw().cloned()
     }
 
     pub(crate) fn set_primary_key_range(&self, primary_key_range: (Bytes, Bytes)) {
-        *self.inner.primary_key_range.write().unwrap() = Some(primary_key_range);
+        // SST contents are immutable. Hydrate missing raw statistics without
+        // replacing the source of already cached schema views.
+        let mut range = self.inner.primary_key_range.write().unwrap();
+        if matches!(*range, PrimaryKeyRange::Missing) {
+            *range = PrimaryKeyRange::Raw(primary_key_range);
+        }
+    }
+}
+
+type PrimaryKeyBounds = (Bytes, Bytes);
+
+/// A single-slot cache shared by file handles. Always retain the source bounds so
+/// older snapshots and changed defaults can realign without interpreting padded values as stored.
+enum PrimaryKeyRange {
+    Missing,
+    Raw(PrimaryKeyBounds),
+    Aligned {
+        raw: PrimaryKeyBounds,
+        schema_version: u64,
+        bounds: Option<PrimaryKeyBounds>,
+    },
+}
+
+impl PrimaryKeyRange {
+    fn raw(&self) -> Option<&PrimaryKeyBounds> {
+        match self {
+            Self::Missing => None,
+            Self::Raw(raw) | Self::Aligned { raw, .. } => Some(raw),
+        }
+    }
+
+    fn aligned(&self, target_version: u64) -> Option<&Option<PrimaryKeyBounds>> {
+        match self {
+            Self::Aligned {
+                schema_version,
+                bounds,
+                ..
+            } if *schema_version == target_version => Some(bounds),
+            _ => None,
+        }
+    }
+
+    fn align(
+        &mut self,
+        mapper: &PrimaryKeyRangeMapper,
+    ) -> crate::error::Result<Option<PrimaryKeyBounds>> {
+        if let Some(bounds) = self.aligned(mapper.schema_version()) {
+            return Ok(bounds.clone());
+        }
+        let Some(raw) = self.raw().cloned() else {
+            return Ok(None);
+        };
+        let aligned = mapper.map(raw.clone());
+        // Failed mappings also occupy the cache, so repeated hits don't repeat the warning.
+        *self = Self::Aligned {
+            raw,
+            schema_version: mapper.schema_version(),
+            bounds: aligned.as_ref().ok().cloned().flatten(),
+        };
+        aligned
     }
 }
 
@@ -629,7 +728,7 @@ struct FileHandleInner {
     compacting: AtomicBool,
     deleted: AtomicBool,
     index_outdated: AtomicBool,
-    primary_key_range: RwLock<Option<(Bytes, Bytes)>>,
+    primary_key_range: RwLock<PrimaryKeyRange>,
     file_purger: FilePurgerRef,
 }
 
@@ -656,7 +755,9 @@ impl FileHandleInner {
             compacting: AtomicBool::new(false),
             deleted: AtomicBool::new(false),
             index_outdated: AtomicBool::new(false),
-            primary_key_range: RwLock::new(primary_key_range),
+            primary_key_range: RwLock::new(
+                primary_key_range.map_or(PrimaryKeyRange::Missing, PrimaryKeyRange::Raw),
+            ),
             file_purger,
         }
     }
@@ -968,6 +1069,31 @@ mod tests {
         );
         let deserialized_file_meta: FileMeta = serde_json::from_str(json_file_meta).unwrap();
         assert_eq!(file_meta, deserialized_file_meta);
+    }
+
+    #[test]
+    fn test_deserialize_legacy_vector_index() {
+        let json = r#"{
+            "region_id": 0,
+            "file_id": "bc5896ec-e4d8-4017-a80d-f2de73188d55",
+            "time_range": [{"value":0,"unit":"Millisecond"},{"value":0,"unit":"Millisecond"}],
+            "available_indexes": ["VectorIndex", "InvertedIndex"],
+            "indexes": [{"column_id": 1, "created_indexes": ["VectorIndex"]}],
+            "level": 0
+        }"#;
+        let meta: FileMeta = serde_json::from_str(json).unwrap();
+        assert!(meta.inverted_index_available());
+        assert!(!meta.fulltext_index_available());
+        assert!(!meta.bloom_filter_index_available());
+        let encoded = serde_json::to_value(&meta).unwrap();
+        assert_eq!(
+            encoded["available_indexes"],
+            serde_json::json!(["VectorIndex", "InvertedIndex"])
+        );
+        assert_eq!(
+            encoded["indexes"][0]["created_indexes"],
+            serde_json::json!(["VectorIndex"])
+        );
     }
 
     #[test]

@@ -20,6 +20,7 @@ use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContext;
 use table::table_reference::TableReference;
 use tests_integration::cluster::GreptimeDbClusterBuilder;
+use tests_integration::test_util::test_event_recorder_options;
 
 use crate::event_recorder_test_util::{assert_eventually_eq, find_eventually_string};
 
@@ -33,6 +34,7 @@ async fn test_catalog_and_database_reconciliation_events() {
 
     let cluster = GreptimeDbClusterBuilder::new("catalog_database_reconciliation_events")
         .await
+        .with_event_recorder_options(test_event_recorder_options())
         .with_datanodes(1)
         .build(true)
         .await;
@@ -243,6 +245,7 @@ async fn test_table_reconciliation_events() {
 
     let cluster = GreptimeDbClusterBuilder::new("table_reconciliation_events")
         .await
+        .with_event_recorder_options(test_event_recorder_options())
         .with_datanodes(1)
         .build(true)
         .await;
@@ -351,6 +354,7 @@ async fn test_logical_table_reconciliation_events() {
 
     let cluster = GreptimeDbClusterBuilder::new("logical_table_reconciliation_events")
         .await
+        .with_event_recorder_options(test_event_recorder_options())
         .with_datanodes(1)
         .build(true)
         .await;

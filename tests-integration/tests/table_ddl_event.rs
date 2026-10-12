@@ -41,7 +41,9 @@ use servers::query_handler::grpc::GrpcQueryHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{Channel, QueryContext};
 use tests_integration::cluster::GreptimeDbClusterBuilder;
-use tests_integration::test_util::setup_authenticated_grpc_database;
+use tests_integration::test_util::{
+    setup_authenticated_grpc_database, test_event_recorder_options,
+};
 
 use crate::event_recorder_test_util::{
     assert_eventually_eq, assert_procedure_actor, assert_single_event, find_eventually_string,
@@ -79,6 +81,7 @@ async fn test_table_ddl_procedure_events() {
     }
     let cluster = GreptimeDbClusterBuilder::new("table_ddl_procedure_events")
         .await
+        .with_event_recorder_options(test_event_recorder_options())
         .with_datanodes(1)
         .with_metasrv_gc_config(gc_options)
         .with_datanode_gc_config(GcConfig {

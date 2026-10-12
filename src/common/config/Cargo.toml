@@ -29,4 +29,3 @@ datanode.workspace = true
 meta-client.workspace = true
 serde.workspace = true
 temp-env = "0.3"
-tempfile.workspace = true

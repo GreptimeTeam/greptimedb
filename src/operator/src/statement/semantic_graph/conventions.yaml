@@ -37,7 +37,7 @@ virtual_dst_candidates:
   - { column: span_attributes.db.name, connection_type: database }
   - { column: span_attributes.server.address, connection_type: virtual_node }
 
-# Implicit declarations for greptime_trace_v1 tables; the pod UID bridges
+# Implicit declarations for Trace V1/V2 tables; the pod UID bridges
 # trace-side pods onto the kube-state-metrics entities below. host.name and
 # container.name vary by SDK and resource detector, so identity is the id.
 # qualified_by folds the namespace into the service identity the same way the

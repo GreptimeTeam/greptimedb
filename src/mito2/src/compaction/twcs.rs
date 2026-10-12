@@ -31,11 +31,12 @@ use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::{Picker, PickerOutput, get_expired_ssts};
 use crate::compaction::run::{
-    Ranged, SortedRun, find_sorted_runs, find_sorted_runs_by_time_range, merge_primary_key_ranges,
-    primary_key_ranges_overlap,
+    Ranged, SortedRun, files_overlap, files_overlap_inclusive, find_sorted_runs,
+    find_sorted_runs_by_time_range, merge_primary_key_ranges, primary_key_ranges_overlap,
 };
 use crate::error::{JoinSnafu, Result};
 use crate::sst::file::{FileHandle, Level, overlaps};
+use crate::sst::primary_key::PrimaryKeyRangeMapper;
 use crate::sst::version::LevelMeta;
 
 const LEVEL_COMPACTED: Level = 1;
@@ -69,6 +70,14 @@ struct WindowPickContext<'a> {
     files: &'a Window,
     windows: &'a BTreeMap<i64, Window>,
     phase: PickPhase,
+    primary_key_mapper: &'a PrimaryKeyRangeMapper,
+}
+
+struct WindowOutputContext {
+    active_window: Option<i64>,
+    time_window_size: Option<i64>,
+    max_outputs: Option<usize>,
+    primary_key_mapper: Arc<PrimaryKeyRangeMapper>,
 }
 
 /// A mixed L0/L1 compaction may rewrite at most this many L1 rows per L0 row.
@@ -119,13 +128,18 @@ pub struct TwcsPicker {
 }
 
 impl TwcsPicker {
-    async fn build_output_with_time_range(
+    async fn build_output(
         &self,
         region_id: RegionId,
         time_windows: BTreeMap<i64, Window>,
-        active_window: Option<i64>,
-        time_window_size: Option<i64>,
+        context: WindowOutputContext,
     ) -> Result<Vec<CompactionOutput>> {
+        let WindowOutputContext {
+            active_window,
+            time_window_size,
+            max_outputs,
+            primary_key_mapper,
+        } = context;
         let mut output = vec![];
         let windows = time_windows
             .values()
@@ -145,6 +159,8 @@ impl TwcsPicker {
             .map(|window| window.time_window)
             .collect::<Vec<_>>();
         let time_windows = Arc::new(time_windows);
+        // Enumerating all LastNonNull seeds must not increase the number of
+        // concurrently planned windows along with the output limit.
         let chunk_size = self.max_background_tasks.unwrap_or(windows.len()).max(1);
         let mut selected_windows = HashSet::new();
         'phases: for phase in PICK_PHASES {
@@ -163,6 +179,7 @@ impl TwcsPicker {
                     let picker = self.clone();
                     let time_windows = time_windows.clone();
                     let window = *window;
+                    let primary_key_mapper = primary_key_mapper.clone();
                     handles.push(common_runtime::spawn_blocking_compact(move || {
                         time_windows.get(&window).map(|files| {
                             (
@@ -174,6 +191,7 @@ impl TwcsPicker {
                                         files,
                                         windows: &time_windows,
                                         phase,
+                                        primary_key_mapper: &primary_key_mapper,
                                     },
                                 ),
                             )
@@ -198,12 +216,12 @@ impl TwcsPicker {
                         output_time_range: None, // we do not enforce output time range in twcs compactions.
                     });
 
-                    if let Some(max_background_tasks) = self.max_background_tasks
-                        && output.len() >= max_background_tasks
+                    if let Some(max_outputs) = max_outputs
+                        && output.len() >= max_outputs
                     {
                         debug!(
-                            "Region ({:?}) compaction task size larger than max background tasks({}), remaining tasks discarded",
-                            region_id, max_background_tasks
+                            "Region ({:?}) compaction output limit ({}) reached, remaining candidates discarded",
+                            region_id, max_outputs
                         );
                         break 'phases;
                     }
@@ -226,6 +244,7 @@ impl TwcsPicker {
             files,
             windows,
             phase,
+            primary_key_mapper,
         } = context;
         let is_active_window = active_window == Some(files.time_window);
         let window = &files.time_window;
@@ -263,13 +282,21 @@ impl TwcsPicker {
         }
         let (inputs, found_runs) = if is_active_window {
             match phase {
-                PickPhase::HasL0 if num_l0_files >= self.trigger_file_num => {
-                    pick_candidate_files(l0_files, self.max_output_file_size, pick_count_first)
-                }
+                PickPhase::HasL0 if num_l0_files >= self.trigger_file_num => pick_candidate_files(
+                    l0_files,
+                    self.max_output_file_size,
+                    pick_count_first,
+                    primary_key_mapper,
+                ),
                 PickPhase::L1FileReduction | PickPhase::L1OverlapOnly
                     if num_l1_files >= self.active_window_l1_merge_trigger =>
                 {
-                    pick_l1_candidate_files(l1_files, self.max_output_file_size, phase)
+                    pick_l1_candidate_files(
+                        l1_files,
+                        self.max_output_file_size,
+                        phase,
+                        primary_key_mapper,
+                    )
                 }
                 _ => (vec![], 0),
             }
@@ -281,6 +308,7 @@ impl TwcsPicker {
                     l0_file_num: self.inactive_window_trigger_file_num,
                     l1_file_num: self.inactive_window_l1_merge_trigger,
                     phase,
+                    primary_key_mapper,
                 },
                 self.max_output_file_size,
             )
@@ -291,7 +319,7 @@ impl TwcsPicker {
 
         let filter_deleted = !self.append_mode
             && !window_has_overlap(files, windows)
-            && !selected_overlaps_unselected(&inputs, files);
+            && !selected_overlaps_unselected(&inputs, files, primary_key_mapper);
 
         if inputs.len() > 1 {
             // If we have more than one file to compact.
@@ -324,72 +352,106 @@ impl TwcsPicker {
 ///    The rewrite is bounded by the L0 bytes and leaves large compacted files
 ///    untouched. If nothing qualifies, the window is left as-is.
 #[derive(Debug, Clone, Copy)]
-struct InactiveWindowPick {
+struct InactiveWindowPick<'a> {
     l0_file_num: usize,
     l1_file_num: usize,
     phase: PickPhase,
+    primary_key_mapper: &'a PrimaryKeyRangeMapper,
 }
 
 fn pick_inactive_window_files(
     l0_files: Vec<FileHandle>,
     l1_files: Vec<FileHandle>,
-    pick: InactiveWindowPick,
+    pick: InactiveWindowPick<'_>,
     max_output_file_size: Option<u64>,
 ) -> (Vec<FileHandle>, usize) {
     if !matches!(pick.phase, PickPhase::HasL0) {
         return if l1_files.len() >= pick.l1_file_num {
-            pick_l1_candidate_files(l1_files, max_output_file_size, pick.phase)
+            pick_l1_candidate_files(
+                l1_files,
+                max_output_file_size,
+                pick.phase,
+                pick.primary_key_mapper,
+            )
         } else {
             (vec![], 0)
         };
     }
 
     if l0_files.len() >= pick.l0_file_num {
-        let pick = pick_candidate_files(l0_files.clone(), max_output_file_size, pick_count_first);
-        if !pick.0.is_empty() {
-            return pick;
+        let candidate = pick_candidate_files(
+            l0_files.clone(),
+            max_output_file_size,
+            pick_count_first,
+            pick.primary_key_mapper,
+        );
+        if !candidate.0.is_empty() {
+            return candidate;
         }
     }
 
-    let pick = pick_candidate_files(l0_files.clone(), max_output_file_size, pick_count_first);
-    if !pick.0.is_empty() {
-        return pick;
+    let candidate = pick_candidate_files(
+        l0_files.clone(),
+        max_output_file_size,
+        pick_count_first,
+        pick.primary_key_mapper,
+    );
+    if !candidate.0.is_empty() {
+        return candidate;
     }
     let mut all_files = l0_files.clone();
     all_files.extend(l1_files);
-    let pick = pick_candidate_files(all_files, max_output_file_size, pick_mixed_within_budget);
-    if !pick.0.is_empty() {
-        return pick;
+    let candidate = pick_candidate_files(
+        all_files,
+        max_output_file_size,
+        pick_mixed_within_budget,
+        pick.primary_key_mapper,
+    );
+    if !candidate.0.is_empty() {
+        return candidate;
     }
 
-    pick_candidate_files(l0_files, max_output_file_size, pick_unbalanced_count_first)
+    pick_candidate_files(
+        l0_files,
+        max_output_file_size,
+        pick_unbalanced_count_first,
+        pick.primary_key_mapper,
+    )
 }
 
 fn pick_l1_candidate_files(
     l1_files: Vec<FileHandle>,
     max_output_file_size: Option<u64>,
     phase: PickPhase,
+    mapper: &PrimaryKeyRangeMapper,
 ) -> (Vec<FileHandle>, usize) {
     let picker = match phase {
         PickPhase::L1FileReduction => pick_l1_file_reduction,
         PickPhase::L1OverlapOnly => pick_l1_overlap_only,
         PickPhase::HasL0 => return (vec![], 0),
     };
-    pick_candidate_files(l1_files, max_output_file_size, picker)
+    pick_candidate_files(l1_files, max_output_file_size, picker, mapper)
 }
+
+type CandidatePicker =
+    fn(Vec<SortedRun<FileHandle>>, Option<u64>, &PrimaryKeyRangeMapper) -> Vec<FileHandle>;
 
 fn pick_candidate_files(
     mut files: Vec<FileHandle>,
     max_output_file_size: Option<u64>,
-    picker: fn(Vec<SortedRun<FileHandle>>, Option<u64>) -> Vec<FileHandle>,
+    picker: CandidatePicker,
+    mapper: &PrimaryKeyRangeMapper,
 ) -> (Vec<FileHandle>, usize) {
     let sorted_runs = if files.len() < 1024 {
-        find_sorted_runs(&mut files)
+        find_sorted_runs(&mut files, |lhs, rhs| files_overlap(lhs, rhs, mapper))
     } else {
         find_sorted_runs_by_time_range(&mut files)
     };
     let found_runs = sorted_runs.len();
-    (picker(sorted_runs, max_output_file_size), found_runs)
+    (
+        picker(sorted_runs, max_output_file_size, mapper),
+        found_runs,
+    )
 }
 
 #[derive(Debug)]
@@ -431,6 +493,7 @@ impl Candidate {
         file: &OrderedFile,
         preceding: &[OrderedFile],
         participations: &mut Vec<bool>,
+        mapper: &PrimaryKeyRangeMapper,
     ) {
         self.num_files += 1;
         let file_size = file.file.size() as usize;
@@ -440,7 +503,8 @@ impl Candidate {
 
         let mut participates = false;
         for (offset, other) in preceding.iter().enumerate() {
-            if file.run_id != other.run_id && file.file.overlap_inclusive(other.file) {
+            if file.run_id != other.run_id && files_overlap_inclusive(file.file, other.file, mapper)
+            {
                 if !participations[offset] {
                     participations[offset] = true;
                     self.overlap_participants += 1;
@@ -570,15 +634,22 @@ impl CandidateScore {
 fn pick_count_first(
     sorted_runs: Vec<SortedRun<FileHandle>>,
     max_output_file_size: Option<u64>,
+    mapper: &PrimaryKeyRangeMapper,
 ) -> Vec<FileHandle> {
-    pick_count_first_where(sorted_runs, max_output_file_size, is_balanced_candidate)
+    pick_count_first_where(
+        sorted_runs,
+        max_output_file_size,
+        mapper,
+        is_balanced_candidate,
+    )
 }
 
 fn pick_l1_file_reduction(
     sorted_runs: Vec<SortedRun<FileHandle>>,
     max_output_file_size: Option<u64>,
+    mapper: &PrimaryKeyRangeMapper,
 ) -> Vec<FileHandle> {
-    pick_count_first_where(sorted_runs, max_output_file_size, |candidate| {
+    pick_count_first_where(sorted_runs, max_output_file_size, mapper, |candidate| {
         is_balanced_candidate(candidate) && candidate.file_reduction(max_output_file_size) > 0
     })
 }
@@ -586,8 +657,9 @@ fn pick_l1_file_reduction(
 fn pick_l1_overlap_only(
     sorted_runs: Vec<SortedRun<FileHandle>>,
     max_output_file_size: Option<u64>,
+    mapper: &PrimaryKeyRangeMapper,
 ) -> Vec<FileHandle> {
-    pick_count_first_where(sorted_runs, max_output_file_size, |candidate| {
+    pick_count_first_where(sorted_runs, max_output_file_size, mapper, |candidate| {
         is_balanced_candidate(candidate)
             && candidate.file_reduction(max_output_file_size) == 0
             && candidate.overlap_participants > 0
@@ -598,8 +670,9 @@ fn pick_l1_overlap_only(
 fn pick_mixed_count_first(
     sorted_runs: Vec<SortedRun<FileHandle>>,
     max_output_file_size: Option<u64>,
+    mapper: &PrimaryKeyRangeMapper,
 ) -> Vec<FileHandle> {
-    pick_count_first_where(sorted_runs, max_output_file_size, |candidate| {
+    pick_count_first_where(sorted_runs, max_output_file_size, mapper, |candidate| {
         candidate.has_mixed_levels() && is_balanced_candidate(candidate)
     })
 }
@@ -609,8 +682,9 @@ fn pick_mixed_count_first(
 fn pick_mixed_within_budget(
     sorted_runs: Vec<SortedRun<FileHandle>>,
     max_output_file_size: Option<u64>,
+    mapper: &PrimaryKeyRangeMapper,
 ) -> Vec<FileHandle> {
-    pick_count_first_where(sorted_runs, max_output_file_size, |candidate| {
+    pick_count_first_where(sorted_runs, max_output_file_size, mapper, |candidate| {
         candidate.has_mixed_levels() && candidate.within_rewrite_budget(max_output_file_size)
     })
 }
@@ -621,8 +695,9 @@ fn pick_mixed_within_budget(
 fn pick_unbalanced_count_first(
     sorted_runs: Vec<SortedRun<FileHandle>>,
     max_output_file_size: Option<u64>,
+    mapper: &PrimaryKeyRangeMapper,
 ) -> Vec<FileHandle> {
-    pick_count_first_where(sorted_runs, max_output_file_size, |_| true)
+    pick_count_first_where(sorted_runs, max_output_file_size, mapper, |_| true)
 }
 
 fn is_balanced_candidate(candidate: &Candidate) -> bool {
@@ -632,6 +707,7 @@ fn is_balanced_candidate(candidate: &Candidate) -> bool {
 fn pick_count_first_where(
     sorted_runs: Vec<SortedRun<FileHandle>>,
     max_output_file_size: Option<u64>,
+    mapper: &PrimaryKeyRangeMapper,
     is_eligible: impl Fn(&Candidate) -> bool,
 ) -> Vec<FileHandle> {
     let files = ordered_files(&sorted_runs);
@@ -642,7 +718,12 @@ fn pick_count_first_where(
         let right_bound = left.saturating_add(*MAX_INPUT_FILES).min(files.len());
         let mut participations: Vec<bool> = Vec::with_capacity(right_bound - left);
         for right in left..right_bound {
-            candidate.absorb(&files[right], &files[left..right], &mut participations);
+            candidate.absorb(
+                &files[right],
+                &files[left..right],
+                &mut participations,
+                mapper,
+            );
             if candidate.num_files < 2
                 || !is_eligible(&candidate)
                 || !candidate.makes_progress(max_output_file_size)
@@ -695,7 +776,11 @@ fn ordered_files(sorted_runs: &[SortedRun<FileHandle>]) -> Vec<OrderedFile<'_>> 
     files
 }
 
-fn selected_overlaps_unselected(selected: &[FileHandle], window: &Window) -> bool {
+fn selected_overlaps_unselected(
+    selected: &[FileHandle],
+    window: &Window,
+    mapper: &PrimaryKeyRangeMapper,
+) -> bool {
     // The overall time span of the selection: a file outside it cannot overlap any
     // selected file (ranges are inclusive), so it needs no precise overlap check.
     let Some((span_start, span_end)) = selected
@@ -719,7 +804,7 @@ fn selected_overlaps_unselected(selected: &[FileHandle], window: &Window) -> boo
         .any(|unselected| {
             selected
                 .iter()
-                .any(|selected| selected.overlap_inclusive(unselected))
+                .any(|selected| files_overlap_inclusive(selected, unselected, mapper))
         })
 }
 
@@ -772,9 +857,22 @@ fn log_pick_result(
 #[async_trait::async_trait]
 impl Picker for TwcsPicker {
     async fn pick(&self, compaction_region: &CompactionRegion) -> Result<Option<PickerOutput>> {
+        self.pick_with_output_limit(compaction_region, self.max_background_tasks)
+            .await
+    }
+}
+
+impl TwcsPicker {
+    pub(crate) async fn pick_with_output_limit(
+        &self,
+        compaction_region: &CompactionRegion,
+        max_outputs: Option<usize>,
+    ) -> Result<Option<PickerOutput>> {
         let region_id = compaction_region.region_id;
         let picker = self.clone();
         let compaction_region = compaction_region.clone();
+        let primary_key_mapper = compaction_region.current_version.ssts.primary_key_mapper();
+        let window_mapper = primary_key_mapper.clone();
         let (expired_ssts, time_window_size, active_window, windows) =
             common_runtime::spawn_blocking_compact(move || {
                 let levels = compaction_region.current_version.ssts.levels();
@@ -812,6 +910,7 @@ impl Picker for TwcsPicker {
                         .flat_map(LevelMeta::files)
                         .filter(|file| !expired_file_ids.contains(&file.file_id())),
                     time_window_size,
+                    &window_mapper,
                 );
                 // Compute activity from the candidate files so expired or
                 // compacting files cannot identify a window absent from `windows`.
@@ -835,7 +934,16 @@ impl Picker for TwcsPicker {
             .context(JoinSnafu)?;
 
         let outputs = self
-            .build_output_with_time_range(region_id, windows, active_window, Some(time_window_size))
+            .build_output(
+                region_id,
+                windows,
+                WindowOutputContext {
+                    active_window,
+                    time_window_size: Some(time_window_size),
+                    max_outputs,
+                    primary_key_mapper,
+                },
+            )
             .await?;
 
         if outputs.is_empty() && expired_ssts.is_empty() {
@@ -861,15 +969,16 @@ struct Window {
     start: Timestamp,
     end: Timestamp,
     files: Vec<FileHandle>,
+    /// Start of the half-open window, in seconds.
     time_window: i64,
     primary_key_range: Option<(bytes::Bytes, bytes::Bytes)>,
 }
 
 impl Window {
     /// Creates a new [Window] with given file.
-    fn new_with_file(file: FileHandle) -> Self {
+    fn new_with_file(file: FileHandle, mapper: &PrimaryKeyRangeMapper) -> Self {
         let (start, end) = file.time_range();
-        let primary_key_range = file.primary_key_range();
+        let primary_key_range = file.primary_key_range(mapper);
         Self {
             start,
             end,
@@ -885,12 +994,14 @@ impl Window {
     }
 
     /// Adds a new file to window and updates time range.
-    fn add_file(&mut self, file: FileHandle) {
+    fn add_file(&mut self, file: FileHandle, mapper: &PrimaryKeyRangeMapper) {
         let (start, end) = file.time_range();
         self.start = self.start.min(start);
         self.end = self.end.max(end);
-        self.primary_key_range =
-            merge_primary_key_ranges(self.primary_key_range.take(), file.primary_key_range());
+        self.primary_key_range = merge_primary_key_ranges(
+            self.primary_key_range.take(),
+            file.primary_key_range(mapper),
+        );
         self.files.push(file);
     }
 
@@ -903,6 +1014,7 @@ impl Window {
 fn assign_to_windows<'a>(
     files: impl Iterator<Item = &'a FileHandle>,
     time_window_size: i64,
+    mapper: &PrimaryKeyRangeMapper,
 ) -> BTreeMap<i64, Window> {
     let mut windows: HashMap<i64, Window> = HashMap::new();
     // Iterates all files and assign to time windows according to max timestamp
@@ -911,19 +1023,14 @@ fn assign_to_windows<'a>(
             continue;
         }
         let (_, end) = f.time_range();
-        let time_window = end
-            .convert_to(TimeUnit::Second)
-            .unwrap()
-            .value()
-            .align_to_ceil_by_bucket(time_window_size)
-            .unwrap_or(i64::MIN);
+        let time_window = time_window_start(end, time_window_size);
 
         match windows.entry(time_window) {
             Entry::Occupied(mut e) => {
-                e.get_mut().add_file(f.clone());
+                e.get_mut().add_file(f.clone(), mapper);
             }
             Entry::Vacant(e) => {
-                let mut window = Window::new_with_file(f.clone());
+                let mut window = Window::new_with_file(f.clone(), mapper);
                 window.time_window = time_window;
                 e.insert(window);
             }
@@ -932,37 +1039,41 @@ fn assign_to_windows<'a>(
     windows.into_iter().collect()
 }
 
+/// Uses the same half-open windows as memtables, including timestamps in the first
+/// second after a boundary. An unrepresentable window start is clamped to `i64::MIN`.
+fn time_window_start(timestamp: Timestamp, time_window_size: i64) -> i64 {
+    // Conversion to seconds cannot overflow.
+    timestamp
+        .convert_to(TimeUnit::Second)
+        .and_then(|ts| ts.value().align_by_bucket(time_window_size))
+        .unwrap_or(i64::MIN)
+}
+
 fn time_window_intersects_range(
-    window_end: i64,
+    window_start: i64,
     time_window_size: i64,
     time_range: &TimestampRange,
 ) -> bool {
-    let first_window = match time_range.start() {
-        None => i64::MIN,
-        Some(start) => {
-            let Some(first_window) = start
-                .convert_to(TimeUnit::Second)
-                .and_then(|timestamp| timestamp.value().align_to_ceil_by_bucket(time_window_size))
-            else {
-                return false;
-            };
-            first_window
-        }
-    };
+    if time_range.is_empty() {
+        return false;
+    }
+    let first_window = time_range
+        .start()
+        .map_or(i64::MIN, |start| time_window_start(start, time_window_size));
     let last_window = match time_range.end() {
         None => i64::MAX,
         Some(end) => {
-            let Some(last_window) = end
+            // The range end is exclusive; keep the last second that intersects it.
+            let Some(last_second) = end
                 .convert_to_ceil(TimeUnit::Second)
                 .and_then(|timestamp| timestamp.value().checked_sub(1))
-                .and_then(|timestamp| timestamp.align_to_ceil_by_bucket(time_window_size))
             else {
                 return false;
             };
-            last_window
+            time_window_start(Timestamp::new_second(last_second), time_window_size)
         }
     };
-    (first_window..=last_window).contains(&window_end)
+    (first_window..=last_window).contains(&window_start)
 }
 
 fn window_has_overlap(this: &Window, windows: &BTreeMap<i64, Window>) -> bool {
@@ -980,7 +1091,7 @@ fn window_has_overlap(this: &Window, windows: &BTreeMap<i64, Window>) -> bool {
 }
 
 /// Finds the latest active writing window among all files.
-/// Returns `None` when there are no files or all files are corrupted.
+/// Returns `None` when there are no files.
 fn find_latest_window_in_seconds<'a>(
     files: impl Iterator<Item = &'a FileHandle>,
     time_window_size: i64,
@@ -996,9 +1107,7 @@ fn find_latest_window_in_seconds<'a>(
             latest_timestamp = Some(end);
         }
     }
-    latest_timestamp
-        .and_then(|ts| ts.convert_to_ceil(TimeUnit::Second))
-        .and_then(|ts| ts.value().align_to_ceil_by_bucket(time_window_size))
+    latest_timestamp.map(|ts| time_window_start(ts, time_window_size))
 }
 
 /// Finds the active window from the file with the highest sequence number.
@@ -1008,9 +1117,7 @@ fn find_latest_window_in_seconds<'a>(
 /// survives the transient state where level 0 is empty right after its files
 /// were compacted away. Returns `None` when no file carries a sequence.
 ///
-/// The window key follows the same convention as [`assign_to_windows`]
-/// (truncate to seconds, then align up), since it is compared against the
-/// window keys produced there.
+/// The window key is its inclusive start, as in [`assign_to_windows`].
 fn find_active_window_by_sequence<'a>(
     files: impl Iterator<Item = &'a FileHandle>,
     time_window_size: i64,
@@ -1018,12 +1125,7 @@ fn find_active_window_by_sequence<'a>(
     files
         .filter(|f| f.meta_ref().sequence.is_some())
         .max_by_key(|f| f.meta_ref().sequence)
-        .and_then(|f| {
-            f.time_range()
-                .1
-                .convert_to(TimeUnit::Second)
-                .and_then(|ts| ts.value().align_to_ceil_by_bucket(time_window_size))
-        })
+        .map(|f| time_window_start(f.time_range().1, time_window_size))
 }
 
 #[cfg(test)]
@@ -1033,7 +1135,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use bytes::Bytes;
     use common_base::Plugins;
     use common_time::range::TimestampRange;
     use store_api::storage::FileId;
@@ -1042,8 +1143,10 @@ mod tests {
     use crate::cache::CacheManager;
     use crate::compaction::compactor::CompactionVersion;
     use crate::compaction::test_util::{
-        new_file_handle, new_file_handle_with_sequence, new_file_handle_with_size_and_sequence,
-        new_file_handle_with_size_sequence_and_primary_key_range,
+        compaction_region_with_ssts, new_file_handle, new_file_handle_with_sequence,
+        new_file_handle_with_size_and_sequence,
+        new_file_handle_with_size_sequence_and_primary_key_range, pk_range,
+        primary_key_mapper_for_test,
     };
     use crate::config::MitoConfig;
     use crate::region::options::RegionOptions;
@@ -1051,6 +1154,132 @@ mod tests {
     use crate::sst::version::SstVersion;
     use crate::test_util::memtable_util::metadata_for_test;
     use crate::test_util::scheduler_util::SchedulerEnv;
+
+    fn assign_to_windows<'a>(
+        files: impl Iterator<Item = &'a FileHandle>,
+        time_window_size: i64,
+    ) -> BTreeMap<i64, Window> {
+        super::assign_to_windows(files, time_window_size, &primary_key_mapper_for_test())
+    }
+
+    fn pick_count_first(
+        sorted_runs: Vec<SortedRun<FileHandle>>,
+        max_output_file_size: Option<u64>,
+    ) -> Vec<FileHandle> {
+        super::pick_count_first(
+            sorted_runs,
+            max_output_file_size,
+            &primary_key_mapper_for_test(),
+        )
+    }
+
+    fn pick_mixed_count_first(
+        sorted_runs: Vec<SortedRun<FileHandle>>,
+        max_output_file_size: Option<u64>,
+    ) -> Vec<FileHandle> {
+        super::pick_mixed_count_first(
+            sorted_runs,
+            max_output_file_size,
+            &primary_key_mapper_for_test(),
+        )
+    }
+
+    impl TwcsPicker {
+        async fn build_output_with_time_range(
+            &self,
+            region_id: RegionId,
+            time_windows: BTreeMap<i64, Window>,
+            active_window: Option<i64>,
+            time_window_size: Option<i64>,
+        ) -> Result<Vec<CompactionOutput>> {
+            self.build_output(
+                region_id,
+                time_windows,
+                WindowOutputContext {
+                    active_window,
+                    time_window_size,
+                    max_outputs: self.max_background_tasks,
+                    primary_key_mapper: Arc::new(primary_key_mapper_for_test()),
+                },
+            )
+            .await
+        }
+    }
+
+    #[test]
+    fn test_cross_schema_pk_overlap_before_window_aggregation() {
+        use crate::test_util::sst_util::{new_primary_key, sst_region_metadata};
+
+        let metadata = Arc::new(sst_region_metadata());
+        let mut old = FileMeta {
+            region_id: metadata.region_id,
+            file_id: FileId::random(),
+            time_range: (
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(1000),
+            ),
+            primary_key_min: Some(new_primary_key(&["a"]).into()),
+            primary_key_max: Some(new_primary_key(&["b"]).into()),
+            ..Default::default()
+        };
+        let mut completed = new_primary_key(&["b"]);
+        completed.push(0); // The appended nullable tag's default.
+        let new = FileMeta {
+            file_id: FileId::random(),
+            time_range: (
+                Timestamp::new_millisecond(500),
+                Timestamp::new_millisecond(2000),
+            ),
+            primary_key_min: Some(completed.clone().into()),
+            primary_key_max: Some(completed.clone().into()),
+            ..old.clone()
+        };
+        assert!(old.primary_key_max < new.primary_key_min);
+        let mut ssts = SstVersion::new(metadata);
+        let old_id = old.file_id;
+        let new_id = new.file_id;
+        ssts.add_files(
+            crate::test_util::new_noop_file_purger(),
+            [old.clone(), new].into_iter(),
+        );
+        let old_file = &ssts.levels()[0].files[&old_id];
+        let new_file = &ssts.levels()[0].files[&new_id];
+        let ranges = ssts.primary_key_mapper();
+        let windows = super::assign_to_windows([old_file, new_file].into_iter(), 1, &ranges);
+        assert_eq!(2, windows.len());
+        assert!(
+            windows
+                .values()
+                .all(|window| window_has_overlap(window, &windows))
+        );
+
+        let mut window = Window::new_with_file(old_file.clone(), &ranges);
+        window.add_file(new_file.clone(), &ranges);
+        assert!(selected_overlaps_unselected(
+            std::slice::from_ref(new_file),
+            &window,
+            &ranges,
+        ));
+        assert_eq!(
+            Some(completed.into()),
+            window
+                .primary_key_range
+                .as_ref()
+                .map(|range| range.1.clone())
+        );
+
+        // In the same target schema, a genuinely disjoint range still prunes.
+        old.file_id = FileId::random();
+        old.primary_key_max = old.primary_key_min.clone();
+        let disjoint_id = old.file_id;
+        ssts.add_files(crate::test_util::new_noop_file_purger(), [old].into_iter());
+        let files = &ssts.levels()[0].files;
+        assert!(!files_overlap_inclusive(
+            &files[&disjoint_id],
+            &files[&new_id],
+            &ranges
+        ));
+    }
 
     #[test]
     fn test_valid_max_input_files_env_overrides_default() {
@@ -1061,40 +1290,6 @@ mod tests {
     fn test_invalid_max_input_files_env_falls_back_to_default() {
         for env_value in [None, Some(""), Some("invalid"), Some("0"), Some("1")] {
             assert_eq!(16, parse_max_input_files(env_value));
-        }
-    }
-
-    async fn compaction_region_with_ssts(
-        files: impl IntoIterator<Item = FileMeta>,
-        ttl: Duration,
-    ) -> CompactionRegion {
-        let env = SchedulerEnv::new().await;
-        let metadata = metadata_for_test();
-        let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
-        let mut ssts = SstVersion::new();
-        ssts.add_files(
-            Arc::new(crate::sst::file_purger::NoopFilePurger),
-            files.into_iter(),
-        );
-
-        CompactionRegion {
-            region_id: metadata.region_id,
-            region_options: RegionOptions::default(),
-            engine_config: Arc::new(MitoConfig::default()),
-            region_metadata: metadata.clone(),
-            cache_manager: Arc::new(CacheManager::default()),
-            access_layer: env.access_layer,
-            manifest_ctx,
-            current_version: CompactionVersion {
-                metadata,
-                options: RegionOptions::default(),
-                ssts: Arc::new(ssts),
-                compaction_time_window: None,
-            },
-            file_purger: None,
-            ttl: Some(ttl.into()),
-            max_parallelism: 1,
-            plugins: Plugins::new(),
         }
     }
 
@@ -1233,10 +1428,11 @@ mod tests {
         let env = SchedulerEnv::new().await;
         let metadata = metadata_for_test();
         let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
-        let mut ssts = SstVersion::new();
+        let mut ssts = SstVersion::new(metadata.clone());
         ssts.add_files(
             Arc::new(crate::sst::file_purger::NoopFilePurger),
             [100, 101].into_iter().map(|sequence| FileMeta {
+                region_id: metadata.region_id,
                 file_id: FileId::random(),
                 time_range: (
                     Timestamp::new_millisecond(0),
@@ -1259,6 +1455,7 @@ mod tests {
                 metadata,
                 options: RegionOptions::default(),
                 ssts: Arc::new(ssts),
+                memtable_min_sequence: None,
                 compaction_time_window: None,
             },
             file_purger: None,
@@ -1327,7 +1524,7 @@ mod tests {
             new_file_handle_with_sequence(FileId::random(), 0, 999, 1, 0),
             new_file_handle_with_sequence(FileId::random(), 2000, 2999, 0, 0),
         ];
-        assert_eq!(Some(3), active_window_of(&files));
+        assert_eq!(Some(2), active_window_of(&files));
 
         // No sequence and no L0: None, exactly as before.
         let files = [new_file_handle_with_sequence(
@@ -1343,7 +1540,7 @@ mod tests {
     #[test]
     fn test_get_latest_window_in_seconds() {
         assert_eq!(
-            Some(1),
+            Some(0),
             find_latest_window_in_seconds([new_file_handle(FileId::random(), 0, 999, 0)].iter(), 1)
         );
         assert_eq!(
@@ -1355,7 +1552,7 @@ mod tests {
         );
 
         assert_eq!(
-            Some(-9223372036854000),
+            Some(-9223372036857600),
             find_latest_window_in_seconds(
                 [new_file_handle(FileId::random(), i64::MIN, i64::MIN + 1, 0)].iter(),
                 3600,
@@ -1363,7 +1560,7 @@ mod tests {
         );
 
         assert_eq!(
-            (i64::MAX / 10000000 + 1) * 10000,
+            (i64::MAX / 10000000) * 10000,
             find_latest_window_in_seconds(
                 [new_file_handle(FileId::random(), i64::MIN, i64::MAX, 0)].iter(),
                 10000,
@@ -1372,7 +1569,7 @@ mod tests {
         );
 
         assert_eq!(
-            Some((i64::MAX / 3600000 + 1) * 3600),
+            Some((i64::MAX / 3600000) * 3600),
             find_latest_window_in_seconds(
                 [
                     new_file_handle(FileId::random(), i64::MIN, i64::MAX, 0),
@@ -1382,6 +1579,114 @@ mod tests {
                 3600
             )
         );
+    }
+
+    #[test]
+    fn test_window_assignment_and_activity_at_boundaries() {
+        // Before, at, and after positive/negative boundaries, including the first
+        // fractional second: all picker paths must agree with half-open partitions.
+        for (unit, ticks_per_second) in [
+            (TimeUnit::Second, 1),
+            (TimeUnit::Millisecond, 1_000),
+            (TimeUnit::Microsecond, 1_000_000),
+            (TimeUnit::Nanosecond, 1_000_000_000),
+        ] {
+            for window_size in [1, 3, 86_400] {
+                for boundary in [-window_size, 0, window_size] {
+                    for (offset, expected_window) in [
+                        (-1, boundary - window_size),
+                        (0, boundary),
+                        (ticks_per_second - 1, boundary),
+                        (ticks_per_second, boundary + i64::from(window_size == 1)),
+                    ] {
+                        let timestamp = Timestamp::new(boundary * ticks_per_second + offset, unit);
+                        let file = FileHandle::new(
+                            FileMeta {
+                                time_range: (timestamp, timestamp),
+                                sequence: NonZeroU64::new(1),
+                                ..Default::default()
+                            },
+                            crate::test_util::new_noop_file_purger(),
+                        );
+                        let files = [file];
+                        let windows = assign_to_windows(files.iter(), window_size);
+                        assert_eq!(
+                            vec![expected_window],
+                            windows.keys().copied().collect::<Vec<_>>(),
+                            "{timestamp:?}, window size {window_size}"
+                        );
+                        assert_eq!(
+                            Some(expected_window),
+                            find_active_window_by_sequence(files.iter(), window_size)
+                        );
+                        assert_eq!(
+                            Some(expected_window),
+                            find_latest_window_in_seconds(files.iter(), window_size)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_window_assignment_at_timestamp_limits() {
+        for (seconds, expected_window) in [(i64::MIN, i64::MIN), (i64::MAX, i64::MAX - 1)] {
+            let timestamp = Timestamp::new_second(seconds);
+            let files = [FileHandle::new(
+                FileMeta {
+                    time_range: (timestamp, timestamp),
+                    sequence: NonZeroU64::new(1),
+                    ..Default::default()
+                },
+                crate::test_util::new_noop_file_purger(),
+            )];
+            let windows = assign_to_windows(files.iter(), 3);
+            assert_eq!(
+                vec![expected_window],
+                windows.keys().copied().collect::<Vec<_>>()
+            );
+            assert_eq!(
+                Some(expected_window),
+                find_active_window_by_sequence(files.iter(), 3)
+            );
+            assert_eq!(
+                Some(expected_window),
+                find_latest_window_in_seconds(files.iter(), 3)
+            );
+            assert!(time_window_intersects_range(
+                expected_window,
+                3,
+                &TimestampRange::single(timestamp)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_midnight_file_is_not_compacted_with_previous_day() {
+        // Regression for #9441: flush already separates the midnight-only SST.
+        let midnight = 86_400_000;
+        CompactionPickerTestCase {
+            window_size: 86_400,
+            input_files: [
+                (midnight - 240_000, midnight - 180_000),
+                (midnight - 180_000, midnight - 90_000),
+                (midnight - 90_000, midnight - 30_000),
+                (midnight, midnight),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (start, end))| {
+                new_file_handle_with_sequence(FileId::random(), start, end, 0, index as u64 + 1)
+            })
+            .collect(),
+            expected_outputs: vec![ExpectedOutput {
+                input_files: vec![0, 1, 2],
+                output_level: 1,
+            }],
+        }
+        .check()
+        .await;
     }
 
     #[test]
@@ -1413,7 +1718,7 @@ mod tests {
         assert_eq!(
             files[0],
             windows
-                .get(&0)
+                .get(&-3)
                 .unwrap()
                 .files()
                 .next()
@@ -1424,7 +1729,7 @@ mod tests {
         assert_eq!(
             files[1],
             windows
-                .get(&3)
+                .get(&0)
                 .unwrap()
                 .files()
                 .next()
@@ -1435,7 +1740,7 @@ mod tests {
         assert_eq!(
             files[2],
             windows
-                .get(&12)
+                .get(&9)
                 .unwrap()
                 .files()
                 .next()
@@ -1510,10 +1815,6 @@ mod tests {
     /// (Window value, overlapping, files' time ranges in window)
     type ExpectedWindowSpec = (i64, bool, Vec<(i64, i64)>);
 
-    fn pk_range(min: &'static [u8], max: &'static [u8]) -> Option<(Bytes, Bytes)> {
-        Some((Bytes::from_static(min), Bytes::from_static(max)))
-    }
-
     fn check_assign_to_windows_with_overlapping(
         file_time_ranges: &[(i64, i64)],
         time_window: i64,
@@ -1530,6 +1831,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         let windows = assign_to_windows(file_handles.iter(), time_window);
+        assert_eq!(expected_files.len(), windows.len());
 
         for (expected_window, overlapping, window_files) in expected_files {
             let actual_window = windows.get(expected_window).unwrap();
@@ -1554,8 +1856,8 @@ mod tests {
             &[(0, 999), (1000, 1999), (2000, 2999)],
             2,
             &[
-                (0, false, vec![(0, 999)]),
-                (2, false, vec![(1000, 1999), (2000, 2999)]),
+                (0, false, vec![(0, 999), (1000, 1999)]),
+                (2, false, vec![(2000, 2999)]),
             ],
         );
 
@@ -1572,9 +1874,8 @@ mod tests {
             &[(0, 999), (1000, 1999), (2000, 2999), (3000, 3999)],
             2,
             &[
-                (0, false, vec![(0, 999)]),
-                (2, false, vec![(1000, 1999), (2000, 2999)]),
-                (4, false, vec![(3000, 3999)]),
+                (0, false, vec![(0, 999), (1000, 1999)]),
+                (2, false, vec![(2000, 2999), (3000, 3999)]),
             ],
         );
 
@@ -1588,9 +1889,8 @@ mod tests {
             ],
             2,
             &[
-                (0, true, vec![(0, 999)]),
-                (2, true, vec![(1000, 1999), (2000, 2999)]),
-                (4, true, vec![(0, 3999), (3000, 3999)]),
+                (0, true, vec![(0, 999), (1000, 1999)]),
+                (2, true, vec![(0, 3999), (2000, 2999), (3000, 3999)]),
             ],
         );
 
@@ -1604,43 +1904,39 @@ mod tests {
             ],
             2,
             &[
-                (0, false, vec![(0, 999)]),
-                (2, true, vec![(1000, 1999), (2000, 2999)]),
-                (4, true, vec![(1999, 3999), (3000, 3999)]),
+                (0, true, vec![(0, 999), (1000, 1999)]),
+                (2, true, vec![(1999, 3999), (2000, 2999), (3000, 3999)]),
             ],
         );
 
         check_assign_to_windows_with_overlapping(
             &[
                 (0, 999),     // window 0
-                (1000, 1999), // window 2
+                (1000, 1999), // window 0
                 (2000, 2999), // window 2
-                (3000, 3999), // window 4
-                (2999, 3999), // window 4
+                (3000, 3999), // window 2
+                (2999, 3999), // window 2
             ],
             2,
             &[
-                // window 2 overlaps with window 4
-                (0, false, vec![(0, 999)]),
-                (2, true, vec![(1000, 1999), (2000, 2999)]),
-                (4, true, vec![(2999, 3999), (3000, 3999)]),
+                // Overlap within a window does not imply cross-window overlap.
+                (0, false, vec![(0, 999), (1000, 1999)]),
+                (2, false, vec![(2000, 2999), (2999, 3999), (3000, 3999)]),
             ],
         );
 
         check_assign_to_windows_with_overlapping(
             &[
                 (0, 999),     // window 0
-                (1000, 1999), // window 2
+                (1000, 1999), // window 0
                 (2000, 2999), // window 2
-                (3000, 3999), // window 4
-                (0, 1000),    // // window 2
+                (3000, 3999), // window 2
+                (0, 2000),    // window 2
             ],
             2,
             &[
-                // only window 0 overlaps with window 2.
-                (0, true, vec![(0, 999)]),
-                (2, true, vec![(0, 1000), (1000, 1999), (2000, 2999)]),
-                (4, false, vec![(3000, 3999)]),
+                (0, true, vec![(0, 999), (1000, 1999)]),
+                (2, true, vec![(0, 2000), (2000, 2999), (3000, 3999)]),
             ],
         );
     }
@@ -1660,7 +1956,7 @@ mod tests {
             new_file_handle_with_size_sequence_and_primary_key_range(
                 FileId::random(),
                 500,
-                1999,
+                2999,
                 0,
                 2,
                 10,
@@ -1670,7 +1966,8 @@ mod tests {
 
         let windows = assign_to_windows(files.iter(), 2);
 
-        let overlapping = window_has_overlap(windows.get(&2).unwrap(), &windows);
+        assert_eq!(2, windows.len());
+        let overlapping = window_has_overlap(windows.get(&0).unwrap(), &windows);
         assert!(!overlapping);
     }
 
@@ -2390,7 +2687,7 @@ mod tests {
         };
 
         let output = picker
-            .build_output_with_time_range(RegionId::from_u64(123), windows, Some(9), None)
+            .build_output_with_time_range(RegionId::from_u64(123), windows, Some(6), None)
             .await
             .unwrap();
 
@@ -2407,27 +2704,60 @@ mod tests {
 
     #[test]
     fn test_filter_time_windows_by_time_range() {
-        let time_range = TimestampRange::new(
-            Timestamp::new_millisecond(1_200),
-            Timestamp::new_millisecond(1_800),
-        )
-        .unwrap();
+        // Interior, exclusive boundary ends, fractional boundary ends, negative
+        // timestamps, and empty ranges must all use the same half-open windows.
+        for (start, end, expected_windows) in [
+            (1_200, 1_800, vec![0]),
+            (0, 3_000, vec![0]),
+            (3_000, 6_000, vec![3]),
+            (2_999, 3_000, vec![0]),
+            (2_999, 3_001, vec![0, 3]),
+            (3_000, 3_001, vec![3]),
+            (3_001, 3_002, vec![3]),
+            (-3_000, 0, vec![-3]),
+            (-3_001, -2_999, vec![-6, -3]),
+            (0, 0, vec![]),
+            (1_500, 1_500, vec![]),
+        ] {
+            let time_range = TimestampRange::with_unit(start, end, TimeUnit::Millisecond).unwrap();
+            let selected = [-6, -3, 0, 3, 6]
+                .into_iter()
+                .filter(|window| time_window_intersects_range(*window, 3, &time_range))
+                .collect::<Vec<_>>();
+            assert_eq!(expected_windows, selected, "{time_range}");
+        }
+    }
 
-        assert!(time_window_intersects_range(3, 3, &time_range));
-        assert!(!time_window_intersects_range(9, 3, &time_range));
+    #[test]
+    fn test_filter_time_windows_with_unbounded_and_extreme_ranges() {
+        for (range, expected_windows) in [
+            (TimestampRange::min_to_max(), vec![-3, 0, 3]),
+            (
+                TimestampRange::from_start(Timestamp::new_second(0)),
+                vec![0, 3],
+            ),
+            (
+                TimestampRange::until_end(Timestamp::new_second(0), false),
+                vec![-3],
+            ),
+        ] {
+            let selected = [-3, 0, 3]
+                .into_iter()
+                .filter(|window| time_window_intersects_range(*window, 3, &range))
+                .collect::<Vec<_>>();
+            assert_eq!(expected_windows, selected, "{range}");
+        }
 
-        let boundary_range =
-            TimestampRange::new(Timestamp::new_second(0), Timestamp::new_second(3)).unwrap();
-        assert!(time_window_intersects_range(0, 3, &boundary_range));
-        assert!(time_window_intersects_range(3, 3, &boundary_range));
-        assert!(!time_window_intersects_range(6, 3, &boundary_range));
-
-        let overflowing_range = TimestampRange::new(
+        let upper_range = TimestampRange::new(
             Timestamp::new_second(i64::MAX - 1),
             Timestamp::new_second(i64::MAX),
         )
         .unwrap();
-        assert!(!time_window_intersects_range(0, 4, &overflowing_range));
+        assert!(!time_window_intersects_range(0, 4, &upper_range));
+        assert!(time_window_intersects_range(i64::MAX - 3, 4, &upper_range));
+
+        let lower_range = TimestampRange::until_end(Timestamp::new_second(i64::MIN), false);
+        assert!(!time_window_intersects_range(i64::MIN, 3, &lower_range));
     }
 
     #[tokio::test]
@@ -2457,7 +2787,7 @@ mod tests {
         };
 
         let output = picker
-            .build_output_with_time_range(RegionId::from_u64(123), windows, Some(9), Some(3))
+            .build_output_with_time_range(RegionId::from_u64(123), windows, Some(6), Some(3))
             .await
             .unwrap();
 
@@ -2534,6 +2864,7 @@ mod tests {
                 l0_file_num: 8,
                 l1_file_num: 2,
                 phase: PickPhase::L1FileReduction,
+                primary_key_mapper: &primary_key_mapper_for_test(),
             },
             None,
         );
@@ -2564,6 +2895,7 @@ mod tests {
                 l0_file_num: 2,
                 l1_file_num: 8,
                 phase: PickPhase::L1FileReduction,
+                primary_key_mapper: &primary_key_mapper_for_test(),
             },
             None,
         );

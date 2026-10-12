@@ -45,6 +45,11 @@ DEFAULT_CASES = [
 
 HEAVY_CASES = [
     "tests/perf/query_cases/prom_remote_write_7913/case.toml",
+    # High-cardinality direct-SST cases exceed the default query-regression
+    # runner's resources (the self-hosted runner is repeatedly lost during the
+    # run). Keep them in the heavy set so they only run on demand.
+    "tests/perf/query_cases/promql_constant_tag_concat_ms_10k/case.toml",
+    "tests/perf/query_cases/promql_constant_tag_concat_ms_100k/case.toml",
 ]
 
 CASE_GROUPS = {

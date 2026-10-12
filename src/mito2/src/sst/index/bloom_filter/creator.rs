@@ -41,6 +41,7 @@ use crate::error::{
 use crate::read::Batch;
 use crate::sst::index::TYPE_BLOOM_FILTER_INDEX;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
+use crate::sst::index::column::column_index_rows;
 use crate::sst::index::intermediate::{
     IntermediateLocation, IntermediateManager, TempFileProvider,
 };
@@ -63,6 +64,7 @@ pub struct BloomFilterIndexer {
     codec: IndexValuesCodec,
     /// Scratch storage for extracting indexed tags from sparse primary keys.
     pk_offsets: SparseOffsetsCache,
+    /// Reusable buffer for encoding materialized values and extracting sparse labels.
     value_buf: Vec<u8>,
 
     /// Whether the indexing process has been aborted.
@@ -313,19 +315,16 @@ impl BloomFilterIndexer {
                     .context(crate::error::ConvertVectorSnafu)?;
                 let sort_field = SortField::new(vector.data_type());
 
-                for i in 0..n {
-                    let value = vector.get_ref(i);
-                    let elems = (!value.is_null())
-                        .then(|| {
-                            let mut buf = vec![];
-                            IndexValueCodec::encode_nonnull_value(value, &sort_field, &mut buf)
-                                .context(EncodeSnafu)?;
-                            Ok(buf)
-                        })
-                        .transpose()?;
+                for (row, count) in column_index_rows(batch, column_meta.semantic_type) {
+                    let elem = IndexValueCodec::encode_value(
+                        vector.get_ref(row),
+                        &sort_field,
+                        &mut self.value_buf,
+                    )
+                    .context(EncodeSnafu)?;
 
                     creator
-                        .push_row_elems(elems)
+                        .push_n_row_elem(count, elem)
                         .await
                         .context(PushBloomFilterValueSnafu)?;
                 }

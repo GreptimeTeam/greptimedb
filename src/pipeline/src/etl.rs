@@ -278,24 +278,6 @@ impl PipelineExecOutput {
         }
     }
 
-    // Backward compatibility helper that returns first ContextOpt with all its rows
-    // or merges all rows with default ContextOpt for multi-context scenarios
-    pub fn into_legacy_format(self) -> Option<(ContextOpt, Vec<RowWithTableSuffix>)> {
-        if let Self::Transformed(TransformedOutput { rows_by_context }) = self {
-            if rows_by_context.len() == 1 {
-                let (opt, rows) = rows_by_context.into_iter().next().unwrap();
-                Some((opt, rows))
-            } else {
-                // Multiple contexts: merge all rows with default ContextOpt for test compatibility
-                let all_rows: Vec<RowWithTableSuffix> =
-                    rows_by_context.into_values().flatten().collect();
-                Some((ContextOpt::default(), all_rows))
-            }
-        } else {
-            None
-        }
-    }
-
     // Note: This is a test only function, do not use it in production.
     pub fn into_dispatched(self) -> Option<DispatchedTo> {
         if let Self::DispatchedTo(d, _) = self {

@@ -82,7 +82,7 @@ impl KvBackend for ChrootKvBackend {
 
     async fn batch_put(&self, mut req: BatchPutRequest) -> Result<BatchPutResponse, Self::Error> {
         for kv in req.kvs.iter_mut() {
-            kv.key = self.key_prepend_root(kv.key.drain(..).collect());
+            kv.key = self.key_prepend_root(std::mem::take(&mut kv.key));
         }
         let mut res = self.inner.batch_put(req).await?;
         res.prev_kvs = res

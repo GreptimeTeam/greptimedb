@@ -17,6 +17,7 @@ INSERT INTO TABLE test VALUES
     (15000, 'host2', 'idc4',8);
 
 -- Missing source labels --
+-- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "new_host", "-");
 
 -- dst_label is equal to source label --
@@ -27,9 +28,14 @@ TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "host", "-", "host");
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "host", "-", "idc", "host");
 
--- test the empty source label --
--- SQLNESS SORT_RESULT 3 1
+-- Absent labels join as empty strings and keep their separators --
+TQL EVAL (0, 15, '5s') label_join(label_join(vector(1), "a", "", "missing"), "b", "-", "a", "a");
+
+-- An empty source label name is invalid --
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "host", "-", "");
+
+-- Both hosts are joined to the same `host` at 0s, leaving two series with the same label set --
+TQL EVAL (0, 15, '5s') label_join(test, "host", "-", "idc");
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "new_host", "-", "idc", "host");
@@ -50,8 +56,13 @@ TQL EVAL (0, 15, '5s') label_replace(test{host="host2"}, "new_idc", "$2", "idc",
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_replace(test{host="host2"}, "idc", "$2", "idc", "(.*):(.*)");
 
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') label_replace(test{host="host1"}, "idc", "$2", "idc", "(.*):(.*)");
+
+-- Both hosts are rewritten to the same `host`, leaving two series with the same label set --
+TQL EVAL (0, 15, '5s') label_replace(test, "host", "x", "host", ".*");
+
 -- test the empty source label --
--- TODO(dennis): we can't remove the label currently --
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_replace(test{host="host2"}, "idc2", "", "", "");
 
@@ -76,6 +87,10 @@ TQL EVAL(0, 15, '5s') label_replace(test{host="host1"}, "host2", "host2", "insta
 -- Empty regex with not existing source label, but replacement is empty
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL(0, 15, '5s') label_replace(test{host="host1"}, "host2", "", "instance", "");
+
+-- An empty replacement removes an existing label --
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') label_replace(test{idc="idc1"}, "idc", "", "instance", "");
 
 -- Empty regex and different label value
 -- SQLNESS SORT_RESULT 3 1
@@ -129,3 +144,32 @@ TQL EVAL (0, 1, '5s') test{job=""};
 TQL EVAL (0, 1, '5s') test{job!=""};
 
 DROP TABLE test;
+
+-- Issue 9444 --
+-- Normalizing mixed histogram boundary representations must not be rejected while
+-- another label still tells the series apart.
+CREATE TABLE demo_bucket (
+  ts timestamp(3) time index,
+  instance STRING,
+  le STRING,
+  val DOUBLE,
+  PRIMARY KEY(instance, le),
+);
+
+INSERT INTO TABLE demo_bucket VALUES
+    (3000000, 'a', '10', 40),
+    (3000000, 'a', '100', 50),
+    (3000000, 'a', '+Inf', 50),
+    (3000000, 'b', '10.0', 40),
+    (3000000, 'b', '100.0', 50),
+    (3000000, 'b', '1000.0', 50),
+    (3000000, 'b', '+Inf', 50);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (3000, 3000, '5s') label_replace(demo_bucket, "le", "$1", "le", "([0-9]+)[.]0+");
+
+-- Aggregating `instance` away first makes the same rewrite collapse two series into
+-- one label set, which is a genuine duplicate and must still fail.
+TQL EVAL (3000, 3000, '5s') label_replace(sum by (le) (demo_bucket), "le", "$1", "le", "([0-9]+)[.]0+");
+
+DROP TABLE demo_bucket;

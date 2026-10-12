@@ -37,3 +37,8 @@ serde_json.workspace = true
 snafu.workspace = true
 sqlparser.workspace = true
 sqlparser_derive = "0.1"
+
+[package.metadata.cargo-shear]
+# `sqlparser` is required by `sqlparser_derive`: the generated code references
+# `::sqlparser` paths, so it must stay a direct dependency.
+ignored = ["sqlparser"]

@@ -8,7 +8,7 @@ CREATE TABLE distinct_basic (
 
 Affected Rows: 0
 
--- should fallback to streaming mode when there is no EVAL INTERVAL
+-- request-local DISTINCT is supported in streaming mode
 -- SQLNESS REPLACE id=\d+ id=REDACTED
 CREATE FLOW test_distinct_basic SINK TO out_distinct_basic AS
 SELECT
@@ -18,8 +18,18 @@ FROM
 
 Affected Rows: 0
 
+-- instant-TTL sources reject non-stateless LIMIT plans
+CREATE FLOW test_limit_instant_rejected SINK TO out_limit_instant_rejected AS
+SELECT
+    number
+FROM
+    distinct_basic
+LIMIT 1;
+
+Error: 1004(InvalidArguments), Invalid SQL, error: instant-TTL flow sources support only stateless projection/filter queries over one source; non-stateless queries require a persisted source
+
 -- flow_options should have a flow_type:streaming
--- since source table's ttl=instant
+-- since source table's ttl=instant and DISTINCT is request-local
 SELECT flow_name, options FROM INFORMATION_SCHEMA.FLOWS;
 
 +---------------------+---------------------------+
@@ -76,6 +86,8 @@ VALUES
 
 Affected Rows: 0
 
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_distinct_basic');
 
@@ -104,7 +116,6 @@ SELECT number FROM distinct_basic;
 +--------+
 +--------+
 
--- SQLNESS SLEEP 6s
 ADMIN FLUSH_TABLE('distinct_basic');
 
 +-------------------------------------+
@@ -113,13 +124,31 @@ ADMIN FLUSH_TABLE('distinct_basic');
 | 0                                   |
 +-------------------------------------+
 
+-- Recover the persisted streaming DISTINCT flow, then replan its first write
+-- against an extended source schema without recreating the flow.
+-- SQLNESS ARG restart=true
+SELECT 1;
+
++----------+
+| Int64(1) |
++----------+
+| 1        |
++----------+
+
+ALTER TABLE distinct_basic ADD COLUMN extra INT NULL;
+
+Affected Rows: 0
+
 INSERT INTO
-    distinct_basic
+    distinct_basic (number, ts)
 VALUES
+    (23, "2021-07-01 00:00:01.600"),
     (23, "2021-07-01 00:00:01.600");
 
 Affected Rows: 0
 
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_distinct_basic');
 
@@ -194,13 +223,29 @@ DROP TABLE distinct_basic;
 
 Affected Rows: 0
 
--- test ttl = 5s
+-- test ttl = 5s (DISTINCT remains batching for persisted sources)
 CREATE TABLE distinct_basic (
     "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)
 )WITH ('ttl' = '5s');
+
+Affected Rows: 0
+
+-- Without a schedule, persisted DISTINCT must reach batching validation,
+-- not silently become request-local streaming.
+CREATE FLOW test_distinct_persisted_unscheduled
+SINK TO out_distinct_persisted_unscheduled AS
+SELECT DISTINCT number AS dis FROM distinct_basic;
+
+Error: 3001(EngineExecuteQuery), Invalid query: SQL batching flow without a time-window expression must specify EVAL INTERVAL to run as an explicit full-query flow
+
+DROP FLOW IF EXISTS test_distinct_persisted_unscheduled;
+
+Affected Rows: 0
+
+DROP TABLE IF EXISTS out_distinct_persisted_unscheduled;
 
 Affected Rows: 0
 
@@ -213,7 +258,7 @@ FROM
 Affected Rows: 0
 
 -- flow_options should have a flow_type:batching
--- since source table's ttl=instant
+-- persisted-source DISTINCT retains batching semantics
 SELECT flow_name, options FROM INFORMATION_SCHEMA.FLOWS;
 
 +---------------------+--------------------------+
@@ -241,6 +286,8 @@ VALUES
 
 Affected Rows: 3
 
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_distinct_basic');
 
@@ -308,7 +355,6 @@ SELECT number FROM distinct_basic;
 | 22     |
 +--------+
 
--- SQLNESS SLEEP 6s
 ADMIN FLUSH_TABLE('distinct_basic');
 
 +-------------------------------------+
@@ -324,6 +370,8 @@ VALUES
 
 Affected Rows: 1
 
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_distinct_basic');
 
@@ -363,6 +411,113 @@ DROP TABLE distinct_basic;
 Affected Rows: 0
 
 DROP TABLE out_distinct_basic;
+
+Affected Rows: 0
+
+-- Streaming DISTINCT auto-sink retains all 1000 output tuples.
+CREATE TABLE distinct_auto_sink (
+    v INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP TIME INDEX
+) WITH ('ttl' = 'instant');
+
+Affected Rows: 0
+
+CREATE FLOW test_distinct_auto_sink SINK TO out_distinct_auto_sink AS
+SELECT DISTINCT v FROM distinct_auto_sink;
+
+Affected Rows: 0
+
+INSERT INTO distinct_auto_sink (v)
+SELECT number FROM numbers LIMIT 1000;
+
+Affected Rows: 0
+
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('test_distinct_auto_sink');
+
++---------------------------------------------+
+| ADMIN FLUSH_FLOW('test_distinct_auto_sink') |
++---------------------------------------------+
+|  FLOW_FLUSHED  |
++---------------------------------------------+
+
+SELECT count(*) AS rows, count(DISTINCT v) AS distinct_values, min(v) AS min_v, max(v) AS max_v
+FROM out_distinct_auto_sink;
+
++------+-----------------+-------+-------+
+| rows | distinct_values | min_v | max_v |
++------+-----------------+-------+-------+
+| 1000 | 1000            | 0     | 999   |
++------+-----------------+-------+-------+
+
+DROP FLOW test_distinct_auto_sink;
+
+Affected Rows: 0
+
+DROP TABLE distinct_auto_sink;
+
+Affected Rows: 0
+
+DROP TABLE out_distinct_auto_sink;
+
+Affected Rows: 0
+
+CREATE TABLE distinct_auto_sink_pk (
+    v INT,
+    k INT,
+    extra_value INT,
+    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP TIME INDEX,
+    PRIMARY KEY (v, k)
+) WITH ('ttl' = 'instant');
+
+Affected Rows: 0
+
+CREATE FLOW test_distinct_auto_sink_pk SINK TO out_distinct_auto_sink_pk AS
+SELECT DISTINCT v, extra_value FROM distinct_auto_sink_pk;
+
+Affected Rows: 0
+
+INSERT INTO distinct_auto_sink_pk (v, k, extra_value)
+SELECT number % 10 AS v, number AS k, number AS extra_value FROM numbers LIMIT 1000;
+
+Affected Rows: 0
+
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('test_distinct_auto_sink_pk');
+
++------------------------------------------------+
+| ADMIN FLUSH_FLOW('test_distinct_auto_sink_pk') |
++------------------------------------------------+
+|  FLOW_FLUSHED  |
++------------------------------------------------+
+
+SELECT
+    count(*) AS rows,
+    count(DISTINCT extra_value) AS distinct_values,
+    min(extra_value) AS min_value,
+    max(extra_value) AS max_value,
+    sum(CASE WHEN v = extra_value % 10 THEN 0 ELSE 1 END) AS mismatched_keys
+FROM out_distinct_auto_sink_pk;
+
++------+-----------------+-----------+-----------+-----------------+
+| rows | distinct_values | min_value | max_value | mismatched_keys |
++------+-----------------+-----------+-----------+-----------------+
+| 1000 | 1000            | 0         | 999       | 0               |
++------+-----------------+-----------+-----------+-----------------+
+
+DROP FLOW test_distinct_auto_sink_pk;
+
+Affected Rows: 0
+
+DROP TABLE distinct_auto_sink_pk;
+
+Affected Rows: 0
+
+DROP TABLE out_distinct_auto_sink_pk;
 
 Affected Rows: 0
 

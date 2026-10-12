@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::env;
-
 use crate::{ObjectStore, Result};
 
 /// Temp folder for object store test
@@ -34,31 +32,4 @@ impl TempFolder {
     pub async fn remove_all(&self) -> Result<()> {
         self.store.delete_with(&self.path).recursive(true).await
     }
-}
-
-/// Test s3 config from environment variables
-#[derive(Debug)]
-pub struct TestS3Config {
-    pub root: String,
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub bucket: String,
-    pub region: Option<String>,
-}
-
-/// Returns s3 test config, return None if not found.
-pub fn s3_test_config() -> Option<TestS3Config> {
-    if let Ok(b) = env::var("GT_S3_BUCKET")
-        && !b.is_empty()
-    {
-        return Some(TestS3Config {
-            root: uuid::Uuid::new_v4().to_string(),
-            access_key_id: env::var("GT_S3_ACCESS_KEY_ID").ok()?,
-            secret_access_key: env::var("GT_S3_ACCESS_KEY").ok()?,
-            bucket: env::var("GT_S3_BUCKET").ok()?,
-            region: Some(env::var("GT_S3_REGION").ok()?),
-        });
-    }
-
-    None
 }

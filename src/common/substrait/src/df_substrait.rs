@@ -25,7 +25,9 @@ use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::optimizer::AnalyzerRule;
 use datafusion::prelude::SessionConfig;
 use datafusion_expr::LogicalPlan;
-use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
+use datafusion_substrait::logical_plan::consumer::{
+    SubstraitConsumer, from_substrait_plan, from_substrait_plan_with_consumer,
+};
 use datafusion_substrait::logical_plan::producer::to_substrait_plan;
 use datafusion_substrait::substrait::proto::Plan;
 use prost::Message;
@@ -74,6 +76,21 @@ impl SubstraitPlan for DFLogicalSubstraitConvertor {
 }
 
 impl DFLogicalSubstraitConvertor {
+    /// Decode with a custom consumer, retaining Greptime's state-aggregate ordering correction.
+    pub async fn decode_with_consumer(
+        &self,
+        plan: &Plan,
+        state: &SessionState,
+        consumer: &impl SubstraitConsumer,
+    ) -> Result<LogicalPlan, Error> {
+        let df_plan = from_substrait_plan_with_consumer(consumer, plan)
+            .await
+            .context(DecodeDfPlanSnafu)?;
+        FixStateUdafOrderingAnalyzer {}
+            .analyze(df_plan, state.config_options())
+            .context(DecodeDfPlanSnafu)
+    }
+
     pub fn to_sub_plan(
         &self,
         plan: &LogicalPlan,

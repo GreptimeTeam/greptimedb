@@ -15,6 +15,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use common_function::aggrs::aggr_wrapper::get_aggr_func;
+use common_function::aggrs::extremum::Extremum;
 use datafusion::config::ConfigOptions;
 use datafusion::functions_aggregate::count::count_udaf;
 use datafusion::logical_expr::{Extension, LogicalPlan, LogicalPlanBuilder, Sort};
@@ -236,9 +238,8 @@ impl CountNestAggrRule {
     where
         F: FnOnce(&str) -> bool,
     {
-        let Expr::AggregateFunction(func) = expr else {
-            return None;
-        };
+        // The PromQL planner aliases `prom_min`/`prom_max` to the builtin names.
+        let func = get_aggr_func(expr)?;
         let name = func.func.name();
         if !accept_name(name)
             || func.params.filter.is_some()
@@ -253,9 +254,19 @@ impl CountNestAggrRule {
     }
 
     fn is_supported_inner_aggregate(name: &str) -> bool {
+        // PromQL `min`/`max` plan to `prom_min`/`prom_max`, which return NULL for the same
+        // groups as the builtin ones.
         matches!(
             name,
-            "count" | "sum" | "avg" | "min" | "max" | "stddev_pop" | "var_pop"
+            "count"
+                | "sum"
+                | "avg"
+                | "min"
+                | "max"
+                | Extremum::MIN_NAME
+                | Extremum::MAX_NAME
+                | "stddev_pop"
+                | "var_pop"
         )
     }
 

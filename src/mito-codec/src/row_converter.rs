@@ -134,6 +134,11 @@ pub trait PrimaryKeyCodec: Send + Sync + Debug {
     /// Returns the encoding type of the primary key.
     fn encoding(&self) -> PrimaryKeyEncoding;
 
+    /// Returns the dense codec for schema-aware positional access, if applicable.
+    fn as_dense(&self) -> Option<&DensePrimaryKeyCodec> {
+        None
+    }
+
     /// Decodes the primary key from the given bytes.
     ///
     /// Returns a [`CompositeValues`] that follows the primary key ordering.
@@ -163,6 +168,31 @@ pub fn build_primary_key_codec_with_fields(
         PrimaryKeyEncoding::Dense => Arc::new(DensePrimaryKeyCodec::with_fields(fields.collect())),
         PrimaryKeyEncoding::Sparse => {
             Arc::new(SparsePrimaryKeyCodec::with_fields(fields.collect()))
+        }
+    }
+}
+
+/// Finds the checked boundary of an Option<String>, shared by Dense and Sparse.
+/// This validates framing, not UTF-8; consumers decoding strings validate UTF-8.
+pub(crate) fn encoded_string_len(bytes: &[u8]) -> memcomparable::Result<usize> {
+    match bytes.first().copied().ok_or(memcomparable::Error::Eof)? {
+        0 => return Ok(1),
+        1 => {}
+        marker => return Err(memcomparable::Error::InvalidTagEncoding(marker as usize)),
+    }
+    match bytes.get(1).copied().ok_or(memcomparable::Error::Eof)? {
+        0 => return Ok(2),
+        1 => {}
+        marker => return Err(memcomparable::Error::InvalidBytesEncoding(marker)),
+    }
+    let mut end = 2;
+    loop {
+        let chunk = bytes.get(end..end + 9).ok_or(memcomparable::Error::Eof)?;
+        end += 9;
+        match chunk[8] {
+            1..=8 => return Ok(end),
+            9 => {}
+            marker => return Err(memcomparable::Error::InvalidBytesEncoding(marker)),
         }
     }
 }

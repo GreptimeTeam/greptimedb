@@ -741,9 +741,9 @@ fn resolve_value(
                 &ConcreteDataType::string_datatype(),
                 schema_info,
             )?;
-            Some(ValueData::StringValue(String::from_utf8_lossy_owned(
-                v.to_vec(),
-            )))
+            Some(ValueData::StringValue(
+                String::from_utf8_lossy(&v).into_owned(),
+            ))
         }
 
         VrlValue::Regex(v) => {
@@ -911,7 +911,7 @@ fn identity_pipeline_inner(
     }
 
     let column_count = schema_info.schema.len();
-    for (_, row) in opt_map.iter_mut() {
+    for row in opt_map.values_mut() {
         for row in row.iter_mut() {
             assert!(
                 column_count >= row.values.len(),
@@ -1101,8 +1101,6 @@ mod tests {
             vec![JsonTypeHint {
                 path: vec!["age".to_string()],
                 data_type: ConcreteDataType::int64_datatype(),
-                nullable: false,
-                default_constraint: None,
                 inverted_index: false,
             }],
             None,
@@ -1118,8 +1116,6 @@ mod tests {
             vec![JsonTypeHint {
                 path: vec!["age".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
-                nullable: false,
-                default_constraint: None,
                 inverted_index: false,
             }],
             None,

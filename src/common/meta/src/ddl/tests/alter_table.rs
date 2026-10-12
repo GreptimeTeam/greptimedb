@@ -30,7 +30,7 @@ use common_error::status_code::StatusCode;
 use common_procedure::store::poison_store::PoisonStore;
 use common_procedure::{Procedure, ProcedureId, Status};
 use common_procedure_test::{MockContextProvider, execute_procedure_until_done};
-use common_wal::options::{KafkaWalOptions, WalOptions};
+use common_wal::options::{KafkaWalOptions, ObjectStoreWalOptions, WalOptions};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use store_api::metadata::ColumnMetadata;
@@ -1061,7 +1061,7 @@ async fn test_enable_wal_updates_metadata_and_region_request() {
         ),
         (
             3,
-            WalOptions::Kafka(KafkaWalOptions::new("topic-3".to_string())),
+            WalOptions::ObjectStore(ObjectStoreWalOptions::new("wal".to_string())),
         ),
     ]);
     ddl_context

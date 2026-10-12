@@ -46,7 +46,6 @@ common-time.workspace = true
 common-wal.workspace = true
 common-workload.workspace = true
 datafusion-common.workspace = true
-datafusion-expr.workspace = true
 datatypes.workspace = true
 deadpool = { workspace = true, optional = true }
 deadpool-postgres = { workspace = true, optional = true }
@@ -55,7 +54,6 @@ etcd-client.workspace = true
 flexbuffers = "25.2"
 futures.workspace = true
 futures-util.workspace = true
-greptime-proto.workspace = true
 hex.workspace = true
 humantime-serde.workspace = true
 itertools.workspace = true

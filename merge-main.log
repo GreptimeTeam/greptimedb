@@ -1,0 +1,10 @@
+Auto-merging src/flow/src/batching_mode/frontend_client.rs
+Auto-merging src/flow/src/lib.rs
+CONFLICT (content): Merge conflict in src/flow/src/lib.rs
+Auto-merging src/flow/src/server.rs
+CONFLICT (content): Merge conflict in src/flow/src/server.rs
+Auto-merging src/operator/src/statement/ddl.rs
+Recorded preimage for 'src/flow/src/lib.rs'
+Recorded preimage for 'src/flow/src/server.rs'
+Automatic merge failed; fix conflicts and then commit the result.
+exit=1

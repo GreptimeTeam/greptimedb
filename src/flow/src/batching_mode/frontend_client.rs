@@ -34,7 +34,7 @@ use query::options::{FlowQueryExtensions, QueryOptions};
 use rand::rng;
 use rand::seq::SliceRandom;
 use servers::query_handler::grpc::GrpcQueryHandler;
-use session::context::{QueryContextBuilder, QueryContextRef};
+use session::context::{Channel, QueryContextBuilder, QueryContextRef};
 use session::hints::READ_PREFERENCE_HINT;
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::SetOnce;
@@ -91,7 +91,8 @@ impl HandlerMutable {
 pub enum FrontendClient {
     Distributed {
         meta_client: Arc<MetaClient>,
-        chnl_mgr: ChannelManager,
+        query_channel_manager: ChannelManager,
+        control_channel_manager: ChannelManager,
         query: QueryOptions,
         batch_opts: BatchingModeOptions,
     },
@@ -136,17 +137,19 @@ impl FrontendClient {
         batch_opts: BatchingModeOptions,
     ) -> Result<Self, Error> {
         common_telemetry::info!("Frontend client build without auth");
+        let cfg = ChannelConfig::new()
+            .connect_timeout(batch_opts.grpc_conn_timeout)
+            .timeout(Some(batch_opts.query_timeout));
+        let tls_config = load_client_tls_config(batch_opts.frontend_tls.clone())
+            .context(InvalidClientConfigSnafu)?;
+        // Keep separate TLS config handles and pools for query and control traffic.
+        let query_channel_manager = ChannelManager::with_config(cfg.clone(), tls_config.clone());
+        let control_channel_manager = ChannelManager::with_config(cfg, tls_config);
+
         Ok(Self::Distributed {
             meta_client,
-            chnl_mgr: {
-                let cfg = ChannelConfig::new()
-                    .connect_timeout(batch_opts.grpc_conn_timeout)
-                    .timeout(Some(batch_opts.query_timeout));
-
-                let tls_config = load_client_tls_config(batch_opts.frontend_tls.clone())
-                    .context(InvalidClientConfigSnafu)?;
-                ChannelManager::with_config(cfg, tls_config)
-            },
+            query_channel_manager,
+            control_channel_manager,
             query,
             batch_opts,
         })
@@ -227,7 +230,8 @@ impl FrontendClient {
         frontends: &[Peer],
     ) -> Result<Vec<String>, Error> {
         let Self::Distributed {
-            chnl_mgr,
+            query_channel_manager,
+            control_channel_manager,
             batch_opts,
             ..
         } = self
@@ -240,10 +244,15 @@ impl FrontendClient {
             .iter()
             .map(|peer| {
                 let addr = peer.addr.clone();
-                let chnl_mgr = chnl_mgr.clone();
+                let query_channel_manager = query_channel_manager.clone();
+                let control_channel_manager = control_channel_manager.clone();
 
                 async move {
-                    let client = Client::with_manager_and_urls(chnl_mgr, vec![addr.clone()]);
+                    let client = Client::with_query_and_control_managers(
+                        query_channel_manager,
+                        control_channel_manager,
+                        vec![addr.clone()],
+                    );
                     let database = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
 
                     match tokio::time::timeout(probe_timeout, database.sql("SELECT 1")).await {
@@ -282,7 +291,8 @@ impl FrontendClient {
     ) -> Result<DatabaseWithPeer, Error> {
         let Self::Distributed {
             meta_client: _,
-            chnl_mgr,
+            query_channel_manager,
+            control_channel_manager,
             query: _,
             batch_opts,
         } = self
@@ -302,7 +312,11 @@ impl FrontendClient {
 
             for peer in frontends {
                 let addr = peer.addr.clone();
-                let client = Client::with_manager_and_urls(chnl_mgr.clone(), vec![addr.clone()]);
+                let client = Client::with_query_and_control_managers(
+                    query_channel_manager.clone(),
+                    control_channel_manager.clone(),
+                    vec![addr.clone()],
+                );
                 let database = Database::new(catalog, schema, client);
                 let db = DatabaseWithPeer::new(database, peer);
                 match db.try_select_one().await {
@@ -521,6 +535,7 @@ impl FrontendClient {
                     .current_catalog(catalog.to_string())
                     .current_schema(schema.to_string())
                     .extensions(extensions_map)
+                    .channel(Channel::Internal)
                     .snapshot_seqs(Arc::new(RwLock::new(snapshot_seqs.clone())))
                     .build();
                 let ctx = Arc::new(ctx);
@@ -551,6 +566,82 @@ impl FrontendClient {
                     })
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)
+            }
+        }
+    }
+
+    /// Handle an insert request with one attempt.
+    ///
+    /// Unlike [`Self::handle`], this does not use the batching retry policy. It
+    /// is intended for stateless streaming sinks, where retrying an insert can
+    /// duplicate rows.
+    pub(crate) async fn handle_insert_once(
+        &self,
+        req: api::v1::greptime_request::Request,
+        catalog: &str,
+        schema: &str,
+        peer_desc: &mut Option<PeerDesc>,
+    ) -> Result<u32, Error> {
+        match self {
+            FrontendClient::Distributed { .. } => {
+                let db = self.get_random_active_frontend(catalog, schema).await?;
+
+                *peer_desc = Some(PeerDesc::Dist {
+                    peer: db.peer.clone(),
+                });
+
+                db.database
+                    .handle(req.clone())
+                    .await
+                    .with_context(|_| InvalidRequestSnafu {
+                        context: format!("Failed to handle request at {:?}: {:?}", db.peer, req),
+                    })
+            }
+            FrontendClient::Standalone {
+                database_client,
+                query,
+            } => {
+                let ctx = QueryContextBuilder::default()
+                    .current_catalog(catalog.to_string())
+                    .current_schema(schema.to_string())
+                    .channel(Channel::Internal)
+                    .extensions(HashMap::from([(
+                        QUERY_PARALLELISM_HINT.to_string(),
+                        query.parallelism.to_string(),
+                    )]))
+                    .build();
+                let ctx = Arc::new(ctx);
+                let database_client = {
+                    database_client
+                        .handler
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .context(UnexpectedSnafu {
+                            reason: "Standalone's frontend instance is not set",
+                        })?
+                        .upgrade()
+                        .context(UnexpectedSnafu {
+                            reason: "Failed to upgrade database client",
+                        })?
+                };
+                let resp: common_query::Output = database_client
+                    .do_query(req, ctx)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+                match resp.data {
+                    common_query::OutputData::AffectedRows(rows) => rows.try_into().map_err(|_| {
+                        UnexpectedSnafu {
+                            reason: format!("Failed to convert rows to u32: {}", rows),
+                        }
+                        .build()
+                    }),
+                    _ => UnexpectedSnafu {
+                        reason: "Unexpected output data",
+                    }
+                    .fail(),
+                }
             }
         }
     }
@@ -674,7 +765,7 @@ fn wrap_standalone_output_with_terminal_metrics(
 
 /// Describe a peer of frontend
 #[derive(Debug, Default, Clone)]
-pub(crate) enum PeerDesc {
+pub enum PeerDesc {
     /// The query failed before a frontend peer was selected.
     #[default]
     Unknown,
@@ -700,6 +791,7 @@ impl std::fmt::Display for PeerDesc {
 #[cfg(test)]
 mod tests {
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
     use std::time::Duration;
 
@@ -774,6 +866,11 @@ mod tests {
     struct MetricsHandler;
 
     #[derive(Debug)]
+    struct InsertOnceHandler {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug)]
     struct ExtensionAwareHandler;
 
     #[derive(Debug)]
@@ -805,6 +902,19 @@ mod tests {
             _ctx: QueryContextRef,
         ) -> std::result::Result<Output, BoxedError> {
             Ok(Output::new_with_affected_rows(0))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl GrpcQueryHandlerWithBoxedError for InsertOnceHandler {
+        async fn do_query(
+            &self,
+            _query: Request,
+            ctx: QueryContextRef,
+        ) -> std::result::Result<Output, BoxedError> {
+            assert_eq!(ctx.channel(), Channel::Internal);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Output::new_with_affected_rows(1))
         }
     }
 
@@ -848,6 +958,7 @@ mod tests {
             ctx: QueryContextRef,
         ) -> std::result::Result<Output, BoxedError> {
             assert_eq!(ctx.extension("flow.return_region_seq"), Some("true"));
+            assert_eq!(ctx.channel(), Channel::Internal);
             Ok(Output::new_with_affected_rows(1))
         }
     }
@@ -1000,6 +1111,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_handle_insert_once_calls_standalone_handler_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(InsertOnceHandler {
+            calls: calls.clone(),
+        });
+        let client =
+            FrontendClient::from_grpc_handler(Arc::downgrade(&handler), QueryOptions::default());
+        let mut peer_desc = None;
+
+        let affected_rows = client
+            .handle_insert_once(
+                Request::RowInserts(api::v1::RowInsertRequests { inserts: vec![] }),
+                "greptime",
+                "public",
+                &mut peer_desc,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(affected_rows, 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(peer_desc.is_none());
+    }
+
+    #[tokio::test]
     async fn test_query_with_terminal_metrics_tracks_watermark_in_standalone_mode() {
         let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(MetricsHandler);
         let client =
@@ -1125,7 +1261,11 @@ mod tests {
         let database = Database::new(
             DEFAULT_CATALOG_NAME,
             DEFAULT_SCHEMA_NAME,
-            Client::with_urls([addr.as_str()]),
+            Client::with_query_and_control_managers(
+                ChannelManager::new(),
+                ChannelManager::new(),
+                [addr.as_str()],
+            ),
         );
         let db = DatabaseWithPeer::new(
             database,
@@ -1162,7 +1302,11 @@ mod tests {
         let database = Database::new(
             DEFAULT_CATALOG_NAME,
             DEFAULT_SCHEMA_NAME,
-            Client::with_urls([addr.as_str()]),
+            Client::with_query_and_control_managers(
+                ChannelManager::new(),
+                ChannelManager::new(),
+                [addr.as_str()],
+            ),
         );
         let db = DatabaseWithPeer::new(
             database,

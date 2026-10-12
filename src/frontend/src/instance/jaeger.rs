@@ -23,16 +23,18 @@ use common_catalog::consts::{
 };
 use common_function::function::FunctionRef;
 use common_function::scalars::json::json_get::{
-    JsonGetBool, JsonGetFloat, JsonGetInt, JsonGetString,
+    JsonGetBool, JsonGetFloat, JsonGetInt, JsonGetString, JsonGetWithType,
 };
 use common_function::scalars::udf::create_udf;
 use common_query::{Output, OutputData};
 use common_recordbatch::adapter::RecordBatchStreamAdapter;
 use common_recordbatch::util;
 use common_telemetry::warn;
+use datafusion::common::ScalarValue;
 use datafusion::dataframe::DataFrame;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::SessionContext;
+use datafusion::functions::core::expr_fn::coalesce;
 use datafusion::functions_window::expr_fn::row_number;
 use datafusion_expr::select_expr::SelectExpr;
 use datafusion_expr::{Expr, ExprFunctionExt, SortExpr, col, lit, lit_timestamp_nano, wildcard};
@@ -43,9 +45,9 @@ use servers::error::{
 };
 use servers::http::jaeger::{JAEGER_QUERY_TABLE_NAME_KEY, QueryTraceParams, TraceUserAgent};
 use servers::otlp::trace::{
-    DURATION_NANO_COLUMN, KEY_OTEL_STATUS_ERROR_KEY, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN,
-    SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, SPAN_STATUS_CODE, SPAN_STATUS_ERROR,
-    TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
+    DURATION_NANO_COLUMN, KEY_OTEL_STATUS_ERROR_KEY, RESOURCE_ATTRIBUTES_COLUMN,
+    SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_KIND_COLUMN, SPAN_KIND_PREFIX,
+    SPAN_NAME_COLUMN, SPAN_STATUS_CODE, SPAN_STATUS_ERROR, TIMESTAMP_COLUMN, TRACE_ID_COLUMN,
 };
 use servers::query_handler::JaegerQueryHandler;
 use session::context::QueryContextRef;
@@ -200,8 +202,9 @@ impl JaegerQueryHandler for Instance {
 
         let mut filters = vec![];
 
-        // `service_name` is already validated in `from_jaeger_query_params()`, so no additional check needed here.
-        filters.push(col(SERVICE_NAME_COLUMN).eq(lit(query_params.service_name)));
+        if let Some(service_name) = query_params.service_name {
+            filters.push(col(SERVICE_NAME_COLUMN).eq(lit(service_name)));
+        }
 
         if let Some(operation_name) = query_params.operation_name {
             filters.push(col(SPAN_NAME_COLUMN).eq(lit(operation_name)));
@@ -252,6 +255,7 @@ impl JaegerQueryHandler for Instance {
         .await?;
 
         // Get all traces that match the trace ids from the previous query.
+        // API v3 applies the time window only to the search, not to the returned spans.
         // It's equivalent to the following SQL query:
         //
         // ```
@@ -274,11 +278,15 @@ impl JaegerQueryHandler for Instance {
             ),
         ];
 
-        if let Some(start_time) = query_params.start_time {
+        if !query_params.fetch_full_trace
+            && let Some(start_time) = query_params.start_time
+        {
             filters.push(col(TIMESTAMP_COLUMN).gt_eq(lit_timestamp_nano(start_time)));
         }
 
-        if let Some(end_time) = query_params.end_time {
+        if !query_params.fetch_full_trace
+            && let Some(end_time) = query_params.end_time
+        {
             filters.push(col(TIMESTAMP_COLUMN).lt_eq(lit_timestamp_nano(end_time)));
         }
 
@@ -367,11 +375,11 @@ async fn query_trace_table(
             schema: ctx.current_schema(),
         })?;
 
-    let is_data_model_v1 = table::requests::is_trace_v1_table(&table.table_info());
+    let table_info = table.table_info();
+    let data_model = table_info.meta.options.data_model();
 
     // collect to set
-    let col_names = table
-        .table_info()
+    let col_names = table_info
         .meta
         .field_column_names()
         .map(|s| format!("\"{}\"", s))
@@ -389,7 +397,7 @@ async fn query_trace_table(
     let dataframe = filters
         .into_iter()
         .chain(tags.map_or(Ok(vec![]), |t| {
-            tags_filters(&dataframe, t, is_data_model_v1, &col_names)
+            tags_filters(&dataframe, t, data_model, &col_names)
         })?)
         .try_fold(dataframe, |df, expr| {
             df.filter(expr).context(DataFusionSnafu)
@@ -518,8 +526,9 @@ fn create_df_context(query_engine: &QueryEngineRef) -> ServerResult<SessionConte
         SessionStateBuilder::new_from_existing(query_engine.engine_state().session_state()).build(),
     );
 
-    // The following JSON UDFs will be used for tags filters on v0 data model.
+    // JSON UDFs used by the v0 and v2 tag filters.
     let udfs: Vec<FunctionRef> = vec![
+        Arc::new(JsonGetWithType::default()),
         Arc::new(JsonGetInt::default()),
         Arc::new(JsonGetFloat::default()),
         Arc::new(JsonGetBool::default()),
@@ -537,67 +546,99 @@ fn json_tag_filters(
     dataframe: &DataFrame,
     tags: HashMap<String, JsonValue>,
 ) -> ServerResult<Vec<Expr>> {
+    let has_resource_attributes = dataframe
+        .schema()
+        .has_column_with_unqualified_name(RESOURCE_ATTRIBUTES_COLUMN);
     let mut filters = vec![];
 
     // NOTE: The key of the tags may contain `.`, for example: `http.status_code`, so we need to use `["http.status_code"]` in json path to access the value.
     for (key, value) in tags.iter() {
-        if let JsonValue::String(value) = value {
-            filters.push(
-                dataframe
-                    .registry()
-                    .udf(JsonGetString::NAME)
-                    .context(DataFusionSnafu)?
-                    .call(vec![
-                        col(SPAN_ATTRIBUTES_COLUMN),
-                        lit(format!("[\"{}\"]", key)),
-                    ])
-                    .eq(lit(value)),
-            );
-        }
-        if let JsonValue::Number(value) = value {
-            if value.is_i64() {
-                filters.push(
-                    dataframe
-                        .registry()
-                        .udf(JsonGetInt::NAME)
-                        .context(DataFusionSnafu)?
-                        .call(vec![
-                            col(SPAN_ATTRIBUTES_COLUMN),
-                            lit(format!("[\"{}\"]", key)),
-                        ])
-                        .eq(lit(value.as_i64().unwrap())),
-                );
+        let (udf, value) = match value {
+            JsonValue::String(value) => (JsonGetString::NAME, lit(value)),
+            JsonValue::Number(value) if value.is_i64() => {
+                (JsonGetInt::NAME, lit(value.as_i64().unwrap()))
             }
-            if value.is_f64() {
-                filters.push(
-                    dataframe
-                        .registry()
-                        .udf(JsonGetFloat::NAME)
-                        .context(DataFusionSnafu)?
-                        .call(vec![
-                            col(SPAN_ATTRIBUTES_COLUMN),
-                            lit(format!("[\"{}\"]", key)),
-                        ])
-                        .eq(lit(value.as_f64().unwrap())),
-                );
+            JsonValue::Number(value) if value.is_f64() => {
+                (JsonGetFloat::NAME, lit(value.as_f64().unwrap()))
             }
-        }
-        if let JsonValue::Bool(value) = value {
-            filters.push(
-                dataframe
-                    .registry()
-                    .udf(JsonGetBool::NAME)
-                    .context(DataFusionSnafu)?
-                    .call(vec![
-                        col(SPAN_ATTRIBUTES_COLUMN),
-                        lit(format!("[\"{}\"]", key)),
-                    ])
-                    .eq(lit(*value)),
-            );
-        }
+            JsonValue::Bool(value) => (JsonGetBool::NAME, lit(*value)),
+            _ => continue,
+        };
+        let get = dataframe.registry().udf(udf).context(DataFusionSnafu)?;
+        let path = lit(format!("[\"{}\"]", key));
+        let span_value = get.call(vec![col(SPAN_ATTRIBUTES_COLUMN), path.clone()]);
+        // Same precedence as `json2_tag_filters`: a span attribute shadows a resource attribute.
+        let attribute = if has_resource_attributes {
+            coalesce(vec![
+                span_value,
+                get.call(vec![col(RESOURCE_ATTRIBUTES_COLUMN), path]),
+            ])
+        } else {
+            span_value
+        };
+        filters.push(attribute.eq(value));
     }
 
     Ok(filters)
+}
+
+/// Resolves each tag per row, falling back to Resource when the typed Span value is null.
+fn json2_tag_filters(
+    dataframe: &DataFrame,
+    tags: HashMap<String, JsonValue>,
+) -> ServerResult<Vec<Expr>> {
+    let get = dataframe
+        .registry()
+        .udf(JsonGetWithType::NAME)
+        .context(DataFusionSnafu)?;
+    tags.into_iter()
+        .map(|(key, value)| {
+            if key == KEY_OTEL_STATUS_ERROR_KEY && value == JsonValue::Bool(true) {
+                return Ok(col(SPAN_STATUS_CODE).eq(lit(SPAN_STATUS_ERROR)));
+            }
+            // JSON quoting preserves literal dots, quotes, and backslashes in attribute keys.
+            let path = lit(format!("$[{}]", JsonValue::String(key)));
+            let (value, value_type) = match value {
+                JsonValue::String(value) => (
+                    ScalarValue::Utf8View(Some(value)),
+                    ScalarValue::Utf8View(None),
+                ),
+                JsonValue::Bool(value) => (
+                    ScalarValue::Boolean(Some(value)),
+                    ScalarValue::Boolean(None),
+                ),
+                JsonValue::Number(value) => {
+                    if let Some(value) = value.as_i64() {
+                        (ScalarValue::Int64(Some(value)), ScalarValue::Int64(None))
+                    } else if let Some(value) = value.as_u64() {
+                        (ScalarValue::UInt64(Some(value)), ScalarValue::UInt64(None))
+                    } else if let Some(value) = value.as_f64() {
+                        (
+                            ScalarValue::Float64(Some(value)),
+                            ScalarValue::Float64(None),
+                        )
+                    } else {
+                        return Ok(lit(false));
+                    }
+                }
+                JsonValue::Null => (ScalarValue::Utf8View(None), ScalarValue::Utf8View(None)),
+                JsonValue::Array(_) | JsonValue::Object(_) => return Ok(lit(false)),
+            };
+            let attribute = coalesce(vec![
+                get.call(vec![
+                    col(SPAN_ATTRIBUTES_COLUMN),
+                    path.clone(),
+                    lit(value_type.clone()),
+                ]),
+                get.call(vec![col(RESOURCE_ATTRIBUTES_COLUMN), path, lit(value_type)]),
+            ]);
+            Ok(if value.is_null() {
+                attribute.is_null()
+            } else {
+                attribute.eq(lit(value))
+            })
+        })
+        .collect()
 }
 
 /// Helper function to check if span_key or resource_key exists in col_names and create an expression.
@@ -679,13 +720,13 @@ fn flatten_tag_filters(
 fn tags_filters(
     dataframe: &DataFrame,
     tags: HashMap<String, JsonValue>,
-    is_data_model_v1: bool,
+    data_model: Option<&str>,
     col_names: &HashSet<String>,
 ) -> ServerResult<Vec<Expr>> {
-    if is_data_model_v1 {
-        flatten_tag_filters(tags, col_names)
-    } else {
-        json_tag_filters(dataframe, tags)
+    match data_model {
+        Some(table::requests::TABLE_DATA_MODEL_TRACE_V1) => flatten_tag_filters(tags, col_names),
+        Some(table::requests::TABLE_DATA_MODEL_TRACE_V2) => json2_tag_filters(dataframe, tags),
+        _ => json_tag_filters(dataframe, tags),
     }
 }
 

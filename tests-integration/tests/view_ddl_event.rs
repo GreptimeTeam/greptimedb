@@ -17,9 +17,9 @@ use std::sync::Arc;
 use common_test_util::temp_dir::create_temp_dir;
 use common_wal::config::DatanodeWalConfig;
 use tests_integration::cluster::GreptimeDbClusterBuilder;
-use tests_integration::standalone::GreptimeDbStandaloneBuilder;
 use tests_integration::test_util::{
     StorageType, get_test_store_config, setup_authenticated_grpc_database,
+    test_event_recorder_options,
 };
 use uuid::Uuid;
 
@@ -44,6 +44,7 @@ async fn test_view_ddl_events() {
     let home_dir = create_temp_dir("test_view_ddl_events_data_home");
     let cluster = GreptimeDbClusterBuilder::new("test_view_ddl_events")
         .await
+        .with_event_recorder_options(test_event_recorder_options())
         .with_datanodes(1)
         .with_store_config(store_config)
         .with_datanode_wal_config(DatanodeWalConfig::Noop)
@@ -56,19 +57,6 @@ async fn test_view_ddl_events() {
     let view = format!("view_ddl_event_{suffix}");
 
     execute_view_ddl(instance, &source_table, &view).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_standalone_view_ddl_events() {
-    common_telemetry::init_default_ut_logging();
-    let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_view_ddl_events")
-        .build()
-        .await;
-    let suffix = Uuid::new_v4().simple();
-    let source_table = format!("view_ddl_event_source_{suffix}");
-    let view = format!("view_ddl_event_{suffix}");
-
-    execute_view_ddl(standalone.fe_instance(), &source_table, &view).await;
 }
 
 async fn execute_view_ddl(

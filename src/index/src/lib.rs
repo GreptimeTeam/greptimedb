@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(iter_partition_in_place)]
-
 pub mod bitmap;
 pub mod bloom_filter;
 pub mod error;
@@ -21,8 +19,6 @@ pub mod external_provider;
 pub mod fulltext_index;
 pub mod inverted_index;
 pub mod target;
-#[cfg(feature = "vector_index")]
-pub mod vector;
 
 pub type Bytes = Vec<u8>;
 pub type BytesRef<'a> = &'a [u8];
