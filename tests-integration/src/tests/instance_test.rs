@@ -551,8 +551,9 @@ ORDER BY t.key_id"#;
 /// (millisecond) and the range invariant trips with
 /// "Current batch have data on the left side of working range, something is very wrong".
 ///
-/// The two rows are one second apart, so casting the millisecond time index to second precision
-/// collapses the first row onto second 0, which is before the start of the region's time range.
+/// The two rows are 1000 seconds apart, so casting the millisecond time index to second precision
+/// truncates sub-second parts and collapses the first row onto second 0, which is before the start
+/// of the region's time range.
 #[apply(standalone_instance_case)]
 async fn test_windowed_sort_sort_column_cast_time_unit_mismatch(instance: Arc<dyn MockInstance>) {
     let frontend = instance.frontend();
@@ -592,19 +593,28 @@ async fn test_windowed_sort_sort_column_cast_time_unit_mismatch(instance: Arc<dy
 | ts                      | host |
 +-------------------------+------+
 | 1970-01-01T00:00:00.001 | a    |
-| 1970-01-01T00:00:01.001 | b    |
+| 1970-01-01T00:16:40.001 | b    |
 +-------------------------+------+"#;
     let rows_by_cast = r#"+---------------------+------+
 | t                   | host |
 +---------------------+------+
 | 1970-01-01T00:00:00 | a    |
-| 1970-01-01T00:00:01 | b    |
+| 1970-01-01T00:16:40 | b    |
++---------------------+------+"#;
+    // `ORDER BY t DESC` returns the same rows in the opposite order; without distinct cast values
+    // the two rows tie and this expectation would be vacuous. `rows_by_cast` is an ascending
+    // fixture, so the descending query needs its own.
+    let rows_by_cast_desc = r#"+---------------------+------+
+| t                   | host |
++---------------------+------+
+| 1970-01-01T00:16:40 | b    |
+| 1970-01-01T00:00:00 | a    |
 +---------------------+------+"#;
 
     for table in ["f05_mito_wc", "f05_metric_wc"] {
         let output = execute_sql(
             &frontend,
-            &format!("INSERT INTO {table} (ts, host, val) VALUES (1, 'a', 1), (1001, 'b', 2)"),
+            &format!("INSERT INTO {table} (ts, host, val) VALUES (1, 'a', 1), (1000001, 'b', 2)"),
         )
         .await
         .data;
@@ -643,20 +653,22 @@ async fn test_windowed_sort_sort_column_cast_time_unit_mismatch(instance: Arc<dy
     let mut failures = Vec::new();
     for table in ["f05_mito_wc", "f05_metric_wc"] {
         for parallelism in [1, 4] {
-            for (sql, range_side) in [
+            for (sql, range_side, expected) in [
                 (
                     format!("SELECT CAST(ts AS TIMESTAMP(0)) AS t, host FROM {table} ORDER BY t"),
                     "left side",
+                    rows_by_cast,
                 ),
                 (
                     format!(
                         "SELECT CAST(ts AS TIMESTAMP(0)) AS t, host FROM {table} ORDER BY t DESC"
                     ),
                     "right side",
+                    rows_by_cast_desc,
                 ),
             ] {
                 match try_execute_sql_with_query_parallelism(&frontend, &sql, parallelism).await {
-                    Ok(output) => check_output_stream(output, rows_by_cast).await,
+                    Ok(output) => check_output_stream(output, expected).await,
                     Err((code, message)) => {
                         // Only this exact error is the bug under test, anything else is a
                         // different regression.

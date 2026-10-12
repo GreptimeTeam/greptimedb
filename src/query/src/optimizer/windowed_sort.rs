@@ -218,7 +218,20 @@ fn is_time_index_expr(
     }
 
     if let Some(cast_expr) = expr.downcast_ref::<CastExpr>() {
-        return if matches!(cast_expr.cast_type(), DataType::Timestamp(_, _)) {
+        // A cast that changes the time unit changes the values of the sort column, so the
+        // working ranges derived from the time index, which keep the unit of the time index,
+        // no longer apply. A cast adding a timezone to a naive timestamp re-interprets the
+        // underlying values in the same way, so only a cast that keeps both unit and values
+        // can still be the time index.
+        let source_type = cast_expr.expr().data_type(plan.schema().as_ref())?;
+        let keeps_time_unit = matches!(
+            (cast_expr.cast_type(), &source_type),
+            (
+                DataType::Timestamp(target_unit, target_tz),
+                DataType::Timestamp(source_unit, source_tz)
+            ) if target_unit == source_unit && (source_tz.is_some() || target_tz.is_none())
+        );
+        return if keeps_time_unit {
             is_time_index_expr(plan, cast_expr.expr())
         } else {
             Ok(false)
@@ -340,7 +353,7 @@ mod test {
     use datafusion::config::ConfigOptions;
     use datafusion::physical_plan::filter::FilterExecBuilder;
     use datafusion_common::ScalarValue;
-    use datafusion_functions::datetime::to_timestamp_millis;
+    use datafusion_functions::datetime::{to_timestamp, to_timestamp_millis};
     use datafusion_physical_expr::expressions::{CastExpr, Literal};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
@@ -427,7 +440,7 @@ mod test {
     }
 
     #[test]
-    fn test_is_time_index_expr_tracks_cast_aliases_through_projection() {
+    fn test_is_time_index_expr_rejects_unit_changing_cast_through_projection() {
         let scan = new_region_scan();
         let projection = Arc::new(
             ProjectionExec::try_new(
@@ -445,7 +458,65 @@ mod test {
         ) as Arc<dyn ExecutionPlan>;
         let expr = Arc::new(PhysicalColumn::new("ts_ms", 0)) as Arc<dyn PhysicalExpr>;
 
-        assert!(is_time_index_expr(&projection, &expr).unwrap());
+        // The cast changes the time unit (ns → ms), so it is no longer the time index.
+        assert!(!is_time_index_expr(&projection, &expr).unwrap());
+    }
+
+    #[test]
+    fn test_is_time_index_expr_rejects_timezone_adding_cast() {
+        let scan = new_region_scan();
+
+        // The cast keeps the time unit but adds a timezone, which re-interprets the
+        // underlying values, so it is no longer the time index.
+        let adds_timezone = Arc::new(CastExpr::new(
+            Arc::new(PhysicalColumn::new("ts", 1)),
+            DataType::Timestamp(TimeUnit::Nanosecond, Some(Arc::from("+07:00"))),
+            None,
+        )) as Arc<dyn PhysicalExpr>;
+        assert!(!is_time_index_expr(&scan, &adds_timezone).unwrap());
+
+        // Adding the `UTC` timezone also shifts the underlying values, so it is rejected
+        // as well.
+        let adds_utc_timezone = Arc::new(CastExpr::new(
+            Arc::new(PhysicalColumn::new("ts", 1)),
+            DataType::Timestamp(TimeUnit::Nanosecond, Some(Arc::from("UTC"))),
+            None,
+        )) as Arc<dyn PhysicalExpr>;
+        assert!(!is_time_index_expr(&scan, &adds_utc_timezone).unwrap());
+
+        // A cast between two aware timestamps of the same unit keeps the underlying
+        // values, so it is still the time index.
+        let mut config = ConfigOptions::default();
+        config.execution.time_zone = Some("+08:00".to_string());
+        let config = Arc::new(config);
+        let aware_source = ScalarFunctionExpr::try_new(
+            to_timestamp(config.as_ref()),
+            vec![Arc::new(PhysicalColumn::new("ts", 1))],
+            scan.schema().as_ref(),
+            config.clone(),
+        )
+        .unwrap();
+        let projection = Arc::new(
+            ProjectionExec::try_new(
+                vec![(
+                    Arc::new(aware_source) as Arc<dyn PhysicalExpr>,
+                    "ts_aware".to_string(),
+                )],
+                scan,
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>;
+        assert_eq!(
+            projection.schema().field(0).data_type(),
+            &DataType::Timestamp(TimeUnit::Nanosecond, Some(Arc::from("+08:00")))
+        );
+        let aware_cast = Arc::new(CastExpr::new(
+            Arc::new(PhysicalColumn::new("ts_aware", 0)),
+            DataType::Timestamp(TimeUnit::Nanosecond, Some(Arc::from("+07:00"))),
+            None,
+        )) as Arc<dyn PhysicalExpr>;
+
+        assert!(is_time_index_expr(&projection, &aware_cast).unwrap());
     }
 
     #[test]
@@ -505,7 +576,8 @@ mod test {
             DataType::Timestamp(TimeUnit::Millisecond, None),
             None,
         )) as Arc<dyn PhysicalExpr>;
-        assert!(is_time_index_expr(&scan, &cast_expr).unwrap());
+        // The cast changes the time unit (ns → ms), so it is no longer the time index.
+        assert!(!is_time_index_expr(&scan, &cast_expr).unwrap());
 
         let non_timestamp_cast = Arc::new(CastExpr::new(
             Arc::new(PhysicalColumn::new("ts", 1)),
