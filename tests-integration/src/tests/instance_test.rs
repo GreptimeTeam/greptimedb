@@ -265,7 +265,9 @@ WHERE greptime_timestamp = (
 /// index>` query is planned. The rejection is checked after the catalog existence
 /// lookup, so a no-op `IF NOT EXISTS` keeps working for an existing table. Grouping
 /// by an ordinary column plus the time index must still preserve every row at every
-/// query parallelism.
+/// query parallelism. A logical metric table is not exempt either: it reports
+/// `engine = metric` but owns no `__tsid`, so adding the reserved name there is
+/// rejected as well and the logical table keeps its rows.
 #[apply(both_instances_cases)]
 async fn test_group_by_tsid_and_time_preserves_rows(instance: Arc<dyn MockInstance>) {
     let frontend = instance.frontend();
@@ -422,6 +424,64 @@ async fn test_group_by_tsid_and_time_preserves_rows(instance: Arc<dyn MockInstan
             "unexpected audit_min result with query_parallelism={parallelism}:\\n{result}"
         );
     }
+
+    // A logical metric table reports `engine = metric` without the physical-table
+    // option, so it does not own the internal `__tsid` column: the reserved name is
+    // rejected instead of binding by name to the internal column, which would leave
+    // every later read of the logical table broken.
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE audit_metric_phy (
+            ts TIMESTAMP(3) TIME INDEX,
+            val DOUBLE
+        ) ENGINE = metric WITH ('physical_metric_table' = '')"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE audit_metric_logical (
+            ts TIMESTAMP(3) TIME INDEX,
+            val DOUBLE,
+            host STRING PRIMARY KEY
+        ) ENGINE = metric WITH ('on_physical_table' = 'audit_metric_phy')"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        "INSERT INTO audit_metric_logical (ts, val, host) \
+         VALUES ('2024-01-01 00:00:00', 1.5, 'a')",
+    )
+    .await;
+
+    let error = try_execute_sql(
+        &frontend,
+        "ALTER TABLE audit_metric_logical ADD COLUMN __tsid STRING PRIMARY KEY",
+    )
+    .await
+    .expect_err("a logical metric table must not be able to add `__tsid`");
+    let message = error.output_msg();
+    assert!(
+        message.contains("column name `__tsid` is reserved by the metric engine"),
+        "unexpected error for rejected logical metric ALTER TABLE: {message}"
+    );
+
+    // The rejected ALTER must not leave the logical table in a broken state.
+    let logical = execute_sql(
+        &frontend,
+        "SELECT host, val, ts FROM audit_metric_logical ORDER BY ts",
+    )
+    .await
+    .data
+    .pretty_print()
+    .await;
+    assert_eq!(
+        result_rows(&logical),
+        vec![
+            vec!["host", "val", "ts"],
+            vec!["a", "1.5", "2024-01-01T00:00:00"],
+        ],
+        "the rejected ALTER must not break reads from the logical metric table: {logical}"
+    );
 }
 
 #[apply(both_instances_cases)]

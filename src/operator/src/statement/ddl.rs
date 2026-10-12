@@ -2597,15 +2597,16 @@ pub fn verify_alter(
         }) {
             return Ok(false);
         }
-        // The metric engine owns `__tsid` on its physical tables, so any other engine
-        // must not be able to add the reserved column. A physical metric table is
-        // exempt, because its stored engine may be `mito` while the physical-table
-        // option still marks it as owned by the metric engine. Legacy tables that
+        // The metric engine owns `__tsid` on its physical tables, so nothing else
+        // may add the reserved column. Only the physical table itself is exempt,
+        // identified by the physical-table option instead of the engine: a logical
+        // metric table also reports `engine = metric` but stores no `__tsid` of its
+        // own, so it must be rejected, while the physical table's stored engine may
+        // be `mito` and still be owned by the metric engine. Legacy tables that
         // already store it keep their writes: only a genuinely new `__tsid` column
         // is rejected, and the all-`add_if_not_exists` no-op case returned above
         // stays a no-op.
-        let is_physical_metric_table =
-            table_info.meta.engine == METRIC_ENGINE_NAME || table_info.is_physical_table();
+        let is_physical_metric_table = table_info.is_physical_table();
         if !is_physical_metric_table
             && columns.iter().any(|column| {
                 column.column_schema.name == DATA_SCHEMA_TSID_COLUMN_NAME
@@ -3992,6 +3993,57 @@ WITH ('repartition.column.hint' = ' host ')",
         let err = verify_alter(1, table_info, alter(vec![tsid_column(false)])).unwrap_err();
         let msg = common_error::ext::ErrorExt::output_msg(&err);
         assert!(msg.contains("__tsid"), "{msg}");
+
+        // A logical metric table also reports `engine = metric`, but it stores no
+        // `__tsid` of its own, so a new `__tsid` there must not slip through the
+        // exemption and bind by name to the internal column.
+        let new_tsid_column = || api::v1::AddColumn {
+            column_def: Some(api::v1::ColumnDef {
+                name: DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                data_type: api::v1::ColumnDataType::String as i32,
+                is_nullable: true,
+                default_constraint: vec![],
+                semantic_type: api::v1::SemanticType::Tag as i32,
+                ..Default::default()
+            }),
+            location: None,
+            add_if_not_exists: false,
+        };
+        let logical_expr = create_expr_from_sql(
+            "CREATE TABLE metric_logical (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY) \
+             ENGINE = metric WITH ('on_physical_table' = 'metric_phy');",
+        );
+        assert_eq!(logical_expr.engine, METRIC_ENGINE_NAME);
+        let logical_info = Arc::new(create_table_info(&logical_expr, vec![]).unwrap());
+        assert!(!logical_info.is_physical_table());
+        let err = verify_alter(1, logical_info, alter(vec![new_tsid_column()])).unwrap_err();
+        let msg = common_error::ext::ErrorExt::output_msg(&err);
+        assert!(
+            msg.contains("column name `__tsid` is reserved by the metric engine"),
+            "{msg}"
+        );
+
+        // The physical table stays exempt whichever engine it is stored under: the
+        // physical-table option marks the ownership, and `SHOW CREATE TABLE` renders
+        // it back with that option plus the internal columns.
+        for (engine, sql) in [
+            (
+                "metric",
+                "CREATE TABLE metric_phy (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY) \
+                 ENGINE = metric WITH ('physical_metric_table' = '');",
+            ),
+            (
+                "mito",
+                "CREATE TABLE metric_phy (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY) \
+                 ENGINE = mito WITH ('physical_metric_table' = '');",
+            ),
+        ] {
+            let expr = create_expr_from_sql(sql);
+            assert_eq!(expr.engine, engine);
+            let info = Arc::new(create_table_info(&expr, vec![]).unwrap());
+            assert!(info.is_physical_table());
+            assert!(verify_alter(1, info, alter(vec![new_tsid_column()])).unwrap());
+        }
     }
 
     #[test]
