@@ -249,7 +249,10 @@ pub(crate) async fn tracked_query(
                 }
                 let output = OutputWithMetrics::from_output(Output::new(
                     OutputData::AffectedRows(rows),
-                    OutputMeta { plan: None, cost },
+                    OutputMeta {
+                        cost,
+                        ..Default::default()
+                    },
                 ));
                 output.metrics.update(metrics);
                 return Ok(output);

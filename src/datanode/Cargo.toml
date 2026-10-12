@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 testing = []
-enterprise = ["mito2/enterprise", "dep:common-grpc", "common-grpc/enterprise"]
+enterprise = ["mito2/enterprise", "common-grpc/enterprise"]
 
 [lints]
 workspace = true
@@ -25,7 +25,7 @@ common-datasource.workspace = true
 common-error.workspace = true
 common-function.workspace = true
 common-greptimedb-telemetry.workspace = true
-common-grpc = { workspace = true, optional = true }
+common-grpc.workspace = true
 common-macro.workspace = true
 common-meta.workspace = true
 common-options.workspace = true

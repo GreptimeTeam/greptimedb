@@ -841,7 +841,6 @@ impl Inserter {
             has_instant_rows,
         )?;
 
-
         // Tracked Flow children use a same-capability write protocol. Keep the
         // ordinary dispatch path unchanged for every other request.
         #[cfg(feature = "enterprise")]
@@ -849,7 +848,7 @@ impl Inserter {
             let dispatcher = self.write_dispatcher.clone();
             let request = request_factory.build_insert(normal_requests);
             let writes = dispatcher.prepare(vec![request]).await?;
-            let tracked_tasks = writes.into_iter().map(|(peer, request)| {
+            let tracked_tasks = writes.into_iter().map(|(peer, mut request)| {
                 let mut query_context = crate::utils::to_meta_query_context(ctx.clone());
                 query_context.extensions.insert(
                     common_grpc::flow_write::CHILD_KEY.to_string(),
