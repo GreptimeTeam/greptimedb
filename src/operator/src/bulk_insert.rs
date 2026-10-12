@@ -14,7 +14,6 @@
 
 use std::collections::HashSet;
 
-use api::region::RegionResponse;
 use api::v1::flow::{DirtyWindowRequest, DirtyWindowRequests};
 use api::v1::region::{
     BulkInsertRequest, RegionRequest, RegionRequestHeader, bulk_insert_request, region_request,
@@ -41,6 +40,7 @@ use crate::error::Result;
 use crate::insert::Inserter;
 use crate::req_convert::TablePartitioner;
 use crate::req_convert::insert;
+use crate::write_dispatcher::WriteOutcome;
 use crate::{error, metrics};
 
 impl Inserter {
@@ -246,7 +246,7 @@ impl Inserter {
             } else {
                 None
             };
-            let handle: common_runtime::JoinHandle<Result<RegionResponse>> =
+            let handle: common_runtime::JoinHandle<Result<WriteOutcome>> =
                 common_runtime::spawn_global(async move {
                     let (header, payload) = if mask.select_all() {
                         // SAFETY: raw data must be present, we can avoid re-encoding.
@@ -301,27 +301,40 @@ impl Inserter {
                         })),
                     };
 
-                    dispatcher
-                        .dispatch_prepared(
-                            vec![(peer, request)],
+                    Ok(dispatcher
+                        .dispatch_initial(
+                            peer,
+                            request,
                             Some(
-                                metrics::HANDLE_BULK_INSERT_ELAPSED
+                                &metrics::HANDLE_BULK_INSERT_ELAPSED
                                     .with_label_values(&["datanode_handle"]),
                             ),
                         )
-                        .await
-                        .context(error::RequestRegionSnafu)
+                        .await)
                 });
             handles.push(handle);
         }
 
-        let results = future::try_join_all(handles)
-            .await
-            .context(error::JoinTaskSnafu)?;
-        let rows_inserted = results
-            .into_iter()
-            .map(|result| result.map(|response| response.affected_rows))
-            .sum::<Result<usize>>()?;
+        let dispatcher = self.write_dispatcher.clone();
+        let rows_inserted = common_runtime::spawn_global(async move {
+            let results = future::try_join_all(handles)
+                .await
+                .context(error::JoinTaskSnafu)?;
+            let outcomes = results.into_iter().collect::<Result<Vec<_>>>()?;
+            dispatcher
+                .finish_dispatch(
+                    outcomes,
+                    Some(
+                        &metrics::HANDLE_BULK_INSERT_ELAPSED
+                            .with_label_values(&["datanode_handle"]),
+                    ),
+                )
+                .await
+                .context(error::RequestRegionSnafu)
+                .map(|response| response.affected_rows)
+        })
+        .await
+        .context(error::JoinTaskSnafu)??;
         wait_all_datanode_timer.observe_duration();
         crate::metrics::DIST_INGEST_ROW_COUNT
             .with_label_values(&[db_name.as_str()])

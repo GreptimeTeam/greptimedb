@@ -14,7 +14,7 @@ insert/delete routing.
 | Statements | `src/operator/src/statement.rs`, `src/operator/src/statement/` | `StatementExecutor` and per-statement handlers |
 | Inserts | `src/operator/src/insert.rs`, `src/operator/src/bulk_insert.rs` | Insert, auto-create/alter, routing, dispatch |
 | Deletes | `src/operator/src/delete.rs` | Delete conversion and dispatch |
-| Write dispatch | `src/operator/src/write_dispatcher.rs` | Shared insert/delete/bulk dispatch and batched peer resolution |
+| Write dispatch | `src/operator/src/write_dispatcher.rs` | Shared insert/delete/bulk dispatch, bounded retries, route refresh and repartition |
 | Request conversion | `src/operator/src/req_convert.rs`, `src/operator/src/req_convert/` | Table/row/column requests to region requests |
 | Region requests | `src/operator/src/region_req_factory.rs` | Region-level DDL/DML request construction |
 | Procedures | `src/operator/src/procedure.rs` | Metasrv procedure administration |
@@ -39,6 +39,8 @@ cargo sqlness bare -t <case>
 ```
 
 Check standalone and distributed routing when changing region dispatch.
+Write retries operate on prepared region requests in `write_dispatcher`; keep
+admission and Flow side effects outside retries, and preserve successful regions.
 
 Write admission uses fallible `write_meter!` calls in `Inserter::do_request`
 and `handle_bulk_insert`, before flow side effects and datanode dispatch. Bulk
