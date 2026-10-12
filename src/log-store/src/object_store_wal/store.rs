@@ -3292,15 +3292,7 @@ mod tests {
     async fn test_store_recovery_fetches_a_footer_longer_than_the_tail_window() {
         let _serialized = SERIALIZED.lock().await;
         let object_store = memory_store();
-        let regions = (RECOVERY_TAIL_WINDOW / FOOTER_ENTRY_LEN + 100) as u32;
-        let records = (1..=regions)
-            .map(|number| Record {
-                region_id: region(number),
-                entry_id: 1,
-                payload: Bytes::from_static(b"wide"),
-            })
-            .collect::<Vec<_>>();
-        put_records(&object_store, 0, &records).await;
+        put_wide_object(&object_store).await;
         put_object(&object_store, 1, region(1), &[id(1, 1)]).await;
 
         let (io, reads) = RecordingIo::over(object_store.clone());
@@ -3312,7 +3304,7 @@ mod tests {
         let recovered = recover(io.as_ref()).await.unwrap();
         let expected = recover_by_decoding(io.as_ref()).await.unwrap();
         assert_same_recovery(&expected, &recovered);
-        assert_eq!(regions as usize, recovered.durable_entry_ids.len());
+        assert_eq!(WIDE_REGIONS as usize, recovered.durable_entry_ids.len());
 
         // The wide object took the header, the tail window and the footer;
         // the narrow one was read whole.
@@ -3345,7 +3337,7 @@ mod tests {
 
         let store = open(object_store, &eager()).await;
         assert_eq!(id(1, 1), latest(&store, region(1)));
-        assert_eq!(1, latest(&store, region(regions)));
+        assert_eq!(1, latest(&store, region(WIDE_REGIONS)));
         store.stop().await.unwrap();
     }
 
@@ -3364,6 +3356,33 @@ mod tests {
             })
             .collect::<Vec<_>>();
         put_records(object_store, object_seq, &records).await;
+    }
+
+    /// Regions enough for a footer longer than the window recovery reads
+    /// from the end of an object, so that recovery fetches the header, that
+    /// window and the footer of such an object separately.
+    const WIDE_REGIONS: u32 = (RECOVERY_TAIL_WINDOW / FOOTER_ENTRY_LEN + 100) as u32;
+
+    /// Writes object 0 with a footer longer than the tail window and returns
+    /// the offsets of the window and of the footer.
+    async fn put_wide_object(object_store: &ObjectStore) -> (u64, u64) {
+        let records = (1..=WIDE_REGIONS)
+            .map(|number| Record {
+                region_id: region(number),
+                entry_id: 1,
+                payload: Bytes::from_static(b"wide"),
+            })
+            .collect::<Vec<_>>();
+        put_records(object_store, 0, &records).await;
+        let bytes = object_store
+            .read(&object_path(object_store, 0))
+            .await
+            .unwrap()
+            .to_vec();
+        let (trailer, _) = footer_of(&bytes);
+        let tail_start = (bytes.len() - RECOVERY_TAIL_WINDOW) as u64;
+        assert!(trailer.footer_offset < tail_start);
+        (tail_start, trailer.footer_offset)
     }
 
     #[tokio::test]
@@ -8339,10 +8358,12 @@ mod tests {
             }
         }
 
-        /// Puts both indexed gauges at the one start object of a store opened
-        /// on an empty prefix, so a case that abandons a recovery can tell the
-        /// gauges standing still from a publication of what its prefix holds.
-        async fn settled_gauges() -> (i64, i64) {
+        /// Opens and stops a store on an empty prefix, which sets both
+        /// process-wide indexed gauges to its one start object and moves the
+        /// recovery and create counters, so a case that abandons a recovery
+        /// can tell the gauges standing still from a publication of what its
+        /// prefix holds. It runs before the case samples `Counters`.
+        async fn initialize_indexed_gauges() -> (i64, i64) {
             let store = open(memory_store(), &eager()).await;
             store.stop().await.unwrap();
             let gauges = indexed_gauges();
@@ -8360,7 +8381,7 @@ mod tests {
             recognise: impl Fn(&Error) -> bool,
             retry_hint: RetryHint,
         ) {
-            let gauges = settled_gauges().await;
+            let gauges = initialize_indexed_gauges().await;
             let before = Counters::sample();
             let error = ObjectStoreLogStore::open(io.clone(), &eager(), PREFIX.to_string())
                 .await
@@ -8424,33 +8445,6 @@ mod tests {
                 Counters::since(before)
             );
             store.stop().await.unwrap();
-        }
-
-        /// Regions enough for a footer longer than the window recovery reads
-        /// from the end of an object, so that recovery fetches the header,
-        /// that window and the footer of such an object separately.
-        const WIDE_REGIONS: u32 = (RECOVERY_TAIL_WINDOW / FOOTER_ENTRY_LEN + 100) as u32;
-
-        /// Writes object 0 with a footer longer than the tail window and
-        /// returns the offsets of the window and of the footer.
-        async fn put_wide_object(object_store: &ObjectStore) -> (u64, u64) {
-            let records = (1..=WIDE_REGIONS)
-                .map(|number| Record {
-                    region_id: region(number),
-                    entry_id: 1,
-                    payload: Bytes::from_static(b"wide"),
-                })
-                .collect::<Vec<_>>();
-            put_records(object_store, 0, &records).await;
-            let bytes = object_store
-                .read(&object_path(object_store, 0))
-                .await
-                .unwrap()
-                .to_vec();
-            let (trailer, _) = footer_of(&bytes);
-            let tail_start = (bytes.len() - RECOVERY_TAIL_WINDOW) as u64;
-            assert!(trailer.footer_offset < tail_start);
-            (tail_start, trailer.footer_offset)
         }
 
         async fn trailer_fetch_fails_at_recovery() {
@@ -8548,11 +8542,11 @@ mod tests {
             }
         }
 
-        /// The fetch of recovery that finds an object gone.
+        /// The fetch of recovery at which an object is found gone.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        enum Gone {
+        enum RecoveryFetchStage {
             /// The read of a short object as a whole.
-            Whole,
+            WholeObject,
             /// The reads of the header and of the tail window of a wide object.
             Header,
             /// The separate read of the footer of a wide object.
@@ -8576,18 +8570,22 @@ mod tests {
         /// is ignored, at or above it the construction fails.
         async fn object_vanishes_before_its_fetch() {
             for (vanished, fails) in [(1, false), (2, true)] {
-                for gone in [Gone::Whole, Gone::Header, Gone::Footer] {
-                    object_vanishes_at(vanished, fails, gone).await;
+                for stage in [
+                    RecoveryFetchStage::WholeObject,
+                    RecoveryFetchStage::Header,
+                    RecoveryFetchStage::Footer,
+                ] {
+                    object_vanishes_at(vanished, fails, stage).await;
                 }
             }
         }
 
-        async fn object_vanishes_at(vanished: u64, fails: bool, gone: Gone) {
+        async fn object_vanishes_at(vanished: u64, fails: bool, stage: RecoveryFetchStage) {
             let object_store = memory_store();
-            put_bounded_chain(&object_store, gone != Gone::Whole).await;
+            put_bounded_chain(&object_store, stage != RecoveryFetchStage::WholeObject).await;
             let (io, mut parked) = ParkedIo::over(object_store.clone());
             io.range_reads_parked.store(true, Ordering::SeqCst);
-            let gauges = settled_gauges().await;
+            let gauges = initialize_indexed_gauges().await;
             let before = Counters::sample();
             let opening = {
                 let io = io.clone();
@@ -8604,15 +8602,16 @@ mod tests {
             };
             // A short object parks once, a wide one twice, at its header and
             // at its tail window, and then once more at its footer.
-            let first = parked_releases(&mut parked, if gone == Gone::Whole { 4 } else { 8 }).await;
-            if gone != Gone::Footer {
+            let whole = stage == RecoveryFetchStage::WholeObject;
+            let first = parked_releases(&mut parked, if whole { 4 } else { 8 }).await;
+            if stage != RecoveryFetchStage::Footer {
                 delete().await.unwrap();
             }
             release_all(first);
-            match gone {
-                Gone::Whole => {}
-                Gone::Header => release_all(parked_releases(&mut parked, 3).await),
-                Gone::Footer => {
+            match stage {
+                RecoveryFetchStage::WholeObject => {}
+                RecoveryFetchStage::Header => release_all(parked_releases(&mut parked, 3).await),
+                RecoveryFetchStage::Footer => {
                     let footers = parked_releases(&mut parked, 4).await;
                     delete().await.unwrap();
                     release_all(footers);
@@ -8782,13 +8781,12 @@ mod tests {
                 append(&store, region_id, "a1").await.unwrap();
                 let (object_seq, release) = next_parked_operation(&mut parked).await;
                 assert_eq!(0, object_seq);
-                // The first poll queues the stop command; the delete in
-                // flight holds the answer back.
+                // The first poll queues the stop command; the command queued
+                // behind it is answered once the stop was handled, and the
+                // delete in flight still holds the answer to the stop back.
                 let mut stop = Box::pin(store.stop());
                 assert!((&mut stop).now_or_never().is_none());
-                for _ in 0..16 {
-                    tokio::task::yield_now().await;
-                }
+                round_trip_stopping_actor(&store).await;
                 assert!((&mut stop).now_or_never().is_none());
                 release.send(deleted).unwrap();
                 timeout(WAIT, stop).await.unwrap().unwrap();
@@ -8888,8 +8886,21 @@ mod tests {
         }
 
         /// Four creates are in flight and a fifth batch waits for a slot when
-        /// `stop` begins: the fifth is dropped, the four complete out of
-        /// order and are indexed and acknowledged in order.
+        /// `stop` begins: the fifth is dropped; objects 4 to 2 complete while
+        /// object 1 stays parked and nothing is acknowledged or indexed; then
+        /// object 1 releases the four acknowledgements in order.
+        /// Round-trips a command through the actor once `stop` began, when
+        /// the seal command is refused: the collection that `obsolete_all` of
+        /// a region without entries requests is answered by the actor, and
+        /// hides nothing of the regions a case reads.
+        async fn round_trip_stopping_actor(store: &ObjectStoreLogStore) {
+            let region_id = region(9);
+            store
+                .obsolete_all(&provider(region_id), region_id)
+                .await
+                .unwrap();
+        }
+
         async fn creates_succeed_after_stop_began() {
             let (store, io, mut parked) = open_parking_creates(memory_store(), &eager()).await;
             let before = Counters::sample();
@@ -8902,9 +8913,19 @@ mod tests {
                 tokio::spawn(async move { store.stop().await })
             };
             assert_stopped(&timeout(WAIT, dropped).await.unwrap().unwrap().unwrap_err());
-            for object_seq in (1..=MAX_IN_FLIGHT_CREATES as u64).rev() {
+            for object_seq in (2..=MAX_IN_FLIGHT_CREATES as u64).rev() {
                 releases.remove(&object_seq).unwrap().send(true).unwrap();
             }
+            wait_until(|| {
+                Counters::since(before).created_objects == MAX_IN_FLIGHT_CREATES as u64 - 1
+            })
+            .await;
+            round_trip_stopping_actor(&store).await;
+            assert!(appends.iter().all(|append| !append.is_finished()));
+            assert_eq!(0, latest(&store, region_id));
+            assert_indexed(io.as_ref(), &[0]).await;
+
+            releases.remove(&1).unwrap().send(true).unwrap();
             for (index, append) in appends.into_iter().enumerate() {
                 let response = timeout(WAIT, append).await.unwrap().unwrap().unwrap();
                 assert_eq!(
