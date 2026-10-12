@@ -14,10 +14,10 @@
 
 pub mod const_normalization;
 pub mod constant_term;
-pub(crate) mod count_join;
 pub mod count_nest_aggr;
 pub mod count_wildcard;
 pub mod enforce_sorting;
+pub(crate) mod factorized_join_agg;
 pub mod global_limit;
 pub(crate) mod insert_assignment;
 pub(crate) mod json_schema_concretize;

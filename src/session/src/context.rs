@@ -737,6 +737,7 @@ pub struct ConfigurationVariables {
     pg_intervalstyle_format: ArcSwap<PGIntervalStyle>,
     allow_query_fallback: ArcSwap<bool>,
     experimental_enable_factorized_join_agg: ArcSwap<bool>,
+    experimental_enable_factorized_join_agg_set: ArcSwap<bool>,
 }
 
 impl Clone for ConfigurationVariables {
@@ -748,6 +749,11 @@ impl Clone for ConfigurationVariables {
             allow_query_fallback: ArcSwap::new(self.allow_query_fallback.load().clone()),
             experimental_enable_factorized_join_agg: ArcSwap::new(
                 self.experimental_enable_factorized_join_agg.load().clone(),
+            ),
+            experimental_enable_factorized_join_agg_set: ArcSwap::new(
+                self.experimental_enable_factorized_join_agg_set
+                    .load()
+                    .clone(),
             ),
         }
     }
@@ -797,6 +803,12 @@ impl ConfigurationVariables {
     pub fn set_experimental_enable_factorized_join_agg(&self, enabled: bool) {
         self.experimental_enable_factorized_join_agg
             .swap(Arc::new(enabled));
+        self.experimental_enable_factorized_join_agg_set
+            .swap(Arc::new(true));
+    }
+
+    pub fn experimental_enable_factorized_join_agg_is_set(&self) -> bool {
+        **self.experimental_enable_factorized_join_agg_set.load()
     }
 }
 

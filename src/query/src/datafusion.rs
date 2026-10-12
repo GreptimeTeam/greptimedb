@@ -149,6 +149,16 @@ impl DatafusionQueryEngine {
         Self { state, plugins }
     }
 
+    /// Crate-visible view of the per-query engine context, for tests that
+    /// assert configuration propagation through the real query path.
+    #[cfg(test)]
+    pub(crate) fn engine_context_for_tests(
+        &self,
+        query_ctx: QueryContextRef,
+    ) -> QueryEngineContext {
+        self.engine_context(query_ctx)
+    }
+
     #[tracing::instrument(skip_all)]
     async fn exec_query_plan(
         &self,
@@ -567,15 +577,17 @@ impl QueryEngine for DatafusionQueryEngine {
             }
         }
 
-        if query_ctx
-            .configuration_parameter()
-            .experimental_enable_factorized_join_agg()
-        {
+        let factorized_join_agg = query_ctx.configuration_parameter();
+        if factorized_join_agg.experimental_enable_factorized_join_agg_is_set() {
+            // Preserve the server-level default when the session variable is unset,
+            // but let either explicit SET value override that default.
             state
                 .config_mut()
                 .options_mut()
                 .extensions
-                .insert(FactorizedJoinAggOptions { enabled: true });
+                .insert(FactorizedJoinAggOptions {
+                    enabled: factorized_join_agg.experimental_enable_factorized_join_agg(),
+                });
         }
 
         // configure execution options

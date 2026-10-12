@@ -76,7 +76,6 @@ pub enum QueryMemoryPoolPolicy {
     Fair,
 }
 
-/// Query engine config
 #[derive(Debug, Clone, Default)]
 pub struct FactorizedJoinAggOptions {
     pub enabled: bool,
@@ -110,6 +109,7 @@ impl ExtensionOptions for FactorizedJoinAggOptions {
     }
 }
 
+/// Query engine configuration options.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct QueryOptions {

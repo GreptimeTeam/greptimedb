@@ -278,14 +278,26 @@ pub fn set_allow_query_fallback(exprs: Vec<Expr>, ctx: QueryContextRef) -> Resul
     }
 }
 
-pub fn set_experimental_enable_factorized_join_agg(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
-    let value = exprs.first().context(NotSupportedSnafu { feat: "No factorized join aggregate value found in SET" })?;
+pub fn set_experimental_enable_factorized_join_agg(
+    exprs: Vec<Expr>,
+    ctx: QueryContextRef,
+) -> Result<()> {
+    let value = exprs.first().context(NotSupportedSnafu {
+        feat: "No factorized join aggregate value found in SET",
+    })?;
     match value {
-        Expr::Value(ValueWithSpan { value: Value::Boolean(enabled), .. }) => {
-            ctx.configuration_parameter().set_experimental_enable_factorized_join_agg(*enabled);
+        Expr::Value(ValueWithSpan {
+            value: Value::Boolean(enabled),
+            ..
+        }) => {
+            ctx.configuration_parameter()
+                .set_experimental_enable_factorized_join_agg(*enabled);
             Ok(())
         }
-        expr => NotSupportedSnafu { feat: format!("Unsupported factorized join aggregate expression {expr}") }.fail(),
+        expr => NotSupportedSnafu {
+            feat: format!("Unsupported factorized join aggregate expression {expr}"),
+        }
+        .fail(),
     }
 }
 
