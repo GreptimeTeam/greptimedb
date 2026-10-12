@@ -3342,7 +3342,7 @@ async fn test_histogram_ingestion_storage_lifecycle(#[case] metric_engine: bool)
     let mut context = TestContext::new(builder).await;
     let make_router = |frontend: Arc<Instance>| {
         let builder = if metric_engine {
-            build_test_prom_server(frontend.clone(), true)
+            build_test_prom_server(frontend.clone(), true, None)
         } else {
             HttpServerBuilder::new(HttpOptions::default())
                 .with_sql_handler(frontend.clone())
