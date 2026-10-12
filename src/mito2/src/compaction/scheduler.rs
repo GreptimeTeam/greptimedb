@@ -488,6 +488,12 @@ impl CompactionScheduler {
             CompactionStatus::new(region_id, version_control.clone(), access_layer.clone())
         });
         if status.has_ddl() {
+            info!(
+                "Region {} has pending DDL requests, ignoring compaction: queued={}, executing={}",
+                region_id,
+                status.pending_ddl_requests.len(),
+                status.executing_ddl.is_some(),
+            );
             waiter.send(CompactionCancelledSnafu.fail());
             return Ok(false);
         }
