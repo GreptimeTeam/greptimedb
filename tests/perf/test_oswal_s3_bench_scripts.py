@@ -76,6 +76,52 @@ class PlanTest(unittest.TestCase):
             with self.subTest(args=args), self.assertRaises(ValueError):
                 bench.build_plan(*args, smoke=False)
 
+    def test_a_sweep_multiplies_the_object_store_cells_and_reverses_every_other_round(self):
+        plan = bench.build_plan("8", "2000000", "1000", "2", smoke=False, configs="R,R0,D,E",
+                                sweep="MAX_IN_FLIGHT_CREATES=1,4")
+        self.assertEqual([c["id"] for c in plan["cells"]], [
+            "1-8-R", "1-8-R0", "1-8-D-1", "1-8-D-4", "1-8-E-1", "1-8-E-4",
+            "2-8-E-4", "2-8-E-1", "2-8-D-4", "2-8-D-1", "2-8-R0", "2-8-R"])
+        cells = {c["id"]: c for c in plan["cells"]}
+        self.assertEqual(cells["1-8-D-1"]["env"], {"GREPTIMEDB_OSWAL_MAX_IN_FLIGHT_CREATES": "1"})
+        self.assertEqual((cells["1-8-R0"]["env"], cells["1-8-R0"]["sweep_value"]), ({}, None))
+        self.assertEqual(cells["1-8-R0"]["wal"], {"PROVIDER": "raft_engine", "SYNC_WRITE": "false", "DIR": "/wal"})
+        self.assertEqual(plan["sweep"], {"name": "GREPTIMEDB_OSWAL_MAX_IN_FLIGHT_CREATES", "values": [1, 4]})
+
+    def test_extra_env_and_restart_reach_every_cell(self):
+        for extra in ('{"GREPTIMEDB_OSWAL_MAX_IN_FLIGHT_CREATES": 4, "RUST_LOG": "info"}',
+                      "GREPTIMEDB_OSWAL_MAX_IN_FLIGHT_CREATES=4\n\nRUST_LOG = info\n"):
+            plan = bench.build_plan("8", "2000000", "1000", "1", smoke=False, configs="R,D", extra_env=extra,
+                                    sweep="GREPTIMEDB_OSWAL_MAX_SEALED_BATCHES=6,32", restart=True)
+            with self.subTest(extra=extra):
+                self.assertEqual([c["id"] for c in plan["cells"]], ["1-8-R", "1-8-D-6", "1-8-D-32"])
+                cells = {c["id"]: c for c in plan["cells"]}
+                self.assertEqual(cells["1-8-D-6"]["env"], {"GREPTIMEDB_OSWAL_MAX_IN_FLIGHT_CREATES": "4",
+                                                           "RUST_LOG": "info", "GREPTIMEDB_OSWAL_MAX_SEALED_BATCHES": "6"})
+                self.assertEqual(cells["1-8-D-6"]["wal"]["FLUSH_INTERVAL"], "10ms")
+                self.assertNotIn("FLUSH_INTERVAL", cells["1-8-R"]["wal"])
+                self.assertTrue(all(c["restart"] for c in plan["cells"]))
+
+    def test_invalid_sweeps_and_extra_env_are_rejected(self):
+        for kwargs in ({"sweep": "MAX_DELETES=1,2"}, {"sweep": "RECOVERY_CONCURRENCY=0,2"},
+                       {"sweep": "RECOVERY_CONCURRENCY=2,2"}, {"sweep": "MAX_SEALED_BATCHES=5,8"},
+                       {"extra_env": "GREPTIMEDB_OSWAL_MAX_IN_FLIGHT_CREATES=8", "sweep": "MAX_SEALED_BATCHES=8"},
+                       {"extra_env": "GREPTIMEDB_OSWAL_RECOVERY_CONCURRENCY=8", "sweep": "RECOVERY_CONCURRENCY=2"},
+                       {"extra_env": "GREPTIMEDB_STANDALONE__STORAGE__BUCKET=other"}, {"extra_env": "NO_VALUE"},
+                       {"extra_env": "A=1\nA=2"}, {"extra_env": '{"A": true}'}, {"extra_env": "1A=x"},
+                       {"extra_env": "GREPTIMEDB_OSWAL_MAX_IN_FLIGHT_CREATES=many"}, {"configs": "R,X"},
+                       {"configs": "D,D"}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                bench.build_plan("8", "6000", "1000", "1", smoke=False, **kwargs)
+
+    def test_the_image_is_the_full_reference_or_a_greptimedb_tag(self):
+        image = "docker.io/greptime/greptimedb-dev:dev-20261013-1791848986-a5a1a9f4"
+        self.assertEqual(bench.resolve_image(image, "nightly"), image)
+        self.assertEqual(bench.resolve_image("", "v1.4.0-nightly-20261012"), "greptime/greptimedb:v1.4.0-nightly-20261012")
+        for bad in ("greptimedb", "docker.io/greptime/greptimedb", "Docker.io/x/y:1", "x/y:bad tag"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                bench.resolve_image(bad, "nightly")
+
     def test_nightly_tag_is_the_newest_by_date(self):
         tags = ["latest", "v1.3.0-alpha.1-nightly-20260907", "v1.4.0-nightly-20261012",
                 "v1.4.0-nightly-20261005", "nightly-arm64"]
@@ -117,14 +163,15 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(summary.quantile(0.99, [(0.1, 1.0), (float("inf"), 4.0)]), 0.1)
         self.assertNotIn("kafka_client_produce_elapsed_count", summary.parse_metrics(ACK_BUCKETS)["samples"])
 
-    def write_cell(self, root, cell_id, rows_per_second, exit_code=0, metrics=""):
-        round_number, concurrency, config = cell_id.split("-")
+    def write_cell(self, root, cell_id, rows_per_second, exit_code=0, metrics="", **extra):
+        round_number, concurrency, config, *value = cell_id.split("-")
         path = root / "cells" / cell_id
         (path / "greptimedb-1").mkdir(parents=True)
         (path / "cell.json").write_text(json.dumps({
             "id": cell_id, "round": int(round_number), "concurrency": int(concurrency), "config": config,
-            "wal": bench.WAL_CONFIGS[config], "metrics_scraped": True,
-            "exit_code": exit_code, "wal_device": "/dev/nvme1n1", "version": "1.4.0", "load_wall_seconds": 61.0}))
+            "wal": bench.WAL_CONFIGS[config], "metrics_scraped": True, "sweep_value": int(value[0]) if value else None,
+            "env": {"GREPTIMEDB_OSWAL_MAX_IN_FLIGHT_CREATES": value[0]} if value else {},
+            "exit_code": exit_code, "wal_device": "/dev/nvme1n1", "version": "1.4.0", "load_wall_seconds": 61.0} | extra))
         if exit_code == 0:
             (path / "greptimedb-1" / "load-result.json").write_text(json.dumps({
                 "count_after": 6000, "load_seconds": 60.0, "rows_per_second": rows_per_second}))
@@ -149,9 +196,35 @@ class SummaryTest(unittest.TestCase):
             d_cell = next(c for c in result["cells"] if c["id"] == "1-8-D")
             self.assertEqual(d_cell["creates_per_minute"], 120.0)
             self.assertEqual(d_cell["stalled_appends_total"], 3)
-            self.assertIn("| 1-8-D | 80 | 60.0 | 61.0 | 6,000 | 128.0 | 253.4 | 120 | 120.0 | 3 | 0 | 0 | 0 |", output)
+            self.assertIn("| 1-8-D | — | 80 | 60.0 | 61.0 | 128.0 / 253.4 | — / — | — / — | 120 | 120.0 | 3 | 0 | 0 | 0 | — | — |", output)
             r_cell = next(c for c in result["cells"] if c["id"] == "1-8-R")
             self.assertIsNone(r_cell["stalled_appends_total"])
+
+    def test_sweep_ratios_cover_both_controls_and_restart_cells_report_recovery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            restart = {"restart": True, "restart_scraped": True, "restart_seconds": 3.5,
+                       "restart_query_seconds": 4.25, "restart_count": 6000,
+                       "server_cpu_seconds": 122.0, "host_cpu_busy": 0.5, "host_cpus": 8}
+            self.write_cell(root, "1-8-R", 100.0)
+            self.write_cell(root, "1-8-R0", 125.0)
+            self.write_cell(root, "1-8-D-2", 50.0, metrics=ACK_BUCKETS, **restart)
+            self.write_cell(root, "1-8-D-16", 75.0)
+            (root / "cells" / "1-8-D-2" / "metrics-restart.prom").write_text(
+                "greptime_logstore_object_store_wal_recovery_seconds_sum 1.5\n"
+                "greptime_logstore_object_store_wal_recovery_seconds_count 1\n"
+                "greptime_logstore_object_store_wal_recovered_objects_total 118\n")
+            rows = [summary.load_cell(path) for path in sorted((root / "cells").iterdir())]
+            pairs = {(p["ratio"], p["sweep_value"]): p["geomean"] for p in summary.ratios(rows)}
+            self.assertEqual(pairs, {("D/R", 2): 0.5, ("D/R0", 2): 0.4, ("D/R", 16): 0.75, ("D/R0", 16): 0.6})
+            cell = next(r for r in rows if r["id"] == "1-8-D-2")
+            self.assertEqual(cell["restart"], {"wall_seconds": 3.5, "query_seconds": 4.25, "rows": 6000,
+                                               "recovery_seconds": 1.5, "recovered_objects": 118})
+            self.assertEqual(cell["server_cpu_cores"], 2.0)
+            output = summary.render({}, rows, summary.ratios(rows))
+            self.assertIn("| 1-8-D-2 | MAX_IN_FLIGHT_CREATES=2 | 120 | 3.50 | 4.25 | 1.500 | 118 | 6,000 |", output)
+            self.assertIn("| 2.00 | 50% of 8 |", output)
+            self.assertIn("| 8 | D/R0 | 16 | 0.600 | 0.600 |", output)
 
     def test_untouched_counters_are_zero_only_for_an_active_object_store_wal(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -205,16 +278,17 @@ case "$1" in
         done
         [[ "$FAKE_LOAD_RC" == 0 ]] || exit "$FAKE_LOAD_RC"
         mkdir -p "$results/greptimedb-1"
-        echo "{\"count_before\": 0, \"count_after\": $FAKE_ROWS, \"load_seconds\": 2, \"rows_per_second\": 3000}" \
+        echo "{\"count_before\": 0, \"count_after\": $FAKE_ROWS, \"load_seconds\": 2, \"rows_per_second\": 3000, \"table\": \"agent_observations\"}" \
             > "$results/greptimedb-1/load-result.json" ;;
     inspect) echo true ;;
-    exec) echo 'version: 1.4.0-test' ;;
+    exec) [[ "$*" == *cpu.stat* ]] && echo 'usage_usec 5000000' || echo 'version: 1.4.0-test' ;;
     logs) echo 'server log' ;;
 esac
 """
 FAKE_CURL = r"""#!/usr/bin/env bash
 printf '%s\n' "curl $*" >> "$FAKE_LOG"
 for arg in "$@"; do
+    [[ "$arg" != */v1/sql* ]] || { echo "{\"output\": [{\"records\": {\"rows\": [[${FAKE_COUNT:-6000}]]}}]}"; exit 0; }
     [[ "$arg" != */metrics ]] || {
         [[ "$FAKE_METRICS_RC" == 0 ]] || exit "$FAKE_METRICS_RC"
         printf '%s\n' 'greptime_logstore_object_store_wal_poisoned_total 1' 'other_total 2'; exit 0;
@@ -225,19 +299,20 @@ done
 
 class CellLifecycleTest(unittest.TestCase):  # the run script against fake docker and curl
 
-    def run_cells(self, root, load_rc, metrics_rc=0):
+    def run_cells(self, root, load_rc, metrics_rc=0, restart=False, count=6000):
         bin_dir = root / "bin"
         bin_dir.mkdir()
         for name, body in (("docker", FAKE_DOCKER), ("curl", FAKE_CURL)):
             (bin_dir / name).write_text(body)
             (bin_dir / name).chmod(0o755)
-        plan = bench.build_plan("8", "6000", "1000", "1", smoke=False)
-        plan["cells"] = [cell for cell in plan["cells"] if cell["config"] != "R"]
+        plan = bench.build_plan("8", "6000", "1000", "1", smoke=False, configs="D,E", restart=restart,
+                                extra_env="GREPTIMEDB_OSWAL_RECOVERY_CONCURRENCY=2")
         (root / "results").mkdir()
         (root / "results" / "plan.json").write_text(json.dumps(plan))
         env = os.environ | {
             "PATH": f"{bin_dir}:{os.environ['PATH']}", "FAKE_LOG": str(root / "fake.log"),
-            "FAKE_LOAD_RC": str(load_rc), "FAKE_METRICS_RC": str(metrics_rc), "FAKE_ROWS": "6000", "PLAN": str(root / "results" / "plan.json"),
+            "FAKE_LOAD_RC": str(load_rc), "FAKE_METRICS_RC": str(metrics_rc), "FAKE_ROWS": "6000", "FAKE_COUNT": str(count),
+            "PLAN": str(root / "results" / "plan.json"),
             "RESULTS": str(root / "results"), "CORPUS_DIR": str(root / "corpus"), "OWNER": "o11ybench-oswal-1-1",
             "RUNTIME_IMAGE": "runtime@sha256:" + "b" * 64, "GREPTIMEDB_IMAGE": "greptimedb@sha256:" + "a" * 64,
             "RUN_PREFIX": "oswal-bench/1-1", "WAL_ROOT": str(root / "wal"), "S3_BUCKET": "bucket",
@@ -302,6 +377,9 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
             self.assertIn("GREPTIMEDB_STANDALONE__STORAGE__ROOT=oswal-bench/1-1/1-8-D", config)
             self.assertIn("GREPTIMEDB_STANDALONE__WAL__ACK_MODE=durable", config)
             self.assertIn("GREPTIMEDB_STANDALONE__STORAGE__SECRET_ACCESS_KEY=<redacted>", config)
+            self.assertIn("GREPTIMEDB_OSWAL_RECOVERY_CONCURRENCY=2", config)
+            self.assertIn("-e GREPTIMEDB_OSWAL_RECOVERY_CONCURRENCY=2 ", log)
+            self.assertNotIn("docker kill", log)
             recorded = json.loads((cell / "cell.json").read_text())
             self.assertEqual((recorded["exit_code"], recorded["version"], recorded["metrics_scraped"]),
                              (0, "1.4.0-test", True))
@@ -312,6 +390,34 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
                                     capture_output=True, text=True, timeout=60)
             self.assertNotEqual(leaked.returncode, 0)
             self.assertFalse((root / "results").exists())
+
+    def test_a_restart_cell_kills_restarts_and_counts_the_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cells, _, log, _ = self.run_cells(root, load_rc=0, restart=True)
+            self.assertEqual(cells.returncode, 0, cells.stdout + cells.stderr)
+            self.assertEqual(log.count("docker kill --signal KILL fakecid"), 2)
+            self.assertEqual(log.count("docker stop -t 120 fakecid"), 2)
+            self.assertIn("--name o11ybench-oswal-1-1-1-8-D-restart", log)
+            self.assertIn("sql=SELECT count(*) FROM agent_observations", log)
+            cell = root / "results" / "cells" / "1-8-D"
+            recorded = json.loads((cell / "cell.json").read_text())
+            self.assertEqual((recorded["exit_code"], recorded["restart_count"], recorded["restart_scraped"]), (0, 6000, True))
+            self.assertIsInstance(recorded["restart_seconds"], float)
+            config = (cell / "config.env").read_text().splitlines()
+            self.assertIn("GREPTIMEDB_STANDALONE__STORAGE__DATA_HOME=/oswal_home", config)
+            self.assertIn("GREPTIMEDB_STANDALONE__WAL__FLUSH_INTERVAL=10ms", config)
+            self.assertIn(f"type=bind,src={root}/wal/1-8-D-home,dst=/oswal_home", log)
+            for name in ("metrics.prom", "metrics-restart.prom", "server.log", "server-restart.log"):
+                self.assertTrue((cell / name).exists(), name)
+
+    def test_a_restart_that_loses_rows_fails_the_cell(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cells, _, _, _ = self.run_cells(root, load_rc=0, restart=True, count=5999)
+            self.assertNotEqual(cells.returncode, 0)
+            recorded = json.loads((root / "results" / "cells" / "1-8-D" / "cell.json").read_text())
+            self.assertEqual((recorded["exit_code"], recorded["restart_count"]), (5, 5999))
 
 
 if __name__ == "__main__":

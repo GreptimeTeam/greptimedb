@@ -22,12 +22,12 @@ check_runtime() {
 }
 
 pull_images() {
-    : "${RESULTS:?}" "${RUNTIME_IMAGE:?}" "${GREPTIMEDB_TAG:?}"
+    : "${RESULTS:?}" "${RUNTIME_IMAGE:?}" "${GREPTIMEDB_REF:?}"
     mkdir -p "$RESULTS/images"
     bash "$here/pull-benchmark-image.sh" "$RUNTIME_IMAGE"
-    bash "$here/pull-benchmark-image.sh" "greptime/greptimedb:$GREPTIMEDB_TAG"
+    bash "$here/pull-benchmark-image.sh" "$GREPTIMEDB_REF"
     docker image inspect "$RUNTIME_IMAGE" > "$RESULTS/images/runtime.json"
-    docker image inspect "greptime/greptimedb:$GREPTIMEDB_TAG" > "$RESULTS/images/greptimedb.json"
+    docker image inspect "$GREPTIMEDB_REF" > "$RESULTS/images/greptimedb.json"
 }
 
 wal_disk() {
@@ -59,12 +59,60 @@ generate() {
     jq -e --argjson rows "$(jq .rows "$PLAN")" '.line_count == $rows' "$CORPUS_DIR/summary.json" >/dev/null
 }
 
-# Scrape once, after the load succeeded or failed, while the server still runs.
+# Scrape once per server, after the load succeeded or failed, while it still runs:
+# the loaded server into metrics.prom, a restarted one into metrics-restart.prom.
 scrape_metrics() {
     curl --noproxy '*' -fsS --max-time 30 http://127.0.0.1:4000/metrics > "$dir/metrics.all" || { rm -f "$dir/metrics.all"; return 1; }
-    grep -E '^(# (HELP|TYPE) )?greptime_logstore_object_store_wal_' "$dir/metrics.all" > "$dir/metrics.prom" || true
+    grep -E '^(# (HELP|TYPE) )?greptime_logstore_object_store_wal_' "$dir/metrics.all" > "$dir/metrics$phase.prom" || true
     rm -f "$dir/metrics.all"
-    metrics_scraped=true
+    if [[ -z "$phase" ]]; then metrics_scraped=true; else restart_scraped=true; fi
+}
+
+now() { date +%s.%N; }
+elapsed() { awk -v a="$1" -v b="$(now)" 'BEGIN {printf "%.3f", b - a}'; }
+# CPU seconds the server's cgroup used, and busy and total jiffies of the host.
+server_cpu() { docker exec "$cid" cat /sys/fs/cgroup/cpu.stat 2>/dev/null | awk '/^usage_usec / {printf "%.3f", $2 / 1e6}' || true; }
+host_cpu() { awk '/^cpu / {print $2 + $3 + $4 + $7 + $8 + $9, $2 + $3 + $4 + $5 + $6 + $7 + $8 + $9}' /proc/stat 2>/dev/null || true; }
+
+start_server() {
+    cid=$(docker run -d --init --name "$name$phase" --label "o11ybench.owner=$OWNER" \
+        --add-host host.docker.internal:host-gateway \
+        -p 127.0.0.1:4000:4000 -p 127.0.0.1:4001:4001 "${docker_env[@]}" ${mounts[@]+"${mounts[@]}"} \
+        "$GREPTIMEDB_IMAGE" standalone start --http-addr=0.0.0.0:4000 --grpc-bind-addr=0.0.0.0:4001)
+    local deadline=$((SECONDS + 300))
+    until curl --noproxy '*' -fsS --max-time 5 http://127.0.0.1:4000/health >/dev/null 2>&1; do
+        [[ $(docker inspect --format '{{.State.Running}}' "$cid") == true ]] || { echo "$id: server$phase exited" >&2; exit 1; }
+        ((SECONDS < deadline)) || { echo "$id: server$phase not healthy in 300s" >&2; exit 1; }
+        sleep 0.2
+    done
+}
+
+stop_server() {
+    if [[ "${1:-}" == kill ]]; then docker kill --signal KILL "$cid" >/dev/null; else docker stop -t 120 "$cid" >/dev/null; fi
+    docker logs "$cid" > "$dir/server$phase.log" 2>&1
+    docker rm -fv "$cid" >/dev/null
+    cid=
+}
+
+# Kill the loaded server, start the same configuration on the same prefix and
+# data home, and time it until /health and until the loaded table answers.
+restart() {
+    local table count started deadline
+    table=$(jq -er .table "$dir/greptimedb-1/load-result.json")
+    scrape_metrics || { echo "$id: metrics scrape failed" >&2; exit 4; }
+    stop_server kill
+    phase=-restart started=$(now)
+    start_server
+    restart_seconds=$(elapsed "$started")
+    deadline=$((SECONDS + 300))
+    # Regions may still be opening after /health.
+    until count=$(curl --noproxy '*' -fsS --max-time 30 --data-urlencode "sql=SELECT count(*) FROM $table" \
+        'http://127.0.0.1:4000/v1/sql?db=public' | jq -er '.output[0].records.rows[0][0]'); do
+        ((SECONDS < deadline)) || { echo "$id: $table not readable in 300s after restart" >&2; exit 5; }
+        sleep 0.2
+    done
+    restart_query_seconds=$(elapsed "$started") restart_count=$count
+    [[ "$count" == "$(jq .rows "$PLAN")" ]] || { echo "$id: $count rows after restart" >&2; exit 5; }
 }
 
 finish() {
@@ -74,15 +122,22 @@ finish() {
     if [[ -n "$cid" ]]; then
         # A load that succeeded without its metrics is not a measurement.
         scrape_metrics || { echo "$id: metrics scrape failed" >&2; [[ $rc != 0 ]] || rc=4; }
-        docker stop -t 120 "$cid" >/dev/null
-        docker logs "$cid" > "$dir/server.log" 2>&1
-        docker rm -fv "$cid" >/dev/null
+        stop_server
     fi
     [[ -z "$wal_dir" ]] || sudo -n rm -rf "$wal_dir"
+    [[ -z "$home_dir" ]] || sudo -n rm -rf "$home_dir"
     jq -n --argjson spec "$spec" --arg device "$wal_device" --arg version "$version" \
         --arg load_seconds "$load_seconds" --argjson exit_code "$rc" --argjson scraped "$metrics_scraped" \
+        --argjson restart_scraped "$restart_scraped" --arg restart_seconds "$restart_seconds" \
+        --arg restart_query_seconds "$restart_query_seconds" --arg restart_count "$restart_count" \
+        --arg server_cpu_seconds "$server_cpu_seconds" --arg host_cpu_busy "$host_cpu_busy" --arg host_cpus "$(nproc 2>/dev/null)" \
         '$spec + {wal_device: $device, version: $version, exit_code: $exit_code, metrics_scraped: $scraped,
-          load_wall_seconds: ($load_seconds | tonumber? // null)}' > "$dir/cell.json"
+          load_wall_seconds: ($load_seconds | tonumber? // null),
+          server_cpu_seconds: ($server_cpu_seconds | tonumber? // null),
+          host_cpu_busy: ($host_cpu_busy | tonumber? // null), host_cpus: ($host_cpus | tonumber? // null),
+          restart_scraped: $restart_scraped, restart_seconds: ($restart_seconds | tonumber? // null),
+          restart_query_seconds: ($restart_query_seconds | tonumber? // null),
+          restart_count: ($restart_count | tonumber? // null)}' > "$dir/cell.json"
     exit "$rc"
 }
 
@@ -91,22 +146,29 @@ finish() {
 cell() {
     : "${PLAN:?}" "${RESULTS:?}" "${CORPUS_DIR:?}" "${OWNER:?}" "${RUNTIME_IMAGE:?}" "${GREPTIMEDB_IMAGE:?}"
     : "${RUN_PREFIX:?}" "${WAL_ROOT:?}" "${S3_BUCKET:?}" "${S3_REGION:?}" "${AWS_ACCESS_KEY_ID:?}" "${AWS_SECRET_ACCESS_KEY:?}"
-    spec=$1 cid= wal_dir= version= load_seconds= metrics_scraped=false id=
-    local concurrency name setting started ended
+    spec=$1 cid= wal_dir= home_dir= version= load_seconds= metrics_scraped=false id= phase=
+    restart_scraped=false restart_seconds= restart_query_seconds= restart_count= server_cpu_seconds= host_cpu_busy=
+    local concurrency setting started cpu_before host_before host_after
     id=$(jq -r .id <<< "$spec"); concurrency=$(jq -r .concurrency <<< "$spec")
-    dir="$RESULTS/cells/$id"; name="$OWNER-$id"
+    dir="$RESULTS/cells/$id" name="$OWNER-$id"
     mkdir -p "$dir"
     # The root holds data/ and the WAL's default prefix wal/ side by side.
     local settings=(STORAGE__TYPE=S3 "STORAGE__BUCKET=$S3_BUCKET" "STORAGE__REGION=$S3_REGION"
         "STORAGE__ROOT=$RUN_PREFIX/$id")
     [[ -z "${S3_CONTAINER_ENDPOINT:-}" ]] || settings+=("STORAGE__ENDPOINT=$S3_CONTAINER_ENDPOINT")
+    # A restarted server needs the metadata the loaded one kept in its data home.
+    jq -e '.restart' <<< "$spec" >/dev/null && settings+=(STORAGE__DATA_HOME=/oswal_home)
     while IFS= read -r setting; do settings+=("$setting"); done \
         < <(jq -r '.wal | to_entries[] | "WAL__\(.key)=\(.value)"' <<< "$spec")
-    local docker_env=() mounts=()
+    docker_env=() mounts=()
     for setting in "${settings[@]}"; do
         docker_env+=(-e "GREPTIMEDB_STANDALONE__$setting")
         printf 'GREPTIMEDB_STANDALONE__%s\n' "$setting" >> "$dir/config.env"
     done
+    while IFS= read -r setting; do
+        docker_env+=(-e "$setting")
+        printf '%s\n' "$setting" >> "$dir/config.env"
+    done < <(jq -r '.env // {} | to_entries[] | "\(.key)=\(.value)"' <<< "$spec")
     # Pass the two keys by name: their values never reach argv, a file or the artifact.
     export GREPTIMEDB_STANDALONE__STORAGE__ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
     export GREPTIMEDB_STANDALONE__STORAGE__SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
@@ -119,20 +181,16 @@ cell() {
     else
         wal_device="s3://$S3_BUCKET/$RUN_PREFIX/$id/wal"
     fi
+    if jq -e '.restart' <<< "$spec" >/dev/null; then
+        home_dir="$WAL_ROOT/$id-home"; mkdir -p "$home_dir"
+        mounts+=(--mount "type=bind,src=$home_dir,dst=/oswal_home")
+    fi
     trap finish EXIT
-    cid=$(docker run -d --init --name "$name" --label "o11ybench.owner=$OWNER" \
-        --add-host host.docker.internal:host-gateway \
-        -p 127.0.0.1:4000:4000 -p 127.0.0.1:4001:4001 "${docker_env[@]}" ${mounts[@]+"${mounts[@]}"} \
-        "$GREPTIMEDB_IMAGE" standalone start --http-addr=0.0.0.0:4000 --grpc-bind-addr=0.0.0.0:4001)
-    local deadline=$((SECONDS + 300))
-    until curl --noproxy '*' -fsS --max-time 5 http://127.0.0.1:4000/health >/dev/null 2>&1; do
-        [[ $(docker inspect --format '{{.State.Running}}' "$cid") == true ]] || { echo "$id: server exited" >&2; exit 1; }
-        ((SECONDS < deadline)) || { echo "$id: server not healthy in 300s" >&2; exit 1; }
-        sleep 2
-    done
+    start_server
     version=$(docker exec "$cid" greptime --version | sed -n 's/^version: //p')
     [[ -n "$version" ]]
-    started=$(date +%s.%N)
+    cpu_before=$(server_cpu) host_before=$(host_cpu)
+    started=$(now)
     # Only the load phase, run exactly as run-agent-observability.sh runs it.
     runtime --name "$name-load" --network host \
         --mount "type=bind,src=$CORPUS_DIR,dst=/work/corpus,readonly" --mount "type=bind,src=$dir,dst=/results" \
@@ -142,10 +200,15 @@ cell() {
         -e "TARGET_ID=$name" -e TARGET_HOST=127.0.0.1 -e PREPARE_WORKERS= -e "MAX_IN_FLIGHT=$concurrency" \
         -e "GREPTIMEDB_BATCH_SIZE=$(jq -r .batch_rows "$PLAN")" --entrypoint /bin/bash \
         "$RUNTIME_IMAGE" scripts/agent-observability/greptimedb.sh load > "$dir/load.log" 2>&1
-    ended=$(date +%s.%N)
-    load_seconds=$(awk -v a="$started" -v b="$ended" 'BEGIN {printf "%.3f", b - a}')
+    load_seconds=$(elapsed "$started")
+    host_after=$(host_cpu)
+    server_cpu_seconds=$(awk -v a="$cpu_before" -v b="$(server_cpu)" 'BEGIN {if (a != "" && b != "") printf "%.3f", b - a}')
+    # Busy share of all host CPUs during the load, the loader included.
+    host_cpu_busy=$(awk -v a="$host_before" -v b="$host_after" \
+        'BEGIN {split(a, x, " "); split(b, y, " "); if (y[2] > x[2]) printf "%.4f", (y[1] - x[1]) / (y[2] - x[2])}')
     jq -e --argjson rows "$(jq .rows "$PLAN")" '.count_before == 0 and .count_after == $rows' \
         "$dir/greptimedb-1/load-result.json" >/dev/null
+    if jq -e '.restart' <<< "$spec" >/dev/null; then restart; fi
 }
 
 scrub() {

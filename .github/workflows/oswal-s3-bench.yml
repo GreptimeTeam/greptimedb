@@ -10,6 +10,26 @@ on:
         description: 'Docker Hub greptime/greptimedb tag; nightly = the newest v*-nightly-* tag (latest is a release without the object store WAL)'
         type: string
         default: nightly
+      greptimedb_image:
+        description: 'Full image reference with a tag or digest; used instead of greptimedb_tag when set'
+        type: string
+        default: ''
+      configs:
+        description: 'WAL configurations: R (Raft Engine, sync_write), R0 (Raft Engine, standalone default), D (durable), E (enqueued)'
+        type: string
+        default: R,D,E
+      extra_env:
+        description: 'Environment for every GreptimeDB container: a JSON object or K=V lines'
+        type: string
+        default: ''
+      sweep:
+        description: 'One depth and its values, e.g. MAX_IN_FLIGHT_CREATES=1,2,4: one D and E cell per value (needs an image with the overrides)'
+        type: string
+        default: ''
+      restart:
+        description: 'After each load, SIGKILL the server, restart it on the same prefix and data home, and time recovery; object store cells flush every 10ms'
+        type: boolean
+        default: false
       instance_type:
         description: EC2 instance type in the bucket region; the d of c6id gives a local NVMe instance store for the Raft Engine WAL
         type: string
@@ -47,6 +67,11 @@ permissions:
 env:
   SMOKE: ${{ inputs.smoke }}
   GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
+  GREPTIMEDB_IMAGE_INPUT: ${{ inputs.greptimedb_image }}
+  CONFIGS: ${{ inputs.configs }}
+  EXTRA_ENV: ${{ inputs.extra_env }}
+  SWEEP: ${{ inputs.sweep }}
+  RESTART: ${{ inputs.restart }}
   REQUESTED_INSTANCE_TYPE: ${{ inputs.instance_type }}
   CONCURRENCY: ${{ inputs.concurrency }}
   ROWS: ${{ inputs.rows }}
@@ -61,7 +86,7 @@ jobs:
     timeout-minutes: 15
     outputs:
       instance_type: ${{ steps.runner.outputs.instance_type }}
-      greptimedb_tag: ${{ steps.plan.outputs.greptimedb_tag }}
+      greptimedb_ref: ${{ steps.plan.outputs.greptimedb_ref }}
       runtime_image: ${{ steps.runtime.outputs.runtime_image }}
     steps:
     - uses: actions/checkout@v4
@@ -77,8 +102,9 @@ jobs:
       run: |
         python3 greptimedb/.github/scripts/oswal-s3-bench.py plan --smoke "$SMOKE" \
           --concurrency "$CONCURRENCY" --rows "$ROWS" --batch-rows "$BATCH_ROWS" --rounds "$ROUNDS" \
+          --configs "$CONFIGS" --extra-env "$EXTRA_ENV" --sweep "$SWEEP" --restart "$RESTART" \
           --timeout-minutes "$BENCHMARK_TIMEOUT_MINUTES" --ttl-hours "$JANITOR_TTL_HOURS"
-        python3 greptimedb/.github/scripts/oswal-s3-bench.py tag "$GREPTIMEDB_TAG"
+        python3 greptimedb/.github/scripts/oswal-s3-bench.py image --tag "$GREPTIMEDB_TAG" --image "$GREPTIMEDB_IMAGE_INPUT"
     - name: Resolve CI runner
       id: runner
       run: python3 greptimedb/.github/scripts/ci-runner-config.py --provider AWS --instance-type "$REQUESTED_INSTANCE_TYPE"
@@ -132,7 +158,7 @@ jobs:
     timeout-minutes: ${{ fromJSON(format('{0}', inputs.benchmark_timeout_minutes)) }}
     env:
       INSTANCE_TYPE: ${{ inputs.smoke && 'ubuntu-latest' || needs.validate.outputs.instance_type }}
-      GREPTIMEDB_TAG: ${{ needs.validate.outputs.greptimedb_tag }}
+      GREPTIMEDB_REF: ${{ needs.validate.outputs.greptimedb_ref }}
       RUNTIME_IMAGE: ${{ needs.validate.outputs.runtime_image }}
       RUN_PREFIX: oswal-bench/${{ github.run_id }}-${{ github.run_attempt }}
       OWNER: o11ybench-oswal-${{ github.run_id }}-${{ github.run_attempt }}
@@ -161,7 +187,8 @@ jobs:
       run: |
         bash greptimedb/.github/scripts/oswal-s3-bench-run.sh pull
         python3 greptimedb/.github/scripts/oswal-s3-bench.py plan --smoke "$SMOKE" --output "$PLAN" \
-          --concurrency "$CONCURRENCY" --rows "$ROWS" --batch-rows "$BATCH_ROWS" --rounds "$ROUNDS"
+          --concurrency "$CONCURRENCY" --rows "$ROWS" --batch-rows "$BATCH_ROWS" --rounds "$ROUNDS" \
+          --configs "$CONFIGS" --extra-env "$EXTRA_ENV" --sweep "$SWEEP" --restart "$RESTART"
         python3 greptimedb/.github/scripts/oswal-s3-bench.py manifest --results "$RESULTS" \
           --runtime-image "$RUNTIME_IMAGE" --instance-type "$INSTANCE_TYPE" --region "$S3_REGION" --prefix "$RUN_PREFIX"
     - name: Probe the bucket
