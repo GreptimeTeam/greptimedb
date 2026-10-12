@@ -6,52 +6,42 @@ on:
         description: 'Smoke run: ubuntu-latest and the MinIO fixture instead of EC2 and S3, 50000 rows, one round; its numbers mean nothing'
         type: boolean
         default: false
-        required: false
       greptimedb_tag:
         description: 'Docker Hub greptime/greptimedb tag; nightly = the newest v*-nightly-* tag (latest is a release without the object store WAL)'
         type: string
         default: nightly
-        required: true
       instance_type:
         description: EC2 instance type; the d of c7id gives a local NVMe instance store for the Raft Engine WAL
         type: string
         default: c7id.2xlarge
-        required: true
       concurrency:
         description: Comma-separated loader concurrency levels
         type: string
         default: '1,8'
-        required: true
       rows:
         description: Dataset rows (2000000 = o11ybench profile D)
         type: number
         default: 2000000
-        required: true
       batch_rows:
         description: Rows per write request
         type: number
         default: 1000
-        required: true
       rounds:
         description: Rounds; the configuration order alternates between rounds (R, D, E then E, D, R)
         type: number
         default: 2
-        required: true
       runtime_image:
         description: 'o11ybench runtime image: auto = AWS ECR Public; explicit tag/digest overrides'
         type: string
         default: auto
-        required: true
       benchmark_timeout_minutes:
         description: Benchmark job timeout in minutes (1..360)
         type: number
         default: 240
-        required: true
       janitor_ttl_hours:
         description: Instance lifetime before janitor eligibility (1..168 hours; at least timeout + 2h)
         type: number
         default: 8
-        required: true
 permissions:
   contents: read
 env:
