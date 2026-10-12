@@ -221,8 +221,9 @@ impl InvertedIndexApplier {
         let start = Instant::now();
 
         let context = SearchContext {
-            // Encountering a non-existing column indicates that it doesn't match predicates.
-            index_not_found_strategy: IndexNotFoundStrategy::ReturnEmpty,
+            // Older SSTs may lack an index enabled by ALTER, or a column with a default value.
+            // Missing indexes cannot rule out matching rows.
+            index_not_found_strategy: IndexNotFoundStrategy::Ignore,
         };
 
         let mut cache_miss = 0;
