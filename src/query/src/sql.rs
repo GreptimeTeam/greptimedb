@@ -879,6 +879,14 @@ pub fn show_query_option(
             .map(|options| options.allow_query_fallback)
             .unwrap_or(false)
             .to_string(),
+        "query.experimental_enable_factorized_join_agg" => context
+            .state()
+            .config_options()
+            .extensions
+            .get::<crate::options::FactorizedJoinAggOptions>()
+            .map(|options| options.enabled)
+            .unwrap_or(false)
+            .to_string(),
         "query.enable_remote_dynamic_filter_pushdown" => {
             crate::options::remote_dyn_filter_pushdown_enabled_from_extensions(
                 &context.query_ctx().extensions(),

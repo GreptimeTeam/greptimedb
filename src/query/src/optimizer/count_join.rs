@@ -81,7 +81,12 @@ impl OptimizerRule for CountJoinRewrite {
         plan: LogicalPlan,
         config: &dyn OptimizerConfig,
     ) -> Result<Transformed<LogicalPlan>> {
-        if !config.options().extensions.get::<crate::options::FactorizedJoinAggOptions>().is_some_and(|options| options.enabled) {
+        if !config
+            .options()
+            .extensions
+            .get::<crate::options::FactorizedJoinAggOptions>()
+            .is_some_and(|options| options.enabled)
+        {
             return Ok(Transformed::no(plan));
         }
         let LogicalPlan::Aggregate(agg) = &plan else {
@@ -154,7 +159,14 @@ fn rewrite_payload(
         Arc::clone(&join.left),
         vec![Expr::Column(left_key.clone())],
         vec![
-            partial_aggregate(count_udaf(), vec![Expr::Literal(datafusion_common::utils::expr::COUNT_STAR_EXPANSION, None)], &fact_rows_name),
+            partial_aggregate(
+                count_udaf(),
+                vec![Expr::Literal(
+                    datafusion_common::utils::expr::COUNT_STAR_EXPANSION,
+                    None,
+                )],
+                &fact_rows_name,
+            ),
             partial_aggregate(
                 count_udaf(),
                 vec![Expr::Column(fact_payload.clone())],
@@ -174,7 +186,14 @@ fn rewrite_payload(
             Expr::Column(right_group.clone()),
         ],
         vec![
-            partial_aggregate(count_udaf(), vec![Expr::Literal(datafusion_common::utils::expr::COUNT_STAR_EXPANSION, None)], &dim_rows_name),
+            partial_aggregate(
+                count_udaf(),
+                vec![Expr::Literal(
+                    datafusion_common::utils::expr::COUNT_STAR_EXPANSION,
+                    None,
+                )],
+                &dim_rows_name,
+            ),
             partial_aggregate(
                 count_udaf(),
                 vec![Expr::Column(dim_payload.clone())],
