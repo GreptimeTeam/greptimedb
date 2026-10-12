@@ -30,8 +30,9 @@ use crate::common::ObjectStoreConfig;
 use crate::data::export_v2::coordinator::{ExportDataOptions, export_data};
 use crate::data::export_v2::error::{
     ChunkTimeWindowRequiresBoundsSnafu, DatabaseSnafu, IoSnafu, ManifestVersionMismatchSnafu,
-    Result, ResumeConfigMismatchSnafu, SchemaOnlyArgsNotAllowedSnafu, SchemaOnlyModeMismatchSnafu,
-    SnapshotVerifyFailedSnafu, UnexpectedValueTypeSnafu,
+    MetricExportRequiresParquetSnafu, Result, ResumeConfigMismatchSnafu,
+    SchemaOnlyArgsNotAllowedSnafu, SchemaOnlyModeMismatchSnafu, SnapshotVerifyFailedSnafu,
+    UnexpectedValueTypeSnafu,
 };
 use crate::data::export_v2::extractor::SchemaExtractor;
 use crate::data::export_v2::manifest::{
@@ -725,7 +726,7 @@ impl ExportCreate {
 
 fn require_metric_export_format(format: DataFormat) -> Result<()> {
     if format != DataFormat::Parquet {
-        return crate::data::export_v2::error::MetricExportRequiresParquetSnafu.fail();
+        return MetricExportRequiresParquetSnafu.fail();
     }
     Ok(())
 }
@@ -1735,7 +1736,7 @@ mod tests {
 
     #[test]
     fn test_schema_only_mode_mismatch_error_message() {
-        let error = crate::data::export_v2::error::SchemaOnlyModeMismatchSnafu {
+        let error = SchemaOnlyModeMismatchSnafu {
             existing_schema_only: false,
             requested_schema_only: true,
         }
