@@ -1,8 +1,5 @@
 name: Object Store WAL S3 Benchmark
 on:
-  # Registers the workflow for dispatch before it reaches the default branch; such runs skip every job.
-  push:
-    branches: [bench/oswal-s3-wal]
   workflow_dispatch:
     inputs:
       smoke:
@@ -60,7 +57,6 @@ env:
   JANITOR_TTL_HOURS: ${{ inputs.janitor_ttl_hours }}
 jobs:
   validate:
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
