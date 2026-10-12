@@ -1282,35 +1282,6 @@ async fn test_copy_in_csv() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_copy_in_text_format() -> Result<()> {
-    let (server, port, handler) = start_copy_in_test_server(copy_in_test_table()).await?;
-    let client = create_plain_connection(port, false).await.unwrap();
-
-    let mut sink = Box::pin(client.copy_in("COPY metrics FROM STDIN").await.unwrap());
-    sink.as_mut()
-        .send(bytes::Bytes::from_static(
-            b"2023-11-14 22:13:22\thost3\t2.5\twith\\ttab\n2023-11-14 22:13:23\thost4\t\\N\t\\N\n",
-        ))
-        .await
-        .unwrap();
-    let rows = sink.as_mut().finish().await.unwrap();
-    assert_eq!(rows, 2);
-
-    let rows = recorded_rows(&handler);
-    assert_eq!(rows.len(), 2);
-    assert_eq!(
-        rows[0].values[3].value_data,
-        Some(api::v1::value::ValueData::StringValue(
-            "with\ttab".to_string()
-        ))
-    );
-    assert_eq!(rows[1].values[2].value_data, None);
-
-    server.shutdown().await.unwrap();
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_copy_in_column_list_and_batches() -> Result<()> {
     let (server, port, handler) = start_copy_in_test_server(copy_in_test_table()).await?;
     let client = create_plain_connection(port, false).await.unwrap();
@@ -1364,7 +1335,7 @@ async fn test_copy_in_unknown_table() -> Result<()> {
     let client = create_plain_connection(port, false).await.unwrap();
 
     let err = match client
-        .copy_in::<_, bytes::Bytes>("COPY not_exist FROM STDIN")
+        .copy_in::<_, bytes::Bytes>("COPY not_exist FROM STDIN WITH (FORMAT csv)")
         .await
     {
         Ok(_) => panic!("expected COPY to unknown table to fail"),
@@ -1408,7 +1379,7 @@ async fn test_copy_in_multi_statement_rejected() -> Result<()> {
 
     let err = match feed_copy_in(
         &client,
-        "COPY metrics FROM STDIN; SELECT 1",
+        "COPY metrics FROM STDIN WITH (FORMAT csv); SELECT 1",
         vec![bytes::Bytes::from_static(b"1,2,3,4\n")],
     )
     .await

@@ -27,15 +27,15 @@
 //! stateless strategy that validates its options at statement-parse time,
 //! describes the column types it can ingest, and creates the stateful
 //! record parser for one stream. Formats register a builder under every
-//! accepted `FORMAT` name in [`REGISTERED_FORMATS`] — PostgreSQL's formats
-//! (`text`, `csv`, and eventually `binary`) and GreptimeDB-specific
-//! formats alike; see the `codec` module docs for how to add one.
+//! accepted `FORMAT` name in [`REGISTERED_FORMATS`] — `csv` is the only
+//! implemented format today; PostgreSQL's `text`/`binary` and
+//! GreptimeDB-specific formats alike can be added the same way. See the
+//! `codec` module docs.
 
 mod codec;
 mod csv;
 mod options;
 mod parse;
-mod text;
 
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -70,23 +70,27 @@ use crate::postgres::utils::convert_err;
 /// Number of parsed rows buffered before flushing a batch to the handler.
 pub(crate) const COPY_IN_FLUSH_ROWS: usize = 8192;
 
-/// The default format when `WITH (FORMAT ...)` is absent.
-const DEFAULT_FORMAT: &str = "text";
-
 /// Builds a codec from the format-neutral option set.
 type CodecBuilder = fn(options::CopyOptionSet) -> PgWireResult<Arc<dyn CopyInCodec>>;
 
 /// The registered COPY FROM STDIN formats: accepted `FORMAT` name to
-/// builder. A format may register aliases (like `txt` for `text`).
+/// builder. `csv` is the only implemented format; the others are
+/// registered so they report a clear "not supported yet" instead of an
+/// unknown-format error.
 const REGISTERED_FORMATS: &[(&str, CodecBuilder)] = &[
-    ("text", text::build_text_codec),
-    ("txt", text::build_text_codec),
     ("csv", csv::build_csv_codec),
-    // Registered so `FORMAT binary` reports a clear "not supported yet"
-    // instead of an unknown-format error; replace with a real codec when
-    // implemented.
+    ("text", build_unimplemented_text_codec),
+    ("txt", build_unimplemented_text_codec),
     ("binary", build_unimplemented_binary_codec),
 ];
+
+fn build_unimplemented_text_codec(
+    _options: options::CopyOptionSet,
+) -> PgWireResult<Arc<dyn CopyInCodec>> {
+    Err(unsupported(
+        "the text format is not supported yet; use WITH (FORMAT csv)",
+    ))
+}
 
 fn build_unimplemented_binary_codec(
     _options: options::CopyOptionSet,
@@ -98,9 +102,11 @@ fn build_unimplemented_binary_codec(
 
 /// Resolves the format codec from the parsed options.
 fn resolve_codec(options: &mut options::CopyOptionSet) -> PgWireResult<Arc<dyn CopyInCodec>> {
-    let name = options
-        .take_format()?
-        .unwrap_or_else(|| DEFAULT_FORMAT.to_string());
+    let name = options.take_format()?.ok_or_else(|| {
+        unsupported(
+            "COPY FROM STDIN requires an explicit format in this version; use WITH (FORMAT csv)",
+        )
+    })?;
     let builder = REGISTERED_FORMATS
         .iter()
         .find(|(registered, _)| *registered == name)
@@ -545,13 +551,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_copy_from_stdin_default() {
-        let copy = copy_from_stdin_from_sql("COPY t FROM STDIN")
+    fn test_parse_copy_from_stdin_requires_format() {
+        let err = copy_from_stdin_from_sql("COPY t FROM STDIN").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("requires an explicit format in this version"),
+            "{err}"
+        );
+
+        let copy = copy_from_stdin_from_sql("COPY t FROM STDIN WITH (FORMAT csv)")
             .unwrap()
             .unwrap();
         assert_eq!(copy.table, vec!["t"]);
         assert!(copy.columns.is_empty());
-        assert_eq!(copy.codec.name(), "text");
+        assert_eq!(copy.codec.name(), "csv");
         assert_eq!(copy.codec.format_code(), 0);
     }
 
@@ -567,11 +580,17 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_copy_from_stdin_txt_alias() {
-        let copy = copy_from_stdin_from_sql("COPY t FROM STDIN WITH (FORMAT txt)")
-            .unwrap()
-            .unwrap();
-        assert_eq!(copy.codec.name(), "text");
+    fn test_parse_copy_from_stdin_text_unsupported() {
+        for sql in [
+            "COPY t FROM STDIN WITH (FORMAT text)",
+            "COPY t FROM STDIN WITH (FORMAT txt)",
+        ] {
+            let err = copy_from_stdin_from_sql(sql).unwrap_err();
+            assert!(
+                err.to_string().contains("text format is not supported yet"),
+                "{err}"
+            );
+        }
     }
 
     #[test]
@@ -618,22 +637,15 @@ mod tests {
     }
 
     #[test]
-    fn test_format_specific_options_rejected_by_other_formats() {
-        // The open WITH section parses anything, but each format rejects
+    fn test_format_specific_options_rejected() {
+        // The open WITH section parses anything, but the format rejects
         // the options it does not understand.
-        let err = copy_from_stdin_from_sql(
-            "COPY t FROM STDIN WITH (FORMAT text, QUOTE '\"', PRECISION 'ns')",
-        )
-        .unwrap_err();
+        let err =
+            copy_from_stdin_from_sql("COPY t FROM STDIN WITH (FORMAT csv, PRECISION 'ns', FREEZE)")
+                .unwrap_err();
         assert!(
-            err.to_string().contains("not supported by format text"),
+            err.to_string().contains("not supported by format csv"),
             "{err}"
-        );
-
-        let err = copy_from_stdin_from_sql("COPY t FROM STDIN WITH (HEADER)").unwrap_err();
-        assert!(
-            err.to_string().contains("HEADER"),
-            "HEADER must be rejected by the text format: {err}"
         );
     }
 
@@ -643,12 +655,12 @@ mod tests {
         assert!(err.to_string().contains("alone"));
         // Trailing separators and quoted semicolons are fine.
         assert!(
-            copy_from_stdin_from_sql("COPY t FROM STDIN;")
+            copy_from_stdin_from_sql("COPY t FROM STDIN WITH (FORMAT csv);")
                 .unwrap()
                 .is_some()
         );
         assert!(
-            copy_from_stdin_from_sql("COPY t FROM STDIN WITH (NULL ';')")
+            copy_from_stdin_from_sql("COPY t FROM STDIN WITH (FORMAT csv, DELIMITER ';')")
                 .unwrap()
                 .is_some()
         );

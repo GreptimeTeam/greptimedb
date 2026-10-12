@@ -75,21 +75,6 @@ async fn test_postgres_copy_in_end_to_end() {
     .unwrap();
     assert_eq!(rows, 2);
 
-    // Default text format with escaped tab and `\N` NULLs, split into
-    // several chunks across a row boundary.
-    let rows = feed_copy_in(
-        &client,
-        "COPY copy_demo FROM STDIN",
-        vec![
-            Bytes::from_static(b"host3\t2"),
-            Bytes::from_static(b".5\twith\\ttab\t2023-11-14 22:13:22\n"),
-            Bytes::from_static(b"host4\t\\N\t\\N\t2023-11-14 22:13:23\n"),
-        ],
-    )
-    .await
-    .unwrap();
-    assert_eq!(rows, 2);
-
     // A column list targeting a subset.
     let rows = feed_copy_in(
         &client,
@@ -111,15 +96,13 @@ async fn test_postgres_copy_in_end_to_end() {
         .iter()
         .filter(|m| matches!(m, tokio_postgres::SimpleQueryMessage::Row(_)))
         .collect();
-    assert_eq!(rows.len(), 5);
+    assert_eq!(rows.len(), 3);
     assert_eq!(host_of(rows[0], 0), "host1");
     assert_eq!(host_of(rows[0], 2), "hello, world");
     assert_eq!(host_of(rows[1], 0), "host2");
     // NULL val and note round-trip as NULL.
-    assert_eq!(host_of(rows[3], 0), "host4");
-    assert_eq!(host_of(rows[3], 2), "");
-    assert_eq!(host_of(rows[4], 0), "");
-    assert_eq!(host_of(rows[4], 2), "from_column_list");
+    assert_eq!(host_of(rows[2], 0), "");
+    assert_eq!(host_of(rows[2], 2), "from_column_list");
 
     server.shutdown().await.unwrap();
 }
@@ -158,6 +141,18 @@ async fn test_postgres_copy_in_error_keeps_table_clean() {
             .contains("failed to parse"),
         "{err}"
     );
+
+    // A bare COPY (PostgreSQL's text default) fails with guidance.
+    let err = match client.copy_in::<_, Bytes>("COPY copy_err FROM STDIN").await {
+        Ok(_) => panic!("expected bare COPY to fail"),
+        Err(e) => e,
+    };
+    let message = err
+        .as_db_error()
+        .expect("expected db error")
+        .message()
+        .to_string();
+    assert!(message.contains("requires an explicit format"), "{message}");
 
     // The connection stays usable and no rows were written.
     let messages = client

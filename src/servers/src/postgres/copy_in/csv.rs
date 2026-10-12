@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The `csv` format.
+//! The `csv` format — currently the only implemented COPY FROM STDIN
+//! format.
 //!
 //! Parsing and typed conversion both reuse arrow-csv's incremental
 //! [`Decoder`](arrow::csv::reader::Decoder) — the same engine backing
@@ -38,7 +39,7 @@ use datatypes::schema::{ColumnSchema, Schema as GreptimeSchema};
 use datatypes::vectors::Helper;
 use pgwire::error::{PgWireError, PgWireResult};
 
-use super::codec::{CopyInCodec, ParsedRow, RecordParser, check_text_representable_type};
+use super::codec::{CopyInCodec, ParsedRow, RecordParser};
 use super::options::CopyOptionSet;
 use super::{COPY_IN_FLUSH_ROWS, bad_copy_data, invalid_text_repr, unsupported};
 
@@ -86,14 +87,27 @@ impl CopyInCodec for CsvCodec {
         "csv"
     }
 
-    /// The default text-representable types minus Binary and Json, which
-    /// arrow-csv cannot decode.
+    /// The column types arrow-csv can decode against.
     fn check_column_type(&self, data_type: &ConcreteDataType) -> PgWireResult<()> {
-        check_text_representable_type(data_type)?;
-        if matches!(
+        let supported = matches!(
             data_type,
-            ConcreteDataType::Binary(_) | ConcreteDataType::Json(_)
-        ) {
+            ConcreteDataType::Boolean(_)
+                | ConcreteDataType::Int8(_)
+                | ConcreteDataType::Int16(_)
+                | ConcreteDataType::Int32(_)
+                | ConcreteDataType::Int64(_)
+                | ConcreteDataType::UInt8(_)
+                | ConcreteDataType::UInt16(_)
+                | ConcreteDataType::UInt32(_)
+                | ConcreteDataType::UInt64(_)
+                | ConcreteDataType::Float32(_)
+                | ConcreteDataType::Float64(_)
+                | ConcreteDataType::String(_)
+                | ConcreteDataType::Date(_)
+                | ConcreteDataType::Timestamp(_)
+                | ConcreteDataType::Decimal128(_)
+        );
+        if !supported {
             return Err(unsupported(format!(
                 "column type \"{}\" is not supported by format csv",
                 data_type.name()
