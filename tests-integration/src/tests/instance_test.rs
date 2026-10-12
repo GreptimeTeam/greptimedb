@@ -554,6 +554,11 @@ ORDER BY t.key_id"#;
 /// The two rows are 1000 seconds apart, so casting the millisecond time index to second precision
 /// truncates sub-second parts and collapses the first row onto second 0, which is before the start
 /// of the region's time range.
+///
+/// `to_timestamp_seconds(ts)` casts the time index to second precision *inside* the function, so it
+/// has to be rejected exactly like the cast in the plan; the cast is just not visible as a
+/// `CastExpr`. `to_timestamp_millis(ts)` keeps the values of the millisecond time index and is used
+/// as the value-preserving control.
 #[apply(standalone_instance_case)]
 async fn test_windowed_sort_sort_column_cast_time_unit_mismatch(instance: Arc<dyn MockInstance>) {
     let frontend = instance.frontend();
@@ -611,6 +616,20 @@ async fn test_windowed_sort_sort_column_cast_time_unit_mismatch(instance: Arc<dy
 | 1970-01-01T00:00:00 | a    |
 +---------------------+------+"#;
 
+    // `to_timestamp_seconds` casts the millisecond time index to second precision inside the
+    // function, so it returns the same rows as the direct cast above (the function is registered
+    // without a session time zone, so its result stays a naive timestamp).
+    let rows_by_seconds_wrapper = rows_by_cast;
+    let rows_by_seconds_wrapper_desc = rows_by_cast_desc;
+    // `to_timestamp_millis` keeps the values of the millisecond time index, so the control below
+    // returns the same rows as sorting by the time index itself, only under the `t` alias.
+    let rows_by_millis_wrapper = r#"+-------------------------+------+
+| t                       | host |
++-------------------------+------+
+| 1970-01-01T00:00:00.001 | a    |
+| 1970-01-01T00:16:40.001 | b    |
++-------------------------+------+"#;
+
     for table in ["f05_mito_wc", "f05_metric_wc"] {
         let output = execute_sql(
             &frontend,
@@ -632,6 +651,14 @@ async fn test_windowed_sort_sort_column_cast_time_unit_mismatch(instance: Arc<dy
 
         let output = execute_sql(
             &frontend,
+            &format!("SELECT to_timestamp_millis(ts) AS t, host FROM {table} ORDER BY t"),
+        )
+        .await
+        .data;
+        check_output_stream(output, rows_by_millis_wrapper).await;
+
+        let output = execute_sql(
+            &frontend,
             &format!("SELECT CAST(ts AS TIMESTAMP(0)) AS t, host FROM {table} ORDER BY t LIMIT 10"),
         )
         .await
@@ -647,9 +674,9 @@ async fn test_windowed_sort_sort_column_cast_time_unit_mismatch(instance: Arc<dy
         check_output_stream(output, rows_by_cast).await;
     }
 
-    // The regression itself: ordering by the cast has to return exactly the same rows as the
-    // controls above. Every combination is collected first so that a single run reports the whole
-    // scope of the bug.
+    // The regression itself: ordering by the cast, or by a function wrapper that casts inside the
+    // function, has to return exactly the same rows as the controls above. Every combination is
+    // collected first so that a single run reports the whole scope of the bug.
     let mut failures = Vec::new();
     for table in ["f05_mito_wc", "f05_metric_wc"] {
         for parallelism in [1, 4] {
@@ -665,6 +692,18 @@ async fn test_windowed_sort_sort_column_cast_time_unit_mismatch(instance: Arc<dy
                     ),
                     "right side",
                     rows_by_cast_desc,
+                ),
+                (
+                    format!("SELECT to_timestamp_seconds(ts) AS t, host FROM {table} ORDER BY t"),
+                    "left side",
+                    rows_by_seconds_wrapper,
+                ),
+                (
+                    format!(
+                        "SELECT to_timestamp_seconds(ts) AS t, host FROM {table} ORDER BY t DESC"
+                    ),
+                    "right side",
+                    rows_by_seconds_wrapper_desc,
                 ),
             ] {
                 match try_execute_sql_with_query_parallelism(&frontend, &sql, parallelism).await {
