@@ -292,13 +292,10 @@ pub struct ExportCreateCommand {
     #[clap(long, value_enum, default_value = "parquet")]
     format: DataFormat,
 
-    /// Use shared Metric physical scans (Parquet only). Resume requires that the previous
-    /// export and storage writes have ended; an HTTP timeout does not establish this.
-    #[clap(long)]
-    experimental_metric_export: bool,
-
-    /// Store independent Metric Parquet streams in shared packed objects.
-    #[clap(long, value_parser = ["packed"], requires = "experimental_metric_export")]
+    /// Use shared Metric physical scans and packed objects (Parquet only).
+    /// Resume uses the manifest layout and requires that previous export and storage
+    /// writes have ended; an HTTP timeout does not establish this.
+    #[clap(long, value_parser = ["packed"])]
     metric_data_layout: Option<String>,
 
     /// Delete existing snapshot and recreate.
@@ -413,39 +410,17 @@ impl ExportCreateCommand {
         );
 
         // The filesystem storage constructor can create the snapshot root.
-        if self.experimental_metric_export {
-            if self.format != DataFormat::Parquet {
-                return crate::data::export_v2::error::MetricExportUnavailableSnafu
-                    .fail()
-                    .map_err(BoxedError::new);
-            }
-            let capability = database_client
-                .sql_response(
-                    "SHOW VARIABLES experimental_metric_export",
-                    DEFAULT_SCHEMA_NAME,
-                )
+        if self.metric_data_layout.is_some() {
+            require_metric_export(&database_client, self.format)
                 .await
-                .context(DatabaseSnafu)
                 .map_err(BoxedError::new)?;
-            let expected_schema = OutputSchema::new(vec![ColumnSchema::new(
-                "EXPERIMENTAL_METRIC_EXPORT".to_string(),
-                "String".to_string(),
-            )]);
-            if !matches!(capability.output(), [GreptimeQueryOutput::Records(records)]
-                if records.schema() == &expected_schema
-                    && records.rows() == &vec![vec![Value::String("true".to_string())]])
-            {
-                return crate::data::export_v2::error::MetricExportUnavailableSnafu
-                    .fail()
-                    .map_err(BoxedError::new);
+            if !self.schema_only {
+                database_client
+                    .require_packed_export()
+                    .await
+                    .context(DatabaseSnafu)
+                    .map_err(BoxedError::new)?;
             }
-        }
-        if self.metric_data_layout.is_some() && !self.schema_only {
-            database_client
-                .require_packed_export()
-                .await
-                .context(DatabaseSnafu)
-                .map_err(BoxedError::new)?;
         }
         let storage = OpenDalStorage::from_uri(&self.to, &self.storage).map_err(BoxedError::new)?;
 
@@ -455,7 +430,6 @@ impl ExportCreateCommand {
                 schemas,
                 schema_only: self.schema_only,
                 format: self.format,
-                experimental_metric_export: self.experimental_metric_export,
                 packed: self.metric_data_layout.is_some(),
                 force: self.force,
                 time_range,
@@ -484,7 +458,6 @@ struct ExportConfig {
     schemas: Option<Vec<String>>,
     schema_only: bool,
     format: DataFormat,
-    experimental_metric_export: bool,
     packed: bool,
     force: bool,
     time_range: TimeRange,
@@ -538,13 +511,11 @@ impl ExportCreate {
 
                 validate_resume_config(&manifest, &self.config)?;
                 if manifest.is_packed() {
+                    require_metric_export(&self.database_client, manifest.format).await?;
                     self.database_client
                         .require_packed_export()
                         .await
                         .context(DatabaseSnafu)?;
-                    if !self.config.experimental_metric_export {
-                        return crate::data::export_v2::error::MetricExportUnavailableSnafu.fail();
-                    }
                 }
 
                 info!(
@@ -573,7 +544,6 @@ impl ExportCreate {
                         storage_config: &self.config.storage_config,
                         parallelism: self.config.parallelism,
                         chunk_parallelism: self.config.chunk_parallelism,
-                        experimental_metric_export: self.config.experimental_metric_export,
                         resume: true,
                     },
                     progress.as_ref(),
@@ -608,7 +578,7 @@ impl ExportCreate {
             manifest.version = 2;
             manifest.data_layout = Some(common_datasource::packed_snapshot::PACKED_LAYOUT.into());
         }
-        if self.config.experimental_metric_export {
+        if manifest.is_packed() {
             for chunk in &manifest.chunks {
                 self.storage
                     .prepare_export_chunk(&schema_names, chunk.id, false, manifest.is_packed())
@@ -651,7 +621,6 @@ impl ExportCreate {
                     storage_config: &self.config.storage_config,
                     parallelism: self.config.parallelism,
                     chunk_parallelism: self.config.chunk_parallelism,
-                    experimental_metric_export: self.config.experimental_metric_export,
                     resume: false,
                 },
                 progress.as_ref(),
@@ -759,6 +728,30 @@ impl ExportCreate {
 
         Ok(tables.into_iter().collect())
     }
+}
+
+async fn require_metric_export(client: &DatabaseClient, format: DataFormat) -> Result<()> {
+    if format != DataFormat::Parquet {
+        return crate::data::export_v2::error::MetricExportUnavailableSnafu.fail();
+    }
+    let capability = client
+        .sql_response(
+            "SHOW VARIABLES experimental_metric_export",
+            DEFAULT_SCHEMA_NAME,
+        )
+        .await
+        .context(DatabaseSnafu)?;
+    let expected_schema = OutputSchema::new(vec![ColumnSchema::new(
+        "EXPERIMENTAL_METRIC_EXPORT".to_string(),
+        "String".to_string(),
+    )]);
+    if !matches!(capability.output(), [GreptimeQueryOutput::Records(records)]
+        if records.schema() == &expected_schema
+            && records.rows() == &vec![vec![Value::String("true".to_string())]])
+    {
+        return crate::data::export_v2::error::MetricExportUnavailableSnafu.fail();
+    }
+    Ok(())
 }
 
 fn validate_resume_config(manifest: &Manifest, config: &ExportConfig) -> Result<()> {
@@ -1683,6 +1676,45 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_metric_layout_arguments() {
+        let directory = tempfile::tempdir().unwrap();
+        let snapshot = directory.path().join("snapshot");
+        let uri = url::Url::from_file_path(&snapshot).unwrap();
+        let args = [
+            "export-v2-create",
+            "--addr",
+            "127.0.0.1:1",
+            "--to",
+            uri.as_str(),
+        ];
+        assert!(
+            ExportCreateCommand::parse_from(args)
+                .metric_data_layout
+                .is_none()
+        );
+        let packed = ExportCreateCommand::parse_from(
+            args.into_iter().chain(["--metric-data-layout", "packed"]),
+        );
+        assert_eq!(packed.metric_data_layout.as_deref(), Some("packed"));
+        let error = ExportCreateCommand::try_parse_from(
+            args.into_iter().chain(["--experimental-metric-export"]),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        for format in ["csv", "json"] {
+            let command = ExportCreateCommand::parse_from(args.into_iter().chain([
+                "--metric-data-layout",
+                "packed",
+                "--format",
+                format,
+            ]));
+            let error = command.build().await.err().unwrap();
+            assert!(error.to_string().contains("Metric export requires Parquet"));
+            assert!(!snapshot.exists());
+        }
+    }
+
     #[test]
     fn test_chunk_parallelism_parses_valid_value() {
         let cmd = ExportCreateCommand::parse_from([
@@ -1755,7 +1787,6 @@ mod tests {
             schemas: None,
             schema_only: false,
             format: DataFormat::Parquet,
-            experimental_metric_export: false,
             packed: false,
             force: false,
             time_range: TimeRange::unbounded(),
@@ -1794,7 +1825,6 @@ mod tests {
             ]),
             schema_only: false,
             format: DataFormat::Parquet,
-            experimental_metric_export: false,
             packed: false,
             force: false,
             time_range: TimeRange::unbounded(),
@@ -1840,7 +1870,6 @@ mod tests {
             schemas: None,
             schema_only: false,
             format: DataFormat::Parquet,
-            experimental_metric_export: false,
             packed: false,
             force: false,
             time_range,
@@ -1875,7 +1904,6 @@ mod tests {
             schemas: None,
             schema_only: false,
             format: DataFormat::Csv,
-            experimental_metric_export: false,
             packed: false,
             force: false,
             time_range: TimeRange::unbounded(),
@@ -1912,7 +1940,6 @@ mod tests {
             schemas: None,
             schema_only: false,
             format: DataFormat::Parquet,
-            experimental_metric_export: false,
             packed: false,
             force: false,
             time_range: TimeRange::new(Some(start), Some(start)),

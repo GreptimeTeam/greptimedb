@@ -193,6 +193,12 @@ Packed Metric exports write manifest version 2 with a required data-layout marke
 exports can keep version 1. A version-2 snapshot indexes all data in its schema
 chunks, including ordinary tables stored as standalone Parquet objects.
 
+`export-v2 create --metric-data-layout packed` selects shared physical scans and
+packed output. Omitting the layout keeps the default version-1 export path;
+schema-only snapshots also retain version 1. The source frontend or standalone
+server must enable `experimental_metric_export = true`. Resume derives the layout
+from the manifest, so packed snapshots do not need the layout argument repeated.
+
 Before creating or replacing a snapshot, the CLI checks the source server's
 explicit packed-export capability. Before target DDL or data writes, the importer
 checks the manifest version/layout and the target's packed-import capability.
