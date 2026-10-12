@@ -38,7 +38,7 @@ use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
 use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef, DdlManagerRef};
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
-use common_meta::kv_backend::{ClosableKvBackend, ClosableKvBackendRef, KvBackendRef};
+use common_meta::kv_backend::{ClosableKvBackendRef, KvBackendRef};
 use common_meta::node_manager::{FlownodeRef, NodeManagerRef};
 use common_meta::procedure_executor::{LocalProcedureExecutor, ProcedureExecutorRef};
 use common_meta::region_keeper::MemoryRegionKeeper;
@@ -224,7 +224,7 @@ pub struct Instance {
     procedure_manager: ProcedureManagerRef,
     leader_services_controller: Box<dyn StandaloneLeaderServicesController>,
     leader_services_context: LeaderServicesContext,
-    /// Closed last on shutdown, see [ClosableKvBackend].
+    /// Closed last on shutdown, see [ClosableKvBackend](common_meta::kv_backend::ClosableKvBackend).
     metadata_kv_backend: ClosableKvBackendRef,
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
@@ -847,8 +847,8 @@ impl NodeManagerCreator for DefaultNodeManagerCreator {
 /// configuration types.
 #[async_trait]
 pub trait MetadataKvBackendCreator: Send + Sync {
-    /// Wrappers must forward [ClosableKvBackend::close] to the backend they wrap: standalone
-    /// closes it on shutdown.
+    /// Standalone closes the backend on shutdown, so wrappers must forward
+    /// [close](common_meta::kv_backend::ClosableKvBackend::close) to the backend they wrap.
     async fn create(
         &self,
         metadata_dir: String,
