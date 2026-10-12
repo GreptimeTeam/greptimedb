@@ -1456,7 +1456,9 @@ mod test {
         RecordBatch::try_new(schema, columns).unwrap()
     }
 
-    fn prepare_test_data() -> DataSourceExec {
+    /// The batches and schema shared by [`prepare_test_data`] and
+    /// [`prepare_test_data_with_two_partitions`].
+    fn prepare_test_data_batches() -> (Vec<RecordBatch>, SchemaRef) {
         let schema = Arc::new(Schema::new(vec![
             Field::new("host", DataType::Utf8, true),
             Field::new("le", DataType::Utf8, true),
@@ -1509,8 +1511,24 @@ mod test {
         )
         .unwrap();
 
+        (vec![data_1, data_2, data_3], schema)
+    }
+
+    fn prepare_test_data() -> DataSourceExec {
+        let (batches, schema) = prepare_test_data_batches();
         DataSourceExec::new(Arc::new(
-            MemorySourceConfig::try_new(&[vec![data_1, data_2, data_3]], schema, None).unwrap(),
+            MemorySourceConfig::try_new(&[batches], schema, None).unwrap(),
+        ))
+    }
+
+    /// The batches from [`prepare_test_data_batches`], laid out over two
+    /// partitions, so that partitioning metadata is checked against a real
+    /// multi-partition input.
+    fn prepare_test_data_with_two_partitions() -> DataSourceExec {
+        let (mut batches, schema) = prepare_test_data_batches();
+        let first_partition = vec![batches.remove(0)];
+        DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[first_partition, batches], schema, None).unwrap(),
         ))
     }
 
@@ -1598,9 +1616,8 @@ mod test {
 
         let properties = PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
-            Partitioning::Hash(
-                partition_exprs.clone(),
-                input.output_partitioning().partition_count(),
+            Partitioning::UnknownPartitioning(
+                input.properties().output_partitioning().partition_count(),
             ),
             EmissionType::Incremental,
             Boundedness::Bounded,
@@ -1805,7 +1822,7 @@ mod test {
 
     #[test]
     fn fold_does_not_claim_hash_partitioning() {
-        let input: Arc<dyn ExecutionPlan> = Arc::new(prepare_test_data());
+        let input: Arc<dyn ExecutionPlan> = Arc::new(prepare_test_data_with_two_partitions());
         let logical_input = LogicalPlan::EmptyRelation(EmptyRelation {
             produce_one_row: false,
             schema: Arc::new(input.schema().to_dfschema().unwrap()),
@@ -1821,30 +1838,10 @@ mod test {
         let constructed = logical_fold.to_execution_plan(input.clone());
         assert!(matches!(
             constructed.output_partitioning(),
-            Partitioning::UnknownPartitioning(1)
+            Partitioning::UnknownPartitioning(2)
         ));
-        let output_schema = Arc::new(
-            HistogramFold::convert_schema(&Arc::new(input.schema().to_dfschema().unwrap()), "le")
-                .unwrap()
-                .as_arrow()
-                .clone(),
-        );
-        let (tag_columns, partition_exprs, properties) =
-            build_test_plan_properties(&input, output_schema.clone(), 0);
-        let fold_exec = Arc::new(HistogramFoldExec {
-            le_column_index: 1,
-            field_column_index: 2,
-            histogram_column_index: None,
-            ts_column_index: 0,
-            input: input.clone(),
-            tag_columns,
-            partition_exprs,
-            operation: HistogramFoldOperation::Quantile(0.5.into()),
-            output_schema,
-            metric: ExecutionPlanMetricsSet::new(),
-            properties,
-        });
-        let rebuilt = fold_exec
+
+        let rebuilt = constructed
             .replace_children(
                 vec![input],
                 ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
@@ -1852,7 +1849,7 @@ mod test {
             .unwrap();
         assert!(matches!(
             rebuilt.output_partitioning(),
-            Partitioning::UnknownPartitioning(1)
+            Partitioning::UnknownPartitioning(2)
         ));
     }
 
