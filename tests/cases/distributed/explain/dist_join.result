@@ -130,14 +130,13 @@ ORDER BY p.p_val, p.p_id, b.b_val, b.b_id;
 |_|_TableScan: dist_join_build, partial_filters=[dist_join_build.b_key IS NOT NULL]_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [p_val@2 ASC NULLS LAST, p_id@0 ASC NULLS LAST, b_val@5 ASC NULLS LAST, b_id@3 ASC NULLS LAST]_|
-|_|_ProjectionExec: expr=[p_id@3 as p_id, p_key@4 as p_key, p_val@5 as p_val, b_id@0 as b_id, b_key@1 as b_key, b_val@2 as b_val]_|
-|_|_SortExec: expr=[p_val@5 ASC NULLS LAST, p_id@3 ASC NULLS LAST, b_val@2 ASC NULLS LAST, b_id@0 ASC NULLS LAST], preserve_partitioning=[true] |
+|_|_SortExec: expr=[p_val@2 ASC NULLS LAST, p_id@0 ASC NULLS LAST, b_val@5 ASC NULLS LAST, b_id@3 ASC NULLS LAST], preserve_partitioning=[true] |
 |_|_REDACTED
-|_|_CoalescePartitionsExec_|
-|_|_ProjectionExec: expr=[b_id@0 as b_id, b_key@1 as b_key, b_val@2 as b_val]_|
-|_|_MergeScanExec: REDACTED
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_ProjectionExec: expr=[p_id@0 as p_id, p_key@1 as p_key, p_val@2 as p_val]_|
+|_|_MergeScanExec: REDACTED
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_ProjectionExec: expr=[b_id@0 as b_id, b_key@1 as b_key, b_val@2 as b_val]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
@@ -240,14 +239,13 @@ ORDER BY p.p_val, p.p_id, b.b_val, b.b_id;
 |_|_TableScan: dist_join_build, partial_filters=[dist_join_build.b_key IS NOT NULL]_|
 |_| ]]_|
 | physical_plan | SortPreservingMergeExec: [p_val@2 ASC NULLS LAST, p_id@0 ASC NULLS LAST, b_val@5 ASC NULLS LAST, b_id@3 ASC NULLS LAST]_|
-|_|_ProjectionExec: expr=[p_id@3 as p_id, p_key@4 as p_key, p_val@5 as p_val, b_id@0 as b_id, b_key@1 as b_key, b_val@2 as b_val]_|
-|_|_SortExec: expr=[p_val@5 ASC NULLS LAST, p_id@3 ASC NULLS LAST, b_val@2 ASC NULLS LAST, b_id@0 ASC NULLS LAST], preserve_partitioning=[true] |
+|_|_SortExec: expr=[p_val@2 ASC NULLS LAST, p_id@0 ASC NULLS LAST, b_val@5 ASC NULLS LAST, b_id@3 ASC NULLS LAST], preserve_partitioning=[true] |
 |_|_REDACTED
-|_|_CoalescePartitionsExec_|
-|_|_ProjectionExec: expr=[b_id@0 as b_id, b_key@1 as b_key, b_val@2 as b_val]_|
-|_|_MergeScanExec: REDACTED
 |_|_RepartitionExec: partitioning=REDACTED
 |_|_ProjectionExec: expr=[p_id@0 as p_id, p_key@1 as p_key, p_val@2 as p_val]_|
+|_|_MergeScanExec: REDACTED
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_ProjectionExec: expr=[b_id@0 as b_id, b_key@1 as b_key, b_val@2 as b_val]_|
 |_|_MergeScanExec: REDACTED
 |_|_|
 +-+-+
