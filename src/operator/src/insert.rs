@@ -834,12 +834,14 @@ impl Inserter {
 
         let dispatcher = self.write_dispatcher.clone();
         let request = request_factory.build_insert(normal_requests);
-        let affected_rows =
-            common_runtime::spawn_global(async move { dispatcher.dispatch(vec![request]).await })
-                .await
-                .context(crate::error::JoinTaskSnafu)?
-                .context(RequestInsertsSnafu)?
-                .affected_rows;
+        let writes = dispatcher.prepare(vec![request]).await?;
+        let affected_rows = common_runtime::spawn_global(async move {
+            dispatcher.dispatch_prepared(writes, None).await
+        })
+        .await
+        .context(crate::error::JoinTaskSnafu)?
+        .context(RequestInsertsSnafu)?
+        .affected_rows;
         crate::metrics::DIST_INGEST_ROW_COUNT
             .with_label_values(&[ctx.get_db_string().as_str()])
             .inc_by(affected_rows as u64);

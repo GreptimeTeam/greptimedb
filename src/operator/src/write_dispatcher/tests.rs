@@ -19,15 +19,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use api::v1::region::InsertRequest;
+use api::v1::region::{
+    BulkInsertRequest, DeleteRequest, InsertRequest, RegionRequestHeader, bulk_insert_request,
+};
+use api::v1::{
+    ArrowIpc, ColumnDataType, PartitionExprVersion, Row, Rows, helper, value::ValueData,
+};
 use client::client_manager::NodeClients;
 use common_error::ext::ErrorExt;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache as meta_cache;
+use common_meta::ddl::test_util::datanode_handler::DatanodeWatcher;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::node_manager::{
     Datanode, DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef,
 };
+use common_meta::test_util::MockDatanodeManager;
 use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
 use partition::manager::PartitionRuleManager;
@@ -90,6 +97,108 @@ async fn test_resolve_peers_batches_logical_and_physical_regions() {
     assert_eq!(actual.status_code(), expected.status_code());
     assert_eq!(actual.retry_hint(), expected.retry_hint());
     assert!(dispatcher.resolve_peers(&[]).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_dispatch_preserves_write_payloads_and_envelopes() {
+    let backend = test_util::prepare_mocked_backend().await;
+    let partition_manager = test_util::create_partition_rule_manager(backend.clone()).await;
+    common_meta::key::TableMetadataManager::new(backend)
+        .create_table_metadata(
+            test_util::new_test_table_info(42, "dispatcher_logical", [1, 2, 3].into_iter()),
+            TableRouteValue::logical(1),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let (sender, mut received) = tokio::sync::mpsc::channel(8);
+    let watcher = DatanodeWatcher::new(sender).with_handler(|_, _| Ok(RegionResponse::new(1)));
+    let dispatcher = WriteDispatcher::new(
+        Arc::new(MockDatanodeManager::new(watcher)),
+        partition_manager,
+    );
+    // Physical and logical regions share a peer but retain distinct region IDs.
+    let regions = [RegionId::new(1, 1), RegionId::new(42, 1)];
+    let rows = Rows {
+        schema: vec![helper::tag_column_schema("a", ColumnDataType::Int32)],
+        rows: vec![Row {
+            values: vec![ValueData::I32Value(7).into()],
+        }],
+    };
+    let version = Some(PartitionExprVersion { value: 17 });
+    let bodies = [
+        Body::Inserts(InsertRequests {
+            requests: regions
+                .iter()
+                .map(|region| InsertRequest {
+                    region_id: region.as_u64(),
+                    rows: Some(rows.clone()),
+                    partition_expr_version: version,
+                    skip_wal: true,
+                })
+                .collect(),
+        }),
+        Body::Deletes(DeleteRequests {
+            requests: regions
+                .iter()
+                .map(|region| DeleteRequest {
+                    region_id: region.as_u64(),
+                    rows: Some(rows.clone()),
+                    partition_expr_version: version,
+                })
+                .collect(),
+        }),
+    ];
+    for body in bodies {
+        let requests = ["first", "second"].map(|dbname| RegionRequest {
+            header: Some(RegionRequestHeader {
+                dbname: dbname.to_string(),
+                ..Default::default()
+            }),
+            body: Some(body.clone()),
+        });
+        let writes = dispatcher.prepare(requests.to_vec()).await.unwrap();
+        assert!(received.try_recv().is_err());
+        let response = dispatcher.dispatch_prepared(writes, None).await.unwrap();
+        assert_eq!(response.affected_rows, 2);
+        for request in requests {
+            assert_eq!(received.try_recv().unwrap(), (Peer::new(1, ""), request));
+        }
+        assert!(received.try_recv().is_err());
+    }
+    let requests = regions.map(|region| RegionRequest {
+        header: Some(RegionRequestHeader {
+            dbname: "bulk".to_string(),
+            ..Default::default()
+        }),
+        body: Some(Body::BulkInsert(BulkInsertRequest {
+            region_id: region.as_u64(),
+            partition_expr_version: version,
+            aligned_schema_version: None,
+            skip_wal: true,
+            body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
+                schema: "schema".into(),
+                data_header: "header".into(),
+                payload: "payload".into(),
+            })),
+        })),
+    });
+    let response = dispatcher.dispatch(requests.to_vec()).await.unwrap();
+    assert_eq!(response.affected_rows, 2);
+    for request in requests {
+        assert_eq!(received.try_recv().unwrap(), (Peer::new(1, ""), request));
+    }
+    assert!(received.try_recv().is_err());
+
+    let error = dispatcher
+        .prepare(vec![build_insert_request(&[1, 999])])
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::error::Error::FindRegionLeader { .. }
+    ));
+    assert!(received.try_recv().is_err());
 }
 
 struct GatedNodeManager {
@@ -222,18 +331,21 @@ async fn test_resolve_peers_cache_lookup_ablation() {
     for run in 0..6 {
         // Alternate order; compare the same warm cache, routes and deterministic workload.
         let modes = if run % 2 == 0 {
-            [false, true]
+            ["delete", "insert", "batched"]
         } else {
-            [true, false]
+            ["batched", "insert", "delete"]
         };
-        for batched in modes {
+        for mode in modes {
             let before = counter.get();
             let started = Instant::now();
-            let peers = if batched {
+            let peers = if mode == "batched" {
                 dispatcher.resolve_peers(&regions).await.unwrap()
             } else {
                 let mut peers = HashMap::new();
                 for region in &regions {
+                    if mode == "insert" && peers.contains_key(region) {
+                        continue;
+                    }
                     peers.insert(
                         *region,
                         partition_manager.find_region_leader(*region).await.unwrap(),
@@ -244,9 +356,15 @@ async fn test_resolve_peers_cache_lookup_ablation() {
             let elapsed = started.elapsed();
             let gets = counter.get() - before;
             assert_eq!(peers, expected);
-            assert_eq!(gets, if batched { 3 } else { 384 });
+            let expected_gets = match mode {
+                "delete" => 384,
+                "insert" => 9,
+                "batched" => 3,
+                _ => unreachable!(),
+            };
+            assert_eq!(gets, expected_gets);
             eprintln!(
-                "route_resolution_ablation run={run} batched={batched} regions={} cache_gets={gets} elapsed_ns={}",
+                "route_resolution_ablation run={run} mode={mode} regions={} cache_gets={gets} elapsed_ns={}",
                 regions.len(),
                 elapsed.as_nanos()
             );

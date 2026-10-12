@@ -63,32 +63,32 @@ impl WriteDispatcher {
         self.dispatch_inner(requests, Some(histogram)).await
     }
 
-    async fn dispatch_inner(
+    /// Resolves routes before writes are detached from the caller.
+    pub(crate) async fn prepare(
         &self,
         requests: Vec<RegionRequest>,
-        histogram: Option<Histogram>,
-    ) -> Result<RegionResponse> {
-        self.dispatch_once(requests, histogram.as_ref()).await
-    }
-
-    async fn dispatch_once(
-        &self,
-        requests: Vec<RegionRequest>,
-        histogram: Option<&Histogram>,
-    ) -> Result<RegionResponse> {
+    ) -> crate::error::Result<Vec<(Peer, RegionRequest)>> {
         let requests = requests.into_iter().map(split_request).collect::<Vec<_>>();
         let regions = requests
             .iter()
             .flatten()
             .map(write_region_id)
-            .collect::<Result<Vec<_>>>()?;
-        let peers = self.resolve_peers(&regions).await?;
+            .collect::<Result<Vec<_>>>()
+            .context(crate::error::RequestRegionSnafu)?;
+        let peers = self
+            .resolve_peers(&regions)
+            .await
+            .context(crate::error::FindRegionLeaderSnafu)?;
         let mut writes = Vec::new();
         // Preserve each original envelope and peer batching when retries are disabled.
         for requests in requests {
             let mut by_peer: HashMap<Peer, RegionRequest> = HashMap::new();
             for request in requests {
-                let peer = get_peer(&peers, write_region_id(&request)?)?;
+                let peer = get_peer(
+                    &peers,
+                    write_region_id(&request).context(crate::error::RequestRegionSnafu)?,
+                )
+                .context(crate::error::RequestRegionSnafu)?;
                 match by_peer.entry(peer) {
                     std::collections::hash_map::Entry::Vacant(entry) => {
                         entry.insert(request);
@@ -105,7 +105,8 @@ impl WriteDispatcher {
                                 return error::UnexpectedSnafu {
                                     err_msg: "Cannot combine different write kinds",
                                 }
-                                .fail();
+                                .fail()
+                                .context(crate::error::RequestRegionSnafu);
                             }
                         }
                     }
@@ -113,9 +114,19 @@ impl WriteDispatcher {
             }
             writes.extend(by_peer);
         }
+        Ok(writes)
+    }
+
+    /// Sends requests using routes already resolved by the caller.
+    pub(crate) async fn dispatch_prepared(
+        &self,
+        writes: Vec<(Peer, RegionRequest)>,
+        histogram: Option<Histogram>,
+    ) -> Result<RegionResponse> {
+        let histogram = histogram.as_ref();
         let results = future::join_all(writes.into_iter().map(|(peer, request)| async move {
-            let datanode = self.node_manager.datanode(&peer).await;
             let _timer = histogram.map(Histogram::start_timer);
+            let datanode = self.node_manager.datanode(&peer).await;
             datanode.handle(request).await
         }))
         .await;
@@ -126,27 +137,24 @@ impl WriteDispatcher {
         Ok(response)
     }
 
-    async fn resolve_peers(&self, regions: &[RegionId]) -> Result<HashMap<RegionId, Peer>> {
+    /// Resolves only the requested peers, loading each table route once.
+    pub(crate) async fn resolve_peers(
+        &self,
+        regions: &[RegionId],
+    ) -> partition::error::Result<HashMap<RegionId, Peer>> {
         let table_ids = regions
             .iter()
             .map(|region| region.table_id())
             .collect::<HashSet<_>>();
         let mut physical_tables = HashMap::new();
-        let mut leaders = HashMap::new();
+        let mut routes = HashMap::new();
         for table_id in table_ids {
             let (physical_id, route) = self
                 .partition_manager
                 .find_physical_table_route_with_id(table_id)
-                .await
-                .map_err(BoxedError::new)
-                .context(error::ExternalSnafu)?;
+                .await?;
             physical_tables.insert(table_id, physical_id);
-            leaders.entry(physical_id).or_insert_with(|| {
-                router::convert_to_region_leader_map(&route.region_routes)
-                    .into_iter()
-                    .map(|(region, peer)| (region, peer.clone()))
-                    .collect::<HashMap<_, _>>()
-            });
+            routes.entry(physical_id).or_insert(route);
         }
         let mut peers = HashMap::with_capacity(regions.len());
         for region in regions {
@@ -155,18 +163,29 @@ impl WriteDispatcher {
             }
             let peer = physical_tables
                 .get(&region.table_id())
-                .and_then(|physical_id| leaders.get(physical_id))
-                .and_then(|leaders| leaders.get(&region.region_number()))
-                .cloned()
+                .and_then(|physical_id| routes.get(physical_id))
+                .and_then(|route| {
+                    router::find_region_leader(&route.region_routes, region.region_number())
+                })
                 .context(partition::error::FindLeaderSnafu {
                     region_id: *region,
                     table_id: region.table_id(),
-                })
-                .map_err(BoxedError::new)
-                .context(error::ExternalSnafu)?;
+                })?;
             peers.insert(*region, peer);
         }
         Ok(peers)
+    }
+    async fn dispatch_inner(
+        &self,
+        requests: Vec<RegionRequest>,
+        histogram: Option<Histogram>,
+    ) -> Result<RegionResponse> {
+        let writes = self
+            .prepare(requests)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExternalSnafu)?;
+        self.dispatch_prepared(writes, histogram).await
     }
 }
 

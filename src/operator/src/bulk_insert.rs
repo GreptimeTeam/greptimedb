@@ -31,7 +31,7 @@ use futures::future;
 use meter_core::data::MeterRecord;
 use meter_macros::write_meter;
 use session::context::{Channel, QueryContextRef};
-use snafu::{ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::RegionId;
 use table::TableRef;
 use table::metadata::TableInfoRef;
@@ -54,7 +54,8 @@ impl Inserter {
         ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
         let requests = TablePartitioner::try_new(&self.partition_manager, &table_info)
-            .await?
+            .await
+            .context(error::InvalidPartitionSnafu)?
             .partition_bulk_insert_requests(batch, None, ctx.skip_wal())?;
         let writes = requests
             .into_iter()
@@ -67,9 +68,10 @@ impl Inserter {
                 body: Some(region_request::Body::BulkInsert(request)),
             })
             .collect();
+        let writes = self.write_dispatcher.prepare(writes).await?;
         Ok(self
             .write_dispatcher
-            .dispatch(writes)
+            .dispatch_prepared(writes, None)
             .await
             .context(error::RequestInsertsSnafu)?
             .affected_rows)
@@ -180,11 +182,14 @@ impl Inserter {
                 })),
             };
 
+            let writes = self.write_dispatcher.prepare(vec![request]).await?;
             let result = self
                 .write_dispatcher
-                .dispatch_with_metrics(
-                    vec![request],
-                    metrics::HANDLE_BULK_INSERT_ELAPSED.with_label_values(&["datanode_handle"]),
+                .dispatch_prepared(
+                    writes,
+                    Some(
+                        metrics::HANDLE_BULK_INSERT_ELAPSED.with_label_values(&["datanode_handle"]),
+                    ),
                 )
                 .await
                 .context(error::RequestRegionSnafu)
@@ -196,6 +201,16 @@ impl Inserter {
             }
             return result;
         }
+
+        let regions = region_masks
+            .keys()
+            .map(|region| RegionId::new(table_id, *region))
+            .collect::<Vec<_>>();
+        let mut peers = self
+            .write_dispatcher
+            .resolve_peers(&regions)
+            .await
+            .context(error::FindRegionLeaderSnafu)?;
 
         let wait_all_datanode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
             .with_label_values(&["wait_all_datanode"])
@@ -212,6 +227,14 @@ impl Inserter {
                 .get(&region_id.region_number())
                 .copied()
                 .unwrap_or_default();
+            let peer = peers
+                .remove(&region_id)
+                .context(partition::error::FindLeaderSnafu {
+                    region_id,
+                    table_id,
+                })
+                .context(error::FindRegionLeaderSnafu)?;
+            let dispatcher = self.write_dispatcher.clone();
             let rb = record_batch.clone();
             let schema_bytes = schema_bytes.clone();
             let raw_header_and_data = if mask.select_all() {
@@ -222,7 +245,7 @@ impl Inserter {
             } else {
                 None
             };
-            let handle: common_runtime::JoinHandle<Result<RegionRequest>> =
+            let handle: common_runtime::JoinHandle<Result<api::region::RegionResponse>> =
                 common_runtime::spawn_global(async move {
                     let (header, payload) = if mask.select_all() {
                         // SAFETY: raw data must be present, we can avoid re-encoding.
@@ -277,29 +300,27 @@ impl Inserter {
                         })),
                     };
 
-                    Ok(request)
+                    dispatcher
+                        .dispatch_prepared(
+                            vec![(peer, request)],
+                            Some(
+                                metrics::HANDLE_BULK_INSERT_ELAPSED
+                                    .with_label_values(&["datanode_handle"]),
+                            ),
+                        )
+                        .await
+                        .context(error::RequestRegionSnafu)
                 });
             handles.push(handle);
         }
 
-        let dispatcher = self.write_dispatcher.clone();
-        let rows_inserted = common_runtime::spawn_global(async move {
-            let writes = future::try_join_all(handles)
-                .await
-                .context(error::JoinTaskSnafu)?
-                .into_iter()
-                .collect::<Result<Vec<_>>>()?;
-            dispatcher
-                .dispatch_with_metrics(
-                    writes,
-                    metrics::HANDLE_BULK_INSERT_ELAPSED.with_label_values(&["datanode_handle"]),
-                )
-                .await
-                .context(error::RequestRegionSnafu)
-        })
-        .await
-        .context(error::JoinTaskSnafu)??
-        .affected_rows;
+        let results = future::try_join_all(handles)
+            .await
+            .context(error::JoinTaskSnafu)?;
+        let rows_inserted = results
+            .into_iter()
+            .map(|result| result.map(|response| response.affected_rows))
+            .sum::<Result<usize>>()?;
         wait_all_datanode_timer.observe_duration();
         crate::metrics::DIST_INGEST_ROW_COUNT
             .with_label_values(&[db_name.as_str()])

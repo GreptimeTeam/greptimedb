@@ -38,7 +38,7 @@ pub struct Partitioner<'a> {
 pub(crate) struct TablePartitioner {
     table_id: TableId,
     rule: PartitionRuleRef,
-    versions: HashMap<RegionNumber, Option<u64>>,
+    versions: HashMap<RegionNumber, Option<PartitionExprVersion>>,
 }
 
 impl<'a> Partitioner<'a> {
@@ -55,7 +55,8 @@ impl<'a> Partitioner<'a> {
         skip_wal: bool,
     ) -> Result<Vec<InsertRequest>> {
         TablePartitioner::try_new(self.partition_manager, table_info)
-            .await?
+            .await
+            .context(SplitInsertSnafu)?
             .partition_insert_requests(rows, skip_wal)
     }
 
@@ -66,7 +67,8 @@ impl<'a> Partitioner<'a> {
         rows: Rows,
     ) -> Result<Vec<DeleteRequest>> {
         TablePartitioner::try_new(self.partition_manager, table_info)
-            .await?
+            .await
+            .context(SplitDeleteSnafu)?
             .partition_delete_requests(rows)
     }
 }
@@ -76,15 +78,19 @@ impl TablePartitioner {
     pub async fn try_new(
         partition_manager: &PartitionRuleManager,
         table_info: &TableInfo,
-    ) -> Result<Self> {
+    ) -> partition::error::Result<Self> {
         let (rule, versions) = partition_manager
             .find_table_partition_rule(table_info)
-            .await
-            .context(error::InvalidPartitionSnafu)?;
+            .await?;
         Ok(Self {
             table_id: table_info.table_id(),
             rule,
-            versions,
+            versions: versions
+                .into_iter()
+                .map(|(region, version)| {
+                    (region, version.map(|value| PartitionExprVersion { value }))
+                })
+                .collect(),
         })
     }
 
@@ -173,10 +179,73 @@ impl TablePartitioner {
     }
 
     fn version(&self, region: RegionNumber) -> Option<PartitionExprVersion> {
-        self.versions
-            .get(&region)
-            .copied()
-            .flatten()
-            .map(|value| PartitionExprVersion { value })
+        self.versions.get(&region).copied().flatten()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common_error::ext::{ErrorExt, RetryHint};
+    use common_error::status_code::StatusCode;
+    use common_meta::cache;
+    use common_meta::kv_backend::test_util::MockKvBackendBuilder;
+    use common_meta::rpc::store::RangeResponse;
+    use moka::future::Cache;
+
+    use super::*;
+    use crate::test_util;
+
+    #[tokio::test]
+    async fn test_partition_requests_preserve_routing_errors() {
+        let table_info = test_util::new_test_table_info(1, "table_1", [1].into_iter());
+        for (backend_unavailable, expected_status, expected_hint) in [
+            (false, StatusCode::TableNotFound, RetryHint::NonRetryable),
+            (true, StatusCode::Internal, RetryHint::Retryable),
+        ] {
+            let backend = Arc::new(
+                MockKvBackendBuilder::default()
+                    .range_fn(Arc::new(move |_| {
+                        if backend_unavailable {
+                            common_meta::error::NoLeaderSnafu { table_id: 1u32 }.fail()
+                        } else {
+                            Ok(RangeResponse {
+                                kvs: Vec::new(),
+                                more: false,
+                            })
+                        }
+                    }))
+                    .build()
+                    .unwrap(),
+            );
+            let routes = Arc::new(cache::new_table_route_cache(
+                "partitioner_test_routes".to_string(),
+                Cache::new(16),
+                backend.clone(),
+            ));
+            let partitions = Arc::new(partition::cache::new_partition_info_cache(
+                "partitioner_test_partitions".to_string(),
+                Cache::new(16),
+                routes.clone(),
+            ));
+            let manager = PartitionRuleManager::new(backend, routes, partitions);
+            let partitioner = Partitioner::new(&manager);
+            let insert_error = partitioner
+                .partition_insert_requests(&table_info, Rows::default(), false)
+                .await
+                .unwrap_err();
+            let delete_error = partitioner
+                .partition_delete_requests(&table_info, Rows::default())
+                .await
+                .unwrap_err();
+
+            assert!(matches!(insert_error, error::Error::SplitInsert { .. }));
+            assert!(matches!(delete_error, error::Error::SplitDelete { .. }));
+            for error in [insert_error, delete_error] {
+                assert_eq!(error.status_code(), expected_status);
+                assert_eq!(error.retry_hint(), expected_hint);
+            }
+        }
     }
 }
