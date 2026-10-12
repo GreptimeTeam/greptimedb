@@ -33,6 +33,8 @@ pull_images() {
 wal_disk() {
     local root=$1 device
     device=$(lsblk -dnpo NAME,MODEL | awk '/Instance Storage/ {print $1; exit}')
+    # Only a smoke run may keep the Raft Engine WAL on the root volume.
+    [[ -n "$device" || "${SMOKE:-}" == true ]] || { echo 'No local NVMe instance store; choose an instance type with one' >&2; return 1; }
     sudo -n mkdir -p "$root"
     if [[ -n "$device" ]]; then
         sudo -n umount "$device" 2>/dev/null || true

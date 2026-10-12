@@ -264,6 +264,16 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
             self.assertEqual(log.count("docker stop -t 120 fakecid"), 2)
             self.assertEqual(log.count("docker rm -fv fakecid"), 2)
 
+    def test_an_ec2_run_without_an_instance_store_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "lsblk").write_text("#!/usr/bin/env bash\necho '/dev/nvme0n1 Amazon Elastic Block Store'\n")
+            (Path(directory) / "lsblk").chmod(0o755)
+            env = os.environ | {"PATH": f"{directory}:{os.environ['PATH']}", "SMOKE": "false"}
+            done = subprocess.run(["bash", str(SCRIPTS / "oswal-s3-bench-run.sh"), "wal-disk", f"{directory}/wal"],
+                                  env=env, capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(done.returncode, 0)
+            self.assertIn("No local NVMe instance store", done.stderr)
+
     def test_a_failed_scrape_fails_a_successful_load(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
