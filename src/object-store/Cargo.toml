@@ -24,7 +24,7 @@ common-telemetry.workspace = true
 derive_builder = { workspace = true, optional = true }
 hdfs-native = { workspace = true, optional = true }
 humantime-serde.workspace = true
-opendal = { version = "0.59.2", features = [
+opendal = { version = "0.59.4", features = [
     "layers-tracing",
     "layers-prometheus",
     "services-azblob",
@@ -34,7 +34,7 @@ opendal = { version = "0.59.2", features = [
     "services-oss",
     "services-s3",
 ] }
-opendal-http-transport-reqwest = "0.59.2"
+opendal-http-transport-reqwest = "0.59.4"
 prometheus.workspace = true
 reqwest.workspace = true
 serde.workspace = true
