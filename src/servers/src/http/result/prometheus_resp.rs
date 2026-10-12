@@ -829,6 +829,27 @@ mod tests {
         column
     }
 
+    #[test]
+    fn column_layout_keeps_tag_names_verbatim() {
+        // The layout reads the name of every tag column as it is. A column
+        // spelled like the reserved name is not worked around either: a table
+        // that brings one is refused where it enters PromQL, so no unmarked
+        // column of that spelling can reach this layout.
+        let schema = Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(METRIC_NAME, ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]);
+        let layout = ColumnLayout::infer(&schema).unwrap();
+        assert!(layout.metric_name_column_index.is_none());
+        assert_eq!(layout.tag_names, vec!["host", METRIC_NAME]);
+    }
+
     #[tokio::test]
     async fn marked_metric_name_splits_adjacent_runs_in_buffered_and_streamed_output() {
         // Two adjacent runs that differ only in the marked metric name must
@@ -892,6 +913,83 @@ mod tests {
             Some("second")
         );
         assert_eq!(series[1].values.len(), 2);
+    }
+
+    #[test]
+    fn marked_null_or_empty_metric_name_is_not_emitted() {
+        // Both rows share their ordinary labels; a fabricated name would merge
+        // them into one named series instead of leaving the name unset.
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            marked_metric_name_column("identity"),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondVector::from_values([1_000, 2_000])) as _,
+                Arc::new(StringVector::from(vec![Some("host-a"), Some("host-a")])) as _,
+                Arc::new(StringVector::from(vec![None::<&str>, Some("")])) as _,
+                Arc::new(Float64Vector::from_values([1.0, 2.0])) as _,
+            ],
+        )
+        .unwrap();
+        let response = PrometheusJsonResponse::record_batches_to_data(
+            RecordBatches::try_new(schema, vec![batch]).unwrap(),
+            ValueType::Matrix,
+        )
+        .unwrap();
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Matrix(series),
+            ..
+        }) = response
+        else {
+            panic!("expected matrix response");
+        };
+        assert_eq!(series.len(), 1);
+        assert!(!series[0].metric.contains_key(METRIC_NAME));
+        assert_eq!(
+            series[0].metric.get("host").map(String::as_str),
+            Some("host-a")
+        );
+        assert_eq!(series[0].values.len(), 2);
+    }
+
+    #[test]
+    fn malformed_metric_name_markers_are_rejected() {
+        let duplicate_markers = Schema::new(vec![
+            marked_metric_name_column("identity"),
+            marked_metric_name_column("identity_2"),
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]);
+        assert!(ColumnLayout::infer(&duplicate_markers).is_err());
+
+        let mut wrong_type =
+            ColumnSchema::new("identity", ConcreteDataType::float64_datatype(), true);
+        wrong_type.mut_metadata().insert(
+            PROMQL_FIELD_ROLE_KEY.to_string(),
+            PROMQL_METRIC_NAME_ROLE.to_string(),
+        );
+        let wrong_type_marker = Schema::new(vec![
+            wrong_type,
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]);
+        assert!(ColumnLayout::infer(&wrong_type_marker).is_err());
     }
 
     #[tokio::test]
