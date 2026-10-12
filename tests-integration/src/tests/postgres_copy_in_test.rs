@@ -173,3 +173,56 @@ async fn test_postgres_copy_in_error_keeps_table_clean() {
 
     server.shutdown().await.unwrap();
 }
+
+/// Exercises the CSV format's options end-to-end through a Postgres
+/// client driver: HEADER, custom delimiter, quoted fields with embedded
+/// newlines and escaped quotes, CRLF record separators and NULL fields.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_csv_options() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_csv_options").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    client
+        .simple_query(
+            "CREATE TABLE copy_csv_opts (host STRING, val DOUBLE, note STRING, ts TIMESTAMP, TIME INDEX(ts))",
+        )
+        .await
+        .unwrap();
+
+    let rows = feed_copy_in(
+        &client,
+        // WITH omitted, matching PostgreSQL; HEADER skips the first record.
+        "COPY copy_csv_opts FROM STDIN (FORMAT csv, HEADER, DELIMITER ';')",
+        vec![Bytes::from_static(
+            b"host;val;note;ts\r\n\
+              h1;1.5;\"line one\nline two\";2023-11-14 22:13:20\r\n\
+              h2;;\"say \"\"hi\"\"\";2023-11-14 22:13:21\r\n",
+        )],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 2);
+
+    // Verify the parsed values came through the real insert path.
+    let messages = client
+        .simple_query("SELECT host, val, note FROM copy_csv_opts ORDER BY ts")
+        .await
+        .unwrap();
+    let rows: Vec<_> = messages
+        .iter()
+        .filter(|m| matches!(m, tokio_postgres::SimpleQueryMessage::Row(_)))
+        .collect();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(host_of(rows[0], 0), "h1");
+    assert_eq!(host_of(rows[0], 1), "1.5");
+    // Quoted field with an embedded newline survives the round trip.
+    assert_eq!(host_of(rows[0], 2), "line one\nline two");
+    assert_eq!(host_of(rows[1], 0), "h2");
+    // Unquoted empty field is NULL; escaped quotes decode to one quote.
+    assert_eq!(host_of(rows[1], 1), "");
+    assert_eq!(host_of(rows[1], 2), "say \"hi\"");
+
+    server.shutdown().await.unwrap();
+}
