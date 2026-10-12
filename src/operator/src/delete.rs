@@ -29,8 +29,8 @@ use table::TableRef;
 use table::requests::DeleteRequest as TableDeleteRequest;
 
 use crate::error::{
-    CatalogSnafu, InvalidDeleteRequestSnafu, MissingTimeIndexColumnSnafu, RequestDeletesSnafu,
-    Result, TableNotFoundSnafu,
+    CatalogSnafu, InvalidDeleteRequestSnafu, JoinTaskSnafu, MissingTimeIndexColumnSnafu,
+    RequestDeletesSnafu, Result, TableNotFoundSnafu,
 };
 use crate::region_req_factory::RegionRequestFactory;
 use crate::req_convert::common::preprocess_row_delete_requests;
@@ -145,7 +145,7 @@ impl Deleter {
             dispatcher.dispatch_prepared(writes, None).await
         })
         .await
-        .context(crate::error::JoinTaskSnafu)?
+        .context(JoinTaskSnafu)?
         .context(RequestDeletesSnafu)?
         .affected_rows;
         crate::metrics::DIST_DELETE_ROW_COUNT

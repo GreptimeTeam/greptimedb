@@ -196,7 +196,7 @@ async fn test_dispatch_preserves_write_payloads_and_envelopes() {
         .unwrap_err();
     assert!(matches!(
         error,
-        crate::error::Error::FindRegionLeader { .. }
+        operator_error::Error::FindRegionLeader { .. }
     ));
     assert!(received.try_recv().is_err());
 }

@@ -31,6 +31,8 @@ use prometheus::Histogram;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
 
+use crate::error as operator_error;
+
 /// Dispatches already partitioned insert, delete, and bulk requests to their peers.
 pub struct WriteDispatcher {
     node_manager: NodeManagerRef,
@@ -67,18 +69,18 @@ impl WriteDispatcher {
     pub(crate) async fn prepare(
         &self,
         requests: Vec<RegionRequest>,
-    ) -> crate::error::Result<Vec<(Peer, RegionRequest)>> {
+    ) -> operator_error::Result<Vec<(Peer, RegionRequest)>> {
         let requests = requests.into_iter().map(split_request).collect::<Vec<_>>();
         let regions = requests
             .iter()
             .flatten()
             .map(write_region_id)
             .collect::<Result<Vec<_>>>()
-            .context(crate::error::RequestRegionSnafu)?;
+            .context(operator_error::RequestRegionSnafu)?;
         let peers = self
             .resolve_peers(&regions)
             .await
-            .context(crate::error::FindRegionLeaderSnafu)?;
+            .context(operator_error::FindRegionLeaderSnafu)?;
         let mut writes = Vec::new();
         // Preserve each original envelope and peer batching when retries are disabled.
         for requests in requests {
@@ -86,9 +88,9 @@ impl WriteDispatcher {
             for request in requests {
                 let peer = get_peer(
                     &peers,
-                    write_region_id(&request).context(crate::error::RequestRegionSnafu)?,
+                    write_region_id(&request).context(operator_error::RequestRegionSnafu)?,
                 )
-                .context(crate::error::RequestRegionSnafu)?;
+                .context(operator_error::RequestRegionSnafu)?;
                 match by_peer.entry(peer) {
                     std::collections::hash_map::Entry::Vacant(entry) => {
                         entry.insert(request);
@@ -106,7 +108,7 @@ impl WriteDispatcher {
                                     err_msg: "Cannot combine different write kinds",
                                 }
                                 .fail()
-                                .context(crate::error::RequestRegionSnafu);
+                                .context(operator_error::RequestRegionSnafu);
                             }
                         }
                     }

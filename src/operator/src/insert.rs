@@ -84,7 +84,7 @@ use table::table_reference::TableReference;
 use crate::batcher::PendingRowsBatcher;
 use crate::error::{
     CatalogSnafu, ColumnOptionsSnafu, CreatePartitionRulesSnafu, InvalidInsertRequestSnafu,
-    RequestInsertsSnafu, Result, TableNotFoundSnafu, WriteRejectedSnafu,
+    JoinTaskSnafu, RequestInsertsSnafu, Result, TableNotFoundSnafu, WriteRejectedSnafu,
 };
 use crate::expr_helper;
 use crate::region_req_factory::RegionRequestFactory;
@@ -839,7 +839,7 @@ impl Inserter {
             dispatcher.dispatch_prepared(writes, None).await
         })
         .await
-        .context(crate::error::JoinTaskSnafu)?
+        .context(JoinTaskSnafu)?
         .context(RequestInsertsSnafu)?
         .affected_rows;
         crate::metrics::DIST_INGEST_ROW_COUNT
