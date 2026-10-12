@@ -6835,6 +6835,46 @@ impl PromPlanner {
         }
     }
 
+    /// The names the labels of a match group are reported under.
+    ///
+    /// A group is built from physical columns, and the marked metric-name identity is one of
+    /// them. The identity is not a label of a series: Prometheus names the metric of a series
+    /// `__name__`, so a group that matches on the identity is reported under that name rather
+    /// than under the column it is carried in. The identity of a column is its own metadata,
+    /// resolved with the column itself: a column of another qualifier is never inferred for it,
+    /// an unresolvable or ambiguous column keeps its label, and `group_exprs` is untouched, so
+    /// matching still compares what it did.
+    fn match_group_labels(
+        schema: &DFSchemaRef,
+        group_exprs: &[DfExpr],
+        group_labels: Vec<String>,
+    ) -> Vec<String> {
+        group_exprs
+            .iter()
+            .zip(group_labels)
+            .map(|(expr, label)| {
+                let DfExpr::Column(column) = expr else {
+                    return label;
+                };
+                let is_metric_name =
+                    schema
+                        .qualified_field_from_column(column)
+                        .is_ok_and(|(_, field)| {
+                            field
+                                .metadata()
+                                .get(PROMQL_FIELD_ROLE_KEY)
+                                .map(String::as_str)
+                                == Some(PROMQL_METRIC_NAME_ROLE)
+                        });
+                if is_metric_name {
+                    METRIC_NAME.to_string()
+                } else {
+                    label
+                }
+            })
+            .collect()
+    }
+
     /// Wrap `plan` in a check that fails the query when a match group holds more than one row at
     /// a timestamp. `group_exprs` are the label columns of the group, resolved against `plan`.
     fn assert_unique_match_group(
@@ -6844,6 +6884,7 @@ impl PromPlanner {
         time_index_expr: DfExpr,
         violation: MatchGroupViolation,
     ) -> Result<LogicalPlan> {
+        let group_labels = Self::match_group_labels(plan.schema(), &group_exprs, group_labels);
         let mut partition_by = group_exprs.clone();
         partition_by.push(time_index_expr);
         // A label may carry the generated name, and the count column has to stay unambiguous

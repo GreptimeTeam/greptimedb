@@ -79,6 +79,7 @@ use promql_parser::label::Matcher;
 use query::QueryEngineRef;
 use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryStatement};
+use query::promql::planner::PromPlanner;
 use query::query_engine::DescribeResult;
 use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
 use servers::batcher::logical_table::LogicalTablePendingRowsBatcher;
@@ -1074,12 +1075,16 @@ impl Instance {
             return vec![error::SuspendedSnafu {}.fail()];
         }
 
-        // check will be done in prometheus handler's do_query
-        let result = PrometheusHandler::do_query(self, query, query_ctx)
-            .await
-            .with_context(|_| ExecutePromqlSnafu {
-                query: format!("{query:?}"),
-            });
+        // The PromQL query API is tabular: the internal metric-name column kept
+        // for the Prometheus HTTP API is stripped from the plan before execution.
+        let result = async {
+            let query = ParsedPromQuery::parse(query.clone(), &query_ctx)?;
+            self.do_query_parsed_inner(query, query_ctx, true).await
+        }
+        .await
+        .with_context(|_| ExecutePromqlSnafu {
+            query: format!("{query:?}"),
+        });
         vec![result]
     }
 
@@ -1445,25 +1450,19 @@ impl Instance {
             PermissionTableTargets::Unresolved
         })
     }
-}
 
-#[async_trait]
-impl PrometheusHandler for Instance {
+    /// Runs an already parsed PromQL query: privilege checks, target permissions,
+    /// planning, interception, execution, cancellation and post-execution.
+    ///
+    /// `tabular` marks the query as one whose result is a table rather than the
+    /// Prometheus HTTP API response, so the internal metric-name column kept for
+    /// the latter is stripped from the plan before execution.
     #[tracing::instrument(skip_all)]
-    async fn do_query(
-        &self,
-        query: &PromQuery,
-        query_ctx: QueryContextRef,
-    ) -> server_error::Result<Output> {
-        let query = ParsedPromQuery::parse(query.clone(), &query_ctx)?;
-        self.do_query_parsed(query, query_ctx).await
-    }
-
-    #[tracing::instrument(skip_all)]
-    async fn do_query_parsed(
+    async fn do_query_parsed_inner(
         &self,
         query: ParsedPromQuery,
         query_ctx: QueryContextRef,
+        tabular: bool,
     ) -> server_error::Result<Output> {
         let interceptor = self
             .plugins
@@ -1497,6 +1496,14 @@ impl PrometheusHandler for Instance {
         };
 
         interceptor.pre_execute(&query, &eval_stmt.expr, Some(&plan), query_ctx.clone())?;
+
+        let plan = if tabular {
+            PromPlanner::strip_metric_name_column(plan)
+                .map_err(BoxedError::new)
+                .context(ExecuteQuerySnafu)?
+        } else {
+            plan
+        };
 
         // Take the EvalStmt from the original QueryStatement and use it to create the CatalogQueryStatement.
         let query_statement = if let QueryStatement::Promql(eval_stmt, alias) = stmt {
@@ -1549,6 +1556,28 @@ impl PrometheusHandler for Instance {
         };
         let output = Output { data, meta };
         Ok(interceptor.post_execute(output, query_ctx)?)
+    }
+}
+
+#[async_trait]
+impl PrometheusHandler for Instance {
+    #[tracing::instrument(skip_all)]
+    async fn do_query(
+        &self,
+        query: &PromQuery,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Output> {
+        let query = ParsedPromQuery::parse(query.clone(), &query_ctx)?;
+        self.do_query_parsed(query, query_ctx).await
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn do_query_parsed(
+        &self,
+        query: ParsedPromQuery,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Output> {
+        self.do_query_parsed_inner(query, query_ctx, false).await
     }
 
     async fn check_query_permission(
