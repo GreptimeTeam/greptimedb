@@ -65,11 +65,11 @@ use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_B
 use crate::optimizer::ExtensionAnalyzerRule;
 use crate::optimizer::const_normalization::ConstNormalizationRule;
 use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
-use crate::optimizer::count_join::CountJoinRewrite;
 use crate::optimizer::count_nest_aggr::CountNestAggrRule;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::enforce_sorting::EnforceSorting;
 use crate::optimizer::expr_depth;
+use crate::optimizer::factorized_join_agg::FactorizedJoinAggRule;
 use crate::optimizer::global_limit::EnsureGlobalLimitForFetch;
 use crate::optimizer::infer_aggregate_input_bounds::InferAggregateInputBoundsRule;
 use crate::optimizer::json_schema_concretize::JsonSchemaConcretizeRule;
@@ -261,7 +261,7 @@ impl QueryEngineState {
         }
         optimizer.rules.push(Arc::new(ScanHintRule));
         optimizer.rules.push(Arc::new(JsonTypeConcretizeRule));
-        optimizer.rules.push(Arc::new(CountJoinRewrite));
+        optimizer.rules.push(Arc::new(FactorizedJoinAggRule));
 
         // add physical optimizer
         let mut physical_optimizer = PhysicalOptimizer::new();
@@ -797,7 +797,7 @@ impl MemoryPool for MetricsMemoryPool {
 
 #[cfg(test)]
 mod tests {
-    mod ffx_count_tests;
+    mod factorized_join_agg_tests;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use common_base::Plugins;

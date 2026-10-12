@@ -148,6 +148,16 @@ impl DatafusionQueryEngine {
         Self { state, plugins }
     }
 
+    /// Crate-visible view of the per-query engine context, for tests that
+    /// assert configuration propagation through the real query path.
+    #[cfg(test)]
+    pub(crate) fn engine_context_for_tests(
+        &self,
+        query_ctx: QueryContextRef,
+    ) -> QueryEngineContext {
+        self.engine_context(query_ctx).unwrap()
+    }
+
     #[tracing::instrument(skip_all)]
     async fn exec_query_plan(
         &self,
