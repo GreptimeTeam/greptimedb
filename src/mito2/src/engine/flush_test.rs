@@ -50,6 +50,7 @@ use crate::engine::listener::{EventListener, FlushListener, StallListener};
 use crate::engine::region_hook::{RegionGcInfo, RegionHook, RegionHookRef, SstFileInfo};
 use crate::error::Error;
 use crate::manifest::action::RegionMetaActionList;
+use crate::memtable::RangesOptions;
 use crate::test_util::{
     CreateRequestBuilder, LogStoreFactory, MockWriteBufferManager, TestEnv,
     build_delete_rows_for_key, build_rows, build_rows_for_key, build_rows_with_fields, delete_rows,
@@ -1977,7 +1978,7 @@ async fn test_bulk_last_non_null_merge_and_flush(#[values(false, true)] encoded:
         .field_num(2)
         .insert_option("memtable.type", "bulk")
         .insert_option("merge_mode", "last_non_null")
-        .insert_option("memtable.bulk.merge_threshold", "2")
+        .insert_option("memtable.bulk.merge_threshold", "4")
         .insert_option(
             "memtable.bulk.encode_row_threshold",
             if encoded { "1" } else { "1000000" },
@@ -2017,21 +2018,30 @@ async fn test_bulk_last_non_null_merge_and_flush(#[values(false, true)] encoded:
         },
     )
     .await;
+    // Intermediate writes must be bulk parts, not an unordered merge barrier.
+    let mut b = build_rows_with_fields(
+        "b",
+        &(0..1023).collect::<Vec<_>>(),
+        &[(Some(0), None); 1023],
+    );
+    b.extend(build_rows_with_fields("k", &[1], &[(Some(2), None)]));
     put_rows(
         &engine,
         region_id,
         Rows {
             schema: schema.clone(),
-            rows: build_rows_with_fields("k", &[1], &[(Some(2), None)]),
+            rows: b,
         },
     )
     .await;
+    let mut deletes = build_delete_rows_for_key("d", 0, 1023);
+    deletes.extend(build_delete_rows_for_key("deleted", 1, 2));
     delete_rows(
         &engine,
         region_id,
         Rows {
             schema: delete_rows_schema(&request),
-            rows: build_delete_rows_for_key("deleted", 1, 2),
+            rows: deletes,
         },
     )
     .await;
@@ -2056,6 +2066,22 @@ async fn test_bulk_last_non_null_merge_and_flush(#[values(false, true)] encoded:
     )
     .await;
     compact_bulk_memtables(&engine, region_id);
+    // All four sources must have merged, with the requested output format.
+    let version = engine.get_region(region_id).unwrap().version();
+    let mut ranges = Vec::new();
+    for memtable in version.memtables.list_memtables() {
+        ranges.extend(
+            memtable
+                .ranges(None, RangesOptions::default())
+                .unwrap()
+                .ranges
+                .into_values(),
+        );
+    }
+    assert_eq!(1, ranges.len());
+    assert_eq!(encoded, ranges[0].encoded().is_some());
+    drop(ranges);
+    drop(version);
     let expected = "\
 +---------+---------+---------+---------------------+
 | tag_0   | field_0 | field_1 | ts                  |

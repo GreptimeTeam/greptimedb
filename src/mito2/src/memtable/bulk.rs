@@ -21,7 +21,7 @@ pub mod part_reader;
 mod row_group_reader;
 
 use std::collections::{BTreeMap, HashSet};
-use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Instant;
 
@@ -203,11 +203,18 @@ impl BulkParts {
         self.unordered_part.is_empty() && self.parts.is_empty()
     }
 
-    /// Returns whether a consecutive group is ready to merge.
-    fn should_merge_parts(&self, merge_threshold: usize, encode_bytes_threshold: usize) -> bool {
-        !self
-            .pick_merge_groups(merge_threshold, 1, encode_bytes_threshold)
-            .is_empty()
+    /// Returns a conservative scheduling hint without sorting or allocating.
+    /// The picker checks sequence barriers and sizes when compaction runs.
+    fn may_merge_parts(&self, merge_threshold: usize) -> bool {
+        let merge_threshold = merge_threshold.max(2);
+        self.parts.len() >= merge_threshold
+            && self
+                .parts
+                .iter()
+                .filter(|wrapper| !wrapper.merging)
+                .take(merge_threshold)
+                .count()
+                == merge_threshold
     }
 
     fn is_merge_candidate_by_size(
@@ -431,6 +438,8 @@ pub struct BulkMemtable {
     compactor: Arc<Mutex<MemtableCompactor>>,
     /// Dispatcher for scheduling compaction tasks
     compact_dispatcher: Option<Arc<CompactDispatcher>>,
+    /// Whether a write-triggered compaction is queued or running.
+    compacting: Arc<AtomicBool>,
     /// Whether the append mode is enabled
     append_mode: bool,
     /// Mode to handle duplicate rows while merging
@@ -513,9 +522,7 @@ impl Memtable for BulkMemtable {
             self.update_stats(local_metrics);
         }
 
-        if self.should_compact() {
-            self.schedule_compact();
-        }
+        self.schedule_compact();
 
         Ok(())
     }
@@ -678,21 +685,12 @@ impl Memtable for BulkMemtable {
             return Ok(());
         }
 
-        // Unified merge for all parts
-        let should_merge = self.parts.read().unwrap().should_merge_parts(
-            self.config.merge_threshold,
-            self.config.encode_bytes_threshold,
-        );
-        if should_merge {
-            compactor.merge_parts(
-                &self.parts,
-                &self.metadata,
-                !self.append_mode,
-                self.merge_mode,
-            )?;
-        }
-
-        Ok(())
+        compactor.merge_parts(
+            &self.parts,
+            &self.metadata,
+            !self.append_mode,
+            self.merge_mode,
+        )
     }
 }
 
@@ -717,6 +715,7 @@ impl BulkMemtable {
                 self.float_field_encoding,
             ))),
             compact_dispatcher: self.compact_dispatcher.clone(),
+            compacting: Arc::new(AtomicBool::new(false)),
             append_mode: self.append_mode,
             merge_mode: self.merge_mode,
             row_group_size: self.row_group_size,
@@ -805,6 +804,7 @@ impl BulkMemtable {
                 float_field_encoding,
             ))),
             compact_dispatcher,
+            compacting: Arc::new(AtomicBool::new(false)),
             append_mode,
             merge_mode,
             row_group_size,
@@ -860,22 +860,27 @@ impl BulkMemtable {
             .sum()
     }
 
-    /// Returns whether the memtable should be compacted.
-    fn should_compact(&self) -> bool {
-        let parts = self.parts.read().unwrap();
-        parts.should_merge_parts(
-            self.config.merge_threshold,
-            self.config.encode_bytes_threshold,
-        )
-    }
-
-    /// Schedules a compaction task using the CompactDispatcher.
+    /// Schedules at most one write-triggered compaction at a time.
     fn schedule_compact(&self) {
+        if self.config.max_merge_groups == 0 || self.compacting.load(Ordering::Relaxed) {
+            return;
+        }
+        if !self
+            .parts
+            .read()
+            .unwrap()
+            .may_merge_parts(self.config.merge_threshold)
+        {
+            return;
+        }
+        let Some(guard) = CompactTaskGuard::try_new(self.compacting.clone()) else {
+            return;
+        };
         if let Some(dispatcher) = &self.compact_dispatcher {
             let task = MemCompactTask {
                 metadata: self.metadata.clone(),
                 parts: self.parts.clone(),
-                config: self.config.clone(),
+                _guard: guard,
                 compactor: self.compactor.clone(),
                 append_mode: self.append_mode,
                 merge_mode: self.merge_mode,
@@ -1499,12 +1504,31 @@ impl MemtableCompactor {
     }
 }
 
+/// Keeps the compaction flag set while queued or running and clears it on drop,
+/// including failures and cancellation while waiting for a dispatcher permit.
+struct CompactTaskGuard(Arc<AtomicBool>);
+
+impl CompactTaskGuard {
+    fn try_new(compacting: Arc<AtomicBool>) -> Option<Self> {
+        // The compactor mutex protects merging; this flag only avoids duplicate tasks.
+        compacting
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .ok()
+            .map(|_| Self(compacting))
+    }
+}
+
+impl Drop for CompactTaskGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
 /// A memtable compact task to run in background.
 struct MemCompactTask {
     metadata: RegionMetadataRef,
     parts: Arc<RwLock<BulkParts>>,
-    /// Configuration for the bulk memtable.
-    config: BulkMemtableConfig,
+    _guard: CompactTaskGuard,
     /// Compactor for merging bulk parts
     compactor: Arc<Mutex<MemtableCompactor>>,
     /// Whether the append mode is enabled
@@ -1515,22 +1539,12 @@ struct MemCompactTask {
 
 impl MemCompactTask {
     fn compact(&self) -> Result<()> {
-        let mut compactor = self.compactor.lock().unwrap();
-
-        let should_merge = self.parts.read().unwrap().should_merge_parts(
-            self.config.merge_threshold,
-            self.config.encode_bytes_threshold,
-        );
-        if should_merge {
-            compactor.merge_parts(
-                &self.parts,
-                &self.metadata,
-                !self.append_mode,
-                self.merge_mode,
-            )?;
-        }
-
-        Ok(())
+        self.compactor.lock().unwrap().merge_parts(
+            &self.parts,
+            &self.metadata,
+            !self.append_mode,
+            self.merge_mode,
+        )
     }
 }
 
@@ -1801,6 +1815,7 @@ mod tests {
             assert_eq!(expected_min, memtable.stats().min_sequence);
             assert_eq!(expected_min, memtable.min_sequence());
             assert_eq!(expected_ranges, memtable.stats().num_ranges);
+            assert!(!memtable.compacting.load(Ordering::Relaxed));
         }
         // The third write synchronously merges all parts without a dispatcher.
         // Dedup can remove the oldest rows, but their lower bound remains safe.
@@ -2791,10 +2806,10 @@ mod tests {
     }
 
     #[test]
-    fn test_should_merge_parts_below_threshold() {
+    fn test_may_merge_parts_below_threshold() {
         let mut bulk_parts = BulkParts::default();
 
-        // Add 7 bulk parts (below DEFAULT_MERGE_THRESHOLD of 8)
+        // Add one fewer part than the merge threshold.
         for i in 0..DEFAULT_MERGE_THRESHOLD - 1 {
             let part = create_bulk_part_with_converter(
                 &format!("key_{}", i),
@@ -2805,14 +2820,18 @@ mod tests {
             )
             .unwrap();
             bulk_parts.parts.push(create_bulk_part_wrapper(part));
+            if i == 0 {
+                assert!(!bulk_parts.may_merge_parts(0));
+                assert!(!bulk_parts.may_merge_parts(1));
+            }
         }
 
-        // Should not trigger merge since we have only 7 parts
-        assert!(!bulk_parts.should_merge_parts(DEFAULT_MERGE_THRESHOLD, usize::MAX));
+        // There are not enough parts to merge.
+        assert!(!bulk_parts.may_merge_parts(DEFAULT_MERGE_THRESHOLD));
     }
 
     #[test]
-    fn test_should_merge_parts_at_threshold() {
+    fn test_may_merge_parts_at_threshold() {
         let mut bulk_parts = BulkParts::default();
         let merge_threshold = 8;
 
@@ -2830,7 +2849,7 @@ mod tests {
         }
 
         // Should trigger merge since we have 8 parts
-        assert!(bulk_parts.should_merge_parts(merge_threshold, usize::MAX));
+        assert!(bulk_parts.may_merge_parts(merge_threshold));
     }
 
     #[test]
@@ -2850,7 +2869,7 @@ mod tests {
         }
 
         let max_size = bulk_parts.parts[0].part.estimated_size();
-        assert!(bulk_parts.should_merge_parts(merge_threshold, max_size));
+        assert!(bulk_parts.may_merge_parts(merge_threshold));
         assert_eq!(
             1,
             bulk_parts
@@ -2861,7 +2880,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_merge_parts_with_merging_flag() {
+    fn test_may_merge_parts_with_merging_flag() {
         let mut bulk_parts = BulkParts::default();
         let merge_threshold = 8;
 
@@ -2879,7 +2898,7 @@ mod tests {
         }
 
         // Should trigger merge since we have 10 parts
-        assert!(bulk_parts.should_merge_parts(merge_threshold, usize::MAX));
+        assert!(bulk_parts.may_merge_parts(merge_threshold));
 
         // Mark first 3 parts as merging
         for wrapper in bulk_parts.parts.iter_mut().take(3) {
@@ -2887,7 +2906,44 @@ mod tests {
         }
 
         // Now only 7 parts are available for merging, should not trigger
-        assert!(!bulk_parts.should_merge_parts(merge_threshold, usize::MAX));
+        assert!(!bulk_parts.may_merge_parts(merge_threshold));
+    }
+
+    #[test]
+    fn test_compact_task_guard() {
+        let compacting = Arc::new(AtomicBool::new(false));
+        let guard = CompactTaskGuard::try_new(compacting.clone()).unwrap();
+        assert!(compacting.load(Ordering::Relaxed));
+        assert!(CompactTaskGuard::try_new(compacting.clone()).is_none());
+        drop(guard);
+        assert!(!compacting.load(Ordering::Relaxed));
+        assert!(CompactTaskGuard::try_new(compacting.clone()).is_some());
+        assert!(!compacting.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_compact_scheduling_disabled() {
+        let memtable = BulkMemtable::new(
+            0,
+            BulkMemtableConfig {
+                merge_threshold: 2,
+                max_merge_groups: 0,
+                ..Default::default()
+            },
+            metadata_for_test(),
+            None,
+            Some(Arc::new(CompactDispatcher::new(0))),
+            false,
+            MergeMode::LastRow,
+        );
+        let part =
+            create_bulk_part_with_converter("key", 0, vec![1000], vec![Some(1.0)], 0).unwrap();
+        memtable.parts.write().unwrap().parts = vec![
+            create_bulk_part_wrapper(part.clone()),
+            create_bulk_part_wrapper(part),
+        ];
+        memtable.schedule_compact();
+        assert!(!memtable.compacting.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -2926,10 +2982,17 @@ mod tests {
         };
         // The oversized encoded part connects three intervals transitively;
         // neither the merge threshold nor its size may split that component.
+        assert!(parts.may_merge_parts(parts.parts.len()));
         assert_eq!(
             vec![vec![1, 4, 2], vec![3, 0]],
             parts.pick_merge_groups(2, 2, 1)
         );
+        // The hint may schedule a merge even when unordered writes block all parts.
+        parts.unordered_part.push(make_part(0, 100));
+        assert!(parts.may_merge_parts(2));
+        assert!(parts.pick_merge_groups(2, 2, 1).is_empty());
+        parts.unordered_part.clear();
+
         // Touching the unordered interval blocks the entire transitive component.
         parts.unordered_part.push(make_part(50, 55));
         assert_eq!(vec![vec![3, 0]], parts.pick_merge_groups(2, 2, 1));
