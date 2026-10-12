@@ -988,7 +988,7 @@ async fn test_copy_in_column_list_and_batches() -> Result<()> {
 
     let mut chunks = Vec::new();
     let mut payload = String::new();
-    for i in 0..20000u64 {
+    for i in 0..70000u64 {
         payload.push_str(&format!("{i},2023-11-14 22:13:20,host{i},0.5\n"));
         if (i + 1) % 100 == 0 {
             chunks.push(bytes::Bytes::from(std::mem::take(&mut payload)));
@@ -1001,10 +1001,11 @@ async fn test_copy_in_column_list_and_batches() -> Result<()> {
     )
     .await
     .unwrap();
-    assert_eq!(rows, 20000);
+    assert_eq!(rows, 70000);
 
     let recorded = handler.requests.lock().unwrap().clone();
-    // The 20000 rows must have been flushed in multiple batches.
+    // The 70000 rows must have been flushed in multiple batches of at
+    // most COPY_IN_FLUSH_ROWS.
     assert!(recorded.len() > 1);
     let total: usize = recorded
         .iter()
@@ -1016,7 +1017,7 @@ async fn test_copy_in_column_list_and_batches() -> Result<()> {
                 .unwrap_or(0)
         })
         .sum();
-    assert_eq!(total, 20000);
+    assert_eq!(total, 70000);
 
     let rows = recorded_rows(&handler);
     // The column list reorders the fields: first field lands in `note`.

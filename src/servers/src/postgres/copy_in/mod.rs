@@ -48,7 +48,7 @@ use api::v1::{
 use async_trait::async_trait;
 use codec::{CopyInCodec, RecordParser};
 use common_query::OutputData;
-use common_telemetry::info;
+use common_telemetry::{info, warn};
 use datafusion::sql::sqlparser::ast::{CopyTarget, Statement as SqlParserStatement};
 use datatypes::data_type::DataType;
 use datatypes::schema::{ColumnSchema, SchemaRef};
@@ -68,7 +68,17 @@ use crate::postgres::types::PgErrorCode;
 use crate::postgres::utils::convert_err;
 
 /// Number of parsed rows buffered before flushing a batch to the handler.
-pub(crate) const COPY_IN_FLUSH_ROWS: usize = 8192;
+///
+/// Each flush runs the full insert pipeline (catalog lookup, on-demand
+/// schema check, partition split, region write) and, without the
+/// pending-rows batcher, waits for it — so larger batches mean fewer
+/// round trips at the cost of linearly more memory per connection
+/// (decoder batch + rows buffer). The constant doubles as the arrow
+/// decoder's batch size. High-rate COPY users should enable the
+/// pending-rows batcher (`global-table-batch` / `BatcherOptions.protocols`
+/// containing `Postgres`), which turns flushes into enqueues and makes
+/// the per-batch fixed costs negligible.
+pub(crate) const COPY_IN_FLUSH_ROWS: usize = 32768;
 
 /// Builds a codec from the format-neutral option set.
 type CodecBuilder = fn(options::CopyOptionSet) -> PgWireResult<Arc<dyn CopyInCodec>>;
@@ -213,8 +223,9 @@ fn resolve_table_name(
 /// Per-connection state of an in-progress COPY FROM STDIN.
 pub(crate) struct CopyInState {
     query_ctx: QueryContextRef,
-    /// The gRPC column schemas of the targeted columns, reused for every
-    /// batch.
+    /// The gRPC column schemas of the targeted columns. Cloned into each
+    /// flushed batch: `Rows.schema` is an owned `Vec` in the proto
+    /// request, so one copy per request is inherent.
     grpc_schema: Vec<api::v1::ColumnSchema>,
     table_name: String,
     parser: Box<dyn RecordParser + Send>,
@@ -262,7 +273,7 @@ impl CopyInState {
             parser,
             codec_name: codec.name(),
             codec_format_code: codec.format_code(),
-            rows: Vec::new(),
+            rows: Vec::with_capacity(COPY_IN_FLUSH_ROWS),
             rows_written: 0,
         })
     }
@@ -446,7 +457,10 @@ impl PostgresServerHandlerInner {
             .map_err(convert_err)?;
         match output.data {
             OutputData::AffectedRows(rows) => Ok(rows as u64),
-            _ => Ok(0),
+            OutputData::RecordBatches(_) | OutputData::Stream(_) => {
+                warn!("unexpected output from COPY FROM STDIN insert");
+                Ok(0)
+            }
         }
     }
 }
