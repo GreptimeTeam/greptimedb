@@ -51,6 +51,7 @@
 
 use std::sync::Arc;
 
+use crate::dist_plan::MergeScanLogicalPlan;
 use arrow_schema::DataType;
 use datafusion::functions_aggregate::average::Avg;
 use datafusion::functions_aggregate::count::count_udaf;
@@ -65,9 +66,9 @@ use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 
 /// Rewrites supported AVG/SUM payload products into partial aggregates.
 #[derive(Debug, Default)]
-pub(crate) struct CountJoinRewrite;
+pub(crate) struct FactorizedJoinAggRule;
 
-impl OptimizerRule for CountJoinRewrite {
+impl OptimizerRule for FactorizedJoinAggRule {
     fn name(&self) -> &str {
         "factorized_join_agg_rewrite"
     }
@@ -148,10 +149,9 @@ fn rewrite_payload(
         dim_payload,
     } = matched;
 
-    let fact_rows_name = config.alias_generator().next("partial_nf");
     let fact_payloads_name = config.alias_generator().next("partial_nv");
     let fact_sum_name = config.alias_generator().next("partial_sv");
-    let dim_rows_name = config.alias_generator().next("partial_nd");
+
     let dim_payloads_name = config.alias_generator().next("partial_nw");
     let dim_sum_name = config.alias_generator().next("partial_sw");
 
@@ -159,14 +159,6 @@ fn rewrite_payload(
         Arc::clone(&join.left),
         vec![Expr::Column(left_key.clone())],
         vec![
-            partial_aggregate(
-                count_udaf(),
-                vec![Expr::Literal(
-                    datafusion_common::utils::expr::COUNT_STAR_EXPANSION,
-                    None,
-                )],
-                &fact_rows_name,
-            ),
             partial_aggregate(
                 count_udaf(),
                 vec![Expr::Column(fact_payload.clone())],
@@ -186,14 +178,6 @@ fn rewrite_payload(
             Expr::Column(right_group.clone()),
         ],
         vec![
-            partial_aggregate(
-                count_udaf(),
-                vec![Expr::Literal(
-                    datafusion_common::utils::expr::COUNT_STAR_EXPANSION,
-                    None,
-                )],
-                &dim_rows_name,
-            ),
             partial_aggregate(
                 count_udaf(),
                 vec![Expr::Column(dim_payload.clone())],
@@ -318,9 +302,8 @@ struct PayloadMatch<'a> {
 /// `SUM(payload * payload)` shape and returns the join plus everything the
 /// rewrite needs from it.
 ///
-/// Required shape: the same inner `ON` equi-join on `host` with a `fact` table
-/// or subquery alias on the left and a `dim` one on the right (so the payload
-/// columns are the `fact.value` and `dim.weight` columns the rewrite reads),
+/// Required shape: an inner `ON` equi-join whose group and payload columns map directly
+/// to the respective join sides,
 /// grouped by the left `host` and the right `area`, aggregated by a single
 /// `AVG` — or, for [`PayloadFunction::Sum`], `SUM` — of the product of those two
 /// columns, with no `DISTINCT`, `FILTER`, `ORDER BY`, null treatment or extra
@@ -338,6 +321,12 @@ fn matching_payload_shape(agg: &Aggregate, function: PayloadFunction) -> Option<
         },
         _ => return None,
     };
+    // Distributed planning wraps each scan in a MergeScan extension and then
+    // restores the original scan schema with a projection. Keep the wrapper in
+    // the rewritten branches, but validate its hidden remote input is a scan.
+    if !is_scan_input(&join.left) || !is_scan_input(&join.right) {
+        return None;
+    }
     if join.join_type != JoinType::Inner
         || join.join_constraint != JoinConstraint::On
         || join.null_equality != NullEquality::NullEqualsNothing
@@ -345,9 +334,7 @@ fn matching_payload_shape(agg: &Aggregate, function: PayloadFunction) -> Option<
         return None;
     }
     let (left_key, right_key) = equality_keys(join)?;
-    if left_key.name != "host" || right_key.name != "host" {
-        return None;
-    }
+
     let aggregate = match &agg.aggr_expr[0] {
         Expr::AggregateFunction(aggregate) => aggregate,
         Expr::Alias(alias) => match alias.expr.as_ref() {
@@ -376,22 +363,39 @@ fn matching_payload_shape(agg: &Aggregate, function: PayloadFunction) -> Option<
     else {
         return None;
     };
+    let left_group = resolve_through_projection(left_group, projection)?;
+    let right_group = resolve_through_projection(right_group, projection)?;
+    let left_key = resolve_through_projection(left_key, None)?;
+    let right_key = resolve_through_projection(right_key, None)?;
     if left_group != left_key
-        || !right_group.name.eq_ignore_ascii_case("area")
-        || right_group.relation != right_key.relation
-        || !fixture_scan(&join.left, "fact")
-        || !fixture_scan(&join.right, "dim")
+        || !join.left.schema().has_column(&left_group)
+        || !join.right.schema().has_column(&right_group)
     {
         return None;
     }
     let (first, second) = product_operands(&params.args[0], projection)?;
+    let first = resolve_expr_through_projection(first, projection)?;
+    let second = resolve_expr_through_projection(second, projection)?;
+    let (fact_payload, dim_payload) =
+        if join.left.schema().has_column(&first) && join.right.schema().has_column(&second) {
+            (first, second)
+        } else if join.left.schema().has_column(&second) && join.right.schema().has_column(&first) {
+            (second, first)
+        } else {
+            return None;
+        };
+    if field_type(join.left.schema(), &fact_payload)? != &DataType::Float64
+        || field_type(join.right.schema(), &dim_payload)? != &DataType::Float64
+    {
+        return None;
+    }
     Some(PayloadMatch {
         join,
-        left_key: left_key.clone(),
-        right_key: right_key.clone(),
-        right_group: right_group.clone(),
-        fact_payload: payload_column(&join.left, "value", first)?,
-        dim_payload: payload_column(&join.right, "weight", second)?,
+        left_key,
+        right_key,
+        right_group,
+        fact_payload,
+        dim_payload,
     })
 }
 
@@ -437,17 +441,62 @@ fn product_operands<'a>(
     Some((entry.left.as_ref(), entry.right.as_ref()))
 }
 
-/// Resolves `operand` to the `name` column of the input it must come from, so a
-/// payload from the wrong side of the join — or any expression other than a
-/// plain column — cannot be rewritten.
-fn payload_column(input: &LogicalPlan, name: &str, operand: &Expr) -> Option<Column> {
-    let Expr::Column(column) = operand else {
+fn is_scan_input(plan: &LogicalPlan) -> bool {
+    match plan {
+        LogicalPlan::SubqueryAlias(alias) => is_scan_input(&alias.input),
+        // The distributed planner wraps each scan in a MergeScan extension and
+        // restores the original schema with a projection; a plain column
+        // selection may additionally sit between that wrapper and the join.
+        LogicalPlan::Projection(projection) => is_scan_input(&projection.input),
+        LogicalPlan::Extension(ext) => ext
+            .node
+            .as_any()
+            .downcast_ref::<MergeScanLogicalPlan>()
+            // The merge scan's input can itself carry the wrapped stages (a
+            // projection or filter over the original scan), so recurse.
+            .is_some_and(|scan| is_scan_input(scan.input())),
+        LogicalPlan::TableScan(_) => true,
+        LogicalPlan::Filter(filter) => is_scan_input(&filter.input),
+        _ => false,
+    }
+}
+
+/// Resolve columns through projections only when they are exact pass-throughs.
+fn resolve_expr_through_projection(expr: &Expr, projection: Option<&Projection>) -> Option<Column> {
+    let Expr::Column(column) = expr else {
         return None;
     };
-    if !column.name.eq(name) || !input.schema().has_column(column) {
-        return None;
+    resolve_through_projection(column, projection)
+}
+fn resolve_through_projection(column: &Column, projection: Option<&Projection>) -> Option<Column> {
+    if let Some(projection) = projection {
+        let idx = projection
+            .schema
+            .maybe_index_of_column(column)
+            .or_else(|| {
+                projection
+                    .schema
+                    .index_of_column_by_name(None, &column.name)
+            })?;
+        let expr = projection.expr.get(idx)?;
+        let Expr::Column(c) = expr else {
+            return None;
+        };
+        return Some(c.clone());
     }
     Some(column.clone())
+}
+fn field_type<'a>(schema: &'a DFSchema, column: &Column) -> Option<&'a DataType> {
+    schema
+        .iter()
+        .find(|(q, f)| {
+            f.name().as_str() == column.name.as_str()
+                && column
+                    .relation
+                    .as_ref()
+                    .is_none_or(|relation| *q == Some(relation))
+        })
+        .map(|(_, f)| f.data_type())
 }
 
 fn equality_keys(join: &Join) -> Option<(&Column, &Column)> {
@@ -458,15 +507,4 @@ fn equality_keys(join: &Join) -> Option<(&Column, &Column)> {
         return None;
     };
     Some((left, right))
-}
-
-fn fixture_scan(plan: &LogicalPlan, table: &str) -> bool {
-    match plan {
-        LogicalPlan::TableScan(scan) => scan.table_name.to_string().eq_ignore_ascii_case(table),
-        LogicalPlan::SubqueryAlias(alias) => match alias.input.as_ref() {
-            LogicalPlan::TableScan(scan) => scan.table_name.to_string().eq_ignore_ascii_case(table),
-            _ => false,
-        },
-        _ => false,
-    }
 }
