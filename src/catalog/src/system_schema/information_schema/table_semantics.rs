@@ -59,7 +59,10 @@ use crate::CatalogManager;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
-use crate::system_schema::information_schema::{InformationTable, Predicates, TABLE_SEMANTICS};
+use crate::system_schema::SystemTable;
+use crate::system_schema::information_schema::{
+    InformationSchemaTableScope, InformationTable, Predicates, TABLE_SEMANTICS,
+};
 use crate::system_schema::semantic_graph::{EntityGraphProviderRef, TableEntityDeclaration};
 use crate::system_schema::utils;
 
@@ -235,6 +238,12 @@ impl InformationSchemaTableSemantics {
 }
 
 impl InformationTable for InformationSchemaTableSemantics {
+    fn scope(&self) -> InformationSchemaTableScope {
+        InformationSchemaTableScope::Catalog
+    }
+}
+
+impl SystemTable for InformationSchemaTableSemantics {
     fn table_id(&self) -> TableId {
         INFORMATION_SCHEMA_TABLE_SEMANTICS_TABLE_ID
     }

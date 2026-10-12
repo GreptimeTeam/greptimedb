@@ -38,7 +38,7 @@ mod views;
 #[cfg(all(test, feature = "enterprise"))]
 mod recycle_bin_test;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Weak};
 
 use common_catalog::consts::{self, DEFAULT_CATALOG_NAME, INFORMATION_SCHEMA_NAME};
@@ -63,16 +63,15 @@ use store_api::metric_engine_consts::{
 };
 use store_api::region_info::RegionInfoEntry;
 use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
-use store_api::storage::{ScanRequest, TableId};
-use table::metadata::{FilterPushDownType, TableType};
-use table::requests::SEMANTIC_TABLE_SCOPE;
-use table::{Table, TableRef};
+use store_api::storage::ScanRequest;
+use table::TableRef;
+use table::requests::{SEMANTIC_TABLE_SCOPE, TableOptions};
 pub use table_names::*;
 use views::InformationSchemaViews;
 
 use self::columns::InformationSchemaColumns;
 use crate::CatalogManager;
-use crate::error::{Error, Result};
+use crate::error::Error;
 use crate::process_manager::ProcessManagerRef;
 use crate::system_schema::information_schema::cluster_info::InformationSchemaClusterInfo;
 use crate::system_schema::information_schema::flow_statistics::InformationSchemaFlowStatistics;
@@ -93,9 +92,7 @@ use crate::system_schema::information_schema::table_semantics::InformationSchema
 use crate::system_schema::information_schema::tables::InformationSchemaTables;
 use crate::system_schema::memory_table::MemoryTable;
 pub(crate) use crate::system_schema::predicate::Predicates;
-use crate::system_schema::{
-    SystemSchemaProvider, SystemSchemaProviderInner, SystemTable, SystemTableRef,
-};
+use crate::system_schema::{SystemSchemaProvider, SystemTable, build_system_table};
 
 const DENSE_PRIMARY_KEY_ENCODING: &str = "dense";
 const SPARSE_PRIMARY_KEY_ENCODING: &str = "sparse";
@@ -186,10 +183,8 @@ impl InformationSchemaTableScope {
 /// This trait allows for extensibility of the information schema by providing
 /// a way to dynamically create custom information schema tables.
 pub trait InformationSchemaTableFactory {
-    /// Returns the visibility guaranteed by every table created by this factory.
-    fn scope(&self) -> InformationSchemaTableScope;
-
-    fn make_information_table(&self, req: MakeInformationTableRequest) -> SystemTableRef;
+    /// Creates a table whose scope is declared by its [`InformationTable`] implementation.
+    fn make_information_table(&self, req: MakeInformationTableRequest) -> InformationTableRef;
 }
 
 pub type InformationSchemaTableFactoryRef = Arc<dyn InformationSchemaTableFactory + Send + Sync>;
@@ -213,15 +208,8 @@ impl SystemSchemaProvider for InformationSchemaProvider {
     }
 }
 
-impl SystemSchemaProviderInner for InformationSchemaProvider {
-    fn catalog_name(&self) -> &str {
-        &self.catalog_name
-    }
-    fn schema_name() -> &'static str {
-        INFORMATION_SCHEMA_NAME
-    }
-
-    fn system_table(&self, name: &str) -> Option<SystemTableRef> {
+impl InformationSchemaProvider {
+    fn information_table(&self, name: &str) -> Option<InformationTableRef> {
         if let Some(factory) = self.extra_table_factories.get(name) {
             let req = MakeInformationTableRequest {
                 catalog_name: self.catalog_name.clone(),
@@ -378,32 +366,27 @@ impl InformationSchemaProvider {
     }
 
     fn build_tables(&mut self) {
-        use InformationSchemaTableScope::{Catalog, Global};
-
-        // Registration requires a scope; metadata is attached centrally below.
-        let mut table_scopes = HashMap::new();
+        let mut table_names = HashSet::new();
 
         // SECURITY NOTE:
         // Carefully consider the tables that may expose sensitive cluster configurations,
         // authentication details, and other critical information.
         // Only put these tables under `greptime` catalog to prevent info leak.
         if self.catalog_name == DEFAULT_CATALOG_NAME {
-            for (name, scope) in [
-                (BUILD_INFO, Global),
-                (REGION_PEERS, Catalog),
-                (CLUSTER_INFO, Global),
-                (PROCEDURE_INFO, Global),
-                (REGION_STATISTICS, Global),
-                (REGION_INFO, Global),
-                (SSTS_MANIFEST, Global),
-                (SSTS_STORAGE, Global),
-                (SSTS_INDEX_META, Global),
-            ] {
-                table_scopes.insert(name, scope);
-            }
+            table_names.extend([
+                BUILD_INFO,
+                REGION_PEERS,
+                CLUSTER_INFO,
+                PROCEDURE_INFO,
+                REGION_STATISTICS,
+                REGION_INFO,
+                SSTS_MANIFEST,
+                SSTS_STORAGE,
+                SSTS_INDEX_META,
+            ]);
         }
 
-        for name in [
+        table_names.extend([
             TABLES,
             VIEWS,
             SCHEMATA,
@@ -417,86 +400,42 @@ impl InformationSchemaProvider {
             RECYCLE_BIN,
             TABLE_SEMANTICS,
             PARTITIONS,
-        ] {
-            table_scopes.insert(name, Catalog);
-        }
+        ]);
         if self.process_manager.is_some() {
-            table_scopes.insert(PROCESS_LIST, Global);
+            table_names.insert(PROCESS_LIST);
         }
-        // Add memory tables
-        for name in MEMORY_TABLES.iter() {
-            table_scopes.insert(*name, Global);
-        }
-        for (name, factory) in &self.extra_table_factories {
-            table_scopes.insert(name.as_str(), factory.scope());
-        }
-        self.tables = table_scopes
+        table_names.extend(MEMORY_TABLES.iter().copied());
+        table_names.extend(self.extra_table_factories.keys().map(String::as_str));
+        self.tables = table_names
             .into_iter()
-            .map(|(name, scope)| {
-                let table = self.build_table(name).expect(name);
-                let mut info = (*table.table_info()).clone();
-                info.meta
-                    .options
-                    .extra_options
-                    .insert(SEMANTIC_TABLE_SCOPE.to_string(), scope.as_str().to_string());
-                let table = Arc::new(Table::new(
-                    Arc::new(info),
-                    FilterPushDownType::Inexact,
-                    table.data_source(),
-                ));
+            .map(|name| {
+                let table = self.information_table(name).expect(name);
+                let options = TableOptions {
+                    extra_options: HashMap::from([(
+                        SEMANTIC_TABLE_SCOPE.to_string(),
+                        table.scope().as_str().to_string(),
+                    )]),
+                    ..Default::default()
+                };
+                let table = build_system_table(
+                    self.catalog_name.clone(),
+                    INFORMATION_SCHEMA_NAME,
+                    table,
+                    options,
+                );
                 (name.to_string(), table)
             })
             .collect();
     }
 }
 
-pub trait InformationTable {
-    fn table_id(&self) -> TableId;
-
-    fn table_name(&self) -> &'static str;
-
-    fn schema(&self) -> SchemaRef;
-
-    fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream>;
-
-    fn scan_plan(&self, _request: ScanRequest) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-        Ok(None)
-    }
-
-    fn table_type(&self) -> TableType {
-        TableType::Temporary
-    }
+/// An information-schema table with an explicit visibility guarantee.
+pub trait InformationTable: SystemTable {
+    /// Returns the visibility guaranteed by this table's query implementation.
+    fn scope(&self) -> InformationSchemaTableScope;
 }
 
-// Provide compatibility for legacy `information_schema` code.
-impl<T> SystemTable for T
-where
-    T: InformationTable,
-{
-    fn table_id(&self) -> TableId {
-        InformationTable::table_id(self)
-    }
-
-    fn table_name(&self) -> &'static str {
-        InformationTable::table_name(self)
-    }
-
-    fn schema(&self) -> SchemaRef {
-        InformationTable::schema(self)
-    }
-
-    fn table_type(&self) -> TableType {
-        InformationTable::table_type(self)
-    }
-
-    fn to_stream(&self, request: ScanRequest) -> Result<SendableRecordBatchStream> {
-        InformationTable::to_stream(self, request)
-    }
-
-    fn scan_plan(&self, request: ScanRequest) -> Result<Option<Arc<dyn ExecutionPlan>>> {
-        InformationTable::scan_plan(self, request)
-    }
-}
+pub type InformationTableRef = Arc<dyn InformationTable + Send + Sync>;
 
 pub type InformationExtensionRef = Arc<dyn InformationExtension<Error = Error> + Send + Sync>;
 
@@ -612,8 +551,10 @@ mod tests {
     use datatypes::schema::Schema;
     use futures_util::TryStreamExt;
     use store_api::region_info::RegionInfoEntry;
+    use store_api::storage::TableId;
 
     use super::*;
+    use crate::error::Result;
     use crate::information_schema::NoopInformationExtension;
     use crate::kvbackend::KvBackendCatalogManagerBuilder;
     use crate::memory::MemoryCatalogManager;
@@ -625,17 +566,40 @@ mod tests {
     }
 
     impl InformationSchemaTableFactory for ScopedFactory {
+        fn make_information_table(&self, _req: MakeInformationTableRequest) -> InformationTableRef {
+            Arc::new(ScopedTable {
+                name: self.name,
+                scope: self.scope,
+            })
+        }
+    }
+
+    struct ScopedTable {
+        name: &'static str,
+        scope: InformationSchemaTableScope,
+    }
+
+    impl InformationTable for ScopedTable {
         fn scope(&self) -> InformationSchemaTableScope {
             self.scope
         }
+    }
 
-        fn make_information_table(&self, _req: MakeInformationTableRequest) -> SystemTableRef {
-            Arc::new(MemoryTable::new(
-                999,
-                self.name,
-                Arc::new(Schema::new(vec![])),
-                vec![],
-            ))
+    impl SystemTable for ScopedTable {
+        fn table_id(&self) -> TableId {
+            999
+        }
+
+        fn table_name(&self) -> &'static str {
+            self.name
+        }
+
+        fn schema(&self) -> SchemaRef {
+            Arc::new(Schema::new(vec![]))
+        }
+
+        fn to_stream(&self, _request: ScanRequest) -> Result<SendableRecordBatchStream> {
+            Ok(common_recordbatch::RecordBatches::empty().as_stream())
         }
     }
 
@@ -648,6 +612,7 @@ mod tests {
         let factories: HashMap<_, InformationSchemaTableFactoryRef> = [
             ("future_catalog_table", Catalog),
             ("future_global_table", Global),
+            (ENGINES, Catalog),
         ]
         .into_iter()
         .map(|(name, scope)| {
@@ -673,6 +638,7 @@ mod tests {
             #[cfg(feature = "enterprise")]
             RECYCLE_BIN,
             "future_catalog_table",
+            ENGINES,
         ];
 
         for (catalog, with_process_manager) in [
@@ -687,8 +653,21 @@ mod tests {
                 Arc::new(FlowMetadataManager::new(backend.clone())),
                 with_process_manager.then(|| Arc::new(ProcessManager::new(String::new(), None))),
                 backend.clone(),
-            )
-            .with_extra_table_factories(factories.clone());
+            );
+            assert_eq!(
+                provider
+                    .table(ENGINES)
+                    .unwrap()
+                    .table_info()
+                    .meta
+                    .options
+                    .extra_options
+                    .get(SEMANTIC_TABLE_SCOPE)
+                    .map(String::as_str),
+                Some(Global.as_str()),
+            );
+            // An extension replacing a built-in supplies the replacement table's scope.
+            let provider = provider.with_extra_table_factories(factories.clone());
             let expected_count =
                 43 + usize::from(with_process_manager) + usize::from(cfg!(feature = "enterprise"))
                     - if catalog == DEFAULT_CATALOG_NAME {
