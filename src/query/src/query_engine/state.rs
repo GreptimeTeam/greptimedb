@@ -66,6 +66,7 @@ use crate::optimizer::ExtensionAnalyzerRule;
 use crate::optimizer::const_normalization::ConstNormalizationRule;
 use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
 use crate::optimizer::count_nest_aggr::CountNestAggrRule;
+use crate::optimizer::count_join::CountJoinRewrite;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::enforce_sorting::EnforceSorting;
 use crate::optimizer::expr_depth;
@@ -89,7 +90,8 @@ use crate::optimizer::transcribe_atat::TranscribeAtatRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::optimizer::windowed_sort::WindowedSortPhysicalRule;
 use crate::options::{
-    NativePromqlExtension, QueryMemoryPoolPolicy, QueryOptions as QueryOptionsNew,
+    FactorizedJoinAggOptions, NativePromqlExtension, QueryMemoryPoolPolicy,
+    QueryOptions as QueryOptionsNew,
 };
 use crate::promql::planner::NATIVE_PROMQL_EXTENSION_KEY;
 use crate::promql::planner::native::native_promql_requested;
@@ -171,6 +173,9 @@ impl QueryEngineState {
         let mut session_config = SessionConfig::new().with_create_default_catalog_and_schema(false);
         if options.parallelism > 0 {
             session_config = session_config.with_target_partitions(options.parallelism);
+        }
+        if options.experimental_enable_factorized_join_agg {
+            session_config.options_mut().extensions.insert(FactorizedJoinAggOptions { enabled: true });
         }
         if options.allow_query_fallback {
             session_config
@@ -264,6 +269,7 @@ impl QueryEngineState {
         }
         optimizer.rules.push(Arc::new(ScanHintRule));
         optimizer.rules.push(Arc::new(JsonTypeConcretizeRule));
+        optimizer.rules.push(Arc::new(CountJoinRewrite));
 
         // add physical optimizer
         let mut physical_optimizer = PhysicalOptimizer::new();
@@ -420,6 +426,15 @@ impl QueryEngineState {
             .insert(NativePromqlExtension {
                 requested: native_promql,
             });
+        if let Some(enabled) = options.get("query.experimental_enable_factorized_join_agg") {
+            state
+                .config_mut()
+                .options_mut()
+                .extensions
+                .insert(FactorizedJoinAggOptions {
+                    enabled: enabled == "true",
+                });
+        }
         Ok(query_ctx)
     }
 
@@ -824,6 +839,8 @@ impl MemoryPool for MetricsMemoryPool {
 
 #[cfg(test)]
 mod tests {
+    #[path = "state/ffx_count_tests.rs"]
+    mod ffx_count_tests;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use common_base::Plugins;
