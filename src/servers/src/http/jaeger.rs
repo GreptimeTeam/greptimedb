@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod v3;
+
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::str::FromStr;
@@ -289,9 +291,9 @@ fn update_query_context(query_ctx: &mut QueryContext, table_name: Option<String>
 impl QueryTraceParams {
     fn from_jaeger_query_params(query_params: JaegerQueryParams) -> Result<Self> {
         let mut internal_query_params: QueryTraceParams = QueryTraceParams {
-            service_name: query_params.service_name.context(InvalidJaegerQuerySnafu {
+            service_name: Some(query_params.service_name.context(InvalidJaegerQuerySnafu {
                 reason: "service_name is required".to_string(),
-            })?,
+            })?),
             operation_name: query_params.operation_name,
             // Convert start time from microseconds to nanoseconds.
             start_time: query_params.start.map(|start| start * 1000),
@@ -347,7 +349,7 @@ impl QueryTraceParams {
 
 #[derive(Debug, Default, PartialEq)]
 pub struct QueryTraceParams {
-    pub service_name: String,
+    pub service_name: Option<String>,
     pub operation_name: Option<String>,
 
     // The limit of the number of traces to return.
@@ -361,6 +363,9 @@ pub struct QueryTraceParams {
     pub end_time: Option<i64>,
     pub min_duration: Option<u64>,
     pub max_duration: Option<u64>,
+
+    /// Fetch all spans of matching traces, including spans outside the search window.
+    pub fetch_full_trace: bool,
 
     // The user agent of the trace query, mainly find traces
     pub user_agent: TraceUserAgent,
@@ -1647,7 +1652,7 @@ mod tests {
                     ..Default::default()
                 },
                 QueryTraceParams {
-                    service_name: "test-service-0".to_string(),
+                    service_name: Some("test-service-0".to_string()),
                     ..Default::default()
                 },
             ),
@@ -1664,7 +1669,7 @@ mod tests {
                     ..Default::default()
                 },
                 QueryTraceParams {
-                    service_name: "test-service-0".to_string(),
+                    service_name: Some("test-service-0".to_string()),
                     operation_name: Some("access-mysql".to_string()),
                     start_time: Some(1738726754492422000),
                     end_time: Some(1738726754642422000),
@@ -1679,6 +1684,7 @@ mod tests {
                         ("http.path".to_string(), JsonValue::String("/api/v1/users".to_string())),
                     ])),
                     user_agent: TraceUserAgent::Jaeger,
+                    fetch_full_trace: false,
                 },
             ),
         ];
