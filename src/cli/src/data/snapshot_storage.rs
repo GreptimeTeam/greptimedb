@@ -577,7 +577,7 @@ impl OpenDalStorage {
             .chunk(WRITE_BYTES)
             .concurrent(1)
             .await
-            .with_context(|| StorageOperationSnafu {
+            .with_context(|_| StorageOperationSnafu {
                 operation: format!("open writer {}", path),
             })?;
         let data = object_store::Buffer::from(data);
@@ -593,7 +593,7 @@ impl OpenDalStorage {
         {
             common_telemetry::warn!(error; "Failed to abort snapshot metadata write");
         }
-        result.with_context(|| StorageOperationSnafu {
+        result.with_context(|_| StorageOperationSnafu {
             operation: format!("write {}", path),
         })
     }
