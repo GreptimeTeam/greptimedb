@@ -500,28 +500,17 @@ mod tests {
     async fn large_footer_flush_uses_bounded_submissions_in_one_parquet_stream() {
         use std::sync::Mutex;
 
-        use object_store::layers::mock::{Metadata, MockLayerBuilder, MockWriterFactory, oio};
-        struct ObservedWriter(oio::Writer, Arc<Mutex<Vec<usize>>>);
-        impl oio::Write for ObservedWriter {
-            async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
-                self.1.lock().unwrap().push(bytes.len());
-                self.0.write(bytes).await
-            }
-            async fn close(&mut self) -> object_store::Result<Metadata> {
-                self.0.close().await
-            }
-            async fn abort(&mut self) -> object_store::Result<()> {
-                self.0.abort().await
-            }
-        }
+        use object_store::layers::mock::{
+            MockLayerBuilder, MockWriterFactory, ObservedWriter, WriterObservations,
+        };
         let directory = common_test_util::temp_dir::create_temp_dir("bounded_parquet");
         let store = object_store::secure_fs::SecureFsRoot::open(directory.path())
             .unwrap()
             .build_operator();
-        let sizes = Arc::new(Mutex::new(Vec::new()));
+        let observations = Arc::new(Mutex::new(WriterObservations::default()));
         let factory: MockWriterFactory = Arc::new({
-            let sizes = sizes.clone();
-            move |_, _, writer| Box::new(ObservedWriter(writer, sizes.clone()))
+            let observations = observations.clone();
+            move |_, _, writer| Box::new(ObservedWriter::new(writer, observations.clone()))
         });
         let store = store.layer(
             MockLayerBuilder::default()
@@ -548,7 +537,7 @@ mod tests {
         writer.sink = ParquetSink::Object(store.writer("large.parquet").await.unwrap());
         writer.write(batch.clone(), None).await.unwrap();
         writer.finish(None).await.unwrap();
-        let sizes = sizes.lock().unwrap().clone();
+        let sizes = observations.lock().unwrap().write_sizes.clone();
         let limit = DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize;
         assert!(sizes.iter().sum::<usize>() > limit);
         assert!(sizes.iter().all(|size| *size <= limit), "{sizes:?}");
