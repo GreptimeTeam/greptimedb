@@ -79,10 +79,15 @@ def now():
 
 
 def has_private_access():
-    try:
-        return run(["gh", "api", f"repos/{PRIVATE}"], check=False, timeout=60).returncode == 0
-    except Abort:
+    # GitHub answers 404 for a private repo the user cannot see. Any other
+    # failure (expired login, rate limit, network) must not be mistaken for
+    # "no access", or publish silently skips and review drops to blind-only.
+    proc = run(["gh", "api", f"repos/{PRIVATE}"], check=False, timeout=60)
+    if proc.returncode == 0:
+        return True
+    if "HTTP 404" in proc.stderr or "HTTP 403" in proc.stderr:
         return False
+    raise Abort(f"cannot determine access to {PRIVATE}: {proc.stderr.strip()}")
 
 
 def gh_login():
@@ -113,7 +118,9 @@ def private_raw(path):
 def private_list(path):
     proc = run(["gh", "api", f"repos/{PRIVATE}/contents/{path}"], check=False)
     if proc.returncode != 0:
-        return []
+        if "HTTP 404" in proc.stderr:
+            return []
+        raise Abort(f"listing {path} in {PRIVATE} failed: {proc.stderr.strip()}")
     files = []
     for entry in json.loads(proc.stdout):
         if entry["type"] == "dir":
@@ -516,6 +523,11 @@ def cmd_prepare(args):
     (workdir / "diff.patch").write_text(diff, encoding="utf-8")
     run(["git", "fetch", "--quiet", "--no-tags", f"https://github.com/{UPSTREAM}.git",
          f"pull/{info['number']}/head"], cwd=REPO_ROOT)
+    fetched = run(["git", "rev-parse", "FETCH_HEAD"], cwd=REPO_ROOT).stdout.strip()
+    if fetched != head:
+        # The diff above may belong to either head; start over rather than mix them.
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise Abort(f"PR head moved from {head[:7]} to {fetched[:7]} during prepare; run prepare again")
     run(["git", "worktree", "add", "--quiet", "--detach", str(workdir / "src"), head], cwd=REPO_ROOT)
     shutil.copyfile(REVIEW_CRITERIA, workdir / "criteria.md")
 

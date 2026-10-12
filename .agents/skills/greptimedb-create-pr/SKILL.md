@@ -206,4 +206,4 @@ With `full`:
 Report in English: the PR URL and title; pre-flight checks that failed or were skipped; for the
 private part, either "skipped" or the published path, the sessions included,
 the redactions made, and that internal hostnames, customer names, and personal
-data are not detected by the scan.
+data are not scanned automatically; only the rationale was reviewed by hand.

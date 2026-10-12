@@ -16,8 +16,9 @@ regex = '''[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s:@"]+:([^/\s@"]{3,})@'''
 secretGroup = 1
 
 # Upper-case names only: `(?i)` matches JSON-escaped text such as `\ntokens: 123`.
+# The optional quote after the name covers JSON keys, plain and escaped.
 [[rules]]
 id = "env-secret-assignment"
 description = "Secret-looking environment variable assignment"
-regex = '''[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API_KEY)[A-Z0-9_]*\s*[=:]\s*\\?["']?([^\s"'\\]{8,})'''
+regex = '''[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API_KEY)[A-Z0-9_]*(?:\\?["'])?\s*[=:]\s*\\?["']?([^\s"'\\]{8,})'''
 secretGroup = 1
