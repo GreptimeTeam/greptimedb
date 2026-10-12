@@ -411,7 +411,7 @@ impl ExportCreateCommand {
 
         // The filesystem storage constructor can create the snapshot root.
         if self.metric_data_layout.is_some() {
-            require_metric_export(&database_client, self.format)
+            require_metric_export_enabled(&database_client, self.format)
                 .await
                 .map_err(BoxedError::new)?;
             if !self.schema_only {
@@ -511,7 +511,7 @@ impl ExportCreate {
 
                 validate_resume_config(&manifest, &self.config)?;
                 if manifest.is_packed() {
-                    require_metric_export(&self.database_client, manifest.format).await?;
+                    require_metric_export_enabled(&self.database_client, manifest.format).await?;
                     self.database_client
                         .require_packed_export()
                         .await
@@ -730,7 +730,7 @@ impl ExportCreate {
     }
 }
 
-async fn require_metric_export(client: &DatabaseClient, format: DataFormat) -> Result<()> {
+async fn require_metric_export_enabled(client: &DatabaseClient, format: DataFormat) -> Result<()> {
     if format != DataFormat::Parquet {
         return crate::data::export_v2::error::MetricExportUnavailableSnafu.fail();
     }
