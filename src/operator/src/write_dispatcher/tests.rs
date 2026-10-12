@@ -30,6 +30,7 @@ use common_error::ext::ErrorExt;
 use common_grpc::channel_manager::ChannelConfig;
 use common_meta::cache as meta_cache;
 use common_meta::ddl::test_util::datanode_handler::DatanodeWatcher;
+use common_meta::key::TableMetadataManager;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::test_util::{MockDatanodeHandler, MockDatanodeManager};
 use common_query::request::QueryRequest;
@@ -60,7 +61,7 @@ fn build_insert_request(regions: &[u32]) -> RegionRequest {
 async fn test_resolve_peers_batches_logical_and_physical_regions() {
     let backend = test_util::prepare_mocked_backend().await;
     let partition_manager = test_util::create_partition_rule_manager(backend.clone()).await;
-    common_meta::key::TableMetadataManager::new(backend)
+    TableMetadataManager::new(backend)
         .create_table_metadata(
             test_util::new_test_table_info(42, "dispatcher_logical", [1, 2, 3].into_iter()),
             TableRouteValue::logical(1),
@@ -101,7 +102,7 @@ async fn test_resolve_peers_batches_logical_and_physical_regions() {
 async fn test_dispatch_preserves_write_payloads_and_envelopes() {
     let backend = test_util::prepare_mocked_backend().await;
     let partition_manager = test_util::create_partition_rule_manager(backend.clone()).await;
-    common_meta::key::TableMetadataManager::new(backend)
+    TableMetadataManager::new(backend)
         .create_table_metadata(
             test_util::new_test_table_info(42, "dispatcher_logical", [1, 2, 3].into_iter()),
             TableRouteValue::logical(1),
@@ -276,7 +277,7 @@ async fn test_resolve_peers_cache_lookup_ablation() {
     common_telemetry::init_default_ut_logging();
     let backend = test_util::prepare_mocked_backend().await;
     test_util::create_partition_rule_manager(backend.clone()).await;
-    common_meta::key::TableMetadataManager::new(backend.clone())
+    TableMetadataManager::new(backend.clone())
         .create_table_metadata(
             test_util::new_test_table_info(42, "resolution_ablation", [1, 2, 3].into_iter()),
             TableRouteValue::logical(1),

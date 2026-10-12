@@ -195,6 +195,7 @@ mod tests {
     use moka::future::Cache;
 
     use super::*;
+    use crate::error::Error;
     use crate::test_util;
 
     #[tokio::test]
@@ -240,8 +241,8 @@ mod tests {
                 .await
                 .unwrap_err();
 
-            assert!(matches!(insert_error, error::Error::SplitInsert { .. }));
-            assert!(matches!(delete_error, error::Error::SplitDelete { .. }));
+            assert!(matches!(insert_error, Error::SplitInsert { .. }));
+            assert!(matches!(delete_error, Error::SplitDelete { .. }));
             for error in [insert_error, delete_error] {
                 assert_eq!(error.status_code(), expected_status);
                 assert_eq!(error.retry_hint(), expected_hint);
