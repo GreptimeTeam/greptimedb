@@ -105,20 +105,22 @@ tql eval (30, 30, '1s') range_vector_result[20s] as v;
 -- SQLNESS REPLACE (partitioning.*) REDACTED
 tql explain (30, 30, '1s') range_vector_result[20s];
 
-+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                               |
-+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                    |
-|               | PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [true]                                                                                                               |
-|               |   PromSeriesDivide: tags=["host"]                                                                                                                                                  |
-|               |     Sort: range_vector_result.host ASC NULLS FIRST, range_vector_result.ts ASC NULLS FIRST                                                                                         |
-|               |       Filter: range_vector_result.ts >= TimestampMillisecond(10001, None) AND range_vector_result.ts <= TimestampMillisecond(30000, None)                                          |
-|               |         TableScan: range_vector_result, partial_filters=[range_vector_result.ts >= TimestampMillisecond(10001, None), range_vector_result.ts <= TimestampMillisecond(30000, None)] |
-|               | ]]                                                                                                                                                                                 |
-| physical_plan | CooperativeExec                                                                                                                                                                    |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                          |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                               |
+|               | Projection: range_vector_result.ts, range_vector_result.val, range_vector_result.host                                                                                                                         |
+|               |   Projection: range_vector_result.ts, range_vector_result.val, range_vector_result.host, Utf8("range_vector_result") FieldMetadata { inner: {"greptime:promql:role": "metric_name"} } AS __promql_metric_name |
+|               |     PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [true]                                                                                                                                      |
+|               |       PromSeriesDivide: tags=["host"]                                                                                                                                                                         |
+|               |         Sort: range_vector_result.host ASC NULLS FIRST, range_vector_result.ts ASC NULLS FIRST                                                                                                                |
+|               |           Filter: range_vector_result.ts >= TimestampMillisecond(10001, None) AND range_vector_result.ts <= TimestampMillisecond(30000, None)                                                                 |
+|               |             TableScan: range_vector_result, partial_filters=[range_vector_result.ts >= TimestampMillisecond(10001, None), range_vector_result.ts <= TimestampMillisecond(30000, None)]                        |
+|               | ]]                                                                                                                                                                                                            |
+| physical_plan | CooperativeExec                                                                                                                                                                                               |
 |               |   MergeScanExec: REDACTED
-|               |                                                                                                                                                                                    |
-+---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|               |                                                                                                                                                                                                               |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 tql eval (30, 30, '1s') range_vector_result[30s:0.0001];
 

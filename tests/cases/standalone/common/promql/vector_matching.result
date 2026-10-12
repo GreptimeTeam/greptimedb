@@ -135,7 +135,7 @@ Error: 3001(EngineExecuteQuery), Execution error: found duplicate series for the
 -- same labels.
 TQL EVAL (0, 0, '5s') counter_metric / on(host) group_left(device) gauge_metric{device="eth0"};
 
-Error: 3001(EngineExecuteQuery), Execution error: multiple matches for labels {host="host1", device="eth0"}: grouping labels must ensure unique matches
+Error: 3001(EngineExecuteQuery), Execution error: multiple matches for labels {host="host1", __name__="counter_metric", device="eth0"}: grouping labels must ensure unique matches
 
 -- An included label the one side doesn't carry is dropped from the result.
 -- SQLNESS SORT_RESULT 3 1
