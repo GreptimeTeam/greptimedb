@@ -2157,6 +2157,7 @@ async fn metric_export_v2_disabled_and_legacy_cli() {
 #[tokio::test]
 async fn metric_export_v2_refuses_missing_or_malformed_capability_before_force() {
     use axum::http::StatusCode;
+    use common_error::ext::StackError;
     use serde_json::json;
     let column = json!({"name": "EXPERIMENTAL_METRIC_EXPORT", "data_type": "String"});
     let records = |rows, columns| {
@@ -2255,8 +2256,8 @@ async fn metric_export_v2_refuses_missing_or_malformed_capability_before_force()
         let error = run_data_cli(&args).await.unwrap_err();
         if gate_enabled {
             assert!(
-                error.to_string().contains("metric_packed_export"),
-                "{error}"
+                error.last().to_string().contains("metric_packed_export"),
+                "{error:?}"
             );
         } else if status == StatusCode::OK {
             assert!(
@@ -2294,7 +2295,7 @@ async fn metric_export_v2_refuses_missing_or_malformed_capability_before_force()
             .filter(|arg| !matches!(*arg, "--force" | "--metric-data-layout" | "packed"))
             .collect::<Vec<_>>();
         let resume_error = run_data_cli(&resume).await.unwrap_err();
-        assert_eq!(resume_error.to_string(), error.to_string());
+        assert_eq!(resume_error.last().to_string(), error.last().to_string());
         assert_eq!(std::fs::read(&manifest).unwrap(), original);
         assert_eq!(std::fs::read(&part).unwrap(), b"unfinished");
         server.abort();
