@@ -151,7 +151,7 @@ impl OptionMap {
                 result.push(format!("{k} = '{}'", v.escape_debug()));
             }
         }
-        for (k, _) in self.secrets.iter() {
+        for k in self.secrets.keys() {
             if k.contains(".") {
                 result.push(format!("'{k}' = '******'"));
             } else {
