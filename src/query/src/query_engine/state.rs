@@ -64,6 +64,7 @@ use crate::optimizer::ExtensionAnalyzerRule;
 use crate::optimizer::const_normalization::ConstNormalizationRule;
 use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
 use crate::optimizer::count_nest_aggr::CountNestAggrRule;
+use crate::optimizer::count_join::CountJoinRewrite;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::enforce_sorting::EnforceSorting;
 use crate::optimizer::global_limit::EnsureGlobalLimitForFetch;
@@ -77,7 +78,7 @@ use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::transcribe_atat::TranscribeAtatRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::optimizer::windowed_sort::WindowedSortPhysicalRule;
-use crate::options::{QueryMemoryPoolPolicy, QueryOptions as QueryOptionsNew};
+use crate::options::{FactorizedJoinAggOptions, QueryMemoryPoolPolicy, QueryOptions as QueryOptionsNew};
 use crate::query_engine::DefaultSerializer;
 use crate::query_engine::options::QueryOptions;
 use crate::query_engine::runtime::{
@@ -154,6 +155,9 @@ impl QueryEngineState {
         if options.parallelism > 0 {
             session_config = session_config.with_target_partitions(options.parallelism);
         }
+        if options.experimental_enable_factorized_join_agg {
+            session_config.options_mut().extensions.insert(FactorizedJoinAggOptions { enabled: true });
+        }
         if options.allow_query_fallback {
             session_config
                 .options_mut()
@@ -224,6 +228,7 @@ impl QueryEngineState {
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(ScanHintRule));
         optimizer.rules.push(Arc::new(JsonTypeConcretizeRule));
+        optimizer.rules.push(Arc::new(CountJoinRewrite));
 
         // add physical optimizer
         let mut physical_optimizer = PhysicalOptimizer::new();
@@ -681,6 +686,8 @@ impl MemoryPool for MetricsMemoryPool {
 
 #[cfg(test)]
 mod tests {
+    #[path = "state/ffx_count_tests.rs"]
+    mod ffx_count_tests;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use common_base::Plugins;

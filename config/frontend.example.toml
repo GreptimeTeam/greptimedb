@@ -363,6 +363,9 @@ metadata_cache_tti = "5m"
 
 ## The query engine options.
 [query]
+## Experimental opt-in for shape-based AVG/SUM join aggregation; default false.
+experimental_enable_factorized_join_agg = false
+
 ## Parallelism of the query engine.
 ## Default to 0, which means the number of CPU cores.
 parallelism = 0

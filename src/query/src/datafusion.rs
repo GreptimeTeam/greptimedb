@@ -68,7 +68,7 @@ use crate::metrics::{
     OnDone, QUERY_STAGE_ELAPSED, maybe_attach_region_watermark_metrics,
     should_collect_region_watermark_from_query_ctx,
 };
-use crate::options::ScheduledTimeExtension;
+use crate::options::{FactorizedJoinAggOptions, ScheduledTimeExtension};
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
@@ -565,6 +565,10 @@ impl QueryEngine for DatafusionQueryEngine {
                     parallelism
                 );
             }
+        }
+
+        if query_ctx.configuration_parameter().experimental_enable_factorized_join_agg() {
+            state.config_mut().options_mut().extensions.insert(FactorizedJoinAggOptions { enabled: true });
         }
 
         // configure execution options

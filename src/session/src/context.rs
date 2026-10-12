@@ -736,6 +736,7 @@ pub struct ConfigurationVariables {
     pg_datestyle_format: ArcSwap<(PGDateTimeStyle, PGDateOrder)>,
     pg_intervalstyle_format: ArcSwap<PGIntervalStyle>,
     allow_query_fallback: ArcSwap<bool>,
+    experimental_enable_factorized_join_agg: ArcSwap<bool>,
 }
 
 impl Clone for ConfigurationVariables {
@@ -745,6 +746,7 @@ impl Clone for ConfigurationVariables {
             pg_datestyle_format: ArcSwap::new(self.pg_datestyle_format.load().clone()),
             pg_intervalstyle_format: ArcSwap::new(self.pg_intervalstyle_format.load().clone()),
             allow_query_fallback: ArcSwap::new(self.allow_query_fallback.load().clone()),
+            experimental_enable_factorized_join_agg: ArcSwap::new(self.experimental_enable_factorized_join_agg.load().clone()),
         }
     }
 }
@@ -784,6 +786,14 @@ impl ConfigurationVariables {
 
     pub fn set_allow_query_fallback(&self, allow: bool) {
         self.allow_query_fallback.swap(Arc::new(allow));
+    }
+
+    pub fn experimental_enable_factorized_join_agg(&self) -> bool {
+        **self.experimental_enable_factorized_join_agg.load()
+    }
+
+    pub fn set_experimental_enable_factorized_join_agg(&self, enabled: bool) {
+        self.experimental_enable_factorized_join_agg.swap(Arc::new(enabled));
     }
 }
 
