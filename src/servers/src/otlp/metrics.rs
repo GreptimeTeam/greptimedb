@@ -349,12 +349,13 @@ fn from_metric_type(data: &metric::Data) -> MetricType {
     }
 }
 
-/// Non-scalar values (bool, arrays, maps, bytes) are not representable as tags.
+/// Non-scalar values (arrays, maps, bytes) are not representable as tags.
 fn scalar_value_string(value: Option<&AnyValue>) -> Option<String> {
     match value.and_then(|v| v.value.as_ref())? {
         any_value::Value::StringValue(s) => Some(s.clone()),
         any_value::Value::IntValue(v) => Some(v.to_string()),
         any_value::Value::DoubleValue(v) => Some(v.to_string()),
+        any_value::Value::BoolValue(v) => Some(v.to_string()),
         _ => None,
     }
 }
@@ -1571,6 +1572,15 @@ mod tests {
         }
     }
 
+    fn bool_keyvalue(key: &str, value: bool) -> KeyValue {
+        KeyValue {
+            key: key.into(),
+            value: Some(AnyValue {
+                value: Some(Val::BoolValue(value)),
+            }),
+        }
+    }
+
     fn descriptor_ctx() -> OtlpMetricCtx {
         OtlpMetricCtx {
             resource_info: true,
@@ -1732,6 +1742,64 @@ mod tests {
         process_resource_attrs(&mut attrs, &OtlpMetricCtx::default());
         assert_eq!(attr_value(&attrs, "job"), None);
         assert_eq!(attr_value(&attrs, "instance").as_deref(), Some("inst-1"));
+    }
+
+    #[test]
+    fn test_boolean_attributes_keep_series_distinct() {
+        set_default_prefix(None).unwrap();
+        let request = metrics_request(vec![Metric {
+            name: "bool_repro".to_string(),
+            data: Some(metric::Data::Sum(Sum {
+                data_points: vec![
+                    NumberDataPoint {
+                        attributes: vec![bool_keyvalue("failed", false)],
+                        start_time_unix_nano: 1_000_000,
+                        time_unix_nano: 2_000_000,
+                        value: Some(Value::AsDouble(100.0)),
+                        ..Default::default()
+                    },
+                    NumberDataPoint {
+                        attributes: vec![bool_keyvalue("failed", true)],
+                        start_time_unix_nano: 1_000_000,
+                        time_unix_nano: 2_000_000,
+                        value: Some(Value::AsDouble(7.0)),
+                        ..Default::default()
+                    },
+                ],
+                aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                is_monotonic: true,
+            })),
+            ..Default::default()
+        }]);
+        let conversion = to_grpc_insert_requests(request, &mut OtlpMetricCtx::default()).unwrap();
+
+        let rows = conversion
+            .requests
+            .inserts
+            .iter()
+            .find(|insert| insert.table_name == "bool_repro_total")
+            .expect("missing bool_repro_total table")
+            .rows
+            .as_ref()
+            .unwrap();
+        assert_eq!(2, rows.rows.len());
+        let failed = rows
+            .schema
+            .iter()
+            .position(|column| column.column_name == "failed")
+            .expect("boolean attribute `failed` was dropped from the label set");
+        let values = rows
+            .rows
+            .iter()
+            .map(|row| row.values[failed].value_data.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            vec![
+                Some(ValueData::StringValue("false".to_string())),
+                Some(ValueData::StringValue("true".to_string())),
+            ],
+            values
+        );
     }
 
     #[test]

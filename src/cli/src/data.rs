@@ -18,6 +18,7 @@ mod import;
 pub mod import_v2;
 pub(crate) mod path;
 pub(crate) mod progress;
+mod schema_export;
 pub mod snapshot_storage;
 pub(crate) mod sql;
 mod storage_export;

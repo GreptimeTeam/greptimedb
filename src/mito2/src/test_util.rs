@@ -42,11 +42,13 @@ use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_telemetry::{debug, warn};
 use common_test_util::temp_dir::{TempDir, create_temp_dir};
+use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATION};
 use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use datatypes::arrow::array::{TimestampMillisecondArray, UInt8Array, UInt64Array};
 use datatypes::extension::json::{Json2ExtensionType, JsonExtensionType};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
+use log_store::ObjectStoreLogStore;
 use log_store::kafka::log_store::KafkaLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
@@ -56,7 +58,7 @@ use object_store::layers::mock::{
     Buffer, Deleter, Metadata, MockLayer, MockLayerBuilder, OpDelete, Result as MockResult, Writer,
 };
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
-use object_store::services::Fs;
+use object_store::services::{Fs, Memory};
 use rskafka::client::partition::{Compression, UnknownTopicHandling};
 use rskafka::client::{Client, ClientBuilder};
 use rskafka::record::Record;
@@ -490,6 +492,49 @@ impl TestEnv {
         self.object_store_manager = Some(object_store_manager.clone());
 
         self.new_mito_engine_with_plugins(config, plugins).await
+    }
+
+    /// Creates a new engine with specific config on `log_store` under this env.
+    pub(crate) async fn create_engine_with_log_store<S: LogStore>(
+        &mut self,
+        config: MitoConfig,
+        log_store: Arc<S>,
+    ) -> MitoEngine {
+        let object_store_manager = Arc::new(self.create_object_store_manager());
+        self.object_store_manager = Some(object_store_manager.clone());
+
+        let data_home = self.data_home().display().to_string();
+        MitoEngine::new(
+            &data_home,
+            config,
+            log_store,
+            object_store_manager,
+            self.schema_metadata_manager.clone(),
+            self.file_ref_manager.clone(),
+            self.partition_expr_fetcher.clone(),
+            Plugins::new(),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// Creates a new engine with specific config on an [ObjectStoreLogStore] that
+    /// keeps its objects in memory, opened as datanode 0 in the standalone
+    /// generation. Returns the store so that a test can drive its testing hooks.
+    pub(crate) async fn create_engine_with_object_store_wal(
+        &mut self,
+        config: MitoConfig,
+        wal_config: &ObjectStoreWalConfig,
+    ) -> (MitoEngine, Arc<ObjectStoreLogStore>) {
+        let wal_object_store = ObjectStore::new(Memory::default()).unwrap();
+        let log_store =
+            ObjectStoreLogStore::try_new(wal_object_store, wal_config, 0, STANDALONE_GENERATION)
+                .await
+                .unwrap();
+        let engine = self
+            .create_engine_with_log_store(config, log_store.clone())
+            .await;
+        (engine, log_store)
     }
 
     /// Creates a new engine with specific config and existing logstore and object store manager.

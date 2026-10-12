@@ -125,6 +125,7 @@ api.workspace = true
 client = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 common-version.workspace = true
+datanode = { workspace = true, features = ["testing"] }
 file-engine.workspace = true
 metric-engine.workspace = true
 mito2.workspace = true

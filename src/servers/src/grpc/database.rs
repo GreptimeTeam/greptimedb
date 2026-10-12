@@ -25,6 +25,7 @@ use session::context::Channel;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
+use crate::grpc::memory_limit::PreDecodeMemoryReservation;
 use crate::grpc::{TonicResult, cancellation};
 use crate::hint_headers;
 use crate::request_memory_limiter::ServerMemoryLimiter;
@@ -57,7 +58,20 @@ impl GreptimeDatabase for DatabaseService {
             remote_addr, hints
         );
 
-        let _guard = if let Some(limiter) = request.extensions().get::<ServerMemoryLimiter>() {
+        // Retain the pre-decode reservation for the whole request: the
+        // extension holding the guard would be dropped when the request is
+        // consumed below, but the post-decode charge is skipped while it is
+        // active.
+        let _pre_reservation = request
+            .extensions()
+            .get::<PreDecodeMemoryReservation>()
+            .cloned();
+        let _guard = if _pre_reservation.is_some() {
+            // Compressed requests already reserved the worst-case decoded
+            // size before tonic decompressed the message; skip the exact
+            // post-decode charge to avoid double accounting.
+            None
+        } else if let Some(limiter) = request.extensions().get::<ServerMemoryLimiter>() {
             let message_size = request.get_ref().encoded_len() as u64;
             Some(limiter.acquire(message_size).await?)
         } else {
@@ -117,16 +131,31 @@ impl GreptimeDatabase for DatabaseService {
         );
 
         let limiter = request.extensions().get::<ServerMemoryLimiter>().cloned();
+        // For compressed streams the whole stream's decoding memory was
+        // reserved before tonic started decompressing; messages are decoded
+        // one at a time, so the reservation covers each of them. The
+        // reservation is retained below for the whole stream: the extension
+        // holding the guard would otherwise be dropped when the request is
+        // consumed, while per-message charges stay skipped.
+        let reservation = request
+            .extensions()
+            .get::<PreDecodeMemoryReservation>()
+            .cloned();
+        let pre_reserved = reservation.is_some();
 
         let handler = self.handler.clone();
         let request_future = async move {
             let mut affected_rows = 0;
 
+            // Hold the pre-decode reservation until the stream is exhausted.
+            let _reservation = reservation;
             let mut stream = request.into_inner();
             while let Some(request) = stream.next().await {
                 let request = request?;
 
-                let _guard = if let Some(limiter_ref) = &limiter {
+                let _guard = if pre_reserved {
+                    None
+                } else if let Some(limiter_ref) = &limiter {
                     let message_size = request.encoded_len() as u64;
                     Some(limiter_ref.acquire(message_size).await?)
                 } else {

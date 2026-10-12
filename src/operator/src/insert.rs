@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use api::v1::alter_table_expr::Kind;
@@ -104,6 +106,10 @@ pub struct Inserter {
     /// per-request `auto_create_table` hint. When `true`, the hint still applies.
     auto_create_table: bool,
     pending_rows_batcher: Option<Arc<dyn PendingRowsBatcher>>,
+    /// Rows handed to detached flow mirror tasks that have not finished yet.
+    /// Bounds how much row data in-flight mirror writes may keep alive, see
+    /// [`MAX_MIRROR_PENDING_ROWS`].
+    mirror_pending_rows: Arc<AtomicU64>,
 }
 
 pub type InserterRef = Arc<Inserter>;
@@ -300,6 +306,7 @@ impl Inserter {
             table_flownode_set_cache,
             auto_create_table,
             pending_rows_batcher: None,
+            mirror_pending_rows: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -548,11 +555,14 @@ impl Inserter {
             // Observe every table completion even when another table fails.
             future::join_all(submissions).await
         };
-        let affected_rows = results.into_iter().sum::<Result<usize>>()?;
-        Ok(Output::new(
-            OutputData::AffectedRows(affected_rows),
-            OutputMeta::new_with_cost(write_cost as _),
-        ))
+        let mut affected_rows = 0;
+        let mut meta = OutputMeta::new_with_cost(write_cost as _);
+        for result in results {
+            let output = result?;
+            affected_rows += output.extract_rows_and_cost().0;
+            meta.write_completions.extend(output.meta.write_completions);
+        }
+        Ok(Output::new(OutputData::AffectedRows(affected_rows), meta))
     }
 
     /// Handles row inserts request with metric engine.
@@ -804,7 +814,17 @@ impl Inserter {
                 .chain(instant_requests.requests.iter()),
         )
         .await?;
-        flow_mirror_task.detach(self.node_manager.clone())?;
+        let has_instant_rows = instant_requests.requests.iter().any(|request| {
+            request
+                .rows
+                .as_ref()
+                .is_some_and(|rows| !rows.rows.is_empty())
+        });
+        flow_mirror_task.detach(
+            self.node_manager.clone(),
+            self.mirror_pending_rows.clone(),
+            has_instant_rows,
+        )?;
 
         // Write requests to datanode and wait for response
         let write_tasks = self
@@ -2004,9 +2024,65 @@ struct CreateAlterTableResult {
     table_infos: HashMap<TableId, Arc<TableInfo>>,
 }
 
+/// Upper bound of rows buffered by detached flow mirror tasks on this frontend.
+///
+/// Rows retained by in-flight mirror RPCs count against this bound. If ordinary
+/// persisted source-table mirroring exceeds it, that mirror batch is best-effort
+/// dropped while its datanode write continues. Instant-TTL batches fail retryably
+/// on temporary saturation; oversized batches fail non-retryably so the client
+/// can reduce the batch size.
+const MAX_MIRROR_PENDING_ROWS: usize = 1_000_000;
+
+/// How often at most each mirror event is reported.
+const MIRROR_LOG_INTERVAL: Duration = Duration::from_secs(10);
+const MIRROR_LOG_NEVER_REPORTED: u64 = u64::MAX;
+
+struct MirrorLog {
+    last_log_millis: AtomicU64,
+    events: AtomicU64,
+}
+
+impl MirrorLog {
+    const fn new() -> Self {
+        Self {
+            last_log_millis: AtomicU64::new(MIRROR_LOG_NEVER_REPORTED),
+            events: AtomicU64::new(0),
+        }
+    }
+
+    /// Returns the count since the previous report, including this event, to
+    /// the single caller that claims the interval.
+    fn claim_report(&self, now_millis: u64) -> Option<u64> {
+        self.events.fetch_add(1, Ordering::Relaxed);
+        let last = self.last_log_millis.load(Ordering::Relaxed);
+        if last != MIRROR_LOG_NEVER_REPORTED
+            && now_millis.saturating_sub(last) < MIRROR_LOG_INTERVAL.as_millis() as u64
+        {
+            return None;
+        }
+        if self
+            .last_log_millis
+            .compare_exchange(last, now_millis, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return None;
+        }
+        Some(self.events.swap(0, Ordering::Relaxed))
+    }
+}
+
+static MIRROR_DROP_LOG: MirrorLog = MirrorLog::new();
+static MIRROR_FAILURE_LOG: MirrorLog = MirrorLog::new();
+
+/// Milliseconds since the first call, so the drop log is rate limited on a
+/// monotonic clock instead of the wall clock, which can jump.
+fn mirror_drop_log_millis() -> u64 {
+    static START: LazyLock<Instant> = LazyLock::new(Instant::now);
+    START.elapsed().as_millis() as u64
+}
+
 struct FlowMirrorTask {
     requests: HashMap<Peer, RegionInsertRequests>,
-    num_rows: usize,
 }
 
 impl FlowMirrorTask {
@@ -2016,7 +2092,6 @@ impl FlowMirrorTask {
     ) -> Result<Self> {
         let mut src_table_reqs: HashMap<TableId, Option<(Vec<Peer>, RegionInsertRequests)>> =
             HashMap::new();
-        let mut num_rows = 0;
 
         for req in requests {
             let table_id = RegionId::from_u64(req.region_id).table_id();
@@ -2040,11 +2115,6 @@ impl FlowMirrorTask {
                     if !peers.is_empty() {
                         let mut reqs = RegionInsertRequests::default();
                         reqs.requests.push(req.clone());
-                        num_rows += reqs
-                            .requests
-                            .iter()
-                            .map(|r| r.rows.as_ref().unwrap().rows.len())
-                            .sum::<usize>();
                         src_table_reqs.insert(table_id, Some((peers, reqs)));
                     } else {
                         // insert a empty entry to avoid repeat query
@@ -2080,16 +2150,69 @@ impl FlowMirrorTask {
             }
         }
 
-        Ok(Self {
-            requests: inserts,
-            num_rows,
-        })
+        Ok(Self { requests: inserts })
     }
 
-    fn detach(self, node_manager: NodeManagerRef) -> Result<()> {
-        crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.add(self.num_rows as i64);
+    /// Rows of row data this task keeps alive once detached: the payload it
+    /// spawns per peer, not the source requests it was built from.
+    ///
+    /// A source table mapped to several flownodes clones its requests per peer
+    /// and every clone owns its own copy of the rows, so reserving from
+    /// `self.requests` is what the per-peer shares released by [`Self::detach`]
+    /// sum to. Counting the source requests instead under-reserves whenever a
+    /// batch holds several requests for the same source table.
+    fn pending_rows(&self) -> u64 {
+        self.requests.values().map(region_inserts_rows).sum()
+    }
+
+    fn detach(
+        self,
+        node_manager: NodeManagerRef,
+        mirror_pending_rows: Arc<AtomicU64>,
+        has_instant_rows: bool,
+    ) -> Result<()> {
+        // Reserve the cloned per-peer payload before spawning. A full budget
+        // drops normal mirrors or rejects instant writes before datanode dispatch.
+        let num_rows = self.pending_rows();
+        if num_rows == 0 {
+            return Ok(());
+        }
+        if has_instant_rows && num_rows > MAX_MIRROR_PENDING_ROWS as u64 {
+            return InvalidInsertRequestSnafu {
+                reason: format!(
+                    "flow mirror batch has {num_rows} peer-fan-out rows, exceeding the limit of {}; reduce the batch size",
+                    MAX_MIRROR_PENDING_ROWS
+                ),
+            }
+            .fail();
+        }
+
+        let pending = reserve_mirror_pending_rows(&mirror_pending_rows, num_rows);
+        if pending > MAX_MIRROR_PENDING_ROWS as u64 {
+            release_mirror_pending_rows(&mirror_pending_rows, num_rows);
+            if has_instant_rows {
+                return Err(meter_core::collect::WriteRejected::new(
+                    "flow mirror pending rows limit exceeded for instant-TTL insert",
+                ))
+                .context(WriteRejectedSnafu);
+            }
+            crate::metrics::DIST_MIRROR_DROPPED_ROW_COUNT.inc_by(num_rows);
+            if let Some(events) = MIRROR_DROP_LOG.claim_report(mirror_drop_log_millis()) {
+                warn!(
+                    "Flow mirror write dropped: {} pending rows exceeds limit {}, {} drop events since last report",
+                    pending, MAX_MIRROR_PENDING_ROWS, events
+                );
+            }
+            return Ok(());
+        }
+
         for (peer, inserts) in self.requests {
+            // Each spawned task releases exactly its own share of the
+            // reservation. The shares are computed over the same per-peer
+            // payload as `pending_rows`, so they sum to the reservation.
+            let peer_rows = region_inserts_rows(&inserts);
             let node_manager = node_manager.clone();
+            let mirror_pending_rows = mirror_pending_rows.clone();
             common_runtime::spawn_global(async move {
                 let result = node_manager
                     .flownode(&peer)
@@ -2102,12 +2225,18 @@ impl FlowMirrorTask {
                     Ok(resp) => {
                         let affected_rows = resp.affected_rows;
                         crate::metrics::DIST_MIRROR_ROW_COUNT.inc_by(affected_rows);
-                        crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.sub(affected_rows as _);
                     }
                     Err(err) => {
-                        error!(err; "Failed to insert data into flownode {}", peer);
+                        if let Some(events) =
+                            MIRROR_FAILURE_LOG.claim_report(mirror_drop_log_millis())
+                        {
+                            error!(err; flownode_id = peer.id, flownode_addr = %peer.addr, "Failed to insert data into flownode ({} total mirror failures across peers since last report)", events);
+                        }
                     }
                 }
+                // Release the reservation on both the success and the failure
+                // path, otherwise a broken flownode would fill the budget forever.
+                release_mirror_pending_rows(&mirror_pending_rows, peer_rows);
             });
         }
 
@@ -2115,17 +2244,62 @@ impl FlowMirrorTask {
     }
 }
 
+/// Rows of row data carried by `inserts`. A request without a `rows` payload
+/// carries nothing to keep buffered and contributes zero.
+fn region_inserts_rows(inserts: &RegionInsertRequests) -> u64 {
+    inserts
+        .requests
+        .iter()
+        .filter_map(|req| req.rows.as_ref())
+        .map(|rows| rows.rows.len() as u64)
+        .sum()
+}
+
+/// Reserves `rows` of the pending mirror budget and returns the resulting
+/// pending row count. The caller must [`release_mirror_pending_rows`] exactly
+/// these rows once they are no longer buffered, whether it spawns the batch or
+/// drops it.
+fn reserve_mirror_pending_rows(mirror_pending_rows: &AtomicU64, rows: u64) -> u64 {
+    let pending = mirror_pending_rows.fetch_add(rows, Ordering::Relaxed) + rows;
+    // Keep the gauge in step by applying the same increment, never by setting an
+    // absolute value: another task may move the budget in between.
+    crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.add(rows as i64);
+    pending
+}
+
+/// Releases `rows` of the pending mirror budget.
+///
+/// Every release mirrors the reservation it hands back, so a well-behaved
+/// release never subtracts more than is pending; the saturating update only
+/// keeps a duplicated release from wrapping the shared budget around.
+fn release_mirror_pending_rows(mirror_pending_rows: &AtomicU64, rows: u64) {
+    let prev = mirror_pending_rows
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
+            Some(pending.saturating_sub(rows))
+        })
+        .unwrap_or_else(|prev| prev);
+    // Subtract from the gauge with the opposite sign of
+    // [`reserve_mirror_pending_rows`]; reading the budget here and `set`-ting it
+    // would publish a stale value whenever another task releases concurrently.
+    let released = rows.min(prev);
+    if released > 0 {
+        crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.sub(released as i64);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use api::helper::ColumnDataTypeWrapper;
+    use api::v1::flow::FlowResponse;
     use api::v1::helper::{field_column_schema, time_index_column_schema};
     use api::v1::{Row, RowInsertRequest, Rows, Value};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_meta::cache::new_table_flownode_set_cache;
     use common_meta::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
-    use common_meta::test_util::MockDatanodeManager;
+    use common_meta::test_util::{MockDatanodeManager, MockFlownodeHandler, MockFlownodeManager};
     use common_query::native_histogram::NATIVE_HISTOGRAM_FIELD;
     use common_query::prelude::{greptime_native_histogram, set_default_prefix};
     use datatypes::data_type::ConcreteDataType;
@@ -3131,7 +3305,7 @@ mod tests {
             _batch: arrow::record_batch::RecordBatch,
             _ctx: QueryContextRef,
             _permit: Arc<tokio::sync::OwnedSemaphorePermit>,
-        ) -> Result<usize> {
+        ) -> Result<Output> {
             panic!("empty writes must not submit a batch")
         }
     }
@@ -3339,5 +3513,696 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(output.data, OutputData::AffectedRows(0)));
+    }
+
+    /// Flownode handler that keeps mirror inserts in flight until the test
+    /// releases the gate, so the pending mirror budget can be observed
+    /// deterministically.
+    #[derive(Clone)]
+    struct GatedFlownodeHandler {
+        gate: Arc<tokio::sync::Semaphore>,
+        affected_rows: u64,
+    }
+
+    #[async_trait::async_trait]
+    impl MockFlownodeHandler for GatedFlownodeHandler {
+        async fn handle_inserts(
+            &self,
+            _peer: &Peer,
+            _requests: api::v1::region::InsertRequests,
+        ) -> common_meta::error::Result<FlowResponse> {
+            let _permit = self.gate.acquire().await.unwrap();
+            Ok(FlowResponse {
+                affected_rows: self.affected_rows,
+                ..Default::default()
+            })
+        }
+    }
+
+    fn flownode_peer() -> Peer {
+        Peer {
+            id: 1,
+            addr: "127.0.0.1:4001".to_string(),
+        }
+    }
+
+    #[derive(Clone)]
+    struct RecordingNodeManager {
+        datanode_dispatch: tokio::sync::mpsc::UnboundedSender<usize>,
+        flownode_dispatch: tokio::sync::mpsc::UnboundedSender<Peer>,
+        gates: Arc<std::sync::Mutex<HashMap<u64, Arc<tokio::sync::Semaphore>>>>,
+        fail_flownode: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl common_meta::node_manager::DatanodeManager for RecordingNodeManager {
+        async fn datanode(&self, peer: &Peer) -> common_meta::node_manager::DatanodeRef {
+            Arc::new(RecordingNode {
+                peer: peer.clone(),
+                manager: self.clone(),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl common_meta::node_manager::FlownodeManager for RecordingNodeManager {
+        async fn flownode(&self, peer: &Peer) -> common_meta::node_manager::FlownodeRef {
+            Arc::new(RecordingNode {
+                peer: peer.clone(),
+                manager: self.clone(),
+            })
+        }
+    }
+
+    struct RecordingNode {
+        peer: Peer,
+        manager: RecordingNodeManager,
+    }
+
+    #[async_trait::async_trait]
+    impl common_meta::node_manager::Datanode for RecordingNode {
+        async fn handle(
+            &self,
+            _request: api::v1::region::RegionRequest,
+        ) -> common_meta::error::Result<api::region::RegionResponse> {
+            let rows = match _request.body.as_ref() {
+                Some(api::v1::region::region_request::Body::Inserts(requests)) => requests
+                    .requests
+                    .iter()
+                    .filter_map(|request| request.rows.as_ref())
+                    .map(|rows| rows.rows.len())
+                    .sum(),
+                _ => 0,
+            };
+            let _ = self.manager.datanode_dispatch.send(rows);
+            Ok(api::region::RegionResponse::new(rows))
+        }
+
+        async fn handle_query(
+            &self,
+            _request: common_query::request::QueryRequest,
+        ) -> common_meta::error::Result<common_recordbatch::SendableRecordBatchStream> {
+            unreachable!()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl common_meta::node_manager::Flownode for RecordingNode {
+        async fn handle(
+            &self,
+            _request: api::v1::flow::FlowRequest,
+        ) -> common_meta::error::Result<FlowResponse> {
+            unreachable!()
+        }
+
+        async fn handle_inserts(
+            &self,
+            _request: api::v1::region::InsertRequests,
+        ) -> common_meta::error::Result<FlowResponse> {
+            let _ = self.manager.flownode_dispatch.send(self.peer.clone());
+            if self.manager.fail_flownode {
+                return Err(common_meta::error::UnexpectedSnafu {
+                    err_msg: "test flownode failure".to_string(),
+                }
+                .build());
+            }
+            let gate = self
+                .manager
+                .gates
+                .lock()
+                .unwrap()
+                .get(&self.peer.id)
+                .cloned();
+            if let Some(gate) = gate {
+                let _permit = gate.acquire().await.unwrap();
+            }
+            Ok(FlowResponse::default())
+        }
+
+        async fn handle_mark_window_dirty(
+            &self,
+            _request: api::v1::flow::DirtyWindowRequests,
+        ) -> common_meta::error::Result<FlowResponse> {
+            unreachable!()
+        }
+    }
+
+    fn mirror_requests(peer: &Peer, num_rows: usize) -> HashMap<Peer, RegionInsertRequests> {
+        HashMap::from_iter([(
+            peer.clone(),
+            RegionInsertRequests {
+                requests: vec![RegionInsertRequest {
+                    region_id: RegionId::new(1, 1).as_u64(),
+                    rows: Some(Rows {
+                        schema: vec![],
+                        rows: vec![api::v1::Row { values: vec![] }; num_rows],
+                    }),
+                    ..Default::default()
+                }],
+            },
+        )])
+    }
+
+    /// Serializes the mirror metric tests below: the metrics are process-wide
+    /// singletons, so these tests would otherwise observe each other's updates
+    /// when the test binary runs tests in parallel (they are isolated per
+    /// process only under nextest).
+    static MIRROR_METRIC_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    async fn lock_mirror_metrics() -> tokio::sync::MutexGuard<'static, ()> {
+        MIRROR_METRIC_TEST_LOCK.lock().await
+    }
+
+    // The tests below share the process-wide mirror metrics, so they take
+    // `MIRROR_METRIC_TEST_LOCK` and assert on the difference their own budget
+    // publishes instead of on absolute values.
+    #[tokio::test]
+    async fn flow_mirror_saturation_preserves_instant_and_normal_contracts() {
+        use common_error::ext::{ErrorExt, RetryHint};
+        use common_error::status_code::StatusCode;
+
+        let _guard = lock_mirror_metrics().await;
+        let kv_backend = prepare_mocked_backend().await;
+        let partition_manager = create_partition_rule_manager(kv_backend.clone()).await;
+        let (datanode_tx, mut datanode_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (flownode_tx, mut flownode_rx) = tokio::sync::mpsc::unbounded_channel();
+        let node_manager = Arc::new(RecordingNodeManager {
+            datanode_dispatch: datanode_tx,
+            flownode_dispatch: flownode_tx,
+            gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            fail_flownode: false,
+        });
+        let flow_cache = Cache::new(10);
+        let flow_cache_backend = prepare_mocked_backend().await;
+        let inserter = Inserter::new(
+            catalog::memory::MemoryCatalogManager::new(),
+            partition_manager,
+            node_manager,
+            Arc::new(new_table_flownode_set_cache(
+                String::new(),
+                flow_cache.clone(),
+                flow_cache_backend,
+            )),
+            true,
+        );
+        let peer = flownode_peer();
+        inserter
+            .table_flownode_set_cache
+            .invalidate(&[common_meta::instruction::CacheIdent::CreateFlow(
+                common_meta::instruction::CreateFlow {
+                    flow_id: 1,
+                    source_table_ids: vec![1, 2],
+                    partition_to_peer_mapping: vec![(0, peer)],
+                },
+            )])
+            .await
+            .unwrap();
+        let mut normal_info = new_test_table_info(1, "normal_table", [1].into_iter());
+        normal_info.catalog_name = DEFAULT_CATALOG_NAME.to_string();
+        normal_info.schema_name = DEFAULT_SCHEMA_NAME.to_string();
+        let mut instant_info = new_test_table_info(2, "instant_table", [1].into_iter());
+        instant_info.meta.options.ttl = Some(common_time::ttl::TimeToLive::Instant);
+        let table_infos =
+            HashMap::from_iter([(1, Arc::new(normal_info)), (2, Arc::new(instant_info))]);
+        let ctx = Arc::new(QueryContext::with(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+        ));
+        let insert = |table_id, num_rows| RegionInsertRequests {
+            requests: vec![RegionInsertRequest {
+                region_id: RegionId::new(table_id, 1).as_u64(),
+                rows: Some(Rows {
+                    schema: vec![],
+                    rows: vec![api::v1::Row::default(); num_rows],
+                }),
+                ..Default::default()
+            }],
+        };
+        let make_request = |normal, instant| InstantAndNormalInsertRequests {
+            normal_requests: if normal == 0 {
+                RegionInsertRequests::default()
+            } else {
+                insert(1, normal)
+            },
+            instant_requests: if instant == 0 {
+                RegionInsertRequests::default()
+            } else {
+                insert(2, instant)
+            },
+        };
+
+        let pending = inserter.mirror_pending_rows.clone();
+        let gauge_before = crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get();
+        crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.add(MAX_MIRROR_PENDING_ROWS as i64);
+        pending.store(MAX_MIRROR_PENDING_ROWS as u64, Ordering::Relaxed);
+        let dropped_before = crate::metrics::DIST_MIRROR_DROPPED_ROW_COUNT.get();
+        for request in [make_request(0, 1), make_request(1, 1)] {
+            let error = inserter
+                .do_request(request, &table_infos, &ctx)
+                .await
+                .unwrap_err();
+            assert_eq!(error.status_code(), StatusCode::RateLimited);
+            assert_eq!(error.retry_hint(), RetryHint::Retryable);
+            assert!(datanode_rx.try_recv().is_err());
+            assert!(flownode_rx.try_recv().is_err());
+            assert_eq!(
+                pending.load(Ordering::Relaxed),
+                MAX_MIRROR_PENDING_ROWS as u64
+            );
+        }
+        assert_eq!(
+            crate::metrics::DIST_MIRROR_DROPPED_ROW_COUNT.get(),
+            dropped_before
+        );
+
+        for pending_before in [0, MAX_MIRROR_PENDING_ROWS as u64] {
+            if pending_before == 0 {
+                pending.store(0, Ordering::Relaxed);
+                crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.sub(MAX_MIRROR_PENDING_ROWS as i64);
+            }
+            let gauge_before_rejection = crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get();
+            for (normal, instant) in [
+                (0, MAX_MIRROR_PENDING_ROWS + 1),
+                (MAX_MIRROR_PENDING_ROWS / 2, MAX_MIRROR_PENDING_ROWS / 2 + 1),
+            ] {
+                let error = inserter
+                    .do_request(make_request(normal, instant), &table_infos, &ctx)
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+                assert_eq!(error.retry_hint(), RetryHint::NonRetryable);
+                let message = error.to_string();
+                assert!(message.contains("1000001"), "{message}");
+                assert!(message.contains("1000000"), "{message}");
+                assert!(message.contains("reduce the batch size"), "{message}");
+                assert!(datanode_rx.try_recv().is_err());
+                assert!(flownode_rx.try_recv().is_err());
+                assert_eq!(pending.load(Ordering::Relaxed), pending_before);
+                assert_eq!(
+                    crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get(),
+                    gauge_before_rejection
+                );
+                assert_eq!(
+                    crate::metrics::DIST_MIRROR_DROPPED_ROW_COUNT.get(),
+                    dropped_before
+                );
+            }
+            if pending_before == 0 {
+                crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.add(MAX_MIRROR_PENDING_ROWS as i64);
+                pending.store(MAX_MIRROR_PENDING_ROWS as u64, Ordering::Relaxed);
+            }
+        }
+
+        let result = inserter
+            .do_request(make_request(1, 0), &table_infos, &ctx)
+            .await
+            .unwrap();
+        assert!(matches!(result.data, OutputData::AffectedRows(1)));
+        assert_eq!(1, datanode_rx.try_recv().unwrap());
+        assert!(flownode_rx.try_recv().is_err());
+        assert_eq!(
+            crate::metrics::DIST_MIRROR_DROPPED_ROW_COUNT.get(),
+            dropped_before + 1
+        );
+        pending.store(0, Ordering::Relaxed);
+        crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.sub(MAX_MIRROR_PENDING_ROWS as i64);
+        assert_eq!(
+            crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get(),
+            gauge_before
+        );
+    }
+
+    #[tokio::test]
+    async fn flow_mirror_new_counts_regions_and_peer_clones() {
+        use common_meta::instruction::{CacheIdent, CreateFlow};
+
+        let peer1 = flownode_peer();
+        let peer2 = Peer {
+            id: 2,
+            addr: "127.0.0.1:4002".to_string(),
+        };
+        let cache_backend = prepare_mocked_backend().await;
+        let cache = Arc::new(new_table_flownode_set_cache(
+            String::new(),
+            Cache::new(10),
+            cache_backend,
+        ));
+        cache
+            .invalidate(&[CacheIdent::CreateFlow(CreateFlow {
+                flow_id: 1,
+                source_table_ids: vec![1],
+                partition_to_peer_mapping: vec![(0, peer1), (1, peer2)],
+            })])
+            .await
+            .unwrap();
+        let request = |region_id| RegionInsertRequest {
+            region_id,
+            rows: Some(Rows {
+                schema: vec![],
+                rows: vec![api::v1::Row { values: vec![] }; 3],
+            }),
+            ..Default::default()
+        };
+        let requests = [
+            request(RegionId::new(1, 0).as_u64()),
+            request(RegionId::new(1, 1).as_u64()),
+        ];
+        let task = FlowMirrorTask::new(&cache, requests.iter()).await.unwrap();
+        assert_eq!(12, task.pending_rows());
+        assert_eq!(2, task.requests.len());
+    }
+
+    #[tokio::test]
+    async fn flow_mirror_dropped_when_pending_exceeds_limit() {
+        let _guard = lock_mirror_metrics().await;
+        let pending = Arc::new(AtomicU64::new(MAX_MIRROR_PENDING_ROWS as u64));
+        let dropped_before = crate::metrics::DIST_MIRROR_DROPPED_ROW_COUNT.get();
+        let gauge_before = crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get();
+        let num_rows = 100;
+
+        let task = FlowMirrorTask {
+            requests: mirror_requests(&flownode_peer(), num_rows),
+        };
+        // The budget is already full, so nothing may be spawned for this batch.
+        task.detach(
+            Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)),
+            pending.clone(),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            num_rows as u64,
+            crate::metrics::DIST_MIRROR_DROPPED_ROW_COUNT.get() - dropped_before
+        );
+        // The dropped batch must not leak its reservation.
+        assert_eq!(
+            MAX_MIRROR_PENDING_ROWS as u64,
+            pending.load(Ordering::Relaxed)
+        );
+        // The reservation taken before the limit check is released again, so the
+        // gauge nets out and keeps matching the pending budget.
+        assert_eq!(
+            gauge_before,
+            crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get(),
+            "a dropped batch must not change the pending gauge"
+        );
+
+        let task = FlowMirrorTask {
+            requests: mirror_requests(&flownode_peer(), num_rows),
+        };
+        let error = task
+            .detach(
+                Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)),
+                pending.clone(),
+                true,
+            )
+            .err()
+            .unwrap();
+        use common_error::ext::{ErrorExt, RetryHint};
+        use common_error::status_code::StatusCode;
+        assert_eq!(error.status_code(), StatusCode::RateLimited);
+        assert_eq!(error.retry_hint(), RetryHint::Retryable);
+        assert_eq!(
+            crate::metrics::DIST_MIRROR_DROPPED_ROW_COUNT.get(),
+            dropped_before + num_rows as u64,
+            "rejected instant rows are not successful best-effort drops"
+        );
+        assert_eq!(
+            MAX_MIRROR_PENDING_ROWS as u64,
+            pending.load(Ordering::Relaxed)
+        );
+        assert_eq!(
+            gauge_before,
+            crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get()
+        );
+    }
+
+    /// A source table mapped to several flownodes clones its requests per peer,
+    /// so the reservation must cover every clone and each spawned task must hand
+    /// back exactly its own share; otherwise the shared budget drifts.
+    #[tokio::test]
+    async fn flow_mirror_reserves_and_releases_per_peer_shares() {
+        let _guard = lock_mirror_metrics().await;
+        let per_peer_rows = 10;
+        let total_rows = (2 * per_peer_rows) as u64;
+        // Exactly enough room for the whole batch, cloned rows included.
+        let start = MAX_MIRROR_PENDING_ROWS as u64 - total_rows;
+        let pending = Arc::new(AtomicU64::new(start));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let node_manager = Arc::new(MockFlownodeManager::new(GatedFlownodeHandler {
+            gate: gate.clone(),
+            affected_rows: per_peer_rows as u64,
+        }));
+
+        let mut requests = mirror_requests(&flownode_peer(), per_peer_rows);
+        requests.extend(mirror_requests(
+            &Peer {
+                id: 2,
+                addr: "127.0.0.1:4002".to_string(),
+            },
+            per_peer_rows,
+        ));
+
+        let gauge_before = crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get();
+        FlowMirrorTask { requests }
+            .detach(node_manager, pending.clone(), false)
+            .unwrap();
+
+        // Both per-peer payloads are counted, so the budget is exactly full
+        // instead of over-reserved by the duplicated rows.
+        assert_eq!(
+            MAX_MIRROR_PENDING_ROWS as u64,
+            pending.load(Ordering::Relaxed)
+        );
+
+        // Let both tasks finish and check that the budget lands back on its
+        // starting value: over-releasing a shared reservation would saturate it.
+        // The gauge is checked too because `release_mirror_pending_rows` moves
+        // the budget before the gauge; exiting on the budget alone could leak a
+        // pending `gauge.sub` into the next test holding the metrics lock.
+        gate.add_permits(2);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while pending.load(Ordering::Relaxed) != start
+            || crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get() != gauge_before
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the mirror tasks must release exactly their own shares"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[tokio::test]
+    async fn flow_mirror_fast_peer_releases_only_its_share_before_drop() {
+        let _guard = lock_mirror_metrics().await;
+        let peer1 = flownode_peer();
+        let peer2 = Peer {
+            id: 2,
+            addr: "127.0.0.1:4002".to_string(),
+        };
+        let gate1 = Arc::new(tokio::sync::Semaphore::new(0));
+        let gate2 = Arc::new(tokio::sync::Semaphore::new(0));
+        let gates = Arc::new(std::sync::Mutex::new(HashMap::from_iter([
+            (peer1.id, gate1.clone()),
+            (peer2.id, gate2.clone()),
+        ])));
+        let (datanode_tx, _datanode_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (flownode_tx, mut flownode_rx) = tokio::sync::mpsc::unbounded_channel();
+        let node_manager = Arc::new(RecordingNodeManager {
+            datanode_dispatch: datanode_tx,
+            flownode_dispatch: flownode_tx,
+            gates,
+            fail_flownode: false,
+        });
+        let pending = Arc::new(AtomicU64::new(MAX_MIRROR_PENDING_ROWS as u64 - 20));
+        let gauge_before = crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get();
+        let mut requests = mirror_requests(&peer1, 10);
+        requests.extend(mirror_requests(&peer2, 10));
+        let task = FlowMirrorTask { requests };
+        task.detach(node_manager.clone(), pending.clone(), false)
+            .unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(10), flownode_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(10), flownode_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(first.id, second.id);
+        let fast_gate = if first.id == peer1.id {
+            gate1.clone()
+        } else {
+            gate2.clone()
+        };
+        let slow_gate = if first.id == peer1.id {
+            gate2.clone()
+        } else {
+            gate1.clone()
+        };
+        fast_gate.add_permits(1);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while pending.load(Ordering::Relaxed) != MAX_MIRROR_PENDING_ROWS as u64 - 10 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fast peer did not release"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let dropped_before = crate::metrics::DIST_MIRROR_DROPPED_ROW_COUNT.get();
+        FlowMirrorTask {
+            requests: mirror_requests(&peer1, 11),
+        }
+        .detach(node_manager, pending.clone(), false)
+        .unwrap();
+        assert_eq!(
+            crate::metrics::DIST_MIRROR_DROPPED_ROW_COUNT.get(),
+            dropped_before + 11
+        );
+        assert!(flownode_rx.try_recv().is_err());
+        slow_gate.add_permits(1);
+        while pending.load(Ordering::Relaxed) != MAX_MIRROR_PENDING_ROWS as u64 - 20
+            || crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get() != gauge_before
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "slow peer did not release"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[tokio::test]
+    async fn flow_mirror_failure_releases_budget_and_gauge() {
+        let _guard = lock_mirror_metrics().await;
+        let (datanode_tx, _datanode_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (flownode_tx, mut flownode_rx) = tokio::sync::mpsc::unbounded_channel();
+        let node_manager = Arc::new(RecordingNodeManager {
+            datanode_dispatch: datanode_tx,
+            flownode_dispatch: flownode_tx,
+            gates: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            fail_flownode: true,
+        });
+        let pending = Arc::new(AtomicU64::new(0));
+        let gauge_before = crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get();
+        FlowMirrorTask {
+            requests: mirror_requests(&flownode_peer(), 5),
+        }
+        .detach(node_manager, pending.clone(), false)
+        .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), flownode_rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            flownode_peer().id
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while pending.load(Ordering::Relaxed) != 0
+            || crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get() != gauge_before
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "failed task leaked reservation"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[tokio::test]
+    async fn flow_mirror_pending_counter_consistent() {
+        let _guard = lock_mirror_metrics().await;
+        let pending = Arc::new(AtomicU64::new(0));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let node_manager = Arc::new(MockFlownodeManager::new(GatedFlownodeHandler {
+            gate: gate.clone(),
+            affected_rows: 7,
+        }));
+
+        // A batch without rows short-circuits and leaves the budget untouched.
+        let gauge_before = crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get();
+        FlowMirrorTask {
+            requests: HashMap::new(),
+        }
+        .detach(node_manager.clone(), pending.clone(), false)
+        .unwrap();
+        assert_eq!(0, pending.load(Ordering::Relaxed));
+        assert_eq!(
+            gauge_before,
+            crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get(),
+            "an empty batch must not touch the pending gauge"
+        );
+
+        let dropped_before = crate::metrics::DIST_MIRROR_DROPPED_ROW_COUNT.get();
+        let num_rows = 7;
+
+        FlowMirrorTask {
+            requests: mirror_requests(&flownode_peer(), num_rows),
+        }
+        .detach(node_manager, pending.clone(), false)
+        .unwrap();
+
+        // The spawned task is still waiting on the gated flownode, so the
+        // reservation made by `detach` is the value observable here.
+        assert_eq!(num_rows as u64, pending.load(Ordering::Relaxed));
+        assert_eq!(
+            num_rows as i64,
+            crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get() - gauge_before,
+            "the pending gauge must track the pending rows"
+        );
+        assert_eq!(
+            dropped_before,
+            crate::metrics::DIST_MIRROR_DROPPED_ROW_COUNT.get(),
+            "a batch within the limit must not be counted as dropped"
+        );
+
+        // Release the in-flight task and wait for it to hand its reservation
+        // back, so no task is left holding the shared metrics after this test.
+        gate.add_permits(1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while pending.load(Ordering::Relaxed) != 0
+            || crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get() != gauge_before
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the mirror task did not release its pending reservation"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn mirror_logs_are_rate_limited() {
+        let log = Arc::new(MirrorLog::new());
+        assert_eq!(Some(1), log.claim_report(1_000));
+        assert_eq!(None, log.claim_report(1_500));
+        assert_eq!(None, log.claim_report(10_999));
+        assert_eq!(Some(3), log.claim_report(11_000));
+        assert_eq!(None, log.claim_report(11_001));
+        assert_eq!(Some(2), log.claim_report(21_000));
+
+        let concurrent = Arc::new(MirrorLog::new());
+        assert_eq!(Some(1), concurrent.claim_report(50_000));
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let threads = (0..8)
+            .map(|_| {
+                let log = concurrent.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    log.claim_report(60_000)
+                })
+            })
+            .collect::<Vec<_>>();
+        let winners = threads
+            .into_iter()
+            .filter_map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(winners.len(), 1);
+        let residual = concurrent.events.swap(0, Ordering::Relaxed);
+        assert_eq!(winners[0] + residual, 8);
     }
 }

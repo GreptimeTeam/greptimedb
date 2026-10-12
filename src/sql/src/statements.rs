@@ -36,7 +36,10 @@ pub mod truncate;
 use std::sync::Arc;
 
 use api::helper::ColumnDataTypeWrapper;
-use api::v1::SemanticType;
+use api::v1::{ColumnOptions, SemanticType};
+use arrow_schema::extension::{
+    EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
+};
 use common_sql::default_constraint::parse_column_default_constraint;
 use common_time::timezone::Timezone;
 use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
@@ -148,32 +151,34 @@ pub fn column_to_schema(
 
     column_schema.set_inverted_index(column.extensions.inverted_index_options.is_some());
 
-    let is_json2_column = if let SqlDataType::Custom(object_name, _) = column.data_type() {
-        object_name
-            .0
-            .first()
-            .map(|x| x.to_string_unquoted().eq_ignore_ascii_case(JSON2_TYPE_NAME))
-            .unwrap_or_default()
-    } else {
-        false
-    };
-    if is_json2_column {
-        let settings = column
-            .extensions
-            .build_json_settings()?
-            .unwrap_or_else(JsonSettings::new_v2);
-        let extension = Json2ExtensionType::new(Arc::new(JsonMetadata::new(settings)));
-        column_schema.with_extension_type(&extension);
-    }
+    set_json2_extension(&mut column_schema, column)?;
 
     Ok(column_schema)
 }
 
-/// Convert `ColumnDef` in sqlparser to `ColumnDef` in gRPC proto.
-pub fn sql_column_def_to_grpc_column_def(
-    col: &ColumnDef,
+/// Attaches extension metadata and settings to JSON2 columns.
+fn set_json2_extension(column_schema: &mut ColumnSchema, column: &Column) -> Result<()> {
+    if !column_schema.data_type.is_json2() {
+        return Ok(());
+    }
+
+    let settings = column
+        .extensions
+        .build_json_settings()?
+        .unwrap_or_else(JsonSettings::new_v2);
+    if let Some(extension) = json2_extension(column.data_type(), settings) {
+        column_schema.with_extension_type(&extension);
+    }
+
+    Ok(())
+}
+
+/// Converts a SQL [`Column`] to a `ColumnDef` in gRPC proto.
+pub fn sql_col_to_grpc_col_def(
+    column: &Column,
     timezone: Option<&Timezone>,
 ) -> Result<api::v1::ColumnDef> {
+    let col = &column.column_def;
     let name = col.name.value.clone();
     let data_type = sql_data_type_to_concrete_data_type(&col.data_type)?;
 
@@ -204,6 +209,24 @@ pub fn sql_column_def_to_grpc_column_def(
         SemanticType::Field
     };
 
+    let settings = column
+        .extensions
+        .build_json_settings()?
+        .unwrap_or_else(JsonSettings::new_v2);
+    let options = json2_extension(&col.data_type, settings).map(|extension| {
+        let mut options = ColumnOptions::default();
+        options.options.insert(
+            EXTENSION_TYPE_NAME_KEY.to_string(),
+            Json2ExtensionType::NAME.to_string(),
+        );
+        if let Some(metadata) = extension.serialize_metadata() {
+            options
+                .options
+                .insert(EXTENSION_TYPE_METADATA_KEY.to_string(), metadata);
+        }
+        options
+    });
+
     Ok(api::v1::ColumnDef {
         name,
         data_type: datatype as i32,
@@ -212,8 +235,24 @@ pub fn sql_column_def_to_grpc_column_def(
         semantic_type: semantic_type as _,
         comment: String::new(),
         datatype_extension: datatype_ext,
-        options: None,
+        options,
     })
+}
+
+fn json2_extension(data_type: &SqlDataType, settings: JsonSettings) -> Option<Json2ExtensionType> {
+    let SqlDataType::Custom(name, _) = data_type else {
+        return None;
+    };
+    if !name.0.first().is_some_and(|name| {
+        name.to_string_unquoted()
+            .eq_ignore_ascii_case(JSON2_TYPE_NAME)
+    }) {
+        return None;
+    }
+
+    Some(Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+        settings,
+    ))))
 }
 
 pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<ConcreteDataType> {
@@ -453,15 +492,18 @@ mod tests {
     }
 
     #[test]
-    pub fn test_sql_column_def_to_grpc_column_def() {
+    pub fn test_sql_col_to_grpc_col_def() {
         // test basic
-        let column_def = ColumnDef {
-            name: "col".into(),
-            data_type: SqlDataType::Double(ExactNumberInfo::None),
-            options: vec![],
+        let column = Column {
+            column_def: ColumnDef {
+                name: "col".into(),
+                data_type: SqlDataType::Double(ExactNumberInfo::None),
+                options: vec![],
+            },
+            extensions: ColumnExtensions::default(),
         };
 
-        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def, None).unwrap();
+        let grpc_column_def = sql_col_to_grpc_col_def(&column, None).unwrap();
 
         assert_eq!("col", grpc_column_def.name);
         assert!(grpc_column_def.is_nullable); // nullable when options are empty
@@ -470,56 +512,65 @@ mod tests {
         assert_eq!(grpc_column_def.semantic_type, SemanticType::Field as i32);
 
         // test not null
-        let column_def = ColumnDef {
-            name: "col".into(),
-            data_type: SqlDataType::Double(ExactNumberInfo::None),
-            options: vec![ColumnOptionDef {
-                name: None,
-                option: ColumnOption::NotNull,
-            }],
+        let column = Column {
+            column_def: ColumnDef {
+                name: "col".into(),
+                data_type: SqlDataType::Double(ExactNumberInfo::None),
+                options: vec![ColumnOptionDef {
+                    name: None,
+                    option: ColumnOption::NotNull,
+                }],
+            },
+            extensions: ColumnExtensions::default(),
         };
 
-        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def, None).unwrap();
+        let grpc_column_def = sql_col_to_grpc_col_def(&column, None).unwrap();
         assert!(!grpc_column_def.is_nullable);
 
         // test primary key
-        let column_def = ColumnDef {
-            name: "col".into(),
-            data_type: SqlDataType::Double(ExactNumberInfo::None),
-            options: vec![ColumnOptionDef {
-                name: None,
-                option: ColumnOption::PrimaryKey(PrimaryKeyConstraint {
+        let column = Column {
+            column_def: ColumnDef {
+                name: "col".into(),
+                data_type: SqlDataType::Double(ExactNumberInfo::None),
+                options: vec![ColumnOptionDef {
                     name: None,
-                    index_name: None,
-                    index_type: None,
-                    columns: vec![],
-                    index_options: vec![],
-                    characteristics: None,
-                }),
-            }],
+                    option: ColumnOption::PrimaryKey(PrimaryKeyConstraint {
+                        name: None,
+                        index_name: None,
+                        index_type: None,
+                        columns: vec![],
+                        index_options: vec![],
+                        characteristics: None,
+                    }),
+                }],
+            },
+            extensions: ColumnExtensions::default(),
         };
 
-        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def, None).unwrap();
+        let grpc_column_def = sql_col_to_grpc_col_def(&column, None).unwrap();
         assert_eq!(grpc_column_def.semantic_type, SemanticType::Tag as i32);
     }
 
     #[test]
-    pub fn test_sql_column_def_to_grpc_column_def_with_timezone() {
-        let column_def = ColumnDef {
-            name: "col".into(),
-            // MILLISECOND
-            data_type: SqlDataType::Timestamp(Some(3), TimezoneInfo::None),
-            options: vec![ColumnOptionDef {
-                name: None,
-                option: ColumnOption::Default(Expr::Value(
-                    SqlValue::SingleQuotedString("2024-01-30T00:01:01".to_string()).into(),
-                )),
-            }],
+    pub fn test_sql_col_to_grpc_col_def_with_timezone() {
+        let column = Column {
+            column_def: ColumnDef {
+                name: "col".into(),
+                // MILLISECOND
+                data_type: SqlDataType::Timestamp(Some(3), TimezoneInfo::None),
+                options: vec![ColumnOptionDef {
+                    name: None,
+                    option: ColumnOption::Default(Expr::Value(
+                        SqlValue::SingleQuotedString("2024-01-30T00:01:01".to_string()).into(),
+                    )),
+                }],
+            },
+            extensions: ColumnExtensions::default(),
         };
 
         // with timezone "Asia/Shanghai"
-        let grpc_column_def = sql_column_def_to_grpc_column_def(
-            &column_def,
+        let grpc_column_def = sql_col_to_grpc_col_def(
+            &column,
             Some(&Timezone::from_tz_string("Asia/Shanghai").unwrap()),
         )
         .unwrap();
@@ -539,7 +590,7 @@ mod tests {
         );
 
         // without timezone
-        let grpc_column_def = sql_column_def_to_grpc_column_def(&column_def, None).unwrap();
+        let grpc_column_def = sql_col_to_grpc_col_def(&column, None).unwrap();
         assert_eq!("col", grpc_column_def.name);
         assert!(grpc_column_def.is_nullable); // nullable when options are empty
         assert_eq!(

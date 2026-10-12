@@ -934,14 +934,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_put_skip_wal_batch_recovery() {
-        check_put_skip_wal_batch_recovery("sparse", false).await;
-        check_put_skip_wal_batch_recovery("sparse", true).await;
-        check_put_skip_wal_batch_recovery("dense", false).await;
-        check_put_skip_wal_batch_recovery("dense", true).await;
+        check_put_skip_wal_batch_recovery("sparse", false, false).await;
+        check_put_skip_wal_batch_recovery("sparse", true, false).await;
+        check_put_skip_wal_batch_recovery("dense", false, false).await;
+        check_put_skip_wal_batch_recovery("dense", true, false).await;
     }
 
-    async fn check_put_skip_wal_batch_recovery(encoding: &str, skip_wal: bool) {
-        let env = TestEnv::new().await;
+    #[tokio::test]
+    async fn test_put_skip_wal_batch_close_recovery() {
+        check_put_skip_wal_batch_recovery("sparse", false, true).await;
+        check_put_skip_wal_batch_recovery("sparse", true, true).await;
+        check_put_skip_wal_batch_recovery("dense", false, true).await;
+        check_put_skip_wal_batch_recovery("dense", true, true).await;
+    }
+
+    async fn check_put_skip_wal_batch_recovery(encoding: &str, skip_wal: bool, close: bool) {
+        let mut env = TestEnv::new().await;
         let engine = env.metric();
         engine.inner.flush_task.stop().await.unwrap();
         let physical_region_id = env.default_physical_region_id();
@@ -1009,18 +1017,21 @@ mod tests {
             assert!(stat.memtable_size > 0);
             assert_eq!(stat.sst_num, 0);
         }
-        engine
-            .handle_request(
-                physical_region_id,
-                RegionRequest::Close(RegionCloseRequest {
-                    flush_on_close: false,
-                }),
-            )
-            .await
-            .unwrap();
-
-        // Recreate the wrapper as well, discarding its metadata cache.
-        let reopened = MetricEngine::try_new(env.mito(), Default::default()).unwrap();
+        let reopened = if close {
+            engine
+                .handle_request(
+                    physical_region_id,
+                    RegionRequest::Close(RegionCloseRequest::default()),
+                )
+                .await
+                .unwrap();
+            // Recreate the wrapper as well, discarding its metadata cache.
+            MetricEngine::try_new(env.mito(), Default::default()).unwrap()
+        } else {
+            // Bypass Close to retain coverage of rows lost without WAL protection.
+            env.reopen_engine(Default::default()).await;
+            env.metric()
+        };
         reopened.inner.flush_task.stop().await.unwrap();
         reopened
             .handle_request(
@@ -1042,12 +1053,17 @@ mod tests {
             )
             .await
             .unwrap();
+        let stat = env
+            .mito()
+            .region_statistic(crate::utils::to_data_region_id(physical_region_id))
+            .unwrap();
+        assert_eq!(stat.sst_num > 0, skip_wal && close);
         let recovered_metadata = reopened.get_metadata(logical_region_id).await.unwrap();
         assert_eq!(
             metadata_before.column_metadatas,
             recovered_metadata.column_metadatas
         );
-        let expected = if skip_wal {
+        let expected = if skip_wal && !close {
             vec![]
         } else {
             vec![(0, 30.0), (1, 10.0), (2, 20.0), (3, 30.0)]
@@ -1055,7 +1071,7 @@ mod tests {
         assert_eq!(
             scan_timestamp_values(&reopened, logical_region_id).await,
             expected,
-            "encoding={encoding}, skip_wal={skip_wal}"
+            "encoding={encoding}, skip_wal={skip_wal}, close={close}"
         );
     }
 

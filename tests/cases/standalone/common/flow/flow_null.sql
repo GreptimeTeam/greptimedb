@@ -164,6 +164,8 @@ VALUES
     (2, "name2", "2024-10-18 19:00:00"),
     (3, "name3", "2024-10-18 19:00:00");
 
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_nullable_pk');
 
@@ -177,6 +179,8 @@ VALUES
     ("name2", "2024-10-18 19:00:00"),
     ("name3", "2024-10-18 19:00:00");
 
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('calc_nullable_pk');
 

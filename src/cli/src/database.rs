@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
@@ -25,9 +26,7 @@ use servers::http::header::constants::GREPTIME_DB_HEADER_TIMEOUT;
 use servers::http::result::greptime_result_v1::GreptimedbV1Response;
 use snafu::ResultExt;
 
-use crate::error::{
-    BuildClientSnafu, HttpQuerySqlSnafu, ParseProxyOptsSnafu, Result, SerdeJsonSnafu,
-};
+use crate::error::{BuildClientSnafu, HttpQuerySqlSnafu, ParseProxyOptsSnafu, Result};
 
 #[derive(Debug, Clone)]
 pub struct DatabaseClient {
@@ -37,6 +36,7 @@ pub struct DatabaseClient {
     timeout: Duration,
     proxy: Option<reqwest::Proxy>,
     no_proxy: bool,
+    client: Arc<tokio::sync::OnceCell<reqwest::Client>>,
 }
 
 pub fn parse_proxy_opts(
@@ -86,6 +86,7 @@ impl DatabaseClient {
             timeout,
             proxy,
             no_proxy,
+            client: Arc::new(tokio::sync::OnceCell::new()),
         }
     }
 
@@ -97,57 +98,84 @@ impl DatabaseClient {
         self.sql(sql, DEFAULT_SCHEMA_NAME).await
     }
 
-    /// Requires the explicit packed-import protocol before any restore mutation.
-    pub async fn require_packed_import(&self) -> Result<()> {
-        self.require_packed_capability("metric_packed_import").await
+    pub(crate) fn catalog(&self) -> &str {
+        &self.catalog
     }
 
     /// Requires packed export support before creating snapshot artifacts.
     pub async fn require_packed_export(&self) -> Result<()> {
-        self.require_packed_capability("metric_packed_export").await
+        self.capabilities().await?.require("metric_packed_export")
     }
 
-    async fn require_packed_capability(&self, capability: &str) -> Result<()> {
+    /// Reads target capabilities once; older targets advertise no extensions.
+    pub(crate) async fn capabilities(&self) -> Result<Capabilities> {
         let url = format!("http://{}/v1/capabilities", self.addr);
-        let mut builder = reqwest::Client::builder().timeout(self.timeout);
-        if let Some(proxy) = self.proxy.clone() {
-            builder = builder.proxy(proxy);
-        }
-        if self.no_proxy {
-            builder = builder.no_proxy();
-        }
-        let client = builder.build().context(BuildClientSnafu)?;
-        let mut request = client.get(&url);
+        let mut request = self.http_client().await?.get(&url).timeout(self.timeout);
         if let Some(auth) = &self.auth_header {
             request = request.header("Authorization", auth);
         }
         let response = request.send().await.with_context(|_| HttpQuerySqlSnafu {
-            reason: "packed snapshot capability request failed",
+            reason: "capability request failed",
         })?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return crate::error::InvalidArgumentsSnafu {
-                msg: format!("server does not support {capability}"),
-            }
-            .fail();
+            return Ok(Capabilities(serde_json::json!({})));
         }
         let response = response
             .error_for_status()
             .with_context(|_| HttpQuerySqlSnafu {
-                reason: "packed snapshot capability request rejected",
+                reason: "capability request rejected",
             })?;
         let body = response.text().await.with_context(|_| HttpQuerySqlSnafu {
             reason: "cannot read capability response",
         })?;
-        let value: Value = serde_json::from_str(&body).context(SerdeJsonSnafu)?;
-        if !value.is_object() {
+        let value: Value = serde_json::from_str(&body).map_err(|_| {
+            crate::error::UnexpectedSnafu {
+                msg: "invalid capability response",
+            }
+            .build()
+        })?;
+        if !value.is_object()
+            || value.get("error").is_some()
+            || value.get("code").is_some_and(|v| v.as_u64() != Some(0))
+        {
             return crate::error::UnexpectedSnafu {
                 msg: "invalid capability response: expected JSON object",
             }
             .fail();
         }
-        if value.get(capability).and_then(Value::as_u64) != Some(1) {
+        for key in [
+            "metric_batch_ddl",
+            "metric_packed_import",
+            "metric_packed_export",
+        ] {
+            if value.get(key).is_some_and(|v| v.as_u64().is_none()) {
+                return crate::error::UnexpectedSnafu {
+                    msg: "invalid capability version",
+                }
+                .fail();
+            }
+        }
+        Ok(Capabilities(value))
+    }
+
+    /// Submits a batch once. An ambiguous failure must not be replayed here.
+    pub(crate) async fn logical_tables(&self, sql: &str, schema: &str, count: usize) -> Result<()> {
+        let db = format!("{}-{}", self.catalog, schema);
+        if 8 + form_encoded_len(&db) + form_encoded_len(sql) > 4 * 1024 * 1024 {
             return crate::error::InvalidArgumentsSnafu {
-                msg: format!("server does not support {capability} version 1"),
+                msg: "logical-table batch exceeds 4 MiB form limit",
+            }
+            .fail();
+        }
+        let response = self.ddl_response(sql, schema, "ddl/logical-tables").await?;
+        if response.output().len() != count
+            || response
+                .output()
+                .iter()
+                .any(|output| !matches!(output, GreptimeQueryOutput::AffectedRows(0)))
+        {
+            return crate::error::UnexpectedSnafu {
+                msg: "invalid logical-table batch output",
             }
             .fail();
         }
@@ -168,23 +196,39 @@ impl DatabaseClient {
         sql: &str,
         schema: &str,
     ) -> Result<GreptimedbV1Response> {
-        let url = format!("http://{}/v1/sql", self.addr);
+        self.ddl_response(sql, schema, "sql").await
+    }
+
+    async fn ddl_response(
+        &self,
+        sql: &str,
+        schema: &str,
+        endpoint: &str,
+    ) -> Result<GreptimedbV1Response> {
+        let url = format!("http://{}/v1/{endpoint}", self.addr);
         let params = [
             ("db", format!("{}-{}", self.catalog, schema)),
             ("sql", sql.to_string()),
         ];
-        let mut builder = reqwest::Client::builder();
-        if let Some(proxy) = self.proxy.clone() {
-            builder = builder.proxy(proxy);
-        }
-        if self.no_proxy {
-            builder = builder.no_proxy();
-        }
-        let client = builder.build().context(BuildClientSnafu)?;
-        let mut request = client
+        let mut request = self
+            .http_client()
+            .await?
             .post(&url)
-            .form(&params)
             .header("Content-Type", "application/x-www-form-urlencoded");
+        if endpoint == "ddl/logical-tables" {
+            let body = url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs(&params)
+                .finish();
+            // A streaming body cannot be cloned for reqwest's protocol retries.
+            request = request
+                .timeout(self.timeout)
+                .header(reqwest::header::CONTENT_LENGTH, body.len())
+                .body(reqwest::Body::wrap_stream(futures::stream::once(
+                    std::future::ready(Ok::<_, std::io::Error>(body)),
+                )));
+        } else {
+            request = request.form(&params);
+        }
         if let Some(ref auth) = self.auth_header {
             request = request.header("Authorization", auth);
         }
@@ -197,17 +241,105 @@ impl DatabaseClient {
         let response = request.send().await.with_context(|_| HttpQuerySqlSnafu {
             reason: format!("bad url: {}", url),
         })?;
-        let response = response
-            .error_for_status()
-            .with_context(|_| HttpQuerySqlSnafu {
-                reason: format!("query failed: {}", sql),
-            })?;
-
+        let status = response.status();
         let text = response.text().await.with_context(|_| HttpQuerySqlSnafu {
             reason: "cannot get response text".to_string(),
         })?;
+        let value: Value = serde_json::from_str(&text).map_err(|_| {
+            crate::error::UnexpectedSnafu {
+                msg: format!("invalid SQL response ({status})"),
+            }
+            .build()
+        })?;
+        if !status.is_success()
+            || value.get("error").is_some()
+            || value
+                .get("code")
+                .is_some_and(|code| code.as_u64() != Some(0))
+        {
+            return crate::error::UnexpectedSnafu {
+                msg: format!(
+                    "SQL request failed ({status}, code {:?})",
+                    value.get("code").and_then(Value::as_u64)
+                ),
+            }
+            .fail();
+        }
+        if let Some(outputs) = value.get("output").and_then(Value::as_array) {
+            for (index, output) in outputs.iter().enumerate() {
+                if output.get("error").is_some()
+                    || output
+                        .get("code")
+                        .is_some_and(|code| code.as_u64() != Some(0))
+                {
+                    return crate::error::UnexpectedSnafu {
+                        msg: format!(
+                            "SQL statement {} failed (code {:?})",
+                            index + 1,
+                            output.get("code").and_then(Value::as_u64)
+                        ),
+                    }
+                    .fail();
+                }
+            }
+        }
+        serde_json::from_value(value).map_err(|_| {
+            crate::error::UnexpectedSnafu {
+                msg: format!("invalid SQL response ({status})"),
+            }
+            .build()
+        })
+    }
 
-        serde_json::from_str::<GreptimedbV1Response>(&text).context(SerdeJsonSnafu)
+    async fn http_client(&self) -> Result<&reqwest::Client> {
+        self.client
+            .get_or_try_init(|| async {
+                let mut builder = reqwest::Client::builder().redirect(
+                    reqwest::redirect::Policy::custom(|attempt| {
+                        if attempt
+                            .previous()
+                            .first()
+                            .is_some_and(|url| url.path() == "/v1/ddl/logical-tables")
+                        {
+                            attempt.stop()
+                        } else {
+                            reqwest::redirect::Policy::default().redirect(attempt)
+                        }
+                    }),
+                );
+                if let Some(proxy) = self.proxy.clone() {
+                    builder = builder.proxy(proxy);
+                }
+                if self.no_proxy {
+                    builder = builder.no_proxy();
+                }
+                builder.build().context(BuildClientSnafu)
+            })
+            .await
+    }
+}
+
+fn form_encoded_len(value: &str) -> usize {
+    url::form_urlencoded::byte_serialize(value.as_bytes())
+        .map(str::len)
+        .sum()
+}
+
+pub(crate) struct Capabilities(Value);
+
+impl Capabilities {
+    pub(crate) fn supports(&self, capability: &str) -> bool {
+        self.0.get(capability).and_then(Value::as_u64) == Some(1)
+    }
+
+    pub(crate) fn require(&self, capability: &str) -> Result<()> {
+        if !self.supports(capability) {
+            return crate::error::InvalidArgumentsSnafu {
+                msg: format!("server does not support {capability} version 1"),
+            }
+            .fail();
+        }
+        Ok(())
     }
 }
 
@@ -226,7 +358,7 @@ pub(crate) fn split_database(database: &str) -> Result<(String, Option<String>)>
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #[tokio::test]
     async fn packed_capability_probe_checks_auth_and_protocol_version() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -271,7 +403,11 @@ mod tests {
                     if export {
                         client.require_packed_export().await.is_ok()
                     } else {
-                        client.require_packed_import().await.is_ok()
+                        client
+                            .capabilities()
+                            .await
+                            .and_then(|c| c.require("metric_packed_import"))
+                            .is_ok()
                     },
                     supported,
                     "{status}: {body}"
@@ -282,6 +418,173 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn form_size_counts_utf8_and_escaping() {
+        for (db, sql) in [
+            ("greptime-public", "SELECT 1"),
+            ("测-试", "+&='秘密';\n"),
+            ("a_b.*", "a~b"),
+        ] {
+            let encoded = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("db", db)
+                .append_pair("sql", sql)
+                .finish();
+            assert_eq!(
+                8 + form_encoded_len(db) + form_encoded_len(sql),
+                encoded.len()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_capabilities_distinguish_absence_from_errors() {
+        for (status, body, expected) in [
+            (200, r#"{"metric_batch_ddl":1}"#, Some(true)),
+            (200, r#"{"metric_batch_ddl":2}"#, Some(false)),
+            (200, "{}", Some(false)),
+            (404, "", Some(false)),
+            (401, "{}", None),
+            (403, "{}", None),
+            (500, "{}", None),
+            (200, "[]", None),
+            (200, "bad", None),
+            (200, r#"{"metric_batch_ddl":"1"}"#, None),
+            (200, r#"{"error":"secret"}"#, None),
+        ] {
+            let (client, requests, server) = test_server(status, body).await;
+            let result = client.capabilities().await;
+            assert_eq!(
+                result.as_ref().ok().map(|c| c.supports("metric_batch_ddl")),
+                expected
+            );
+            assert_eq!(requests.lock().unwrap().len(), 1);
+            server.abort();
+            let _ = server.await;
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_redirects_are_not_replayed() {
+        for status in [303, 307, 308] {
+            let (client, requests, server) = test_server(
+                status,
+                r#"{"execution_time_ms":0,"output":[{"affectedrows":0}]}"#,
+            )
+            .await;
+            assert!(
+                client
+                    .logical_tables("CREATE TABLE t", "public", 1)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(requests.lock().unwrap().len(), 1);
+            assert!(requests.lock().unwrap()[0].starts_with("POST /v1/ddl/logical-tables "));
+            // Ordinary SQL retains the shared client's existing redirect behavior.
+            assert!(client.sql("SELECT 1", "public").await.is_err());
+            assert!(requests.lock().unwrap().len() > 2);
+            server.abort();
+            let _ = server.await;
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_disconnect_and_timeout_are_errors() {
+        use tokio::io::AsyncReadExt;
+        for disconnect in [true, false] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut client = DatabaseClient::new(
+                listener.local_addr().unwrap().to_string(),
+                "greptime".into(),
+                None,
+                Duration::from_millis(100),
+                None,
+                true,
+            );
+            let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                assert!(socket.read(&mut request).await.unwrap() > 0);
+                if !disconnect {
+                    let _ = stopped.await;
+                }
+            });
+            assert!(
+                client
+                    .logical_tables("CREATE TABLE t", "public", 1)
+                    .await
+                    .is_err()
+            );
+            let _ = stop.send(());
+            server.await.unwrap();
+            client.catalog = "测".repeat(500_000);
+            let error = client
+                .logical_tables("CREATE TABLE t", "public", 1)
+                .await
+                .unwrap_err();
+            assert!(format!("{error:?}").contains("4 MiB form limit"));
+        }
+    }
+
+    pub(crate) async fn test_server(
+        status: u16,
+        body: &str,
+    ) -> (
+        DatabaseClient,
+        Arc<std::sync::Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = DatabaseClient::new(
+            listener.local_addr().unwrap().to_string(),
+            "greptime".into(),
+            Some("user:password".into()),
+            Duration::from_secs(5),
+            None,
+            true,
+        );
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let body = body.to_string();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                loop {
+                    let mut buf = [0; 4096];
+                    let n = socket.read(&mut buf).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&buf[..n]);
+                    if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..end]).to_lowercase();
+                        let length = headers
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length: "))
+                            .map(|n| n.parse::<usize>().unwrap())
+                            .unwrap_or(0);
+                        if bytes.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8(bytes).unwrap());
+                let location = if (300..400).contains(&status) {
+                    "Location: /v1/sql\r\n"
+                } else {
+                    ""
+                };
+                socket.write_all(format!("HTTP/1.1 {status} Response\r\n{location}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        (client, requests, server)
+    }
 
     #[test]
     fn test_split_database() {

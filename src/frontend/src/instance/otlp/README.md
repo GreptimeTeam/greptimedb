@@ -175,6 +175,58 @@ Accounting follows the main-table write:
   accepted or rejected span counts; and
 - failure details are bounded before they are folded into `TraceIngestOutcome`.
 
+A cache shared by each frontend's `Instance` clones skips previously confirmed
+auxiliary writes for v0, v1, and v2. `otlp.trace_aux_cache_size` sets an estimated
+memory budget across all catalogs, schemas, and trace tables on each frontend.
+By default, the budget is 1/128 of the pod's cgroup memory limit or total host
+memory, with a minimum of `32MiB`. If memory detection is unavailable, it uses
+`32MiB`. An explicit size overrides this default; `0` disables caching.
+The estimate includes key structs and allocated string capacity, charging shared
+table names per entry. It excludes cache and allocator overhead, so it is not a
+strict process-memory limit. Changes take effect on frontend or standalone
+restart. There is no time-based expiry.
+Services and operations are cached independently. Only a successful
+auxiliary write populates the cache. Auxiliary writes always bypass batching,
+including when main spans use asynchronous batching. Failures, eviction,
+frontend restarts, and concurrent misses can cause repeat writes. Write cost
+reflects only the writes actually performed.
+
+`greptime_frontend_cache_hit{type="otlp_trace_aux"}` and
+`greptime_frontend_cache_miss{type="otlp_trace_aux"}` count distinct service and
+operation keys at the first cache check in each request.
+Requests with auxiliary admission count before acquiring a slot; other requests
+count when preparing auxiliary writes. Admission and write rechecks do not count.
+When the cache is disabled, all checked keys count as misses.
+
+Successful auxiliary writes with `skip_wal` enabled are cached too. If a
+datanode crashes before flushing those rows while the frontend survives, the
+cache can suppress their recreation, even by later WAL-enabled requests, until
+eviction or frontend restart. Missing service/operation discovery rows in this
+case are an accepted limitation; the cache does not guarantee durability beyond
+the write's WAL policy.
+
+With asynchronous main-table batching, the response still acknowledges queue
+admission. A frontend task waits for the storage results and writes auxiliary
+rows only for successful chunks. Failed chunks do not populate the auxiliary
+tables or cache. Deferred auxiliary failures are logged; they cannot change an
+already returned response. Deferred writes retain the original request's row
+admission, and their write cost is not included in the early response.
+
+Async trace requests with cache misses acquire one shared auxiliary-work slot
+before submitting main chunks. Each frontend limits these requests separately
+from main-table batching, using `pending_rows_batcher.max_inflight_requests`.
+The slot is held through auxiliary completion, including failures. Requests
+whose service/operation entries are all cached bypass this admission and need
+no deferred task. Cache lookups and updates hold no lock across storage writes.
+
+The auxiliary tables are ingestion-managed. When caching is enabled, manual
+`DROP`, `TRUNCATE`, `DELETE`, or other mutations require clearing the affected
+caches or restarting all serving frontends before relying on ingestion to
+populate the lookup rows again.
+There is no automatic invalidation or public cache-clear command. In v0, fewer
+duplicate rows are appended; distinct service/operation lookup results remain
+the same.
+
 A rejection detail carries the failing cause, not just a status code, so an
 unusable attribute value names its column, source value, and target type. Repeats
 of the same `(site, cause)` collapse into one entry with an occurrence count, and

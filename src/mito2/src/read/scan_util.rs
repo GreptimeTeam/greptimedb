@@ -1234,7 +1234,15 @@ pub(crate) fn should_split_flat_batches_for_merge(
             let file = &stream_ctx.input.files[file_index];
             let file_meta = file.meta_ref();
             if file_meta.level == 0 {
-                // Always split level 0 files.
+                // Short series can leave too many tiny batches retained by the merge.
+                if file_meta.num_series > 0 {
+                    if !can_split_series(file_meta.num_rows, file_meta.num_series) {
+                        return None;
+                    }
+                    total_rows += file_meta.num_rows;
+                    total_series += file_meta.num_series;
+                }
+                // Older L0 files may lack series statistics; keep their fallback behavior.
                 num_files_to_split += 1;
                 continue;
             } else if file_meta.num_rows < SPLIT_ROW_THRESHOLD || file_meta.num_series == 0 {
@@ -1911,6 +1919,30 @@ mod tests {
             None,
             should_split_flat_batches_for_merge(&stream_ctx, &range_meta)
         );
+    }
+
+    #[tokio::test]
+    async fn test_should_split_flat_batches_for_merge_uses_level_zero_series_stats() {
+        for (num_rows, num_series, expected) in [
+            (70_144, 35_083, None),
+            (100_000, 1_000, Some(100)),
+            (100_000, 0, Some(DEFAULT_READ_BATCH_SIZE / 4)),
+        ] {
+            let mut meta = new_test_file(num_rows, num_series).meta_ref().clone();
+            meta.level = 0;
+            let file = FileHandle::new(meta, Arc::new(NoopFilePurger));
+            let stream_ctx = new_test_stream_ctx(vec![file], vec![]).await;
+            let range_meta = new_test_range_meta(smallvec![RowGroupIndex {
+                index: 0,
+                row_group_index: 0,
+            }]);
+
+            assert_eq!(
+                expected,
+                should_split_flat_batches_for_merge(&stream_ctx, &range_meta),
+                "rows={num_rows}, series={num_series}",
+            );
+        }
     }
 
     #[tokio::test]

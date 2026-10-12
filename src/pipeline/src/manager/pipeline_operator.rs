@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use api::v1::CreateTableExpr;
 use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
 use common_catalog::consts::{DEFAULT_PRIVATE_SCHEMA_NAME, default_engine};
+use common_frontend::metrics;
 use common_meta::rpc::ddl::TriggerReason;
 use common_telemetry::info;
 use common_time::FOREVER;
@@ -164,7 +165,9 @@ impl PipelineOperator {
 
     /// Get a pipeline table from the cache.
     pub fn get_pipeline_table_from_cache(&self, catalog: &str) -> Option<PipelineTableRef> {
-        self.tables.read().unwrap().get(catalog).cloned()
+        let table = self.tables.read().unwrap().get(catalog).cloned();
+        metrics::record_cache_lookup("pipeline_table", table.is_some());
+        table
     }
 }
 

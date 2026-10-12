@@ -46,7 +46,7 @@ pub struct CopyQueryTo {
 
 impl Display for CopyQueryTo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "COPY ({}) TO {}", &self.query, &self.arg.location)?;
+        write!(f, "COPY ({}) TO {}", self.query, self.arg.location)?;
         if !self.arg.with.is_empty() {
             let options = self.arg.with.kv_pairs();
             write!(f, " WITH ({})", options.join(", "))?;
@@ -70,11 +70,11 @@ impl Display for CopyTable {
         write!(f, "COPY ")?;
         let (with, connection) = match self {
             CopyTable::To(args) => {
-                write!(f, "{} TO {}", &args.table_name, &args.location)?;
+                write!(f, "{} TO {}", args.table_name, args.location)?;
                 (&args.with, &args.connection)
             }
             CopyTable::From(args) => {
-                write!(f, "{} FROM {}", &args.table_name, &args.location)?;
+                write!(f, "{} FROM {}", args.table_name, args.location)?;
                 (&args.with, &args.connection)
             }
         };
@@ -101,11 +101,11 @@ impl Display for CopyDatabase {
         write!(f, "COPY DATABASE ")?;
         let (with, connection) = match self {
             CopyDatabase::To(args) => {
-                write!(f, "{} TO {}", &args.database_name, &args.location)?;
+                write!(f, "{} TO {}", args.database_name, args.location)?;
                 (&args.with, &args.connection)
             }
             CopyDatabase::From(args) => {
-                write!(f, "{} FROM {}", &args.database_name, &args.location)?;
+                write!(f, "{} FROM {}", args.database_name, args.location)?;
                 (&args.with, &args.connection)
             }
         };

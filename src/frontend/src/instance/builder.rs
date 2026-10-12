@@ -22,6 +22,7 @@ use catalog::kvbackend::KvBackendCatalogManager;
 use catalog::process_manager::ProcessManagerRef;
 use catalog::system_schema::semantic_graph::EntityGraphProviderRef;
 use common_base::Plugins;
+use common_batcher::request_limiter::RequestLimiter;
 use common_datasource::object_store::LocalFileAccess;
 use common_event_recorder::{EventRecorderImpl, EventRecorderRef};
 use common_meta::cache::{LayeredCacheRegistryRef, TableFlownodeSetCacheRef, TableRouteCacheRef};
@@ -50,8 +51,8 @@ use partition::manager::PartitionRuleManager;
 use pipeline::pipeline_operator::PipelineOperator;
 use query::QueryEngineFactory;
 use query::region_query::RegionQueryHandlerFactoryRef;
-use servers::batcher::BatchingProtocol;
 use servers::batcher::table::TablePendingRowsBatcher;
+use servers::batcher::{BatchingProtocol, pending_rows_batch_sync_enabled};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, DataFusionSnafu, ExternalSnafu, Result};
@@ -60,6 +61,7 @@ use crate::frontend::FrontendOptions;
 use crate::heartbeat::frontend_peer_addr;
 use crate::instance::Instance;
 use crate::instance::entity_graph::EntityGraphProviderImpl;
+use crate::instance::otlp::TraceAuxCache;
 use crate::instance::region_query::FrontendRegionQueryHandler;
 use crate::service_config::BatcherOptions;
 
@@ -385,6 +387,15 @@ impl FrontendBuilder {
         ));
         admin_event_recorder.install(&event_recorder);
 
+        let batcher_options = self.options.table_batcher_options();
+        let trace_aux_limiter = if batcher_options.pending_rows_batching_enabled()
+            && !pending_rows_batch_sync_enabled()
+        {
+            RequestLimiter::try_new(batcher_options.max_inflight_requests)
+        } else {
+            None
+        };
+
         Ok(Instance {
             logical_batcher: Default::default(),
             frontend_peer_addr,
@@ -400,10 +411,12 @@ impl FrontendBuilder {
             event_recorder,
             slow_query_recorder,
             process_manager,
-            otlp_metrics_table_legacy_cache: DashMap::new(),
+            otlp_metrics_table_legacy_cache: Arc::new(DashMap::new()),
             slow_query_options: self.options.slow_query.clone(),
             influxdb_default_merge_mode: self.options.influxdb.default_merge_mode,
             trace_ingest_chunk_size: self.options.otlp.trace_ingest_chunk_size,
+            trace_aux_cache: TraceAuxCache::new(self.options.otlp.trace_aux_cache_size.as_bytes()),
+            trace_aux_limiter,
             otlp_resource_info: self.options.otlp.experimental_enable_resource_info,
             suspend: Arc::new(AtomicBool::new(false)),
         })

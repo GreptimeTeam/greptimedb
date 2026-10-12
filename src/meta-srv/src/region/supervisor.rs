@@ -35,6 +35,7 @@ use common_time::util::current_time_millis;
 use futures::{StreamExt, TryStreamExt};
 use snafu::{ResultExt, ensure};
 use store_api::storage::RegionId;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
 use tokio::time::{MissedTickBehavior, interval, interval_at};
@@ -43,6 +44,7 @@ use crate::discovery::utils::accept_ingest_workload;
 use crate::error::{self, Result};
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
 use crate::metasrv::{RegionStatAwareSelectorRef, SelectTarget, SelectorContext, SelectorRef};
+use crate::metrics::METRIC_META_HEARTBEAT_DROPPED;
 use crate::procedure::region_migration::manager::{
     RegionMigrationManagerRef, RegionMigrationTriggerReason, SubmitRegionMigrationTaskResult,
 };
@@ -356,10 +358,29 @@ impl HeartbeatAcceptor {
         Self { sender }
     }
 
-    /// Accepts heartbeats from datanodes.
-    pub(crate) async fn accept(&self, heartbeat: DatanodeHeartbeat) {
-        if let Err(err) = self.sender.send(Event::HeartbeatArrived(heartbeat)).await {
-            error!(err; "RegionSupervisor has stop receiving heartbeat.");
+    /// Accepts heartbeats from datanodes without waiting for queue capacity: a full queue
+    /// drops the heartbeat, counted in [`METRIC_META_HEARTBEAT_DROPPED`]. A dropped
+    /// heartbeat costs the failure detector one sample.
+    pub(crate) fn accept(&self, heartbeat: DatanodeHeartbeat) {
+        let datanode_id = heartbeat.datanode_id;
+        match self.sender.try_send(Event::HeartbeatArrived(heartbeat)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                METRIC_META_HEARTBEAT_DROPPED
+                    .with_label_values(&["full"])
+                    .inc();
+                warn!(
+                    "Dropping heartbeat because the region supervisor event queue is full, datanode_id: {}, queue_capacity: {}",
+                    datanode_id,
+                    self.sender.max_capacity()
+                );
+            }
+            Err(TrySendError::Closed(err)) => {
+                METRIC_META_HEARTBEAT_DROPPED
+                    .with_label_values(&["closed"])
+                    .inc();
+                error!(err; "RegionSupervisor has stop receiving heartbeat.");
+            }
         }
     }
 }
@@ -899,14 +920,15 @@ pub(crate) mod tests {
     use tokio::time::sleep;
 
     use super::RegionSupervisorSelector;
+    use crate::metrics::METRIC_META_HEARTBEAT_DROPPED;
     use crate::procedure::region_migration::RegionMigrationTriggerReason;
     use crate::procedure::region_migration::manager::{
         RegionMigrationManager, SubmitRegionMigrationTaskResult,
     };
     use crate::procedure::region_migration::test_util::TestingEnv;
     use crate::region::supervisor::{
-        DatanodeHeartbeat, Event, RegionFailureDetectorControl, RegionSupervisor,
-        RegionSupervisorTicker,
+        DatanodeHeartbeat, Event, HeartbeatAcceptor, RegionFailureDetectorControl,
+        RegionSupervisor, RegionSupervisorTicker,
     };
     use crate::selector::test_utils::{RandomNodeSelector, new_test_selector_context};
 
@@ -938,6 +960,14 @@ pub(crate) mod tests {
             ),
             tx,
         )
+    }
+
+    fn filler_heartbeat() -> DatanodeHeartbeat {
+        DatanodeHeartbeat {
+            datanode_id: 1,
+            regions: vec![],
+            timestamp: 0,
+        }
     }
 
     #[tokio::test]
@@ -1371,5 +1401,40 @@ pub(crate) mod tests {
             .unwrap();
         assert!(supervisor.failure_detector.contains(&detecting_region));
         assert!(supervisor.failover_counts.contains_key(&detecting_region));
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_accept_does_not_block_on_full_queue() {
+        // Regression test for #9419: a full queue used to park the caller.
+        // The supervisor is never run, so the queue stays full.
+        let (mut supervisor, sender) = new_test_supervisor();
+
+        let mut queued = 0;
+        while sender
+            .try_send(Event::HeartbeatArrived(filler_heartbeat()))
+            .is_ok()
+        {
+            queued += 1;
+        }
+        assert_eq!(queued, sender.max_capacity());
+        assert_eq!(sender.capacity(), 0);
+
+        let acceptor = HeartbeatAcceptor::new(sender.clone());
+        let dropped = || {
+            METRIC_META_HEARTBEAT_DROPPED
+                .with_label_values(&["full"])
+                .get()
+        };
+        let dropped_before = dropped();
+        // The full queue drops the heartbeat and counts it.
+        acceptor.accept(filler_heartbeat());
+        assert_eq!(dropped(), dropped_before + 1);
+        assert_eq!(sender.capacity(), 0);
+
+        // Free one slot: the next heartbeat is accepted.
+        supervisor.receiver.try_recv().unwrap();
+        acceptor.accept(filler_heartbeat());
+        assert_eq!(dropped(), dropped_before + 1);
+        assert_eq!(sender.capacity(), 0);
     }
 }

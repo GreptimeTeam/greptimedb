@@ -270,8 +270,10 @@ mod tests {
     /// Converts a slice of bytes to a vector of `u64`.
     pub fn u64_vec_from_bytes(bytes: &[u8]) -> Vec<u64> {
         bytes
-            .chunks_exact(std::mem::size_of::<u64>())
-            .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
+            .as_chunks::<{ std::mem::size_of::<u64>() }>()
+            .0
+            .iter()
+            .map(|chunk| u64::from_le_bytes(*chunk))
             .collect()
     }
 
