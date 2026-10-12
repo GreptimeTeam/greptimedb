@@ -143,7 +143,11 @@ datafusion-pg-catalog = "0.18.3"
 datafusion-physical-expr = "=55.1.0"
 datafusion-physical-plan = "=55.1.0"
 datafusion-proto = "=55.1.0"
-datafusion-sql = "=55.1.0"
+# `recursive_protection` makes the SQL planner grow the stack at its recursive
+# entry points (`query_to_plan`/`set_expr_to_plan`), so deeply nested statements
+# planned on the global-worker threads cannot overflow their 2MB stacks
+# (see issue #9356).
+datafusion-sql = { version = "=55.1.0", features = ["recursive_protection"] }
 datafusion-substrait = "=55.1.0"
 datafusion_object_store = { package = "object_store", version = "0.13.2" }
 deadpool = "0.12"
@@ -256,7 +260,6 @@ sqlx = { version = "0.8", default-features = false, features = [
     "tls-rustls-aws-lc-rs",
     "rust_decimal",
 ] }
-stacker = "0.1"
 stringprep = "0.1"
 strum = { version = "0.27", features = ["derive"] }
 sysinfo = "0.33"

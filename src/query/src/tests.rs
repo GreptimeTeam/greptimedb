@@ -23,6 +23,7 @@ use crate::parser::QueryLanguageParser;
 use crate::{QueryEngineFactory, QueryEngineRef};
 
 mod query_engine_test;
+mod recursive_protection_test;
 mod time_range_filter_test;
 
 mod function;
