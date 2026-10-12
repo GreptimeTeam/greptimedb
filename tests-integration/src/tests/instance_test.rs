@@ -541,6 +541,152 @@ ORDER BY t.key_id"#;
     );
 }
 
+/// Sorting by `CAST(ts AS TIMESTAMP(0))` must not be optimized as if it were sorting by the
+/// (millisecond) time index column.
+///
+/// The windowed sort rule still recognizes the cast as the time index column, but the working
+/// ranges it derives from the region scan's `PartitionRange`s stay in the unit of the table's time
+/// index (millisecond here). `PartSortExec` projects those ranges onto the unit of the sort column
+/// while `WindowedSortExec` does not, so sorted runs (second) are checked against working ranges
+/// (millisecond) and the range invariant trips with
+/// "Current batch have data on the left side of working range, something is very wrong".
+///
+/// The two rows are one second apart, so casting the millisecond time index to second precision
+/// collapses the first row onto second 0, which is before the start of the region's time range.
+#[apply(standalone_instance_case)]
+async fn test_windowed_sort_sort_column_cast_time_unit_mismatch(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE f05_mito_wc (
+            ts TIMESTAMP(3) TIME INDEX,
+            host STRING PRIMARY KEY,
+            val DOUBLE
+        ) ENGINE = mito"#,
+    )
+    .await;
+
+    // The metric engine flavor only creates its physical table explicitly; rows are written to and
+    // read from the logical table built on it.
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE f05_metric_phy (
+            ts TIMESTAMP(3) TIME INDEX,
+            host STRING PRIMARY KEY,
+            val DOUBLE
+        ) ENGINE = metric WITH ('physical_metric_table' = '')"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE f05_metric_wc (
+            ts TIMESTAMP(3) TIME INDEX,
+            host STRING PRIMARY KEY,
+            val DOUBLE
+        ) ENGINE = metric WITH ('on_physical_table' = 'f05_metric_phy')"#,
+    )
+    .await;
+
+    let rows_by_time_index = r#"+-------------------------+------+
+| ts                      | host |
++-------------------------+------+
+| 1970-01-01T00:00:00.001 | a    |
+| 1970-01-01T00:00:01.001 | b    |
++-------------------------+------+"#;
+    let rows_by_cast = r#"+---------------------+------+
+| t                   | host |
++---------------------+------+
+| 1970-01-01T00:00:00 | a    |
+| 1970-01-01T00:00:01 | b    |
++---------------------+------+"#;
+
+    for table in ["f05_mito_wc", "f05_metric_wc"] {
+        let output = execute_sql(
+            &frontend,
+            &format!("INSERT INTO {table} (ts, host, val) VALUES (1, 'a', 1), (1001, 'b', 2)"),
+        )
+        .await
+        .data;
+        assert!(matches!(output, OutputData::AffectedRows(2)), "{table}");
+
+        // Controls: sorting by the time index itself, applying a fetch, or sorting by the cast
+        // together with another column all keep working.
+        let output = execute_sql(
+            &frontend,
+            &format!("SELECT ts, host FROM {table} ORDER BY ts"),
+        )
+        .await
+        .data;
+        check_output_stream(output, rows_by_time_index).await;
+
+        let output = execute_sql(
+            &frontend,
+            &format!("SELECT CAST(ts AS TIMESTAMP(0)) AS t, host FROM {table} ORDER BY t LIMIT 10"),
+        )
+        .await
+        .data;
+        check_output_stream(output, rows_by_cast).await;
+
+        let output = execute_sql(
+            &frontend,
+            &format!("SELECT CAST(ts AS TIMESTAMP(0)) AS t, host FROM {table} ORDER BY t, host"),
+        )
+        .await
+        .data;
+        check_output_stream(output, rows_by_cast).await;
+    }
+
+    // The regression itself: ordering by the cast has to return exactly the same rows as the
+    // controls above. Every combination is collected first so that a single run reports the whole
+    // scope of the bug.
+    let mut failures = Vec::new();
+    for table in ["f05_mito_wc", "f05_metric_wc"] {
+        for parallelism in [1, 4] {
+            for (sql, range_side) in [
+                (
+                    format!("SELECT CAST(ts AS TIMESTAMP(0)) AS t, host FROM {table} ORDER BY t"),
+                    "left side",
+                ),
+                (
+                    format!(
+                        "SELECT CAST(ts AS TIMESTAMP(0)) AS t, host FROM {table} ORDER BY t DESC"
+                    ),
+                    "right side",
+                ),
+            ] {
+                match try_execute_sql_with_query_parallelism(&frontend, &sql, parallelism).await {
+                    Ok(output) => check_output_stream(output, rows_by_cast).await,
+                    Err((code, message)) => {
+                        // Only this exact error is the bug under test, anything else is a
+                        // different regression.
+                        assert_eq!(
+                            StatusCode::EngineExecuteQuery,
+                            code,
+                            "`{sql}` (query_parallelism={parallelism}) failed with an unexpected error: {message}"
+                        );
+                        assert!(
+                            message.contains("working range") && message.contains(range_side),
+                            "`{sql}` (query_parallelism={parallelism}) failed with an unexpected error: {message}"
+                        );
+                        failures.push(format!(
+                            "`{sql}` (query_parallelism={parallelism}, {range_side}): code {} {message}",
+                            code as u32
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "the sort column of the windowed sort must keep its own time unit, but it reported a \
+         working range error for {} queries:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
 #[apply(both_instances_cases)]
 async fn test_show_create_table(instance: Arc<dyn MockInstance>) {
     let frontend = instance.frontend();
@@ -3309,6 +3455,31 @@ async fn execute_sql_with_query_parallelism(
     let mut query_ctx = QueryContext::with_db_name(None);
     query_ctx.set_extension(QUERY_PARALLELISM_HINT, parallelism.to_string());
     execute_sql_with(instance, sql, Arc::new(query_ctx)).await
+}
+
+/// Executes `sql` with the given query parallelism and returns its output, or the status code and
+/// message of the error it failed with.
+///
+/// The output stream is collected, as execution errors (the windowed sort only fails once its
+/// input is consumed) are raised while polling the stream instead of while querying.
+async fn try_execute_sql_with_query_parallelism(
+    instance: &Arc<Instance>,
+    sql: &str,
+    parallelism: usize,
+) -> Result<OutputData, (StatusCode, String)> {
+    let mut query_ctx = QueryContext::with_db_name(None);
+    query_ctx.set_extension(QUERY_PARALLELISM_HINT, parallelism.to_string());
+
+    match instance.do_query(sql, Arc::new(query_ctx)).await.remove(0) {
+        Ok(output) => match output.data {
+            OutputData::Stream(stream) => match util::collect_batches(stream).await {
+                Ok(batches) => Ok(OutputData::RecordBatches(batches)),
+                Err(err) => Err((err.status_code(), err.output_msg())),
+            },
+            data => Ok(data),
+        },
+        Err(err) => Err((err.status_code(), err.output_msg())),
+    }
 }
 
 async fn try_execute_sql(instance: &Arc<Instance>, sql: &str) -> server_error::Result<Output> {
