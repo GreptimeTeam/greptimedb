@@ -14,22 +14,33 @@
 
 //! The COPY FROM STDIN codec framework.
 //!
-//! A *codec* binds one COPY data format (text, CSV, binary, ...) to its
-//! implementation. Codecs are stateless strategies: they validate the
-//! options they accept at statement-parse time, describe which column
-//! types they can ingest, and create the stateful [`RecordParser`] per
-//! stream.
+//! A *codec* binds one COPY data format to its implementation. Codecs are
+//! stateless strategies: they validate the options they accept at
+//! statement-parse time, describe which column types they can ingest, and
+//! create the stateful [`RecordParser`] per stream.
+//!
+//! Formats are not limited to PostgreSQL's own — GreptimeDB-specific
+//! formats (a line protocol, a JSON-lines dialect, ...) register exactly
+//! like `text` and `csv` do, and may define their own options through the
+//! open `WITH (...)` clause.
 //!
 //! # Parsing and conversion
 //!
 //! A [`RecordParser`] consumes raw `CopyData` bytes and emits complete,
-//! insertable rows: one [`ParsedRow`] (a vector of gRPC values) per
-//! record, in the order of the targeted columns. Parsers validate record
-//! shape (field counts) and convert field values themselves — the `text`
-//! family does so with the shared text-representation helpers in this
-//! module, while the `csv` codec delegates both splitting and typed
-//! conversion to arrow-csv's incremental decoder, the same engine used
-//! by `COPY ... FROM 'file.csv'`.
+//! insertable rows: one [`ParsedRow`] per record, in the order of the
+//! targeted columns. Parsers validate record shape (field counts) and
+//! convert field values themselves. Two building-block styles exist, and
+//! a format picks freely:
+//!
+//! - formats whose records split into raw text fields can reuse this
+//!   module's building blocks: [`Field`], [`convert_text_field`] (a
+//!   field parsed as the column value's text representation) and
+//!   [`check_text_representable_type`] (the default column-type check).
+//!   The `text` format composes them directly;
+//! - formats with their own typed decoding build rows themselves — `csv`
+//!   delegates splitting and conversion to arrow-csv's incremental
+//!   decoder (the engine behind `COPY ... FROM 'file.csv'`) and turns
+//!   decoded batches into rows with the shared `api::helper::vectors_to_rows`.
 //!
 //! # Options
 //!
@@ -65,12 +76,13 @@ use pgwire::error::PgWireResult;
 use super::{invalid_text_repr, unsupported};
 
 /// A parsed, insertable row: one gRPC value per targeted column, in COPY
-/// field order. Parsers emit these directly — the `text` family converts
-/// with the helpers below, `csv` converts arrow batches with the shared
-/// `api::helper::vectors_to_rows`.
+/// field order. Every parser emits these directly, whatever mechanism it
+/// used to produce them.
 pub(super) type ParsedRow = api::v1::Row;
 
-/// One parsed field of a text-family record.
+/// One raw field of a record: bytes, or a NULL marker. Formats that split
+/// records into text fields (like `text`, and any future line-oriented
+/// format) share it.
 pub(super) enum Field {
     Null,
     Value(Vec<u8>),
@@ -95,14 +107,16 @@ pub(super) trait RecordParser: Send {
 ///
 /// Implementations are shared per statement (hence `Send + Sync`) and must
 /// be stateless; per-stream state belongs to the [`RecordParser`] they
-/// create. The default `check_column_type` accepts the types whose
-/// PostgreSQL text representation the shared helpers below can parse; a
-/// codec with its own typed decoding (like `csv`) overrides it.
+/// create. Every method may be tailored to the format: the default
+/// `check_column_type` accepts the types whose text representation the
+/// shared helpers below can parse, which a format narrows (a line
+/// protocol might accept only booleans, numbers and strings) or replaces
+/// (like `csv`, which is bounded by what arrow-csv can decode).
 pub(super) trait CopyInCodec: Send + Sync + std::fmt::Debug {
     /// The canonical format name, used in error messages.
     fn name(&self) -> &'static str;
-    /// The format code advertised in the `CopyInResponse` header:
-    /// 0 for text, 1 for binary.
+    /// The format code advertised in the `CopyInResponse` header: 0 when
+    /// the client sends textual data (the default), 1 for binary.
     fn format_code(&self) -> i8 {
         0
     }
@@ -117,9 +131,9 @@ pub(super) trait CopyInCodec: Send + Sync + std::fmt::Debug {
     -> PgWireResult<Box<dyn RecordParser + Send>>;
 }
 
-/// The default [`CopyInCodec::check_column_type`] for text-family
-/// formats: column types whose PostgreSQL text representation the
-/// helpers below can parse.
+/// Column types whose values have a text representation the helpers below
+/// can parse; the default [`CopyInCodec::check_column_type`] for formats
+/// that read values as text.
 fn check_text_representable_type(data_type: &ConcreteDataType) -> PgWireResult<()> {
     let supported = matches!(
         data_type,
@@ -150,8 +164,9 @@ fn check_text_representable_type(data_type: &ConcreteDataType) -> PgWireResult<(
     Ok(())
 }
 
-/// Converts one text-format field into a gRPC value following the column
-/// type; shared by the text-family codecs.
+/// Converts one raw field, interpreted as the column value's text
+/// representation, into a gRPC value; usable by any format that carries
+/// values as text.
 pub(super) fn convert_text_field(
     column: &ColumnSchema,
     field: Field,

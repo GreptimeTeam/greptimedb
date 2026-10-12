@@ -12,10 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The default `text` format: one record per line, fields separated by an
-//! unescaped delimiter (tab by default), special characters escaped with
-//! backslashes and `\N` marking NULL. This is PostgreSQL's plain text
-//! COPY format.
+//! PostgreSQL's default `text` format: one record per line, fields
+//! separated by an unescaped delimiter (tab by default), special
+//! characters escaped with backslashes and `\N` marking NULL.
+//!
+//! This is the smallest example of the field-splitting building-block
+//! style: it splits records into raw [`Field`]s and converts them with
+//! the shared text-representation helpers — the same pieces are
+//! available to any future format that carries values as text.
 
 use std::sync::Arc;
 
@@ -257,7 +261,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_rejects_csv_only_options() {
+    fn test_build_rejects_unsupported_options() {
         let mut set = CopyOptionSet::default();
         set.insert("quote".into(), CopyOptionValue::String("\"".into()))
             .unwrap();

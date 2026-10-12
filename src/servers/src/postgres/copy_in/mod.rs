@@ -25,10 +25,11 @@
 //!
 //! Each COPY data format is implemented as a [`codec::CopyInCodec`]: a
 //! stateless strategy that validates its options at statement-parse time,
-//! describes the column types it can ingest, creates the stateful record
-//! parser for one stream, and converts parsed fields into typed values.
-//! Formats register a builder under every accepted `FORMAT` name in
-//! [`REGISTERED_FORMATS`]; see the `codec` module docs for how to add one.
+//! describes the column types it can ingest, and creates the stateful
+//! record parser for one stream. Formats register a builder under every
+//! accepted `FORMAT` name in [`REGISTERED_FORMATS`] — PostgreSQL's formats
+//! (`text`, `csv`, and eventually `binary`) and GreptimeDB-specific
+//! formats alike; see the `codec` module docs for how to add one.
 
 mod codec;
 mod csv;
