@@ -295,8 +295,8 @@ pub struct ExportCreateCommand {
     /// Use shared Metric physical scans and packed objects (Parquet only).
     /// Resume uses the manifest layout and requires that previous export and storage
     /// writes have ended; an HTTP timeout does not establish this.
-    #[clap(long, value_parser = ["packed"])]
-    metric_data_layout: Option<String>,
+    #[clap(long)]
+    pack_metric_data: bool,
 
     /// Delete existing snapshot and recreate.
     #[clap(long)]
@@ -347,10 +347,7 @@ impl ExportCreateCommand {
 
         let time_range = TimeRange::parse(self.start_time.as_deref(), self.end_time.as_deref())
             .map_err(BoxedError::new)?;
-        if self.metric_data_layout.is_some()
-            && time_range.is_bounded()
-            && time_range.start == time_range.end
-        {
+        if self.pack_metric_data && time_range.is_bounded() && time_range.start == time_range.end {
             return crate::error::InvalidArgumentsSnafu {
                 msg: "Packed export requires --start-time to be earlier than --end-time",
             }
@@ -410,7 +407,7 @@ impl ExportCreateCommand {
         );
 
         // The filesystem storage constructor can create the snapshot root.
-        if self.metric_data_layout.is_some() {
+        if self.pack_metric_data {
             require_metric_export_enabled(&database_client, self.format)
                 .await
                 .map_err(BoxedError::new)?;
@@ -430,7 +427,7 @@ impl ExportCreateCommand {
                 schemas,
                 schema_only: self.schema_only,
                 format: self.format,
-                packed: self.metric_data_layout.is_some(),
+                packed: self.pack_metric_data,
                 force: self.force,
                 time_range,
                 chunk_time_window: self.chunk_time_window,
@@ -757,7 +754,7 @@ async fn require_metric_export_enabled(client: &DatabaseClient, format: DataForm
 fn validate_resume_config(manifest: &Manifest, config: &ExportConfig) -> Result<()> {
     if config.packed && !manifest.schema_only && !manifest.is_packed() {
         return ResumeConfigMismatchSnafu {
-            field: "metric_data_layout",
+            field: "data_layout",
             existing: "standalone".to_string(),
             requested: "packed".to_string(),
         }
@@ -1677,7 +1674,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_metric_layout_arguments() {
+    async fn test_pack_metric_data_arguments() {
         let directory = tempfile::tempdir().unwrap();
         let snapshot = directory.path().join("snapshot");
         let uri = url::Url::from_file_path(&snapshot).unwrap();
@@ -1688,24 +1685,23 @@ mod tests {
             "--to",
             uri.as_str(),
         ];
-        assert!(
-            ExportCreateCommand::parse_from(args)
-                .metric_data_layout
-                .is_none()
-        );
-        let packed = ExportCreateCommand::parse_from(
-            args.into_iter().chain(["--metric-data-layout", "packed"]),
-        );
-        assert_eq!(packed.metric_data_layout.as_deref(), Some("packed"));
-        let error = ExportCreateCommand::try_parse_from(
-            args.into_iter().chain(["--experimental-metric-export"]),
-        )
-        .unwrap_err();
-        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        assert!(!ExportCreateCommand::parse_from(args).pack_metric_data);
+        let packed =
+            ExportCreateCommand::parse_from(args.into_iter().chain(["--pack-metric-data"]));
+        assert!(packed.pack_metric_data);
+        for removed in [
+            &["--experimental-metric-export"][..],
+            &["--metric-data-layout", "packed"][..],
+        ] {
+            let error = ExportCreateCommand::try_parse_from(
+                args.into_iter().chain(removed.iter().copied()),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+        }
         for format in ["csv", "json"] {
             let command = ExportCreateCommand::parse_from(args.into_iter().chain([
-                "--metric-data-layout",
-                "packed",
+                "--pack-metric-data",
                 "--format",
                 format,
             ]));
@@ -1842,7 +1838,7 @@ mod tests {
             validate_resume_config(&manifest, &config)
                 .unwrap_err()
                 .to_string()
-                .contains("metric_data_layout")
+                .contains("data_layout")
         );
         manifest.version = 2;
         manifest.data_layout = Some(common_datasource::packed_snapshot::PACKED_LAYOUT.into());

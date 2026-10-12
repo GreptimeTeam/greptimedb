@@ -38,7 +38,7 @@
 //!   --end-time 2025-01-31T23:59:59Z
 //! ```
 //!
-//! `--metric-data-layout packed` enables shared Metric physical scans for Parquet
+//! `--pack-metric-data` enables shared Metric physical scans for Parquet
 //! and writes version-2 packed snapshots.
 //! Enable `experimental_metric_export = true` on the frontend or standalone server
 //! and use an endpoint whose frontends all support and enable this option.

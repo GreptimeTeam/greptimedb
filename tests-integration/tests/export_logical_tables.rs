@@ -1713,8 +1713,7 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
                 uri.as_str(),
                 "--schemas",
                 "public",
-                "--metric-data-layout",
-                "packed",
+                "--pack-metric-data",
                 "--no-proxy",
                 "--start-time",
                 "1970-01-01T00:00:00Z",
@@ -1803,7 +1802,7 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
     ];
     args.extend(storage_args.iter().map(String::as_str));
     if packed {
-        args.extend(["--metric-data-layout", "packed"]);
+        args.push("--pack-metric-data");
     }
     assert!(run_data_cli(&args).await.is_err());
     let before: cli::export_v2::manifest::Manifest =
@@ -1837,7 +1836,7 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
             .unwrap()
     );
     if packed {
-        args.truncate(args.len() - 2);
+        args.pop();
         store
             .write("data/public/2/unknown.txt", "keep")
             .await
@@ -2032,8 +2031,7 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
             "--schemas",
             "public",
             "--schema-only",
-            "--metric-data-layout",
-            "packed",
+            "--pack-metric-data",
             "--no-proxy",
             "--progress",
             "never",
@@ -2115,8 +2113,7 @@ async fn metric_export_v2_disabled_and_legacy_cli() {
         "--to",
         &uri,
         "--force",
-        "--metric-data-layout",
-        "packed",
+        "--pack-metric-data",
         "--no-proxy",
         "--progress",
         "never",
@@ -2246,8 +2243,7 @@ async fn metric_export_v2_refuses_missing_or_malformed_capability_before_force()
             &addr,
             "--to",
             &uri,
-            "--metric-data-layout",
-            "packed",
+            "--pack-metric-data",
             "--force",
             "--no-proxy",
             "--progress",
@@ -2290,7 +2286,7 @@ async fn metric_export_v2_refuses_missing_or_malformed_capability_before_force()
         std::fs::write(&part, b"unfinished").unwrap();
         let resume = args
             .into_iter()
-            .filter(|arg| !matches!(*arg, "--force" | "--metric-data-layout" | "packed"))
+            .filter(|arg| !matches!(*arg, "--force" | "--pack-metric-data"))
             .collect::<Vec<_>>();
         let resume_error = run_data_cli(&resume).await.unwrap_err();
         assert_eq!(
