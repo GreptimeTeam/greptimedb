@@ -60,7 +60,10 @@ ORDER BY host, ts;
 | h3   | third event  | 3.0 |
 +------+--------------+-----+
 
--- 5. Index DDL must still work against the old table.
+-- 5. Enabling an index on an existing column must keep SSTs written before the
+--    index existed readable (regression guard for #9535). 'first note' and
+--    'second note' live in the SST written by the old binary, which carries
+--    inverted indexes for host/msg but not for msg2.
 ALTER TABLE t_inverted_index_survival MODIFY COLUMN msg2 SET INVERTED INDEX;
 
 Affected Rows: 0
@@ -84,6 +87,40 @@ SHOW CREATE TABLE t_inverted_index_survival;
 |                           |                                                          |
 +---------------------------+----------------------------------------------------------+
 
+SELECT host, msg2
+FROM t_inverted_index_survival
+WHERE msg2 = 'first note'
+ORDER BY host, ts;
+
++------+------------+
+| host | msg2       |
++------+------------+
+| h1   | first note |
++------+------------+
+
+SELECT host, msg2
+FROM t_inverted_index_survival
+WHERE msg2 = 'second note'
+ORDER BY host, ts;
+
++------+-------------+
+| host | msg2        |
++------+-------------+
+| h2   | second note |
++------+-------------+
+
+-- A non-matching predicate must still return nothing.
+SELECT host, msg2
+FROM t_inverted_index_survival
+WHERE msg2 = 'no such note'
+ORDER BY host, ts;
+
++------+------+
+| host | msg2 |
++------+------+
++------+------+
+
+-- 6. The index can still be removed afterwards.
 ALTER TABLE t_inverted_index_survival MODIFY COLUMN msg2 UNSET INVERTED INDEX;
 
 Affected Rows: 0
