@@ -3549,9 +3549,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl common_meta::node_manager::Datanode for RecordingNode {
-        async fn handle(
+        async fn handle_request(
             &self,
-            _request: api::v1::region::RegionRequest,
+            _request: Arc<api::v1::region::RegionRequest>,
         ) -> common_meta::error::Result<api::region::RegionResponse> {
             let rows = match _request.body.as_ref() {
                 Some(api::v1::region::region_request::Body::Inserts(requests)) => requests

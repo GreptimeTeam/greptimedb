@@ -28,10 +28,20 @@ use crate::peer::Peer;
 #[async_trait::async_trait]
 pub trait Datanode: Send + Sync {
     /// Handles DML, and DDL requests.
-    async fn handle(&self, request: RegionRequest) -> Result<RegionResponse>;
+    async fn handle_request(&self, request: Arc<RegionRequest>) -> Result<RegionResponse>;
 
     /// Handles query requests
     async fn handle_query(&self, request: QueryRequest) -> Result<SendableRecordBatchStream>;
+}
+
+impl dyn Datanode + '_ {
+    /// Handles an owned or shared request without cloning its payload.
+    pub async fn handle<R>(&self, request: R) -> Result<RegionResponse>
+    where
+        R: Into<Arc<RegionRequest>> + Send,
+    {
+        self.handle_request(request.into()).await
+    }
 }
 
 pub type DatanodeRef = Arc<dyn Datanode>;

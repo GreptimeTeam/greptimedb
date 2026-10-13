@@ -67,7 +67,7 @@ pub struct RegionRequester {
 
 #[async_trait]
 impl Datanode for RegionRequester {
-    async fn handle(&self, request: RegionRequest) -> MetaResult<RegionResponse> {
+    async fn handle_request(&self, request: Arc<RegionRequest>) -> MetaResult<RegionResponse> {
         self.handle_inner(request).await.map_err(Into::into)
     }
 
@@ -761,9 +761,8 @@ mod tests {
                 assert_eq!(error.retry_hint(), baseline.retry_hint());
                 assert_eq!(error.tonic_code(), baseline.tonic_code());
             }
-            let error = Datanode::handle(&requester, build_insert_request())
-                .await
-                .unwrap_err();
+            let datanode: &dyn Datanode = &requester;
+            let error = datanode.handle(build_insert_request()).await.unwrap_err();
             assert_eq!(error.status_code(), StatusCode::RegionNotFound);
             assert_eq!(error.retry_hint(), hint);
             match hint {

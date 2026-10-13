@@ -177,8 +177,7 @@ impl RegionTestServer {
         let registry = cache::build_fundamental_cache_registry(backend);
         let table_info_cache = registry.get::<TableInfoCacheRef>().unwrap();
         let clients = Arc::new(NodeClients::new(ChannelConfig::default()));
-        WriteDispatcher::new(clients.clone(), partition_manager).with_retry(
-            clients,
+        WriteDispatcher::new(clients, partition_manager).with_retry(
             build_retry_options(max_retries),
             table_info_cache,
             self.invalidator.clone(),
@@ -364,7 +363,7 @@ async fn test_should_retry_requires_a_retained_request_and_budget() {
     let backend = test_util::prepare_mocked_backend().await;
     let (partition_manager, table_info_cache, cache_invalidator) = create_routing_caches(backend);
     let retry = WriteRetry {
-        clients: Arc::new(NodeClients::default()),
+        node_manager: Arc::new(NodeClients::default()),
         partition_manager,
         options: build_retry_options(2),
         table_info_cache,
@@ -444,8 +443,7 @@ async fn test_finish_retries_initial_failures_in_one_round() {
         ..Default::default()
     });
     let clients = Arc::new(NodeClients::new(ChannelConfig::default()));
-    let dispatcher = WriteDispatcher::new(clients.clone(), partition_manager).with_retry(
-        clients,
+    let dispatcher = WriteDispatcher::new(clients, partition_manager).with_retry(
         build_retry_options(2),
         table_info_cache,
         invalidator.clone(),
@@ -526,8 +524,7 @@ async fn test_write_retry_refreshes_stale_route_and_sends_only_failed_region_to_
         ..Default::default()
     });
     let clients = Arc::new(NodeClients::new(ChannelConfig::default()));
-    let dispatcher = WriteDispatcher::new(clients.clone(), partition_manager).with_retry(
-        clients,
+    let dispatcher = WriteDispatcher::new(clients, partition_manager).with_retry(
         build_retry_options(2),
         table_info_cache,
         invalidator.clone(),
@@ -745,13 +742,11 @@ async fn test_write_retry_rebuilds_only_failed_rows_after_route_refresh() {
             route_update: Mutex::new(Some((backend, current.update(routes).unwrap()))),
         });
         let clients = Arc::new(NodeClients::new(ChannelConfig::default()));
-        let dispatcher = WriteDispatcher::new(clients.clone(), partition_manager.clone())
-            .with_retry(
-                clients,
-                build_retry_options(2),
-                table_info_cache,
-                invalidator.clone(),
-            );
+        let dispatcher = WriteDispatcher::new(clients, partition_manager.clone()).with_retry(
+            build_retry_options(2),
+            table_info_cache,
+            invalidator.clone(),
+        );
         let response = dispatcher
             .dispatch(vec![
                 build_partitioned_request(kind, 1, old_versions[&1], &[70]),
@@ -1153,8 +1148,7 @@ async fn test_write_retry_rebuilds_logical_rows_in_mixed_table_envelope() {
             ..Default::default()
         });
         let clients = Arc::new(NodeClients::new(ChannelConfig::default()));
-        let dispatcher = WriteDispatcher::new(clients.clone(), partition_manager).with_retry(
-            clients,
+        let dispatcher = WriteDispatcher::new(clients, partition_manager).with_retry(
             build_retry_options(2),
             table_info_cache,
             invalidator.clone(),
@@ -1225,15 +1219,10 @@ async fn test_with_retry_can_disable_previously_enabled_retries() {
     let server = RegionTestServer::start().await;
     let dispatcher = server.create_dispatcher(1).await;
     let retry = dispatcher.retry.as_ref().unwrap();
-    let clients = retry.clients.clone();
     let table_info_cache = retry.table_info_cache.clone();
     let cache_invalidator = retry.cache_invalidator.clone();
-    let dispatcher = dispatcher.with_retry(
-        clients,
-        build_retry_options(0),
-        table_info_cache,
-        cache_invalidator,
-    );
+    let dispatcher =
+        dispatcher.with_retry(build_retry_options(0), table_info_cache, cache_invalidator);
     assert!(dispatcher.retry.is_none());
     server.fail_region(1, [RetryHint::Retryable]);
     assert!(

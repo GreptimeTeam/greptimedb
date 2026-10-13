@@ -22,7 +22,6 @@ use std::sync::Arc;
 use api::region::RegionResponse;
 use api::v1::region::{DeleteRequests, InsertRequests, RegionRequest, region_request::Body};
 use backon::{BackoffBuilder, ExponentialBuilder};
-use client::client_manager::NodeClients;
 use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_meta::cache::TableInfoCacheRef;
 use common_meta::cache_invalidator::{CacheInvalidatorRef, Context};
@@ -75,14 +74,13 @@ impl WriteDispatcher {
     /// Enables shared remote sends and retries using frontend configuration and caches.
     pub fn with_retry(
         mut self,
-        clients: Arc<NodeClients>,
         options: WriteRetryOptions,
         table_info_cache: TableInfoCacheRef,
         cache_invalidator: CacheInvalidatorRef,
     ) -> Self {
         if options.max_retries > 0 {
             self.retry = Some(WriteRetry {
-                clients,
+                node_manager: self.node_manager.clone(),
                 partition_manager: self.partition_manager.clone(),
                 options,
                 table_info_cache,
@@ -277,7 +275,7 @@ impl WriteDispatcher {
 
 /// Sends shared requests and coordinates retries with refreshed routes.
 struct WriteRetry {
-    clients: Arc<NodeClients>,
+    node_manager: NodeManagerRef,
     partition_manager: PartitionRuleManagerRef,
     options: WriteRetryOptions,
     table_info_cache: TableInfoCacheRef,
@@ -293,15 +291,17 @@ pub(crate) struct RoutedWrite {
 impl WriteRetry {
     async fn send(&self, write: RoutedWrite, histogram: Option<&Histogram>) -> WriteAttempt {
         let _timer = histogram.map(Histogram::start_timer);
-        let requester = self.clients.make_region_requester(&write.peer).await;
+        let requester = self.node_manager.datanode(&write.peer).await;
         match requester.handle(Arc::clone(&write.request)).await {
             Ok(response) => WriteAttempt::Success(response),
             Err(error) => {
-                let request = error.retry_hint().is_retryable().then_some(write);
-                WriteAttempt::Failed {
-                    error: error.into(),
-                    request,
-                }
+                // Preserve the client hint for writes while Datanode still wraps retryable errors.
+                let hint = match &error {
+                    Error::RetryLater { source, .. } => source.retry_hint(),
+                    _ => error.retry_hint(),
+                };
+                let request = hint.is_retryable().then_some(write);
+                WriteAttempt::Failed { error, request }
             }
         }
     }

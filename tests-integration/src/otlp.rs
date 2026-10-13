@@ -134,9 +134,9 @@ mod test {
 
     #[async_trait::async_trait]
     impl Datanode for GatedTraceDatanode {
-        async fn handle(
+        async fn handle_request(
             &self,
-            request: RegionRequest,
+            request: Arc<RegionRequest>,
         ) -> common_meta::error::Result<RegionResponse> {
             let gate = {
                 let mut gate = self.gate.lock().unwrap();
