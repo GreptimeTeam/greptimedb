@@ -784,7 +784,7 @@ impl CompactionScheduler {
             status.executing_ddl = Some(DdlExecution::new(generation, ddls.len()));
         }
 
-        for (request_id, ddl) in ddls.iter_mut().enumerate() {
+        for (request_index, ddl) in ddls.iter_mut().enumerate() {
             // Swap the DDL's real reply sender for a temporary one so we can observe it. The
             // spawned task forwards the observed result to the original caller and, in between,
             // notifies the scheduler that this slot of the batch has completed.
@@ -802,10 +802,10 @@ impl CompactionScheduler {
                 //
                 // At most one batch can be outstanding per region: [`CompactionStatus::has_ddl`] blocks
                 // compaction admission while `executing_ddl` is set, so `fence_ddl_replies` cannot run again
-                // for the same region before the current batch drains. A single `(generation, request_id)`
+                // for the same region before the current batch drains. A single `(generation, request_index)`
                 // pair therefore identifies every reply. `generation` comes from the scheduler-wide counter,
                 // which outlives region statuses, so a late reply from a previous incarnation cannot clear the
-                // current fence. Inside the batch `request_id` makes completion idempotent: only the last
+                // current fence. Inside the batch `request_index` makes completion idempotent: only the last
                 // distinct reply releases the fence.
                 let _ = sender
                     .send(WorkerRequestWithTime::new(
@@ -813,7 +813,7 @@ impl CompactionScheduler {
                             region_id,
                             notify: crate::request::BackgroundNotify::CompactionDdlComplete {
                                 generation,
-                                request_id,
+                                request_index,
                             },
                         },
                     ))
@@ -829,16 +829,16 @@ impl CompactionScheduler {
         &mut self,
         region_id: RegionId,
         generation: u64,
-        request_id: usize,
+        request_index: usize,
     ) {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return;
         };
-        // `complete` returns false for a stale generation or a duplicate `request_id`, so a late or
+        // `complete` returns false for a stale generation or a duplicate `request_index`, so a late or
         // repeated notify cannot end the batch early. It only clears the fence on the last distinct
         // reply, which is what lets `has_ddl` unblock compaction admission again.
         if let Some(ddl) = &mut status.executing_ddl
-            && ddl.complete(generation, request_id)
+            && ddl.complete(generation, request_index)
         {
             status.executing_ddl = None;
         }

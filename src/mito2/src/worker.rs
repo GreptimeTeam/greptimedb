@@ -1362,10 +1362,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::CompactionDdlComplete {
                 generation,
-                request_id,
+                request_index,
             } => {
                 self.compaction_scheduler
-                    .on_ddl_complete(region_id, generation, request_id);
+                    .on_ddl_complete(region_id, generation, request_index);
             }
             BackgroundNotify::CompactionPickFinished(req) => {
                 self.handle_compaction_pick_finished(region_id, req).await

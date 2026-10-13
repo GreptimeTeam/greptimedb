@@ -281,9 +281,9 @@ impl DdlExecution {
     }
 
     /// Returns true only for the last distinct reply of this batch.
-    pub(crate) fn complete(&mut self, generation: u64, request_id: usize) -> bool {
+    pub(crate) fn complete(&mut self, generation: u64, request_index: usize) -> bool {
         self.generation == generation
-            && self.pending_replies.remove(&request_id)
+            && self.pending_replies.remove(&request_index)
             && self.pending_replies.is_empty()
     }
 }

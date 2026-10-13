@@ -422,14 +422,14 @@ async fn recv_ddl_completion(rx: &mut mpsc::Receiver<WorkerRequestWithTime>) -> 
         notify:
             BackgroundNotify::CompactionDdlComplete {
                 generation,
-                request_id,
+                request_index,
             },
         ..
     } = request.request
     else {
         panic!("expected DDL completion");
     };
-    (generation, request_id)
+    (generation, request_index)
 }
 
 #[tokio::test]
@@ -535,9 +535,9 @@ async fn test_resident_region_ddl_handoff_and_late_replies() {
         .unwrap()
         .sender
         .send(InvalidSchedulerStateSnafu.fail());
-    let (generation, request_id) = recv_ddl_completion(&mut rx).await;
-    scheduler.on_ddl_complete(id, generation, request_id);
-    scheduler.on_ddl_complete(id, generation, request_id);
+    let (generation, request_index) = recv_ddl_completion(&mut rx).await;
+    scheduler.on_ddl_complete(id, generation, request_index);
+    scheduler.on_ddl_complete(id, generation, request_index);
     assert!(response.await.unwrap().is_err());
     assert!(!scheduler.region_status[&id].has_ddl());
     assert!(

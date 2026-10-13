@@ -906,7 +906,10 @@ pub(crate) enum BackgroundNotify {
         registered: Sender<()>,
     },
     /// A DDL released by compaction has actually completed, including failure.
-    CompactionDdlComplete { generation: u64, request_id: usize },
+    CompactionDdlComplete {
+        generation: u64,
+        request_index: usize,
+    },
     /// Compaction planning has finished.
     CompactionPickFinished(CompactionPickFinished),
     /// Flush has finished.
