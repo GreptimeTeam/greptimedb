@@ -15,3 +15,5 @@
 pub(crate) mod common;
 pub mod delete;
 pub mod insert;
+
+pub(crate) use common::partitioner::TablePartitioner;

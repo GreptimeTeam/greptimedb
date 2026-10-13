@@ -41,3 +41,12 @@ cargo nextest run -p common-meta
 ```
 
 Backend-specific coverage may also need `pg_kvbackend` or `mysql_kvbackend`.
+
+`test_util::etcd_certs_dir` and `test_util::test_certs_dir` resolve fixture
+certificates using `CARGO_MANIFEST_DIR` at **run time** (`std::env::var`, not `env!`).
+`cargo nextest run` sets it; direct test-binary execution requires setting the
+variable to the crate directory. Run this example from the repository root:
+
+```bash
+CARGO_MANIFEST_DIR="$PWD/src/common/meta" ./target/debug/deps/<test_binary>
+```

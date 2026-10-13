@@ -128,7 +128,6 @@ lazy_static! {
 #[derive(Clone)]
 pub struct Instance {
     frontend_peer_addr: String,
-    experimental_metric_export: bool,
     catalog_manager: CatalogManagerRef,
     pipeline_operator: Arc<PipelineOperator>,
     statement_executor: Arc<StatementExecutor>,
@@ -409,14 +408,6 @@ impl Instance {
                     return self
                         .copy_packed_database(arg.clone(), &stmt, query_ctx)
                         .await;
-                }
-                if let Statement::ShowVariables(show) = &stmt
-                    && show
-                        .variable
-                        .to_string()
-                        .eq_ignore_ascii_case("experimental_metric_export")
-                {
-                    return self.show_metric_export_capability();
                 }
                 if let Statement::Copy(sql::statements::copy::Copy::CopyDatabase(CopyDatabase::To(
                     arg,
@@ -2922,10 +2913,7 @@ mod tests {
         let catalog = catalog::memory::MemoryCatalogManager::new_with_table(source);
         let kv = Arc::new(MemoryKvBackend::new());
         let instance = FrontendBuilder::new(
-            FrontendOptions {
-                experimental_metric_export: true,
-                ..Default::default()
-            },
+            FrontendOptions::default(),
             kv.clone(),
             test_cache_registry(kv).unwrap(),
             catalog,

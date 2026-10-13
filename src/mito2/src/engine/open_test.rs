@@ -31,11 +31,12 @@ use store_api::region_request::{
     RegionRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 
 use crate::compaction::compactor::{OpenCompactionRegionRequest, open_compaction_region};
 use crate::config::MitoConfig;
 use crate::engine::flush_test::MockRegionHook;
+use crate::engine::listener::EventListener;
 use crate::engine::region_hook::RegionHookRef;
 use crate::error;
 use crate::region::opener::{PartitionExprFetcher, PartitionExprFetcherRef};
@@ -761,6 +762,112 @@ async fn test_open_region_skip_wal_replay_with_format(flat_format: bool) {
 | 4     | 4.0     | 1970-01-01T00:00:04 |
 +-------+---------+---------------------+";
     assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+/// Holds the first background opener after registration without blocking the worker.
+#[derive(Default)]
+struct OpenRegistrationGate {
+    registrations: AtomicUsize,
+    entered: Notify,
+    resume: Notify,
+}
+
+#[async_trait::async_trait]
+impl EventListener for OpenRegistrationGate {
+    async fn on_region_open_registered(&self, _region_id: RegionId) {
+        if self.registrations.fetch_add(1, Ordering::Relaxed) == 0 {
+            self.entered.notify_one();
+            self.resume.notified().await;
+        }
+    }
+}
+
+/// Releases the opener even if a regression assertion fails.
+struct OpenRegistrationGateGuard(Arc<OpenRegistrationGate>);
+
+impl Drop for OpenRegistrationGateGuard {
+    fn drop(&mut self) {
+        self.0.resume.notify_one();
+    }
+}
+
+#[tokio::test]
+async fn test_reopen_does_not_wait_for_previous_open_task() {
+    let mut env = TestEnv::with_prefix("reopen-before-open-task-exits").await;
+    let gate = Arc::new(OpenRegistrationGate::default());
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                num_workers: 1,
+                ..Default::default()
+            },
+            None,
+            Some(gate.clone()),
+            None,
+        )
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let create = CreateRequestBuilder::new().build();
+    let open = RegionOpenRequest {
+        engine: String::new(),
+        table_dir: create.table_dir.clone(),
+        path_type: PathType::Bare,
+        options: Default::default(),
+        skip_wal_replay: false,
+        checkpoint: None,
+        requirements: Default::default(),
+    };
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
+        .await
+        .unwrap();
+
+    let guard = OpenRegistrationGateGuard(gate.clone());
+    let first_engine = engine.clone();
+    let first_request = open.clone();
+    let first_open = tokio::spawn(async move {
+        first_engine
+            .handle_request(region_id, RegionRequest::Open(first_request))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+        .await
+        .expect("the first opener did not receive its registration acknowledgement");
+    assert!(engine.is_region_exists(region_id));
+
+    // A later open must load the region again, not join the first opener's waiters.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Close(RegionCloseRequest::default()),
+            )
+            .await
+            .unwrap();
+        assert!(!engine.is_region_exists(region_id));
+        engine
+            .handle_request(region_id, RegionRequest::Open(open))
+            .await
+            .unwrap();
+    })
+    .await
+    .expect("reopening must not wait for the previous background opener to exit");
+    assert!(engine.is_region_exists(region_id));
+    assert!(!engine.is_region_opening(region_id));
+
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(5), first_open)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]

@@ -212,6 +212,10 @@ pub struct StartCommand {
     internal_grpc_server_addr: Option<String>,
     #[clap(long)]
     http_addr: Option<String>,
+    /// The address to bind the dedicated public HTTP API server. Setting this
+    /// flag also enables the API server.
+    #[clap(long)]
+    http_api_server_addr: Option<String>,
     #[clap(long)]
     http_timeout: Option<u64>,
     #[clap(long)]
@@ -299,6 +303,11 @@ impl StartCommand {
 
         if let Some(disable_dashboard) = self.disable_dashboard {
             opts.http.disable_dashboard = disable_dashboard;
+        }
+
+        if let Some(addr) = &self.http_api_server_addr {
+            opts.http.api_server_addr.clone_from(addr);
+            opts.http.enable_api_server = true;
         }
 
         if let Some(addr) = &self.grpc_bind_addr {

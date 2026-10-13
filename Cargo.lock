@@ -2122,6 +2122,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic 0.14.2",
+ "tonic-prost",
 ]
 
 [[package]]
@@ -10094,7 +10095,9 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum 0.8.4",
+ "backon",
  "bytes",
+ "cache",
  "catalog",
  "chrono",
  "client",
@@ -10125,6 +10128,7 @@ dependencies = [
  "futures",
  "futures-util",
  "humantime",
+ "humantime-serde",
  "itertools 0.14.0",
  "jsonb",
  "lazy_static",
@@ -10151,6 +10155,7 @@ dependencies = [
  "substrait 1.4.0-alpha.0",
  "table",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tonic 0.14.2",
  "tracing",

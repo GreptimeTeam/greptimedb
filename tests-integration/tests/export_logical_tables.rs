@@ -1587,7 +1587,6 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
     });
     plugins.insert::<SqlQueryInterceptorRef<frontend::error::Error>>(faults.clone());
     let source = GreptimeDbStandaloneBuilder::new("metric_v2_source")
-        .with_experimental_metric_export()
         .with_plugin(plugins)
         .build()
         .await;
@@ -1713,9 +1712,7 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
                 uri.as_str(),
                 "--schemas",
                 "public",
-                "--experimental-metric-export",
-                "--metric-data-layout",
-                "packed",
+                "--pack-metric-data",
                 "--no-proxy",
                 "--start-time",
                 "1970-01-01T00:00:00Z",
@@ -1792,7 +1789,6 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
         } else {
             "public,z_later"
         },
-        "--experimental-metric-export",
         "--no-proxy",
         "--start-time",
         "1970-01-01T00:00:00Z",
@@ -1805,7 +1801,7 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
     ];
     args.extend(storage_args.iter().map(String::as_str));
     if packed {
-        args.extend(["--metric-data-layout", "packed"]);
+        args.push("--pack-metric-data");
     }
     assert!(run_data_cli(&args).await.is_err());
     let before: cli::export_v2::manifest::Manifest =
@@ -1838,25 +1834,28 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
             .await
             .unwrap()
     );
-    store
-        .write("data/public/2/unknown.txt", "keep")
-        .await
-        .unwrap();
-    let copies = faults.copies.load(std::sync::atomic::Ordering::SeqCst);
-    assert!(run_data_cli(&args).await.is_err());
-    assert_eq!(
-        faults.copies.load(std::sync::atomic::Ordering::SeqCst),
-        copies
-    );
-    assert_eq!(
+    if packed {
+        args.pop();
         store
-            .read("data/public/2/unknown.txt")
+            .write("data/public/2/unknown.txt", "keep")
             .await
-            .unwrap()
-            .to_vec(),
-        b"keep"
-    );
-    store.delete("data/public/2/unknown.txt").await.unwrap();
+            .unwrap();
+        let copies = faults.copies.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(run_data_cli(&args).await.is_err());
+        assert_eq!(
+            faults.copies.load(std::sync::atomic::Ordering::SeqCst),
+            copies
+        );
+        assert_eq!(
+            store
+                .read("data/public/2/unknown.txt")
+                .await
+                .unwrap()
+                .to_vec(),
+            b"keep"
+        );
+        store.delete("data/public/2/unknown.txt").await.unwrap();
+    }
     run_data_cli(&args).await.unwrap();
     let after: cli::export_v2::manifest::Manifest =
         serde_json::from_slice(&store.read("manifest.json").await.unwrap().to_vec()).unwrap();
@@ -2031,9 +2030,7 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
             "--schemas",
             "public",
             "--schema-only",
-            "--experimental-metric-export",
-            "--metric-data-layout",
-            "packed",
+            "--pack-metric-data",
             "--no-proxy",
             "--progress",
             "never",
@@ -2096,8 +2093,8 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
 }
 
 #[tokio::test]
-async fn metric_export_v2_disabled_and_legacy_cli() {
-    let source = GreptimeDbStandaloneBuilder::new("metric_v2_disabled")
+async fn metric_export_v2_requires_parquet_and_keeps_default_layout() {
+    let source = GreptimeDbStandaloneBuilder::new("metric_v2_default")
         .build()
         .await;
     let (addr, server) = export_http(source.fe_instance().clone()).await;
@@ -2115,12 +2112,15 @@ async fn metric_export_v2_disabled_and_legacy_cli() {
         "--to",
         &uri,
         "--force",
-        "--experimental-metric-export",
+        "--format",
+        "csv",
+        "--pack-metric-data",
         "--no-proxy",
         "--progress",
         "never",
     ];
-    assert!(run_data_cli(&args).await.is_err());
+    let error = run_data_cli(&args).await.unwrap_err();
+    assert!(error.to_string().contains("requires Parquet"), "{error}");
     assert_eq!(
         std::fs::read(&manifest).unwrap(),
         b"preserve-before-capability-check"
@@ -2150,80 +2150,30 @@ async fn metric_export_v2_disabled_and_legacy_cli() {
     run_data_cli(&["export-v2", "verify", "--snapshot", &uri])
         .await
         .unwrap();
+    let saved: cli::export_v2::manifest::Manifest =
+        serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    assert_eq!(saved.version, 1);
+    assert!(!saved.is_packed());
     server.abort();
 }
 
 #[tokio::test]
 async fn metric_export_v2_refuses_missing_or_malformed_capability_before_force() {
     use axum::http::StatusCode;
+    use common_error::ext::ErrorExt;
     use serde_json::json;
-    let column = json!({"name": "EXPERIMENTAL_METRIC_EXPORT", "data_type": "String"});
-    let records = |rows, columns| {
-        json!({"records": {
-            "schema": {"column_schemas": columns},
-            "rows": rows
-        }})
-    };
-    let valid = records(json!([["true"]]), json!([column.clone()]));
-    let mut responses = [
-        (StatusCode::BAD_REQUEST, json!([])),
-        (StatusCode::OK, json!([])),
-        (StatusCode::OK, json!([[true]])),
-        (StatusCode::OK, json!([["true", "extra"]])),
-        (StatusCode::OK, json!([["true"], ["true"]])),
-    ]
-    .map(|(status, rows)| (status, json!([records(rows, json!([column.clone()]))])))
-    .to_vec();
-    responses.extend([
-        (
-            StatusCode::OK,
-            json!([
-                valid.clone(),
-                records(json!([["false"]]), json!([column.clone()]))
-            ]),
-        ),
-        (
-            StatusCode::OK,
-            json!([records(json!([["true"]]), json!([]))]),
-        ),
-        (
-            StatusCode::OK,
-            json!([records(json!([["true"]]), json!([column.clone(), column]))]),
-        ),
-        (
-            StatusCode::OK,
-            json!([records(
-                json!([["true"]]),
-                json!([{"name": "EXPERIMENTAL_METRIC_EXPORT", "data_type": "Boolean"}])
-            )]),
-        ),
-        (
-            StatusCode::OK,
-            json!([records(
-                json!([["true"]]),
-                json!([{"name": "OTHER", "data_type": "String"}])
-            )]),
-        ),
-    ]);
-    for (status, output) in responses {
-        let app =
-            axum::Router::new().route(
-                "/v1/sql",
-                axum::routing::post(
-                    move |axum::Form(form): axum::Form<
-                        std::collections::HashMap<String, String>,
-                    >| async move {
-                        assert_eq!(form["sql"], "SHOW VARIABLES experimental_metric_export");
-                        (
-                            status,
-                            axum::Json(json!({
-                                "execution_time_ms": 0,
-                                "output": output
-                            })),
-                        )
-                    },
-                ),
-            );
+    for (status, capability) in [
+        (StatusCode::NOT_FOUND, json!({})),
+        (StatusCode::OK, json!({})),
+        (StatusCode::OK, json!({"metric_packed_export": 0})),
+        (StatusCode::OK, json!({"metric_packed_export": 2})),
+        (StatusCode::OK, json!({"metric_packed_export": true})),
+        (StatusCode::OK, json!({"metric_packed_export": "1"})),
+    ] {
+        let app = axum::Router::new().route(
+            "/v1/capabilities",
+            axum::routing::get(move || async move { (status, axum::Json(capability)) }),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -2237,25 +2187,57 @@ async fn metric_export_v2_refuses_missing_or_malformed_capability_before_force()
             &addr,
             "--to",
             &uri,
-            "--experimental-metric-export",
+            "--pack-metric-data",
             "--force",
             "--no-proxy",
             "--progress",
             "never",
         ];
         let error = run_data_cli(&args).await.unwrap_err();
-        if status == StatusCode::OK {
-            assert!(
-                error.to_string().contains("Metric export requires"),
-                "{error}"
-            );
-        }
+        let cause = error.root_cause().unwrap_or(&error).to_string();
+        assert!(
+            cause.contains("metric_packed_export") || cause.contains("invalid capability version"),
+            "{error:?}"
+        );
         assert!(!snapshot.exists());
         std::fs::create_dir(&snapshot).unwrap();
         let manifest = snapshot.join("manifest.json");
         std::fs::write(&manifest, b"preserve").unwrap();
         assert!(run_data_cli(&args).await.is_err());
-        assert_eq!(std::fs::read(manifest).unwrap(), b"preserve");
+        assert_eq!(std::fs::read(&manifest).unwrap(), b"preserve");
+
+        let mut packed = cli::export_v2::manifest::Manifest::new_for_export(
+            "greptime".into(),
+            vec!["public".into()],
+            false,
+            cli::export_v2::manifest::TimeRange::unbounded(),
+            cli::export_v2::manifest::DataFormat::Parquet,
+            None,
+        )
+        .unwrap();
+        packed.version = 2;
+        packed.data_layout = Some(common_datasource::packed_snapshot::PACKED_LAYOUT.into());
+        packed.validate_layout().unwrap();
+        let original = serde_json::to_vec(&packed).unwrap();
+        std::fs::write(&manifest, &original).unwrap();
+        let chunk = snapshot.join("data/public/1");
+        std::fs::create_dir_all(&chunk).unwrap();
+        let part = chunk.join("pack-000000.bin");
+        std::fs::write(&part, b"unfinished").unwrap();
+        let resume = args
+            .into_iter()
+            .filter(|arg| !matches!(*arg, "--force" | "--pack-metric-data"))
+            .collect::<Vec<_>>();
+        let resume_error = run_data_cli(&resume).await.unwrap_err();
+        assert_eq!(
+            resume_error
+                .root_cause()
+                .unwrap_or(&resume_error)
+                .to_string(),
+            cause
+        );
+        assert_eq!(std::fs::read(&manifest).unwrap(), original);
+        assert_eq!(std::fs::read(&part).unwrap(), b"unfinished");
         server.abort();
     }
 }

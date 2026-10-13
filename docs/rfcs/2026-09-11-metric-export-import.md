@@ -193,11 +193,20 @@ Packed Metric exports write manifest version 2 with a required data-layout marke
 exports can keep version 1. A version-2 snapshot indexes all data in its schema
 chunks, including ordinary tables stored as standalone Parquet objects.
 
-Before creating or replacing a snapshot, the CLI checks the source server's
-explicit packed-export capability. Before target DDL or data writes, the importer
+`export-v2 create --pack-metric-data` selects shared physical scans and
+packed output. Omitting the flag keeps the default version-1 export path;
+schema-only snapshots also retain version 1. Default frontend and standalone
+configurations accept explicit packed export requests. Resume derives the layout
+from the manifest, so packed snapshots do not need the flag repeated.
+
+Before creating or replacing a packed data snapshot, the CLI checks the source
+server's explicit packed-export capability. Schema-only exports do not require
+packed-data capability. Before target DDL or data writes, the importer
 checks the manifest version/layout and the target's packed-import capability.
 An unsupported packed layout fails; it must not fall through to listing `.parquet`
 files and silently omit packed tables. Batch-DDL capability is checked separately.
+General batch-DDL and schema metadata optimizations apply independently of packed
+export selection.
 
 | Reader and snapshot | Behavior |
 | --- | --- |
@@ -432,8 +441,8 @@ The CLI retains one `COPY DATABASE FROM` operation per `(chunk, schema)` task.
 Add an explicit `metric_data_layout = 'packed'` COPY option, paired with
 `FORMAT = 'parquet'`, for the advertised capability. The server validates the
 index and selected destination tables, then schedules table streams by object
-and offset. Use the same explicit layout option for packed export. The existing
-Metric feature gate continues to control the experimental export path.
+and offset. Use the same explicit layout option for packed export, with
+per-table authorization and storage access checks.
 
 A reader owned by that request translates each Parquet-relative read into a
 bounded object range. Start with two shared 8 MiB read windows per request;
@@ -512,16 +521,15 @@ the existing durable state update.
 - Pin supported old-reader binaries for version-2 rejection and version-1
   compatibility tests. The first-release storage targets are local files and
   S3-compatible storage exercised through MinIO.
-- Decide when release acceptance permits removing the existing experimental
-  gate. Packed export/restore capability is required while mixed versions exist.
+- Packed export/restore capability is required while mixed versions exist.
 
 # Integration and release acceptance
 
 Use existing COPY DATABASE orchestration to form Metric export units. Retain
 ordinary COPY for non-Metric tables and other formats, and direct COPY TABLE
-behavior. Gate the unfinished Metric fast path behind an `experimental_`
-configuration option; disabling it selects the existing path. Add packed-import
-support before enabling packed snapshot creation. The writer and reader form one
+behavior. Explicit packed requests select the Metric fast path; ordinary exports
+keep the existing path. Packed snapshot creation requires packed-export capability,
+and restore requires packed-import capability. The writer and reader form one
 first-release feature, even though they land in separate PRs.
 
 The [tracking issue](https://github.com/GreptimeTeam/greptimedb/issues/9120) owns
@@ -534,7 +542,7 @@ must verify its own correctness and failure behavior. Release acceptance require
 | Restore | Authenticated remote batch DDL, per-table authorization, fresh target IDs and reconstructed metadata, dependency ordering, older-server behavior and batch failure/retry. |
 | V2 lifecycle | New-reader version-1/2 coverage, old-reader version-2 rejection, target capability preflight; local/object-store interruption, multipart abort, owned-output cleanup, index/manifest failure and import replay. |
 | Scale | Repeated release-build measurements varying table count up to approximately 100,000, rows/file, physical union width, regions and backend. Report median/spread, control execution order/cache, and include schema export and metadata discovery in end-to-end timing. |
-| Open decisions | Agreed batch-DDL interface, resource limits, compatibility targets and experimental gate. |
+| Open decisions | Agreed batch-DDL interface, resource limits, compatibility targets. |
 
 ## Snapshot format acceptance
 
