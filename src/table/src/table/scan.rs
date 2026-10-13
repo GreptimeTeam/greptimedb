@@ -713,6 +713,7 @@ mod test {
     use store_api::region_engine::{
         PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties, SinglePartitionScanner,
     };
+    use store_api::storage::consts::ReservedColumnId;
     use store_api::storage::{RegionId, TimeSeriesDistribution};
 
     use super::*;
@@ -1089,23 +1090,22 @@ mod test {
         }
     }
 
-    /// A metric region keeps its tags behind the physical `__table_id`/`__tsid` row key
-    /// prefix. A projection that hides that prefix must not claim the visible tag (or the
-    /// time index) as order or hash partition columns, while a projection that keeps
-    /// `__tsid` still reports the metric TSID properties.
+    /// Metric TSID properties require projecting `__tsid` and restricting the scan to one
+    /// `__table_id`; hiding the physical row-key prefix must not claim a visible tag or time as
+    /// order or hash partition columns.
     #[test]
     fn test_metric_projection_claims_only_projected_row_key_prefix() {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1234, 5691));
-        for (index, name) in [
-            DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
-            DATA_SCHEMA_TSID_COLUMN_NAME,
-            "A",
-            "marker",
-            "ts",
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        for (name, column_id) in [
+            (
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                ReservedColumnId::table_id(),
+            ),
+            (DATA_SCHEMA_TSID_COLUMN_NAME, ReservedColumnId::tsid()),
+            ("A", 1),
+            ("marker", 2),
+            ("ts", 3),
+        ] {
             builder.push_column_metadata(ColumnMetadata {
                 column_schema: column_schema_of(name),
                 semantic_type: if name == "ts" {
@@ -1113,11 +1113,16 @@ mod test {
                 } else {
                     SemanticType::Tag
                 },
-                column_id: index as u32 + 1,
+                column_id,
             });
         }
         // The physical row key order: `__table_id`, `__tsid`, then the tag columns.
-        builder.primary_key(vec![1, 2, 3, 4]);
+        builder.primary_key(vec![
+            ReservedColumnId::table_id(),
+            ReservedColumnId::tsid(),
+            1,
+            2,
+        ]);
         let metadata = Arc::new(builder.build().unwrap());
 
         for (projection, partitioned_by_tsid, claimed, unclaimed) in [
@@ -1129,7 +1134,7 @@ mod test {
                 vec![],
                 vec![vec!["A"], vec!["marker"], vec!["ts"], vec!["A", "ts"]],
             ),
-            // `__tsid` is projected, so the metric TSID partitioning and ordering stay.
+            // Projecting internal `__tsid` plus the single-table filter preserves metric TSID properties.
             (
                 vec![DATA_SCHEMA_TSID_COLUMN_NAME, "A", "marker", "ts"],
                 true,
@@ -1158,6 +1163,14 @@ mod test {
                 scanner,
                 ScanRequest {
                     distribution: Some(TimeSeriesDistribution::PerSeries),
+                    filters: if partitioned_by_tsid {
+                        vec![
+                            datafusion_expr::col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+                                .eq(datafusion_expr::lit(42u32)),
+                        ]
+                    } else {
+                        vec![]
+                    },
                     ..Default::default()
                 },
                 None,
