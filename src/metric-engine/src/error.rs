@@ -486,6 +486,9 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
+            PhysicalRegionNotFound { .. } | LogicalRegionNotFound { .. } => {
+                RetryHint::RetryAfterRouteRefresh
+            }
             CreateMitoRegion { source, .. }
             | OpenMitoRegion { source, .. }
             | CleanUpMitoRegion { source, .. }
@@ -507,6 +510,23 @@ impl ErrorExt for Error {
             CacheGet { source, .. } => source.retry_hint(),
 
             _ => RetryHint::NonRetryable,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_missing_region_retry_hints() {
+        let region_id = RegionId::new(1024, 1);
+        for error in [
+            PhysicalRegionNotFoundSnafu { region_id }.build(),
+            LogicalRegionNotFoundSnafu { region_id }.build(),
+        ] {
+            assert_eq!(error.status_code(), StatusCode::RegionNotFound);
+            assert_eq!(error.retry_hint(), RetryHint::RetryAfterRouteRefresh);
         }
     }
 }

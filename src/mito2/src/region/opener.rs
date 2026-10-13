@@ -384,6 +384,7 @@ impl RegionOpener {
             FormatType::PrimaryKey
         };
         ensure_json2_not_use_time_series_memtable(&metadata, &options)?;
+        options.validate_column_compression(&metadata)?;
         // Create a manifest manager for this region and writes regions to the manifest file.
         let mut region_manifest_options =
             RegionManifestOptions::new(config, &region_dir, &object_store);
@@ -539,6 +540,7 @@ impl RegionOpener {
         // Updates the region options with the manifest.
         sanitize_region_options(&manifest, &mut region_options);
         ensure_json2_not_use_time_series_memtable(&metadata, &region_options)?;
+        region_options.validate_column_compression(&metadata)?;
 
         let region_id = self.region_id;
         let provider = self.provider::<S>(&region_options.wal_options)?;

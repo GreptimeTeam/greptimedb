@@ -41,7 +41,10 @@ use crate::error::{
     UpgradeWeakCatalogManagerRefSnafu,
 };
 use crate::kvbackend::KvBackendCatalogManager;
-use crate::system_schema::information_schema::{InformationTable, Predicates, REGION_PEERS};
+use crate::system_schema::SystemTable;
+use crate::system_schema::information_schema::{
+    InformationSchemaTableScope, InformationTable, Predicates, REGION_PEERS,
+};
 
 pub const TABLE_CATALOG: &str = "table_catalog";
 pub const TABLE_SCHEMA: &str = "table_schema";
@@ -105,6 +108,12 @@ impl InformationSchemaRegionPeers {
 }
 
 impl InformationTable for InformationSchemaRegionPeers {
+    fn scope(&self) -> InformationSchemaTableScope {
+        InformationSchemaTableScope::Catalog
+    }
+}
+
+impl SystemTable for InformationSchemaRegionPeers {
     fn table_id(&self) -> TableId {
         INFORMATION_SCHEMA_REGION_PEERS_TABLE_ID
     }

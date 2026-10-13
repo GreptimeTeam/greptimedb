@@ -20,13 +20,16 @@ use std::sync::Arc;
 use api::v1::SemanticType;
 use common_base::readable_size::ReadableSize;
 use datatypes::json::JsonSettings;
+use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::metadata::ParquetMetaData;
-use parquet::file::properties::WriterPropertiesBuilder;
+use parquet::file::properties::{DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT, WriterPropertiesBuilder};
 use parquet::schema::types::ColumnPath;
+use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::mito_engine_options::FloatFieldEncoding;
 use store_api::storage::{ColumnId, FileId};
 
+use crate::error::{CompressionOptionsSnafu, Result, WriteParquetSnafu};
 use crate::sst::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::sst::file::FileTimeRange;
 use crate::sst::index::IndexOutput;
@@ -88,6 +91,41 @@ pub const DEFAULT_ROW_GROUP_SIZE: usize = 100 * 1024;
 /// decode primary keys from it.
 pub(crate) const COLUMN_INDEX_TRUNCATE_LENGTH: Option<usize> =
     parquet::file::properties::DEFAULT_COLUMN_INDEX_TRUNCATE_LENGTH;
+
+/// Applies the per-column options declared with `COMPRESSION WITH (...)`.
+pub(crate) fn apply_column_compression(
+    mut builder: WriterPropertiesBuilder,
+    metadata: &RegionMetadataRef,
+) -> Result<WriterPropertiesBuilder> {
+    for column in &metadata.column_metadatas {
+        let Some(options) =
+            column
+                .column_schema
+                .compression_options()
+                .context(CompressionOptionsSnafu {
+                    column_name: &column.column_schema.name,
+                })?
+        else {
+            continue;
+        };
+        let path = ColumnPath::new(vec![column.column_schema.name.clone()]);
+        if let Some(level) = options.level {
+            let level = ZstdLevel::try_new(level).context(WriteParquetSnafu)?;
+            builder = builder.set_column_compression(path.clone(), Compression::ZSTD(level));
+        }
+        if let Some(page_size) = options.page_size {
+            let page_size = page_size.as_bytes() as usize;
+            builder = builder.set_column_data_page_size_limit(path.clone(), page_size);
+            // While dictionary encoding, parquet sizes write batches by the dictionary page
+            // budget and keeps that size for the rest of the batch after falling back to plain
+            // encoding, so a data page limit below the dictionary limit would be ignored.
+            if page_size < DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT {
+                builder = builder.set_column_dictionary_page_size_limit(path, page_size);
+            }
+        }
+    }
+    Ok(builder)
+}
 
 /// Applies the configured encoding to direct floating-point field columns.
 pub(crate) fn apply_float_field_encoding(
@@ -167,6 +205,7 @@ mod tests {
 
     use api::v1::{OpType, SemanticType};
     use bytes::Bytes;
+    use common_base::readable_size::ReadableSize;
     use common_function::function::FunctionRef;
     use common_function::function_factory::ScalarFunctionFactory;
     use common_function::scalars::matches::MatchesFunction;
@@ -184,7 +223,9 @@ mod tests {
     use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit, UInt32Type};
     use datatypes::arrow::util::pretty::pretty_format_batches;
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{FulltextAnalyzer, FulltextBackend, FulltextOptions};
+    use datatypes::schema::{
+        CompressionOptions, FulltextAnalyzer, FulltextBackend, FulltextOptions,
+    };
     use object_store::ObjectStore;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use parquet::arrow::{ArrowWriter, AsyncArrowWriter};
@@ -818,6 +859,138 @@ mod tests {
             &[new_record_batch_by_range(&["b", "h"], 150, 200)],
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_column_compression_options() {
+        // Text-like values: pseudo-random words from a small vocabulary, so zstd levels
+        // compress differently and the dictionary falls back to plain encoding.
+        let words: Vec<String> = (0..256).map(|i| format!("word{i:03}")).collect();
+        let mut seed = 42u64;
+        let values: Vec<Vec<u8>> = (0..2048)
+            .map(|_| {
+                (0..250)
+                    .map(|_| {
+                        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        words[(seed >> 33) as usize % words.len()].as_str()
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .into_bytes()
+            })
+            .collect();
+
+        async fn write(
+            values: &[Vec<u8>],
+            compression: Option<CompressionOptions>,
+        ) -> (usize, usize) {
+            let mut metadata = (*build_test_binary_test_region_metadata()).clone();
+            if let Some(options) = compression {
+                let column = &mut metadata.column_metadatas[1];
+                assert_eq!("field_0", column.column_schema.name);
+                column.column_schema = column
+                    .column_schema
+                    .clone()
+                    .with_compression_options(options)
+                    .unwrap();
+            }
+            let metadata = Arc::new(metadata);
+            let flat_schema = to_flat_sst_arrow_schema(&metadata, &FlatSchemaOptions::default());
+            let num_rows = values.len();
+            let pk = new_primary_key(&["a"]);
+            let mut tags = StringDictionaryBuilder::<UInt32Type>::new();
+            let mut pks = BinaryDictionaryBuilder::<UInt32Type>::new();
+            for _ in 0..num_rows {
+                tags.append_value("a");
+                pks.append(&pk).unwrap();
+            }
+            let batch = RecordBatch::try_new(
+                flat_schema,
+                vec![
+                    Arc::new(tags.finish()),
+                    Arc::new(datatypes::arrow::array::BinaryArray::from_iter_values(
+                        values.iter().map(|v| v.as_slice()),
+                    )),
+                    Arc::new(TimestampMillisecondArray::from_iter_values(
+                        0..num_rows as i64,
+                    )),
+                    Arc::new(pks.finish()),
+                    Arc::new(UInt64Array::from_value(1000, num_rows)),
+                    Arc::new(UInt8Array::from_value(OpType::Put as u8, num_rows)),
+                ],
+            )
+            .unwrap();
+
+            let mut env = TestEnv::new().await;
+            let object_store = env.init_object_store_manager();
+            let handle = sst_file_handle(0, 1000);
+            let mut metrics = Metrics::new(WriteType::Flush);
+            let mut writer = ParquetWriter::new_with_object_store(
+                object_store.clone(),
+                metadata,
+                IndexConfig::default(),
+                NoopIndexBuilder,
+                FixedPathProvider {
+                    region_file_id: handle.file_id(),
+                },
+                &mut metrics,
+            )
+            .await;
+            writer
+                .write_all_flat_as_primary_key(
+                    new_flat_source_from_record_batches(vec![batch]),
+                    None,
+                    &WriteOptions::default(),
+                )
+                .await
+                .unwrap();
+
+            let bytes = object_store
+                .read(&handle.file_path(FILE_DIR, PathType::Bare))
+                .await
+                .unwrap()
+                .to_bytes();
+            let options = parquet::arrow::arrow_reader::ArrowReaderOptions::new()
+                .with_page_index_policy(PageIndexPolicy::Required);
+            let builder =
+                ParquetRecordBatchReaderBuilder::try_new_with_options(bytes, options).unwrap();
+            let schema = builder.metadata().file_metadata().schema_descr();
+            let field = (0..schema.num_columns())
+                .find(|i| schema.column(*i).name() == "field_0")
+                .unwrap();
+            let pages = builder.metadata().offset_index().unwrap()[0][field]
+                .page_locations()
+                .len();
+            let size = builder
+                .metadata()
+                .row_group(0)
+                .column(field)
+                .compressed_size() as usize;
+            (size, pages)
+        }
+
+        let (default_size, default_pages) = write(&values, None).await;
+        let (level_size, level_pages) = write(
+            &values,
+            Some(CompressionOptions {
+                level: Some(19),
+                ..Default::default()
+            }),
+        )
+        .await;
+        let (_, pages) = write(
+            &values,
+            Some(CompressionOptions {
+                page_size: Some(ReadableSize::kb(64)),
+                ..Default::default()
+            }),
+        )
+        .await;
+
+        assert!(default_pages > 1, "{default_pages}");
+        assert_eq!(default_pages, level_pages);
+        assert!(level_size < default_size, "{level_size} >= {default_size}");
+        assert!(pages > default_pages, "{pages} <= {default_pages}");
     }
 
     #[tokio::test]

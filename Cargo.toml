@@ -107,6 +107,7 @@ arrow-buffer = "=59.2.0"
 arrow-flight = "=59.2.0"
 arrow-ipc = { version = "=59.2.0", default-features = false, features = ["lz4", "zstd"] }
 arrow-schema = { version = "=59.2.0", features = ["serde"] }
+arrow-select = "=59.2.0"
 async-stream = "0.3"
 async-trait = "0.1"
 # Remember to update axum-extra, axum-macros when updating axum
@@ -271,6 +272,7 @@ url = "2.3"
 # Pin below 0.14.5 to avoid the `connection_timeout_future` "async fn resumed after
 # completion" panic (greptimedb#8265 / grpc-rust#2522). Remove once tonic ships a fix.
 tonic = { version = "0.14, <0.14.5", features = ["tls-aws-lc", "gzip", "zstd"] }
+tonic-prost = "0.14"
 tower = "0.5"
 tracing = "0.1"
 tracing-appender = "0.2"

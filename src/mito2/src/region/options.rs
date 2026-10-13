@@ -19,16 +19,19 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use api::v1::SemanticType;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::info;
 use common_time::TimeToLive;
 use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
+use datatypes::schema::COMPRESSION_KEY;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use serde_with::{DisplayFromStr, NoneAsEmptyString, serde_as, with_prefix};
 use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
+use store_api::metadata::RegionMetadata;
 use store_api::metric_engine_consts::{
     MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, PRIMARY_KEY_ENCODING,
 };
@@ -191,6 +194,32 @@ impl RegionOptions {
                 reason: "inactive_window.l1_merge_trigger must be at least 2",
             }
         );
+        Ok(())
+    }
+
+    /// Rejects tag compression when the SST layout packs tags into `__primary_key`.
+    /// The caller must resolve the SST format before validation.
+    pub(crate) fn validate_column_compression(&self, metadata: &RegionMetadata) -> Result<()> {
+        if self.sst_format == Some(FormatType::Flat)
+            && metadata.primary_key_encoding == PrimaryKeyEncoding::Dense
+        {
+            return Ok(());
+        }
+        for column in &metadata.column_metadatas {
+            ensure!(
+                column.semantic_type != SemanticType::Tag
+                    || !column
+                        .column_schema
+                        .metadata()
+                        .contains_key(COMPRESSION_KEY),
+                InvalidRegionOptionsSnafu {
+                    reason: format!(
+                        "COMPRESSION on tag column {} requires flat SST format and dense primary key encoding",
+                        column.column_schema.name
+                    ),
+                }
+            );
+        }
         Ok(())
     }
 
