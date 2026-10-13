@@ -1714,7 +1714,7 @@ async fn check_request_skip_wal_mixed_batch_recovery(
     );
 
     // Inspect persisted WAL mutations, not just an encoder or counter.
-    let mut reader = wal.wal_entry_reader(&region.provider, region_id, None);
+    let mut reader = wal.wal_entry_reader(&region.provider, region_id);
     let entries = reader
         .read(&region.provider, 1)
         .unwrap()
