@@ -495,8 +495,9 @@ impl QueryContext {
             if key.eq_ignore_ascii_case("query_parallelism") && value == "0" {
                 continue;
             }
+            // Wire decoding preserves legacy frontend nonzero values; public entry points enforce the limit.
             if let Some((canonical, normalized)) =
-                crate::query_options::parse_query_option(key, value)?
+                crate::query_options::parse_query_option(key, value, u16::MAX)?
             {
                 if request_options
                     .get(&canonical)
@@ -862,13 +863,17 @@ impl ConfigurationVariables {
         key: &str,
         value: &str,
     ) -> Result<(), crate::session_config::Error> {
-        let (canonical, normalized) = crate::query_options::parse_query_option(key, value)?
-            .ok_or_else(|| crate::session_config::Error::InvalidConfigValue {
-                name: key.to_string(),
-                value: value.to_string(),
-                hint: "Not a supported query option".to_string(),
-                location: snafu::Location::new(file!(), line!(), column!()),
-            })?;
+        let (canonical, normalized) = crate::query_options::parse_query_option(
+            key,
+            value,
+            crate::query_options::MAX_PUBLIC_PARALLELISM,
+        )?
+        .ok_or_else(|| crate::session_config::Error::InvalidConfigValue {
+            name: key.to_string(),
+            value: value.to_string(),
+            hint: "Not a supported query option".to_string(),
+            location: snafu::Location::new(file!(), line!(), column!()),
+        })?;
         self.query_options
             .write()
             .unwrap()
@@ -890,6 +895,37 @@ mod test {
 
     use crate::Session;
     use crate::context::{Channel, *};
+
+    #[test]
+    fn test_query_parallelism_wire_accepts_legacy_value() {
+        let mut context = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        context.set_extension("query_parallelism", "2048");
+
+        assert_eq!(
+            context
+                .effective_query_options()
+                .unwrap()
+                .get("query.parallelism"),
+            Some(&"2048".to_string())
+        );
+    }
+
+    #[test]
+    fn test_set_query_parallelism_public_limit() {
+        let context = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        assert!(
+            context
+                .configuration_parameter()
+                .set_query_option("query.parallelism", "1025")
+                .is_err()
+        );
+        assert!(
+            context
+                .configuration_parameter()
+                .set_query_option("query.parallelism", "1024")
+                .is_ok()
+        );
+    }
 
     #[test]
     fn test_session() {

@@ -64,7 +64,11 @@ pub(crate) fn validate_public_hints(hints: Vec<(String, String)>) -> Result<Vec<
         if key.eq_ignore_ascii_case("query_parallelism") && value == "0" {
             continue;
         }
-        match session::query_options::parse_query_option(&key, &value) {
+        match session::query_options::parse_query_option(
+            &key,
+            &value,
+            session::query_options::MAX_PUBLIC_PARALLELISM,
+        ) {
             Ok(Some((canonical, normalized_value))) => {
                 if let Some(existing) = seen.insert(canonical.clone(), normalized_value.clone())
                     && existing != normalized_value

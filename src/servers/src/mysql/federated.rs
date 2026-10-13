@@ -288,7 +288,7 @@ fn check_show_variables(query: &str) -> Option<Output> {
         if remainder.is_empty() {
             Some(show_variables("", ""))
         } else {
-            let remainder = remainder.trim_start();
+            let remainder = remainder.trim();
             // Filter keywords need an identifier boundary; named variables do not.
             let looks_like_filter = ["WHERE", "LIKE"].iter().any(|keyword| {
                 remainder
@@ -299,7 +299,15 @@ fn check_show_variables(query: &str) -> Option<Output> {
                         .next()
                         .is_none_or(|c| !(c == '_' || c == '$' || c.is_alphanumeric()))
             });
-            if looks_like_filter {
+            let is_dotted_identifier = remainder.split('.').all(|part| {
+                let bytes = part.as_bytes();
+                !bytes.is_empty()
+                    && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_' || bytes[0] == b'$')
+                    && bytes[1..]
+                        .iter()
+                        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'$')
+            });
+            if looks_like_filter || !is_dotted_identifier {
                 Some(show_variables("", ""))
             } else {
                 None
@@ -576,6 +584,37 @@ mod test {
     use session::context::{Channel, QueryContext};
 
     use super::*;
+
+    #[test]
+    fn test_show_variables_where_filter_is_absorbed() {
+        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
+        let output = check(
+            "show variables where Variable_name = 'sql_mode'",
+            QueryContext::arc(),
+            session,
+        )
+        .expect("WHERE-filtered SHOW VARIABLES should be absorbed");
+        assert!(matches!(output.data, OutputData::RecordBatches(_)));
+    }
+
+    #[test]
+    fn test_show_variables_named_identifier_falls_back() {
+        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
+        assert!(check("show variables some_name", QueryContext::arc(), session).is_none());
+    }
+
+    #[test]
+    fn test_show_variables_dotted_identifier_falls_back() {
+        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
+        assert!(
+            check(
+                "show variables query.parallelism",
+                QueryContext::arc(),
+                session
+            )
+            .is_none()
+        );
+    }
 
     #[test]
     fn test_check_abnormal() {

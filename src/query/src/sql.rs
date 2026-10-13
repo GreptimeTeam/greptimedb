@@ -855,7 +855,12 @@ pub fn show_query_option(
         if name.to_ascii_lowercase().starts_with("query.")
             || name.to_ascii_lowercase().starts_with("datafusion.")
         {
-            session::query_options::parse_query_option(&name, "").map_err(|error| {
+            session::query_options::parse_query_option(
+                &name,
+                "",
+                session::query_options::MAX_PUBLIC_PARALLELISM,
+            )
+            .map_err(|error| {
                 error::InvalidQueryContextExtensionSnafu {
                     reason: error.to_string(),
                 }
