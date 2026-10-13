@@ -1,8 +1,8 @@
 name = "inverted_index_survival"
-reason = "Verify column-level INVERTED INDEX written by old binaries stays readable, writable and alterable after upgrade."
-introduced_by = "#5188"
+reason = "Verify column-level INVERTED INDEX written by old binaries stays readable, writable and alterable after upgrade, and that a column indexed after the fact stays queryable."
+introduced_by = "#5188; regression guard for #9535"
 topologies = ["distributed", "standalone"]
 from_range = ["*"]
-to_range = ["*"]
-features = ["table", "index", "inverted_index", "metadata", "read", "write"]
+to_range = [">=v1.4.0-alpha.0"]
+features = ["table", "index", "inverted_index", "metadata", "alter", "read", "write"]
 owner = "storage"
