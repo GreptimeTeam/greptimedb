@@ -109,7 +109,8 @@ def parse_extra_env(text: str) -> dict:
                 raise ValueError(f"extra_env line is not a new K=V: {line!r}")
             env[name.strip()] = value.strip()
     for name, value in env.items():
-        if not ENV_NAME.fullmatch(name) or name.startswith(RESERVED_ENV) or "\n" in value:
+        # GreptimeDB matches its environment keys without regard to case.
+        if not ENV_NAME.fullmatch(name) or name.upper().startswith(RESERVED_ENV) or "\n" in value:
             raise ValueError(f"extra_env may not set {name!r}")
         if name in DEPTHS:
             positive(name, value, 4096)

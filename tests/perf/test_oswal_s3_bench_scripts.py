@@ -114,6 +114,8 @@ class PlanTest(unittest.TestCase):
                        {"extra_env": "GREPTIMEDB_STANDALONE__STORAGE__BUCKET=other"}, {"extra_env": "NO_VALUE"},
                        {"extra_env": "GREPTIMEDB_STANDALONE__WAL__FLUSH_INTERVAL=100ms", "restart": True},
                        {"extra_env": "GREPTIMEDB_STANDALONE__WAL__SYNC_WRITE=false"},
+                       {"extra_env": "GREPTIMEDB_STANDALONE__wal__FLUSH_INTERVAL=100ms", "restart": True},
+                       {"extra_env": "greptimedb_standalone__Storage__bucket=other"},
                        {"extra_env": "GREPTIMEDB_OSWAL_MAX_SEALED_BATCHES=4", "sweep": "MAX_IN_FLIGHT_CREATES=2,3"},
                        {"extra_env": "A=1\nA=2"}, {"extra_env": '{"A": true}'}, {"extra_env": "1A=x"},
                        {"extra_env": "GREPTIMEDB_OSWAL_MAX_IN_FLIGHT_CREATES=many"}, {"configs": "R,X"},
