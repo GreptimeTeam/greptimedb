@@ -33,7 +33,7 @@ use object_store::ObjectStore;
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use store_api::logstore::entry::{Entry, NaiveEntry};
 use store_api::logstore::provider::{ObjectStoreProvider, Provider};
-use store_api::logstore::{AppendBatchResponse, EntryId, LogStore, SendableEntryStream, WalIndex};
+use store_api::logstore::{AppendBatchResponse, EntryId, LogStore, SendableEntryStream};
 use store_api::storage::RegionId;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::time::MissedTickBehavior;
@@ -755,7 +755,6 @@ impl LogStore for ObjectStoreLogStore {
         &self,
         provider: &Provider,
         entry_id: EntryId,
-        _index: Option<WalIndex>,
     ) -> Result<SendableEntryStream<'static, Entry, Error>> {
         self.check_terminal()?;
         let region_id = self.region_of(provider)?;
@@ -3596,7 +3595,7 @@ mod tests {
             let errors = [
                 store.append_batch(vec![entry]).await.unwrap_err(),
                 store.latest_entry_id(foreign).unwrap_err(),
-                store.read(foreign, 0, None).await.err().unwrap(),
+                store.read(foreign, 0).await.err().unwrap(),
                 store.create_namespace(foreign).await.unwrap_err(),
                 store.delete_namespace(foreign).await.unwrap_err(),
                 store.obsolete(foreign, region_id, 1).await.unwrap_err(),
@@ -3705,7 +3704,7 @@ mod tests {
         let errors = [
             store.append_batch(Vec::new()).await.unwrap_err(),
             store.latest_entry_id(&provider).unwrap_err(),
-            store.read(&provider, 0, None).await.err().unwrap(),
+            store.read(&provider, 0).await.err().unwrap(),
             store.create_namespace(&provider).await.unwrap_err(),
             store.delete_namespace(&provider).await.unwrap_err(),
             store.list_namespaces().await.unwrap_err(),
@@ -3880,7 +3879,7 @@ mod tests {
         start: EntryId,
     ) -> Vec<Entry> {
         store
-            .read(&provider(region_id), start, None)
+            .read(&provider(region_id), start)
             .await
             .unwrap()
             .try_collect::<Vec<_>>()
@@ -4198,7 +4197,7 @@ mod tests {
         );
         reads.lock().unwrap().clear();
         let error = store
-            .read(&provider(region(2)), 0, None)
+            .read(&provider(region(2)), 0)
             .await
             .unwrap()
             .try_collect::<Vec<_>>()
@@ -4262,7 +4261,7 @@ mod tests {
 
             object_store.delete(&path).await.unwrap();
             let error = store
-                .read(&provider(region(1)), 0, None)
+                .read(&provider(region(1)), 0)
                 .await
                 .unwrap()
                 .try_collect::<Vec<_>>()
@@ -5771,11 +5770,7 @@ mod tests {
         assert_stopped(&timeout(WAIT, pending).await.unwrap().unwrap().unwrap_err());
         for error in [
             store.latest_entry_id(&provider(region_id)).unwrap_err(),
-            store
-                .read(&provider(region_id), 1, None)
-                .await
-                .err()
-                .unwrap(),
+            store.read(&provider(region_id), 1).await.err().unwrap(),
         ] {
             assert!(
                 matches!(unwrap_shared(&error), Error::WalObjectConflict { .. }),
@@ -7108,7 +7103,7 @@ mod tests {
         append(&store, region_id, "a2").await.unwrap();
 
         // The read lists objects 1 and 2 before a collection deletes object 1.
-        let stream = store.read(&provider(region_id), 0, None).await.unwrap();
+        let stream = store.read(&provider(region_id), 0).await.unwrap();
         store
             .obsolete(&provider(region_id), region_id, id(1, 1))
             .await
@@ -7152,7 +7147,7 @@ mod tests {
 
             // The read lists objects 1 and 2. The delete of object 1 removes
             // it, but its outcome is not reported yet.
-            let stream = store.read(&provider(region_id), 0, None).await.unwrap();
+            let stream = store.read(&provider(region_id), 0).await.unwrap();
             store
                 .obsolete(&provider(region_id), region_id, id(1, 1))
                 .await
@@ -7905,7 +7900,7 @@ mod tests {
         /// Asserts that a read of the poisoned store fails with the terminal error.
         async fn assert_read_is_terminal(store: &ObjectStoreLogStore, region_id: RegionId) {
             let error = store
-                .read(&provider(region_id), 1, None)
+                .read(&provider(region_id), 1)
                 .await
                 .err()
                 .expect("a read of a poisoned store must fail");
@@ -9183,7 +9178,7 @@ mod tests {
                 .unwrap();
             *io.fail_range_read_at.lock().unwrap() = Some((1, segment.start));
             let error = store
-                .read(&provider(region_id), 1, None)
+                .read(&provider(region_id), 1)
                 .await
                 .unwrap()
                 .try_collect::<Vec<_>>()

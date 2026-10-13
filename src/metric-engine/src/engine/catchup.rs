@@ -54,7 +54,6 @@ impl MetricEngineInner {
                     set_writable: req.set_writable,
                     entry_id: req.metadata_entry_id,
                     metadata_entry_id: None,
-                    location_id: req.location_id,
                     checkpoint: req.checkpoint.map(|c| ReplayCheckpoint {
                         entry_id: c.metadata_entry_id.unwrap_or_default(),
                         metadata_entry_id: None,
@@ -67,7 +66,6 @@ impl MetricEngineInner {
                     set_writable: req.set_writable,
                     entry_id: req.entry_id,
                     metadata_entry_id: None,
-                    location_id: req.location_id,
                     checkpoint: req.checkpoint.map(|c| ReplayCheckpoint {
                         entry_id: c.entry_id,
                         metadata_entry_id: None,

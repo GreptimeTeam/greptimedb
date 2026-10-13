@@ -347,6 +347,30 @@ mod tests {
     }
 
     #[test]
+    fn test_removed_datanode_wal_index_config() {
+        let expected = DatanodeWalConfig::Kafka(DatanodeKafkaConfig::default());
+        for create_index in [false, true] {
+            let config = format!(
+                r#"
+                provider = "kafka"
+                create_index = {create_index}
+                dump_index_interval = "10s"
+                "#
+            );
+            let parsed: DatanodeWalConfig = toml::from_str(&config).unwrap();
+            assert_eq!(parsed, expected);
+            let serialized = toml::to_string(&parsed).unwrap();
+            let table: toml::Table = toml::from_str(&serialized).unwrap();
+            assert!(!table.contains_key("create_index"));
+            assert!(!table.contains_key("dump_index_interval"));
+            assert_eq!(
+                toml::from_str::<DatanodeWalConfig>(&serialized).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn test_kafka_wal_config_debug_redacts_password() {
         let config = MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
             connection: KafkaConnectionConfig {

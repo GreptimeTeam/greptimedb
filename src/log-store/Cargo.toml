@@ -30,7 +30,6 @@ common-time.workspace = true
 common-wal.workspace = true
 crc32fast.workspace = true
 dashmap.workspace = true
-delta-encoding = "0.4"
 derive_builder.workspace = true
 futures.workspace = true
 futures-util.workspace = true

@@ -31,15 +31,12 @@ use store_api::logstore::entry::{
     Entry, Id as EntryId, MultiplePartEntry, MultiplePartHeader, NaiveEntry,
 };
 use store_api::logstore::provider::{KafkaProvider, Provider};
-use store_api::logstore::{AppendBatchResponse, LogStore, SendableEntryStream, WalIndex};
+use store_api::logstore::{AppendBatchResponse, LogStore, SendableEntryStream};
 use store_api::storage::RegionId;
 
 use crate::error::{self, ConsumeRecordSnafu, Error, GetOffsetSnafu, InvalidProviderSnafu, Result};
 use crate::kafka::client_manager::{ClientManager, ClientManagerRef};
-use crate::kafka::consumer::{ConsumerBuilder, RecordsBuffer};
-use crate::kafka::index::{
-    GlobalIndexCollector, MIN_BATCH_WINDOW_SIZE, build_region_wal_index_iterator,
-};
+use crate::kafka::consumer::{ConsumerBuilder, RecordsBuffer, RegionWalRange};
 use crate::kafka::periodic_offset_fetcher::PeriodicOffsetFetcher;
 use crate::kafka::producer::OrderedBatchProducerRef;
 use crate::kafka::util::record::{
@@ -142,14 +139,9 @@ impl TopicStatsReporter for PeriodicTopicStatsReporter {
 
 impl KafkaLogStore {
     /// Tries to create a Kafka log store.
-    pub async fn try_new(
-        config: &DatanodeKafkaConfig,
-        global_index_collector: Option<GlobalIndexCollector>,
-    ) -> Result<Self> {
+    pub async fn try_new(config: &DatanodeKafkaConfig) -> Result<Self> {
         let topic_stats = Arc::new(DashMap::new());
-        let client_manager = Arc::new(
-            ClientManager::try_new(config, global_index_collector, topic_stats.clone()).await?,
-        );
+        let client_manager = Arc::new(ClientManager::try_new(config, topic_stats.clone()).await?);
         let fetcher = PeriodicOffsetFetcher::new(
             config.topic_latest_offset_fetch_interval,
             client_manager.clone(),
@@ -291,8 +283,7 @@ impl LogStore for KafkaLogStore {
         for (region_id, (producer, records)) in region_grouped_records {
             // Safety: `KafkaLogStore::entry` will ensure that the
             // `Record`'s `approximate_size` must be less or equal to `max_batch_bytes`.
-            region_grouped_result_receivers
-                .push((region_id, producer.produce(region_id, records).await?))
+            region_grouped_result_receivers.push((region_id, producer.produce(records).await?))
         }
 
         let region_grouped_max_offset =
@@ -318,7 +309,6 @@ impl LogStore for KafkaLogStore {
         &self,
         provider: &Provider,
         mut entry_id: EntryId,
-        index: Option<WalIndex>,
     ) -> Result<SendableEntryStream<'static, Entry, Self::Error>> {
         let provider = provider
             .as_kafka_provider()
@@ -378,28 +368,13 @@ impl LogStore for KafkaLogStore {
                 record_num: 0,
             });
 
-        let region_indexes = if let (Some(index), Some(collector)) =
-            (index, self.client_manager.global_index_collector())
-        {
-            collector
-                .read_remote_region_index(index.location_id, provider, index.region_id, entry_id)
-                .await?
-        } else {
-            None
-        };
-
-        let Some(iterator) = build_region_wal_index_iterator(
-            entry_id,
-            end_offset as u64,
-            region_indexes,
-            self.max_batch_bytes,
-            MIN_BATCH_WINDOW_SIZE,
-        ) else {
-            let range = entry_id..end_offset as u64;
+        let range = entry_id..end_offset as u64;
+        if range.is_empty() {
             warn!("No new entries in range {:?} of ns {}", range, provider);
             return Ok(futures_util::stream::empty().boxed());
-        };
+        }
 
+        let iterator = RegionWalRange::new(range, self.max_batch_bytes);
         debug!("Reading entries with {:?} of ns {}", iterator, provider);
 
         // Safety: Must be ok.
@@ -495,19 +470,11 @@ impl LogStore for KafkaLogStore {
     /// that the obsolete entries are deleted immediately.
     async fn obsolete(
         &self,
-        provider: &Provider,
-        region_id: RegionId,
-        entry_id: EntryId,
+        _provider: &Provider,
+        _region_id: RegionId,
+        _entry_id: EntryId,
     ) -> Result<()> {
-        if let Some(collector) = self.client_manager.global_index_collector() {
-            let provider = provider
-                .as_kafka_provider()
-                .with_context(|| InvalidProviderSnafu {
-                    expected: KafkaProvider::type_name(),
-                    actual: provider.type_name(),
-                })?;
-            collector.truncate(provider, region_id, entry_id).await?;
-        }
+        // Kafka WAL pruning is coordinated by metasrv.
         Ok(())
     }
 
@@ -682,7 +649,7 @@ mod tests {
             max_batch_bytes: ReadableSize::kb(32),
             ..Default::default()
         };
-        let logstore = KafkaLogStore::try_new(&config, None).await.unwrap();
+        let logstore = KafkaLogStore::try_new(&config).await.unwrap();
         let topic_name = uuid::Uuid::new_v4().to_string();
         prepare_topic(&logstore, &topic_name).await;
         let provider = Provider::kafka_provider(topic_name);
@@ -708,7 +675,7 @@ mod tests {
         // 5 region
         assert_eq!(response.last_entry_ids.len(), 5);
         let got_entries = logstore
-            .read(&provider, 0, None)
+            .read(&provider, 0)
             .await
             .unwrap()
             .try_collect::<Vec<_>>()
@@ -766,7 +733,7 @@ mod tests {
             max_batch_bytes: ReadableSize::kb(8),
             ..Default::default()
         };
-        let logstore = KafkaLogStore::try_new(&config, None).await.unwrap();
+        let logstore = KafkaLogStore::try_new(&config).await.unwrap();
         let topic_name = uuid::Uuid::new_v4().to_string();
         prepare_topic(&logstore, &topic_name).await;
         let provider = Provider::kafka_provider(topic_name);
@@ -792,7 +759,7 @@ mod tests {
         // 5 region
         assert_eq!(response.last_entry_ids.len(), 5);
         let got_entries = logstore
-            .read(&provider, 0, None)
+            .read(&provider, 0)
             .await
             .unwrap()
             .try_collect::<Vec<_>>()

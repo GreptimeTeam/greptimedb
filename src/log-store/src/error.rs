@@ -259,39 +259,6 @@ pub enum Error {
         error: tokio::sync::oneshot::error::RecvError,
     },
 
-    #[snafu(display("Failed to wait for result of DumpIndex"))]
-    WaitDumpIndex {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: tokio::sync::oneshot::error::RecvError,
-    },
-
-    #[snafu(display("Failed to create writer"))]
-    CreateWriter {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: object_store::Error,
-    },
-
-    #[snafu(display("Failed to write index"))]
-    WriteIndex {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: object_store::Error,
-    },
-
-    #[snafu(display("Failed to read index, path: {path}"))]
-    ReadIndex {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: object_store::Error,
-        path: String,
-    },
-
     #[snafu(display(
         "The length of meta if exceeded the limit: {}, actual: {}",
         limit,
@@ -516,7 +483,6 @@ impl ErrorExt for Error {
             | DiscontinuousLogIndex { .. }
             | OrderedBatchProducerStopped { .. }
             | WaitProduceResultReceiver { .. }
-            | WaitDumpIndex { .. }
             | MetaLengthExceededLimit { .. }
             | ObjectStoreWalStopped { .. }
             | WalSegmentFetch { .. } => StatusCode::Internal,
@@ -531,10 +497,7 @@ impl ErrorExt for Error {
             ObjectStoreWal { source, .. } => source.status_code(),
 
             // Object store related errors
-            CreateWriter { .. }
-            | WriteIndex { .. }
-            | ReadIndex { .. }
-            | WalObjectStore { .. }
+            WalObjectStore { .. }
             | StaleWalObject { .. }
             | UnconfirmedWalEpochStart { .. }
             | Io { .. } => StatusCode::StorageUnavailable,
@@ -563,10 +526,7 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            CreateWriter { error, .. }
-            | WriteIndex { error, .. }
-            | ReadIndex { error, .. }
-            | WalObjectStore { error, .. } => retry_hint_from_opendal_error(error),
+            WalObjectStore { error, .. } => retry_hint_from_opendal_error(error),
             ObjectStoreWal { source, .. } => source.retry_hint(),
             Io { error, .. } => retry_hint_from_io_error(error),
             FetchEntry { .. }
