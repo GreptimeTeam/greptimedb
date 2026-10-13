@@ -59,7 +59,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{Barrier, Notify};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::{Request, Response, Status};
+use tonic::{Code, Request, Response, Status};
 
 use super::*;
 use crate::error::Error;
@@ -68,7 +68,7 @@ use crate::test_util;
 #[derive(Clone, Default)]
 struct RecordingRegionService {
     requests: Arc<Mutex<Vec<RegionRequest>>>,
-    rejections: Arc<Mutex<HashMap<u64, VecDeque<RetryHint>>>>,
+    rejections: Arc<Mutex<HashMap<u64, VecDeque<Status>>>>,
 }
 
 #[async_trait::async_trait]
@@ -80,18 +80,13 @@ impl Region for RecordingRegionService {
         let request = request.into_inner();
         let region_id = write_region_id(&request).unwrap().as_u64();
         self.requests.lock().unwrap().push(request);
-        if let Some(hint) = self
+        if let Some(status) = self
             .rejections
             .lock()
             .unwrap()
             .get_mut(&region_id)
             .and_then(VecDeque::pop_front)
         {
-            let mut status = Status::unavailable(format!("region {region_id} rejected the write"));
-            status.metadata_mut().insert(
-                common_error::GREPTIME_DB_HEADER_ERROR_RETRY_HINT,
-                hint.as_str().parse().unwrap(),
-            );
             return Err(status);
         }
         Ok(Response::new(PbRegionResponse {
@@ -185,9 +180,22 @@ impl RegionTestServer {
     }
 
     fn fail_region(&self, region_number: u32, hints: impl IntoIterator<Item = RetryHint>) {
+        let region_id = RegionId::new(1, region_number).as_u64();
         self.service.rejections.lock().unwrap().insert(
-            RegionId::new(1, region_number).as_u64(),
-            hints.into_iter().collect(),
+            region_id,
+            hints
+                .into_iter()
+                .map(|hint| {
+                    let mut status = Status::failed_precondition(format!(
+                        "region {region_id} rejected the write"
+                    ));
+                    status.metadata_mut().insert(
+                        common_error::GREPTIME_DB_HEADER_ERROR_RETRY_HINT,
+                        hint.as_str().parse().unwrap(),
+                    );
+                    status
+                })
+                .collect(),
         );
     }
 
@@ -320,14 +328,90 @@ async fn test_write_retry_attempt_budget_and_nonretryable_errors() {
             .dispatch(vec![build_insert_request(&[1])])
             .await
             .unwrap_err();
-        // The dispatcher uses the explicit client hint for its attempt budget.
-        // The existing common-meta conversion promotes Unavailable to RetryLater.
-        assert_eq!(error.retry_hint(), RetryHint::Retryable);
+        assert_eq!(error.retry_hint(), hint);
         assert_eq!(
             server.attempt_counts()[&RegionId::new(1, 1).as_u64()],
             expected_attempts
         );
         assert!(server.invalidator.calls.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn test_write_retry_transport_errors() {
+    for code in [Code::Unavailable, Code::Cancelled, Code::DeadlineExceeded] {
+        for hint in [
+            None,
+            Some(RetryHint::NonRetryable),
+            Some(RetryHint::Retryable),
+            Some(RetryHint::RetryAfterRouteRefresh),
+        ] {
+            let server = RegionTestServer::start().await;
+            let region_id = RegionId::new(1, 1).as_u64();
+            let mut status = Status::new(code, "write failed");
+            if let Some(hint) = hint {
+                status.metadata_mut().insert(
+                    common_error::GREPTIME_DB_HEADER_ERROR_RETRY_HINT,
+                    hint.as_str().parse().unwrap(),
+                );
+            }
+            server
+                .service
+                .rejections
+                .lock()
+                .unwrap()
+                .insert(region_id, VecDeque::from([status]));
+            let dispatcher = server.create_dispatcher(2).await;
+            let attempt = dispatcher
+                .send(
+                    Arc::new(server.peer.clone()),
+                    build_insert_request(&[1]),
+                    None,
+                )
+                .await;
+            let WriteAttempt::Failed { error, request } = attempt else {
+                panic!("expected a failed write");
+            };
+            assert!(request.is_some(), "{code:?}, {hint:?}");
+            assert_eq!(
+                error.retry_hint(),
+                hint.filter(|hint| hint.is_retryable())
+                    .unwrap_or(RetryHint::Retryable)
+            );
+            assert_eq!(server.attempt_counts(), HashMap::from([(region_id, 1)]));
+            assert!(server.invalidator.calls.lock().unwrap().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_write_retry_transport_attempt_budget() {
+    for code in [Code::Unavailable, Code::Cancelled, Code::DeadlineExceeded] {
+        for failures in [1, 3] {
+            let server = RegionTestServer::start().await;
+            let region_id = RegionId::new(1, 1).as_u64();
+            server.service.rejections.lock().unwrap().insert(
+                region_id,
+                (0..failures)
+                    .map(|_| Status::new(code, "write failed"))
+                    .collect(),
+            );
+            let dispatcher = server.create_dispatcher(2).await;
+            let response = dispatcher.dispatch(vec![build_insert_request(&[1])]).await;
+            let expected_attempts = if failures == 1 {
+                assert_eq!(response.unwrap().affected_rows, 1);
+                2
+            } else {
+                assert_eq!(response.unwrap_err().retry_hint(), RetryHint::Retryable);
+                3
+            };
+            assert_eq!(
+                server.attempt_counts(),
+                HashMap::from([(region_id, expected_attempts)]),
+                "{code:?}, failures: {failures}"
+            );
+            assert!(server.invalidator.calls.lock().unwrap().is_empty());
+        }
     }
 }
 
@@ -370,7 +454,6 @@ async fn test_should_retry_requires_a_retained_request_and_budget() {
         cache_invalidator,
     };
     let failure = |request| {
-        // The converted error alone cannot distinguish an explicitly nonretryable attempt.
         let error: client::Error = Status::unavailable("write rejected").into();
         WriteAttempt::Failed {
             error: error.into(),
@@ -1156,10 +1239,17 @@ async fn test_write_retry_rebuilds_logical_rows_in_mixed_table_envelope() {
         let physical_id = RegionId::new(1, 1).as_u64();
         let stale_logical_id = RegionId::new(42, 2).as_u64();
         let rebuilt_logical_id = RegionId::new(42, 3).as_u64();
-        server.service.rejections.lock().unwrap().insert(
-            stale_logical_id,
-            VecDeque::from([RetryHint::RetryAfterRouteRefresh]),
+        let mut status = Status::unavailable("partition changed");
+        status.metadata_mut().insert(
+            common_error::GREPTIME_DB_HEADER_ERROR_RETRY_HINT,
+            RetryHint::RetryAfterRouteRefresh.as_str().parse().unwrap(),
         );
+        server
+            .service
+            .rejections
+            .lock()
+            .unwrap()
+            .insert(stale_logical_id, VecDeque::from([status]));
 
         let header = Some(RegionRequestHeader {
             dbname: "greptime.public".to_string(),

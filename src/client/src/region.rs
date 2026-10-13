@@ -220,21 +220,21 @@ impl RegionRequester {
                 .await
         }
         .await
-        .map_err(|e| {
-            let code = e.code();
-            // Uses `Error::RegionServer` instead of `Error::Server`
-            error::Error::RegionServer {
-                addr,
-                code,
-                source: BoxedError::new(error::Error::from(e)),
-                location: location!(),
-            }
-        })?
+        .map_err(|status| map_region_error(status, addr))?
         .into_inner();
 
         check_response_header(&response.header)?;
 
         Ok(RegionResponse::from_region_response(response))
+    }
+}
+
+fn map_region_error(status: tonic::Status, addr: String) -> error::Error {
+    error::Error::RegionServer {
+        addr,
+        code: status.code(),
+        source: BoxedError::new(error::Error::from(status)),
+        location: location!(),
     }
 }
 
@@ -765,16 +765,100 @@ mod tests {
             let error = datanode.handle(build_insert_request()).await.unwrap_err();
             assert_eq!(error.status_code(), StatusCode::RegionNotFound);
             assert_eq!(error.retry_hint(), hint);
-            match hint {
-                RetryHint::Retryable | RetryHint::RetryAfterRouteRefresh => assert!(matches!(
-                    error,
-                    meta_error::Error::RetryLater {
-                        clean_poisons: false,
+            assert!(matches!(error, meta_error::Error::External { .. }));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_datanode_transport_retry_hints() {
+        let server = RegionTestServer::start().await;
+        let requester = server.create_requester(ChannelConfig::default(), false, false);
+        let datanode: &dyn Datanode = &requester;
+        let statuses = [
+            tonic::Code::Unavailable,
+            tonic::Code::Cancelled,
+            tonic::Code::DeadlineExceeded,
+            tonic::Code::FailedPrecondition,
+        ]
+        .into_iter()
+        .flat_map(|code| {
+            [
+                None,
+                Some(RetryHint::NonRetryable),
+                Some(RetryHint::Retryable),
+                Some(RetryHint::RetryAfterRouteRefresh),
+            ]
+            .into_iter()
+            .map(move |hint| (code, hint))
+        });
+        for (code, hint) in statuses {
+            for body in [
+                region_request::Body::Inserts(Default::default()),
+                region_request::Body::Deletes(Default::default()),
+                region_request::Body::BulkInsert(Default::default()),
+                region_request::Body::Create(Default::default()),
+                region_request::Body::RemoteDynFilter(Default::default()),
+            ] {
+                let request_type = body.as_ref().to_string();
+                let mut status = Status::new(code, "request failed");
+                // Metadata status is deliberately different from the transport status.
+                status.metadata_mut().insert(
+                    common_error::GREPTIME_DB_HEADER_ERROR_CODE,
+                    (StatusCode::RegionNotReady as u32)
+                        .to_string()
+                        .parse()
+                        .unwrap(),
+                );
+                if let Some(hint) = hint {
+                    status.metadata_mut().insert(
+                        common_error::GREPTIME_DB_HEADER_ERROR_RETRY_HINT,
+                        hint.as_str().parse().unwrap(),
+                    );
+                }
+                let original = Error::from(status.clone());
+                let expected = if original.should_retry() && !original.retry_hint().is_retryable() {
+                    RetryHint::Retryable
+                } else {
+                    original.retry_hint()
+                };
+                server
+                    .service
+                    .responses
+                    .lock()
+                    .unwrap()
+                    .extend([Err(status.clone()), Err(status)]);
+                let request = RegionRequest {
+                    header: None,
+                    body: Some(body),
+                };
+                let shared = Arc::new(request);
+                let shared_error = datanode.handle(Arc::clone(&shared)).await.unwrap_err();
+                assert_eq!(Arc::strong_count(&shared), 1);
+                let request = Arc::try_unwrap(shared).unwrap();
+                let owned_error = datanode.handle(request).await.unwrap_err();
+                for error in [owned_error, shared_error] {
+                    assert_eq!(
+                        error.retry_hint(),
+                        expected,
+                        "{code:?}, {hint:?}, {request_type}"
+                    );
+                    assert_eq!(error.retry_hint().is_retryable(), original.should_retry());
+                    assert_eq!(error.status_code(), StatusCode::RegionNotReady);
+                    let meta_error::Error::External { source, .. } = error else {
+                        panic!("expected an external error");
+                    };
+                    assert_eq!(source.retry_hint(), expected);
+                    let Error::RegionServer {
+                        source,
+                        code: actual_code,
                         ..
-                    }
-                )),
-                RetryHint::NonRetryable => {
-                    assert!(matches!(error, meta_error::Error::External { .. }))
+                    } = source.as_any().downcast_ref::<Error>().unwrap()
+                    else {
+                        panic!("expected a region server error");
+                    };
+                    assert_eq!(*actual_code, code);
+                    assert_eq!(source.retry_hint(), original.retry_hint());
+                    assert_eq!(source.to_string(), original.to_string());
                 }
             }
         }
@@ -845,8 +929,11 @@ mod tests {
                 baseline.status_code(),
                 "shared: {error:?}; generated: {baseline:?}"
             );
+            let Error::RegionServer { source, .. } = &error else {
+                panic!("expected a region server error: {error:?}");
+            };
             assert_eq!(
-                error.retry_hint(),
+                source.retry_hint(),
                 baseline.retry_hint(),
                 "shared: {error:?}; generated: {baseline:?}"
             );

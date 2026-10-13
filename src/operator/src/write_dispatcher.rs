@@ -295,12 +295,7 @@ impl WriteRetry {
         match requester.handle(Arc::clone(&write.request)).await {
             Ok(response) => WriteAttempt::Success(response),
             Err(error) => {
-                // Preserve the client hint for writes while Datanode still wraps retryable errors.
-                let hint = match &error {
-                    Error::RetryLater { source, .. } => source.retry_hint(),
-                    _ => error.retry_hint(),
-                };
-                let request = hint.is_retryable().then_some(write);
+                let request = error.retry_hint().is_retryable().then_some(write);
                 WriteAttempt::Failed { error, request }
             }
         }
