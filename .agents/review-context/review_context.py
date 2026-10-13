@@ -395,6 +395,15 @@ def redact(staging):
     raise Abort(f"gitleaks still reports findings after redaction, nothing pushed: {left}")
 
 
+def split_front_matter(text):
+    """Return ({key: raw value}, body) for a file written by `publish`."""
+    if not text.startswith("---\n"):
+        return {}, text
+    head, _, body = text[4:].partition("\n---\n")
+    front = dict(line.split(": ", 1) for line in head.splitlines() if ": " in line)
+    return front, body.lstrip("\n")
+
+
 def cmd_access(args):
     print("full" if has_private_access() else "none")
 
@@ -405,9 +414,9 @@ def cmd_publish(args):
         return
     if shutil.which("gitleaks") is None:
         raise Abort("gitleaks is not installed; refusing to publish unscanned sessions")
-    rationale = Path(args.rationale)
-    if not rationale.is_file() or not rationale.read_text(encoding="utf-8").strip():
-        raise Abort(f"rationale file is missing or empty: {rationale}")
+    source = Path(args.rationale or args.revision)
+    if not source.is_file() or not source.read_text(encoding="utf-8").strip():
+        raise Abort(f"file is missing or empty: {source}")
 
     specs = []
     if not args.no_current_session:
@@ -418,6 +427,21 @@ def cmd_publish(args):
 
     since = parse_time(args.since) if args.since else None
     info = pr_info(args.pr)
+    pr_dir = f"{args.prefix}/{info['number']}"
+    body, previous_sessions = source.read_text(encoding="utf-8"), []
+    if args.revision:
+        # Append, so a reviewer of an earlier round can read what changed in
+        # the reasoning since then.
+        existing = private_raw(f"{pr_dir}/rationale.md")
+        if existing is None:
+            raise Abort("no rationale is published for this PR yet; publish with --rationale first")
+        front, previous = split_front_matter(existing.decode("utf-8"))
+        previous_sessions = json.loads(front.get("sessions", "[]"))
+        round_no = len(re.findall(r"^## Revision \d+", previous, re.M)) + 1
+        body = (
+            f"{previous.rstrip()}\n\n## Revision {round_no} ({now()[:10]}, head {info['headRefOid'][:7]})\n\n"
+            f"{body.strip()}\n"
+        )
     staging = Path(tempfile.mkdtemp(prefix="review-context-stage-")).resolve()
     try:
         names = stage_sessions(specs, staging)
@@ -426,13 +450,14 @@ def cmd_publish(args):
             path = staging / "sessions" / name
             sizes[name] = path.stat().st_size
             compact_session(path, name.split("-", 1)[0], since)
+        all_sessions = previous_sessions + [n for n in names if n not in previous_sessions]
         header = (
             f"---\npr: {info['number']}\nhead: {info['headRefOid']}\n"
-            f"published_at: {now()}\nsessions: {json.dumps(names)}\n"
+            f"published_at: {now()}\nsessions: {json.dumps(all_sessions)}\n"
             + (f"since: {args.since}\n" if args.since else "")
             + "---\n\n"
         )
-        (staging / "rationale.md").write_text(header + rationale.read_text(encoding="utf-8"), encoding="utf-8")
+        (staging / "rationale.md").write_text(header + body, encoding="utf-8")
         # Redact before truncating: a cut through a secret leaves a fragment
         # too short for gitleaks to recognize.
         replaced = redact(staging)
@@ -454,7 +479,6 @@ def cmd_publish(args):
                 "or leave out a session."
             )
 
-        pr_dir = f"{args.prefix}/{info['number']}"
         with PrivateCheckout(pr_dir) as repo:
             rels = ["rationale.md"]
             target = repo.path("rationale.md")
@@ -761,7 +785,9 @@ def main():
 
     p = sub.add_parser("publish", help="redact and push rationale.md and sessions for a PR")
     p.add_argument("--pr", type=int, required=True)
-    p.add_argument("--rationale", required=True)
+    what = p.add_mutually_exclusive_group(required=True)
+    what.add_argument("--rationale", help="full rationale; replaces any published one")
+    what.add_argument("--revision", help="what changed in this round; appended to the published rationale")
     p.add_argument("--agent", choices=("claude", "codex", "opencode"), required=True,
                    help="the agent running this command; its current session is included")
     p.add_argument("--session", action="append", default=[], metavar="AGENT:ID",

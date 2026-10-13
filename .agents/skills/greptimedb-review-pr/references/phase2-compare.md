@@ -6,7 +6,9 @@ appended.
 
 ## Compare
 
-Read `<workdir>/private/rationale.md` and `<workdir>/blind.md`. Write
+Read `<workdir>/private/rationale.md` and `<workdir>/blind.md`. On a
+re-review, the `## Revision N` sections after the head you last reviewed are
+what changed; read them first. Write
 `<workdir>/compare.md` in the user's language, with these sections (headings
 stay in English):
 

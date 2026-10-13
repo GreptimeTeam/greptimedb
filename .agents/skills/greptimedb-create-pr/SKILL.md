@@ -178,6 +178,14 @@ With `full`:
    hostnames, customer names, or personal data; refer to them abstractly ("a
    customer's S3-compatible store"). Show it to the author and apply their
    edits before publishing.
+
+   Updating a PR that already has a published rationale (for example after
+   addressing review comments): write only this round's revision instead, and
+   publish it with `--revision <file>` in place of `--rationale <file>`. The
+   script appends it to the published rationale as `## Revision N`. Cover:
+   - Review comments addressed, and how.
+   - Review comments not taken, and why.
+   - Design changes since the last round, and new doubts.
 2. Publish:
    ```
    python3 $S publish --pr <n> --rationale <file> --agent <claude|codex|opencode>
@@ -200,13 +208,14 @@ With `full`:
    taken from the first message about this change; that is the expected fix.
    `--max-string` and `--max-mb` change the limits; raise them only when the
    author asks.
-   Running it again for the same PR replaces `rationale.md` and adds or
-   updates sessions.
+
+   Sessions are stored by id: a session published before is replaced by its
+   current, longer copy, and new sessions are added.
 3. If it fails, the PR stays as it is; report the error.
 
 ## Step 7: Report
 
-Report in the user's language: the PR URL and title; pre-flight checks that failed or were skipped; for the
-private part, either "skipped" or the published path, the sessions included,
+Report in the user's language: the PR URL and title; pre-flight checks that
+failed or were skipped; for the private part, either "skipped" or the published path, the sessions included,
 the redactions made, and that internal hostnames, customer names, and personal
 data are not scanned automatically; only the rationale was reviewed by hand.
