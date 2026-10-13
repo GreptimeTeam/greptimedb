@@ -1155,7 +1155,6 @@ async fn test_drop_cancels_a_flush_waiting_for_wal_durability() {
         .unwrap();
 }
 
-/// Requests a drop of the region in the background and returns its handle.
 fn spawn_drop(
     engine: &MitoEngine,
     region_id: RegionId,

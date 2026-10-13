@@ -1114,7 +1114,6 @@ struct SealedBatch {
     reclaim_boundary: u64,
     bytes: Bytes,
     footer: Vec<FooterEntry>,
-    /// The release records the object carries.
     releases: Vec<Release>,
     first_admitted_at: Instant,
     sealed_at: Instant,
@@ -1201,9 +1200,9 @@ impl Failing {
 /// | --- | --- | --- | --- |
 /// | created, or identical retry | advances | acknowledged in order | healthy |
 /// | transient error, `durable` mode | never reused: a create that reported an error may have written its object | every batch that is not indexed fails, created ones included; retries are assigned new ids | healthy: the next batch links to the last indexed object, so no chain reaches a failed batch |
-/// | transient error, `enqueued` mode | unchanged | already acknowledged | healthy: the create is repeated with the same bytes after [`CREATE_RETRY_DELAY`], which an identical retry accepts |
+/// | transient error, `enqueued` mode | unchanged | already acknowledged, except a release, which waits for the repeat | healthy: the create is repeated with the same bytes after [`CREATE_RETRY_DELAY`], which an identical retry accepts |
 /// | error that requires intervention, `enqueued` mode | unchanged | already acknowledged; later appends are rejected with a retryable error | failing, see [`Failing`]: the lowest pending create is repeated alone with backoff, and the first create that succeeds ends it |
-/// | object store error, `enqueued` mode after `stop` began | never reused | already acknowledged | the backlog is dropped and `stop` reports the error |
+/// | object store error, `enqueued` mode after `stop` began | never reused | already acknowledged, except a release, which fails with the stopped error | the backlog is dropped and `stop` reports the error |
 /// | an object of an earlier epoch holds the sequence, `durable` mode | never reused | as for a transient error | healthy: that object can never be on the chain |
 /// | an object of the same or a later epoch holds the sequence, any conflicting object in the `enqueued` mode, encoding or catalog error | unchanged | every batch that is not indexed fails | poisoned |
 /// | created at the last representable sequence | cannot advance | acknowledged | poisoned: no later batch can be allocated a sequence |
@@ -8186,7 +8185,6 @@ mod tests {
         decoded.releases
     }
 
-    /// The watermark the store records for the region.
     fn watermark(store: &ObjectStoreLogStore, region_id: RegionId) -> Option<EntryId> {
         store
             .obsolete_entry_ids
