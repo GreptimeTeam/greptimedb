@@ -148,35 +148,27 @@ struct CsvRecordParser {
 
 impl RecordParser for CsvRecordParser {
     fn feed(&mut self, data: &[u8]) -> PgWireResult<Vec<ParsedRow>> {
+        // Strict arrow-csv decoder protocol: `flush()` may ONLY be called
+        // after `decode()` returned 0 (a full batch of complete records is
+        // buffered) — flushing a partial batch mid-stream, or calling it
+        // while a record spans the chunk boundary, corrupts subsequent
+        // decoding (verified against arrow-csv 56.2.0: chunked feeds
+        // mis-parse fields whenever boundaries land unluckily). Records
+        // therefore surface only in full `COPY_IN_FLUSH_ROWS` batches
+        // here; a trailing partial batch is emitted by `finish`.
         let mut buf = data;
         let mut rows = Vec::new();
-        loop {
-            // Decode until the input is consumed or a full batch is
-            // buffered. A record may end mid-buffer; its bytes stay in the
-            // decoder until more input (or the EOF signal) completes it.
-            while !buf.is_empty() {
-                let consumed = self.decoder.decode(buf).map_err(decode_error)?;
-                if consumed == 0 {
-                    break;
+        while !buf.is_empty() {
+            let consumed = self.decoder.decode(buf).map_err(decode_error)?;
+            if consumed == 0 {
+                while let Some(batch) = self.decoder.flush().map_err(decode_error)? {
+                    rows.extend(flush_batch(&batch)?);
                 }
+            } else {
                 buf = &buf[consumed..];
             }
-            // Flush complete records. `flush` fails without side effects
-            // when a record is still incomplete (the input ended
-            // mid-record); its bytes are kept for the next chunk or the
-            // EOF signal in `finish`.
-            match self.decoder.flush() {
-                Ok(Some(batch)) => rows.extend(flush_batch(&batch)?),
-                Ok(None) => return Ok(rows),
-                Err(error) if is_mid_record(&error) => return Ok(rows),
-                Err(error) => return Err(decode_error(error)),
-            }
-            if buf.is_empty() {
-                return Ok(rows);
-            }
-            // decode() returned 0 with input remaining: a full batch was
-            // flushed, continue with the rest of the input.
         }
+        Ok(rows)
     }
 
     fn finish(&mut self) -> PgWireResult<Vec<ParsedRow>> {
@@ -197,13 +189,6 @@ fn flush_batch(batch: &arrow::record_batch::RecordBatch) -> PgWireResult<Vec<Par
     let vectors = Helper::try_into_vectors(batch.columns())
         .map_err(|e| bad_copy_data(format!("failed to convert decoded CSV batch: {e}")))?;
     Ok(vectors_to_rows(vectors.iter(), batch.num_rows()))
-}
-
-/// Whether the error is arrow-csv reporting a record still in progress,
-/// which `flush` rejects (without side effects) until more input or the
-/// EOF signal completes the record.
-fn is_mid_record(error: &ArrowError) -> bool {
-    matches!(error, ArrowError::CsvError(m) if m.contains("part way through record"))
 }
 
 fn decode_error(error: ArrowError) -> PgWireError {
@@ -257,6 +242,19 @@ mod tests {
             .unwrap()
             .create_parser(&test_columns())
             .unwrap()
+    }
+
+    /// Feeds chunks and then the EOF signal, returning all rows: with the
+    /// strict decoder protocol, feeds only emit full
+    /// `COPY_IN_FLUSH_ROWS` batches; a trailing partial batch surfaces at
+    /// `finish`.
+    fn feed_all(parser: &mut Box<dyn RecordParser + Send>, chunks: &[&[u8]]) -> Vec<ParsedRow> {
+        let mut rows = Vec::new();
+        for chunk in chunks {
+            rows.extend(parser.feed(chunk).unwrap());
+        }
+        rows.extend(parser.finish().unwrap());
+        rows
     }
 
     #[test]
@@ -321,13 +319,12 @@ mod tests {
     #[test]
     fn test_csv_parse_records() {
         let mut parser = parser();
-        let rows = parser
-            .feed(
-                b"host1,1.5,2023-11-14 22:13:20\n\
-                  ,2.5,2023-11-14 22:13:21\n\
-                  \"quoted, comma\",3.5,2023-11-14 22:13:22\n",
-            )
-            .unwrap();
+        let rows = feed_all(
+            &mut parser,
+            &[b"host1,1.5,2023-11-14 22:13:20\n\
+                ,2.5,2023-11-14 22:13:21\n\
+                \"quoted, comma\",3.5,2023-11-14 22:13:22\n"],
+        );
         assert_eq!(rows.len(), 3);
         assert_eq!(string_at(&rows[0], 0), Some("host1".into()));
         // An empty field is NULL.
@@ -338,9 +335,10 @@ mod tests {
     #[test]
     fn test_csv_escaped_quotes() {
         let mut parser = parser();
-        let rows = parser
-            .feed(b"\"say \"\"hi\"\"\",1.0,2023-11-14 22:13:20\n")
-            .unwrap();
+        let rows = feed_all(
+            &mut parser,
+            &[b"\"say \"\"hi\"\"\",1.0,2023-11-14 22:13:20\n"],
+        );
         assert_eq!(string_at(&rows[0], 0), Some("say \"hi\"".into()));
     }
 
@@ -350,9 +348,7 @@ mod tests {
         set.insert("escape".into(), CopyOptionValue::String("\\".into()))
             .unwrap();
         let mut parser = rows_with(set);
-        let rows = parser
-            .feed(b"\"a\\\"b\",1.0,2023-11-14 22:13:20\n")
-            .unwrap();
+        let rows = feed_all(&mut parser, &[b"\"a\\\"b\",1.0,2023-11-14 22:13:20\n"]);
         assert_eq!(string_at(&rows[0], 0), Some("a\"b".into()));
     }
 
@@ -360,7 +356,8 @@ mod tests {
     fn test_csv_quoted_newline_and_chunk_boundaries() {
         let mut parser = parser();
         // Split inside a quoted field containing a newline, and a CRLF
-        // record separator split across chunks.
+        // record separator split across chunks. No batch is full, so all
+        // feeds return nothing and both rows surface at the EOF signal.
         assert!(parser.feed(b"\"multi").unwrap().is_empty());
         assert!(
             parser
@@ -368,7 +365,13 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        let rows = parser.feed(b"\r\nhost2,2.0,2023-11-14 22:13:21\n").unwrap();
+        assert!(
+            parser
+                .feed(b"\r\nhost2,2.0,2023-11-14 22:13:21\n")
+                .unwrap()
+                .is_empty()
+        );
+        let rows = parser.finish().unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(string_at(&rows[0], 0), Some("multiline\nfield".into()));
         assert_eq!(string_at(&rows[1], 0), Some("host2".into()));
@@ -379,9 +382,10 @@ mod tests {
         let mut set = CopyOptionSet::default();
         set.insert("header".into(), CopyOptionValue::Flag).unwrap();
         let mut parser = rows_with(set);
-        let rows = parser
-            .feed(b"host,val,ts\nhost1,1.0,2023-11-14 22:13:20\n")
-            .unwrap();
+        let rows = feed_all(
+            &mut parser,
+            &[b"host,val,ts\nhost1,1.0,2023-11-14 22:13:20\n"],
+        );
         assert_eq!(rows.len(), 1);
         assert_eq!(string_at(&rows[0], 0), Some("host1".into()));
     }
@@ -404,8 +408,99 @@ mod tests {
     #[test]
     fn test_csv_finish_at_record_boundary() {
         let mut parser = parser();
-        parser.feed(b"host1,1.0,2023-11-14 22:13:20\n").unwrap();
-        assert!(parser.finish().unwrap().is_empty());
+        // The complete record stays buffered (no full batch); the feed
+        // emits nothing and `finish` surfaces it.
+        assert!(
+            parser
+                .feed(b"host1,1.0,2023-11-14 22:13:20\n")
+                .unwrap()
+                .is_empty()
+        );
+        let rows = parser.finish().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(string_at(&rows[0], 0), Some("host1".into()));
+    }
+
+    /// Regression test for chunk-boundary corruption: CopyData chunking is
+    /// arbitrary (records may split mid-field), and an earlier feed loop
+    /// flushed partial batches at record-boundary chunk ends, which
+    /// arrow-csv does not permit mid-stream — fields then mis-parse
+    /// ("00001h,ost-001u,..."). Feed the same payload at many chunk sizes
+    /// and verify EVERY cell.
+    #[test]
+    fn test_csv_chunked_feeds_are_alignment_safe() {
+        // (int32 id, timestamp) rows of near-equal length.
+        let sweep_columns = vec![
+            ColumnSchema::new("i", ConcreteDataType::int32_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ];
+        // A payload wider than one decoder batch so batch-full flushes
+        // interleave with chunk boundaries too.
+        let total = 2 * COPY_IN_FLUSH_ROWS + 137;
+        let payload: Vec<u8> = (0..total)
+            .map(|i| {
+                format!(
+                    "{:06},2024-01-01 00:00:{:02}.{:03}\n",
+                    i,
+                    (i / 1000) % 60,
+                    i % 1000
+                )
+            })
+            .collect::<String>()
+            .into_bytes();
+
+        let check = |chunk: usize| {
+            let mut parser = build_csv_codec(CopyOptionSet::default())
+                .unwrap()
+                .create_parser(&sweep_columns)
+                .unwrap();
+            let mut ids: Vec<i32> = Vec::new();
+            for c in payload.chunks(chunk) {
+                for row in parser.feed(c).unwrap() {
+                    ids.push(match row.values[0].value_data.as_ref().unwrap() {
+                        api::v1::value::ValueData::I32Value(v) => *v,
+                        other => panic!("expected i32, got {other:?}"),
+                    });
+                }
+            }
+            for row in parser.finish().unwrap() {
+                ids.push(match row.values[0].value_data.as_ref().unwrap() {
+                    api::v1::value::ValueData::I32Value(v) => *v,
+                    other => panic!("expected i32, got {other:?}"),
+                });
+            }
+            assert_eq!(ids.len(), total, "chunk={chunk}");
+            for (i, v) in ids.iter().enumerate() {
+                assert_eq!(*v, i as i32, "chunk={chunk} row {i} corrupted");
+            }
+        };
+
+        // Small chunk sizes hit every possible boundary alignment,
+        // including multiple decode calls per record.
+        for chunk in [1usize, 2, 3, 7, 8, 13, 31, 64, 97, 128, 1024] {
+            check(chunk);
+        }
+        // Client-natural sizes with a shifted start to vary where
+        // boundaries land relative to records.
+        for chunk in [4096usize, 8192, 65531] {
+            check(chunk);
+            let mut shifted = payload.clone();
+            shifted.drain(..37);
+            let mut parser = build_csv_codec(CopyOptionSet::default())
+                .unwrap()
+                .create_parser(&sweep_columns)
+                .unwrap();
+            let mut count = 0usize;
+            for c in shifted.chunks(chunk) {
+                count += parser.feed(c).unwrap().len();
+            }
+            count += parser.finish().unwrap().len();
+            assert_eq!(count, total - 1, "chunk={chunk} shifted");
+        }
     }
 
     #[test]
@@ -420,8 +515,11 @@ mod tests {
             "{err}"
         );
 
+        // Value conversion runs at flush time, so the bad double
+        // surfaces at the EOF signal, not at feed time.
         let mut p = parser();
-        let err = match p.feed(b"host1,not_a_double,2023-11-14 22:13:20\n") {
+        p.feed(b"host1,not_a_double,2023-11-14 22:13:20\n").unwrap();
+        let err = match p.finish() {
             Ok(_) => panic!("expected parse error"),
             Err(e) => e,
         };
