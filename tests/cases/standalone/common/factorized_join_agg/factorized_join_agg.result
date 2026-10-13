@@ -1,0 +1,175 @@
+-- Factorized join aggregation behind the experimental opt-in switch.
+-- Covers: rewrite off by default, SET enabling it, result parity, SET false
+-- overriding, and EXPLAIN showing the partial-aggregate shape.
+-- SQLNESS PROTOCOL MYSQL
+CREATE TABLE ffx_metrics (
+    ts TIMESTAMP TIME INDEX,
+    mhost STRING,
+    mval DOUBLE
+);
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+CREATE TABLE ffx_nodes (
+    ts TIMESTAMP TIME INDEX,
+    nhost STRING,
+    area STRING,
+    wgt DOUBLE
+);
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+INSERT INTO ffx_metrics VALUES
+    ('2024-01-01 00:00:00', 'm1', 1.0),
+    ('2024-01-01 00:00:01', 'm1', 2.0),
+    ('2024-01-01 00:00:02', 'm1', NULL),
+    ('2024-01-01 00:00:03', 'm2', 4.0);
+
+affected_rows: 4
+
+-- SQLNESS PROTOCOL MYSQL
+INSERT INTO ffx_nodes VALUES
+    ('2024-01-01 00:00:00', 'm1', 'west', 2.0),
+    ('2024-01-01 00:00:01', 'm1', 'east', NULL),
+    ('2024-01-01 00:00:02', 'm2', 'west', 0.5);
+
+affected_rows: 3
+
+-- Default (switch off): plain aggregate over the join.
+-- SQLNESS PROTOCOL MYSQL
+SELECT m.mhost, n.area, AVG(m.mval * n.wgt) AS score
+FROM ffx_metrics m JOIN ffx_nodes n ON m.mhost = n.nhost
+GROUP BY m.mhost, n.area ORDER BY m.mhost, n.area;
+
++-------+------+-------+
+| mhost | area | score |
++-------+------+-------+
+| m1    | east |       |
+| m1    | west | 3     |
+| m2    | west | 2     |
++-------+------+-------+
+
+-- Enable the experimental rewrite for this session.
+-- SQLNESS PROTOCOL MYSQL
+SET experimental_enable_factorized_join_agg = true;
+
+affected_rows: 0
+
+-- Rewritten path: identical results (NULL group preserved).
+-- SQLNESS PROTOCOL MYSQL
+SELECT m.mhost, n.area, AVG(m.mval * n.wgt) AS score
+FROM ffx_metrics m JOIN ffx_nodes n ON m.mhost = n.nhost
+GROUP BY m.mhost, n.area ORDER BY m.mhost, n.area;
+
++-------+------+-------+
+| mhost | area | score |
++-------+------+-------+
+| m1    | east |       |
+| m1    | west | 3     |
+| m2    | west | 2     |
++-------+------+-------+
+
+-- SUM variant also rewrites.
+-- SQLNESS PROTOCOL MYSQL
+SELECT m.mhost, n.area, SUM(m.mval * n.wgt) AS total
+FROM ffx_metrics m JOIN ffx_nodes n ON m.mhost = n.nhost
+GROUP BY m.mhost, n.area ORDER BY m.mhost, n.area;
+
++-------+------+-------+
+| mhost | area | total |
++-------+------+-------+
+| m1    | east |       |
+| m1    | west | 6     |
+| m2    | west | 2     |
++-------+------+-------+
+
+-- The rewrite appears in the plan as partial count/sum aggregates joined.
+-- SQLNESS PROTOCOL MYSQL
+EXPLAIN SELECT m.mhost, n.area, AVG(m.mval * n.wgt) AS score
+FROM ffx_metrics m JOIN ffx_nodes n ON m.mhost = n.nhost
+GROUP BY m.mhost, n.area;
+
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                                                                    |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Projection: m.mhost, n.area, CASE WHEN __common_expr_5 = Int64(0) THEN Float64(NULL) ELSE CASE WHEN partial_sv_2 * partial_sw_4 = Float64(0) THEN Float64(0) ELSE partial_sv_2 * partial_sw_4 END / CAST(__common_expr_5 AS Float64) END AS score       |
+|               |   Projection: partial_nv_1 * partial_nw_3 AS __common_expr_5, m.mhost, partial_sv_2, n.area, partial_sw_4                                                                                                                                               |
+|               |     Inner Join: m.mhost = n.nhost                                                                                                                                                                                                                       |
+|               |       Aggregate: groupBy=[[m.mhost]], aggr=[[count(m.mval) AS partial_nv_1, sum(m.mval) AS partial_sv_2]]                                                                                                                                               |
+|               |         Projection: m.mhost, m.mval                                                                                                                                                                                                                     |
+|               |           MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                                               |
+|               | SubqueryAlias: m                                                                                                                                                                                                                                        |
+|               |   Filter: ffx_metrics.mhost IS NOT NULL                                                                                                                                                                                                                 |
+|               |     TableScan: ffx_metrics, partial_filters=[ffx_metrics.mhost IS NOT NULL]                                                                                                                                                                             |
+|               | ]]                                                                                                                                                                                                                                                      |
+|               |       Aggregate: groupBy=[[n.nhost, n.area]], aggr=[[count(n.wgt) AS partial_nw_3, sum(n.wgt) AS partial_sw_4]]                                                                                                                                         |
+|               |         Projection: n.nhost, n.area, n.wgt                                                                                                                                                                                                              |
+|               |           MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                                               |
+|               | SubqueryAlias: n                                                                                                                                                                                                                                        |
+|               |   Filter: ffx_nodes.nhost IS NOT NULL                                                                                                                                                                                                                   |
+|               |     TableScan: ffx_nodes, partial_filters=[ffx_nodes.nhost IS NOT NULL]                                                                                                                                                                                 |
+|               | ]]                                                                                                                                                                                                                                                      |
+| physical_plan | ProjectionExec: expr=[mhost@1 as mhost, area@3 as area, CASE WHEN __common_expr_5@0 = 0 THEN NULL ELSE CASE WHEN partial_sv_2@2 * partial_sw_4@4 = 0 THEN 0 ELSE partial_sv_2@2 * partial_sw_4@4 END / CAST(__common_expr_5@0 AS Float64) END as score] |
+|               |   ProjectionExec: expr=[partial_nv_1@0 * partial_nw_3@1 as __common_expr_5, mhost@2 as mhost, partial_sv_2@3 as partial_sv_2, area@4 as area, partial_sw_4@5 as partial_sw_4]                                                                           |
+|               |     HashJoinExec: mode=Partitioned, join_type=Inner, on=[(mhost@0, nhost@0)], projection=[partial_nv_1@1, partial_nw_3@5, mhost@0, partial_sv_2@2, area@4, partial_sw_4@6]                                                                              |
+|               |       AggregateExec: mode=FinalPartitioned, gby=[mhost@0 as mhost], aggr=[count(m.mval) as partial_nv_1, sum(m.mval) as partial_sv_2]                                                                                                                   |
+|               |         RepartitionExec: partitioning=Hash([mhost@0], 4), input_partitions=4                                                                                                                                                                            |
+|               |           AggregateExec: mode=Partial, gby=[mhost@0 as mhost], aggr=[count(m.mval) as partial_nv_1, sum(m.mval) as partial_sv_2]                                                                                                                        |
+|               |             RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1                                                                                                                                                                        |
+|               |               ProjectionExec: expr=[mhost@1 as mhost, mval@2 as mval]                                                                                                                                                                                   |
+|               |                 MergeScanExec: peers=[4398046511104(1024, 0), ]                                                                                                                                                                                         |
+|               |       RepartitionExec: partitioning=Hash([nhost@0], 4), input_partitions=4                                                                                                                                                                              |
+|               |         AggregateExec: mode=FinalPartitioned, gby=[nhost@0 as nhost, area@1 as area], aggr=[count(n.wgt) as partial_nw_3, sum(n.wgt) as partial_sw_4]                                                                                                   |
+|               |           RepartitionExec: partitioning=Hash([nhost@0, area@1], 4), input_partitions=4                                                                                                                                                                  |
+|               |             AggregateExec: mode=Partial, gby=[nhost@0 as nhost, area@1 as area], aggr=[count(n.wgt) as partial_nw_3, sum(n.wgt) as partial_sw_4]                                                                                                        |
+|               |               RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1                                                                                                                                                                      |
+|               |                 ProjectionExec: expr=[nhost@1 as nhost, area@2 as area, wgt@3 as wgt]                                                                                                                                                                   |
+|               |                   MergeScanExec: peers=[4402341478400(1025, 0), ]                                                                                                                                                                                       |
+|               |                                                                                                                                                                                                                                                         |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- A shape that must NOT rewrite: single-column AVG.
+-- SQLNESS PROTOCOL MYSQL
+SELECT m.mhost, n.area, AVG(m.mval) AS score
+FROM ffx_metrics m JOIN ffx_nodes n ON m.mhost = n.nhost
+GROUP BY m.mhost, n.area ORDER BY m.mhost, n.area;
+
++-------+------+-------+
+| mhost | area | score |
++-------+------+-------+
+| m1    | east | 1.5   |
+| m1    | west | 1.5   |
+| m2    | west | 4     |
++-------+------+-------+
+
+-- Session SET false turns the rewrite back off.
+-- SQLNESS PROTOCOL MYSQL
+SET experimental_enable_factorized_join_agg = false;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT m.mhost, n.area, AVG(m.mval * n.wgt) AS score
+FROM ffx_metrics m JOIN ffx_nodes n ON m.mhost = n.nhost
+GROUP BY m.mhost, n.area ORDER BY m.mhost, n.area;
+
++-------+------+-------+
+| mhost | area | score |
++-------+------+-------+
+| m1    | east |       |
+| m1    | west | 3     |
+| m2    | west | 2     |
++-------+------+-------+
+
+-- SQLNESS PROTOCOL MYSQL
+DROP TABLE ffx_metrics;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+DROP TABLE ffx_nodes;
+
+affected_rows: 0
+
