@@ -139,12 +139,20 @@ restart() {
 # Pins the WAL with one row in a second table before the writers start, if asked,
 # and samples the object counts every 30 s while they run.
 sample_objects() {
-    while sleep 30; do
-        curl --noproxy '*' -fsS --max-time 10 http://127.0.0.1:4000/metrics 2>/dev/null | awk -v t="$(date +%s)" '
+    set +e
+    local body
+    while sleep "${OSWAL_SAMPLE_SECONDS:-30}"; do
+        # A failed scrape is a missing sample, never zero objects.
+        if ! body=$(curl --noproxy '*' -fsS --max-time 10 http://127.0.0.1:4000/metrics 2>/dev/null) \
+            || ! grep -q '^greptime_logstore_object_store_wal_indexed_objects ' <<< "$body"; then
+            echo "$(date +%s) missing" >> "$dir/objects.tsv"
+            continue
+        fi
+        awk -v t="$(date +%s)" '
             /^greptime_logstore_object_store_wal_indexed_objects / {i = $2}
             /^greptime_logstore_object_store_wal_deleted_objects_total / {d = $2}
             /^greptime_logstore_object_store_wal_created_objects_total / {c = $2}
-            END {print t, i + 0, d + 0, c + 0}' >> "$dir/objects.tsv"
+            END {print t, i + 0, d + 0, c + 0}' <<< "$body" >> "$dir/objects.tsv"
     done
 }
 
@@ -175,7 +183,7 @@ crash_cycles() {
         phase=-cycle-$cycle; scrape_retry || complete=false
         before=$(now_ns); docker kill --signal KILL "$cid" >/dev/null; after=$(now_ns)
         wait "$wpid"
-        [[ -z "$spid" ]] || { kill "$spid" 2>/dev/null; wait "$spid" 2>/dev/null || true; spid=; }
+        if [[ -n "$spid" ]]; then kill "$spid" 2>/dev/null || true; wait "$spid" 2>/dev/null || true; spid=; fi
         stop_server killed
         phase=-restart-$cycle started=$(now)
         start_server
