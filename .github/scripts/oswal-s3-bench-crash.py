@@ -109,14 +109,20 @@ def check_kill(directory: Path, writers: int, before_ns: int, after_ns: int, win
             "kill_errors": errors}
 
 
-def verify(run_dir: Path, found: dict, rows: int, enqueued: bool) -> dict:
-    """Checks the table, read as batch -> row count, against every cycle's writers so far."""
-    acked, stripes = [], collections.OrderedDict()
+def verify(run_dir: Path, found: dict, rows: int, enqueued: bool, cycle: int) -> dict:
+    """Checks the table, read as batch -> row count, against every cycle's writers so far, and
+    counts what the given cycle's writers acknowledged, left and lost on their own."""
+    acked, stripes, cycle_attempted, cycle_acked = [], collections.OrderedDict(), set(), set()
     for cycle_dir in sorted(run_dir.glob("cycle-*"), key=lambda p: int(p.name.split("-")[1])):
+        current = cycle_dir.name == f"cycle-{cycle}"
         for path in sorted(cycle_dir.glob("attempted-*.log")):
             stripes[(cycle_dir.name, path.name)] = [int(seq) for (seq,) in lines(path)]
+            if current:
+                cycle_attempted.update(stripes[(cycle_dir.name, path.name)])
         for path in sorted(cycle_dir.glob("acked-*.log")):
             acked += [int(seq) for (seq,) in lines(path)]
+            if current:
+                cycle_acked.update(int(seq) for (seq,) in lines(path))
     acked_set = set(acked)
     attempted = {seq for stripe in stripes.values() for seq in stripe}
     errors = []
@@ -147,8 +153,12 @@ def verify(run_dir: Path, found: dict, rows: int, enqueued: bool) -> dict:
         errors.append(f"present, unacknowledged and not in flight at a kill: {stray[:20]}")
     if len(acked) != len(acked_set):
         errors.append("a batch was acknowledged twice")
-    return {"found_batches": len(found), "acked_batches": len(acked_set), "lost_batches": len(missing),
-            "lost_rows": len(missing) * rows, "extra_batches": len(extra), "verify_errors": errors}
+    present = set(found) & cycle_attempted
+    return {"cycle_acked_batches": len(cycle_acked), "cycle_present_batches": len(present),
+            "cycle_lost_batches": len(cycle_acked - present), "cycle_lost_rows": len(cycle_acked - present) * rows,
+            "cycle_extra_batches": len(present - cycle_acked),
+            "total_found_batches": len(found), "total_acked_batches": len(acked_set),
+            "total_lost_batches": len(missing), "total_extra_batches": len(extra), "verify_errors": errors}
 
 
 def main() -> int:
@@ -175,9 +185,7 @@ def main() -> int:
     result |= check_kill(args.run_dir / f"cycle-{args.cycle}", args.writers, args.before_ns, args.after_ns,
                          args.window_max_ms)
     result |= verify(args.run_dir, {int(seq): int(count) for seq, count in rows}, args.rows,
-                     args.mode == "enqueued")
-    result["cycle_acked_batches"] = sum(
-        len(lines(p)) for p in (args.run_dir / f"cycle-{args.cycle}").glob("acked-*.log"))
+                     args.mode == "enqueued", args.cycle)
     result["passed"] = not result["kill_errors"] and not result["verify_errors"]
     print(json.dumps(result))
     return 0 if result["passed"] else 1

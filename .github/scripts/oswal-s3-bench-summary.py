@@ -82,14 +82,34 @@ def interval_seconds(wal: dict) -> float:
     return float(value[:-2]) / 1000 if value.endswith("ms") else float(value.rstrip("s"))
 
 
-def crash_cycles(path: Path) -> list:
+def traffic(end: dict, start: dict, seconds, wal: dict) -> dict:
+    """WAL traffic between two scrapes of one process over `seconds`; more objects than seal
+    ticks, or objects near the 8 MiB threshold, mean batches sealed on size rather than on the timer."""
+    def delta(name):
+        value = end["samples"].get(name)
+        return None if value is None else value - start["samples"].get(name, 0)
+    created, written, objects = delta("created_objects_total"), delta("object_bytes_sum"), delta("object_bytes_count")
+    per_second = created / seconds if created and seconds else None
+    mean = written / objects if written and objects else None
+    return {"wal_mb_per_second": written / seconds / 1e6 if written and seconds else None,
+            "objects_per_second": per_second, "mean_object_bytes": mean,
+            "sealed_on_size": None if per_second is None else
+            per_second > 1.05 / interval_seconds(wal) or (mean or 0) >= 0.9 * 8 * 2**20,
+            "requests": {op: n - start["requests"].get(op, 0) for op, n in end["requests"].items()
+                         if n != start["requests"].get(op, 0)}}
+
+
+def crash_cycles(path: Path, wal: dict) -> list:
     """Each cycle's check plus the loaded server's metrics before the kill and the restarted one's after."""
     cycles = [json.loads(line) for line in (path / "cycles.jsonl").read_text().splitlines()
               if line.strip()] if (path / "cycles.jsonl").exists() else []
     for cycle in cycles:
-        before = read_metrics(path / f"metrics-cycle-{cycle['cycle']}.prom")["samples"]
+        start = read_metrics(path / f"metrics-start-{cycle['cycle']}.prom")
+        killed = read_metrics(path / f"metrics-cycle-{cycle['cycle']}.prom")
+        before = killed["samples"]
         after = read_metrics(path / f"metrics-restart-{cycle['cycle']}.prom")
         once = after["samples"].get("recovery_seconds_count") == 1
+        cycle |= traffic(killed, start, cycle.get("load_seconds"), wal)
         cycle |= {"created_before_kill": before.get("created_objects_total"),
                   "indexed_before_kill": before.get("indexed_objects"),
                   "recovery_seconds": after["samples"].get("recovery_seconds_sum") if once else None,
@@ -104,7 +124,9 @@ def load_cell(path: Path, spec: dict | None = None) -> dict:
     cell = json.loads(recorded.read_text()) if recorded.exists() else spec | {"exit_code": None, "missing": True}
     result_path = path / "greptimedb-1" / "load-result.json"
     result = json.loads(result_path.read_text()) if result_path.exists() else {}
-    metrics, restarted = read_metrics(path / "metrics.prom"), read_metrics(path / "metrics-restart.prom")
+    final, restarted = read_metrics(path / "metrics.prom"), read_metrics(path / "metrics-restart.prom")
+    # With an idle window the scrape taken when the load ended describes the load.
+    metrics = read_metrics(path / "metrics-idle.prom") if cell.get("idle_seconds") else final
     load_seconds = result.get("load_seconds")
     wall, cpu = cell.get("load_wall_seconds"), cell.get("server_cpu_seconds")
     row = {
@@ -140,25 +162,15 @@ def load_cell(path: Path, spec: dict | None = None) -> dict:
         row[counter] = metrics["samples"].get(counter, 0 if active else None)
     created = row["created_objects_total"]
     row["creates_per_minute"] = created * 60 / load_seconds if created is not None and load_seconds else None
-    # WAL traffic of the load; more objects than seal ticks, or objects near the
-    # 8 MiB threshold, mean batches sealed on size rather than on the timer.
-    written, objects = metrics["samples"].get("object_bytes_sum"), metrics["samples"].get("object_bytes_count")
-    per_second = created / load_seconds if created and load_seconds else None
-    mean = written / objects if written and objects else None
-    row |= {"wal_mb_per_second": written / load_seconds / 1e6 if written and load_seconds else None,
-            "objects_per_second": per_second, "mean_object_bytes": mean,
-            "sealed_on_size": None if per_second is None else
-            per_second > 1.05 / interval_seconds(cell.get("wal", {})) or (mean or 0) >= 0.9 * 8 * 2**20,
-            "requests": metrics["requests"], "restart_requests": restarted["requests"]}
+    row |= traffic(metrics, {"samples": {}, "requests": {}}, load_seconds, cell.get("wal", {}))
+    row["restart_requests"] = restarted["requests"]
     if cell.get("idle_seconds"):
-        idle = read_metrics(path / "metrics-idle.prom")
-        start = idle["samples"].get("created_objects_total", 0)
-        row["idle"] = {"seconds": cell["idle_seconds"],
-                       "creates": None if created is None else created - start,
-                       "requests": {op: n - idle["requests"].get(op, 0) for op, n in metrics["requests"].items()
-                                    if n != idle["requests"].get(op, 0)}}
+        idle = traffic(final, metrics, cell["idle_seconds"], cell.get("wal", {}))
+        end = final["samples"].get("created_objects_total")
+        row["idle"] = {"seconds": cell["idle_seconds"], "requests": idle["requests"],
+                       "creates": None if end is None else end - metrics["samples"].get("created_objects_total", 0)}
     if row["mode"] == "crash":
-        row["cycles"] = crash_cycles(path)
+        row["cycles"] = crash_cycles(path, cell.get("wal", {}))
         if (path / "objects.tsv").exists():
             row["objects_samples"] = [[int(float(v)) for v in line.split()]
                                       for line in (path / "objects.tsv").read_text().splitlines() if line.strip()]
@@ -244,21 +256,33 @@ def render(run: dict, rows: list, pairs: list) -> str:
             fmt(idle.get("seconds")), fmt(idle.get("creates")), operations(idle["requests"]) if idle else "—"]) + " |")
     crashes = [r for r in rows if r["mode"] == "crash"]
     if crashes:
-        lines += ["", "| Cell | Cycle | Kill after s | Acked batches | In flight | Found | Acked so far | Lost batches "
-                  "| Lost rows | Extra | Indexed at kill | Restart to /health s | Recovery s | Recovered objects "
-                  "| Pin rows | Verdict |",
+        lines += ["", "| Cell | Cycle | Kill after s | Acked | Present | Lost | Lost rows | Extra | In flight "
+                  "| All found | All acked | All lost | Indexed at kill | Restart to /health s | Recovery s "
+                  "| Recovered objects | Pin rows | Verdict |",
                   "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: "
-                  "| ---: | --- |"]
+                  "| ---: | ---: | ---: | --- |"]
         for r in crashes:
             for c in r["cycles"] or [{}]:
+                verdict = "—" if not c else "FAIL: " + "; ".join(c.get("kill_errors", []) + c.get("verify_errors", [])) \
+                    if not c.get("passed") else "pass" if c.get("metrics_complete", True) else "pass, scrape missing"
                 lines.append(" | ".join([
                     f"| {label(r)}", fmt(c.get("cycle")), fmt(c.get("kill_after_seconds"), 1),
-                    fmt(c.get("cycle_acked_batches")), fmt(c.get("in_flight")), fmt(c.get("found_batches")),
-                    fmt(c.get("acked_batches")), fmt(c.get("lost_batches")), fmt(c.get("lost_rows")),
-                    fmt(c.get("extra_batches")), fmt(c.get("indexed_before_kill")), fmt(c.get("restart_seconds"), 2),
-                    fmt(c.get("recovery_seconds"), 3), fmt(c.get("recovered_objects")), fmt(c.get("pin_rows")),
-                    "—" if not c else "pass" if c.get("passed") else "FAIL: " + "; ".join(
-                        c.get("kill_errors", []) + c.get("verify_errors", []))]) + " |")
+                    fmt(c.get("cycle_acked_batches")), fmt(c.get("cycle_present_batches")),
+                    fmt(c.get("cycle_lost_batches")), fmt(c.get("cycle_lost_rows")), fmt(c.get("cycle_extra_batches")),
+                    fmt(c.get("in_flight")), fmt(c.get("total_found_batches")), fmt(c.get("total_acked_batches")),
+                    fmt(c.get("total_lost_batches")), fmt(c.get("indexed_before_kill")),
+                    fmt(c.get("restart_seconds"), 2), fmt(c.get("recovery_seconds"), 3),
+                    fmt(c.get("recovered_objects")), fmt(c.get("pin_rows")), verdict]) + " |")
+        lines += ["", "| Cell | Cycle | Load s | WAL MB/s | Objects/s | Mean object MiB | Sealed on size "
+                  "| Requests until the kill | Requests of the restart |",
+                  "| --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |"]
+        for r in crashes:
+            for c in r["cycles"]:
+                lines.append(" | ".join([
+                    f"| {r['id']}", fmt(c["cycle"]), fmt(c.get("load_seconds"), 1), fmt(c["wal_mb_per_second"], 1),
+                    fmt(c["objects_per_second"], 1), fmt(c["mean_object_bytes"], 2, 1 / 2**20),
+                    "—" if c["sealed_on_size"] is None else ("yes" if c["sealed_on_size"] else "no"),
+                    operations(c["requests"]), operations(c["restart_requests"])]) + " |")
         pinned = [r for r in crashes if r.get("objects_samples")]
         if pinned:
             lines += ["", "| Cell | Indexed objects every 30 s | Deleted objects at the end | Created objects at the end |",
