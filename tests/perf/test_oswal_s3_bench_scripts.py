@@ -125,9 +125,12 @@ class PlanTest(unittest.TestCase):
 
     def test_the_image_is_the_full_reference_or_a_greptimedb_tag(self):
         image = "docker.io/greptime/greptimedb-dev:dev-20261013-1791848986-a5a1a9f4"
-        self.assertEqual(bench.resolve_image(image, "nightly"), image)
+        for valid in (image, "ghcr.io/acme/greptimedb--bench:dev", "ghcr.io/acme/greptimedb__bench:dev",
+                      "localhost:5000/a/b@sha256:" + "c" * 64):
+            self.assertEqual(bench.resolve_image(valid, "nightly"), valid)
         self.assertEqual(bench.resolve_image("", "v1.4.0-nightly-20261012"), "greptime/greptimedb:v1.4.0-nightly-20261012")
-        for bad in ("greptimedb", "docker.io/greptime/greptimedb", "Docker.io/x/y:1", "x/y:bad tag"):
+        for bad in ("greptimedb", "docker.io/greptime/greptimedb", "Docker.io/x/y:1", "x/y:bad tag",
+                    "x/y___z:1", "x/-y:1"):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 bench.resolve_image(bad, "nightly")
 
