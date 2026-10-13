@@ -44,7 +44,7 @@ struct UnitExecution {
 
 /// A request's local units. All transitions run on the owning region worker.
 #[derive(Debug)]
-pub(super) struct LocalCompaction {
+pub(crate) struct LocalCompaction {
     units: HashMap<u64, UnitExecution>,
     pending: VecDeque<CompactionTaskImpl>,
     /// Submitted units awaiting task exit, including queued tasks.
@@ -56,7 +56,7 @@ pub(super) struct LocalCompaction {
 
 impl LocalCompaction {
     /// Requests cancellation for all units that have not started committing.
-    pub(super) fn request_cancel(&self) -> RequestCancelResult {
+    pub(crate) fn request_cancel(&self) -> RequestCancelResult {
         let mut result = RequestCancelResult::TooLateToCancel;
         for unit in self.units.values() {
             match unit.state.request_cancel() {
@@ -112,7 +112,7 @@ impl Drop for LocalCompaction {
 
 impl CompactionScheduler {
     /// Builds unit tasks with fresh execution IDs and shares their already-reserved inputs.
-    pub(super) fn prepare_local_units(
+    pub(crate) fn prepare_local_units(
         &mut self,
         region: CompactionRegion,
         units: Vec<CompactionUnit>,
@@ -171,7 +171,7 @@ impl CompactionScheduler {
     }
 
     /// Submits pending units up to the request limit and arranges task-exit notifications.
-    pub(super) fn dispatch_local_units(&mut self, region_id: RegionId) {
+    pub(crate) fn dispatch_local_units(&mut self, region_id: RegionId) {
         loop {
             let Some(local) = self.local_units_mut(region_id) else {
                 return;
@@ -261,7 +261,7 @@ impl CompactionScheduler {
     }
 
     /// Completes the request only after all units exit, using the existing terminal paths.
-    pub(super) async fn finish_local_units(
+    pub(crate) async fn finish_local_units(
         &mut self,
         region_id: RegionId,
         manifest: &ManifestContextRef,

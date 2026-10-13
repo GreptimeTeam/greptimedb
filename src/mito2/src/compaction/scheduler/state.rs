@@ -246,7 +246,7 @@ impl CompactingFiles {
     }
 
     /// Reserves distinct inputs, releasing acquired leases if any input is already busy.
-    pub(super) fn try_reserve<'a>(
+    fn try_reserve<'a>(
         selected_files: impl IntoIterator<Item = &'a FileHandle>,
     ) -> Option<Self> {
         let mut files = HashMap::new();
@@ -267,7 +267,7 @@ impl CompactingFiles {
     /// Transfers a dependency group's leases without briefly releasing any input.
     /// A delayed remote notifier may retain the same leases across local fallback.
     /// Indexing keeps splitting proportional to the group's input count.
-    pub(super) fn for_inputs(&self, inputs: &[FileHandle]) -> Self {
+    pub(crate) fn for_inputs(&self, inputs: &[FileHandle]) -> Self {
         Self {
             files: inputs
                 .iter()
