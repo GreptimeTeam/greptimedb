@@ -358,7 +358,10 @@ impl NestedBroadcastJoinRewriter<'_> {
         }
 
         let (large_plan, large_merge_scan) = strip_merge_scan(&join.left)?;
-        let (_, small_merge_scan) = strip_merge_scan(&join.right)?;
+        let (small_plan, small_merge_scan) = strip_merge_scan(&join.right)?;
+        if contains_volatile_expr(&small_plan) {
+            return None;
+        }
         if large_merge_scan.is_placeholder() || small_merge_scan.is_placeholder() {
             return None;
         }
@@ -493,6 +496,23 @@ fn restore_join_schema(join: Join, schema: datafusion_common::DFSchemaRef) -> Op
     )))
 }
 
+/// Whether `plan` contains a volatile expression.
+///
+/// The small side is re-executed on every large-side region, so volatile expressions there
+/// would change result semantics within a single query.
+fn contains_volatile_expr(plan: &LogicalPlan) -> bool {
+    if plan.expressions().iter().any(Expr::is_volatile) {
+        return true;
+    }
+    if let LogicalPlan::TableScan(scan) = plan
+        && scan.filters.iter().any(Expr::is_volatile)
+    {
+        return true;
+    }
+
+    plan.inputs().into_iter().any(contains_volatile_expr)
+}
+
 /// Whether `plan` contains a visible `MergeScan` node.
 fn contains_merge_scan(plan: &LogicalPlan) -> bool {
     if let LogicalPlan::Extension(extension) = plan
@@ -558,7 +578,10 @@ mod tests {
     use common_meta::rpc::router::Region;
     use datafusion::datasource::DefaultTableSource;
     use datafusion_common::{DFSchema, DFSchemaRef, JoinConstraint, NullEquality, TableReference};
-    use datafusion_expr::{Expr, LogicalPlanBuilder, build_join_schema, col, lit};
+    use datafusion_expr::{
+        Expr, LogicalPlanBuilder, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature,
+        Volatility, build_join_schema, col, lit,
+    };
     use datatypes::data_type::ConcreteDataType;
     use datatypes::extension::json::JsonExtensionType;
     use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
@@ -721,6 +744,35 @@ mod tests {
         join
     }
 
+    #[derive(Debug, PartialEq, Eq, Hash)]
+    struct VolatileTestUdf;
+
+    impl ScalarUDFImpl for VolatileTestUdf {
+        fn name(&self) -> &str {
+            "volatile_test_udf"
+        }
+
+        fn signature(&self) -> &Signature {
+            static SIGNATURE: std::sync::LazyLock<Signature> = std::sync::LazyLock::new(|| {
+                Signature::uniform(1, vec![DataType::UInt32], Volatility::Volatile)
+            });
+            &SIGNATURE
+        }
+
+        fn return_type(&self, _arg_types: &[DataType]) -> datafusion_common::Result<DataType> {
+            Ok(DataType::Float64)
+        }
+
+        fn invoke_with_args(
+            &self,
+            _args: ScalarFunctionArgs,
+        ) -> datafusion_common::Result<datafusion_expr::ColumnarValue> {
+            Ok(datafusion_expr::ColumnarValue::Scalar(
+                datafusion_common::ScalarValue::Float64(Some(0.5)),
+            ))
+        }
+    }
+
     /// Without the build table option the join stays above the two `MergeScan`s.
     #[test]
     fn nested_broadcast_join_rewrite_disabled_by_default() {
@@ -732,6 +784,34 @@ mod tests {
         assert_eq!(plan.to_string(), result.to_string());
         assert!(matches!(result, LogicalPlan::Join(_)));
         assert_eq!(2, merge_scans(&result).len());
+    }
+
+    #[test]
+    fn nested_broadcast_join_rewrite_rejects_volatile_small_side() {
+        let volatile = Expr::ScalarFunction(datafusion_expr::expr::ScalarFunction::new_udf(
+            Arc::new(ScalarUDF::new_from_impl(VolatileTestUdf)),
+            vec![lit(1u32)],
+        ));
+        let small = LogicalPlanBuilder::from(table_scan("t2", 2, "t2"))
+            .project(vec![col("t2.number"), volatile])
+            .unwrap()
+            .build()
+            .unwrap();
+        let plan = DistPlannerAnalyzer {}
+            .analyze(
+                inner_join(
+                    table_scan("t1", 1, "t1"),
+                    small,
+                    col("t1.number"),
+                    col("t2.number"),
+                ),
+                &ConfigOptions::default(),
+            )
+            .unwrap();
+
+        let result = rewrite(plan.clone());
+        assert_eq!(plan.to_string(), result.to_string());
+        assert!(matches!(result, LogicalPlan::Join(_)));
     }
 
     /// When statistics favor the small right side as build, its `MergeScan` becomes the

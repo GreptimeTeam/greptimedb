@@ -394,6 +394,139 @@ async fn test_nested_broadcast_join_rewrite_executes_on_probe_regions() {
     );
 }
 
+/// The append-only BIG scan reports exact row counts to DataFusion; the SMALL side must remain
+/// the hash-build input after the experimental setting crosses the nested-plan wire boundary.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_experimental_dist_join_roundtrip_keeps_small_hash_build() {
+    common_telemetry::init_default_ut_logging();
+
+    let cluster =
+        build_cluster("test_experimental_dist_join_roundtrip_keeps_small_hash_build").await;
+    let frontend = cluster.fe_instance().clone();
+    let big = "nested_cap_stats_probe";
+    let small = "nested_cap_stats_build";
+
+    execute_sql(
+        &frontend,
+        &format!(
+            "CREATE TABLE {big} (
+                big_id INT,
+                join_key INT,
+                payload STRING,
+                big_ts TIMESTAMP,
+                TIME INDEX (big_ts)
+            ) PARTITION ON COLUMNS (big_id) (
+                big_id < 100,
+                big_id >= 100
+            ) ENGINE=mito"
+        ),
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        &format!(
+            "CREATE TABLE {small} (
+                small_id INT,
+                join_key INT,
+                small_ts TIMESTAMP,
+                TIME INDEX (small_ts),
+                PRIMARY KEY (small_id)
+            ) PARTITION ON COLUMNS (small_id) (
+                small_id < 100,
+                small_id >= 100
+            ) ENGINE=mito"
+        ),
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        &format!(
+            "INSERT INTO {big}(big_id, join_key, payload, big_ts) VALUES
+             (1, 10, repeat('large-big-payload-', 80), 1000),
+             (2, 20, repeat('large-big-payload-', 80), 2000),
+             (3, 30, repeat('large-big-payload-', 80), 3000),
+             (4, 40, repeat('large-big-payload-', 80), 4000),
+             (120, 10, repeat('large-big-payload-', 80), 5000),
+             (121, 20, repeat('large-big-payload-', 80), 6000),
+             (122, 30, repeat('large-big-payload-', 80), 7000),
+             (123, 40, repeat('large-big-payload-', 80), 8000),
+             (5, 10, repeat('large-big-payload-', 80), 9000),
+             (6, 20, repeat('large-big-payload-', 80), 10000),
+             (124, 10, repeat('large-big-payload-', 80), 11000),
+             (125, 20, repeat('large-big-payload-', 80), 12000),
+             (126, 10, repeat('large-big-payload-', 80), 13000),
+             (127, 20, repeat('large-big-payload-', 80), 14000),
+             (128, 10, repeat('large-big-payload-', 80), 15000),
+             (129, 20, repeat('large-big-payload-', 80), 16000)"
+        ),
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        &format!(
+            "INSERT INTO {small}(small_id, join_key, small_ts) VALUES
+             (1, 10, 1000), (2, 20, 2000)"
+        ),
+    )
+    .await;
+
+    let (big_bytes, small_bytes) = wait_for_named_region_statistics(&frontend, big, small, 2).await;
+    assert!(
+        2 * small_bytes < big_bytes,
+        "the planner cost heuristic must favor SMALL: BIG={big_bytes} bytes, SMALL={small_bytes} bytes"
+    );
+    let big_leaders = region_leaders(&frontend, big).await;
+    assert_eq!(2, big_leaders.len());
+    assert_eq!(2, datanodes(&big_leaders).len());
+
+    let query_ctx = query_ctx();
+    run_sql(
+        &frontend,
+        "SET experimental_dist_join = true",
+        query_ctx.clone(),
+    )
+    .await;
+    let sql = format!(
+        "SELECT b.join_key, s.join_key FROM {big} b JOIN {small} s ON b.join_key = s.join_key"
+    );
+    let actual = run_sql(&frontend, &sql, query_ctx).await;
+    let physical = actual
+        .meta
+        .plan
+        .clone()
+        .expect("query output must include its physical plan");
+    let merge_scan = find_merge_scan_exec(&physical)
+        .unwrap_or_else(|| panic!("expected nested MergeScan, got {physical:?}"));
+    let rows = output_batches(actual).await;
+    let total_rows: usize = rows.iter().map(|batch| batch.num_rows()).sum();
+    assert_eq!(12, total_rows);
+
+    let stages = merge_scan.sub_stage_metrics();
+    let hash_joins = stages
+        .iter()
+        .flat_map(|stage| &stage.plan_metrics)
+        .filter(|metric| metric.plan_name == "HashJoinExec")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        merge_scan.regions().len(),
+        hash_joins.len(),
+        "each dispatched BIG region must report its DN HashJoinExec: {stages:?}"
+    );
+    assert!(
+        hash_joins.iter().all(|metric| {
+            metric
+                .metrics
+                .iter()
+                .any(|(name, value)| *name == "build_input_rows" && *value == 2)
+                && metric
+                    .metrics
+                    .iter()
+                    .any(|(name, value)| *name == "input_rows" && *value > 2)
+        }),
+        "each DN join must build the two SMALL rows and probe more BIG rows: {hash_joins:?}"
+    );
+}
+
 /// Complete expected output for the unfiltered broadcast SQL, in its projected column order.
 fn expected_full_broadcast_rows() -> Vec<Vec<String>> {
     let mut rows = Vec::new();
@@ -512,15 +645,24 @@ async fn wait_for_region_statistics(
     frontend: &Arc<Instance>,
     expected_build_rows: u64,
 ) -> (u64, u64) {
+    wait_for_named_region_statistics(frontend, PROBE_TABLE, BUILD_TABLE, expected_build_rows).await
+}
+
+async fn wait_for_named_region_statistics(
+    frontend: &Arc<Instance>,
+    probe_table: &str,
+    build_table: &str,
+    expected_build_rows: u64,
+) -> (u64, u64) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     loop {
         let mut stats = Vec::new();
-        for table in [PROBE_TABLE, BUILD_TABLE] {
+        for table in [probe_table, build_table] {
             stats.push(region_statistics(frontend, table).await);
         }
         let probe = stats[0];
         let build = stats[1];
-        info!("region statistics of {PROBE_TABLE}: {probe:?}, of {BUILD_TABLE}: {build:?}");
+        info!("region statistics of {probe_table}: {probe:?}, of {build_table}: {build:?}");
         if probe.0 == 2
             && probe.2 > 0
             && probe.3 > 0
@@ -532,7 +674,7 @@ async fn wait_for_region_statistics(
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "the region statistics of {PROBE_TABLE} {probe:?} and {BUILD_TABLE} {build:?} must be \
+            "the region statistics of {probe_table} {probe:?} and {build_table} {build:?} must be \
              reported"
         );
         tokio::time::sleep(Duration::from_secs(1)).await;

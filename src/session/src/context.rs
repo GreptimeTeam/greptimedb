@@ -35,8 +35,9 @@ use derive_builder::Builder;
 use sql::dialect::{Dialect, GenericDialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
 pub use crate::hints::{
-    LIVE_ANALYZE_METRICS_EXTENSION_KEY, READ_PREFERENCE_EXTENSION_KEY,
-    REMOTE_QUERY_ID_EXTENSION_KEY, SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
+    EXPERIMENTAL_DIST_JOIN_EXTENSION_KEY, LIVE_ANALYZE_METRICS_EXTENSION_KEY,
+    READ_PREFERENCE_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY,
+    SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
 };
 use crate::protocol_ctx::ProtocolCtx;
 use crate::query_id::QueryId;
@@ -204,6 +205,11 @@ impl TryFrom<api::v1::QueryContext> for QueryContext {
     type Error = crate::session_config::Error;
 
     fn try_from(mut ctx: api::v1::QueryContext) -> Result<Self, Self::Error> {
+        let experimental_dist_join = ctx
+            .extensions
+            .remove(EXPERIMENTAL_DIST_JOIN_EXTENSION_KEY)
+            .as_deref()
+            == Some("true");
         let read_preference = ctx.extensions.remove(READ_PREFERENCE_EXTENSION_KEY);
         let read_preference = match read_preference {
             Some(value) => ReadPreference::from_str(&value).map_err(|_| {
@@ -217,7 +223,7 @@ impl TryFrom<api::v1::QueryContext> for QueryContext {
             None => ReadPreference::default(),
         };
         let sequences = ctx.snapshot_seqs.as_ref();
-        Ok(QueryContextBuilder::default()
+        let query_context = QueryContextBuilder::default()
             .current_catalog(ctx.current_catalog)
             .current_schema(ctx.current_schema)
             .timezone(parse_timezone(Some(&ctx.timezone)))
@@ -235,7 +241,13 @@ impl TryFrom<api::v1::QueryContext> for QueryContext {
             )))
             .explain_options(ctx.explain)
             .read_preference(read_preference)
-            .build())
+            .build();
+        if experimental_dist_join {
+            query_context
+                .configuration_parameter()
+                .set_experimental_dist_join(true);
+        }
+        Ok(query_context)
     }
 }
 
@@ -249,6 +261,7 @@ impl From<QueryContext> for api::v1::QueryContext {
             snapshot_seqs,
             sst_min_sequences,
             mutable_query_context_data,
+            configuration_parameter,
             ..
         }: QueryContext,
     ) -> Self {
@@ -256,6 +269,13 @@ impl From<QueryContext> for api::v1::QueryContext {
         let mutable_inner = mutable_inner.read().unwrap();
         let mut extensions = extensions;
         extensions.remove(READ_PREFERENCE_EXTENSION_KEY);
+        extensions.remove(EXPERIMENTAL_DIST_JOIN_EXTENSION_KEY);
+        if configuration_parameter.experimental_dist_join() {
+            extensions.insert(
+                EXPERIMENTAL_DIST_JOIN_EXTENSION_KEY.to_string(),
+                "true".to_string(),
+            );
+        }
         if mutable_inner.read_preference != ReadPreference::Leader {
             extensions.insert(
                 READ_PREFERENCE_EXTENSION_KEY.to_string(),
@@ -893,6 +913,30 @@ mod test {
                 .configuration_parameter()
                 .experimental_dist_join()
         );
+    }
+
+    #[test]
+    fn test_experimental_dist_join_query_context_roundtrip() {
+        let enabled = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        enabled
+            .configuration_parameter()
+            .set_experimental_dist_join(true);
+        let wire: api::v1::QueryContext = enabled.into();
+        assert_eq!(
+            Some(&"true".to_string()),
+            wire.extensions.get(EXPERIMENTAL_DIST_JOIN_EXTENSION_KEY)
+        );
+        let restored = QueryContext::try_from(wire).unwrap();
+        assert!(restored.configuration_parameter().experimental_dist_join());
+
+        let wire: api::v1::QueryContext = QueryContext::with(DEFAULT_CATALOG_NAME, "public").into();
+        assert!(
+            !wire
+                .extensions
+                .contains_key(EXPERIMENTAL_DIST_JOIN_EXTENSION_KEY)
+        );
+        let restored = QueryContext::try_from(wire).unwrap();
+        assert!(!restored.configuration_parameter().experimental_dist_join());
     }
 
     #[test]
