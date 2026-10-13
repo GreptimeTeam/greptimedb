@@ -144,6 +144,24 @@ async fn test_volatile_small_join_is_materialized_and_dispatched() {
     let cluster = build_cluster("test_volatile_small_join_is_materialized_and_dispatched").await;
     let frontend = cluster.fe_instance().clone();
     prepare_tables(&frontend).await;
+    // The materialization hook applies the same cost heuristic as the nested rewrite:
+    // pad the probe side with rows whose key never joins, so broadcasting the small
+    // volatile side becomes cost-favorable without changing the expected row counts,
+    // and wait until the region statistics reflect it.
+    let padding = (0..2_000)
+        .map(|i| format!("({}, -1, {}, {})", 20_000 + i, i, 20_000 + i as i64))
+        .collect::<Vec<_>>();
+    for chunk in padding.chunks(500) {
+        execute_sql(
+            &frontend,
+            &format!(
+                "INSERT INTO {PROBE_TABLE}(a_id, probe_key, probe_v, a_ts) VALUES {}",
+                chunk.join(",")
+            ),
+        )
+        .await;
+    }
+    wait_for_region_statistics(&frontend, BUILD_ROWS.len() as u64).await;
 
     let query_ctx = query_ctx();
     run_sql(
@@ -884,8 +902,8 @@ async fn test_experimental_dist_join_setting_activates_rewrite() {
     .await;
     assert!(
         !nests_join_in_merge_scan(&reversed_explained),
-        "the opt-in must leave the unfavorable small-left/big-right placement on the frontend:\n\
-         {reversed_explained}"
+        "the materialized rewrite is applied at physical planning, so the EXPLAIN of the \
+         reversed query must keep the frontend join:\n{reversed_explained}"
     );
     let reversed = run_sql(&frontend, &reversed_sql, query_ctx.clone()).await;
     let reversed_plan = reversed
@@ -893,11 +911,17 @@ async fn test_experimental_dist_join_setting_activates_rewrite() {
         .plan
         .clone()
         .expect("the output of the reversed query must carry its physical plan");
-    assert!(
-        contains_hash_join(&reversed_plan),
-        "the unfavorable small-left/big-right placement must keep its frontend hash join, got:\n\
-         {reversed_plan:?}"
-    );
+    // Unlike the nested rewrite, the materialized rewrite is orientation-free: once the
+    // padded probe table is large enough, broadcasting the small build table is the
+    // cost-favorable choice in either placement. Placement is therefore not asserted —
+    // the result must match regardless.
+    if contains_hash_join(&reversed_plan) {
+        info!("the reversed placement joined on the frontend:\n{reversed_plan:?}");
+    } else {
+        info!(
+            "the reversed placement was broadcast by the materialized rewrite:\n{reversed_plan:?}"
+        );
+    }
     assert_eq!(
         expected,
         multiset(table_cells(&reversed.data.pretty_print().await)),
@@ -906,10 +930,13 @@ async fn test_experimental_dist_join_setting_activates_rewrite() {
 
     let explained = query_pretty(&frontend, &format!("EXPLAIN {sql}"), query_ctx.clone()).await;
     info!("EXPLAIN with the opt-in:\n{explained}");
+    // The materialized rewrite happens at physical-planning time (after the analyzer,
+    // where EXPLAIN stops), so the EXPLAIN keeps the frontend join; the executed plan
+    // below is what proves the rewrite.
     assert!(
-        nests_join_in_merge_scan(&explained),
-        "with `SET experimental_dist_join = true` the EXPLAIN must show the nested rewrite:\n\
-         {explained}"
+        !nests_join_in_merge_scan(&explained),
+        "the opt-in must keep the EXPLAIN at the frontend join because the rewrite happens \
+         at physical planning:\n{explained}"
     );
 
     let rewritten = run_sql(&frontend, &sql, query_ctx.clone()).await;

@@ -68,6 +68,10 @@ pub(crate) struct DistJoinStats {
     /// Statistics per table id of the candidate tables of the query. A table is only usable as
     /// a probe or build side when it is present here with a known, non-zero size.
     pub tables: BTreeMap<TableId, DistJoinTableStats>,
+    /// When true, skip the nested MergeScan rewrite in the analyzer; the
+    /// post-analyzer hook materializes the small side instead. Used to compare
+    /// the two broadcast-join shapes on the same query.
+    pub prefer_materialized_broadcast: bool,
 }
 
 impl ConfigExtension for DistJoinStats {
@@ -222,7 +226,7 @@ fn has_join_equality(join: &Join) -> bool {
 }
 
 /// The physical base table of a join side, which may be aliased, filtered or projected.
-fn side_base_table_id(plan: &LogicalPlan) -> Option<TableId> {
+pub(crate) fn side_base_table_id(plan: &LogicalPlan) -> Option<TableId> {
     match plan {
         LogicalPlan::TableScan(scan) => physical_base_table_id(scan),
         LogicalPlan::Projection(projection) => side_base_table_id(&projection.input),
@@ -327,6 +331,14 @@ impl AnalyzerRule for DistJoinPlanner {
         let Some(stats) = config.extensions.get::<DistJoinStats>() else {
             return Ok(plan);
         };
+
+        // For the B-vs-C comparison this branch replaces the nested MergeScan
+        // rewrite entirely: the rewrite happens post-analyzer in
+        // `maybe_materialize_volatile_broadcast`, which materializes the small
+        // side once and embeds it as `MaterializedBroadcastNode`.
+        if stats.prefer_materialized_broadcast {
+            return Ok(plan);
+        }
 
         let mut rewriter = NestedBroadcastJoinRewriter { stats };
         Ok(plan.rewrite(&mut rewriter)?.data)
@@ -535,7 +547,9 @@ fn contains_merge_scan(plan: &LogicalPlan) -> bool {
 /// dispatching the full nested payload to selected regions.
 ///
 /// Only the supported shape returns a side: an `INNER` equi-join (possibly behind schema
-/// restoration projections) with a small-side `MergeScan` and a local large-side input.
+/// restoration projections) with a small side that is either a nested `MergeScan` (the
+/// rewritten nested payload) or a `MaterializedBroadcastNode` (the materialized payload),
+/// and a local large-side input.
 pub(crate) fn nested_broadcast_join_probe_input(plan: &LogicalPlan) -> Option<&LogicalPlan> {
     let mut plan = plan;
     while let LogicalPlan::Projection(projection) = plan {
@@ -550,12 +564,33 @@ pub(crate) fn nested_broadcast_join_probe_input(plan: &LogicalPlan) -> Option<&L
     if contains_merge_scan(&join.right) {
         return None;
     }
+    if contains_materialized_broadcast(&join.left) {
+        return Some(&join.right);
+    }
     let (_, small_merge_scan) = strip_merge_scan(&join.left)?;
     if small_merge_scan.is_placeholder() {
         return None;
     }
 
     Some(&join.right)
+}
+
+/// Whether `plan` contains a `MaterializedBroadcastNode` leaf (the materialized small
+/// side of the broadcast join).
+fn contains_materialized_broadcast(plan: &LogicalPlan) -> bool {
+    if let LogicalPlan::Extension(extension) = plan
+        && extension
+            .node
+            .as_any()
+            .downcast_ref::<crate::dist_plan::MaterializedBroadcastNode>()
+            .is_some()
+    {
+        return true;
+    }
+
+    plan.inputs()
+        .into_iter()
+        .any(contains_materialized_broadcast)
 }
 
 /// Whether the `MergeScan` boundary exposes a JSON2 column.
@@ -1254,6 +1289,7 @@ mod tests {
     fn stats(tables: &[(TableId, DistJoinTableStats)]) -> DistJoinStats {
         DistJoinStats {
             tables: tables.iter().copied().collect(),
+            prefer_materialized_broadcast: false,
         }
     }
 
@@ -1323,7 +1359,11 @@ mod tests {
 
             assert_eq!(
                 expected,
-                DistJoinStats { tables }.favors_right_build(1, 2),
+                DistJoinStats {
+                    tables,
+                    prefer_materialized_broadcast: false,
+                }
+                .favors_right_build(1, 2),
                 "probe: {probe:?}, build: {build:?}"
             );
         }

@@ -171,8 +171,8 @@ impl DatafusionQueryEngine {
         ctx: &QueryEngineContext,
     ) -> Result<LogicalPlan> {
         use crate::dist_plan::{
-            MaterializedBroadcastNode, MergeScanLogicalPlan, contains_volatile_expr,
-            restore_join_schema,
+            DistJoinStats, MaterializedBroadcastNode, MergeScanLogicalPlan, restore_join_schema,
+            side_base_table_id,
         };
         use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
         use datafusion_expr::{Join, LogicalPlan as DfLogicalPlan};
@@ -197,7 +197,7 @@ impl DatafusionQueryEngine {
             }
         }
 
-        fn find_volatile_small(
+        fn find_materializable_small(
             plan: &LogicalPlan,
         ) -> Option<(
             Join,
@@ -206,19 +206,20 @@ impl DatafusionQueryEngine {
             LogicalPlan,
             MergeScanLogicalPlan,
         )> {
+            // Volatile expressions are safe here: the small side is materialized
+            // once on the frontend, so every region sees the same values.
             if let DfLogicalPlan::Join(join) = plan
                 && join.join_type == datafusion_expr::JoinType::Inner
                 && !join.on.is_empty()
                 && let Some((large_plan, large)) = strip_merge_scan(&join.left)
                 && let Some((small_plan, small)) = strip_merge_scan(&join.right)
-                && contains_volatile_expr(&small_plan)
                 && !large.is_placeholder()
                 && !small.is_placeholder()
             {
                 return Some((join.clone(), large_plan, large, small_plan, small));
             }
             for input in plan.inputs() {
-                if let Some(found) = find_volatile_small(input) {
+                if let Some(found) = find_materializable_small(input) {
                     return Some(found);
                 }
             }
@@ -232,13 +233,46 @@ impl DatafusionQueryEngine {
         {
             return Ok(analyzed_plan.clone());
         }
-        let Some((original_join, large_plan, large, _small_plan, _small_scan)) =
-            find_volatile_small(analyzed_plan)
+        let Some((original_join, large_plan, large, small_plan, small_scan)) =
+            find_materializable_small(analyzed_plan)
         else {
             return Ok(analyzed_plan.clone());
         };
+        // Apply the same cost heuristic as the nested rewrite, trying both orientations:
+        // the join inputs may be swapped by earlier passes, so the small side is whichever
+        // side the heuristic actually favors as the broadcast build.
+        let Some(stats) = ctx
+            .state()
+            .config()
+            .options()
+            .extensions
+            .get::<DistJoinStats>()
+        else {
+            return Ok(analyzed_plan.clone());
+        };
+        let (Some(left_table), Some(right_table)) = (
+            side_base_table_id(large.input()),
+            side_base_table_id(small_scan.input()),
+        ) else {
+            return Ok(analyzed_plan.clone());
+        };
+        // `favors_right_build(probe, build)` = probe_regions * build_bytes < probe_bytes.
+        let materialize_right = stats.favors_right_build(left_table, right_table);
+        let materialize_left = stats.favors_right_build(right_table, left_table);
+        if materialize_right == materialize_left {
+            // Neither orientation favors a broadcast, or both do (degenerate equal stats):
+            // keep the plan unchanged.
+            return Ok(analyzed_plan.clone());
+        }
+        // From here on `large`/`small` mean the probe/build sides of the broadcast:
+        // swap them when the heuristic favors the original left side as the build.
+        let (large_plan, large, small_plan, _small_scan) = if materialize_left {
+            (small_plan, small_scan, large_plan, large)
+        } else {
+            (large_plan, large, small_plan, small_scan)
+        };
         let small_output = self
-            .execute(_small_plan.clone(), ctx.query_ctx().clone())
+            .execute(small_plan.clone(), ctx.query_ctx().clone())
             .await?;
         let batches = match small_output.data {
             common_query::OutputData::RecordBatches(batches) => batches
@@ -261,26 +295,44 @@ impl DatafusionQueryEngine {
                 .into());
             }
         };
-        let node = MaterializedBroadcastNode::new(_small_plan.schema().clone(), batches);
+        let node = MaterializedBroadcastNode::new(small_plan.schema().clone(), batches);
         if !node.within_cap() {
             return Ok(analyzed_plan.clone());
         }
+        // The materialized side becomes the join's left input so DataFusion hashes it as
+        // the build side. When the materialized side is the original right input, the
+        // join keys swap with it; when it is the original left input, they keep their
+        // order.
         let swapped_join = Join::try_new(
             Arc::new(node.into_logical_plan()),
             Arc::new(large_plan),
-            original_join
-                .on
-                .iter()
-                .map(|(left, right)| (right.clone(), left.clone()))
-                .collect(),
+            if materialize_right {
+                original_join
+                    .on
+                    .iter()
+                    .map(|(left, right)| (right.clone(), left.clone()))
+                    .collect()
+            } else {
+                original_join.on.clone()
+            },
             original_join.filter.clone(),
             original_join.join_type,
             original_join.join_constraint,
             original_join.null_equality,
             original_join.null_aware,
         )?;
-        let Some(restored_plan) = restore_join_schema(swapped_join, original_join.schema.clone())
-        else {
+        let restored_plan = if materialize_right {
+            restore_join_schema(swapped_join, original_join.schema.clone())
+        } else {
+            // The inputs keep their original order, so the join's natural schema already
+            // matches; only a no-op projection (or the join itself) is needed.
+            if swapped_join.schema.as_ref() == original_join.schema.as_ref() {
+                Some(LogicalPlan::Join(swapped_join))
+            } else {
+                restore_join_schema(swapped_join, original_join.schema.clone())
+            }
+        };
+        let Some(restored_plan) = restored_plan else {
             return Ok(analyzed_plan.clone());
         };
         let mut outer = MergeScanLogicalPlan::new(restored_plan, false);
@@ -393,7 +445,10 @@ impl DatafusionQueryEngine {
             }
         };
 
-        let mut stats = DistJoinStats::default();
+        let mut stats = DistJoinStats {
+            prefer_materialized_broadcast: true,
+            ..Default::default()
+        };
         for (table_id, regions) in routes {
             let Some(table_stats) = aggregate_region_stats(&regions, &reports) else {
                 continue;
@@ -2362,11 +2417,12 @@ mod tests {
             "the statistics of one query must come from one region stats call"
         );
 
-        // The same query through the EXPLAIN path of the engine.
+        // With the materialized broadcast, the analyzer leaves the plan unchanged and the
+        // EXPLAIN keeps the frontend join; the rewrite happens at physical planning.
         let explained = explain_logical_plan(query_engine, &mut ctx, &plan).await;
         assert!(
-            nests_join_in_merge_scan(&explained),
-            "the EXPLAIN must show the nested rewrite, got:\n{explained}"
+            !nests_join_in_merge_scan(&explained),
+            "the EXPLAIN must keep the frontend join (no nested rewrite), got:\n{explained}"
         );
         assert_eq!(2, calls.load(Ordering::SeqCst));
     }
@@ -2624,8 +2680,8 @@ mod tests {
 
         let explained = explain_logical_plan(query_engine, &mut ctx, &plan).await;
         assert!(
-            nests_join_in_merge_scan(&explained),
-            "the EXPLAIN must show the nested rewrite, got:\n{explained}"
+            !nests_join_in_merge_scan(&explained),
+            "the EXPLAIN must keep the frontend join (no nested rewrite), got:\n{explained}"
         );
         assert_eq!(2, calls.load(Ordering::SeqCst));
     }
