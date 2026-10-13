@@ -8138,6 +8138,7 @@ dependencies = [
  "snafu 0.8.6",
  "store-api",
  "tokio",
+ "tokio-util",
  "uuid",
 ]
 
@@ -15489,6 +15490,7 @@ dependencies = [
  "futures-core",
  "futures-io",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "slab",
  "tokio",
