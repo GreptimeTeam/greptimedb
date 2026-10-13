@@ -77,12 +77,12 @@ const MAX_IN_FLIGHT_DELETES: usize = 4;
 /// Delay before a create that failed transiently is attempted again in the
 /// `enqueued` acknowledgement mode, where no caller is left to retry it.
 const CREATE_RETRY_DELAY: Duration = Duration::from_millis(100);
-/// Longest delay between two attempts of a backlog that the object store
-/// refuses with a non-retriable error, see [`Failing`]. The delay doubles from
-/// [`CREATE_RETRY_DELAY`] after every attempt. At the cap a dead bucket costs
-/// four requests a minute, a conditional create and the read that reconciles
-/// it every 30 seconds, and appends resume at most 30 seconds after the object
-/// store accepts the backlog again.
+/// Longest delay from a failed attempt of a backlog that the object store
+/// refuses with a non-retriable error, see [`Failing`], to the next attempt.
+/// The delay doubles from [`CREATE_RETRY_DELAY`] after every attempt. At the
+/// cap a dead bucket costs four requests a minute, a conditional create and
+/// the read that reconciles it every 30 seconds; a longer cap would keep
+/// appends rejected longer after the cause is fixed.
 const MAX_FAILING_RETRY_DELAY: Duration = Duration::from_secs(30);
 /// How often a store logs that the object store still refuses its backlog.
 const FAILING_LOG_INTERVAL: Duration = Duration::from_secs(60);
@@ -3190,23 +3190,29 @@ mod tests {
 
     /// An in-memory object store behind the retry layer object storage has
     /// in production, whose writes and reads fail with the error kind their
-    /// switch holds. The retry layer reports such an error as persistent, as
-    /// it reports a 403 of S3.
+    /// switch holds, recording when each refused write started. The retry
+    /// layer reports such an error as persistent, as it reports a 403 of S3.
     struct RefusingStore {
         store: ObjectStore,
         writes: Arc<Mutex<Option<ErrorKind>>>,
         reads: Arc<Mutex<Option<ErrorKind>>>,
+        refused_writes: Arc<Mutex<Vec<Instant>>>,
     }
 
     impl RefusingStore {
         fn new() -> Self {
             let writes = Arc::new(Mutex::new(None::<ErrorKind>));
             let reads = Arc::new(Mutex::new(None::<ErrorKind>));
-            let (refused_writes, refused_reads) = (writes.clone(), reads.clone());
+            let refused_writes = Arc::new(Mutex::new(Vec::new()));
+            let (refusing_writes, refused_reads) = (writes.clone(), reads.clone());
+            let refused_at = refused_writes.clone();
             let mock = MockLayerBuilder::default()
                 .writer_factory(Arc::new(move |_, _, inner| {
-                    match *refused_writes.lock().unwrap() {
-                        Some(kind) => Box::new(RefusedWriter(kind)),
+                    match *refusing_writes.lock().unwrap() {
+                        Some(kind) => {
+                            refused_at.lock().unwrap().push(Instant::now());
+                            Box::new(RefusedWriter(kind))
+                        }
                         None => inner,
                     }
                 }))
@@ -3222,6 +3228,7 @@ mod tests {
                 store: with_retry_layers(memory_store().layer(mock)),
                 writes,
                 reads,
+                refused_writes,
             }
         }
 
@@ -7038,16 +7045,23 @@ mod tests {
     async fn test_store_enqueued_failing_store_attempts_its_backlog_a_few_times() {
         let _serialized = SERIALIZED.lock().await;
         let (store, refusing) = open_failing(ErrorKind::PermissionDenied).await;
-        // From the first failure the attempts are due after 100, 300, 700 and
-        // 1500 ms, so a window of 1.6 s holds at most four of them, where a
-        // repeat every 100 ms would make sixteen.
-        let failures = METRIC_OBJECT_STORE_WAL_CREATE_FAILURES_TOTAL.get();
-        tokio::time::sleep(Duration::from_millis(1600)).await;
-        let attempts = METRIC_OBJECT_STORE_WAL_CREATE_FAILURES_TOTAL.get() - failures;
-        assert!(
-            (1..=4).contains(&attempts),
-            "{attempts} attempts in the window"
-        );
+        let refused = || refusing.refused_writes.lock().unwrap().clone();
+        wait_until(|| refused().len() >= 5).await;
+
+        // Each attempt starts at least the doubling delay after the previous
+        // one started, so the 1.6 s from the first refusal hold at most five
+        // attempts, where a repeat every 100 ms would make sixteen.
+        let refused = refused();
+        for (index, delay) in [100, 200, 400, 800].into_iter().enumerate() {
+            let gap = refused[index + 1] - refused[index];
+            assert!(
+                gap >= Duration::from_millis(delay),
+                "attempt {} started {gap:?} after the one before",
+                index + 1
+            );
+        }
+        let window = refused[0] + Duration::from_millis(1600);
+        assert!(refused.iter().filter(|at| **at < window).count() <= 5);
         assert_eq!(1, failing_stores());
 
         refusing.refuse_writes(None);
