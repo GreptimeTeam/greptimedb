@@ -82,12 +82,12 @@ const CREATE_RETRY_DELAY: Duration = Duration::from_millis(100);
 /// holds callers back instead of growing the backlog.
 const MAX_SEALED_BATCHES: usize = 2 * MAX_IN_FLIGHT_CREATES;
 /// Number of objects whose footers recovery fetches at a time. On S3 an
-/// object costs two reads, its header and its tail, about 57 to 91 ms per
-/// object per lane on 4, 8 and 16 vCPUs alike, and recovery time scales with
-/// objects divided by concurrency up to 128 lanes without throttling: about
-/// 9,500 objects took 99 s at 8 and 10.5 s at 64. At 64 recovery issues about
-/// 1,800 reads per second, a third of S3's request rate per prefix, which
-/// leaves room for the data file reads of start-up. Each lane holds one
+/// object costs two reads, its header and its tail, tens of milliseconds per
+/// lane however many vCPUs the node has, and recovery time scales with objects
+/// divided by concurrency up to 128 lanes without throttling: at 64 about
+/// 10,000 objects recover in about 10 s instead of about 100 s at 8, while the
+/// reads use about a third of S3's request rate per prefix, leaving room for
+/// the data file reads of start-up. Each lane holds one
 /// [`RECOVERY_TAIL_WINDOW`], 4 MiB in all.
 const RECOVERY_CONCURRENCY: usize = 64;
 /// Number of segments a read fetches ahead of the one whose entries it
