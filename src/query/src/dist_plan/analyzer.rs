@@ -73,6 +73,43 @@ pub struct DistPlannerOptions {
     pub allow_query_fallback: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ExplicitNullJoinKeys {
+    pub(crate) set: bool,
+}
+
+impl ConfigExtension for ExplicitNullJoinKeys {
+    const PREFIX: &'static str = "explicit_null_join_keys";
+}
+
+impl ExtensionOptions for ExplicitNullJoinKeys {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn cloned(&self) -> Box<dyn ExtensionOptions> {
+        Box::new(self.clone())
+    }
+
+    fn set(&mut self, key: &str, value: &str) -> DfResult<()> {
+        Err(datafusion_common::DataFusionError::NotImplemented(format!(
+            "ExplicitNullJoinKeys does not support set key: {key} with value: {value}"
+        )))
+    }
+
+    fn entries(&self) -> Vec<datafusion::config::ConfigEntry> {
+        vec![datafusion::config::ConfigEntry {
+            key: "set".to_string(),
+            value: Some(self.set.to_string()),
+            description: "The user explicitly set datafusion.optimizer.filter_null_join_keys",
+        }]
+    }
+}
+
 impl ConfigExtension for DistPlannerOptions {
     const PREFIX: &'static str = "dist_planner";
 }
@@ -118,7 +155,19 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         plan: LogicalPlan,
         config: &ConfigOptions,
     ) -> datafusion_common::Result<LogicalPlan> {
-        let config = Arc::new(config.clone());
+        let mut config = config.clone();
+        // The pre-MergeScan pass has always forced null-key join filtering on
+        // (mirroring `OptimizerContext::new()`), so keep that default here; an
+        // explicit `datafusion.optimizer.filter_null_join_keys` override from
+        // the session wins instead.
+        if !config
+            .extensions
+            .get::<ExplicitNullJoinKeys>()
+            .is_some_and(|e| e.set)
+        {
+            config.optimizer.filter_null_join_keys = true;
+        }
+        let config = Arc::new(config);
         let opt = config.extensions.get::<DistPlannerOptions>();
         let allow_fallback = opt.map(|o| o.allow_query_fallback).unwrap_or(false);
 

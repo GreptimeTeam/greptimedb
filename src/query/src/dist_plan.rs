@@ -24,6 +24,7 @@ mod region_pruner;
 mod remote_dyn_filter_receiver;
 mod remote_dyn_filter_registry;
 
+pub(crate) use analyzer::ExplicitNullJoinKeys;
 pub use analyzer::{DistPlannerAnalyzer, DistPlannerOptions};
 pub use filter_id::{FilterFingerprint, FilterId, ParseFilterIdError, RemoteDynFilterProducerId};
 pub use merge_scan::{MergeScanExec, MergeScanLogicalPlan};
