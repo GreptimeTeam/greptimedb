@@ -1667,10 +1667,13 @@ impl ScanInput {
                     // We release the permit before sending result to avoid the task waiting on
                     // the channel with the permit held.
                     let maybe_batch = {
-                        // Safety: We never close the semaphore.
                         tokio::select! {
+                            // Cancellation or early completion can drop the receiver while
+                            // we wait for a permit, scan memory, or I/O. Exit and drop the
+                            // input to release its reservations without waiting for a batch.
                             _ = sender.closed() => break,
                             batch = async {
+                                // Safety: We never close the semaphore.
                                 let _permit = semaphore.acquire().await.unwrap();
                                 input.next().await
                             } => batch,
