@@ -4804,4 +4804,69 @@ mod tests {
         assert!(matches!(&submitted[0], DdlTask::CreateTable(_)));
         Ok(())
     }
+
+    /// COPY FROM STDIN must enforce the same cross-catalog restriction as
+    /// SQL INSERT when `disallow_cross_catalog_query` is configured.
+    #[tokio::test]
+    async fn test_copy_in_cross_catalog_restriction() -> TestResult<()> {
+        use catalog::memory::MemoryCatalogManager;
+        use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+        use servers::query_handler::CopyInHandler;
+
+        let catalog = MemoryCatalogManager::new_with_table(test_table(1024, "source")?);
+        // A table in another catalog.
+        catalog.register_catalog_sync("other").unwrap();
+        catalog
+            .register_schema_sync(catalog::RegisterSchemaRequest {
+                catalog: "other".to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+            })
+            .unwrap();
+        catalog
+            .register_table_sync(catalog::RegisterTableRequest {
+                catalog: "other".to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "copy_guard".to_string(),
+                table_id: 2048,
+                table: test_table(2048, "copy_guard")?,
+            })
+            .unwrap();
+        let executor = Arc::new(MockProcedureExecutor::new(catalog.clone()));
+        let plugins = Plugins::new();
+        plugins.insert(QueryOptions {
+            disallow_cross_catalog_query: true,
+        });
+        let instance = test_instance_with_catalog_manager(
+            catalog,
+            test_table(1025, "target")?,
+            plugins,
+            None,
+            executor,
+        )
+        .await?;
+
+        let ctx = Arc::new(QueryContext::with(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+        ));
+
+        // Cross-catalog COPY is rejected before any data is streamed.
+        let err = instance
+            .copy_in_table("other", DEFAULT_SCHEMA_NAME, "copy_guard", ctx.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").contains("Illegal access to catalog"),
+            "{err}"
+        );
+
+        // Same-catalog COPY resolves normally.
+        let found = instance
+            .copy_in_table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "target", ctx)
+            .await
+            .unwrap();
+        assert!(found.is_some());
+
+        Ok(())
+    }
 }

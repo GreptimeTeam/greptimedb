@@ -32,11 +32,12 @@ use pgwire::error::PgWireResult;
 use crate::postgres::copy_in::options::{CopyOptionSet, CopyOptionValue};
 use crate::postgres::copy_in::{bad_copy_data, copy_in_must_run_alone_error};
 
-/// Identifier case is kept as written (`COPY T` addresses `T`), matching
-/// what sqlparser-based paths in this codebase do; PostgreSQL itself folds
-/// unquoted identifiers to lowercase.
-///
 /// A scanned `COPY tbl [(cols)] FROM STDIN [WITH (...)]` statement.
+///
+/// Unquoted identifiers are folded to lowercase and quoted ones keep their
+/// case (`COPY Metrics` addresses the same table as `CREATE TABLE Metrics`,
+/// namely `metrics`), matching `ParserContext::canonicalize_identifier` in
+/// the SQL parser and PostgreSQL's own folding rule.
 #[derive(Debug)]
 pub(super) struct RawCopyFromStdin {
     /// Table name parts, as written (`t`, `schema.t`,
@@ -162,9 +163,15 @@ impl<'a> Tokens<'a> {
     }
 }
 
+/// Returns the identifier with the SQL parser's canonicalization: quoted
+/// identifiers keep their case, unquoted ones fold to lowercase.
 fn expect_ident(cursor: &mut Tokens<'_>) -> Option<String> {
     match cursor.next() {
-        Some(Token::Word(w)) => Some(w.value.clone()),
+        Some(Token::Word(w)) => Some(if w.quote_style.is_none() {
+            w.value.to_lowercase()
+        } else {
+            w.value.clone()
+        }),
         _ => None,
     }
 }
@@ -215,6 +222,13 @@ fn parse_option_list(cursor: &mut Tokens<'_>, options: &mut CopyOptionSet) -> Pg
                 cursor.next();
                 value
             }
+            Some(Token::EscapedStringLiteral(s)) => {
+                // E'...' escape-string constants, e.g. DELIMITER E'\t':
+                // process the backslash escapes PostgreSQL defines.
+                let value = CopyOptionValue::String(unescape_pg_string(s));
+                cursor.next();
+                value
+            }
             Some(Token::Number(n, _)) => {
                 let value = CopyOptionValue::Number(n.clone());
                 cursor.next();
@@ -249,6 +263,79 @@ fn parse_option_list(cursor: &mut Tokens<'_>, options: &mut CopyOptionSet) -> Pg
     Ok(())
 }
 
+/// Processes the backslash escapes of a PostgreSQL `E'...'`
+/// escape-string constant: `\b \f \n \r \t \v \\` octal `\0-\7`
+/// and `\xNN` hex.
+fn unescape_pg_string(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' || i + 1 >= bytes.len() {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        match bytes[i + 1] {
+            b'b' => {
+                out.push(0x08);
+                i += 2;
+            }
+            b'f' => {
+                out.push(0x0C);
+                i += 2;
+            }
+            b'n' => {
+                out.push(b'\n');
+                i += 2;
+            }
+            b'r' => {
+                out.push(b'\r');
+                i += 2;
+            }
+            b't' => {
+                out.push(b'\t');
+                i += 2;
+            }
+            b'v' => {
+                out.push(0x0B);
+                i += 2;
+            }
+            b'\\' => {
+                out.push(b'\\');
+                i += 2;
+            }
+            b'x' => {
+                let mut value = 0u32;
+                let mut j = i + 2;
+                while j < bytes.len() && j < i + 4 && bytes[j].is_ascii_hexdigit() {
+                    value = value * 16 + (bytes[j] as char).to_digit(16).unwrap();
+                    j += 1;
+                }
+                out.push(value as u8);
+                i = j;
+            }
+            b'0'..=b'7' => {
+                let mut value = 0u32;
+                let mut j = i + 1;
+                let octal_end = (j + 3).min(bytes.len());
+                while j < octal_end && (b'0'..=b'7').contains(&bytes[j]) {
+                    value = value * 8 + (bytes[j] - b'0') as u32;
+                    j += 1;
+                }
+                out.push(value as u8);
+                i = j;
+            }
+            other => {
+                // Unknown escapes keep the character as-is.
+                out.push(other);
+                i += 2;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,7 +359,7 @@ mod tests {
         let raw = scan("COPY db.public.Metrics (ts, \"Host\") FROM STDIN")
             .unwrap()
             .unwrap();
-        assert_eq!(raw.table, vec!["db", "public", "Metrics"]);
+        assert_eq!(raw.table, vec!["db", "public", "metrics"]);
         assert_eq!(raw.columns, vec!["ts", "Host"]);
     }
 
@@ -296,9 +383,20 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_case_insensitive() {
-        let raw = scan("copy T from stdin").unwrap().unwrap();
-        assert_eq!(raw.table, vec!["T"]);
+    fn test_scan_folds_unquoted_identifiers() {
+        // Unquoted identifiers fold to lowercase, like the SQL parser.
+        let raw = scan("copy Metrics (Host, ts) from stdin").unwrap().unwrap();
+        assert_eq!(raw.table, vec!["metrics"]);
+        assert_eq!(raw.columns, vec!["host", "ts"]);
+    }
+
+    #[test]
+    fn test_scan_preserves_quoted_identifiers() {
+        let raw = scan("COPY \"Metrics\" (\"Host\") FROM STDIN")
+            .unwrap()
+            .unwrap();
+        assert_eq!(raw.table, vec!["Metrics"]);
+        assert_eq!(raw.columns, vec!["Host"]);
     }
 
     #[test]
@@ -324,6 +422,18 @@ mod tests {
         assert_eq!(
             options.take_value("mode"),
             Some(CopyOptionValue::Ident("strict".into()))
+        );
+    }
+
+    #[test]
+    fn test_scan_escaped_string_constants() {
+        // E'\t' as a delimiter: the escape is processed, the tab is legal.
+        let mut raw = scan("COPY t FROM STDIN WITH (FORMAT csv, DELIMITER E'\\t')")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            raw.options.take_single_byte("DELIMITER").unwrap(),
+            Some(b'\t')
         );
     }
 
