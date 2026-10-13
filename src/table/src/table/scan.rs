@@ -76,7 +76,7 @@ fn restricted_to_single_table_id(filters: &[Expr]) -> bool {
                     if column.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
             )
         }
-        Expr::InList(list) if list.list.len() == 1 => {
+        Expr::InList(list) if !list.negated && list.list.len() == 1 => {
             matches!(&*list.expr, Expr::Column(column) if column.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
                 && matches!(list.list[0], Expr::Literal(_, _))
         }
@@ -718,6 +718,7 @@ mod test {
     use datafusion::physical_plan::{StatisticsArgs, StatisticsContext};
     use datafusion::prelude::SessionContext;
     use datafusion_expr::Expr;
+    use datafusion_expr::expr::InList;
     use datatypes::arrow::array::Array;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
@@ -730,6 +731,23 @@ mod test {
     use store_api::storage::{RegionId, TimeSeriesDistribution};
 
     use super::*;
+
+    #[test]
+    fn restricted_to_single_table_id_handles_in_lists() {
+        let singleton_in = Expr::InList(InList {
+            expr: Box::new(datafusion_expr::col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)),
+            list: vec![datafusion_expr::lit(1_i32)],
+            negated: false,
+        });
+        let singleton_not_in = Expr::InList(InList {
+            expr: Box::new(datafusion_expr::col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)),
+            list: vec![datafusion_expr::lit(1_i32)],
+            negated: true,
+        });
+
+        assert!(restricted_to_single_table_id(&[singleton_in]));
+        assert!(!restricted_to_single_table_id(&[singleton_not_in]));
+    }
 
     #[derive(Debug)]
     struct RepeatableScanner {

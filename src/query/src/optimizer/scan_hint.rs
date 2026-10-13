@@ -72,7 +72,7 @@ fn restricted_to_single_table_id(filters: &[Expr]) -> bool {
                     if column.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
             )
         }
-        Expr::InList(list) if list.list.len() == 1 => {
+        Expr::InList(list) if !list.negated && list.list.len() == 1 => {
             matches!(&*list.expr, Expr::Column(column) if column.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
                 && matches!(list.list[0], Expr::Literal(_, _))
         }
@@ -484,7 +484,7 @@ mod test {
     use datafusion::prelude::JoinType;
     use datafusion_common::tree_node::TreeNodeRecursion;
     use datafusion_expr::expr::{
-        AggregateFunction, AggregateFunctionParams, Cast, WindowFunctionParams,
+        AggregateFunction, AggregateFunctionParams, Cast, InList, WindowFunctionParams,
     };
     use datafusion_expr::expr_fn::scalar_subquery;
     use datafusion_expr::{Extension, LogicalPlan, LogicalPlanBuilder, col, lit};
@@ -498,6 +498,23 @@ mod test {
     use store_api::storage::{RegionId, TimeSeriesRowSelector};
 
     use super::*;
+
+    #[test]
+    fn restricted_to_single_table_id_handles_in_lists() {
+        let singleton_in = Expr::InList(InList {
+            expr: Box::new(col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)),
+            list: vec![lit(1_i32)],
+            negated: false,
+        });
+        let singleton_not_in = Expr::InList(InList {
+            expr: Box::new(col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)),
+            list: vec![lit(1_i32)],
+            negated: true,
+        });
+
+        assert!(restricted_to_single_table_id(&[singleton_in]));
+        assert!(!restricted_to_single_table_id(&[singleton_not_in]));
+    }
 
     fn scan_requests(plan: &LogicalPlan) -> Vec<store_api::storage::ScanRequest> {
         scan_requests_with_names(plan)
