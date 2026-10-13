@@ -3179,15 +3179,6 @@ mod tests {
         store.seal_open_batch().await.unwrap();
     }
 
-    /// Polls until `settled` holds.
-    async fn wait_until(settled: impl Fn() -> bool) {
-        let deadline = Instant::now() + WAIT;
-        while !settled() {
-            assert!(Instant::now() < deadline, "the actor never settled");
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    }
-
     /// An in-memory object store behind the retry layer object storage has
     /// in production, whose writes and reads fail with the error kind their
     /// switch holds, recording when each refused write started. The retry
