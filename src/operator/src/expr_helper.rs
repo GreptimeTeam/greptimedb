@@ -375,7 +375,11 @@ pub fn expr_to_create(expr: &CreateTableExpr, quote_style: Option<char>) -> Resu
             extensions.inverted_index_options = Some(HashMap::new().into());
         }
 
-        if let Ok(Some(opt)) = column_schema.compression_options() {
+        if let Some(opt) = column_schema
+            .compression_options()
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?
+        {
             extensions.compression_options = Some(opt.to_options_map().into());
         }
 
@@ -2073,7 +2077,7 @@ ALTER TABLE metrics PARTITION ON COLUMNS (device_id, area) (
   `protocol` STRING NULL,
   `status_code` INT NULL INVERTED INDEX,
   `response_size` BIGINT NULL,
-  `message` STRING NULL,
+  `message` STRING NULL COMPRESSION WITH(level = '3', page_size = '64KiB', type = 'zstd'),
   TIME INDEX (`timestamp`),
   PRIMARY KEY (`username`, `status_code`)
 )

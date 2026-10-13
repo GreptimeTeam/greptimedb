@@ -42,3 +42,55 @@ CREATE TABLE bad (
     ts TIMESTAMP TIME INDEX,
     host STRING PRIMARY KEY COMPRESSION WITH (level = 3)
 ) WITH ('primary_key_encoding' = 'sparse');
+
+CREATE TABLE compressed_tags (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY COMPRESSION WITH (level = 3, page_size = '64KiB'),
+    val DOUBLE
+) WITH ('sst_format' = 'flat', 'primary_key_encoding' = 'dense');
+
+SHOW CREATE TABLE compressed_tags;
+
+INSERT INTO compressed_tags VALUES (1, 'host-a', 1), (2, 'host-b', 2);
+
+ADMIN flush_table('compressed_tags');
+
+SELECT * FROM compressed_tags ORDER BY ts;
+
+DROP TABLE compressed_tags;
+
+CREATE TABLE compression_phy (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE COMPRESSION WITH (level = 3)
+) ENGINE = metric WITH (physical_metric_table = '');
+
+CREATE TABLE compression_conflict (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE COMPRESSION WITH (level = 9)
+) ENGINE = metric WITH (on_physical_table = 'compression_phy');
+
+CREATE TABLE compression_same (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE COMPRESSION WITH (level = 3)
+) ENGINE = metric WITH (on_physical_table = 'compression_phy');
+
+CREATE TABLE compression_new_tag (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY COMPRESSION WITH (level = 3),
+    val DOUBLE
+) ENGINE = metric WITH (on_physical_table = 'compression_phy');
+
+CREATE TABLE compression_logical (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE
+) ENGINE = metric WITH (on_physical_table = 'compression_phy');
+
+INSERT INTO compression_logical VALUES (1, 42);
+
+ADMIN flush_table('compression_phy');
+
+SELECT * FROM compression_logical;
+
+DROP TABLE compression_logical;
+
+DROP TABLE compression_phy;

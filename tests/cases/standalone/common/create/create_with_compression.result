@@ -99,3 +99,120 @@ CREATE TABLE bad (
 
 Error: 1004(InvalidArguments), Invalid region options, COMPRESSION on tag column host requires flat SST format and dense primary key encoding
 
+CREATE TABLE compressed_tags (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY COMPRESSION WITH (level = 3, page_size = '64KiB'),
+    val DOUBLE
+) WITH ('sst_format' = 'flat', 'primary_key_encoding' = 'dense');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE compressed_tags;
+
++-----------------+-----------------------------------------------------------------------------------------+
+| Table           | Create Table                                                                            |
++-----------------+-----------------------------------------------------------------------------------------+
+| compressed_tags | CREATE TABLE IF NOT EXISTS "compressed_tags" (                                          |
+|                 |   "ts" TIMESTAMP(3) NOT NULL,                                                           |
+|                 |   "host" STRING NULL COMPRESSION WITH(level = '3', page_size = '64KiB', type = 'zstd'), |
+|                 |   "val" DOUBLE NULL,                                                                    |
+|                 |   TIME INDEX ("ts"),                                                                    |
+|                 |   PRIMARY KEY ("host")                                                                  |
+|                 | )                                                                                       |
+|                 |                                                                                         |
+|                 | ENGINE=mito                                                                             |
+|                 | WITH(                                                                                   |
+|                 |   primary_key_encoding = 'dense',                                                       |
+|                 |   sst_format = 'flat'                                                                   |
+|                 | )                                                                                       |
++-----------------+-----------------------------------------------------------------------------------------+
+
+INSERT INTO compressed_tags VALUES (1, 'host-a', 1), (2, 'host-b', 2);
+
+Affected Rows: 2
+
+ADMIN flush_table('compressed_tags');
+
++--------------------------------------+
+| ADMIN flush_table('compressed_tags') |
++--------------------------------------+
+| 0                                    |
++--------------------------------------+
+
+SELECT * FROM compressed_tags ORDER BY ts;
+
++-------------------------+--------+-----+
+| ts                      | host   | val |
++-------------------------+--------+-----+
+| 1970-01-01T00:00:00.001 | host-a | 1.0 |
+| 1970-01-01T00:00:00.002 | host-b | 2.0 |
++-------------------------+--------+-----+
+
+DROP TABLE compressed_tags;
+
+Affected Rows: 0
+
+CREATE TABLE compression_phy (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE COMPRESSION WITH (level = 3)
+) ENGINE = metric WITH (physical_metric_table = '');
+
+Affected Rows: 0
+
+CREATE TABLE compression_conflict (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE COMPRESSION WITH (level = 9)
+) ENGINE = metric WITH (on_physical_table = 'compression_phy');
+
+Error: 1004(InvalidArguments), Unexpected request: COMPRESSION is not supported on logical tables; configure it on the physical table
+
+CREATE TABLE compression_same (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE COMPRESSION WITH (level = 3)
+) ENGINE = metric WITH (on_physical_table = 'compression_phy');
+
+Error: 1004(InvalidArguments), Unexpected request: COMPRESSION is not supported on logical tables; configure it on the physical table
+
+CREATE TABLE compression_new_tag (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY COMPRESSION WITH (level = 3),
+    val DOUBLE
+) ENGINE = metric WITH (on_physical_table = 'compression_phy');
+
+Error: 1004(InvalidArguments), Unexpected request: COMPRESSION is not supported on logical tables; configure it on the physical table
+
+CREATE TABLE compression_logical (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE
+) ENGINE = metric WITH (on_physical_table = 'compression_phy');
+
+Affected Rows: 0
+
+INSERT INTO compression_logical VALUES (1, 42);
+
+Affected Rows: 1
+
+ADMIN flush_table('compression_phy');
+
++--------------------------------------+
+| ADMIN flush_table('compression_phy') |
++--------------------------------------+
+| 0                                    |
++--------------------------------------+
+
+SELECT * FROM compression_logical;
+
++-------------------------+------+
+| ts                      | val  |
++-------------------------+------+
+| 1970-01-01T00:00:00.001 | 42.0 |
++-------------------------+------+
+
+DROP TABLE compression_logical;
+
+Affected Rows: 0
+
+DROP TABLE compression_phy;
+
+Affected Rows: 0
+
