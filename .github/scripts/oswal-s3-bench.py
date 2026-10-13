@@ -168,7 +168,12 @@ def group_cells(group: dict, smoke: bool) -> list:
     if mode == "load":
         if not 0 <= idle <= 600:
             raise ValueError(f"group {name!r}: idle_seconds must be in 0..600")
-        common |= {"rows": rows, "data_profile": DATA_PROFILES.get(rows, "custom")}
+        # The objects a restart cell must leave indexed at its kill; a smoke run is too small for any.
+        min_objects = int(group.get("min_objects", 0))
+        if min_objects < 0 or (min_objects and not restart):
+            raise ValueError(f"group {name!r}: min_objects needs restart and must not be negative")
+        common |= {"rows": rows, "data_profile": DATA_PROFILES.get(rows, "custom"),
+                   "min_objects": 0 if smoke else min_objects}
     else:
         cycles = int(group.get("cycles", 5))
         kill_after = [int(v) for v in group.get("kill_after", [3, 10])]
@@ -207,7 +212,7 @@ def parse_groups(text: str, defaults: dict) -> list:
     groups = json.loads(text)
     if not isinstance(groups, list) or not groups or not all(isinstance(g, dict) for g in groups):
         raise ValueError("groups must be a non-empty JSON list of objects")
-    known = set(defaults) | {"name", "mode", "idle_seconds", "cycles", "kill_after", "pin"}
+    known = set(defaults) | {"name", "mode", "idle_seconds", "cycles", "kill_after", "pin", "min_objects"}
     names = [g.get("name") for g in groups]
     for group, name in zip(groups, names):
         if not isinstance(name, str) or not GROUP_NAME.fullmatch(name):

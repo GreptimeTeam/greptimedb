@@ -175,13 +175,15 @@ impl Depths {
 /// Appends are admitted into an open batch. A background actor seals the batch
 /// when it reaches the size limit or the flush interval elapses and creates
 /// the object under the next sequence while it keeps admitting entries into
-/// the next batch; up to [`MAX_IN_FLIGHT_CREATES`] creates run at a time.
+/// the next batch; up to the store's create limit, [`MAX_IN_FLIGHT_CREATES`]
+/// by default, run at a time.
 /// Objects are indexed in the catalog in sequence order. In the `durable`
 /// acknowledgement mode an append returns once its object is durable and
 /// indexed, so an acknowledged entry never has a missing predecessor; in the
 /// `enqueued` mode it returns on admission and the object is created in the
-/// background. While [`MAX_SEALED_BATCHES`] batches
-/// wait to become durable no append is admitted. A segment that a read cannot
+/// background. While the store's sealed batch limit, [`MAX_SEALED_BATCHES`]
+/// by default, leaves room for fewer than two more batches no append is
+/// admitted. A segment that a read cannot
 /// decode is handled as `on_corrupted_segment` says. Objects below the reclaim
 /// boundary of the last indexed object are deleted in the background.
 pub struct ObjectStoreLogStore {
@@ -1120,7 +1122,8 @@ type CreateOutcome = (u64, Result<PutResult>);
 /// durable.
 ///
 /// Sealed batches form a pipeline in sequence order. A batch is created under
-/// its sequence as soon as one of [`MAX_IN_FLIGHT_CREATES`] slots is free, but
+/// its sequence as soon as one of the store's create slots, [`MAX_IN_FLIGHT_CREATES`]
+/// by default, is free, but
 /// it is indexed and acknowledged only once every earlier batch is, so the
 /// acknowledged history of a region never has a missing predecessor. Every
 /// batch links to its pipeline predecessor, the batch sealed before it, or to
@@ -1144,7 +1147,8 @@ type CreateOutcome = (u64, Result<PutResult>);
 /// if they succeed.
 ///
 /// Appends arrive on their own channel, which the actor does not read while
-/// [`MAX_SEALED_BATCHES`] batches wait or an append is held back at a backlog
+/// the sealed batch limit, [`MAX_SEALED_BATCHES`] by default, leaves room for
+/// fewer than two more batches or an append is held back at a backlog
 /// threshold of the `enqueued` mode, so commands such as `stop` are handled
 /// while admission is held back.
 ///
@@ -1504,7 +1508,7 @@ impl Actor {
     }
 
     /// Starts the creates of pending batches in sequence order while fewer
-    /// than [`MAX_IN_FLIGHT_CREATES`] are in flight, counting the creates of
+    /// than the store's create limit are in flight, counting the creates of
     /// batches that already failed. Nothing starts once stop began, except
     /// the backlog of the `enqueued` mode.
     fn start_creates(&mut self) {
@@ -2320,7 +2324,7 @@ struct FetchedObject {
 /// Rebuilds the catalog from object headers and footers,
 /// so recovery costs a few small reads per object however large the objects
 /// are. Segments are not read; a segment checksum is verified by the read that
-/// decodes it. Footers are fetched for up to [`RECOVERY_CONCURRENCY`] objects
+/// decodes it. Footers are fetched for up to `concurrency` objects
 /// at a time and indexed in sequence order, so the catalog checks the entry
 /// ranges of every object against its predecessors like a sequential replay.
 /// Only the objects on the chain [`select_chain`] picks are indexed.
