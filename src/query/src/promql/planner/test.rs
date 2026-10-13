@@ -2656,31 +2656,54 @@ async fn timestamp_binary_join_falls_back_when_tsid_is_projected_out() {
 }
 
 #[tokio::test]
-async fn timestamp_binary_join_rejects_default_matching_on_mismatched_labels() {
-    let eval_stmt = build_eval_stmt("timestamp(left_host_job) / right_by_job");
-
-    let table_provider = build_test_table_provider_with_tsid_tag_fields(&[
-        (
-            (DEFAULT_SCHEMA_NAME.to_string(), "left_host_job".to_string()),
-            2,
-            1,
-        ),
-        (
-            (DEFAULT_SCHEMA_NAME.to_string(), "right_by_job".to_string()),
-            1,
-            1,
-        ),
-    ])
-    .await;
-    let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+async fn timestamp_binary_join_uses_empty_keys_for_absent_labels() {
+    for query in [
+        "timestamp(left_host_job) / right_by_job",
+        "timestamp(left_host_job) / ignoring() right_by_job",
+    ] {
+        let table_provider = build_test_table_provider_with_tsid_tag_fields(&[
+            (
+                (DEFAULT_SCHEMA_NAME.to_string(), "left_host_job".to_string()),
+                2,
+                1,
+            ),
+            (
+                (DEFAULT_SCHEMA_NAME.to_string(), "right_by_job".to_string()),
+                1,
+                1,
+            ),
+        ])
+        .await;
+        let plan = PromPlanner::stmt_to_plan(
+            table_provider,
+            &build_eval_stmt(query),
+            &build_query_engine_state(),
+        )
         .await
         .unwrap();
-    let plan_str = plan.display_indent_schema().to_string();
+        let plan_str = plan.display_indent_schema().to_string();
 
-    assert!(
-        plan_str.contains("Boolean(false)") || plan_str.contains("false"),
-        "{plan_str}"
-    );
+        assert!(
+            plan_str.contains("left_host_job.tag_0 = right_by_job.tag_0"),
+            "{query}: {plan_str}"
+        );
+        assert!(
+            plan_str.contains(
+                "left_host_job.__promql_missing_match_0 = right_by_job.__promql_missing_match_0"
+            ),
+            "{query}: {plan_str}"
+        );
+        assert!(
+            plan_str.contains("left_host_job.timestamp = right_by_job.timestamp"),
+            "{query}: {plan_str}"
+        );
+        assert!(
+            plan_str.contains("Utf8(\"\") AS __promql_missing_match_0"),
+            "{query}: {plan_str}"
+        );
+        assert!(!plan_str.contains("__tsid ="), "{query}: {plan_str}");
+        assert!(!plan_str.contains("Boolean(false)"), "{query}: {plan_str}");
+    }
 }
 
 #[tokio::test]
@@ -7503,6 +7526,16 @@ fn nullable_label_table(
     tags: &[(&str, &[Option<&str>])],
     values: &[Option<f64>],
 ) -> table::TableRef {
+    nullable_label_table_with_timestamps(name, table_id, tags, values, &vec![0; values.len()])
+}
+
+fn nullable_label_table_with_timestamps(
+    name: &str,
+    table_id: u32,
+    tags: &[(&str, &[Option<&str>])],
+    values: &[Option<f64>],
+    timestamps: &[i64],
+) -> table::TableRef {
     let mut columns = tags
         .iter()
         .map(|(tag, _)| {
@@ -7528,7 +7561,7 @@ fn nullable_label_table(
         .map(|(_, labels)| Arc::new(StringArray::from(labels.to_vec())) as ArrayRef)
         .collect::<Vec<_>>();
     arrays.extend([
-        Arc::new(TimestampMillisecondArray::from(vec![0; values.len()])) as ArrayRef,
+        Arc::new(TimestampMillisecondArray::from(timestamps.to_vec())) as ArrayRef,
         Arc::new(Float64Array::from(values.to_vec())) as ArrayRef,
     ]);
     let batch = RecordBatch::try_new(schema.arrow_schema().clone(), arrays).unwrap();
@@ -7854,6 +7887,87 @@ async fn default_matching_equals_empty_ignoring_for_absent_labels() {
             0,
             "{query}"
         );
+    }
+}
+
+#[tokio::test]
+async fn timestamp_binary_join_matches_absent_and_empty_labels() {
+    for (host, expected_rows) in [(None, 1), (Some(""), 1), (Some("x"), 0)] {
+        let catalog = MemoryCatalogManager::with_default_setup();
+        for table in [
+            nullable_label_table_with_timestamps(
+                "a",
+                2101,
+                &[("host", &[host]), ("job", &[Some("j")])],
+                &[Some(6.0)],
+                &[1_000],
+            ),
+            nullable_label_table_with_timestamps(
+                "b",
+                2102,
+                &[("job", &[Some("j")])],
+                &[Some(3.0)],
+                &[1_000],
+            ),
+        ] {
+            let info = table.table_info();
+            catalog
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: info.name.clone(),
+                    table_id: info.ident.table_id,
+                    table,
+                })
+                .unwrap();
+        }
+        for (query, expected_value) in [
+            ("timestamp(a) / b", 1.0 / 3.0),
+            ("timestamp(a) / ignoring() b", 1.0 / 3.0),
+            ("b / timestamp(a)", 3.0),
+            ("b / ignoring() timestamp(a)", 3.0),
+        ] {
+            let provider = DfTableSourceProvider::new(
+                catalog.clone(),
+                false,
+                QueryContext::arc(),
+                DummyDecoder::arc(),
+                false,
+            );
+            let state = build_query_engine_state();
+            let plan = PromPlanner::stmt_to_plan(provider, &operator_eval_stmt(query), &state)
+                .await
+                .unwrap();
+            let (_, batches) = execute(plan, &state).await;
+            assert_eq!(
+                batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+                expected_rows,
+                "{query}: host={host:?}"
+            );
+            if expected_rows != 0 {
+                let batch = batches.iter().find(|batch| batch.num_rows() != 0).unwrap();
+                let value = batch
+                    .columns()
+                    .iter()
+                    .find_map(|column| column.as_any().downcast_ref::<Float64Array>())
+                    .unwrap();
+                assert_eq!(value.value(0), expected_value, "{query}: host={host:?}");
+                let timestamp = batch
+                    .column_by_name("ts")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .unwrap();
+                assert_eq!(timestamp.value(0), 1_000, "{query}");
+                let job = batch
+                    .column_by_name("job")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                assert_eq!(job.value(0), "j", "{query}");
+            }
+        }
     }
 }
 
