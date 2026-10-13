@@ -37,6 +37,7 @@ common-runtime.workspace = true
 common-stat.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
+crc32fast.workspace = true
 datafusion.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
@@ -55,6 +56,7 @@ itertools.workspace = true
 jsonb.workspace = true
 lazy_static.workspace = true
 log-query.workspace = true
+moka = { workspace = true, features = ["future"] }
 meter-core.workspace = true
 meter-macros.workspace = true
 object-store.workspace = true
@@ -69,6 +71,7 @@ regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 session.workspace = true
+snap.workspace = true
 snafu.workspace = true
 sql.workspace = true
 sqlparser.workspace = true
@@ -78,6 +81,7 @@ table.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 arrow.workspace = true
@@ -86,7 +90,6 @@ common-function.workspace = true
 common-macro.workspace = true
 common-query = { workspace = true, features = ["testing"] }
 fastrand = "2.0"
-moka = { workspace = true, features = ["future"] }
 nalgebra.workspace = true
 paste.workspace = true
 pretty_assertions.workspace = true

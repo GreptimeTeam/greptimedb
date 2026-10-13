@@ -57,6 +57,30 @@ pub struct DefaultSerializer;
 
 impl SerializerRegistry for DefaultSerializer {
     fn serialize_logical_plan(&self, node: &dyn UserDefinedLogicalNode) -> Result<Vec<u8>> {
+        if let Some(instant) = node
+            .as_any()
+            .downcast_ref::<crate::research_series_grid::SeriesInstantMax>()
+        {
+            return instant.serialize();
+        }
+        if let Some(fragment) = node
+            .as_any()
+            .downcast_ref::<crate::research_series_grid::SeriesFragment>()
+        {
+            return fragment.serialize();
+        }
+        if let Some(range) = node
+            .as_any()
+            .downcast_ref::<crate::research_series_grid::SeriesRange>()
+        {
+            return range.serialize();
+        }
+        if let Some(pack) = node
+            .as_any()
+            .downcast_ref::<crate::research_series_grid::SeriesPack>()
+        {
+            return pack.serialize();
+        }
         if node.name() == MergeScanLogicalPlan::name() {
             let merge_scan = node
                 .as_any()
@@ -85,6 +109,26 @@ impl SerializerRegistry for DefaultSerializer {
         name: &str,
         bytes: &[u8],
     ) -> Result<Arc<dyn UserDefinedLogicalNode>> {
+        if name == crate::research_series_grid::SeriesInstantMax::NAME {
+            return Ok(Arc::new(
+                crate::research_series_grid::SeriesInstantMax::deserialize(bytes)?,
+            ));
+        }
+        if name == crate::research_series_grid::SeriesFragment::NAME {
+            return Ok(Arc::new(
+                crate::research_series_grid::SeriesFragment::deserialize(bytes)?,
+            ));
+        }
+        if name == crate::research_series_grid::SeriesRange::NAME {
+            return Ok(Arc::new(
+                crate::research_series_grid::SeriesRange::deserialize(bytes)?,
+            ));
+        }
+        if name == crate::research_series_grid::SeriesPack::NAME {
+            return Ok(Arc::new(
+                crate::research_series_grid::SeriesPack::deserialize(bytes)?,
+            ));
+        }
         if name == MergeScanLogicalPlan::name() {
             // TODO(dennis): missing `session_state` to decode the logical plan in `MergeScanLogicalPlan`,
             // so we only save the unoptimized logical plan for view currently.
@@ -271,6 +315,75 @@ mod tests {
             .unwrap()
             .build()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn series_pack_survives_remote_plan_roundtrip() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("host", ArrowDataType::Utf8, true),
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("value", ArrowDataType::Float64, true),
+        ]));
+        let input = LogicalPlanBuilder::scan(
+            "devices",
+            Arc::new(LogicalTableSource::new(schema.clone())),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let plan =
+            crate::research_series_grid::SeriesPack::plan(input, &["host".into()], "ts", "value")
+                .unwrap();
+        let bytes = DFLogicalSubstraitConvertor
+            .encode(&plan, DefaultSerializer)
+            .unwrap();
+        let factory = QueryEngineFactory::new(
+            catalog::memory::new_memory_catalog_manager().unwrap(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        );
+        let decoder = factory
+            .query_engine()
+            .engine_context(QueryContext::arc())
+            .new_plan_decoder()
+            .unwrap();
+        let table = Arc::new(MemTable::try_new(schema, vec![vec![]]).unwrap());
+        let restored = decoder
+            .decode(
+                bytes,
+                Arc::new(DummyCatalogList::with_table_provider(table)),
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(plan.schema(), restored.schema());
+        let LogicalPlan::Extension(extension) = restored else {
+            panic!("Series pack node was lost");
+        };
+        let node = extension
+            .node
+            .as_any()
+            .downcast_ref::<crate::research_series_grid::SeriesPack>()
+            .unwrap();
+        assert_eq!(extension.node.inputs().len(), 1);
+        let original = match &plan {
+            LogicalPlan::Extension(extension) => extension
+                .node
+                .as_any()
+                .downcast_ref::<crate::research_series_grid::SeriesPack>()
+                .unwrap(),
+            _ => unreachable!(),
+        };
+        assert_eq!(node.serialize().unwrap(), original.serialize().unwrap());
     }
 
     #[tokio::test]

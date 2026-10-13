@@ -51,7 +51,7 @@ use crate::error::{DeserializeSnafu, Result};
 use crate::extension_plan::{METRIC_NUM_SERIES, resolve_column_name, serialize_column_index};
 use crate::metrics::PROMQL_SERIES_COUNT;
 
-enum TagIdentifier<'a> {
+pub(super) enum TagIdentifier<'a> {
     /// A group of raw string tag columns.
     Raw(Vec<RawTagColumn<'a>>),
     /// A single UInt64 identifier (tsid).
@@ -59,7 +59,7 @@ enum TagIdentifier<'a> {
 }
 
 impl<'a> TagIdentifier<'a> {
-    fn try_new(batch: &'a RecordBatch, tag_indices: &[usize]) -> DataFusionResult<Self> {
+    pub(super) fn try_new(batch: &'a RecordBatch, tag_indices: &[usize]) -> DataFusionResult<Self> {
         match tag_indices {
             [] => Ok(Self::Raw(Vec::new())),
             [index] => {
@@ -87,7 +87,12 @@ impl<'a> TagIdentifier<'a> {
         }
     }
 
-    fn equal_at(&self, left_row: usize, other: &Self, right_row: usize) -> DataFusionResult<bool> {
+    pub(super) fn equal_at(
+        &self,
+        left_row: usize,
+        other: &Self,
+        right_row: usize,
+    ) -> DataFusionResult<bool> {
         match (self, other) {
             (Self::Id(left), Self::Id(right)) => {
                 if left.is_null(left_row) || right.is_null(right_row) {
@@ -127,7 +132,7 @@ impl<'a> TagIdentifier<'a> {
     }
 }
 
-struct RawTagColumn<'a>(&'a ArrayRef);
+pub(super) struct RawTagColumn<'a>(&'a ArrayRef);
 
 impl<'a> RawTagColumn<'a> {
     fn try_new(array: &'a ArrayRef) -> DataFusionResult<Self> {
@@ -336,6 +341,12 @@ pub struct SeriesDivideExec {
     time_index_column: String,
     input: Arc<dyn ExecutionPlan>,
     metric: ExecutionPlanMetricsSet,
+}
+
+impl SeriesDivideExec {
+    pub fn research_tags(&self) -> &[String] {
+        &self.tag_columns
+    }
 }
 
 impl ExecutionPlan for SeriesDivideExec {

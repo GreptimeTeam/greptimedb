@@ -245,6 +245,139 @@ fn unwrap_dictionary_literals(plan: LogicalPlan) -> DfResult<Transformed<Logical
 }
 
 impl DistPlannerAnalyzer {
+    pub(crate) fn prepare_series_frontend(plan: &LogicalPlan) -> DfResult<Option<LogicalPlan>> {
+        use datafusion::arrow::datatypes::{DataType, TimeUnit};
+
+        let LogicalPlan::Extension(root) = plan else {
+            return Ok(None);
+        };
+        if !root
+            .node
+            .as_any()
+            .is::<crate::research_series_grid::OnlineNode>()
+            || root.node.inputs().is_empty()
+        {
+            return Ok(None);
+        }
+        for input in root.node.inputs() {
+            let LogicalPlan::Extension(extension) = input else {
+                return Ok(None);
+            };
+            let Some(remote) = extension
+                .node
+                .as_any()
+                .downcast_ref::<MergeScanLogicalPlan>()
+            else {
+                return Ok(None);
+            };
+            let LogicalPlan::Extension(fragment) = remote.input() else {
+                return Ok(None);
+            };
+            if remote.is_placeholder()
+                || !(fragment
+                    .node
+                    .as_any()
+                    .is::<crate::research_series_grid::SeriesFragment>()
+                    || fragment
+                        .node
+                        .as_any()
+                        .is::<crate::research_series_grid::SeriesInstantMax>())
+                || extension.node.schema() != fragment.node.schema()
+                || extension
+                    .node
+                    .schema()
+                    .fields()
+                    .iter()
+                    .any(|field| match field.data_type() {
+                        DataType::Utf8 | DataType::Utf8View | DataType::LargeUtf8 => false,
+                        DataType::Dictionary(key, value) => {
+                            key.as_ref() != &DataType::UInt32 || value.as_ref() != &DataType::Utf8
+                        }
+                        DataType::List(item) => match item.data_type() {
+                            DataType::Float64 => false,
+                            DataType::Struct(fields) => {
+                                fields.len() != 2
+                                    || fields[0].data_type()
+                                        != &DataType::Timestamp(TimeUnit::Millisecond, None)
+                                    || fields[1].data_type() != &DataType::Float64
+                            }
+                            _ => true,
+                        },
+                        _ => true,
+                    })
+            {
+                return Ok(None);
+            }
+        }
+        // The visible tree has no scalar expressions, joins or unresolved placement.
+        // Packed primitive schemas need no JSON boundary conversion. Region planning
+        // still performs source coercion, scan hints and physical optimization.
+        Self::assign_merge_scan_remote_dyn_filter_producer_ids(plan.clone()).map(Some)
+    }
+
+    pub(crate) fn place_series_fragments(
+        plan: LogicalPlan,
+        state: &datafusion::execution::SessionState,
+    ) -> DfResult<LogicalPlan> {
+        if !state
+            .analyzer()
+            .rules
+            .iter()
+            .any(|rule| rule.name() == Self.name())
+        {
+            return Ok(plan);
+        }
+        plan.transform_down(|plan| {
+            let LogicalPlan::Extension(extension) = &plan else {
+                return Ok(Transformed::no(plan));
+            };
+            if !extension
+                .node
+                .as_any()
+                .is::<crate::research_series_grid::SeriesFragment>()
+                && !extension
+                    .node
+                    .as_any()
+                    .is::<crate::research_series_grid::SeriesInstantMax>()
+            {
+                return Ok(Transformed::no(plan));
+            }
+            let inputs = plan.inputs();
+            if inputs.len() != 1 || !series_source_can_run_remotely(inputs[0]) {
+                return Ok(Transformed::no(plan));
+            }
+            if DFLogicalSubstraitConvertor
+                .encode(&plan, DefaultSerializer)
+                .is_err()
+            {
+                return Ok(Transformed::no(plan));
+            }
+            let mut path = vec![&plan];
+            let mut input = inputs[0];
+            loop {
+                path.push(input);
+                let children = input.inputs();
+                let Some(child) = children.first() else { break };
+                input = child;
+            }
+            let mut rewriter = PlanRewriter::default();
+            for node in path.into_iter().rev() {
+                rewriter.maybe_set_partitions(node)?;
+            }
+            let Some(partition_cols) = rewriter.partition_cols else {
+                return Ok(Transformed::no(plan));
+            };
+            debug!(
+                fragment = extension.node.name(),
+                "Research early series placement"
+            );
+            Ok(Transformed::yes(
+                MergeScanLogicalPlan::new(plan, false, partition_cols).into_logical_plan(),
+            ))
+        })
+        .map(|result| result.data)
+    }
+
     /// Try push down as many nodes as possible
     fn try_push_down(&self, plan: LogicalPlan) -> DfResult<LogicalPlan> {
         // Use the subquery-aware transform so expression subqueries (including
@@ -341,6 +474,59 @@ impl DistPlannerAnalyzer {
     }
 }
 
+// Source coercion and exact filter pushdown remain the region planner's responsibility.
+// Excluding functions and subqueries keeps frontend-only rewrites outside this boundary.
+fn series_source_can_run_remotely(plan: &LogicalPlan) -> bool {
+    fn scalar(expr: &Expr) -> bool {
+        match expr {
+            Expr::Column(_) | Expr::Literal(_, _) => true,
+            Expr::BinaryExpr(binary) => scalar(&binary.left) && scalar(&binary.right),
+            Expr::IsNull(expr) | Expr::IsNotNull(expr) | Expr::Not(expr) => scalar(expr),
+            _ => false,
+        }
+    }
+    match plan {
+        LogicalPlan::TableScan(scan) => {
+            scan.fetch.is_none()
+                && scan.filters.iter().all(scalar)
+                && scan
+                    .source
+                    .downcast_ref::<DefaultTableSource>()
+                    .is_some_and(|source| {
+                        source
+                            .table_provider
+                            .downcast_ref::<DfTableProviderAdapter>()
+                            .is_some_and(|provider| {
+                                provider.table().table_type() == TableType::Base
+                            })
+                    })
+        }
+        LogicalPlan::Projection(projection) => {
+            projection.expr.iter().all(|expr| match expr {
+                Expr::Column(_) => true,
+                // Region pruning resolves physical column names before remote execution.
+                Expr::Alias(alias) => {
+                    matches!(alias.expr.as_ref(), Expr::Column(column) if alias.name == column.name)
+                }
+                _ => false,
+            }) && series_source_can_run_remotely(&projection.input)
+        }
+        LogicalPlan::SubqueryAlias(alias) => series_source_can_run_remotely(&alias.input),
+        LogicalPlan::Filter(filter) => {
+            scalar(&filter.predicate) && series_source_can_run_remotely(&filter.input)
+        }
+        LogicalPlan::Sort(sort) => {
+            sort.fetch.is_none()
+                && sort
+                    .expr
+                    .iter()
+                    .all(|expr| matches!(expr.expr, Expr::Column(_)))
+                && series_source_can_run_remotely(&sort.input)
+        }
+        _ => false,
+    }
+}
+
 #[derive(Debug, Default)]
 struct RemoteDynFilterProducerIdAllocator {
     next_remote_dyn_filter_producer_id: u64,
@@ -395,13 +581,11 @@ enum RewriterStatus {
 
 #[derive(Debug, Default)]
 struct PlanRewriter {
-    /// Whether the whole plan this rewriter walks can be encoded to Substrait.
-    /// Used by [`PlanRewriter::should_expand`] to skip the per-node encoding check.
-    whole_plan_encodable: bool,
+    root_encodable: bool,
     /// Current level in the tree
     level: usize,
     /// Simulated stack for the `rewrite` recursion
-    stack: Vec<(LogicalPlan, usize)>,
+    stack: Vec<(LogicalPlan, usize, bool)>,
     /// Stages to be expanded, will be added as parent node of merge scan one by one
     stage: Vec<LogicalPlan>,
     status: RewriterStatus,
@@ -458,46 +642,35 @@ impl PlanRewriter {
     /// [`PlanRewriter::should_expand`] may skip a check it has to perform.
     fn new(plan: &LogicalPlan) -> Self {
         Self {
-            whole_plan_encodable: DFLogicalSubstraitConvertor
+            root_encodable: DFLogicalSubstraitConvertor
                 .encode(plan, DefaultSerializer)
                 .is_ok(),
             ..Default::default()
         }
     }
 
-    fn get_parent(&self) -> Option<&LogicalPlan> {
+    fn get_parent(&self) -> Option<(&LogicalPlan, bool)> {
         // level starts from 1, it's safe to minus by 1
         self.stack
             .iter()
             .rev()
-            .find(|(_, level)| *level == self.level - 1)
-            .map(|(node, _)| node)
+            .find(|(_, level, _)| *level == self.level - 1)
+            .map(|(node, _, encodable)| (node, *encodable))
     }
 
     /// Return true if should stop and expand. The input plan is the parent node of current node
-    fn should_expand(&mut self, plan: &LogicalPlan) -> DfResult<bool> {
+    fn should_expand(&mut self, plan: &LogicalPlan, encodable: bool) -> DfResult<bool> {
         debug!(
             "Check should_expand at level: {}  with Stack:\n{}, ",
             self.level,
             self.stack
                 .iter()
-                .map(|(p, l)| format!("{l}:{}{}", "  ".repeat(l - 1), p.display()))
+                .map(|(p, l, _)| format!("{l}:{}{}", "  ".repeat(l - 1), p.display()))
                 .collect::<Vec<String>>()
                 .join("\n"),
         );
-        // Substrait encoding recurses from the root to the leaves, so a root that encodes
-        // proves that every node below it encodes as well. `plan` here always comes from
-        // `self.stack`, which holds untouched sub-trees of that root, so one check on the
-        // root covers the whole descent. Each check builds a fresh `SessionState`, which
-        // is the dominant cost on deep PromQL plans.
-        // When the root does not encode, the plan holds at least one node that has to stay
-        // on the frontend and only the per-node check locates it.
-        if !self.whole_plan_encodable
-            && let Err(e) = DFLogicalSubstraitConvertor.encode(plan, DefaultSerializer)
-        {
-            debug!(
-                "PlanRewriter: plan cannot be converted to substrait with error={e:?}, expanding now: {plan}"
-            );
+        if !encodable {
+            debug!("PlanRewriter: plan cannot be converted to substrait, expanding now: {plan}");
             return Ok(true);
         }
 
@@ -535,12 +708,18 @@ impl PlanRewriter {
 
         match Categorizer::check_plan(plan, self.partition_cols.clone())? {
             Commutativity::Commutative => {
-                // PATCH: we should reconsider SORT's commutativity instead of doing this trick.
-                // explain: for a fully commutative SeriesDivide, its child Sort plan only serves it. I.e., that
-                //   Sort plan is also fully commutative, instead of conditional commutative. So we can remove
-                //   the generated MergeSort from stage safely.
+                // Series consumers require region-local ordering. Their output may omit
+                // TSID and timestamps, so that ordering must not become a global MergeSort.
                 if let LogicalPlan::Extension(ext_a) = plan
-                    && ext_a.node.name() == SeriesDivide::name()
+                    && (ext_a.node.name() == SeriesDivide::name()
+                        || ext_a
+                            .node
+                            .as_any()
+                            .is::<crate::research_series_grid::SeriesFragment>()
+                        || ext_a
+                            .node
+                            .as_any()
+                            .is::<crate::research_series_grid::SeriesInstantMax>())
                     && let Some(LogicalPlan::Extension(ext_b)) = self.stage.last()
                     && ext_b.node.name() == MergeSortLogicalPlan::name()
                 {
@@ -981,8 +1160,20 @@ impl TreeNodeRewriter for PlanRewriter {
 
     /// descend
     fn f_down<'a>(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
+        // Encoding an untouched subtree proves that all its descendants encode.
+        // A frontend-only ancestor must not invalidate that proof for each remote
+        // branch, nor may a successful sibling supply the proof for this branch.
+        let encodable = match self.stack.last() {
+            None => self.root_encodable,
+            Some((_, _, parent_encodable)) => {
+                *parent_encodable
+                    || DFLogicalSubstraitConvertor
+                        .encode(&node, DefaultSerializer)
+                        .is_ok()
+            }
+        };
         self.level += 1;
-        self.stack.push((node.clone(), self.level));
+        self.stack.push((node.clone(), self.level, encodable));
         // decendening will clear the stage
         self.stage.clear();
         self.set_unexpanded();
@@ -1009,7 +1200,7 @@ impl TreeNodeRewriter for PlanRewriter {
 
         self.maybe_set_partitions(&node)?;
 
-        let Some(parent) = self.get_parent() else {
+        let Some((parent, parent_encodable)) = self.get_parent() else {
             debug!("Plan Rewriter: expand now for no parent found for node: {node}");
             let node = self.expand(node);
             debug!(
@@ -1026,7 +1217,7 @@ impl TreeNodeRewriter for PlanRewriter {
 
         let parent = parent.clone();
 
-        if self.should_expand(&parent)? {
+        if self.should_expand(&parent, parent_encodable)? {
             // TODO(ruihang): does this work for nodes with multiple children?;
             debug!(
                 "PlanRewriter: should expand child:\n {node}\n Of Parent: {}",

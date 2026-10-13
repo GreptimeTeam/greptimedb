@@ -91,6 +91,7 @@ use crate::region_query::RegionQueryHandlerRef;
 #[derive(Clone)]
 pub struct QueryEngineState {
     df_context: SessionContext,
+    pub(crate) series_plan_cache: crate::research_series_grid::plan_cache::PlanCache,
     catalog_manager: CatalogManagerRef,
     dyn_filter_registry_manager: Arc<DynFilterRegistryManager>,
     function_state: Arc<FunctionState>,
@@ -264,6 +265,9 @@ impl QueryEngineState {
             &mut physical_optimizer.rules,
             SanityCheckPlan {}.name(),
         );
+        physical_optimizer
+            .rules
+            .push(Arc::new(crate::research_series_grid::ScanMaxRule));
         physical_optimizer.rules.push(Arc::new(SanityCheckPlan {}));
 
         let session_state = SessionStateBuilder::new()
@@ -287,6 +291,7 @@ impl QueryEngineState {
 
         Ok(Self {
             df_context,
+            series_plan_cache: Default::default(),
             catalog_manager: catalog_list,
             dyn_filter_registry_manager: Arc::new(DynFilterRegistryManager::default()),
             function_state: Arc::new(FunctionState {
@@ -495,6 +500,7 @@ impl QueryEngineState {
 
 struct DfQueryPlanner {
     physical_planner: DefaultPhysicalPlanner,
+    series_program_planner: Option<Arc<DistExtensionPlanner>>,
 }
 
 impl fmt::Debug for DfQueryPlanner {
@@ -510,6 +516,26 @@ impl QueryPlanner for DfQueryPlanner {
         logical_plan: &DfLogicalPlan,
         session: &dyn Session,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
+        if let DfLogicalPlan::Extension(extension) = logical_plan
+            && let Some(node) = extension
+                .node
+                .as_any()
+                .downcast_ref::<crate::research_series_grid::query_program::ProgramNode>(
+            )
+        {
+            if let Some(planner) = &self.series_program_planner
+                && let Some(physical) =
+                    crate::research_series_grid::query_program::try_bind(node, planner, session)
+                        .await?
+            {
+                return Ok(physical);
+            }
+            let fallback = node.fallback()?;
+            return self
+                .physical_planner
+                .create_physical_plan(&fallback, session)
+                .await;
+        }
         self.physical_planner
             .create_physical_plan(logical_plan, session)
             .await
@@ -575,23 +601,30 @@ impl DfQueryPlanner {
         enable_per_region_metrics: bool,
     ) -> Self {
         let mut planners: Vec<Arc<dyn ExtensionPlanner + Send + Sync>> = vec![
+            Arc::new(crate::research_series_grid::GridPlanner),
             Arc::new(PromExtensionPlanner),
             Arc::new(RangeSelectPlanner),
             Arc::new(RemoteDynFilterReceiverExtensionPlanner),
         ];
-        if let (Some(region_query_handler), Some(partition_rule_manager)) =
-            (region_query_handler, partition_rule_manager)
-        {
-            planners.push(Arc::new(DistExtensionPlanner::new(
-                catalog_manager,
-                partition_rule_manager,
-                region_query_handler,
-                enable_per_region_metrics,
-            )));
-            planners.push(Arc::new(MergeSortExtensionPlanner {}));
-        }
+        let series_program_planner =
+            if let (Some(region_query_handler), Some(partition_rule_manager)) =
+                (region_query_handler, partition_rule_manager)
+            {
+                let planner = Arc::new(DistExtensionPlanner::new(
+                    catalog_manager,
+                    partition_rule_manager,
+                    region_query_handler,
+                    enable_per_region_metrics,
+                ));
+                planners.push(planner.clone());
+                planners.push(Arc::new(MergeSortExtensionPlanner {}));
+                Some(planner)
+            } else {
+                None
+            };
         Self {
             physical_planner: DefaultPhysicalPlanner::with_extension_planners(planners),
+            series_program_planner,
         }
     }
 }

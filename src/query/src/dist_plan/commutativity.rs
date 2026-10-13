@@ -217,6 +217,17 @@ impl Categorizer {
         partition_cols: &AliasMapping,
     ) -> Commutativity {
         match plan.name() {
+            crate::research_series_grid::SeriesFragment::NAME
+            | crate::research_series_grid::SeriesInstantMax::NAME => {
+                // These nodes emit partial grids, merged by their online consumer.
+                // Their TSID-ordered source retains the metric engine's series placement.
+                Commutativity::Commutative
+            }
+            crate::research_series_grid::SeriesPack::NAME => {
+                // Packing preserves every point and permits duplicate label tuples
+                // across partitions. The online collector merges the point lists.
+                Commutativity::Commutative
+            }
             name if name == SeriesDivide::name() => {
                 let series_divide = plan.as_any().downcast_ref::<SeriesDivide>().unwrap();
                 // Metric engine `__tsid` uniquely identifies a time-series. Treat a series divide
@@ -241,6 +252,7 @@ impl Categorizer {
                 Commutativity::Commutative
             }
             name if name == SeriesNormalize::name()
+                || name == crate::research_series_grid::SeriesRange::NAME
                 || name == InstantManipulate::name()
                 || name == RangeManipulate::name() =>
             {

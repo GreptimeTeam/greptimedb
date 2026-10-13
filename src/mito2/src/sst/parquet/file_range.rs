@@ -354,6 +354,64 @@ impl FileRange {
         self.row_group_idx
     }
 
+    // Outer None requires the ordinary reader; inner None is an empty selection.
+    pub(crate) async fn prepare_series_blocks(
+        &self,
+        ranges: Option<Vec<Range<usize>>>,
+        series: Option<Arc<Vec<[u8; 22]>>>,
+    ) -> Result<Option<Option<crate::sst::parquet::research_sidecar::PreparedSeriesSelection>>>
+    {
+        if !self.in_dynamic_filter_range() {
+            return Ok(Some(None));
+        }
+        let selection = if let Some(ranges) = ranges {
+            let rows = self
+                .context
+                .reader_builder
+                .parquet_metadata()
+                .row_group(self.row_group_idx)
+                .num_rows() as usize;
+            let Some(selection) = refine_row_range_selection(ranges, rows, &self.row_selection)?
+            else {
+                return Ok(Some(None));
+            };
+            Some(selection)
+        } else {
+            self.row_selection.clone()
+        };
+        self.context
+            .reader_builder
+            .prepare_series_blocks(self.row_group_idx, selection, series)
+            .await
+            .map(|prepared| prepared.map(Some))
+    }
+
+    pub(crate) fn supports_projected_series_blocks(&self) -> bool {
+        self.context.base.partition_filter.is_none()
+            && self.context.base.dyn_filters.is_empty()
+            && self.compat_batch().is_none()
+            && self.compaction_projection_mapper().is_none()
+    }
+
+    pub(crate) fn grid_row_bounds(
+        &self,
+        first: i64,
+        step: i128,
+        count: usize,
+    ) -> Option<Range<usize>> {
+        self.context.base.grid_row_bounds(first, step, count)
+    }
+
+    /// Candidate discovery has already applied tag predicates. Evaluate the remaining
+    /// field/time predicates without inventing sequence or operation columns.
+    pub(crate) fn filter_series_values(
+        &self,
+        timestamps: &ArrayRef,
+        values: &ArrayRef,
+    ) -> Result<BooleanBuffer> {
+        self.context.base.filter_series_values(timestamps, values)
+    }
+
     /// Builds a reader from absolute row-group offsets supplied by a range index.
     /// Existing pruning is intersected before reading, without predicate prefiltering.
     pub(crate) async fn reader_by_row_ranges(
@@ -588,6 +646,48 @@ impl FileRangeContext {
     }
 }
 
+#[derive(Clone)]
+pub(crate) enum SeriesBlockContext {
+    Range(FileRange),
+    File(Arc<SeriesFileContext>),
+}
+
+#[derive(Clone)]
+pub(crate) struct SeriesFileContext {
+    // A sidecar cache entry alone does not pin the source SST against deletion.
+    pub(crate) _file: FileHandle,
+    pub(crate) base: Arc<RangeBase>,
+    pub(crate) schema: datatypes::arrow::datatypes::SchemaRef,
+    pub(crate) parquet_metadata: Arc<ParquetMetaData>,
+    pub(crate) read_columns: Option<crate::read::read_columns::ReadColumns>,
+    pub(crate) predicate: Option<Predicate>,
+}
+
+impl SeriesBlockContext {
+    pub(crate) fn grid_row_bounds(
+        &self,
+        first: i64,
+        step: i128,
+        count: usize,
+    ) -> Option<Range<usize>> {
+        match self {
+            Self::Range(range) => range.grid_row_bounds(first, step, count),
+            Self::File(context) => context.base.grid_row_bounds(first, step, count),
+        }
+    }
+
+    pub(crate) fn filter_series_values(
+        &self,
+        timestamps: &ArrayRef,
+        values: &ArrayRef,
+    ) -> Result<BooleanBuffer> {
+        match self {
+            Self::Range(range) => range.filter_series_values(timestamps, values),
+            Self::File(context) => context.base.filter_series_values(timestamps, values),
+        }
+    }
+}
+
 /// Mode to pre-filter columns in a range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreFilterMode {
@@ -649,6 +749,81 @@ impl TagDecodeState {
 }
 
 impl RangeBase {
+    fn filter_series_values(
+        &self,
+        timestamps: &ArrayRef,
+        values: &ArrayRef,
+    ) -> Result<BooleanBuffer> {
+        let mut mask = BooleanBuffer::new_set(timestamps.len());
+        for ctx in &self.filters {
+            let filter = match ctx.filter() {
+                MaybeFilter::Matched => continue,
+                MaybeFilter::Pruned => return Ok(BooleanBuffer::new_unset(timestamps.len())),
+                MaybeFilter::Filter(filter) => filter,
+            };
+            let array = match ctx.semantic_type() {
+                SemanticType::Tag => continue,
+                SemanticType::Field if self.pre_filter_mode.skip_fields() => continue,
+                SemanticType::Field => values,
+                SemanticType::Timestamp => timestamps,
+            };
+            mask = mask.bitand(&filter.evaluate_array(array).context(RecordBatchSnafu)?);
+        }
+        Ok(mask)
+    }
+
+    fn grid_row_bounds(&self, first: i64, step: i128, count: usize) -> Option<Range<usize>> {
+        if self.partition_filter.is_some() || !self.dyn_filters.is_empty() {
+            return None;
+        }
+        let mut lower = i64::MIN as i128;
+        let mut upper = i64::MAX as i128 + 1;
+        for ctx in &self.filters {
+            let filter = match ctx.filter() {
+                MaybeFilter::Matched => continue,
+                MaybeFilter::Pruned => return Some(0..0),
+                MaybeFilter::Filter(filter) => filter,
+            };
+            match ctx.semantic_type() {
+                SemanticType::Tag => continue,
+                SemanticType::Field => return None,
+                SemanticType::Timestamp => {}
+            }
+            let datatypes::value::Value::Timestamp(value) = filter.literal_value()? else {
+                return None;
+            };
+            if value.unit() != common_time::timestamp::TimeUnit::Millisecond {
+                return None;
+            }
+            let value = value.value() as i128;
+            if filter.is_gt() {
+                lower = lower.max(value + 1);
+            } else if filter.is_gt_eq() {
+                lower = lower.max(value);
+            } else if filter.is_lt() {
+                upper = upper.min(value);
+            } else if filter.is_lt_eq() {
+                upper = upper.min(value + 1);
+            } else if filter.is_eq() {
+                lower = lower.max(value);
+                upper = upper.min(value + 1);
+            } else {
+                return None;
+            }
+        }
+        if step < 0 || (step == 0 && count > 1) {
+            return None;
+        }
+        let step = step.max(1);
+        let bound = |value: i128| {
+            let delta = value - first as i128;
+            (delta.div_euclid(step) + i128::from(delta.rem_euclid(step) != 0))
+                .clamp(0, count as i128) as usize
+        };
+        let start = bound(lower);
+        Some(start..bound(upper).max(start))
+    }
+
     /// Filters the input RecordBatch by the pushed down predicate and returns RecordBatch.
     ///
     /// It assumes all necessary tags are already decoded from the primary key.
@@ -1043,6 +1218,63 @@ mod tests {
             pre_filter_mode: PreFilterMode::All,
             partition_filter: None,
         }
+    }
+
+    #[test]
+    fn grid_bounds_match_timestamp_predicates() {
+        use datafusion_common::ScalarValue;
+        use datatypes::arrow::array::TimestampMillisecondArray;
+
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let name = &metadata.time_index_column().column_schema.name;
+        let timestamps: ArrayRef = Arc::new(TimestampMillisecondArray::from_iter_values(
+            (0..20).map(|i| -30 + i * 3),
+        ));
+        for value in [-40, -30, -29, 0, 27, 28, i64::MIN, i64::MAX] {
+            let literal = lit(ScalarValue::TimestampMillisecond(Some(value), None));
+            for expr in [
+                col(name).lt(literal.clone()),
+                col(name).lt_eq(literal.clone()),
+                col(name).gt(literal.clone()),
+                col(name).gt_eq(literal.clone()),
+                col(name).eq(literal),
+            ] {
+                let filter = SimpleFilterContext::new_opt(&metadata, None, &expr).unwrap();
+                let expected: Vec<_> = match filter.filter() {
+                    MaybeFilter::Filter(evaluator) => evaluator
+                        .evaluate_array(&timestamps)
+                        .unwrap()
+                        .set_indices()
+                        .collect(),
+                    _ => panic!("Expected an unevaluated predicate"),
+                };
+                let base = new_test_range_base(vec![filter]);
+                assert_eq!(
+                    base.grid_row_bounds(-30, 3, 20)
+                        .unwrap()
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+            }
+        }
+        let field =
+            SimpleFilterContext::new_opt(&metadata, None, &col("field_0").gt(lit(1_u64))).unwrap();
+        assert!(
+            new_test_range_base(vec![field])
+                .grid_row_bounds(-30, 3, 20)
+                .is_none()
+        );
+        let excluded = SimpleFilterContext::new_opt(
+            &metadata,
+            None,
+            &col(name).not_eq(lit(ScalarValue::TimestampMillisecond(Some(0), None))),
+        )
+        .unwrap();
+        assert!(
+            new_test_range_base(vec![excluded])
+                .grid_row_bounds(-30, 3, 20)
+                .is_none()
+        );
     }
 
     #[test]

@@ -15,7 +15,7 @@
 //! Per-series scan implementation.
 
 use std::fmt;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -35,15 +35,16 @@ use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
-    PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+    PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScanProcessor,
+    ScannerProperties,
 };
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc::error::{SendTimeoutError, TrySendError};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use crate::error::{
-    Error, InvalidSenderSnafu, JoinSnafu, PartitionOutOfRangeSnafu, Result, ScanMultiTimesSnafu,
-    ScanSeriesSnafu, TooManyFilesToReadSnafu,
+    Error, ExternalSnafu, InvalidSenderSnafu, JoinSnafu, PartitionOutOfRangeSnafu, Result,
+    ScanMultiTimesSnafu, ScanSeriesSnafu, TooManyFilesToReadSnafu, UnexpectedSnafu,
 };
 use crate::read::ScannerMetrics;
 use crate::read::pruner::{PartitionPruner, Pruner, PrunerOptions};
@@ -54,7 +55,9 @@ use crate::read::scan_util::{
 };
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_candidate::{SeriesCandidateScanner, is_sparse_metric_metadata};
-use crate::read::series_reader::{AssignedSeriesBatch, SeriesBatchCollector, SeriesReader};
+use crate::read::series_reader::{
+    AssignedSeriesBatch, SeriesBatchCollector, SeriesReader, SharedScanProcessor,
+};
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::PrimaryKeyArray;
@@ -135,6 +138,7 @@ pub struct SeriesScan {
     /// Metrics for each partition.
     /// The scanner only sets in query and keeps it empty during compaction.
     metrics_list: Arc<PartitionMetricsList>,
+    program_claimed: Arc<AtomicBool>,
 }
 
 impl SeriesScan {
@@ -177,6 +181,7 @@ impl SeriesScan {
             legacy_receivers: Mutex::new(Vec::new()),
             candidate_receivers: Mutex::new(Vec::new()),
             metrics_list: Arc::new(PartitionMetricsList::default()),
+            program_claimed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -271,6 +276,7 @@ impl SeriesScan {
                 part_metrics,
                 metrics_set,
                 ctx.explain_verbose,
+                None,
             ),
         }
     }
@@ -315,6 +321,7 @@ impl SeriesScan {
         part_metrics: PartitionMetrics,
         metrics_set: &ExecutionPlanMetricsSet,
         explain_verbose: bool,
+        processor: Option<SharedScanProcessor>,
     ) -> Result<ScanBatchStream> {
         self.maybe_start_candidate_distributor(metrics_set, explain_verbose);
         // Safety: `scan_batch_in_partition` validates the index, and the receiver
@@ -348,6 +355,20 @@ impl SeriesScan {
                     input.range_semaphore,
                     part_metrics.clone(),
                 )?;
+                if let Some(mut blocks) = reader.try_build_projected_block_stream(processor.clone()).await? {
+                    metrics.scan_cost += build_start.elapsed();
+                    fetch_start = Instant::now();
+                    while let Some(batch) = blocks.try_next().await? {
+                        metrics.scan_cost += fetch_start.elapsed();
+                        metrics.num_batches += 1;
+                        metrics.num_rows += batch.num_rows();
+                        let yield_start = Instant::now();
+                        yield ScanBatch::Projected(batch);
+                        metrics.yield_cost += yield_start.elapsed();
+                        fetch_start = Instant::now();
+                    }
+                    continue;
+                }
                 let mut reader_stream = reader.build_stream().await?;
                 metrics.scan_cost += build_start.elapsed();
                 fetch_start = Instant::now();
@@ -356,6 +377,25 @@ impl SeriesScan {
                     metrics.num_batches += 1;
                     metrics.num_rows += record_batch.num_rows();
 
+                    if let Some(processor) = &processor {
+                        let process_start = Instant::now();
+                        let processor = processor.clone();
+                        let mapper = stream_ctx.input.mapper.clone();
+                        let cache = stream_ctx.input.cache_strategy.clone();
+                        common_runtime::spawn_blocking_query(move || -> Result<()> {
+                            let batch = mapper.convert(&record_batch, &cache)
+                                .map_err(BoxedError::new)
+                                .context(ExternalSnafu { context: "Project visible scan batch" })?;
+                            processor.lock().map_err(|_| UnexpectedSnafu {
+                                reason: "Scan processor lock poisoned",
+                            }.build())?.process(&batch)
+                                .context(ExternalSnafu { context: "Process visible scan batch" })
+                        }).await.context(JoinSnafu)??;
+                        metrics.scan_cost += process_start.elapsed();
+                        fetch_start = Instant::now();
+                        continue;
+                    }
+
                     let yield_start = Instant::now();
                     yield ScanBatch::RecordBatch(record_batch);
                     metrics.yield_cost += yield_start.elapsed();
@@ -363,6 +403,21 @@ impl SeriesScan {
                 }
             }
             metrics.scan_cost += fetch_start.elapsed();
+
+            if let Some(processor) = processor {
+                let retained = processor.clone();
+                let batches = common_runtime::spawn_blocking_query(move || -> Result<_> {
+                    retained.lock().map_err(|_| UnexpectedSnafu {
+                        reason: "Scan processor lock poisoned",
+                    }.build())?.finish()
+                        .context(ExternalSnafu { context: "Finish scan processor" })
+                }).await.context(JoinSnafu)??;
+                for batch in batches {
+                    yield ScanBatch::Projected(batch);
+                }
+                // Keep output accounting alive until every yielded batch is consumed.
+                drop(processor);
+            }
 
             part_metrics.merge_metrics(&metrics);
             part_metrics.on_finish();
@@ -564,6 +619,98 @@ impl RegionScanner for SeriesScan {
             .map_err(BoxedError::new)
     }
 
+    fn scan_partition_with_processor(
+        &self,
+        ctx: &QueryScanContext,
+        metrics_set: &ExecutionPlanMetricsSet,
+        partition: usize,
+        processor: Box<dyn ScanProcessor>,
+    ) -> Result<Option<SendableRecordBatchStream>, BoxedError> {
+        if !matches!(self.mode, SeriesScanMode::TwoPhase) {
+            return Ok(None);
+        }
+        if partition >= self.properties.num_partitions() {
+            return Err(BoxedError::new(
+                PartitionOutOfRangeSnafu {
+                    given: partition,
+                    all: self.properties.num_partitions(),
+                }
+                .build(),
+            ));
+        }
+        let schema = processor.schema();
+        let metrics = new_partition_metrics(
+            &self.stream_ctx,
+            ctx.explain_verbose,
+            metrics_set,
+            partition,
+            &self.metrics_list,
+        );
+        let stream = self
+            .scan_two_phase_batch_in_partition(
+                partition,
+                metrics.clone(),
+                metrics_set,
+                ctx.explain_verbose,
+                Some(Arc::new(Mutex::new(processor))),
+            )
+            .map_err(BoxedError::new)?;
+        let input = &self.stream_ctx.input;
+        let converted = ConvertBatchStream::new(
+            stream,
+            input.mapper.clone(),
+            input.cache_strategy.clone(),
+            metrics,
+        );
+        Ok(Some(Box::pin(RecordBatchStreamWrapper::new(
+            schema,
+            Box::pin(converted),
+        ))))
+    }
+
+    fn scan_series_program(
+        &self,
+        factory: store_api::region_engine::ScanProcessorFactory,
+        workers: usize,
+    ) -> futures::future::BoxFuture<'static, Result<Option<SendableRecordBatchStream>, BoxedError>>
+    {
+        let source = self.prepare_series_source();
+        let claimed = self.program_claimed.clone();
+        Box::pin(async move {
+            let Some(source) = source.await? else {
+                return Ok(None);
+            };
+            crate::read::research_series_major::NativeSeriesScan::execute_program(
+                source, factory, workers, claimed,
+            )
+            .map_err(BoxedError::new)
+        })
+    }
+
+    fn prepare_series_source(
+        &self,
+    ) -> futures::future::BoxFuture<
+        'static,
+        Result<Option<Arc<dyn store_api::region_engine::PreparedSeriesSource>>, BoxedError>,
+    > {
+        if self.mode != SeriesScanMode::TwoPhase
+            || self.properties.num_partitions() != 1
+            || (std::env::var_os("GT_RESEARCH_SERIES_PROGRAM").is_none()
+                && std::env::var_os("GT_RESEARCH_QUERY_PROGRAM").is_none())
+            || std::env::var_os("GT_RESEARCH_MAX_SUMMARY").is_some()
+            || !self.candidate_receivers.lock().unwrap().is_empty()
+            || !self.legacy_receivers.lock().unwrap().is_empty()
+        {
+            return Box::pin(async { Ok(None) });
+        }
+        let context = self.stream_ctx.clone();
+        Box::pin(async move {
+            crate::read::research_series_major::NativeSeriesScan::prepare_program_source(context)
+                .await
+                .map_err(BoxedError::new)
+        })
+    }
+
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
         self.properties.prepare(request);
 
@@ -605,6 +752,7 @@ impl RegionScanner for SeriesScan {
         self.legacy_receivers.lock().unwrap().clear();
         self.candidate_receivers.lock().unwrap().clear();
         self.metrics_list = Arc::new(PartitionMetricsList::default());
+        self.program_claimed = Arc::new(AtomicBool::new(false));
     }
 
     fn set_logical_region(&mut self, logical_region: bool) {

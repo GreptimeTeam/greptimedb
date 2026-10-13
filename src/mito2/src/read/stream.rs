@@ -35,6 +35,7 @@ use crate::read::series_scan::SeriesBatch;
 pub enum ScanBatch {
     Series(SeriesBatch),
     RecordBatch(DfRecordBatch),
+    Projected(RecordBatch),
 }
 
 pub type ScanBatchStream = BoxStream<'static, Result<ScanBatch>>;
@@ -66,6 +67,7 @@ impl ConvertBatchStream {
 
     fn convert(&mut self, batch: ScanBatch) -> common_recordbatch::error::Result<RecordBatch> {
         match batch {
+            ScanBatch::Projected(batch) => Ok(batch),
             ScanBatch::Series(series) => {
                 debug_assert!(
                     self.pending.is_empty(),

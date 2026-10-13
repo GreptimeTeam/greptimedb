@@ -633,6 +633,29 @@ impl QueryMemoryTracker {
         }
     }
 
+    /// Charges non-Arrow output against the same quota and exhaustion policy as streams.
+    /// Keep the returned guard alive until the consumer releases the output.
+    pub async fn reserve_output_bytes(&self, bytes: usize) -> Result<QueryMemoryGuard> {
+        let mut tracker = self.new_stream_tracker();
+        if let Err(error) = tracker.try_track(bytes) {
+            match self.on_exhausted_policy {
+                OnExhaustedPolicy::Fail => {
+                    tracker.inc_rejected();
+                    return Err(error);
+                }
+                OnExhaustedPolicy::Wait { .. } => {
+                    let (waiting, result) = tracker.track_with_policy(bytes).await;
+                    tracker = waiting;
+                    if let Err(error) = result {
+                        tracker.inc_rejected();
+                        return Err(tracker.wait_error(bytes, error));
+                    }
+                }
+            }
+        }
+        Ok(QueryMemoryGuard { _tracker: tracker })
+    }
+
     fn new_stream_tracker(&self) -> StreamMemoryTracker {
         StreamMemoryTracker {
             tracker: self.clone(),
@@ -734,6 +757,11 @@ impl QueryMemoryTrackerBuilder {
             on_exhausted_policy: self.on_exhausted_policy,
         }
     }
+}
+
+/// Releases a non-Arrow output charge when dropped, including on cancellation.
+pub struct QueryMemoryGuard {
+    _tracker: StreamMemoryTracker,
 }
 
 struct StreamMemoryTracker {
@@ -1023,6 +1051,59 @@ mod tests {
     use tokio::time::{sleep, timeout};
 
     use super::*;
+
+    #[tokio::test]
+    async fn native_output_shares_stream_quota_and_releases_it() {
+        let rejected = Arc::new(AtomicUsize::new(0));
+        let counter = rejected.clone();
+        let tracker = QueryMemoryTracker::builder(1024, OnExhaustedPolicy::Fail)
+            .on_reject(move || {
+                counter.fetch_add(1, Ordering::Relaxed);
+            })
+            .build();
+        let batch = large_string_batch(32);
+        let mut stream = MemoryTrackedStream::new(
+            RecordBatches::try_new(batch.schema.clone(), vec![batch])
+                .unwrap()
+                .as_stream(),
+            tracker.clone(),
+        );
+        stream.next().await.unwrap().unwrap();
+        assert_eq!(tracker.current(), 1024);
+        assert!(tracker.reserve_output_bytes(1).await.is_err());
+        assert_eq!(rejected.load(Ordering::Relaxed), 1);
+        drop(stream);
+        let output = tracker.reserve_output_bytes(1).await.unwrap();
+        assert_eq!(tracker.current(), 1024);
+        drop(output);
+        assert_eq!(tracker.current(), 0);
+    }
+
+    #[tokio::test]
+    async fn native_output_waits_and_cancellation_releases_quota() {
+        let tracker = QueryMemoryTracker::builder(
+            1024,
+            OnExhaustedPolicy::Wait {
+                timeout: Duration::from_secs(5),
+            },
+        )
+        .build();
+        let held = tracker.reserve_output_bytes(1024).await.unwrap();
+        let mut waiting = Box::pin(tracker.reserve_output_bytes(1024));
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        drop(waiting);
+        assert_eq!(tracker.current(), 1024);
+        let mut waiting = Box::pin(tracker.reserve_output_bytes(1024));
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        drop(held);
+        let output = timeout(Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(tracker.current(), 1024);
+        drop(output);
+        assert_eq!(tracker.current(), 0);
+    }
 
     fn large_string_batch(bytes: usize) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(

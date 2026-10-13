@@ -393,12 +393,46 @@ impl DatafusionQueryEngine {
 
         common_telemetry::debug!("Create physical plan, input plan: {logical_plan}");
 
+        if let DfLogicalPlan::Extension(extension) = logical_plan
+            && extension
+                .node
+                .as_any()
+                .is::<crate::research_series_grid::query_program::ProgramNode>()
+        {
+            let physical = state
+                .query_planner()
+                .create_physical_plan(logical_plan, state)
+                .await?;
+            logger.phy_plan = Some(physical.clone());
+            return Ok(physical);
+        }
+
+        if let Some(physical) =
+            crate::research_series_grid::try_bind_fragment(logical_plan, state).await?
+        {
+            logger.phy_plan = Some(physical.clone());
+            return Ok(physical);
+        }
+
         // special handle EXPLAIN plan
         if matches!(logical_plan, DfLogicalPlan::Explain(_)) {
             return state
                 .create_physical_plan(logical_plan)
                 .await
                 .map_err(Into::into);
+        }
+
+        if std::env::var_os("GT_RESEARCH_DIRECT_ONLINE_BINDING").is_some()
+            && let Some(plan) =
+                crate::dist_plan::DistPlannerAnalyzer::prepare_series_frontend(logical_plan)?
+        {
+            let physical = state
+                .query_planner()
+                .create_physical_plan(&plan, state)
+                .await?;
+            logger.phy_plan = Some(physical.clone());
+            common_telemetry::debug!("Research placed series frontend bound");
+            return Ok(physical);
         }
 
         // analyze first

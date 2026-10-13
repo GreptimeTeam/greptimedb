@@ -60,6 +60,20 @@ impl RegionQueryHandler for FrontendRegionQueryHandler {
             .context(RegionQuerySnafu)
     }
 
+    async fn prepare_series_sources(
+        &self,
+        target: &RegionQueryTarget,
+        requests: Vec<common_query::request::SeriesSourceRequest>,
+    ) -> QueryResult<Option<Vec<common_query::request::PreparedSeriesRead>>> {
+        self.node_manager
+            .datanode(target.peer())
+            .await
+            .prepare_series_sources(requests)
+            .await
+            .map_err(BoxedError::new)
+            .context(RegionQuerySnafu)
+    }
+
     async fn do_get(
         &self,
         target: &RegionQueryTarget,

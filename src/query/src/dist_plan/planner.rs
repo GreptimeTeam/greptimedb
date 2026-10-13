@@ -145,7 +145,7 @@ impl ExtensionPlanner for MergeSortExtensionPlanner {
 pub struct DistExtensionPlanner {
     catalog_manager: CatalogManagerRef,
     partition_rule_manager: PartitionRuleManagerRef,
-    region_query_handler: RegionQueryHandlerRef,
+    pub(crate) region_query_handler: RegionQueryHandlerRef,
     enable_per_region_metrics: bool,
 }
 
@@ -238,13 +238,13 @@ impl ExtensionPlanner for DistExtensionPlanner {
 
 impl DistExtensionPlanner {
     /// Extract fully resolved table name from logical plan
-    fn extract_full_table_name(plan: &LogicalPlan) -> Result<Option<TableName>> {
+    pub(crate) fn extract_full_table_name(plan: &LogicalPlan) -> Result<Option<TableName>> {
         let mut extractor = TableScanExtractor::default();
         let _ = plan.visit(&mut extractor)?;
         Ok(extractor.table_name)
     }
 
-    async fn get_regions(
+    pub(crate) async fn get_regions(
         &self,
         table_name: &TableName,
         logical_plan: &LogicalPlan,

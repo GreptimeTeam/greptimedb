@@ -16,18 +16,19 @@
 
 use std::sync::Arc;
 
-use datatypes::arrow::array::{Array, BinaryArray};
-use datatypes::arrow::compute::concat_batches;
+use datatypes::arrow::array::{Array, BinaryArray, UInt32Array};
+use datatypes::arrow::compute::{concat_batches, take_record_batch};
+use datatypes::arrow::datatypes::{DataType, TimeUnit};
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::{Stream, TryStreamExt};
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::storage::{FileId, TimeSeriesRowSelector};
 
 use crate::cache::{
     CacheStrategy, SelectorResult, SelectorResultKey, SelectorResultValue,
     selector_result_cache_hit, selector_result_cache_miss,
 };
-use crate::error::{ComputeArrowSnafu, Result};
+use crate::error::{ComputeArrowSnafu, InvalidBatchSnafu, Result};
 use crate::read::read_columns::JsonTargetTypes;
 use crate::read::{BoxedRecordBatchStream, timestamp_array_to_i64_slice};
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
@@ -395,6 +396,84 @@ impl FlatLastRowReader {
     }
 }
 
+/// Prunes only proven-unused samples. Batch boundaries retain extra candidates,
+/// so independently pruned streams can be merged without losing a grid winner.
+/// Values, including stale markers and nulls, must remain untouched: downstream
+/// instant evaluation checks staleness after selecting the newest timestamp.
+pub(crate) fn prune_instant_grid(
+    batch: RecordBatch,
+    selector: TimeSeriesRowSelector,
+) -> Result<RecordBatch> {
+    let TimeSeriesRowSelector::InstantGrid {
+        start,
+        end,
+        interval,
+        lookback,
+        offset,
+    } = selector
+    else {
+        return Ok(batch);
+    };
+    if batch.num_rows() == 0 || interval <= 0 || lookback < 0 {
+        return Ok(batch);
+    }
+    let ts_idx = time_index_column_index(batch.num_columns());
+    // The first prototype changes only the native millisecond scan path.
+    if !matches!(
+        batch.column(ts_idx).data_type(),
+        DataType::Timestamp(TimeUnit::Millisecond, _)
+    ) {
+        return Ok(batch);
+    }
+    let pk_idx = primary_key_column_index(batch.num_columns());
+    let pk_array = batch
+        .column(pk_idx)
+        .as_any()
+        .downcast_ref::<PrimaryKeyArray>()
+        .context(InvalidBatchSnafu {
+            reason: "instant grid requires a flat primary-key dictionary",
+        })?;
+    let offsets = primary_key_offsets(pk_array)?;
+    let timestamps = timestamp_array_to_i64_slice(batch.column(ts_idx));
+    let start = i128::from(start);
+    let end = i128::from(end);
+    let interval = i128::from(interval);
+    let offset = i128::from(offset);
+    let lookback = i128::from(lookback);
+    let mut selected = Vec::new();
+    for bounds in offsets.windows(2) {
+        let mut row = bounds[0];
+        let mut evaluation = start;
+        while row < bounds[1] {
+            let timestamp = timestamps[row];
+            let mut next = row + 1;
+            while next < bounds[1] && timestamps[next] == timestamp {
+                next += 1;
+            }
+            let sample = i128::from(timestamp) + offset;
+            if sample > evaluation {
+                let delta = sample - evaluation;
+                evaluation += if delta <= interval {
+                    interval
+                } else {
+                    ((delta + interval - 1) / interval) * interval
+                };
+            }
+            let valid =
+                evaluation <= end && (evaluation == sample || evaluation - sample < lookback);
+            if valid && (next == bounds[1] || evaluation < i128::from(timestamps[next]) + offset) {
+                // Keep every equal-timestamp row; selection must not invent a tie order.
+                selected.extend((row..next).map(|index| index as u32));
+            }
+            row = next;
+        }
+    }
+    if selected.len() == batch.num_rows() {
+        return Ok(batch);
+    }
+    take_record_batch(&batch, &UInt32Array::from(selected)).context(ComputeArrowSnafu)
+}
+
 /// Gets the primary key bytes at `index` from the primary key dictionary column.
 fn primary_key_bytes_at(batch: &RecordBatch, pk_col_idx: usize, index: usize) -> &[u8] {
     let pk_dict = batch
@@ -436,6 +515,109 @@ mod tests {
     use datatypes::arrow::record_batch::RecordBatch;
 
     use super::*;
+
+    #[test]
+    fn instant_grid_preserves_winners_across_batches() {
+        // Duplicate timestamps preserve their original order. Distinct row IDs
+        // let the independent oracle detect accidental tie-breaking changes.
+        let timestamps = [-20, -11, -11, -4, 0, 1, 3, 8, 8, 17, 29, 41];
+        let ids: Vec<i64> = (0..timestamps.len() as i64).collect();
+        let batch = new_flat_batch(&vec![b"a".as_slice(); timestamps.len()], &timestamps, &ids);
+        for interval in [1, 3, 10, 30] {
+            for lookback in [0, 1, 7, 35] {
+                for offset in [-17, 0, 23] {
+                    for chunk_size in [1, 2, 5, 12] {
+                        let selector = TimeSeriesRowSelector::InstantGrid {
+                            start: -10,
+                            end: 50,
+                            interval,
+                            lookback,
+                            offset,
+                        };
+                        let mut retained = Vec::new();
+                        for start in (0..timestamps.len()).step_by(chunk_size) {
+                            let output = prune_instant_grid(
+                                batch.slice(start, chunk_size.min(timestamps.len() - start)),
+                                selector,
+                            )
+                            .unwrap();
+                            retained.extend_from_slice(
+                                output
+                                    .column(0)
+                                    .as_any()
+                                    .downcast_ref::<Int64Array>()
+                                    .unwrap()
+                                    .values(),
+                            );
+                        }
+                        for evaluation in (-10..=50).step_by(interval as usize) {
+                            let winner = |candidates: &[i64]| {
+                                candidates.iter().copied().rev().find(|id| {
+                                    let sample = timestamps[*id as usize] + offset;
+                                    sample <= evaluation
+                                        && (sample == evaluation || evaluation - sample < lookback)
+                                })
+                            };
+                            assert_eq!(
+                                winner(&ids),
+                                winner(&retained),
+                                "{selector:?}, chunk={chunk_size}, evaluation={evaluation}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let reduced = prune_instant_grid(
+            batch,
+            TimeSeriesRowSelector::InstantGrid {
+                start: 0,
+                end: 40,
+                interval: 10,
+                lookback: 30,
+                offset: 0,
+            },
+        )
+        .unwrap();
+        assert!(reduced.num_rows() < timestamps.len());
+
+        let batch = new_flat_batch(&[b"a", b"a", b"b", b"b"], &[0, 4, 0, 4], &[1, 2, 3, 4]);
+        let selected = prune_instant_grid(
+            batch,
+            TimeSeriesRowSelector::InstantGrid {
+                start: 5,
+                end: 5,
+                interval: 10,
+                lookback: 10,
+                offset: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            selected
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .values()
+                .as_ref(),
+            &[2, 4]
+        );
+
+        let batch = new_flat_batch(&[b"a", b"a"], &[i64::MAX - 1, i64::MAX], &[1, 2]);
+        let selected = prune_instant_grid(
+            batch,
+            TimeSeriesRowSelector::InstantGrid {
+                start: -1,
+                end: 0,
+                interval: 1,
+                lookback: 1,
+                offset: -i64::MAX,
+            },
+        )
+        .unwrap();
+        assert_eq!(selected.num_rows(), 2);
+    }
 
     /// Helper to build a flat format RecordBatch for testing.
     fn new_flat_batch(primary_keys: &[&[u8]], timestamps: &[i64], fields: &[i64]) -> RecordBatch {

@@ -410,6 +410,7 @@ async fn delta_mixed_ranges_drop_and_float_ranges_sum() {
                 )
                 .await,
                 ctx: PromPlannerContext::default(),
+                dependencies: None,
                 promql_annotations: Some(collector.clone()),
             };
             let left_context = direct_or_context("lhs", &["job", marker], "v");
@@ -711,6 +712,7 @@ async fn binary_joins_align_only_the_temporality_marker() {
             )
             .await,
             ctx: PromPlannerContext::default(),
+            dependencies: None,
             promql_annotations: None,
         };
         let joined = planner
@@ -750,6 +752,7 @@ async fn binary_joins_align_only_the_temporality_marker() {
             )
             .await,
             ctx: PromPlannerContext::default(),
+            dependencies: None,
             promql_annotations: None,
         };
         let set = planner
@@ -805,6 +808,7 @@ async fn binary_joins_align_only_the_temporality_marker() {
         )
         .await,
         ctx: PromPlannerContext::default(),
+        dependencies: None,
         promql_annotations: None,
     };
     let set = planner
@@ -917,6 +921,7 @@ async fn binary_joins_align_dictionary_temporality_marker_with_tagless_vector() 
             )
             .await,
             ctx: PromPlannerContext::default(),
+            dependencies: None,
             promql_annotations: None,
         };
         let scan = |name, table: Arc<MemTable>| {

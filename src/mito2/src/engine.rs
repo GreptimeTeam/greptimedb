@@ -1454,6 +1454,18 @@ impl RegionEngine for MitoEngine {
             .map_err(BoxedError::new)
     }
 
+    async fn prepare_series_source(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> Result<Option<Arc<dyn store_api::region_engine::PreparedSeriesSource>>, BoxedError> {
+        self.scan_region(region_id, request)
+            .map_err(BoxedError::new)?
+            .prepare_series_source()
+            .await
+            .map_err(BoxedError::new)
+    }
+
     fn query_memory_tracker(&self) -> Option<QueryMemoryTracker> {
         Some(self.inner.scan_memory_tracker.clone())
     }

@@ -58,7 +58,17 @@ impl OptimizerRule for ScanHintRule {
 
 impl ScanHintRule {
     fn optimize(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
-        let mut rewriter = ScanHintRewriter::default();
+        Self::optimize_with_grid(plan, std::env::var_os("GT_RESEARCH_INSTANT_GRID").is_some())
+    }
+
+    fn optimize_with_grid(
+        plan: LogicalPlan,
+        instant_grid_enabled: bool,
+    ) -> Result<Transformed<LogicalPlan>> {
+        let mut rewriter = ScanHintRewriter {
+            instant_grid_enabled,
+            ..Default::default()
+        };
         // The extension's input is included by DataFusion's normal TreeNode
         // rewrite, so this is one scoped recursive walk (subquery expressions
         // are included by the dedicated API as well).
@@ -82,15 +92,18 @@ impl ScanHintRule {
 
         // Attached scan filters are checked below; residual Filter nodes are
         // rejected by the single-evaluation path allowlist.
-        let filters_preserve_last_row = if rewriter.inside_single_evaluation {
-            Self::filters_preserve_last_row(&table_scan, original)
-        } else {
-            true
-        };
+        let filters_preserve_last_row =
+            if rewriter.inside_single_evaluation || rewriter.instant_grid.is_some() {
+                Self::filters_preserve_last_row(&table_scan, original)
+            } else {
+                true
+            };
         let use_last_row = rewriter.inside_single_evaluation && filters_preserve_last_row;
 
-        let has_hint =
-            rewriter.order_expr.is_some() || rewriter.ts_row_selector.is_some() || use_last_row;
+        let has_hint = rewriter.order_expr.is_some()
+            || rewriter.ts_row_selector.is_some()
+            || use_last_row
+            || rewriter.instant_grid.is_some();
         if !has_hint {
             return Ok(Transformed::no(LogicalPlan::TableScan(table_scan)));
         }
@@ -101,6 +114,9 @@ impl ScanHintRule {
         // local as well as the new LastRow hint.
         let adapter = original.clone_for_scan();
         Self::apply_hints(&adapter, rewriter);
+        if filters_preserve_last_row && let Some(grid) = rewriter.instant_grid {
+            adapter.with_time_series_selector_hint(grid);
+        }
         if use_last_row {
             // Apply the instant-derived hint after the aggregate hint. Both
             // select LastRow today, and this ordering preserves the existing
@@ -275,6 +291,9 @@ struct ScanHintRewriter {
     ts_stack: Vec<Option<(HashSet<Column>, Column)>>,
     inside_single_evaluation: bool,
     single_evaluation_stack: Vec<bool>,
+    instant_grid: Option<TimeSeriesRowSelector>,
+    instant_grid_enabled: bool,
+    instant_grid_stack: Vec<Option<TimeSeriesRowSelector>>,
 }
 
 impl TreeNodeRewriter for ScanHintRewriter {
@@ -282,6 +301,7 @@ impl TreeNodeRewriter for ScanHintRewriter {
 
     fn f_down(&mut self, node: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
         self.order_stack.push(self.order_expr.clone());
+        self.instant_grid_stack.push(self.instant_grid);
         self.ts_stack.push(self.ts_row_selector.clone());
         self.single_evaluation_stack
             .push(self.inside_single_evaluation);
@@ -293,12 +313,45 @@ impl TreeNodeRewriter for ScanHintRewriter {
             && let Some(instant) = extension.node.as_any().downcast_ref::<InstantManipulate>()
         {
             self.inside_single_evaluation = instant.is_single_evaluation();
+            let (start, end, interval, lookback, offset) = instant.evaluation_grid();
+            self.instant_grid =
+                (self.instant_grid_enabled && start < end && interval > 0 && lookback >= 0)
+                    .then_some(TimeSeriesRowSelector::InstantGrid {
+                        start,
+                        end,
+                        interval,
+                        lookback,
+                        offset,
+                    });
+        } else if let LogicalPlan::Extension(extension) = &node
+            && let Some(instant) = extension
+                .node
+                .as_any()
+                .downcast_ref::<crate::research_series_grid::SeriesInstantMax>()
+        {
+            let [start, end, interval, lookback, offset] = instant.evaluation_grid();
+            self.inside_single_evaluation = start == end;
+            self.instant_grid =
+                (self.instant_grid_enabled && start < end && interval > 0 && lookback >= 0)
+                    .then_some(TimeSeriesRowSelector::InstantGrid {
+                        start,
+                        end,
+                        interval,
+                        lookback,
+                        offset,
+                    });
         } else if self.inside_single_evaluation {
             // This allowlist is coupled to the controlled PromQL planner. It
             // permits only nodes known to preserve the newest row per series;
             // every other node is a sticky boundary until a nested instant
             // extension establishes a new evaluation scope.
             self.inside_single_evaluation = single_evaluation_node_allowed(&node);
+        }
+        if self.instant_grid.is_some()
+            && !matches!(&node, LogicalPlan::Extension(extension) if (extension.node.as_any().is::<InstantManipulate>() || extension.node.as_any().is::<crate::research_series_grid::SeriesInstantMax>()))
+            && !single_evaluation_node_allowed(&node)
+        {
+            self.instant_grid = None;
         }
         if let LogicalPlan::Aggregate(aggregate) = &node {
             self.ts_row_selector = Self::extract_last_value_selector(aggregate);
@@ -325,6 +378,9 @@ impl TreeNodeRewriter for ScanHintRewriter {
     }
 
     fn f_up(&mut self, node: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
+        if let Some(previous) = self.instant_grid_stack.pop() {
+            self.instant_grid = previous;
+        }
         if let Some(previous) = self.order_stack.pop() {
             self.order_expr = previous;
         }
@@ -698,6 +754,48 @@ mod test {
             Some(TimeSeriesRowSelector::LastRow { after_merge: true })
         );
 
+        assert_eq!(provider.scan_request().series_row_selector, None);
+    }
+
+    #[test]
+    fn instant_grid_hint_is_scoped_and_rejects_residual_filters() {
+        let provider = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+        let rewritten =
+            ScanHintRule::optimize_with_grid(instant_plan(provider.clone(), 2000), true)
+                .unwrap()
+                .data;
+        assert_eq!(
+            scan_requests(&rewritten)[0].series_row_selector,
+            Some(TimeSeriesRowSelector::InstantGrid {
+                start: 1000,
+                end: 2000,
+                interval: 1000,
+                lookback: 1000,
+                offset: 0
+            })
+        );
+        assert_eq!(provider.scan_request().series_row_selector, None);
+
+        let input = LogicalPlanBuilder::from(scan_plan(provider.clone(), "t"))
+            .filter(col("v0").gt(lit(0)))
+            .unwrap()
+            .build()
+            .unwrap();
+        let plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(InstantManipulate::new(
+                1000,
+                2000,
+                1000,
+                1000,
+                0,
+                "ts".to_string(),
+                vec![],
+                Some("v0".to_string()),
+                input,
+            )),
+        });
+        let rewritten = ScanHintRule::optimize_with_grid(plan, true).unwrap().data;
+        assert_eq!(scan_requests(&rewritten)[0].series_row_selector, None);
         assert_eq!(provider.scan_request().series_row_selector, None);
     }
 

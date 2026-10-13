@@ -139,6 +139,9 @@ impl SeriesCandidateScanner {
 
     /// Builds a globally sorted stream of candidate metric-series IDs.
     pub(crate) async fn build_stream(&self) -> Result<MetricSeriesIdStream> {
+        if let Some(scan) = self.stream_ctx.native_series_scan().await? {
+            return scan.candidates(&self.memory_pool).await;
+        }
         let all_ranges = self
             .partitions
             .iter()

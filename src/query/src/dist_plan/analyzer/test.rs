@@ -417,8 +417,8 @@ fn frontend_only_histogram_folds_stay_above_merge_scan() {
 }
 
 /// `Categorizer` calls `Unnest` commutative, so the Substrait check in `should_expand` is
-/// the only thing keeping it on the frontend. It also sits above an encodable projection,
-/// which pins the rewriter to the whole-plan check rather than to the root node alone.
+/// the only thing keeping it on the frontend. An encodable child must not supply
+/// the encoding proof for its unsupported parent.
 #[test]
 fn unencodable_unnest_stays_above_merge_scan() {
     let table = TestTable::table_with_name(0, "t".to_string());
@@ -455,6 +455,67 @@ fn unencodable_unnest_stays_above_merge_scan() {
     DFLogicalSubstraitConvertor
         .encode(remote_input, DefaultSerializer)
         .unwrap();
+}
+
+#[test]
+fn encoding_proof_does_not_cross_sibling_branches() {
+    let scan = |name: &str| {
+        let table = TestTable::table_with_name(0, name.to_string());
+        let source = Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(table),
+        )));
+        LogicalPlanBuilder::scan_with_filters(name, source, None, vec![]).unwrap()
+    };
+    let encoded = scan("a")
+        .project(vec![col("pk1"), col("number")])
+        .unwrap()
+        .build()
+        .unwrap();
+    let unsupported = scan("b")
+        .project(vec![
+            col("pk1"),
+            make_array(vec![col("number")]).alias("numbers"),
+        ])
+        .unwrap()
+        .unnest_column("numbers")
+        .unwrap()
+        .project(vec![col("pk1"), col("numbers").alias("number")])
+        .unwrap()
+        .build()
+        .unwrap();
+    for (left, right) in [
+        (encoded.clone(), unsupported.clone()),
+        (unsupported, encoded),
+    ] {
+        let plan = LogicalPlanBuilder::from(left)
+            .union(right)
+            .unwrap()
+            .build()
+            .unwrap();
+        let result = DistPlannerAnalyzer
+            .analyze(plan, &ConfigOptions::default())
+            .unwrap();
+        assert!(result.to_string().contains("Unnest:"));
+        let mut remote_branches = 0;
+        result
+            .apply(|node| {
+                if let LogicalPlan::Extension(extension) = node
+                    && let Some(remote) = extension
+                        .node
+                        .as_any()
+                        .downcast_ref::<MergeScanLogicalPlan>()
+                {
+                    remote_branches += 1;
+                    assert!(!remote.input().to_string().contains("Unnest:"));
+                    DFLogicalSubstraitConvertor
+                        .encode(remote.input(), DefaultSerializer)
+                        .unwrap();
+                }
+                Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
+            })
+            .unwrap();
+        assert_eq!(remote_branches, 2);
+    }
 }
 
 #[test]
@@ -2908,4 +2969,238 @@ fn expand_nested_scalar_subquery() {
             Ok(TreeNodeRecursion::Continue)
         })
         .unwrap();
+}
+
+#[test]
+fn series_pack_preserves_cross_region_max_merge() {
+    let source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(TestTable::table_with_name(0, "t".into())),
+    )));
+    let input = LogicalPlanBuilder::scan("t", source, None)
+        .unwrap()
+        .aggregate(
+            vec![col("pk3"), col("ts")],
+            vec![max(col("number")).alias("value")],
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+    let plan = crate::research_series_grid::SeriesPack::plan(input, &["pk3".into()], "ts", "value")
+        .unwrap();
+    let result = DistPlannerAnalyzer {}
+        .analyze(plan, &ConfigOptions::default())
+        .unwrap();
+    let text = result.to_string();
+    let remote = text.find("MergeScan").expect("Remote scan missing");
+    assert!(text.find("ResearchSeriesPack").unwrap() < remote, "{text}");
+    assert!(
+        text.find("__max_merge").expect("Global max merge missing") < remote,
+        "{text}"
+    );
+    assert!(text[remote..].contains("__max_state"), "{text}");
+}
+
+fn early_series_source() -> LogicalPlan {
+    let mut columns = TestTable::schema().column_schemas().to_vec();
+    columns.extend([
+        ColumnSchema::new("__tsid", ConcreteDataType::uint64_datatype(), false),
+        ColumnSchema::new("greptime_value", ConcreteDataType::float64_datatype(), true),
+    ]);
+    let schema = Arc::new(
+        SchemaBuilder::try_from_columns(columns)
+            .unwrap()
+            .build()
+            .unwrap(),
+    );
+    let mut info = TestTable::table_info(42, "metrics".into(), "test_engine".into())
+        .as_ref()
+        .clone();
+    info.meta.schema = schema.clone();
+    info.meta.column_ids = (0..7).collect();
+    info.meta.next_column_id = 7;
+    info.meta.value_indices = vec![4, 6];
+    let table = Arc::new(Table::new(
+        Arc::new(info),
+        FilterPushDownType::Exact,
+        Arc::new(TestDataSource::new(schema)),
+    ));
+    LogicalPlanBuilder::scan(
+        "metrics",
+        Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(table),
+        ))),
+        None,
+    )
+    .unwrap()
+    .alias("m")
+    .unwrap()
+    .project(
+        [
+            "pk1",
+            "pk2",
+            "pk3",
+            "ts",
+            "number",
+            "__tsid",
+            "greptime_value",
+        ]
+        .into_iter()
+        .map(|name| col(name).alias(name)),
+    )
+    .unwrap()
+    .filter(col("pk1").eq(lit("cluster-a")))
+    .unwrap()
+    .sort(vec![
+        col("__tsid").sort(true, true),
+        col("ts").sort(true, true),
+    ])
+    .unwrap()
+    .build()
+    .unwrap()
+}
+
+fn early_instant_fragment(source: LogicalPlan) -> LogicalPlan {
+    use promql::extension_plan::InstantManipulate;
+    let divided = LogicalPlan::Extension(Extension {
+        node: Arc::new(SeriesDivide::new(
+            vec!["__tsid".into()],
+            "ts".into(),
+            source,
+        )),
+    });
+    let instant = LogicalPlan::Extension(Extension {
+        node: Arc::new(InstantManipulate::new(
+            10_000,
+            30_000,
+            10_000,
+            10_000,
+            0,
+            "ts".into(),
+            vec!["pk1".into()],
+            Some("greptime_value".into()),
+            divided,
+        )),
+    });
+    let plan = LogicalPlanBuilder::from(instant)
+        .aggregate(
+            vec![col("pk1"), col("ts")],
+            vec![max(col("greptime_value")).alias("value")],
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+    crate::research_series_grid::SeriesInstantMax::recognize(&plan, &["pk1".into()], "ts", "value")
+        .unwrap()
+        .unwrap()
+        .plan()
+}
+
+#[test]
+fn early_series_placement_preserves_partitions_predicates_and_producer_identity() {
+    let source = early_series_source();
+    let fragment = early_instant_fragment(source);
+    let state = datafusion::execution::SessionStateBuilder::new()
+        .with_default_features()
+        .with_analyzer_rules(vec![Arc::new(DistPlannerAnalyzer)])
+        .build();
+    let early = DistPlannerAnalyzer::place_series_fragments(fragment.clone(), &state).unwrap();
+    let LogicalPlan::Extension(extension) = &early else {
+        panic!("Missing MergeScan")
+    };
+    let remote = extension
+        .node
+        .as_any()
+        .downcast_ref::<MergeScanLogicalPlan>()
+        .unwrap();
+    assert_eq!(remote.input(), &fragment);
+    assert_eq!(early.schema(), fragment.schema());
+    assert_eq!(
+        remote.partition_cols().keys().cloned().collect::<Vec<_>>(),
+        ["pk1", "pk2"]
+    );
+    assert!(!remote.partition_cols()["pk1"].is_empty());
+    assert!(remote.partition_cols()["pk2"].is_empty());
+    let before =
+        crate::dist_plan::predicate_extractor::PredicateExtractor::extract_partition_expressions(
+            &fragment,
+            &["pk1".into(), "pk2".into()],
+        )
+        .unwrap();
+    assert!(!before.is_empty());
+    let normal = DistPlannerAnalyzer
+        .analyze(fragment, &ConfigOptions::default())
+        .unwrap();
+    normal.apply(|plan| {
+        if let LogicalPlan::Extension(extension) = plan
+            && let Some(normal) = extension.node.as_any().downcast_ref::<MergeScanLogicalPlan>() {
+            assert_eq!(normal.partition_cols(), remote.partition_cols());
+            let after = crate::dist_plan::predicate_extractor::PredicateExtractor::extract_partition_expressions(
+                normal.input(), &["pk1".into(), "pk2".into()],
+            ).unwrap();
+            assert_eq!(before, after);
+        }
+        Ok(TreeNodeRecursion::Continue)
+    }).unwrap();
+    let analyzed = DistPlannerAnalyzer
+        .analyze(early, &ConfigOptions::default())
+        .unwrap();
+    let mut ids = BTreeSet::new();
+    collect_merge_scan_remote_dyn_filter_producer_ids(&analyzed, &mut ids);
+    assert_eq!(ids.len(), 1);
+    assert_eq!(analyzed.to_string().matches("MergeScan [").count(), 1);
+}
+
+#[test]
+fn early_series_placement_keeps_local_and_unsupported_sources_on_existing_path() {
+    let fragment = early_instant_fragment(early_series_source());
+    let local = SessionContext::new().state();
+    assert_eq!(
+        DistPlannerAnalyzer::place_series_fragments(fragment.clone(), &local).unwrap(),
+        fragment
+    );
+    let state = datafusion::execution::SessionStateBuilder::new()
+        .with_default_features()
+        .with_analyzer_rules(vec![Arc::new(DistPlannerAnalyzer)])
+        .build();
+    let limited = LogicalPlanBuilder::from(early_series_source())
+        .limit(0, Some(1))
+        .unwrap()
+        .build()
+        .unwrap();
+    let fragment = early_instant_fragment(limited);
+    assert_eq!(
+        DistPlannerAnalyzer::place_series_fragments(fragment.clone(), &state).unwrap(),
+        fragment
+    );
+    let computed = LogicalPlanBuilder::from(early_series_source())
+        .filter(
+            col("number")
+                .cast_to(&DataType::Float64, early_series_source().schema())
+                .unwrap()
+                .gt(lit(0.0)),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+    assert!(!series_source_can_run_remotely(&computed));
+    let renamed = LogicalPlanBuilder::from(early_series_source())
+        .project(vec![
+            col("pk2").alias("pk1"),
+            col("pk1").alias("pk2"),
+            col("pk3"),
+            col("ts"),
+            col("number"),
+            col("__tsid"),
+            col("greptime_value"),
+        ])
+        .unwrap()
+        .filter(col("pk1").eq(lit("other-partition")))
+        .unwrap()
+        .build()
+        .unwrap();
+    let fragment = early_instant_fragment(renamed);
+    assert_eq!(
+        DistPlannerAnalyzer::place_series_fragments(fragment.clone(), &state).unwrap(),
+        fragment
+    );
 }

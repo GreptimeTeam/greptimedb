@@ -1744,6 +1744,85 @@ async fn check_two_phase_series_scan(
     assert_eq!(Some(&2), series_to_partition.get("b"));
     assert_eq!(Some(&2), series_to_partition.get("d"));
 
+    struct VisibleSum {
+        schema: datatypes::schema::SchemaRef,
+        sum: u64,
+    }
+
+    impl store_api::region_engine::ScanProcessor for VisibleSum {
+        fn schema(&self) -> datatypes::schema::SchemaRef {
+            self.schema.clone()
+        }
+
+        fn process(
+            &mut self,
+            batch: &common_recordbatch::RecordBatch,
+        ) -> Result<(), common_error::ext::BoxedError> {
+            let values = batch
+                .column_by_name("field_0")
+                .unwrap()
+                .as_primitive::<UInt64Type>();
+            self.sum += values.values().iter().sum::<u64>();
+            Ok(())
+        }
+
+        fn finish(
+            &mut self,
+        ) -> Result<Vec<common_recordbatch::RecordBatch>, common_error::ext::BoxedError> {
+            let batch = DfRecordBatch::try_new(
+                self.schema.arrow_schema().clone(),
+                vec![Arc::new(datatypes::arrow::array::UInt64Array::from(vec![
+                    self.sum,
+                ]))],
+            )
+            .unwrap();
+            Ok(vec![common_recordbatch::RecordBatch::from_df_record_batch(
+                self.schema.clone(),
+                batch,
+            )])
+        }
+    }
+
+    scanner.reset_state();
+    let output_schema = Arc::new(datatypes::schema::Schema::new(vec![
+        datatypes::schema::ColumnSchema::new("sum", ConcreteDataType::uint64_datatype(), false),
+    ]));
+    let processed = try_join_all((0..3).map(|partition| {
+        let stream = scanner
+            .scan_partition_with_processor(
+                &context,
+                &metrics_set,
+                partition,
+                Box::new(VisibleSum {
+                    schema: output_schema.clone(),
+                    sum: 0,
+                }),
+            )
+            .unwrap()
+            .expect("two-phase scanner accepts processing");
+        assert_eq!(output_schema, stream.schema());
+        async move { stream.try_collect::<Vec<_>>().await }
+    }))
+    .await
+    .unwrap();
+    let sums = processed
+        .iter()
+        .map(|batches| {
+            assert_eq!(
+                1,
+                batches.len(),
+                "finish must run once, including empty partitions"
+            );
+            batches[0].column(0).as_primitive::<UInt64Type>().value(0)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        vec![53, 0, 81],
+        sums,
+        "processor must see deduplicated SST and memtable values"
+    );
+    assert!(scanner.scan_partition(&context, &metrics_set, 0).is_err());
+
     scanner.reset_state();
     assert_eq!("two_phase", scanner.mode());
     assert_eq!(

@@ -30,6 +30,14 @@ pub trait Datanode: Send + Sync {
     /// Handles DML, and DDL requests.
     async fn handle(&self, request: RegionRequest) -> Result<RegionResponse>;
 
+    /// Returns `None` when this backend cannot prepare a local series source.
+    async fn prepare_series_sources(
+        &self,
+        _requests: Vec<common_query::request::SeriesSourceRequest>,
+    ) -> Result<Option<Vec<common_query::request::PreparedSeriesRead>>> {
+        Ok(None)
+    }
+
     /// Handles query requests
     async fn handle_query(&self, request: QueryRequest) -> Result<SendableRecordBatchStream>;
 }

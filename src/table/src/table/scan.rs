@@ -53,7 +53,7 @@ use datatypes::compute::SortOptions;
 use futures::{Stream, StreamExt};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::region_engine::{
-    PartitionRange, PrepareRequest, QueryScanContext, RegionScannerRef,
+    PartitionRange, PrepareRequest, QueryScanContext, RegionScannerRef, ScanProcessor,
 };
 use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 
@@ -274,6 +274,84 @@ impl RegionScanExec {
     pub fn scanner_type(&self) -> String {
         let scanner = self.scanner.lock().unwrap();
         scanner.name().to_string()
+    }
+
+    /// Executes a partition with a consumer below the scan's output boundary.
+    /// `None` leaves the scanner untouched so the original plan can execute.
+    pub fn execute_with_processor(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+        processor: Box<dyn ScanProcessor>,
+    ) -> DfResult<Option<DfSendableRecordBatchStream>> {
+        // These predicates refer to raw scan columns, not aggregate output columns.
+        if !self.pushed_dyn_filters.lock().unwrap().is_empty() {
+            return Ok(None);
+        }
+        let ctx = QueryScanContext {
+            explain_verbose: self.explain_verbose,
+        };
+        let Some(stream) = self
+            .scanner
+            .lock()
+            .unwrap()
+            .scan_partition_with_processor(&ctx, &self.metric, partition, processor)
+            .map_err(|error| DataFusionError::External(Box::new(error)))?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(
+            self.wrap_processed_stream(stream, partition, &context),
+        ))
+    }
+
+    /// Executes a complete-series program with engine-managed task parallelism.
+    /// The future is detached from the scanner lock before it is polled.
+    pub async fn execute_series_program(
+        &self,
+        context: Arc<TaskContext>,
+        factory: store_api::region_engine::ScanProcessorFactory,
+    ) -> DfResult<Option<DfSendableRecordBatchStream>> {
+        if !self.pushed_dyn_filters.lock().unwrap().is_empty() {
+            return Ok(None);
+        }
+        let pending = self
+            .scanner
+            .lock()
+            .unwrap()
+            .scan_series_program(factory, context.session_config().target_partitions());
+        let Some(stream) = pending
+            .await
+            .map_err(|error| DataFusionError::External(Box::new(error)))?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(self.wrap_processed_stream(stream, 0, &context)))
+    }
+
+    fn wrap_processed_stream(
+        &self,
+        stream: SendableRecordBatchStream,
+        partition: usize,
+        context: &TaskContext,
+    ) -> DfSendableRecordBatchStream {
+        let stream = if let Some(tracker) = &self.query_memory_tracker {
+            Box::pin(MemoryTrackedStream::new(stream, tracker.clone())) as SendableRecordBatchStream
+        } else {
+            stream
+        };
+        let tracing_context = TracingContext::from_json(context.session_id().as_str());
+        let span = tracing_context.attach(common_telemetry::tracing::info_span!(
+            "read_from_region",
+            partition = partition
+        ));
+        Box::pin(StreamWithMetricWrapper {
+            stream,
+            metric: StreamMetrics::new(&self.metric, partition),
+            span,
+            await_timer: None,
+            dyn_filter: None,
+        })
     }
 
     /// Update the partition ranges of underlying scanner.

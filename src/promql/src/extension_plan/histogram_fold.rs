@@ -1243,7 +1243,7 @@ impl HistogramFoldStream {
     }
 
     /// Evaluate the field column and return the result
-    fn evaluate_row(
+    pub fn evaluate_row(
         operation: HistogramFoldOperation,
         bucket: &[f64],
         counter: &[f64],

@@ -14,7 +14,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, SystemTime};
 
 use chrono::DateTime;
@@ -43,6 +43,32 @@ pub const EXPLAIN_VERBOSE_NODE_NAME: &str = "EXPLAIN VERBOSE";
 pub const ANALYZE_NODE_NAME: &str = "ANALYZE";
 pub const ANALYZE_VERBOSE_NODE_NAME: &str = "ANALYZE VERBOSE";
 pub const ALIAS_NODE_NAME: &str = "ALIAS";
+
+fn parse_cached_promql_expression(query: &str) -> std::result::Result<Expr, String> {
+    static EXPRESSIONS: LazyLock<Mutex<HashMap<String, Expr>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    if query.len() > 16 * 1024 {
+        return promql_parser::parser::parse(query);
+    }
+    if let Some(expr) = EXPRESSIONS
+        .lock()
+        .map_err(|_| "PromQL expression cache lock poisoned".to_owned())?
+        .get(query)
+        .cloned()
+    {
+        return Ok(expr);
+    }
+    let expr = promql_parser::parser::parse(query)?;
+    let mut expressions = EXPRESSIONS
+        .lock()
+        .map_err(|_| "PromQL expression cache lock poisoned".to_owned())?;
+    if expressions.len() >= 64 {
+        expressions.clear();
+    }
+    // Only syntax is shared; aliases, evaluation bounds and resolved tables stay request-local.
+    expressions.insert(query.to_owned(), expr.clone());
+    Ok(expr)
+}
 
 #[derive(Debug, Clone)]
 pub enum QueryStatement {
@@ -143,11 +169,15 @@ impl QueryLanguageParser {
     pub fn parse_promql(query: &PromQuery, _query_ctx: &QueryContextRef) -> Result<QueryStatement> {
         let _timer = PARSE_PROMQL_ELAPSED.start_timer();
 
-        let expr = promql_parser::parser::parse(&query.query)
-            .map_err(|msg| BoxedError::new(PlainError::new(msg, StatusCode::InvalidArguments)))
-            .context(QueryParseSnafu {
-                query: &query.query,
-            })?;
+        let expr = if std::env::var_os("GT_RESEARCH_QUERY_PROGRAM").is_some() {
+            parse_cached_promql_expression(&query.query)
+        } else {
+            promql_parser::parser::parse(&query.query)
+        }
+        .map_err(|msg| BoxedError::new(PlainError::new(msg, StatusCode::InvalidArguments)))
+        .context(QueryParseSnafu {
+            query: &query.query,
+        })?;
 
         let start = Self::parse_promql_timestamp(&query.start)
             .map_err(BoxedError::new)
@@ -422,6 +452,26 @@ mod test {
         assert_eq!(
             result.unwrap_err().to_string(),
             "Failed to add duration '9223372036854775808s' to SystemTime, overflowed"
+        );
+    }
+
+    #[test]
+    fn cached_promql_expression_is_request_local() {
+        let query = "cached_samples{job=~\"api|web\"} offset 1m";
+        let mut first = parse_cached_promql_expression(query).unwrap();
+        let Expr::VectorSelector(selector) = &mut first else {
+            panic!("Expected a vector selector");
+        };
+        selector.name = Some("changed".into());
+        selector.offset = None;
+        selector.matchers.matchers.clear();
+        assert_eq!(
+            parse_cached_promql_expression(query).unwrap(),
+            promql_parser::parser::parse(query).unwrap()
+        );
+        assert_eq!(
+            parse_cached_promql_expression("sum("),
+            promql_parser::parser::parse("sum(")
         );
     }
 

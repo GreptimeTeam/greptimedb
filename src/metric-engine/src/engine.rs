@@ -333,6 +333,17 @@ impl RegionEngine for MetricEngine {
         self.handle_query(region_id, request).await
     }
 
+    async fn prepare_series_source(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> Result<Option<Arc<dyn store_api::region_engine::PreparedSeriesSource>>, BoxedError> {
+        self.inner
+            .prepare_series_source(region_id, request)
+            .await
+            .map_err(BoxedError::new)
+    }
+
     async fn get_committed_sequence(
         &self,
         region_id: RegionId,

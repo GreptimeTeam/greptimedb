@@ -347,6 +347,55 @@ impl RegionServer {
         self.handle_read_inner(request).await
     }
 
+    pub async fn prepare_series_sources(
+        &self,
+        requests: Vec<common_query::request::SeriesSourceRequest>,
+    ) -> Result<Option<Vec<common_query::request::PreparedSeriesRead>>> {
+        let Some(first) = requests.first() else {
+            return Ok(Some(Vec::new()));
+        };
+        if requests
+            .iter()
+            .any(|request| request.header != first.header)
+        {
+            return Err(datafusion_common::DataFusionError::Plan(
+                "Series program sources have different query contexts".into(),
+            ))
+            .context(DataFusionSnafu);
+        }
+        let permit = Arc::new(if let Some(limiter) = &self.inner.parallelism {
+            Some(limiter.acquire().await?)
+        } else {
+            None
+        });
+        let ctx = first.header.as_ref().map(|header| header.into());
+        let query_ctx = Arc::new(ctx.unwrap_or_else(|| QueryContextBuilder::default().build()));
+        let mut sources = Vec::with_capacity(requests.len());
+        for request in requests {
+            let provider = self
+                .table_provider(request.region_id, Some(query_ctx.clone()))
+                .await?;
+            let Some(provider) =
+                provider.downcast_ref::<query::dummy_catalog::DummyTableProvider>()
+            else {
+                return Ok(None);
+            };
+            let Some(mut prepared) = provider
+                .prepare_series_source(&request)
+                .await
+                .context(DataFusionSnafu)?
+            else {
+                return Ok(None);
+            };
+            prepared.source = Arc::new(PermitGuardedSeriesSource {
+                source: prepared.source,
+                _permit: permit.clone(),
+            });
+            sources.push(prepared);
+        }
+        Ok(Some(sources))
+    }
+
     async fn handle_read_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
         let permit = if let Some(p) = &self.inner.parallelism {
             Some(p.acquire().await?)
@@ -1083,6 +1132,25 @@ impl RegionServerParallelism {
             .await
             .context(ConcurrentQueryLimiterTimeoutSnafu)?
             .context(ConcurrentQueryLimiterClosedSnafu)
+    }
+}
+
+struct PermitGuardedSeriesSource {
+    source: Arc<dyn store_api::region_engine::PreparedSeriesSource>,
+    _permit: Arc<Option<OwnedSemaphorePermit>>,
+}
+
+impl store_api::region_engine::PreparedSeriesSource for PermitGuardedSeriesSource {
+    fn num_series(&self) -> usize {
+        self.source.num_series()
+    }
+
+    fn read_series(
+        &self,
+        range: std::ops::Range<usize>,
+        processor: &mut dyn store_api::region_engine::SeriesBlockProcessor,
+    ) -> std::result::Result<(), BoxedError> {
+        self.source.read_series(range, processor)
     }
 }
 
@@ -2784,6 +2852,39 @@ mod tests {
         drop(first_query);
         let forth_query = p.acquire().await;
         assert!(forth_query.is_ok());
+    }
+
+    #[tokio::test]
+    async fn prepared_series_source_holds_permit_for_worker_lifetime() {
+        struct EmptySource;
+        impl store_api::region_engine::PreparedSeriesSource for EmptySource {
+            fn num_series(&self) -> usize {
+                0
+            }
+            fn read_series(
+                &self,
+                _range: std::ops::Range<usize>,
+                _processor: &mut dyn store_api::region_engine::SeriesBlockProcessor,
+            ) -> std::result::Result<(), BoxedError> {
+                unreachable!("this test only prepares and cancels a read")
+            }
+        }
+        let limiter = RegionServerParallelism::from_opts(1, Duration::from_secs(1)).unwrap();
+        let permit = Arc::new(Some(limiter.acquire().await.unwrap()));
+        let sources: Vec<_> = (0..2)
+            .map(|_| {
+                Arc::new(PermitGuardedSeriesSource {
+                    source: Arc::new(EmptySource),
+                    _permit: permit.clone(),
+                })
+            })
+            .collect();
+        drop(permit);
+        let worker = sources[1].clone();
+        drop(sources);
+        assert!(limiter.semaphore.clone().try_acquire_owned().is_err());
+        drop(worker);
+        assert!(limiter.semaphore.clone().try_acquire_owned().is_ok());
     }
 
     fn mock_region_metadata(region_id: RegionId) -> RegionMetadata {

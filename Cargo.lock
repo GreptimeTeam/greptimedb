@@ -11842,6 +11842,7 @@ dependencies = [
  "common-stat",
  "common-telemetry",
  "common-time",
+ "crc32fast",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
@@ -11880,6 +11881,7 @@ dependencies = [
  "serde_json",
  "session",
  "snafu 0.8.6",
+ "snap",
  "sql",
  "sqlparser",
  "store-api",
@@ -11889,6 +11891,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

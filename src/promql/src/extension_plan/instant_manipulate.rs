@@ -311,6 +311,22 @@ impl InstantManipulate {
         self.start == self.end
     }
 
+    /// Returns start, end, interval, lookback and offset in milliseconds.
+    pub fn research_series_instant(&self) -> Option<((i64, i64, i64, i64, i64), &str)> {
+        (self.unfix.is_none() && self.field_column.as_deref() == Some(greptime_value()))
+            .then_some((self.evaluation_grid(), self.time_index_column.as_str()))
+    }
+
+    pub fn evaluation_grid(&self) -> (i64, i64, i64, i64, i64) {
+        (
+            self.start,
+            self.end,
+            self.interval,
+            self.lookback_delta,
+            self.offset,
+        )
+    }
+
     fn staleness_field_columns(&self) -> impl Iterator<Item = &str> {
         let [field, companion] = mixed_sample_fields(self.field_column.as_deref());
         [
@@ -450,6 +466,19 @@ pub struct InstantManipulateExec {
     output_schema: SchemaRef,
     properties: Arc<PlanProperties>,
     metric: ExecutionPlanMetricsSet,
+}
+
+impl InstantManipulateExec {
+    pub fn research_scan_grid(&self) -> Option<(i64, i64, i64, i64, i64)> {
+        (self.reuse_tsid_column && self.field_column.as_deref() == Some(greptime_value()))
+            .then_some((
+                self.start,
+                self.end,
+                self.interval,
+                self.lookback_delta,
+                self.offset,
+            ))
+    }
 }
 
 impl ExecutionPlan for InstantManipulateExec {

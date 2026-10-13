@@ -38,7 +38,7 @@ use tokio::sync::Semaphore;
 use crate::error::{PartitionOutOfRangeSnafu, Result, TooManyFilesToReadSnafu};
 use crate::read::flat_dedup::{FlatDedupReader, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeReader;
-use crate::read::last_row::FlatLastRowReader;
+use crate::read::last_row::{FlatLastRowReader, prune_instant_grid};
 use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::range::RangeMeta;
 use crate::read::range_cache::{
@@ -264,6 +264,21 @@ impl SeqScan {
         };
 
         let reader = match &stream_ctx.input.series_row_selector {
+            Some(selector @ TimeSeriesRowSelector::InstantGrid { .. })
+                if !stream_ctx.input.append_mode && stream_ctx.input.filter_deleted =>
+            {
+                let selector = *selector;
+                let mut reader = reader;
+                Box::pin(async_stream::try_stream! {
+                    while let Some(batch) = reader.try_next().await? {
+                        let batch = prune_instant_grid(batch, selector)?;
+                        if batch.num_rows() > 0 {
+                            yield batch;
+                        }
+                    }
+                }) as BoxedRecordBatchStream
+            }
+            Some(TimeSeriesRowSelector::InstantGrid { .. }) => reader,
             Some(TimeSeriesRowSelector::LastRow { .. }) => {
                 Box::pin(FlatLastRowReader::new(reader).into_stream()) as _
             }

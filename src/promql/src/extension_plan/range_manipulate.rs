@@ -54,6 +54,8 @@ use crate::extension_plan::{
 use crate::metrics::PROMQL_SERIES_COUNT;
 use crate::range_array::RangeArray;
 
+mod compact_input;
+
 /// Time series manipulator for range function.
 ///
 /// This plan will "fold" time index and value columns into [RangeArray]s, and truncate
@@ -84,6 +86,21 @@ struct UnfixIndices {
 }
 
 impl RangeManipulate {
+    pub fn research_series_window(&self) -> Option<(i64, i64, i64, i64, i64, &str, &str)> {
+        let [value] = self.field_columns.as_slice() else {
+            return None;
+        };
+        Some((
+            self.start,
+            self.end,
+            self.interval,
+            self.range,
+            self.offset,
+            &self.time_index,
+            value,
+        ))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         start: Millisecond,
@@ -452,6 +469,25 @@ pub struct RangeManipulateExec {
     properties: Arc<PlanProperties>,
 }
 
+impl RangeManipulateExec {
+    /// Exposes the validated scalar window boundary to the research scan consumer.
+    pub fn research_scan_window(&self) -> Option<(i64, i64, i64, i64, i64, &str, &str, &str)> {
+        let [value] = self.field_columns.as_slice() else {
+            return None;
+        };
+        Some((
+            self.start,
+            self.end,
+            self.interval,
+            self.range,
+            self.offset,
+            &self.time_index_column,
+            &self.time_range_column,
+            value,
+        ))
+    }
+}
+
 impl ExecutionPlan for RangeManipulateExec {
     fn apply_expressions(
         &self,
@@ -524,6 +560,11 @@ impl ExecutionPlan for RangeManipulateExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
+        if std::env::var_os("GT_RESEARCH_COMPACT_RANGE").is_some()
+            && let Some(stream) = compact_input::execute(self, partition, context.clone())?
+        {
+            return Ok(stream);
+        }
         let baseline_metric = BaselineMetrics::new(&self.metric, partition);
         let metrics_builder = MetricBuilder::new(&self.metric);
         let num_series = Count::new();
@@ -616,8 +657,14 @@ impl DisplayAs for RangeManipulateExec {
             | DisplayFormatType::TreeRender => {
                 write!(
                     f,
-                    "PromRangeManipulateExec: req range=[{}..{}], interval=[{}], eval range=[{}], time index=[{}]",
-                    self.start, self.end, self.interval, self.range, self.time_index_column
+                    "PromRangeManipulateExec: req range=[{}..{}], interval=[{}], eval range=[{}], time index=[{}], research_compact=[{}]",
+                    self.start,
+                    self.end,
+                    self.interval,
+                    self.range,
+                    self.time_index_column,
+                    std::env::var_os("GT_RESEARCH_COMPACT_RANGE").is_some()
+                        && compact_input::eligible(self).is_some()
                 )
             }
         }

@@ -1349,6 +1349,7 @@ mod split_tests {
             .build();
 
         StreamContext {
+            native_series_scan: tokio::sync::OnceCell::new(),
             input,
             ranges: vec![],
             query_start: std::time::Instant::now(),
@@ -1790,6 +1791,7 @@ mod tests {
             .build();
 
         Arc::new(StreamContext {
+            native_series_scan: tokio::sync::OnceCell::new(),
             input,
             ranges: Vec::new(),
             query_start: Instant::now(),

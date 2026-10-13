@@ -424,6 +424,32 @@ impl SparsePrimaryKeyCodec {
         Ok(values)
     }
 
+    /// Decodes only the values of `wanted` columns in one pass; other labels are
+    /// skipped without materializing them. Columns absent from `bytes` are omitted.
+    pub fn decode_projected(
+        &self,
+        bytes: &[u8],
+        wanted: &[ColumnId],
+    ) -> Result<Vec<(ColumnId, Value)>> {
+        let mut deserializer = Deserializer::new(bytes);
+        let mut values = Vec::with_capacity(wanted.len());
+        let mut decode = |deserializer: &mut Deserializer<&[u8]>, field: &SortField| {
+            let column_id = u32::deserialize(&mut *deserializer).context(DeserializeFieldSnafu)?;
+            if wanted.contains(&column_id) {
+                values.push((column_id, field.deserialize(deserializer)?));
+            } else {
+                field.skip_deserialize(bytes, deserializer)?;
+            }
+            Ok::<_, crate::error::Error>(())
+        };
+        decode(&mut deserializer, &self.inner.table_id_field)?;
+        decode(&mut deserializer, &self.inner.tsid_field)?;
+        while deserializer.has_remaining() {
+            decode(&mut deserializer, &self.inner.label_field)?;
+        }
+        Ok(values)
+    }
+
     /// Decodes the given bytes into a [`Value`].
     fn decode_leftmost(&self, bytes: &[u8]) -> Result<Option<Value>> {
         let mut deserializer = Deserializer::new(bytes);
@@ -734,6 +760,32 @@ mod tests {
                 ValueRef::Timestamp(Timestamp::new(1618876800000000000, TimeUnit::Nanosecond)),
             ),
         ]
+    }
+
+    #[test]
+    fn test_decode_projected_matches_full_decode() {
+        let region_metadata = test_region_metadata();
+        let codec = SparsePrimaryKeyCodec::new(&region_metadata);
+        let mut buffer = Vec::new();
+        codec
+            .encode_to_vec(test_row().into_iter(), &mut buffer)
+            .unwrap();
+        let CompositeValues::Sparse(full) = codec.decode(&buffer).unwrap() else {
+            unreachable!()
+        };
+        let wanted = [5, RESERVED_COLUMN_ID_TSID, 2, 6];
+        let projected = codec.decode_projected(&buffer, &wanted).unwrap();
+        let expected = full
+            .iter()
+            .filter(|(column, _)| wanted.contains(column))
+            .map(|(column, value)| (*column, value.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(projected, expected);
+        assert!(
+            codec
+                .decode_projected(&buffer[..buffer.len() - 1], &wanted)
+                .is_err()
+        );
     }
 
     #[test]

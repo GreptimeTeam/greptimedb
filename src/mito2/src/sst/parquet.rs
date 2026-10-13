@@ -43,6 +43,7 @@ pub mod prefilter;
 pub mod push_decoder;
 pub mod read_columns;
 pub mod reader;
+pub(crate) mod research_sidecar;
 pub mod row_group;
 pub mod row_selection;
 pub(crate) mod stats;

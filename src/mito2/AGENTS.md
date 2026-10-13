@@ -28,6 +28,7 @@ snapshot isolation). It implements the `RegionEngine` trait from `store-api`.
 | `sst` | `src/mito2/src/sst/` | Parquet format, file metadata, index layout |
 | `series_index` | `src/mito2/src/series_index/` | Series index writer/searcher, bucket planning, catalogs, worker-owned reconciliation (`maintenance.rs`), shared approximate usage (`task.rs`), catalogs, and index lifecycle |
 | `read` | `src/mito2/src/read/` | `ScanRegion`, merge, dedup, projection, streaming |
+| Auxiliary series records | `src/mito2/src/read/research_series_native.rs`, `research_series_major.rs`, `research_series_coalesced.rs` | Opt-in immutable metadata; source identity and visibility checks precede output; value decoding stays in `sst/parquet/research_sidecar.rs` |
 | `manifest` | `src/mito2/src/manifest/` | `RegionManifestManager`, manifest actions/edits |
 | `cache` | `src/mito2/src/cache.rs` | Write/file/page caches |
 | `gc` | `src/mito2/src/gc.rs`, `src/mito2/src/gc/` | Dropped-file cleanup worker |
@@ -62,6 +63,8 @@ filtered `RecordBatch` stream.
 - **Manifest format** (`manifest/action.rs`): affects crash recovery and
   follower replay. Keep it backward compatible.
 - **SST/Parquet layout** (`sst/`): readers must stay compatible with existing files.
+- **Research native records** (`read/research_series_native.rs`): v1 stores whole value blocks; v2 adds full value count and slice offset. Decode and validate the complete source payload before slicing. Preserve v1 reads and source-file visibility checks.
+- **Coalesced research samples** (`read/research_series_coalesced.rs`): v1 stores raw timestamp/value arrays; v2 stores timestamp runs and either raw float bits or exact integer affine values. Both require the complete validated immutable source set. Keep all source handles pinned, preserve sample bits, and apply query time filters after coalescing.
 - **Series-index disk limit**: tasks estimate usage from entry sizes in open-region snapshots
   and defer new builds when the shared estimate is full. Cleanup still prunes obsolete
   range entries and expires series indexes to reclaim published usage. Concurrent builds may

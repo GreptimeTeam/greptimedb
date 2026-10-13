@@ -40,6 +40,9 @@ use crate::region_request::{
 };
 use crate::storage::{FileId, RegionId, ScanRequest, SequenceNumber};
 
+mod series_values;
+pub use series_values::{ExactIntegerSeries, VisibleSeriesValues};
+
 /// The settable region role state.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum SettableRegionRoleState {
@@ -467,6 +470,83 @@ pub struct QueryScanContext {
     pub explain_verbose: bool,
 }
 
+/// Consumes visible, projected batches in one scan partition's original order.
+/// Implementations retain memory accounting for state and returned batches until dropped.
+pub trait ScanProcessor: Send {
+    fn schema(&self) -> SchemaRef;
+
+    fn process(&mut self, batch: &common_recordbatch::RecordBatch) -> Result<(), BoxedError>;
+
+    /// Optional input for complete, strictly ordered, non-null Put-only series.
+    /// Ordinary visible batches still use `process` when the scan cannot prove these bounds.
+    fn series_blocks(&mut self) -> Option<&mut dyn SeriesBlockProcessor> {
+        None
+    }
+
+    /// Called once at partition EOF, never at candidate-assignment boundaries.
+    fn finish(&mut self) -> Result<Vec<common_recordbatch::RecordBatch>, BoxedError>;
+}
+
+/// Creates an independent consumer for each complete-series task.
+pub type ScanProcessorFactory =
+    Arc<dyn Fn() -> Result<Box<dyn ScanProcessor>, BoxedError> + Send + Sync>;
+
+/// A visible sample block whose timestamps are `first_timestamp + index * timestamp_step`.
+/// The scanner has checked timestamp bounds, row predicates and cross-source visibility.
+/// A consumer opting into `range_max_request` may receive partial maxima instead
+/// of raw samples, at the last contributing timestamp of each disjoint window.
+pub struct VisibleSeriesBlock {
+    pub first_timestamp: i64,
+    pub timestamp_step: i128,
+    pub values: VisibleSeriesValues,
+}
+
+/// Allows the scanner to replace samples by ordered partial maxima for these
+/// disjoint windows. Each partial keeps the last contributing sample timestamp.
+pub struct RangeMaxRequest {
+    pub instants: Vec<i64>,
+    pub window: i64,
+    pub offset: i64,
+}
+
+/// Consumes all selected blocks of one series before the scanner advances to another key.
+/// The iterator is lazy and fallible; implementations must exhaust it or return an error.
+/// The scanner accounts for one decoded block while it is borrowed. Retained buffers
+/// and output must be charged to the consumer's reservation.
+pub trait SeriesBlockProcessor: Send {
+    fn range_max_request(&self) -> Option<RangeMaxRequest> {
+        None
+    }
+
+    /// Tag columns `process_series` looks up. `None` means every primary key column.
+    /// Sources may pass only these tags (absent ones as null) to skip per-series decoding.
+    fn tag_names(&self) -> Option<Vec<String>> {
+        None
+    }
+
+    fn process_series(
+        &mut self,
+        tags: &[(String, datatypes::value::Value)],
+        blocks: &mut dyn Iterator<Item = Result<VisibleSeriesBlock, BoxedError>>,
+    ) -> Result<(), BoxedError>;
+}
+
+/// A query-local selection of complete series from a pinned, validated snapshot.
+/// Preparation does not consume the scanner. The caller assigns disjoint ranges
+/// and runs reads on blocking workers; processors remain owned by the caller.
+pub trait PreparedSeriesSource: Send + Sync {
+    fn num_series(&self) -> usize;
+
+    /// Delivers complete series in the selected ordinal range. Invalid bounds
+    /// are errors. Source pins and decoded-buffer accounting cover the read;
+    /// retained values and output remain the processor's responsibility.
+    fn read_series(
+        &self,
+        range: std::ops::Range<usize>,
+        processor: &mut dyn SeriesBlockProcessor,
+    ) -> Result<(), BoxedError>;
+}
+
 /// A scanner that provides a way to scan the region concurrently.
 ///
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
@@ -498,6 +578,41 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError>;
+
+    /// Returns `None` without consuming the scanner when processing is unsupported.
+    /// Once accepted, all sources must use the processor, including ordinary reads.
+    fn scan_partition_with_processor(
+        &self,
+        _ctx: &QueryScanContext,
+        _metrics_set: &ExecutionPlanMetricsSet,
+        _partition: usize,
+        _processor: Box<dyn ScanProcessor>,
+    ) -> Result<Option<SendableRecordBatchStream>, BoxedError> {
+        Ok(None)
+    }
+
+    /// Scans the complete source with engine-managed series tasks and unordered output.
+    /// `None` leaves the scanner unconsumed. Eligibility must be decided before output;
+    /// failures after acceptance are errors, never a request to retry another scan.
+    fn scan_series_program(
+        &self,
+        _factory: ScanProcessorFactory,
+        _workers: usize,
+    ) -> futures::future::BoxFuture<'static, Result<Option<SendableRecordBatchStream>, BoxedError>>
+    {
+        Box::pin(async { Ok(None) })
+    }
+
+    /// Resolves an immutable series selection without creating output tasks.
+    /// `None` leaves ordinary scanning available; preparation errors propagate.
+    fn prepare_series_source(
+        &self,
+    ) -> futures::future::BoxFuture<
+        'static,
+        Result<Option<Arc<dyn PreparedSeriesSource>>, BoxedError>,
+    > {
+        Box::pin(async { Ok(None) })
+    }
 
     /// Check if there is any predicate exclude region partition exprs that may be executed in this scanner.
     fn has_predicate_without_region(&self) -> bool;
@@ -1008,6 +1123,15 @@ pub trait RegionEngine: Send + Sync {
         region_id: RegionId,
         request: ScanRequest,
     ) -> Result<RegionScannerRef, BoxedError>;
+
+    /// Prepares an immutable series source without constructing a row scanner.
+    async fn prepare_series_source(
+        &self,
+        _region_id: RegionId,
+        _request: ScanRequest,
+    ) -> Result<Option<Arc<dyn PreparedSeriesSource>>, BoxedError> {
+        Ok(None)
+    }
 
     /// Returns the query memory tracker for scan execution.
     fn query_memory_tracker(&self) -> Option<QueryMemoryTracker> {

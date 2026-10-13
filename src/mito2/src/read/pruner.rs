@@ -16,7 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use common_telemetry::debug;
@@ -24,7 +24,7 @@ use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::region_engine::PartitionRange;
 use store_api::storage::FileId;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{OnceCell, mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::error::{PruneFileSnafu, Result};
@@ -32,8 +32,11 @@ use crate::metrics::PRUNER_ACTIVE_BUILDERS;
 use crate::read::range::{FileRangeBuilder, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::{FileScanMetrics, PartitionMetrics, new_filter_metrics};
-use crate::sst::parquet::file_range::{FileRange, PreFilterMode};
+use crate::sst::parquet::file_range::{FileRange, PreFilterMode, SeriesBlockContext};
 use crate::sst::parquet::reader::ReaderMetrics;
+use crate::sst::parquet::research_sidecar::{PreparedSeriesFile, PreparedSeriesSelection};
+
+type SeriesFileInput = (SeriesBlockContext, PreparedSeriesFile);
 
 /// Number of files to pre-fetch ahead of the current position.
 const PREFETCH_COUNT: usize = 8;
@@ -152,6 +155,47 @@ impl PartitionPruner {
         pruned
     }
 
+    pub(crate) async fn prepare_file_series_blocks(
+        &self,
+        index: RowGroupIndex,
+        series: Arc<Vec<[u8; 22]>>,
+    ) -> Result<Option<(SeriesBlockContext, PreparedSeriesSelection)>> {
+        let Some(file_index) = self.file_index(index) else {
+            return Ok(None);
+        };
+        let inner = &self.pruner.inner;
+        let input = &inner.stream_ctx.input;
+        if input
+            .predicate
+            .predicate()
+            .is_some_and(|p| !p.dyn_filters().is_empty())
+        {
+            return Ok(None);
+        }
+        let cells = inner
+            .series_file_inputs
+            .get_or_init(|| (0..input.num_files()).map(|_| OnceCell::new()).collect());
+        let prepared = cells[file_index]
+            .get_or_try_init(|| input.prepare_file_series_blocks(&input.files[file_index], None))
+            .await?;
+        Ok(prepared.as_ref().map(|(context, file)| {
+            (
+                context.clone(),
+                file.selection(usize::try_from(index.row_group_index).ok(), series),
+            )
+        }))
+    }
+
+    pub(crate) fn finish_file_series_lookup(
+        &self,
+        index: RowGroupIndex,
+        part_metrics: &PartitionMetrics,
+    ) {
+        let mut metrics = ReaderMetrics::default();
+        self.pruner.skip_file_range(index, &mut metrics);
+        part_metrics.merge_reader_metrics(&metrics, None);
+    }
+
     /// Pre-fetches upcoming files starting from the given position.
     fn prefetch_upcoming_files(&self, current_pos: usize, partition_metrics: &PartitionMetrics) {
         let start = current_pos + 1;
@@ -220,6 +264,9 @@ struct PrunerInner {
     num_workers: usize,
     /// Per-file state (indexed by file_index).
     file_entries: Vec<Mutex<FileBuilderEntry>>,
+    // Only immutable file setup is shared. Candidate sets and block selections
+    // remain local to each assignment, including chunked candidate discovery.
+    series_file_inputs: OnceLock<Vec<OnceCell<Option<SeriesFileInput>>>>,
     /// StreamContext containing all context needed for pruning.
     stream_ctx: Arc<StreamContext>,
     /// Positive manifest-prune cache shared across all scan partitions.
@@ -344,6 +391,7 @@ impl Pruner {
         let inner = Arc::new(PrunerInner {
             num_workers,
             file_entries,
+            series_file_inputs: OnceLock::new(),
             stream_ctx,
             manifest_pruned_files,
             retain_builders,

@@ -26,6 +26,11 @@ side effects live in `operator`.
 - User-visible SQL/PromQL/log behavior needs planner coverage and a sqlness case.
 - `RegionQueryHandler` changes require the frontend implementation to move with
   it.
+- Research series fragments use `series_range.rs` wire v4 for raw instant grids;
+  v3 supports rate/increase/irate and v2 decodes as rate only. Raw instant grids
+  omit null points only at packed selector boundaries; do not fuse an aggregate
+  across that boundary. Keep entry eligibility separate from frontier splitting
+  so counter scalar/sum expressions remain region-local.
 - DataFusion dependency changes follow the pinned-fork rule in the repo-wide
   invariants.
 

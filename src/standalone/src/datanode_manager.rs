@@ -96,6 +96,17 @@ impl Datanode for RegionInvoker {
         Ok(RegionResponse::from_region_response(response))
     }
 
+    async fn prepare_series_sources(
+        &self,
+        requests: Vec<common_query::request::SeriesSourceRequest>,
+    ) -> MetaResult<Option<Vec<common_query::request::PreparedSeriesRead>>> {
+        self.region_server
+            .prepare_series_sources(requests)
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)
+    }
+
     async fn handle_query(&self, request: QueryRequest) -> MetaResult<SendableRecordBatchStream> {
         let region_id = request.region_id.to_string();
         let span = request

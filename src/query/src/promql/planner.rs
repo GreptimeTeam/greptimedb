@@ -113,6 +113,7 @@ use crate::promql::error::{
     ZeroRangeSelectorSnafu,
 };
 use crate::query_engine::QueryEngineState;
+use crate::research_series_grid::plan_cache::Dependencies;
 
 /// `time()` function in PromQL.
 const SPECIAL_TIME_FUNCTION: &str = "time";
@@ -160,6 +161,7 @@ const INTERVAL_1H: i64 = 60 * 60 * 1000;
 
 #[derive(Default, Debug, Clone)]
 struct PromPlannerContext {
+    research_rewrites: Option<Arc<crate::research_series_grid::RewriteCollector>>,
     // query parameters
     start: Millisecond,
     end: Millisecond,
@@ -287,11 +289,37 @@ pub struct PromPlanner {
     ctx: PromPlannerContext,
     /// Optional collector passed to native histogram UDFs.
     promql_annotations: Option<PromqlAnnotationCollector>,
+    dependencies: Option<Dependencies>,
 }
 
 type BinaryFieldPair<'a> = (&'a String, &'a String);
 
 impl PromPlanner {
+    pub(crate) async fn research_rewritten_stmt_with_dependencies(
+        table_provider: DfTableSourceProvider,
+        stmt: &EvalStmt,
+        query_engine_state: &QueryEngineState,
+        record_dependencies: bool,
+    ) -> Result<(EvalStmt, Option<Dependencies>)> {
+        let rewrites = Arc::new(crate::research_series_grid::RewriteCollector::default());
+        let mut ctx = PromPlannerContext::from_eval_stmt(stmt);
+        ctx.research_rewrites = Some(rewrites.clone());
+        let mut planner = Self {
+            table_provider,
+            ctx,
+            promql_annotations: None,
+            dependencies: record_dependencies.then(Default::default),
+        };
+        planner
+            .prom_expr_to_plan(&stmt.expr, query_engine_state)
+            .await?;
+        let mut result = stmt.clone();
+        result.expr = rewrites
+            .rewrite(&stmt.expr)
+            .context(DataFusionPlanningSnafu)?;
+        Ok((result, planner.dependencies))
+    }
+
     pub async fn stmt_to_plan(
         table_provider: DfTableSourceProvider,
         stmt: &EvalStmt,
@@ -307,10 +335,29 @@ impl PromPlanner {
         query_engine_state: &QueryEngineState,
         promql_annotations: Option<PromqlAnnotationCollector>,
     ) -> Result<LogicalPlan> {
+        Self::stmt_to_plan_with_dependencies(
+            table_provider,
+            stmt,
+            query_engine_state,
+            promql_annotations,
+            false,
+        )
+        .await
+        .map(|(plan, _)| plan)
+    }
+
+    pub(crate) async fn stmt_to_plan_with_dependencies(
+        table_provider: DfTableSourceProvider,
+        stmt: &EvalStmt,
+        query_engine_state: &QueryEngineState,
+        promql_annotations: Option<PromqlAnnotationCollector>,
+        record_dependencies: bool,
+    ) -> Result<(LogicalPlan, Option<Dependencies>)> {
         let mut planner = Self {
             table_provider,
             ctx: PromPlannerContext::from_eval_stmt(stmt),
             promql_annotations,
+            dependencies: record_dependencies.then(Default::default),
         };
 
         let plan = planner
@@ -318,7 +365,8 @@ impl PromPlanner {
             .await?;
 
         // Never leak internal series identifier to output.
-        planner.strip_tsid_column(plan)
+        let plan = planner.strip_tsid_column(plan)?;
+        Ok((plan, planner.dependencies))
     }
 
     pub async fn prom_expr_to_plan(
@@ -1191,6 +1239,11 @@ impl PromPlanner {
                     &left_context.aggregation_field_labels,
                     &right_context.aggregation_field_labels,
                 ) {
+                    if let Some(collector) = &self.ctx.research_rewrites {
+                        collector
+                            .record(binary_expr, &rewritten)
+                            .context(DataFusionPlanningSnafu)?;
+                    }
                     // A copied matcher belongs to the scan, not to the operand's identity:
                     // `absent()` turns `selector_matcher` into the labels it reports, so the
                     // re-planned context keeps the matchers the operand was written with.
@@ -2860,6 +2913,9 @@ impl PromPlanner {
             .context(CatalogSnafu)?;
 
         let logical_table = self.table_from_source(&provider)?;
+        if let Some(dependencies) = &mut self.dependencies {
+            dependencies.record(table_ref.clone(), &logical_table);
+        }
 
         // Try to rewrite the table scan to physical table scan if possible.
         let mut maybe_phy_table_ref = table_ref.clone();
@@ -2889,6 +2945,9 @@ impl PromPlanner {
             {
                 Ok(provider) => provider,
                 Err(e) if e.status_code() == StatusCode::TableNotFound => {
+                    if let Some(dependencies) = &mut self.dependencies {
+                        dependencies.invalid = true;
+                    }
                     // Fall back to scanning the logical table. It still works, but without
                     // `__tsid` optimization.
                     scan_provider.clone()
@@ -2899,6 +2958,9 @@ impl PromPlanner {
             if !Arc::ptr_eq(&physical_provider, &scan_provider) {
                 // Only rewrite when internal columns exist in physical schema.
                 let physical_table = self.table_from_source(&physical_provider)?;
+                if let Some(dependencies) = &mut self.dependencies {
+                    dependencies.record(physical_table_ref.clone(), &physical_table);
+                }
 
                 let has_table_id = physical_table
                     .schema()
@@ -3127,12 +3189,18 @@ impl PromPlanner {
         let table_ref = self.table_ref()?;
         let source = match self.table_provider.resolve_table(table_ref.clone()).await {
             Err(e) if e.status_code() == StatusCode::TableNotFound => {
+                if let Some(dependencies) = &mut self.dependencies {
+                    dependencies.invalid = true;
+                }
                 let plan = self.setup_context_for_empty_metric()?;
                 return Ok(Some(plan));
             }
             res => res.context(CatalogSnafu)?,
         };
         let table = self.table_from_source(&source)?;
+        if let Some(dependencies) = &mut self.dependencies {
+            dependencies.record(table_ref.clone(), &table);
+        }
 
         // set time index column name
         let time_index = table

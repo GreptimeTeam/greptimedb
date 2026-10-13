@@ -180,6 +180,14 @@ impl UserDefinedLogicalNodeCore for SeriesNormalize {
 }
 
 impl SeriesNormalize {
+    pub fn research_series_normalization(&self) -> (i64, &str, bool) {
+        (
+            self.offset,
+            &self.time_index_column_name,
+            self.filter_stale_markers,
+        )
+    }
+
     pub(crate) fn offset_for_time_index(&self, time_index: &Column) -> Option<Millisecond> {
         let index = self.input.schema().maybe_index_of_column(time_index)?;
         let (qualifier, field) = self.input.schema().qualified_field(index);
@@ -277,6 +285,21 @@ pub struct SeriesNormalizeExec {
 
     input: Arc<dyn ExecutionPlan>,
     metric: ExecutionPlanMetricsSet,
+}
+
+impl SeriesNormalizeExec {
+    /// Identifies the scalar normalization removed by the research range consumer.
+    pub fn research_scan_normalization(&self) -> (i64, &str, bool) {
+        (
+            self.offset,
+            &self.time_index_column_name,
+            self.filter_stale_markers,
+        )
+    }
+
+    pub(super) fn research_filters_stale(&self) -> bool {
+        self.filter_stale_markers
+    }
 }
 
 impl ExecutionPlan for SeriesNormalizeExec {

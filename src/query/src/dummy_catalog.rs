@@ -174,25 +174,7 @@ impl TableProvider for DummyTableProvider {
         request.projection = projection.cloned();
         request.filters = filters.to_vec();
         request.limit = limit;
-        if let Some(query_ctx) = &self.query_ctx {
-            let is_sink_scan = is_sink_scan(query_ctx, self.region_id)
-                .map_err(|e| DataFusionError::External(Box::new(e)))?;
-            apply_cached_snapshot_to_request(query_ctx, self.region_id, is_sink_scan, &mut request);
-        }
-
-        let scanner = self
-            .engine
-            .handle_query(self.region_id, request.clone())
-            .await
-            .map_err(|e| DataFusionError::External(Box::new(e)))?;
-
-        if request.snapshot_on_scan
-            && let Some(query_ctx) = &self.query_ctx
-            && let Some(snapshot_sequence) = scanner.snapshot_sequence()
-        {
-            bind_snapshot_bound_region_seq(query_ctx, self.region_id, snapshot_sequence)
-                .map_err(|e| DataFusionError::External(Box::new(e)))?;
-        }
+        let (scanner, request) = self.open_scanner(request).await?;
 
         let query_memory_tracker = self.engine.query_memory_tracker();
         let mut scan_exec = RegionScanExec::new(scanner, request, query_memory_tracker)?;
@@ -241,6 +223,99 @@ impl TableProvider for DummyTableProvider {
 }
 
 impl DummyTableProvider {
+    async fn open_scanner(
+        &self,
+        mut request: ScanRequest,
+    ) -> datafusion_common::Result<(store_api::region_engine::RegionScannerRef, ScanRequest)> {
+        if let Some(query_ctx) = &self.query_ctx {
+            let is_sink_scan = is_sink_scan(query_ctx, self.region_id)
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+            apply_cached_snapshot_to_request(query_ctx, self.region_id, is_sink_scan, &mut request);
+        }
+
+        let scanner = self
+            .engine
+            .handle_query(self.region_id, request.clone())
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+
+        if request.snapshot_on_scan
+            && let Some(query_ctx) = &self.query_ctx
+            && let Some(snapshot_sequence) = scanner.snapshot_sequence()
+        {
+            bind_snapshot_bound_region_seq(query_ctx, self.region_id, snapshot_sequence)
+                .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        }
+
+        Ok((scanner, request))
+    }
+
+    pub async fn prepare_series_source(
+        &self,
+        request: &common_query::request::SeriesSourceRequest,
+    ) -> datafusion_common::Result<Option<common_query::request::PreparedSeriesRead>> {
+        if request.region_id != self.region_id || request.schema != self.schema() {
+            return Err(DataFusionError::Plan("Series source schema changed".into()));
+        }
+        if request
+            .projection
+            .iter()
+            .any(|&index| index >= request.schema.fields().len())
+        {
+            return Err(DataFusionError::Plan(
+                "Series source projection out of bounds".into(),
+            ));
+        }
+        if self
+            .supports_filters_pushdown(&request.filters.iter().collect::<Vec<_>>())?
+            .iter()
+            .any(|support| *support != TableProviderFilterPushDown::Exact)
+        {
+            return Ok(None);
+        }
+        let mut scan = self.scan_request.lock().unwrap().clone();
+        scan.projection = Some(request.projection.clone());
+        scan.filters = request.filters.clone();
+        scan.output_ordering = Some(request.ordering.clone());
+        scan.distribution = Some(TimeSeriesDistribution::PerSeries);
+        scan.series_row_selector = request.selector;
+        if std::env::var_os("GT_RESEARCH_QUERY_PROGRAM").is_some() {
+            if let Some(query_ctx) = &self.query_ctx {
+                let sink = is_sink_scan(query_ctx, self.region_id)
+                    .map_err(|error| DataFusionError::External(Box::new(error)))?;
+                apply_cached_snapshot_to_request(query_ctx, self.region_id, sink, &mut scan);
+            }
+            if let Some(source) = self
+                .engine
+                .prepare_series_source(self.region_id, scan.clone())
+                .await
+                .map_err(|error| DataFusionError::External(Box::new(error)))?
+            {
+                return Ok(Some(common_query::request::PreparedSeriesRead {
+                    source,
+                    memory_tracker: self.engine.query_memory_tracker(),
+                }));
+            }
+        }
+        let (mut scanner, _) = self.open_scanner(scan).await?;
+        if scanner.properties().num_partitions() != 1 {
+            return Ok(None);
+        }
+        scanner
+            .prepare(store_api::region_engine::PrepareRequest::default().with_target_partitions(1))
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        let source = scanner
+            .prepare_series_source()
+            .await
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        Ok(
+            source.map(|source| common_query::request::PreparedSeriesRead {
+                source,
+                memory_tracker: self.engine.query_memory_tracker(),
+            }),
+        )
+    }
+
     /// Creates a new provider.
     pub fn new(region_id: RegionId, engine: RegionEngineRef, metadata: RegionMetadataRef) -> Self {
         let preserve_pk_dictionary_encoding = supports_pk_dictionary_encoding(engine.name());

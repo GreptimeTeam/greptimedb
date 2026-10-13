@@ -473,6 +473,7 @@ async fn plan_direct_or(
     let mut planner = PromPlanner {
         table_provider,
         ctx: PromPlannerContext::default(),
+        dependencies: None,
         promql_annotations: None,
     };
     planner
@@ -562,6 +563,7 @@ async fn mixed_direct_or(histogram_on_left: bool) -> (PromPlanner, LogicalPlan) 
     let mut planner = PromPlanner {
         table_provider,
         ctx: PromPlannerContext::default(),
+        dependencies: None,
         promql_annotations: None,
     };
     let left_context = direct_or_context("lhs", &["job", "k"], "v");
@@ -634,6 +636,7 @@ async fn mixed_aggregate_input(histograms: Vec<NativeHistogram>) -> (PromPlanner
             tag_columns: vec!["k".to_string()],
             ..Default::default()
         },
+        dependencies: None,
         promql_annotations: None,
     };
     (planner, plan)
@@ -3298,6 +3301,7 @@ async fn comparison_binary_join_uses_tsid_and_keeps_it_in_filtered_result() {
     let mut planner = PromPlanner {
         table_provider,
         ctx: PromPlannerContext::from_eval_stmt(&eval_stmt),
+        dependencies: None,
         promql_annotations: None,
     };
     let plan = planner
@@ -4930,6 +4934,7 @@ async fn mixed_native_histogram_rate_executes_real_ranges() {
             ],
             ..Default::default()
         },
+        dependencies: None,
         promql_annotations: Some(collector.clone()),
     };
     let input = LogicalPlan::Extension(Extension {
@@ -6267,6 +6272,7 @@ async fn native_scan_bounds_preserve_zero_lookback_and_overflow() {
     let mut planner = PromPlanner {
         table_provider,
         ctx: PromPlannerContext::from_eval_stmt(&build_eval_stmt("some_metric")),
+        dependencies: None,
         promql_annotations: None,
     };
     planner.ctx.time_index_column = Some("timestamp".to_string());
@@ -7107,6 +7113,7 @@ async fn test_direct_or_numeric_value_types() {
     let mut planner = PromPlanner {
         table_provider: provider,
         ctx: PromPlannerContext::default(),
+        dependencies: None,
         promql_annotations: None,
     };
     let left_context = direct_or_context("lhs", &["job"], "v");
@@ -8338,6 +8345,7 @@ async fn test_mixed_or_value_aliases_do_not_replace_labels() {
     let mut planner = PromPlanner {
         table_provider,
         ctx: PromPlannerContext::default(),
+        dependencies: None,
         promql_annotations: None,
     };
     let left = LogicalPlanBuilder::from(scan(&left))

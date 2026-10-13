@@ -339,6 +339,24 @@ impl DynFilterUpdate {
     }
 }
 
+/// Local-only preparation request. No scanner or query result is cached or serialized.
+#[derive(Clone, Debug)]
+pub struct SeriesSourceRequest {
+    pub header: Option<RegionRequestHeader>,
+    pub region_id: RegionId,
+    pub schema: datafusion::arrow::datatypes::SchemaRef,
+    pub projection: Vec<usize>,
+    pub filters: Vec<datafusion_expr::Expr>,
+    pub ordering: Vec<common_recordbatch::OrderOption>,
+    pub selector: Option<store_api::storage::TimeSeriesRowSelector>,
+}
+
+/// A pinned source and its output quota; both belong to this request only.
+pub struct PreparedSeriesRead {
+    pub source: Arc<dyn store_api::region_engine::PreparedSeriesSource>,
+    pub memory_tracker: Option<common_recordbatch::QueryMemoryTracker>,
+}
+
 /// The query request to be handled by the RegionServer (Datanode).
 #[derive(Clone, Debug)]
 pub struct QueryRequest {

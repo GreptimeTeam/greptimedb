@@ -1028,6 +1028,7 @@ mod tests {
         };
         let partition_range = range_meta.new_partition_range(0);
         let stream_ctx = StreamContext {
+            native_series_scan: tokio::sync::OnceCell::new(),
             input,
             ranges: vec![range_meta],
             query_start: Instant::now(),

@@ -315,6 +315,14 @@ impl DfLogicalPlanner {
 
     #[tracing::instrument(skip_all)]
     async fn plan_pql(&self, stmt: &EvalStmt, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
+        if std::env::var_os("GT_RESEARCH_SERIES_GRID").is_some() {
+            return Ok(crate::research_series_grid::plan(
+                stmt,
+                self.engine_state.catalog_manager(),
+                &query_ctx,
+            )
+            .await?);
+        }
         let mut scheduled_state = self.derive_session_state_with_scheduled_time(&query_ctx)?;
         let promql_annotations = query_ctx.remote_query_id().map(promql_annotation_collector);
         if let Some(collector) = &promql_annotations {
@@ -328,18 +336,165 @@ impl DfLogicalPlanner {
             scheduled_state.clone(),
             &query_ctx,
         )?);
-        let table_provider = DfTableSourceProvider::new(
-            self.engine_state.catalog_manager().clone(),
-            self.engine_state.disallow_cross_catalog_query(),
-            query_ctx.clone(),
-            plan_decoder,
-            scheduled_state
-                .config_options()
-                .sql_parser
-                .enable_ident_normalization,
-        );
+        let table_provider = || {
+            DfTableSourceProvider::new(
+                self.engine_state.catalog_manager().clone(),
+                self.engine_state.disallow_cross_catalog_query(),
+                query_ctx.clone(),
+                plan_decoder.clone(),
+                scheduled_state
+                    .config_options()
+                    .sql_parser
+                    .enable_ident_normalization,
+            )
+        };
+        let points = (stmt
+            .end
+            .duration_since(stmt.start)
+            .unwrap_or_default()
+            .as_millis()
+            / stmt.interval.as_millis().max(1)) as usize
+            + 1;
+        let long_join = crate::research_series_grid::exceeds_join_grid(&stmt.expr, points);
+        let packed_series = std::env::var_os("GT_RESEARCH_PACKED_SERIES").is_some()
+            && !long_join
+            && crate::research_series_grid::needs_series_execution(
+                &stmt.expr,
+                std::env::var_os("GT_RESEARCH_ROOT_SELECTOR").is_some(),
+            );
+        if packed_series || (!long_join && std::env::var_os("GT_RESEARCH_ONLINE_SERIES").is_some())
+        {
+            let (expr, explain) = crate::research_series_grid::unwrap_explain(&stmt.expr)?;
+            let mut stmt = stmt.clone();
+            stmt.expr = expr;
+            let cache_request = crate::research_series_grid::plan_cache::PlanCache::request(
+                &stmt,
+                &scheduled_state,
+                &query_ctx,
+            );
+            if let Some(request) = &cache_request
+                && let Some(plan) = self
+                    .engine_state
+                    .series_plan_cache
+                    .get(request, table_provider())
+                    .await
+            {
+                return Ok(match explain {
+                    Some((verbose, analyze)) => LogicalPlanBuilder::from(
+                        crate::research_series_grid::query_program::explain_plan(plan)?,
+                    )
+                    .explain(verbose, analyze)?
+                    .build()?,
+                    None => plan,
+                });
+            }
+            let (stmt, mut dependencies) = PromPlanner::research_rewritten_stmt_with_dependencies(
+                table_provider(),
+                &stmt,
+                &self.engine_state,
+                cache_request.is_some(),
+            )
+            .await
+            .map_err(BoxedError::new)
+            .context(QueryPlanSnafu)?;
+            let mut inputs = Vec::new();
+            let selector_frontier = std::env::var_os("GT_RESEARCH_SELECTOR_FRONTIER").is_some();
+            if packed_series
+                || selector_frontier
+                || std::env::var_os("GT_RESEARCH_ONLINE_FRONTIER").is_some()
+            {
+                let (expr, fragments) = if selector_frontier {
+                    crate::research_series_grid::split_selector_frontier(&stmt.expr)?
+                } else {
+                    crate::research_series_grid::split_frontier(&stmt.expr)?
+                };
+                let mut planned = Vec::new();
+                for (key, expr) in fragments {
+                    let mut fragment = stmt.clone();
+                    fragment.expr = expr.clone();
+                    let (plan, fragment_dependencies) =
+                        PromPlanner::stmt_to_plan_with_dependencies(
+                            table_provider(),
+                            &fragment,
+                            &self.engine_state,
+                            promql_annotations.clone(),
+                            cache_request.is_some(),
+                        )
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(QueryPlanSnafu)?;
+                    if let (Some(dependencies), Some(fragment)) =
+                        (&mut dependencies, fragment_dependencies)
+                    {
+                        dependencies.merge(fragment);
+                    }
+                    planned.push((key, expr, plan));
+                }
+                let mut upper = stmt.clone();
+                upper.expr = expr;
+                let plan = crate::research_series_grid::plan_frontier(&upper, planned)?;
+                let context = QueryEngineContext::new(scheduled_state, query_ctx);
+                let plan = self
+                    .engine_state
+                    .optimize_by_extension_rules(plan, &context)?;
+                let mut plan = crate::dist_plan::DistPlannerAnalyzer::place_series_fragments(
+                    plan,
+                    context.state(),
+                )?;
+                if let (Some(request), Some(dependencies)) = (cache_request, dependencies)
+                    && let Some(bound) = self
+                        .engine_state
+                        .series_plan_cache
+                        .insert(request, plan.clone(), dependencies)
+                        .await
+                {
+                    plan = bound;
+                }
+                return Ok(match explain {
+                    Some((verbose, analyze)) => LogicalPlanBuilder::from(
+                        crate::research_series_grid::query_program::explain_plan(plan)?,
+                    )
+                    .explain(verbose, analyze)?
+                    .build()?,
+                    None => plan,
+                });
+            }
+            for (key, expr) in crate::research_series_grid::selector_requests(&stmt.expr)? {
+                let mut leaf = stmt.clone();
+                leaf.expr = expr;
+                let plan = PromPlanner::stmt_to_plan_with_annotations(
+                    table_provider(),
+                    &leaf,
+                    &self.engine_state,
+                    promql_annotations.clone(),
+                )
+                .await
+                .map_err(BoxedError::new)
+                .context(QueryPlanSnafu)?;
+                inputs.push((key, crate::research_series_grid::raw_series_input(&plan)?));
+            }
+            let plan = crate::research_series_grid::plan_online(
+                &stmt,
+                self.engine_state.catalog_manager(),
+                &query_ctx,
+                inputs,
+            )
+            .await?;
+            let context = QueryEngineContext::new(scheduled_state, query_ctx);
+            let plan = self
+                .engine_state
+                .optimize_by_extension_rules(plan, &context)?;
+            return Ok(match explain {
+                Some((verbose, analyze)) => LogicalPlanBuilder::from(
+                    crate::research_series_grid::query_program::explain_plan(plan)?,
+                )
+                .explain(verbose, analyze)?
+                .build()?,
+                None => plan,
+            });
+        }
         let plan = PromPlanner::stmt_to_plan_with_annotations(
-            table_provider,
+            table_provider(),
             stmt,
             &self.engine_state,
             promql_annotations,

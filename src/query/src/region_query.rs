@@ -62,6 +62,14 @@ pub trait RegionQueryHandler: Send + Sync {
         region_id: store_api::storage::RegionId,
     ) -> Result<RegionQueryTarget>;
 
+    async fn prepare_series_sources(
+        &self,
+        _target: &RegionQueryTarget,
+        _requests: Vec<common_query::request::SeriesSourceRequest>,
+    ) -> Result<Option<Vec<common_query::request::PreparedSeriesRead>>> {
+        Ok(None)
+    }
+
     async fn do_get(
         &self,
         target: &RegionQueryTarget,

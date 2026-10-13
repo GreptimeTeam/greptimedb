@@ -26,6 +26,17 @@ use crate::storage::SequenceNumber;
 /// A hint on how to select rows from a time-series.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Display)]
 pub enum TimeSeriesRowSelector {
+    /// Retain original samples that can be selected by an instant evaluation grid.
+    #[strum(
+        to_string = "InstantGrid {{ start: {start}, end: {end}, interval: {interval}, lookback: {lookback}, offset: {offset} }}"
+    )]
+    InstantGrid {
+        start: i64,
+        end: i64,
+        interval: i64,
+        lookback: i64,
+        offset: i64,
+    },
     /// Only keep the last row of each time-series.
     #[strum(to_string = "LastRow {{ after_merge: {after_merge} }}")]
     LastRow {

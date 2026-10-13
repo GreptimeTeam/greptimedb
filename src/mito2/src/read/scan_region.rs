@@ -14,11 +14,12 @@
 
 //! Scans a region according to the scan request.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::ffi::OsString;
 use std::fmt;
 use std::num::NonZeroU64;
-use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
@@ -71,13 +72,14 @@ use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::range::{FileRangeBuilder, MemRangeBuilder, RangeMeta, RowGroupIndex};
 use crate::read::range_cache::{ScanRequestFingerprint, implied_time_range_from_exprs};
 use crate::read::read_columns::ReadColumns;
+use crate::read::research_series_major::{NativeSeriesScan, NativeSourceTemplate};
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::SeriesScan;
 use crate::read::stream::ScanBatchStream;
 use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{BoxedRecordBatchStream, RecordBatch};
 use crate::region::options::MergeMode;
-use crate::region::version::VersionRef;
+use crate::region::version::{Version, VersionRef};
 use crate::series_index::SeriesIndexReadContext;
 use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::{
@@ -181,6 +183,48 @@ impl Scanner {
     }
 }
 
+struct NativeSourceKey {
+    version: Weak<Version>,
+    request: ScanRequest,
+    roots: [OsString; 3],
+}
+
+impl NativeSourceKey {
+    fn matches(&self, other: &Self) -> bool {
+        self.version.ptr_eq(&other.version)
+            && self.request == other.request
+            && self.roots == other.roots
+    }
+}
+
+struct NativeSourceEntry {
+    key: NativeSourceKey,
+    template: NativeSourceTemplate,
+    created: Instant,
+}
+
+static NATIVE_SOURCES: LazyLock<Mutex<VecDeque<NativeSourceEntry>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::new()));
+
+fn native_source_snapshot_admitted(version: &VersionRef, request: &ScanRequest) -> bool {
+    request.distribution == Some(TimeSeriesDistribution::PerSeries)
+        && !request.snapshot_on_scan
+        && !request.exact_sequence_range
+        && !request.skip_sst_files
+        && request.memtable_min_sequence.is_none()
+        && request.memtable_max_sequence.is_none()
+        && request.sst_min_sequence.is_none()
+        && request.series_row_selector.is_none()
+        && request.limit.is_none()
+        && request.json_type_hint.is_empty()
+        && !version.options.append_mode
+        && version
+            .memtables
+            .list_memtables()
+            .iter()
+            .all(|memtable| memtable.is_empty())
+}
+
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// Helper to scans a region by [ScanRequest].
 ///
@@ -270,6 +314,83 @@ pub(crate) struct ScanRegion {
 }
 
 impl ScanRegion {
+    pub(crate) async fn prepare_series_source(
+        self,
+    ) -> Result<Option<Arc<dyn store_api::region_engine::PreparedSeriesSource>>> {
+        if std::env::var_os("GT_RESEARCH_QUERY_PROGRAM").is_none()
+            || std::env::var_os("GT_RESEARCH_BLOCK_SCAN").is_none()
+            || std::env::var_os("GT_RESEARCH_MAX_SUMMARY").is_some()
+            || !self.experimental_series_scan_v2
+            || !native_source_snapshot_admitted(&self.version, &self.request)
+        {
+            return Ok(None);
+        }
+        #[cfg(feature = "enterprise")]
+        if self.extension_range_provider.is_some() {
+            return Ok(None);
+        }
+        let [Some(native), Some(coalesced), Some(sidecar)] = [
+            std::env::var_os("GT_RESEARCH_NATIVE_SERIES"),
+            std::env::var_os("GT_RESEARCH_COALESCED_SERIES"),
+            std::env::var_os("GT_RESEARCH_SST_SIDECAR"),
+        ] else {
+            return Ok(None);
+        };
+        let key = NativeSourceKey {
+            version: Arc::downgrade(&self.version),
+            request: self.request.clone(),
+            roots: [native, coalesced, sidecar],
+        };
+        let cached = {
+            let mut entries = NATIVE_SOURCES.lock().map_err(|_| {
+                crate::error::UnexpectedSnafu {
+                    reason: "Native source cache lock poisoned",
+                }
+                .build()
+            })?;
+            entries.retain(|entry| {
+                entry.created.elapsed() < Duration::from_secs(30)
+                    && entry.key.version.strong_count() != 0
+            });
+            entries
+                .iter()
+                .find(|entry| entry.key.matches(&key))
+                .map(|entry| entry.template.clone())
+        };
+        let pool = self.scan_memory_pool.clone();
+        if let Some(template) = cached {
+            // Version identity covers metadata and SST handles; mutable rows were checked above.
+            let source = template.bind(&pool)?;
+            debug!("Research native source template hit");
+            return Ok(Some(source));
+        }
+        let input = self.scan_input().await?;
+        let context = Arc::new(StreamContext::seq_scan_ctx(input));
+        let Some(template) = NativeSeriesScan::prepare_program_template(context).await? else {
+            return Ok(None);
+        };
+        let source = template.bind(&pool)?;
+        // Keep prototype metadata bounded independently of the request's scan reservation.
+        if template.num_series() <= 4096 && format!("{:?}", key.request).len() <= 64 * 1024 {
+            let mut entries = NATIVE_SOURCES.lock().map_err(|_| {
+                crate::error::UnexpectedSnafu {
+                    reason: "Native source cache lock poisoned",
+                }
+                .build()
+            })?;
+            if entries.len() >= 16 {
+                entries.pop_front();
+            }
+            entries.push_back(NativeSourceEntry {
+                key,
+                template,
+                created: Instant::now(),
+            });
+        }
+        debug!("Research native source template prepared");
+        Ok(Some(source))
+    }
+
     /// Creates a [ScanRegion].
     pub(crate) fn new(
         version: VersionRef,
@@ -1423,6 +1544,28 @@ impl ScanInput {
         ranges
     }
 
+    pub(crate) async fn prepare_file_series_blocks(
+        &self,
+        file: &FileHandle,
+        reusable: Option<&crate::sst::parquet::file_range::SeriesBlockContext>,
+    ) -> Result<
+        Option<(
+            crate::sst::parquet::file_range::SeriesBlockContext,
+            crate::sst::parquet::research_sidecar::PreparedSeriesFile,
+        )>,
+    > {
+        self.access_layer
+            .read_sst(file.clone())
+            .predicate(self.predicate_for_file(file))
+            .projection(Some(self.read_cols.clone()))
+            .json2_rewrite_targets(self.json2_rewrite_targets.clone())
+            .cache(self.cache_strategy.clone())
+            .expected_metadata(Some(self.mapper.metadata().clone()))
+            .pre_filter_mode(PreFilterMode::All)
+            .prepare_file_series_blocks(reusable)
+            .await
+    }
+
     pub(crate) fn predicate_for_file(&self, file: &FileHandle) -> Option<Predicate> {
         if self.should_skip_region_partition(file) {
             self.predicate.predicate_without_region().cloned()
@@ -1953,6 +2096,8 @@ pub(crate) fn exact_sequence_range(
 pub struct StreamContext {
     /// Input memtables and files.
     pub input: ScanInput,
+    pub(crate) native_series_scan:
+        tokio::sync::OnceCell<Option<Arc<super::research_series_major::NativeSeriesScan>>>,
     /// Metadata for partition ranges.
     pub(crate) ranges: Vec<RangeMeta>,
     // Metrics:
@@ -1970,6 +2115,7 @@ impl StreamContext {
             input,
             ranges,
             query_start,
+            native_series_scan: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -1982,6 +2128,7 @@ impl StreamContext {
             input,
             ranges,
             query_start,
+            native_series_scan: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -2337,6 +2484,88 @@ mod tests {
     use crate::sst::file::FileMeta;
     use crate::test_util::memtable_util::metadata_with_primary_key;
     use crate::test_util::scheduler_util::SchedulerEnv;
+
+    #[test]
+    fn native_source_reuse_requires_fresh_empty_snapshot_and_identical_request() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mutable = crate::memtable::time_partition::TimePartitions::new(
+            metadata.clone(),
+            Arc::new(crate::memtable::time_series::TimeSeriesMemtableBuilder::default()),
+            0,
+            None,
+        );
+        let version = Arc::new(
+            crate::region::version::VersionBuilder::new(metadata.clone(), mutable).build(),
+        );
+        let request = ScanRequest {
+            distribution: Some(TimeSeriesDistribution::PerSeries),
+            filters: vec![col("ts").gt_eq(lit(1000i64)), col("k0").eq(lit("api"))],
+            projection: Some(vec![0, 2, 3]),
+            ..Default::default()
+        };
+        let key = |version: &VersionRef, request: ScanRequest| NativeSourceKey {
+            version: Arc::downgrade(version),
+            request,
+            roots: ["native".into(), "coalesced".into(), "sidecar".into()],
+        };
+        let original = key(&version, request.clone());
+        assert!(native_source_snapshot_admitted(&version, &request));
+        assert!(original.matches(&key(&version, request.clone())));
+        let reopened = Arc::new(version.as_ref().clone());
+        assert!(!original.matches(&key(&reopened, request.clone())));
+        for filters in [
+            vec![col("ts").gt_eq(lit(2000i64)), col("k0").eq(lit("api"))],
+            vec![col("ts").gt_eq(lit(1000i64)), col("k0").eq(lit("web"))],
+        ] {
+            let mut changed = request.clone();
+            changed.filters = filters;
+            assert!(!original.matches(&key(&version, changed)));
+        }
+        let mut moved = key(&version, request.clone());
+        moved.roots[1] = "replacement".into();
+        assert!(!original.matches(&moved));
+        let mut projected = request.clone();
+        projected.projection = Some(vec![0, 2, 4]);
+        assert!(!original.matches(&key(&version, projected)));
+        for restricted in [
+            ScanRequest {
+                snapshot_on_scan: true,
+                ..request.clone()
+            },
+            ScanRequest {
+                memtable_max_sequence: Some(1),
+                ..request.clone()
+            },
+            ScanRequest {
+                memtable_min_sequence: Some(1),
+                ..request.clone()
+            },
+            ScanRequest {
+                sst_min_sequence: Some(1),
+                ..request.clone()
+            },
+            ScanRequest {
+                exact_sequence_range: true,
+                ..request.clone()
+            },
+            ScanRequest {
+                skip_sst_files: true,
+                ..request.clone()
+            },
+        ] {
+            assert!(!native_source_snapshot_admitted(&version, &restricted));
+        }
+        let rows = crate::test_util::memtable_util::build_key_values(
+            &metadata,
+            "api".into(),
+            0,
+            &[1000],
+            1,
+        );
+        version.memtables.mutable.write(&rows).unwrap();
+        assert!(original.matches(&key(&version, request.clone())));
+        assert!(!native_source_snapshot_admitted(&version, &request));
+    }
 
     async fn new_scan_input(metadata: RegionMetadataRef, filters: Vec<Expr>) -> ScanInputBuilder {
         let env = SchedulerEnv::new().await;

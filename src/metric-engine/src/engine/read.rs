@@ -32,6 +32,24 @@ use crate::metrics::MITO_OPERATION_ELAPSED;
 use crate::utils;
 
 impl MetricEngineInner {
+    pub(crate) async fn prepare_series_source(
+        &self,
+        region_id: RegionId,
+        request: ScanRequest,
+    ) -> Result<Option<Arc<dyn store_api::region_engine::PreparedSeriesSource>>> {
+        let (region_id, request) = if self.is_physical_region(region_id) {
+            (region_id, request)
+        } else {
+            let physical = self.get_physical_region_id(region_id).await?;
+            let request = self.transform_request(physical, region_id, request).await?;
+            (utils::to_data_region_id(physical), request)
+        };
+        self.mito
+            .prepare_series_source(region_id, request)
+            .await
+            .context(MitoReadOperationSnafu)
+    }
+
     #[tracing::instrument(skip_all)]
     pub async fn read_region(
         &self,

@@ -429,6 +429,169 @@ impl ParquetReaderBuilder {
         self.build_reader_input_inner(metrics).await
     }
 
+    fn reuse_series_context(
+        &self,
+        reusable: &super::file_range::SeriesBlockContext,
+        parquet: &Arc<ParquetMetaData>,
+    ) -> Option<super::file_range::SeriesFileContext> {
+        let file_metadata = parquet.file_metadata();
+        if let super::file_range::SeriesBlockContext::File(previous) = reusable
+            && previous.read_columns == self.read_cols
+            && previous.predicate.as_ref().map(Predicate::exprs)
+                == self.predicate.as_ref().map(Predicate::exprs)
+            && previous.base.pre_filter_mode == self.pre_filter_mode
+            && previous._file.meta_ref().partition_expr
+                == self.file_handle.meta_ref().partition_expr
+            && previous.base.expected_metadata.as_ref() == self.expected_metadata.as_ref()
+            && previous.parquet_metadata.file_metadata().schema_descr()
+                == file_metadata.schema_descr()
+            && previous
+                .parquet_metadata
+                .file_metadata()
+                .key_value_metadata()
+                == file_metadata.key_value_metadata()
+        {
+            let mut context = previous.as_ref().clone();
+            // Each source must retain its own deletion guard even when the read plan is shared.
+            context._file = self.file_handle.clone();
+            Some(context)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) async fn prepare_file_series_blocks(
+        &self,
+        reusable: Option<&super::file_range::SeriesBlockContext>,
+    ) -> Result<
+        Option<(
+            super::file_range::SeriesBlockContext,
+            super::research_sidecar::PreparedSeriesFile,
+        )>,
+    > {
+        let Some(expected) = &self.expected_metadata else {
+            return Ok(None);
+        };
+        if self.object_store.info().scheme() != "fs"
+            || self.compaction
+            || !self.json2_rewrite_targets.is_empty()
+            || self.file_handle.region_id() != expected.region_id
+            || self
+                .predicate
+                .as_ref()
+                .is_some_and(|p| !p.dyn_filters().is_empty())
+        {
+            return Ok(None);
+        }
+        let file_path = self.file_handle.file_path(&self.table_dir, self.path_type);
+        let (metadata, _) = self
+            .read_parquet_metadata(
+                &file_path,
+                self.file_handle.meta_ref().file_size,
+                &mut MetadataCacheMetrics::default(),
+                PageIndexPolicy::Skip,
+            )
+            .await?;
+        let region = metadata.region_metadata();
+        if region.as_ref() != expected.as_ref() {
+            return Ok(None);
+        }
+        let parquet = metadata.parquet_metadata();
+        let file_metadata = parquet.file_metadata();
+        if let Some(context) =
+            reusable.and_then(|previous| self.reuse_series_context(previous, &parquet))
+        {
+            let Some(selection) = super::research_sidecar::prepare_file_series_blocks(
+                std::path::PathBuf::from(self.object_store.info().root()).join(&file_path),
+                context.schema.clone(),
+                parquet,
+            )
+            .await?
+            else {
+                return Ok(None);
+            };
+            common_telemetry::debug!("Research series read context reused");
+            return Ok(Some((
+                super::file_range::SeriesBlockContext::File(Arc::new(context)),
+                selection,
+            )));
+        }
+        let schema = Arc::new(
+            parquet_to_arrow_schema(
+                file_metadata.schema_descr(),
+                file_metadata.key_value_metadata(),
+            )
+            .context(ParquetToArrowSchemaSnafu { file: &file_path })?,
+        );
+        let columns = self.read_cols.clone().unwrap_or_else(|| {
+            ReadColumns::new(
+                region
+                    .column_metadatas
+                    .iter()
+                    .map(|column| column.column_id),
+            )
+        });
+        let read_format = FlatReadFormat::new(
+            region.clone(),
+            columns,
+            Some(schema.clone()),
+            &file_path,
+            false,
+        )?;
+        if read_format.parquet_read_columns().has_nested()
+            || self
+                .build_partition_filter(&read_format, &region.schema)?
+                .is_some()
+        {
+            return Ok(None);
+        }
+        let codec = build_primary_key_codec(&region);
+        // Candidate discovery applies tags. Keep every simple time/field filter;
+        // no Parquet prefilter or row-group pruning runs on this path.
+        let filters = build_reader_filter_plan(
+            self.predicate.as_ref(),
+            Some(expected),
+            self.pre_filter_mode,
+            false,
+            false,
+            &read_format,
+            &codec,
+            &parquet,
+        );
+        let Some(selection) = super::research_sidecar::prepare_file_series_blocks(
+            std::path::PathBuf::from(self.object_store.info().root()).join(&file_path),
+            schema.clone(),
+            parquet.clone(),
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        let context = super::file_range::SeriesFileContext {
+            _file: self.file_handle.clone(),
+            base: Arc::new(RangeBase {
+                filters: filters.remaining_simple_filters,
+                dyn_filters: Vec::new(),
+                read_format,
+                expected_metadata: Some(expected.clone()),
+                prune_schema: region.schema.clone(),
+                codec,
+                compat_batch: None,
+                compaction_projection_mapper: None,
+                pre_filter_mode: self.pre_filter_mode,
+                partition_filter: None,
+            }),
+            schema,
+            parquet_metadata: parquet,
+            read_columns: self.read_cols.clone(),
+            predicate: self.predicate.clone(),
+        };
+        Ok(Some((
+            super::file_range::SeriesBlockContext::File(Arc::new(context)),
+            selection,
+        )))
+    }
+
     async fn build_reader_input_inner(
         &self,
         metrics: &mut ReaderMetrics,
@@ -1782,6 +1945,30 @@ pub(crate) struct RowGroupBuildContext<'a> {
 }
 
 impl RowGroupReaderBuilder {
+    pub(crate) async fn prepare_series_blocks(
+        &self,
+        row_group_idx: usize,
+        row_selection: Option<RowSelection>,
+        series: Option<Arc<Vec<[u8; 22]>>>,
+    ) -> Result<Option<crate::sst::parquet::research_sidecar::PreparedSeriesSelection>> {
+        if self.object_store.info().scheme() != "fs"
+            || self.has_nested_projection
+            || !self.json2_rewrite_targets.is_empty()
+            || self.prefilter_builder.is_some()
+        {
+            return Ok(None);
+        }
+        crate::sst::parquet::research_sidecar::prepare_series_blocks(
+            std::path::PathBuf::from(self.object_store.info().root()).join(&self.file_path),
+            self.arrow_metadata.schema().clone(),
+            self.parquet_meta.clone(),
+            row_group_idx,
+            row_selection,
+            series,
+        )
+        .await
+    }
+
     /// Path of the file to read.
     pub(crate) fn file_path(&self) -> &str {
         &self.file_path
@@ -2465,6 +2652,148 @@ mod tests {
     use crate::sst::parquet::read_columns::{ParquetReadColumn, ParquetReadColumns};
     use crate::sst::parquet::row_group::ParquetFetchMetrics;
     use crate::test_util::sst_util::{sst_file_handle, sst_region_metadata};
+
+    #[test]
+    fn shared_series_context_preserves_filters_and_source_lifetime() {
+        use std::sync::Mutex;
+
+        use parquet::file::metadata::{FileMetaData, KeyValue};
+        use parquet::schema::parser::parse_message_type;
+        use parquet::schema::types::SchemaDescriptor;
+
+        use crate::sst::file::FileMeta;
+        use crate::sst::file_purger::FilePurger;
+        use crate::sst::parquet::file_range::{SeriesBlockContext, SeriesFileContext};
+
+        #[derive(Debug, Default)]
+        struct Purger(Mutex<Vec<String>>);
+        impl FilePurger for Purger {
+            fn remove_file(&self, meta: FileMeta, deleted: bool, _: bool) {
+                if deleted {
+                    self.0.lock().unwrap().push(meta.file_id.to_string());
+                }
+            }
+        }
+        let metadata = Arc::new(sst_region_metadata());
+        let columns = ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id));
+        let predicate = Predicate::new(vec![
+            col("ts").gt(lit(ScalarValue::TimestampMillisecond(Some(10), None))),
+            col("ts").lt_eq(lit(ScalarValue::TimestampMillisecond(Some(50), None))),
+        ]);
+        let parquet = |message: &str, key: Option<&str>| {
+            Arc::new(ParquetMetaData::new(
+                FileMetaData::new(
+                    1,
+                    0,
+                    None,
+                    key.map(|key| vec![KeyValue::new(key.to_string(), "value".to_string())]),
+                    Arc::new(SchemaDescriptor::new(Arc::new(
+                        parse_message_type(message).unwrap(),
+                    ))),
+                    None,
+                ),
+                vec![],
+            ))
+        };
+        let physical = parquet("message schema { REQUIRED INT64 ts; }", None);
+        let schema = Arc::new(
+            parquet_to_arrow_schema(physical.file_metadata().schema_descr(), None).unwrap(),
+        );
+        let read_format =
+            FlatReadFormat::new(metadata.clone(), columns.clone(), None, "test", false).unwrap();
+        let purger = Arc::new(Purger::default());
+        let first = FileHandle::new(sst_file_handle(0, 100).meta_ref().clone(), purger.clone());
+        let second = FileHandle::new(sst_file_handle(100, 200).meta_ref().clone(), purger.clone());
+        let first_id = first.meta_ref().file_id.to_string();
+        let second_id = second.meta_ref().file_id.to_string();
+        first.mark_deleted();
+        second.mark_deleted();
+        let previous = SeriesBlockContext::File(Arc::new(SeriesFileContext {
+            _file: first,
+            base: Arc::new(RangeBase {
+                filters: predicate
+                    .exprs()
+                    .iter()
+                    .map(|expr| {
+                        SimpleFilterContext::new_opt(&metadata, Some(&metadata), expr).unwrap()
+                    })
+                    .collect(),
+                dyn_filters: vec![],
+                read_format,
+                expected_metadata: Some(metadata.clone()),
+                prune_schema: metadata.schema.clone(),
+                codec: build_primary_key_codec(&metadata),
+                compat_batch: None,
+                compaction_projection_mapper: None,
+                pre_filter_mode: PreFilterMode::All,
+                partition_filter: None,
+            }),
+            schema,
+            parquet_metadata: physical.clone(),
+            read_columns: Some(columns.clone()),
+            predicate: Some(predicate.clone()),
+        }));
+        let mut builder = ParquetReaderBuilder::new(
+            "test".into(),
+            PathType::Bare,
+            second,
+            ObjectStore::new(Memory::default()).unwrap(),
+        )
+        .projection(Some(columns.clone()))
+        .predicate(Some(predicate.clone()))
+        .expected_metadata(Some(metadata.clone()))
+        .pre_filter_mode(PreFilterMode::All);
+        let reused = builder.reuse_series_context(&previous, &physical).unwrap();
+        let SeriesBlockContext::File(old) = &previous else {
+            unreachable!()
+        };
+        assert!(Arc::ptr_eq(&old.base, &reused.base));
+        assert_eq!(
+            SeriesBlockContext::File(Arc::new(reused.clone())).grid_row_bounds(0, 10, 10),
+            Some(2..6)
+        );
+        assert!(
+            builder
+                .reuse_series_context(
+                    &previous,
+                    &parquet("message schema { REQUIRED INT32 ts; }", None)
+                )
+                .is_none()
+        );
+        assert!(
+            builder
+                .reuse_series_context(
+                    &previous,
+                    &parquet("message schema { REQUIRED INT64 ts; }", Some("changed"))
+                )
+                .is_none()
+        );
+        builder.predicate = Some(Predicate::new(vec![
+            col("ts").gt(lit(ScalarValue::TimestampMillisecond(Some(50), None))),
+        ]));
+        assert!(builder.reuse_series_context(&previous, &physical).is_none());
+        builder.predicate = Some(predicate);
+        builder.read_cols = Some(ReadColumns::new([metadata.time_index_column().column_id]));
+        assert!(builder.reuse_series_context(&previous, &physical).is_none());
+        builder.read_cols = Some(columns);
+        builder.pre_filter_mode = PreFilterMode::SkipFields;
+        assert!(builder.reuse_series_context(&previous, &physical).is_none());
+        builder.pre_filter_mode = PreFilterMode::All;
+        builder.expected_metadata = None;
+        assert!(builder.reuse_series_context(&previous, &physical).is_none());
+        builder.expected_metadata = Some(metadata);
+        let mut changed_file = builder.file_handle.meta_ref().clone();
+        changed_file.partition_expr =
+            Some(partition::expr::col("tag_0").eq(datatypes::value::Value::from("a")));
+        builder.file_handle =
+            FileHandle::new(changed_file, crate::test_util::new_noop_file_purger());
+        assert!(builder.reuse_series_context(&previous, &physical).is_none());
+        drop(builder);
+        drop(previous);
+        assert_eq!(*purger.0.lock().unwrap(), vec![first_id.clone()]);
+        drop(reused);
+        assert_eq!(*purger.0.lock().unwrap(), vec![first_id, second_id]);
+    }
 
     async fn prefilter_test_builder(
         object_store: ObjectStore,
