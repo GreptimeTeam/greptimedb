@@ -96,13 +96,15 @@ const RECOVERY_CONCURRENCY: usize = 64;
 /// arrives about every 4 ms. The segments fetched ahead also take their bytes
 /// from [`READ_PREFETCH_BYTES`].
 const READ_PREFETCH_DEPTH: usize = 8;
-/// Bytes of segments that all reads of a store together fetch ahead. A read
-/// always fetches the segment it yields next, as a read that fetched one
-/// segment at a time did, and a later segment only while its length fits in
-/// what is left, so regions replayed in parallel hold one segment each plus at
-/// most these bytes, however many regions open at once. A fetch keeps the
-/// downloaded segment while it copies the payloads out of it, so for a moment
-/// it holds the segment twice.
+/// Bytes of decoded segments that all reads of a store together fetch ahead; a
+/// segment counts as its length, which bounds its payloads, plus a [`Record`]
+/// per entry. A read always fetches the segment it yields next, as a read that
+/// fetched one segment at a time did, and a later segment only while it fits
+/// in what is left, so regions replayed in parallel hold one segment each, up
+/// to about `max_batch_bytes` or more for one oversized append, plus at most
+/// these bytes, however many regions open at once. While a fetch copies the
+/// payloads out of the downloaded segment it briefly holds the segment's
+/// length once more.
 const READ_PREFETCH_BYTES: usize = 64 * 1024 * 1024;
 /// Bytes recovery reads from the end of an object in one request. The window
 /// holds the trailer and the footer of an object with up to 1364 regions of
@@ -809,14 +811,16 @@ impl LogStore for ObjectStoreLogStore {
                     let Some((object_seq, footer_entry)) = objects.next() else {
                         break;
                     };
-                    let fetch = spawn_fetch_segment(io.clone(), object_seq, footer_entry.clone());
-                    fetches.push_back((object_seq, footer_entry, fetch, permit));
+                    let fetch =
+                        spawn_fetch_segment(io.clone(), object_seq, footer_entry.clone(), permit);
+                    fetches.push_back((object_seq, footer_entry, fetch));
                 }
-                // The permit is held until the entries of the segment are yielded.
-                let Some((object_seq, footer_entry, fetch, _permit)) = fetches.pop_front() else {
+                let Some((object_seq, footer_entry, fetch)) = fetches.pop_front() else {
                     break;
                 };
-                let records = match fetch.await {
+                // The permit is held until the entries of the segment are yielded.
+                let (fetched, _permit) = fetch.await;
+                let records = match fetched {
                     Ok(records) => records,
                     Err(error) if is_collected(&catalog, &deleting, object_seq).await => {
                         debug!(
@@ -2188,30 +2192,41 @@ async fn fetch_segment(
     })
 }
 
-/// Takes the bytes of the segment `entry` describes from `budget` if they are
-/// free.
+/// Takes from `budget` the bytes the segment `entry` describes holds once
+/// decoded, if they are free: its length plus a [`Record`] per entry.
 fn reserve_prefetch(budget: &Arc<Semaphore>, entry: &FooterEntry) -> Option<OwnedSemaphorePermit> {
-    let bytes = u32::try_from(entry.segment_len).ok()?;
+    let records = u64::from(entry.entry_count) * std::mem::size_of::<Record>() as u64;
+    let bytes = u32::try_from(entry.segment_len.checked_add(records)?).ok()?;
     budget.clone().try_acquire_many_owned(bytes).ok()
 }
 
 /// Runs [`fetch_segment`] on a task of its own, so the fetch proceeds while
-/// the read is busy with earlier segments. Dropping the returned future, as a
+/// the read is busy with earlier segments, and returns the outcome with
+/// `permit`. The task holds the permit, so the reserved bytes are released
+/// only with the buffers of the fetch. Dropping the returned future, as a
 /// dropped read does, aborts the task; a task that panics fails the fetch with
 /// [`Error::WalSegmentFetch`].
 fn spawn_fetch_segment(
     io: Arc<dyn WalObjectIo>,
     object_seq: u64,
     entry: FooterEntry,
-) -> impl Future<Output = Result<Vec<Record>>> + Send + 'static {
+    permit: Option<OwnedSemaphorePermit>,
+) -> impl Future<Output = (Result<Vec<Record>>, Option<OwnedSemaphorePermit>)> + Send + 'static {
     let task_io = io.clone();
     let mut task = AbortOnDrop(common_runtime::spawn_global(async move {
-        fetch_segment(task_io.as_ref(), object_seq, &entry).await
+        let fetched = fetch_segment(task_io.as_ref(), object_seq, &entry).await;
+        (fetched, permit)
     }));
     async move {
-        (&mut task.0).await.with_context(|_| WalSegmentFetchSnafu {
-            path: io.object_path(object_seq),
-        })?
+        match (&mut task.0).await {
+            Ok(fetched) => fetched,
+            Err(error) => (
+                Err(error).context(WalSegmentFetchSnafu {
+                    path: io.object_path(object_seq),
+                }),
+                None,
+            ),
+        }
     }
 }
 
@@ -4611,6 +4626,42 @@ mod tests {
             READ_PREFETCH_BYTES,
             store.read_prefetch_budget.available_permits()
         );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_dropped_read_keeps_reservations_until_its_fetches_end() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        put_object_per_entry(&object_store, 2).await;
+        let (io, _) = RecordingIo::over(object_store);
+        let store = open_over(io.clone(), &eager()).await;
+        let budget = store.read_prefetch_budget.clone();
+        let (began_tx, began_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *io.block_range_read_of.lock().unwrap() = Some((1, began_tx, release_rx));
+
+        // The first poll fetches object 0, and object 1 with its bytes
+        // reserved; the read of object 1 blocks its thread.
+        let mut stream = store.read(&provider(region(1)), 0, None).await.unwrap();
+        let _ = stream.next().now_or_never();
+        began_rx.recv_timeout(WAIT).unwrap();
+        assert!(budget.available_permits() < READ_PREFETCH_BYTES);
+
+        // The aborted fetch keeps its bytes until it ends.
+        drop(stream);
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert!(budget.available_permits() < READ_PREFETCH_BYTES);
+        release_tx.send(()).unwrap();
+        timeout(WAIT, async {
+            while budget.available_permits() != READ_PREFETCH_BYTES {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         store.stop().await.unwrap();
     }
 
@@ -7465,8 +7516,9 @@ mod tests {
     /// after it wrote the object, fails it with a given error before it
     /// writes, stores the same content before it writes, or damages the bytes
     /// the next range read returns; it also fails the next listing, or the
-    /// next range read of an object at an offset, with a transient error, and
-    /// panics in the next range read of a given object.
+    /// next range read of an object at an offset, with a transient error,
+    /// panics in the next range read of a given object, and blocks its thread
+    /// in the next range read of a given object until the test releases it.
     struct RecordingIo {
         inner: ObjectStoreIo,
         reads: RangeReads,
@@ -7477,7 +7529,16 @@ mod tests {
         fail_next_list: AtomicBool,
         fail_range_read_at: Mutex<Option<(u64, u64)>>,
         panic_range_read_of: Mutex<Option<u64>>,
+        block_range_read_of: Mutex<Option<BlockedRangeRead>>,
     }
+
+    /// The object whose range read blocks, the sender that reports the read
+    /// began and the receiver that releases it.
+    type BlockedRangeRead = (
+        u64,
+        std::sync::mpsc::Sender<()>,
+        std::sync::mpsc::Receiver<()>,
+    );
 
     impl RecordingIo {
         fn over(object_store: ObjectStore) -> (Arc<Self>, RangeReads) {
@@ -7492,6 +7553,7 @@ mod tests {
                 fail_next_list: AtomicBool::new(false),
                 fail_range_read_at: Mutex::new(None),
                 panic_range_read_of: Mutex::new(None),
+                block_range_read_of: Mutex::new(None),
             };
             (Arc::new(io), reads)
         }
@@ -7557,6 +7619,16 @@ mod tests {
                 .take_if(|of| *of == object_seq)
                 .is_some();
             assert!(!panics, "injected panic");
+            let blocked = self
+                .block_range_read_of
+                .lock()
+                .unwrap()
+                .take_if(|(of, ..)| *of == object_seq);
+            if let Some((_, began, release)) = blocked {
+                began.send(()).unwrap();
+                // Blocking the thread keeps an abort from cancelling the read.
+                let _ = release.recv();
+            }
             let bytes = self.inner.get_range(object_seq, offset, len).await?;
             if self.damage_next_range_read.swap(false, Ordering::Relaxed) {
                 let mut damaged = bytes.to_vec();
