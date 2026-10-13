@@ -24,7 +24,6 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::compaction::compactor::{CompactionContext, DefaultCompactor, MergeOutput};
 use crate::compaction::memory_manager::CompactionMemoryManager;
-use crate::compaction::picker::CompactionTask;
 use crate::compaction::unit::CompactionUnit;
 use crate::compaction::{CompactionExecution, format_panic_reason};
 use crate::error::{self, CompactionCancelledSnafu, CompactionMemoryExhaustedSnafu, Result};
@@ -72,6 +71,16 @@ impl Debug for CompactionTaskImpl {
 }
 
 impl CompactionTaskImpl {
+    /// Executes one unit and retains its resources until worker apply or failure acknowledgement.
+    pub(crate) async fn run(&mut self) {
+        let start = std::time::Instant::now();
+        let result = std::panic::AssertUnwindSafe(self.run_once())
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|payload| Err(self.panic_to_error(payload.as_ref())));
+        self.complete(result, start).await;
+    }
+
     /// Acquires the unit's memory budget and merges on the compaction runtime.
     async fn merge(&self) -> Result<MergeOutput> {
         let region_id = self.compaction_context.region_id;
@@ -201,19 +210,6 @@ impl CompactionTaskImpl {
             }))
             .await
             .map_err(|_| error::InvalidSenderSnafu.build())
-    }
-}
-
-#[async_trait::async_trait]
-impl CompactionTask for CompactionTaskImpl {
-    /// Executes one unit and retains its resources until worker apply or failure acknowledgement.
-    async fn run(&mut self) {
-        let start = std::time::Instant::now();
-        let result = std::panic::AssertUnwindSafe(self.run_once())
-            .catch_unwind()
-            .await
-            .unwrap_or_else(|payload| Err(self.panic_to_error(payload.as_ref())));
-        self.complete(result, start).await;
     }
 }
 

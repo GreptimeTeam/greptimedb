@@ -19,7 +19,6 @@ use common_meta::key::SchemaMetadataManagerRef;
 use store_api::storage::RegionId;
 
 use crate::compaction::compactor::{CompactionContext, CompactionRegion};
-use crate::compaction::picker::CompactionTask;
 use crate::compaction::scheduler::state::{CompactingFiles, CompactionExecution, CompactionPhase};
 use crate::compaction::scheduler::{CompactionScheduler, CompactionTransition};
 use crate::compaction::task::CompactionTaskImpl;
@@ -36,8 +35,6 @@ use crate::sst::file::UncommittedSsts;
 /// Tracks one unit through its terminal result and subsequent task exit.
 #[derive(Debug)]
 struct UnitExecution {
-    /// Scheduler-held input lease, released when the terminal result is handled.
-    execution: Option<CompactionExecution>,
     state: CancellableTaskState,
     finished: bool,
 }
@@ -45,10 +42,9 @@ struct UnitExecution {
 /// A request's local units. All transitions run on the owning region worker.
 #[derive(Debug)]
 pub(crate) struct LocalCompaction {
+    /// All pending and submitted units, retained until task exit. Tasks own their input leases.
     units: HashMap<u64, UnitExecution>,
     pending: VecDeque<CompactionTaskImpl>,
-    /// Submitted units awaiting task exit, including queued tasks.
-    running: usize,
     parallelism: usize,
     error: Option<Arc<Error>>,
     made_progress: bool,
@@ -72,6 +68,11 @@ impl LocalCompaction {
         result
     }
 
+    /// Counts submitted units that have not exited, including queued jobs.
+    fn num_running(&self) -> usize {
+        self.units.len() - self.pending.len()
+    }
+
     /// Checks this attempt's phase without depending on any sibling's apply status.
     fn can_apply(&self, id: u64) -> bool {
         self.units
@@ -88,7 +89,6 @@ impl LocalCompaction {
             return;
         }
         unit.finished = true;
-        unit.execution.take();
         match result {
             Ok(progress) => self.made_progress |= progress,
             Err(err) => {
@@ -121,7 +121,6 @@ impl CompactionScheduler {
         let mut local = LocalCompaction {
             units: HashMap::new(),
             pending: VecDeque::new(),
-            running: 0,
             parallelism: region.max_parallelism.max(1),
             error: None,
             made_progress: false,
@@ -137,7 +136,6 @@ impl CompactionScheduler {
             local.units.insert(
                 id,
                 UnitExecution {
-                    execution: Some(execution.clone()),
                     state: state.clone(),
                     finished: false,
                 },
@@ -176,14 +174,13 @@ impl CompactionScheduler {
             let Some(local) = self.local_units_mut(region_id) else {
                 return;
             };
-            if local.running >= local.parallelism {
+            if local.num_running() >= local.parallelism {
                 return;
             }
             let Some(mut task) = local.pending.pop_front() else {
                 return;
             };
             let id = task.execution.plan_id();
-            local.running += 1;
             let sender = self.request_sender.clone();
             let completion = Box::pin(async move {
                 let _ = sender
@@ -206,7 +203,6 @@ impl CompactionScheduler {
             {
                 local.finish(id, Err(Arc::new(err)));
                 local.units.remove(&id);
-                local.running -= 1;
             }
         }
     }
@@ -255,7 +251,6 @@ impl CompactionScheduler {
             )),
         );
         local.units.remove(&id);
-        local.running -= 1;
         self.dispatch_local_units(region_id);
         self.finish_local_units(region_id, manifest, schemas).await
     }
@@ -305,7 +300,6 @@ mod tests {
                 (
                     id,
                     UnitExecution {
-                        execution: Some(CompactionExecution::for_test(id)),
                         state: CancellableTaskState::new(),
                         finished: false,
                     },
@@ -315,7 +309,6 @@ mod tests {
         let mut local = LocalCompaction {
             units,
             pending: VecDeque::new(),
-            running: 2,
             parallelism: 2,
             error: None,
             made_progress: false,

@@ -74,7 +74,7 @@ impl CompactionExecution {
 }
 
 #[derive(Debug)]
-pub(super) enum CompactionPhase {
+pub(crate) enum CompactionPhase {
     /// The region is registered but has no compaction in progress.
     Idle,
     Picking {
@@ -223,7 +223,7 @@ impl ActiveCompaction {
 
 /// Owns atomic reservations for every SST selected by a compaction plan.
 #[derive(Debug, Clone)]
-pub(super) struct CompactingFiles {
+pub(crate) struct CompactingFiles {
     files: HashMap<RegionFileId, Arc<CompactingFile>>,
 }
 
@@ -246,9 +246,7 @@ impl CompactingFiles {
     }
 
     /// Reserves distinct inputs, releasing acquired leases if any input is already busy.
-    fn try_reserve<'a>(
-        selected_files: impl IntoIterator<Item = &'a FileHandle>,
-    ) -> Option<Self> {
+    fn try_reserve<'a>(selected_files: impl IntoIterator<Item = &'a FileHandle>) -> Option<Self> {
         let mut files = HashMap::new();
 
         for file in selected_files {
