@@ -191,9 +191,22 @@ impl ErrorExt for Error {
             Error::Tonic { retry_hint, .. } => *retry_hint,
             Error::FlightGet { source, .. }
             | Error::FlightStream { source, .. }
-            | Error::RegionServer { source, .. }
             | Error::FlowServer { source, .. }
             | Error::External { source, .. } => source.retry_hint(),
+            Error::RegionServer { code, source, .. } => {
+                let hint = source.retry_hint();
+                // Preserve the transport retry policy previously applied by should_retry().
+                if !hint.is_retryable()
+                    && matches!(
+                        code,
+                        Code::Unavailable | Code::Cancelled | Code::DeadlineExceeded
+                    )
+                {
+                    RetryHint::Retryable
+                } else {
+                    hint
+                }
+            }
             Error::ConvertFlightData { source, .. }
             | Error::CreateChannel { source, .. }
             | Error::CreateTlsChannel { source, .. } => source.retry_hint(),
@@ -207,13 +220,9 @@ define_from_tonic_status!(Error, Tonic);
 
 impl From<Error> for common_meta::error::Error {
     fn from(error: Error) -> Self {
-        if error.should_retry() {
-            Self::retry_later(error)
-        } else {
-            Self::External {
-                source: BoxedError::new(error),
-                location: location!(),
-            }
+        Self::External {
+            source: BoxedError::new(error),
+            location: location!(),
         }
     }
 }
