@@ -1211,8 +1211,9 @@ impl Failing {
 /// A create still in flight when its batch failed runs to completion and its
 /// outcome is ignored: whatever it stored is off the chain. After `stop` began
 /// nothing is admitted and no create starts, except that the `enqueued` mode
-/// uploads its backlog; creates in flight run to completion and acknowledge
-/// if they succeed.
+/// uploads its backlog and the `durable` mode creates one object with the
+/// release records of failed batches; creates in flight run to completion and
+/// acknowledge if they succeed.
 ///
 /// Appends arrive on their own channel. The actor holds one back while the
 /// sealed batches leave no room for the two an admission can seal, or at a
