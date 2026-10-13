@@ -135,8 +135,9 @@ fn build_closed_outputs(
     // `None` marks a seed already absorbed by an earlier closure.
     let mut seeds: Vec<_> = seeds.into_iter().map(Some).collect();
     let mapper = PrimaryKeyRangeMapper::new(metadata.clone());
-    let overlaps =
-        |lhs: &FileHandle, rhs: &FileHandle| overlap::files_may_overlap(lhs, rhs, metadata, &mapper);
+    let overlaps = |lhs: &FileHandle, rhs: &FileHandle| {
+        overlap::files_may_overlap(lhs, rhs, metadata, &mapper)
+    };
     let mut remaining = FileOverlapIndex::new(files);
     let mut outputs = Vec::new();
     // The compactor pops from the end; retain TWCS's seed priority.

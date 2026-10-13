@@ -844,7 +844,8 @@ impl<'a> L1OverlapRunBudget<'a> {
         self.remaining.remove(file.file_id());
         let mut component = vec![file.clone()];
         let mapper = self.mapper;
-        let overlaps = |lhs: &FileHandle, rhs: &FileHandle| files_overlap_inclusive(lhs, rhs, mapper);
+        let overlaps =
+            |lhs: &FileHandle, rhs: &FileHandle| files_overlap_inclusive(lhs, rhs, mapper);
         let mut cursor = 0;
         while cursor < component.len() {
             let neighbors = self.remaining.drain_overlaps(&component[cursor], &overlaps);
