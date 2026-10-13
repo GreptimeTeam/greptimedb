@@ -52,18 +52,7 @@ impl Debug for NodeClients {
 #[async_trait::async_trait]
 impl DatanodeManager for NodeClients {
     async fn datanode(&self, datanode: &Peer) -> DatanodeRef {
-        let client = self.get_client(datanode).await;
-
-        let ChannelConfig {
-            send_compression,
-            accept_compression,
-            ..
-        } = self.control_channel_manager.config();
-        Arc::new(RegionRequester::new(
-            client,
-            *send_compression,
-            *accept_compression,
-        ))
+        Arc::new(self.make_region_requester(datanode).await)
     }
 }
 
@@ -86,6 +75,18 @@ impl NodeClients {
                 .time_to_idle(Duration::from_secs(5 * 60))
                 .build(),
         }
+    }
+
+    /// Creates a [`RegionRequester`] with the cached client and control channel compression settings.
+    pub async fn make_region_requester(&self, datanode: &Peer) -> RegionRequester {
+        let client = self.get_client(datanode).await;
+
+        let ChannelConfig {
+            send_compression,
+            accept_compression,
+            ..
+        } = self.control_channel_manager.config();
+        RegionRequester::new(client, *send_compression, *accept_compression)
     }
 
     pub async fn get_client(&self, datanode: &Peer) -> Client {

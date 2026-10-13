@@ -2527,7 +2527,7 @@ mod tests {
             .unwrap_err();
         assert_matches!(&err, error::Error::HandleBatchOpenRequest { .. });
         assert_eq!(err.status_code(), StatusCode::RegionNotFound);
-        assert_eq!(err.retry_hint(), RetryHint::NonRetryable);
+        assert_eq!(err.retry_hint(), RetryHint::RetryAfterRouteRefresh);
     }
 
     struct CurrentEngineTest {

@@ -46,7 +46,7 @@ pub struct InstructionError {
     pub message: String,
     /// Retry hint serialized as a string.
     #[serde(
-        serialize_with = "RetryHint::serialize_as_str",
+        serialize_with = "InstructionError::serialize_retry_hint",
         deserialize_with = "RetryHint::deserialize_from_str"
     )]
     pub retry_hint: RetryHint,
@@ -104,6 +104,18 @@ impl InstructionError {
             message: error.output_msg(),
             retry_hint: error.retry_hint(),
         }
+    }
+
+    /// Keeps instruction replies readable by peers that only know the legacy hints.
+    fn serialize_retry_hint<S>(hint: &RetryHint, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let hint = match hint {
+            RetryHint::RetryAfterRouteRefresh => RetryHint::Retryable,
+            hint => *hint,
+        };
+        RetryHint::serialize_as_str(&hint, serializer)
     }
 }
 
@@ -1257,6 +1269,26 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn test_instruction_error_route_refresh_compatibility() {
+        let error = InstructionError::new(
+            StatusCode::RegionNotFound,
+            "region not found",
+            RetryHint::RetryAfterRouteRefresh,
+        );
+        let serialized = serde_json::to_string(&error).unwrap();
+        assert_eq!(
+            r#"{"code":4005,"message":"region not found","retry_hint":"retryable"}"#,
+            serialized
+        );
+        let decoded: InstructionError = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(decoded.code, error.code);
+        assert_eq!(decoded.message, error.message);
+        assert_eq!(decoded.retry_hint, RetryHint::Retryable);
+        assert_eq!(error.retry_hint, RetryHint::RetryAfterRouteRefresh);
+        assert_eq!(error.retry_hint.as_str(), "retry_after_route_refresh");
     }
 
     #[test]

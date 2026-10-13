@@ -2097,6 +2097,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic 0.14.2",
+ "tonic-prost",
  "tracing",
 ]
 
