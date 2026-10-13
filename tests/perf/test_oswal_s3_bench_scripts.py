@@ -482,14 +482,14 @@ done
 
 class CellLifecycleTest(unittest.TestCase):  # the run script against fake docker and curl
 
-    def run_cells(self, root, load_rc, metrics_rc=0, restart=False, count=6000):
+    def run_cells(self, root, load_rc, metrics_rc=0, restart=False, count=6000, groups=""):
         bin_dir = root / "bin"
         bin_dir.mkdir()
         for name, body in (("docker", FAKE_DOCKER), ("curl", FAKE_CURL)):
             (bin_dir / name).write_text(body)
             (bin_dir / name).chmod(0o755)
         plan = bench.build_plan("8", "6000", "1000", "1", smoke=False, configs="D,E", restart=restart,
-                                extra_env="GREPTIMEDB_OSWAL_RECOVERY_CONCURRENCY=2")
+                                extra_env="GREPTIMEDB_OSWAL_RECOVERY_CONCURRENCY=2", groups=groups)
         (root / "results").mkdir()
         (root / "results" / "plan.json").write_text(json.dumps(plan))
         env = os.environ | {
@@ -593,6 +593,18 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
             self.assertIn(f"type=bind,src={root}/wal/1-8-D-home,dst=/oswal_home", log)
             for name in ("metrics.prom", "metrics-restart.prom", "server.log", "server-restart.log"):
                 self.assertTrue((cell / name).exists(), name)
+
+    def test_an_idle_window_scrapes_before_and_after_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            groups = json.dumps([{"name": "idle", "configs": "D", "idle_seconds": 1}])
+            cells, _, log, _ = self.run_cells(root, load_rc=0, groups=groups)
+            self.assertEqual(cells.returncode, 0, cells.stdout + cells.stderr)
+            cell = root / "results" / "cells" / "idle-1-8-D"
+            self.assertTrue((cell / "metrics-idle.prom").exists())
+            self.assertTrue((cell / "metrics.prom").exists())
+            self.assertEqual(log.count("/metrics"), 2)
+            self.assertIn(f"type=bind,src={root}/corpus/corpus-6000,dst=/work/corpus,readonly", log)
 
     def test_a_restart_that_loses_rows_fails_the_cell(self):
         with tempfile.TemporaryDirectory() as directory:
