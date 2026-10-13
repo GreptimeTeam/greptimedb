@@ -65,8 +65,8 @@ use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
 use store_api::mito_engine_options::{
-    APPEND_MODE_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, TTL_KEY,
-    TWCS_TIME_WINDOW,
+    APPEND_MODE_KEY, COMPACTION_OPTION_KEYS, COMPACTION_TYPE, COMPACTION_TYPE_TWCS, MERGE_MODE_KEY,
+    TTL_KEY,
 };
 use store_api::storage::{RegionId, TableId};
 use table::TableRef;
@@ -1868,6 +1868,21 @@ pub fn fill_table_options_for_create(
         }
     }
 
+    if !matches!(create_type, AutoCreateTableType::Logical(_)) {
+        let mut has_twcs_option = false;
+        for key in COMPACTION_OPTION_KEYS {
+            if let Some(value) = ctx.extension(key) {
+                has_twcs_option |= key.starts_with("compaction.twcs.");
+                table_options.insert(key.to_string(), value.to_string());
+            }
+        }
+        if has_twcs_option {
+            table_options
+                .entry(COMPACTION_TYPE.to_string())
+                .or_insert_with(|| COMPACTION_TYPE_TWCS.to_string());
+        }
+    }
+
     // Semantic keys use their own vocabulary instead of the fixed option list.
     for (key, value) in ctx.extensions() {
         if is_semantic_option_key(&key) && validate_semantic_option(&key, &value) {
@@ -1888,14 +1903,6 @@ pub fn fill_table_options_for_create(
             }
             if let Some(merge_mode) = ctx.extension(MERGE_MODE_KEY) {
                 table_options.insert(MERGE_MODE_KEY.to_string(), merge_mode.to_string());
-            }
-            if let Some(time_window) = ctx.extension(TWCS_TIME_WINDOW) {
-                table_options.insert(TWCS_TIME_WINDOW.to_string(), time_window.to_string());
-                // We need to set the compaction type explicitly.
-                table_options.insert(
-                    COMPACTION_TYPE.to_string(),
-                    COMPACTION_TYPE_TWCS.to_string(),
-                );
             }
         }
         // Set append_mode to true for log table.
@@ -2907,6 +2914,49 @@ mod tests {
             assert_eq!(result.unwrap(), 0);
         }
         assert_eq!(requests, original);
+    }
+
+    #[test]
+    fn test_trace_create_options_copy_compaction_hints() {
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        ctx.set_extension("compaction.twcs.time_window", "1h");
+        ctx.set_extension("compaction.twcs.max_output_file_size", "256MB");
+        ctx.set_extension("compaction.twcs.remote_compaction", "true");
+        ctx.set_extension("compaction.unknown", "ignored");
+        let ctx = Arc::new(ctx);
+        let mut table_options = Default::default();
+
+        fill_table_options_for_create(
+            &mut table_options,
+            &AutoCreateTableType::Trace {
+                alter_existing: true,
+            },
+            &ctx,
+        );
+
+        assert_eq!(
+            Some("twcs"),
+            table_options.get(COMPACTION_TYPE).map(String::as_str)
+        );
+        assert_eq!(
+            Some("1h"),
+            table_options
+                .get("compaction.twcs.time_window")
+                .map(String::as_str)
+        );
+        assert_eq!(
+            Some("256MB"),
+            table_options
+                .get("compaction.twcs.max_output_file_size")
+                .map(String::as_str)
+        );
+        assert_eq!(
+            Some("true"),
+            table_options
+                .get("compaction.twcs.remote_compaction")
+                .map(String::as_str)
+        );
+        assert!(!table_options.contains_key("compaction.unknown"));
     }
 
     #[test]
