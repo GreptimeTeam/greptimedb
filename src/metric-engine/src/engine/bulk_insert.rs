@@ -354,17 +354,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_bulk_insert_physical_region_passthrough() {
-        check_bulk_insert_physical_region_passthrough(false, false).await;
-        check_bulk_insert_physical_region_passthrough(true, false).await;
+        check_bulk_insert_physical_region_passthrough(false, false, false).await;
+        check_bulk_insert_physical_region_passthrough(true, false, false).await;
     }
 
     #[tokio::test]
     async fn test_bulk_insert_physical_region_close_recovery() {
-        check_bulk_insert_physical_region_passthrough(false, true).await;
-        check_bulk_insert_physical_region_passthrough(true, true).await;
+        check_bulk_insert_physical_region_passthrough(false, true, false).await;
+        check_bulk_insert_physical_region_passthrough(true, true, false).await;
     }
 
-    async fn check_bulk_insert_physical_region_passthrough(skip_wal: bool, close: bool) {
+    #[tokio::test]
+    async fn test_physical_bulk_partition_columns_preserve_stored_rows() {
+        for skip_wal in [false, true] {
+            let stripped =
+                check_bulk_insert_physical_region_passthrough(skip_wal, true, false).await;
+            let retained =
+                check_bulk_insert_physical_region_passthrough(skip_wal, true, true).await;
+            assert_eq!(retained, stripped, "skip_wal={skip_wal}");
+        }
+    }
+
+    async fn check_bulk_insert_physical_region_passthrough(
+        skip_wal: bool,
+        close: bool,
+        retain_partition_columns: bool,
+    ) -> String {
         // Use flat format so that BulkMemtable is used (supports write_bulk).
         let mito_config = MitoConfig {
             default_flat_format: true,
@@ -394,7 +409,11 @@ mod tests {
             index: 2,
             column_id: 2, // column_id for "job" in the physical table
         }];
-        let non_tag_indices = vec![0, 1]; // timestamp, value
+        let non_tag_indices = if retain_partition_columns {
+            vec![0, 1, 2] // timestamp, value, and the job partition column
+        } else {
+            vec![0, 1] // timestamp, value
+        };
         let second_batch = build_logical_batch(3, 3);
         let physical_batch = modify_batch_sparse(
             second_batch,
@@ -403,6 +422,10 @@ mod tests {
             &non_tag_indices,
         )
         .unwrap();
+        assert_eq!(
+            physical_batch.column_by_name("job").is_some(),
+            retain_partition_columns
+        );
         let request = build_bulk_request(physical_region_id, physical_batch, skip_wal);
         let response = env
             .metric()
@@ -469,6 +492,7 @@ mod tests {
             batches.iter().map(|b| b.num_rows()).sum::<usize>(),
             if skip_wal && !close { 0 } else { 6 },
         );
+        batches.pretty_print().unwrap()
     }
 
     #[tokio::test]

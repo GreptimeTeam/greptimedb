@@ -29,8 +29,6 @@ use crate::error;
 use crate::error::Result;
 use crate::metrics::PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED;
 
-pub(in crate::batcher::logical_table) const PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT: usize = 3;
-
 /// An aligned logical record batch and its timestamp column index.
 #[derive(Debug, Clone)]
 pub struct RecordBatchWithTsIdx {
@@ -188,23 +186,6 @@ pub(in crate::batcher::logical_table) fn columns_taxonomy(
     Ok((tag_columns, essential_column_indices))
 }
 
-pub(in crate::batcher::logical_table) fn strip_partition_columns_from_batch(
-    batch: RecordBatch,
-) -> Result<RecordBatch> {
-    ensure!(
-        batch.num_columns() >= PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT,
-        error::InternalSnafu {
-            err_msg: format!(
-                "Expected at least {} columns in physical batch, got {}",
-                PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT,
-                batch.num_columns()
-            ),
-        }
-    );
-    let essential_indices: Vec<usize> = (0..PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT).collect();
-    batch.project(&essential_indices).context(error::ArrowSnafu)
-}
-
 /// Transforms logical table batches into physical format (sparse primary key encoding).
 ///
 /// It identifies tag columns and essential columns (timestamp, value) for each logical batch
@@ -290,78 +271,17 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
-    use arrow::array::{Array, BinaryArray, StringArray, TimestampMillisecondArray};
+    use arrow::array::{Array, StringArray, TimestampMillisecondArray};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
     use arrow::record_batch::RecordBatch;
     use metric_engine::batch_modifier::modify_batch_sparse;
     use smallvec::SmallVec;
 
     use crate::batcher::logical_table::batch_convert::{
-        TableBatch, columns_taxonomy, strip_partition_columns_from_batch,
-        transform_logical_batches_to_physical,
+        TableBatch, columns_taxonomy, transform_logical_batches_to_physical,
     };
     use crate::batcher::logical_table::test_util::mock_aligned_tag_batch;
     use crate::error::Error;
-
-    #[test]
-    fn test_strip_partition_columns_from_batch_removes_partition_tags() {
-        let batch = RecordBatch::try_new(
-            Arc::new(ArrowSchema::new(vec![
-                Field::new("__primary_key", ArrowDataType::Binary, false),
-                Field::new(
-                    "greptime_timestamp",
-                    ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-                    false,
-                ),
-                Field::new("greptime_value", ArrowDataType::Float64, true),
-                Field::new("host", ArrowDataType::Utf8, true),
-            ])),
-            vec![
-                Arc::new(BinaryArray::from(vec![b"k1".as_slice()])),
-                Arc::new(TimestampMillisecondArray::from(vec![1000_i64])),
-                Arc::new(arrow::array::Float64Array::from(vec![42.0_f64])),
-                Arc::new(StringArray::from(vec!["node-1"])),
-            ],
-        )
-        .unwrap();
-
-        let stripped = strip_partition_columns_from_batch(batch).unwrap();
-
-        assert_eq!(3, stripped.num_columns());
-        assert_eq!("__primary_key", stripped.schema().field(0).name());
-        assert_eq!("greptime_timestamp", stripped.schema().field(1).name());
-        assert_eq!("greptime_value", stripped.schema().field(2).name());
-    }
-
-    #[test]
-    fn test_strip_partition_columns_from_batch_projects_essential_columns_without_lookup() {
-        let batch = RecordBatch::try_new(
-            Arc::new(ArrowSchema::new(vec![
-                Field::new("__primary_key", ArrowDataType::Binary, false),
-                Field::new(
-                    "greptime_timestamp",
-                    ArrowDataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None),
-                    false,
-                ),
-                Field::new("greptime_value", ArrowDataType::Float64, true),
-                Field::new("host", ArrowDataType::Utf8, true),
-            ])),
-            vec![
-                Arc::new(BinaryArray::from(vec![b"k1".as_slice()])),
-                Arc::new(TimestampMillisecondArray::from(vec![1000_i64])),
-                Arc::new(arrow::array::Float64Array::from(vec![42.0_f64])),
-                Arc::new(StringArray::from(vec!["node-1"])),
-            ],
-        )
-        .unwrap();
-
-        let stripped = strip_partition_columns_from_batch(batch).unwrap();
-
-        assert_eq!(3, stripped.num_columns());
-        assert_eq!("__primary_key", stripped.schema().field(0).name());
-        assert_eq!("greptime_timestamp", stripped.schema().field(1).name());
-        assert_eq!("greptime_value", stripped.schema().field(2).name());
-    }
 
     #[test]
     fn test_collect_tag_columns_and_non_tag_indices_keeps_partition_tag_column() {

@@ -15,10 +15,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::region::RegionResponse;
 use api::v1::flow::{DirtyWindowRequests, FlowRequest, FlowResponse};
 use api::v1::meta::Peer;
-use api::v1::region::{InsertRequests, RegionRequest};
+use api::v1::region::InsertRequests;
 use arrow::array::{StringArray, TimestampMillisecondArray};
 use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
@@ -27,12 +26,9 @@ use common_meta::error::Result as MetaResult;
 use common_meta::node_manager::{
     DatanodeManager, DatanodeRef, Flownode, FlownodeManager, FlownodeRef,
 };
-use snafu::ResultExt;
 use tokio::sync::mpsc;
 
 use crate::batcher::logical_table::batch_convert::RecordBatchWithTsIdx;
-use crate::batcher::logical_table::region_write::PhysicalFlushNodeRequester;
-use crate::error;
 
 pub(in crate::batcher::logical_table) fn mock_tag_batch(
     tag_name: &str,
@@ -147,16 +143,5 @@ impl DatanodeManager for FlowNotificationMockNodeManager {
 impl FlownodeManager for FlowNotificationMockNodeManager {
     async fn flownode(&self, _node: &Peer) -> FlownodeRef {
         self.flownode.clone()
-    }
-}
-
-#[async_trait]
-impl PhysicalFlushNodeRequester for ConcurrentMockNodeManager {
-    async fn handle(&self, peer: &Peer, request: RegionRequest) -> error::Result<RegionResponse> {
-        let datanode = self.datanode(peer).await;
-        datanode
-            .handle(request)
-            .await
-            .context(error::CommonMetaSnafu)
     }
 }
