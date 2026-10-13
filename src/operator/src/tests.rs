@@ -16,4 +16,7 @@ mod kv_backend;
 mod partition_manager;
 
 pub(crate) use kv_backend::prepare_mocked_backend;
-pub(crate) use partition_manager::{create_partition_rule_manager, new_test_table_info};
+pub(crate) use partition_manager::{
+    create_partition_rule_manager, new_test_table_info, test_new_partition_info_cache,
+    test_new_table_route_cache,
+};

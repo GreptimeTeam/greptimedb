@@ -337,6 +337,18 @@ memory_pool_size = "50%"
 #+ experimental_spill_compression = "uncompressed"
 # --- End spill-to-disk ---
 
+## Retry retryable distributed write failures.
+## Backoff grows exponentially, with jitter to spread concurrent retries.
+[write_retry]
+## Maximum retries after the initial write attempt. Set to 0 to disable retries.
+max_retries = 3
+## Initial backoff before jitter is applied. Must be positive.
+initial_backoff = "1500ms"
+## Maximum backoff before jitter is applied. Must be at least initial_backoff.
+max_backoff = "10s"
+## Backoff multiplier. Must be finite and at least 1.
+backoff_multiplier = 2.0
+
 ## Datanode options.
 [datanode]
 ## Datanode client options.

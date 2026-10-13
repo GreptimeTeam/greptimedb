@@ -43,7 +43,7 @@ use crate::error::{DecodeFlightDataSnafu, InvalidFlightDataSnafu, Result};
 /// additional Flight messages cannot be represented by this three-part format.
 pub fn record_batch_to_ipc(
     record_batch: DfRecordBatch,
-) -> Result<(bytes::Bytes, bytes::Bytes, bytes::Bytes)> {
+) -> Result<(ProstBytes, ProstBytes, ProstBytes)> {
     let mut encoder = FlightEncoder::default();
     let schema = encoder.encode_schema(record_batch.schema().as_ref());
     let mut iter = encoder

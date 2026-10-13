@@ -24,6 +24,7 @@ pub use influxdb::{InfluxdbMergeMode, InfluxdbOptions};
 pub use jaeger::JaegerOptions;
 pub use mysql::MysqlOptions;
 pub use opentsdb::OpentsdbOptions;
+pub use operator::write_dispatcher::WriteRetryOptions;
 pub use otlp::OtlpOptions;
 pub use postgres::PostgresOptions;
 pub use prom_store::PromStoreOptions;

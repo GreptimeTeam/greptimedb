@@ -47,7 +47,6 @@ use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
 use datatypes::schema::SkippingIndexOptions;
-use futures_util::future;
 use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
@@ -72,6 +71,7 @@ use table::requests::{
     VALID_TABLE_OPTION_KEYS, is_semantic_option_key, validate_semantic_option,
 };
 use table::table_reference::TableReference;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::{
     CatalogSnafu, ColumnOptionsSnafu, CreatePartitionRulesSnafu, InvalidInsertRequestSnafu,
@@ -446,12 +446,16 @@ impl Inserter {
         let dispatcher = self.write_dispatcher.clone();
         let request = request_factory.build_insert(normal_requests);
         let writes = dispatcher.prepare(vec![request]).await?;
-        let affected_rows =
-            common_runtime::spawn_global(async move { dispatcher.execute(writes, None).await })
-                .await
-                .context(JoinTaskSnafu)?
-                .context(RequestInsertsSnafu)?
-                .affected_rows;
+        // Dropping the caller stops retries without abandoning in-flight writes.
+        let cancellation = CancellationToken::new();
+        let _guard = cancellation.clone().drop_guard();
+        let affected_rows = common_runtime::spawn_global(async move {
+            dispatcher.execute(writes, None, Some(&cancellation)).await
+        })
+        .await
+        .context(JoinTaskSnafu)?
+        .context(RequestInsertsSnafu)?
+        .affected_rows;
         crate::metrics::DIST_INGEST_ROW_COUNT
             .with_label_values(&[ctx.get_db_string().as_str()])
             .inc_by(affected_rows as u64);

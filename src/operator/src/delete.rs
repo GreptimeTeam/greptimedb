@@ -27,6 +27,7 @@ use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use table::TableRef;
 use table::requests::DeleteRequest as TableDeleteRequest;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::{
     CatalogSnafu, InvalidDeleteRequestSnafu, JoinTaskSnafu, MissingTimeIndexColumnSnafu,
@@ -141,12 +142,16 @@ impl Deleter {
         let dispatcher = self.write_dispatcher.clone();
         let request = request_factory.build_delete(requests);
         let writes = dispatcher.prepare(vec![request]).await?;
-        let affected_rows =
-            common_runtime::spawn_global(async move { dispatcher.execute(writes, None).await })
-                .await
-                .context(JoinTaskSnafu)?
-                .context(RequestDeletesSnafu)?
-                .affected_rows;
+        // Dropping the caller stops retries without abandoning in-flight writes.
+        let cancellation = CancellationToken::new();
+        let _guard = cancellation.clone().drop_guard();
+        let affected_rows = common_runtime::spawn_global(async move {
+            dispatcher.execute(writes, None, Some(&cancellation)).await
+        })
+        .await
+        .context(JoinTaskSnafu)?
+        .context(RequestDeletesSnafu)?
+        .affected_rows;
         crate::metrics::DIST_DELETE_ROW_COUNT
             .with_label_values(&[ctx.get_db_string().as_str()])
             .inc_by(affected_rows as u64);

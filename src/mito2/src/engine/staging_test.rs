@@ -309,7 +309,6 @@ async fn test_staging_reject_all_writes_rejects_put_and_bulk() {
             partition_expr_version: None,
         }),
         RegionRequest::BulkInserts(RegionBulkInsertsRequest {
-            skip_wal: false,
             region_id,
             payload,
             raw_data: ArrowIpc {

@@ -42,7 +42,8 @@ remote datanodes via `operator`/`client`.
 - **Insert** (`instance/grpc.rs`): `handle_inserts` / `handle_row_inserts` →
   `check_permission` → `operator`'s `Inserter` (schema validation, optional
   auto-create, partition routing) → local `RegionServer` (standalone) or RPC to
-  datanodes (distributed).
+  datanodes (distributed). `FrontendBuilder` configures the operator write dispatcher
+  with frontend retry options for distributed inserts, deletes, and bulk writes.
 
 ## Public surface
 
@@ -72,7 +73,8 @@ cargo nextest run -p frontend
   `servers`; permissions, planning, and routing live here.
 - Standalone vs distributed diverge in datanode access (the `standalone` crate's
   local `RegionServer` adapter vs `NodeClients` RPC), MetaClient usage, and
-  whether heartbeat matters. In standalone, the cache invalidator is a no-op.
+  whether heartbeat matters. The builder defaults local invalidation to its
+  layered cache registry; callers may supply a custom invalidator.
 
 ## Maintenance contract
 
