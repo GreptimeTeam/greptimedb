@@ -427,6 +427,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to fetch a segment of WAL object, path: {}", path))]
+    WalSegmentFetch {
+        path: String,
+        #[snafu(source)]
+        error: tokio::task::JoinError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid WAL object, path: {}", path))]
     InvalidWalObject {
         path: String,
@@ -509,7 +518,8 @@ impl ErrorExt for Error {
             | WaitProduceResultReceiver { .. }
             | WaitDumpIndex { .. }
             | MetaLengthExceededLimit { .. }
-            | ObjectStoreWalStopped { .. } => StatusCode::Internal,
+            | ObjectStoreWalStopped { .. }
+            | WalSegmentFetch { .. } => StatusCode::Internal,
 
             CorruptedWalObject { .. }
             | WalObjectConflict { .. }

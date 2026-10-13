@@ -43,7 +43,7 @@ use crate::error::{
     InvalidWalObjectSnafu, InvalidWalObjectStoreSnafu, MismatchedWalPrefixSnafu,
     MismatchedWalRegionSnafu, ObjectStoreWalSnafu, ObjectStoreWalStoppedSnafu, Result,
     StaleWalObjectSnafu, UnconfirmedWalEpochStartSnafu, WalObjectSequenceExhaustedSnafu,
-    WalObjectSequenceUnsettledSnafu,
+    WalObjectSequenceUnsettledSnafu, WalSegmentFetchSnafu,
 };
 use crate::metrics::{
     METRIC_OBJECT_STORE_WAL_APPEND_ACK_SECONDS, METRIC_OBJECT_STORE_WAL_CREATE_CONFLICTS_TOTAL,
@@ -2197,21 +2197,21 @@ fn reserve_prefetch(budget: &Arc<Semaphore>, entry: &FooterEntry) -> Option<Owne
 
 /// Runs [`fetch_segment`] on a task of its own, so the fetch proceeds while
 /// the read is busy with earlier segments. Dropping the returned future, as a
-/// dropped read does, aborts the task.
+/// dropped read does, aborts the task; a task that panics fails the fetch with
+/// [`Error::WalSegmentFetch`].
 fn spawn_fetch_segment(
     io: Arc<dyn WalObjectIo>,
     object_seq: u64,
     entry: FooterEntry,
 ) -> impl Future<Output = Result<Vec<Record>>> + Send + 'static {
+    let task_io = io.clone();
     let mut task = AbortOnDrop(common_runtime::spawn_global(async move {
-        fetch_segment(io.as_ref(), object_seq, &entry).await
+        fetch_segment(task_io.as_ref(), object_seq, &entry).await
     }));
     async move {
-        match (&mut task.0).await {
-            Ok(records) => records,
-            // The task is only aborted with this future, so it ended in a panic.
-            Err(error) => std::panic::resume_unwind(error.into_panic()),
-        }
+        (&mut task.0).await.with_context(|_| WalSegmentFetchSnafu {
+            path: io.object_path(object_seq),
+        })?
     }
 }
 
@@ -4535,6 +4535,29 @@ mod tests {
             reads,
             METRIC_OBJECT_STORE_WAL_READ_SECONDS.get_sample_count()
         );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_read_fails_at_a_panicking_fetch() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        put_object_per_entry(&object_store, 3).await;
+        let (io, _) = RecordingIo::over(object_store);
+        let store = open_over(io.clone(), &eager()).await;
+        *io.panic_range_read_of.lock().unwrap() = Some(1);
+        let mut stream = store.read(&provider(region(1)), 0, None).await.unwrap();
+        assert_eq!(object_entries([0]), next_batch(&mut stream).await);
+        let error = timeout(WAIT, stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::WalSegmentFetch { path, .. } if *path == io.object_path(1)),
+            "unexpected error: {error:?}"
+        );
+        assert!(timeout(WAIT, stream.next()).await.unwrap().is_none());
         store.stop().await.unwrap();
     }
 
@@ -7442,7 +7465,8 @@ mod tests {
     /// after it wrote the object, fails it with a given error before it
     /// writes, stores the same content before it writes, or damages the bytes
     /// the next range read returns; it also fails the next listing, or the
-    /// next range read of an object at an offset, with a transient error.
+    /// next range read of an object at an offset, with a transient error, and
+    /// panics in the next range read of a given object.
     struct RecordingIo {
         inner: ObjectStoreIo,
         reads: RangeReads,
@@ -7452,6 +7476,7 @@ mod tests {
         duplicate_next_put: AtomicBool,
         fail_next_list: AtomicBool,
         fail_range_read_at: Mutex<Option<(u64, u64)>>,
+        panic_range_read_of: Mutex<Option<u64>>,
     }
 
     impl RecordingIo {
@@ -7466,6 +7491,7 @@ mod tests {
                 duplicate_next_put: AtomicBool::new(false),
                 fail_next_list: AtomicBool::new(false),
                 fail_range_read_at: Mutex::new(None),
+                panic_range_read_of: Mutex::new(None),
             };
             (Arc::new(io), reads)
         }
@@ -7524,6 +7550,13 @@ mod tests {
             {
                 return injected_failure("read", self.object_path(object_seq));
             }
+            let panics = self
+                .panic_range_read_of
+                .lock()
+                .unwrap()
+                .take_if(|of| *of == object_seq)
+                .is_some();
+            assert!(!panics, "injected panic");
             let bytes = self.inner.get_range(object_seq, offset, len).await?;
             if self.damage_next_range_read.swap(false, Ordering::Relaxed) {
                 let mut damaged = bytes.to_vec();
