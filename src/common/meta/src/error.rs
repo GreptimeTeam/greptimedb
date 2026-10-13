@@ -1346,8 +1346,11 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            RetryLater { .. }
-            | GetLatestCacheRetryExceeded { .. }
+            RetryLater { source, .. } => match source.retry_hint() {
+                RetryHint::RetryAfterRouteRefresh => RetryHint::RetryAfterRouteRefresh,
+                RetryHint::Retryable | RetryHint::NonRetryable => RetryHint::Retryable,
+            },
+            GetLatestCacheRetryExceeded { .. }
             | NoLeader { .. }
             | ElectionNoLeader { .. }
             | ElectionLeaderLeaseExpired { .. }

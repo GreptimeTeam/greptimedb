@@ -24,6 +24,7 @@ use api::v1::Rows;
 use async_trait::async_trait;
 use common_base::Plugins;
 use common_base::readable_size::ReadableSize;
+use common_error::ext::{ErrorExt, RetryHint};
 use common_recordbatch::RecordBatches;
 use common_time::util::current_time_millis;
 use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
@@ -1006,6 +1007,7 @@ async fn test_region_write_buffer_rejects_only_full_region_queue() {
         .expect("the stalled queue should be rejected at the region hard limit")
         .unwrap()
         .unwrap_err();
+    assert_eq!(err.retry_hint(), RetryHint::Retryable);
     assert_matches!(
         err.into_inner().as_any().downcast_ref::<Error>().unwrap(),
         Error::RejectWrite { .. }

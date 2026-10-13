@@ -18,7 +18,7 @@ use common_error::define_from_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use snafu::{Location, Snafu};
+use snafu::{Location, Snafu, location};
 use tonic::Code;
 use tonic::metadata::errors::InvalidMetadataValue;
 
@@ -204,6 +204,19 @@ impl ErrorExt for Error {
 }
 
 define_from_tonic_status!(Error, Tonic);
+
+impl From<Error> for common_meta::error::Error {
+    fn from(error: Error) -> Self {
+        if error.should_retry() {
+            Self::retry_later(error)
+        } else {
+            Self::External {
+                source: BoxedError::new(error),
+                location: location!(),
+            }
+        }
+    }
+}
 
 impl Error {
     /// Returns the gRPC status code if this error is caused by a gRPC request failure.
