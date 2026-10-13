@@ -21,7 +21,7 @@ use store_api::storage::RegionId;
 use crate::compaction::compactor::{CompactionContext, CompactionRegion};
 use crate::compaction::scheduler::state::{CompactingFiles, CompactionExecution, CompactionPhase};
 use crate::compaction::scheduler::{CompactionScheduler, CompactionTransition};
-use crate::compaction::task::CompactionTaskImpl;
+use crate::compaction::task::CompactionTask;
 use crate::compaction::unit::CompactionUnit;
 use crate::error::{self, Error};
 use crate::metrics::INFLIGHT_COMPACTION_COUNT;
@@ -44,7 +44,7 @@ struct UnitExecution {
 pub(crate) struct LocalCompaction {
     /// All pending and submitted units, retained until task exit. Tasks own their input leases.
     units: HashMap<u64, UnitExecution>,
-    pending: VecDeque<CompactionTaskImpl>,
+    pending: VecDeque<CompactionTask>,
     parallelism: usize,
     error: Option<Arc<Error>>,
     made_progress: bool,
@@ -140,7 +140,7 @@ impl CompactionScheduler {
                     finished: false,
                 },
             );
-            local.pending.push_back(CompactionTaskImpl {
+            local.pending.push_back(CompactionTask {
                 state,
                 execution,
                 compaction_context: context.clone(),

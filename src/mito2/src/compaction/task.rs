@@ -42,7 +42,7 @@ use crate::worker::WorkerListener;
 pub const MAX_PARALLEL_COMPACTION: usize = 1;
 
 /// One local atomic unit. The scheduler owns request waiters and sibling units.
-pub(crate) struct CompactionTaskImpl {
+pub(crate) struct CompactionTask {
     pub(crate) state: CancellableTaskState,
     pub(crate) execution: CompactionExecution,
     pub(crate) compaction_context: CompactionContext,
@@ -57,7 +57,7 @@ pub(crate) struct CompactionTaskImpl {
     pub(crate) uncommitted: UncommittedSsts,
 }
 
-impl Debug for CompactionTaskImpl {
+impl Debug for CompactionTask {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TwcsCompactionTask")
             .field("region_id", &self.compaction_context.region_id)
@@ -70,7 +70,7 @@ impl Debug for CompactionTaskImpl {
     }
 }
 
-impl CompactionTaskImpl {
+impl CompactionTask {
     /// Executes one unit and retains its resources until worker apply or failure acknowledgement.
     pub(crate) async fn run(&mut self) {
         let start = std::time::Instant::now();
@@ -238,7 +238,7 @@ mod tests {
     async fn test_compaction_unit_panic_reports_terminal_error() {
         let region = new_test_compaction_region().await;
         let (request_sender, mut requests) = mpsc::channel(1);
-        let mut task = CompactionTaskImpl {
+        let mut task = CompactionTask {
             state: CancellableTaskState::new(),
             execution: CompactionExecution::for_test(7),
             compaction_context: CompactionContext::from(&region),

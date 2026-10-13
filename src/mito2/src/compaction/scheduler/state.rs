@@ -554,7 +554,7 @@ pub(super) struct PendingCompaction {
 }
 
 #[cfg(test)]
-mod lease_tests {
+mod tests {
     use store_api::storage::FileId;
 
     use super::*;
