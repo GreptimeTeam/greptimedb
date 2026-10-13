@@ -47,6 +47,7 @@ DEPTHS = {"GREPTIMEDB_OSWAL_MAX_IN_FLIGHT_CREATES": 4, "GREPTIMEDB_OSWAL_MAX_SEA
           "GREPTIMEDB_OSWAL_RECOVERY_CONCURRENCY": 8}
 # Restart cells seal ten times as often as the default so recovery has thousands of objects.
 RESTART_FLUSH_INTERVAL = "10ms"
+GROUP_NAME = re.compile(r"[a-z][a-z0-9]{0,11}")
 RESERVED_ENV = ("GREPTIMEDB_STANDALONE__STORAGE__", "GREPTIMEDB_STANDALONE__WAL__")
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # Docker's reference grammar: path components separated by ".", "_", "__" or runs of "-".
@@ -90,7 +91,7 @@ def build_manifest(plan: dict, greptimedb_inspect: list, runtime_image: str,
     return {"smoke": plan["smoke"], "rows": plan["rows"], "rounds": plan["rounds"],
             "concurrency": plan["concurrency"], "batch_rows": plan["batch_rows"],
             "configs": plan["configs"], "extra_env": plan["extra_env"], "sweep": plan["sweep"],
-            "restart": plan["restart"],
+            "restart": plan["restart"], "groups": plan["groups"],
             "greptimedb_image": image, "runtime_image": runtime_image,
             "instance_type": instance_type, "region": region, "prefix": prefix}
 
@@ -140,26 +141,49 @@ def check_depths(env: dict) -> None:
         raise ValueError(f"MAX_SEALED_BATCHES {sealed} is below MAX_IN_FLIGHT_CREATES {creates} plus 2")
 
 
-def build_plan(concurrency: str, rows: str, batch_rows: str, rounds: str, smoke: bool,
-               configs: str = "R,D,E", extra_env: str = "", sweep: str = "", restart: bool = False) -> dict:
+def group_cells(group: dict, smoke: bool) -> list:
+    """The cells of one group, in run order; a group without a name is the top-level inputs."""
+    name, mode = group.get("name", ""), group.get("mode", "load")
+    if mode not in ("load", "crash"):
+        raise ValueError(f"group {name!r}: mode must be load or crash, got {mode!r}")
+    concurrency = str(group["concurrency"])
     levels = [positive("concurrency", level.strip(), 256) for level in concurrency.split(",")]
     if len(set(levels)) != len(levels):
         raise ValueError(f"concurrency repeats a level: {concurrency!r}")
-    chosen = [config.strip() for config in configs.split(",")]
-    if not chosen or len(set(chosen)) != len(chosen) or not set(chosen) <= set(WAL_CONFIGS):
-        raise ValueError(f"configs must be distinct names among {', '.join(WAL_CONFIGS)}, got {configs!r}")
-    env = parse_extra_env(extra_env)
-    swept, points = parse_sweep(sweep)
+    chosen = [config.strip() for config in str(group["configs"]).split(",")]
+    allowed = set(WAL_CONFIGS) - (set(BASELINES) if mode == "crash" else set())
+    if not chosen or len(set(chosen)) != len(chosen) or not set(chosen) <= allowed:
+        raise ValueError(f"group {name!r}: configs must be distinct names among {', '.join(sorted(allowed))}, "
+                         f"got {group['configs']!r}")
+    extra = group.get("extra_env", "")
+    env = parse_extra_env(json.dumps(extra) if isinstance(extra, dict) else str(extra))
+    swept, points = parse_sweep(str(group.get("sweep", "")))
     if swept in env:
         raise ValueError(f"{swept} is both swept and set in extra_env")
-    row_count = SMOKE_ROWS if smoke else positive("rows", rows, 100_000_000)
-    round_count = 1 if smoke else positive("rounds", rounds, 10)
-    profile = DATA_PROFILES.get(row_count)
+    restart = group.get("restart", False) is True
+    rows = SMOKE_ROWS if smoke else positive("rows", str(group["rows"]), 100_000_000)
+    rounds = 1 if smoke else positive("rounds", str(group["rounds"]), 10)
+    idle = int(group.get("idle_seconds", 0))
+    common = {"group": name, "mode": mode, "restart": restart, "idle_seconds": idle}
+    if mode == "load":
+        if not 0 <= idle <= 600:
+            raise ValueError(f"group {name!r}: idle_seconds must be in 0..600")
+        common |= {"rows": rows, "data_profile": DATA_PROFILES.get(rows, "custom")}
+    else:
+        cycles = int(group.get("cycles", 5))
+        kill_after = [int(v) for v in group.get("kill_after", [3, 10])]
+        if not 1 <= cycles <= 20 or len(kill_after) != 2 or not 1 <= kill_after[0] <= kill_after[1] <= 3600:
+            raise ValueError(f"group {name!r}: cycles must be in 1..20 and kill_after a [min, max] in 1..3600")
+        if restart or idle:
+            raise ValueError(f"group {name!r}: a crash group restarts after every kill and has no idle window")
+        if smoke:
+            cycles, kill_after = min(cycles, 2), [min(v, 60) for v in kill_after]
+        common |= {"cycles": cycles, "kill_after": kill_after, "pin": group.get("pin", False) is True}
     # Raft Engine ignores the depths, so each baseline runs once per round and level.
     series = [(config, point) for config in WAL_CONFIGS if config in chosen
               for point in (points if config not in BASELINES else [None])]
     cells = []
-    for round_number in range(1, round_count + 1):
+    for round_number in range(1, rounds + 1):
         # Reverse the order every other round so no configuration or value always runs first.
         for level in levels:
             for config, point in series if round_number % 2 else reversed(series):
@@ -167,18 +191,58 @@ def build_plan(concurrency: str, rows: str, batch_rows: str, rounds: str, smoke:
                 if config not in BASELINES:
                     check_depths(cell_env)
                 wal = WAL_CONFIGS[config] | ({"FLUSH_INTERVAL": RESTART_FLUSH_INTERVAL} if restart and config not in BASELINES else {})
-                cells.append({
-                    "id": f"{round_number}-{level}-{config}" + (f"-{point}" if point is not None else ""),
+                cells.append(common | {
+                    "id": (f"{name}-" if name else "") + f"{round_number}-{level}-{config}"
+                    + (f"-{point}" if point is not None else ""),
                     "round": round_number, "concurrency": level, "config": config, "wal": wal,
-                    "env": cell_env, "sweep_value": point, "restart": restart,
+                    "env": cell_env, "sweep_value": point,
                 })
+    return cells
+
+
+def parse_groups(text: str, defaults: dict) -> list:
+    """A JSON list of groups; every key a group leaves out takes the top-level input's value."""
+    if not text.strip():
+        return [defaults]
+    groups = json.loads(text)
+    if not isinstance(groups, list) or not groups or not all(isinstance(g, dict) for g in groups):
+        raise ValueError("groups must be a non-empty JSON list of objects")
+    known = set(defaults) | {"name", "mode", "idle_seconds", "cycles", "kill_after", "pin"}
+    names = [g.get("name") for g in groups]
+    for group, name in zip(groups, names):
+        if not isinstance(name, str) or not GROUP_NAME.fullmatch(name):
+            raise ValueError(f"every group needs a name of up to 12 lowercase letters and digits, got {name!r}")
+        if set(group) - known:
+            raise ValueError(f"group {name!r} has unknown keys {sorted(set(group) - known)}")
+    if len(set(names)) != len(names):
+        raise ValueError(f"group names repeat: {names}")
+    return [defaults | group for group in groups]
+
+
+def build_plan(concurrency: str, rows: str, batch_rows: str, rounds: str, smoke: bool,
+               configs: str = "R,D,E", extra_env: str = "", sweep: str = "", restart: bool = False,
+               groups: str = "") -> dict:
+    defaults = {"concurrency": concurrency, "rows": rows, "rounds": rounds, "configs": configs,
+                "extra_env": extra_env, "sweep": sweep, "restart": restart}
+    resolved = parse_groups(groups, defaults)
+    swept, points = parse_sweep(sweep)
+    cells = [cell for group in resolved for cell in group_cells(group, smoke)]
+    if len({cell["id"] for cell in cells}) != len(cells):
+        raise ValueError("two cells share an id")
+    corpora = []
+    for count in dict.fromkeys(cell["rows"] for cell in cells if cell["mode"] == "load"):
+        profile = DATA_PROFILES.get(count)
+        corpora.append({"rows": count, "dir": f"corpus-{count}", "data_profile": profile or "custom",
+                        "generator_args": ["--data-profile", profile] if profile else ["--line-count", str(count)]})
+    first = cells[0]
     return {
-        "smoke": smoke, "rows": row_count, "rounds": round_count,
-        "batch_rows": positive("batch_rows", batch_rows, 100_000), "concurrency": levels,
-        "configs": chosen, "extra_env": env, "sweep": {"name": swept, "values": points} if swept else None,
-        "restart": restart, "data_profile": profile or "custom",
-        "generator_args": ["--data-profile", profile] if profile else ["--line-count", str(row_count)],
-        "cells": cells,
+        "smoke": smoke, "rows": first.get("rows"), "rounds": max(cell["round"] for cell in cells),
+        "batch_rows": positive("batch_rows", batch_rows, 100_000),
+        "concurrency": sorted({cell["concurrency"] for cell in cells}),
+        "configs": list(dict.fromkeys(cell["config"] for cell in cells)),
+        "extra_env": parse_extra_env(extra_env), "groups": [g.get("name", "") for g in resolved],
+        "sweep": {"name": swept, "values": points} if swept else None,
+        "restart": restart, "corpora": corpora, "cells": cells,
     }
 
 
@@ -255,7 +319,7 @@ def main() -> int:
     plan.add_argument("--smoke", choices=("true", "false"), required=True)
     plan.add_argument("--restart", choices=("true", "false"), default="false")
     plan.add_argument("--configs", default="R,D,E")
-    for name in ("extra-env", "sweep"):
+    for name in ("extra-env", "sweep", "groups"):
         plan.add_argument(f"--{name}", default="")
     for name in ("timeout-minutes", "ttl-hours", "output"):
         plan.add_argument(f"--{name}")
@@ -278,11 +342,11 @@ def main() -> int:
         if args.timeout_minutes or args.ttl_hours:
             validate_budgets(args.timeout_minutes or "", args.ttl_hours or "")
         result = build_plan(args.concurrency, args.rows, args.batch_rows, args.rounds, args.smoke == "true",
-                            args.configs, args.extra_env, args.sweep, args.restart == "true")
+                            args.configs, args.extra_env, args.sweep, args.restart == "true", args.groups)
         if args.output:
             with open(args.output, "w") as output:
                 json.dump(result, output, indent=2)
-        print(f"{len(result['cells'])} cells, {result['rows']} rows, profile {result['data_profile']}")
+        print(f"{len(result['cells'])} cells; corpora {[c['rows'] for c in result['corpora']]}")
     elif args.command == "image":
         reference = resolve_image(args.image, args.tag)
         append_github("GITHUB_OUTPUT", "greptimedb_ref", reference)

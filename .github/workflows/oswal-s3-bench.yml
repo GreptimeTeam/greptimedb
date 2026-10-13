@@ -30,6 +30,10 @@ on:
         description: 'After each load, SIGKILL the server, restart it on the same prefix and data home, and time recovery; object store cells flush every 10ms'
         type: boolean
         default: false
+      groups:
+        description: 'JSON list of cell groups, each overriding configs, sweep, extra_env, concurrency, rounds, rows, restart, plus idle_seconds, or mode crash with cycles, kill_after [min, max] and pin; empty = one group from the inputs above'
+        type: string
+        default: ''
       instance_type:
         description: EC2 instance type in the bucket region; the d of c6id gives a local NVMe instance store for the Raft Engine WAL
         type: string
@@ -72,6 +76,7 @@ env:
   EXTRA_ENV: ${{ inputs.extra_env }}
   SWEEP: ${{ inputs.sweep }}
   RESTART: ${{ inputs.restart }}
+  GROUPS: ${{ inputs.groups }}
   REQUESTED_INSTANCE_TYPE: ${{ inputs.instance_type }}
   CONCURRENCY: ${{ inputs.concurrency }}
   ROWS: ${{ inputs.rows }}
@@ -102,7 +107,7 @@ jobs:
       run: |
         python3 greptimedb/.github/scripts/oswal-s3-bench.py plan --smoke "$SMOKE" \
           --concurrency "$CONCURRENCY" --rows "$ROWS" --batch-rows "$BATCH_ROWS" --rounds "$ROUNDS" \
-          --configs "$CONFIGS" --extra-env "$EXTRA_ENV" --sweep "$SWEEP" --restart "$RESTART" \
+          --configs "$CONFIGS" --extra-env "$EXTRA_ENV" --sweep "$SWEEP" --restart "$RESTART" --groups "$GROUPS" \
           --timeout-minutes "$BENCHMARK_TIMEOUT_MINUTES" --ttl-hours "$JANITOR_TTL_HOURS"
         python3 greptimedb/.github/scripts/oswal-s3-bench.py image --tag "$GREPTIMEDB_TAG" --image "$GREPTIMEDB_IMAGE_INPUT"
     - name: Resolve CI runner
@@ -188,7 +193,7 @@ jobs:
         bash greptimedb/.github/scripts/oswal-s3-bench-run.sh pull
         python3 greptimedb/.github/scripts/oswal-s3-bench.py plan --smoke "$SMOKE" --output "$PLAN" \
           --concurrency "$CONCURRENCY" --rows "$ROWS" --batch-rows "$BATCH_ROWS" --rounds "$ROUNDS" \
-          --configs "$CONFIGS" --extra-env "$EXTRA_ENV" --sweep "$SWEEP" --restart "$RESTART"
+          --configs "$CONFIGS" --extra-env "$EXTRA_ENV" --sweep "$SWEEP" --restart "$RESTART" --groups "$GROUPS"
         python3 greptimedb/.github/scripts/oswal-s3-bench.py manifest --results "$RESULTS" \
           --runtime-image "$RUNTIME_IMAGE" --instance-type "$INSTANCE_TYPE" --region "$S3_REGION" --prefix "$RUN_PREFIX"
     - name: Probe the bucket
