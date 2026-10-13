@@ -26,13 +26,13 @@ use client::client_manager::NodeClients;
 use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_meta::cache::TableInfoCacheRef;
 use common_meta::cache_invalidator::{CacheInvalidatorRef, Context};
-use common_meta::error::{ExternalSnafu, Result, TableInfoNotFoundSnafu, UnexpectedSnafu};
+use common_meta::error::{Error, ExternalSnafu, Result, TableInfoNotFoundSnafu, UnexpectedSnafu};
 use common_meta::instruction::CacheIdent;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::router;
 use futures::future;
-use partition::manager::PartitionRuleManagerRef;
+use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use prometheus::Histogram;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
@@ -45,16 +45,21 @@ use crate::req_convert::TablePartitioner;
 pub struct WriteDispatcher {
     node_manager: NodeManagerRef,
     partition_manager: PartitionRuleManagerRef,
-    remote: Option<RemoteRetry>,
+    retry: Option<WriteRetry>,
 }
 
 /// Shared reference to a [`WriteDispatcher`].
 pub type WriteDispatcherRef = Arc<WriteDispatcher>;
 
-/// A completed send, retaining its request only when a retry is possible.
-pub(crate) struct WriteOutcome {
-    result: Result<RegionResponse>,
-    pending: Option<PendingWrite>,
+/// The result of one write RPC attempt.
+pub(crate) enum WriteAttempt {
+    Success(RegionResponse),
+    Failed {
+        error: Error,
+        /// Retained when retries are enabled and the original client error allows retry.
+        /// The remaining retry budget is checked separately.
+        request: Option<RoutedWrite>,
+    },
 }
 
 impl WriteDispatcher {
@@ -63,7 +68,7 @@ impl WriteDispatcher {
         Self {
             node_manager,
             partition_manager,
-            remote: None,
+            retry: None,
         }
     }
 
@@ -76,14 +81,15 @@ impl WriteDispatcher {
         cache_invalidator: CacheInvalidatorRef,
     ) -> Self {
         if options.max_retries > 0 {
-            self.remote = Some(RemoteRetry {
+            self.retry = Some(WriteRetry {
                 clients,
+                partition_manager: self.partition_manager.clone(),
                 options,
                 table_info_cache,
                 cache_invalidator,
             });
         } else {
-            self.remote = None;
+            self.retry = None;
         }
         self
     }
@@ -161,7 +167,7 @@ impl WriteDispatcher {
         histogram: Option<Histogram>,
     ) -> Result<RegionResponse> {
         let histogram = histogram.as_ref();
-        let writes = if self.remote.is_some() {
+        let writes = if self.retry.is_some() {
             writes
                 .into_iter()
                 .flat_map(|(peer, request)| {
@@ -173,53 +179,59 @@ impl WriteDispatcher {
         } else {
             writes
         };
-        let outcomes = future::join_all(
+        let attempts = future::join_all(
             writes
                 .into_iter()
-                .map(|(peer, request)| self.dispatch_initial(peer, request, histogram)),
+                .map(|(peer, request)| self.dispatch_once(peer, request, histogram)),
         )
         .await;
-        self.finish_dispatch(outcomes, histogram).await
+        self.finish(attempts, histogram).await
     }
 
     /// Sends the first attempt immediately so bulk encoding can overlap other sends.
-    pub(crate) async fn dispatch_initial(
+    pub(crate) async fn dispatch_once(
         &self,
         peer: Peer,
         request: RegionRequest,
         histogram: Option<&Histogram>,
-    ) -> WriteOutcome {
-        if let Some(remote) = &self.remote {
-            return Self::send_write(
-                remote,
-                PendingWrite {
-                    peer,
-                    request: Arc::new(request),
-                },
-                histogram,
-            )
-            .await;
+    ) -> WriteAttempt {
+        if let Some(retry) = &self.retry {
+            return retry
+                .dispatch_once(
+                    RoutedWrite {
+                        peer,
+                        request: Arc::new(request),
+                    },
+                    histogram,
+                )
+                .await;
         }
         let _timer = histogram.map(Histogram::start_timer);
         let datanode = self.node_manager.datanode(&peer).await;
-        WriteOutcome {
-            result: datanode.handle(request).await,
-            pending: None,
+        match datanode.handle(request).await {
+            Ok(response) => WriteAttempt::Success(response),
+            Err(error) => WriteAttempt::Failed {
+                error,
+                request: None,
+            },
         }
     }
 
     /// Collects first attempts and retries their failures together, refreshing routes once per round.
-    pub(crate) async fn finish_dispatch(
+    pub(crate) async fn finish(
         &self,
-        outcomes: Vec<WriteOutcome>,
+        attempts: Vec<WriteAttempt>,
         histogram: Option<&Histogram>,
     ) -> Result<RegionResponse> {
-        if let Some(remote) = &self.remote {
-            return self.dispatch_with_retry(remote, outcomes, histogram).await;
+        if let Some(retry) = &self.retry {
+            return retry.retry(attempts, histogram).await;
         }
         let mut response = RegionResponse::new(0);
-        for outcome in outcomes {
-            merge_response(&mut response, outcome.result?);
+        for attempt in attempts {
+            match attempt {
+                WriteAttempt::Success(result) => merge_response(&mut response, result),
+                WriteAttempt::Failed { error, .. } => return Err(error),
+            }
         }
         Ok(response)
     }
@@ -229,89 +241,90 @@ impl WriteDispatcher {
         &self,
         regions: &[RegionId],
     ) -> partition::error::Result<HashMap<RegionId, Peer>> {
-        let table_ids = regions
-            .iter()
-            .map(|region| region.table_id())
-            .collect::<HashSet<_>>();
-        let mut physical_tables = HashMap::new();
-        let mut routes = HashMap::new();
-        for table_id in table_ids {
-            let (physical_id, route) = self
-                .partition_manager
-                .find_physical_table_route_with_id(table_id)
-                .await?;
-            physical_tables.insert(table_id, physical_id);
-            routes.entry(physical_id).or_insert(route);
-        }
-        let mut peers = HashMap::with_capacity(regions.len());
-        for region in regions {
-            if peers.contains_key(region) {
-                continue;
-            }
-            let peer = physical_tables
-                .get(&region.table_id())
-                .and_then(|physical_id| routes.get(physical_id))
-                .and_then(|route| {
-                    router::find_region_leader(&route.region_routes, region.region_number())
-                })
-                .context(partition::error::FindLeaderSnafu {
-                    region_id: *region,
-                    table_id: region.table_id(),
-                })?;
-            peers.insert(*region, peer);
-        }
-        Ok(peers)
+        resolve_peers(&self.partition_manager, regions).await
     }
 
-    async fn send_write(
-        remote: &RemoteRetry,
-        write: PendingWrite,
-        histogram: Option<&Histogram>,
-    ) -> WriteOutcome {
-        let _timer = histogram.map(Histogram::start_timer);
-        let requester = remote.clients.make_region_requester(&write.peer).await;
-        let result = requester.handle(Arc::clone(&write.request)).await;
-        let pending = if result
-            .as_ref()
-            .is_err_and(|error| error.retry_hint().is_retryable())
-        {
-            Some(write)
-        } else {
-            None
-        };
-        WriteOutcome {
-            result: result.map_err(Into::into),
-            pending,
-        }
-    }
-
-    async fn dispatch_with_retry(
+    async fn dispatch_inner(
         &self,
-        remote: &RemoteRetry,
-        mut outcomes: Vec<WriteOutcome>,
+        requests: Vec<RegionRequest>,
+        histogram: Option<Histogram>,
+    ) -> Result<RegionResponse> {
+        let writes = self
+            .prepare(requests)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        self.dispatch_prepared(writes, histogram).await
+    }
+}
+
+/// Sends shared requests and coordinates retries with refreshed routes.
+struct WriteRetry {
+    clients: Arc<NodeClients>,
+    partition_manager: PartitionRuleManagerRef,
+    options: WriteRetryOptions,
+    table_info_cache: TableInfoCacheRef,
+    cache_invalidator: CacheInvalidatorRef,
+}
+
+/// A single-region write request paired with its destination peer.
+pub(crate) struct RoutedWrite {
+    peer: Peer,
+    request: Arc<RegionRequest>,
+}
+
+impl WriteRetry {
+    async fn dispatch_once(
+        &self,
+        write: RoutedWrite,
+        histogram: Option<&Histogram>,
+    ) -> WriteAttempt {
+        let _timer = histogram.map(Histogram::start_timer);
+        let requester = self.clients.make_region_requester(&write.peer).await;
+        match requester.handle(Arc::clone(&write.request)).await {
+            Ok(response) => WriteAttempt::Success(response),
+            Err(error) => {
+                let request = error.retry_hint().is_retryable().then_some(write);
+                WriteAttempt::Failed {
+                    error: error.into(),
+                    request,
+                }
+            }
+        }
+    }
+
+    async fn retry(
+        &self,
+        mut attempts: Vec<WriteAttempt>,
         histogram: Option<&Histogram>,
     ) -> Result<RegionResponse> {
         let mut response = RegionResponse::new(0);
         let mut backoff = ExponentialBuilder::default()
-            .with_min_delay(remote.options.initial_backoff)
-            .with_max_delay(remote.options.max_backoff)
-            .with_factor(remote.options.backoff_multiplier)
-            .with_max_times(remote.options.max_retries)
+            .with_min_delay(self.options.initial_backoff)
+            .with_max_delay(self.options.max_backoff)
+            .with_factor(self.options.backoff_multiplier)
+            .with_max_times(self.options.max_retries)
             .with_jitter()
             .build();
 
         loop {
             let mut failures = Vec::new();
             let mut terminal_error = None;
-            for outcome in outcomes {
-                match (outcome.pending, outcome.result) {
-                    (_, Ok(result)) => {
+            for attempt in attempts {
+                match attempt {
+                    WriteAttempt::Success(result) => {
                         merge_response(&mut response, result);
                     }
-                    (Some(write), Err(error)) => {
+                    WriteAttempt::Failed {
+                        error,
+                        request: Some(write),
+                    } => {
                         failures.push((write, error));
                     }
-                    (None, Err(error)) => {
+                    WriteAttempt::Failed {
+                        error,
+                        request: None,
+                    } => {
                         terminal_error.get_or_insert(error);
                     }
                 }
@@ -342,35 +355,30 @@ impl WriteDispatcher {
                 }
             }
             if !refresh.is_empty() {
-                pending.extend(self.reroute_failed_writes(remote, refresh).await?);
+                pending.extend(self.reroute_failed_writes(refresh).await?);
             }
-            outcomes = future::join_all(
+            attempts = future::join_all(
                 pending
                     .into_iter()
-                    .map(|write| Self::send_write(remote, write, histogram)),
+                    .map(|write| self.dispatch_once(write, histogram)),
             )
             .await;
         }
     }
 
-    async fn reroute_failed_writes(
-        &self,
-        remote: &RemoteRetry,
-        writes: Vec<PendingWrite>,
-    ) -> Result<Vec<PendingWrite>> {
+    async fn reroute_failed_writes(&self, writes: Vec<RoutedWrite>) -> Result<Vec<RoutedWrite>> {
         let regions = writes
             .iter()
             .map(|write| write_region_id(&write.request))
             .collect::<Result<Vec<_>>>()?;
-        self.invalidate_routes(&regions, &remote.cache_invalidator)
-            .await?;
+        self.invalidate_routes(&regions).await?;
         let mut partitioners = HashMap::new();
         for table_id in regions
             .iter()
             .map(|region| region.table_id())
             .collect::<HashSet<_>>()
         {
-            let table_info = remote
+            let table_info = self
                 .table_info_cache
                 .get(table_id)
                 .await?
@@ -401,16 +409,15 @@ impl WriteDispatcher {
                 .context(ExternalSnafu)?;
             rebuilt_requests.extend(requests);
         }
-        self.prepare_writes(rebuilt_requests).await
+        self.prepare(rebuilt_requests).await
     }
 
-    async fn prepare_writes(&self, requests: Vec<RegionRequest>) -> Result<Vec<PendingWrite>> {
+    async fn prepare(&self, requests: Vec<RegionRequest>) -> Result<Vec<RoutedWrite>> {
         let regions = requests
             .iter()
             .map(write_region_id)
             .collect::<Result<Vec<_>>>()?;
-        let peers = self
-            .resolve_peers(&regions)
+        let peers = resolve_peers(&self.partition_manager, &regions)
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
@@ -418,7 +425,7 @@ impl WriteDispatcher {
             .into_iter()
             .zip(regions)
             .map(|(request, region)| {
-                Ok(PendingWrite {
+                Ok(RoutedWrite {
                     peer: get_peer(&peers, region)?,
                     request: Arc::new(request),
                 })
@@ -426,24 +433,7 @@ impl WriteDispatcher {
             .collect()
     }
 
-    async fn dispatch_inner(
-        &self,
-        requests: Vec<RegionRequest>,
-        histogram: Option<Histogram>,
-    ) -> Result<RegionResponse> {
-        let writes = self
-            .prepare(requests)
-            .await
-            .map_err(BoxedError::new)
-            .context(ExternalSnafu)?;
-        self.dispatch_prepared(writes, histogram).await
-    }
-
-    async fn invalidate_routes(
-        &self,
-        regions: &[RegionId],
-        invalidator: &CacheInvalidatorRef,
-    ) -> Result<()> {
+    async fn invalidate_routes(&self, regions: &[RegionId]) -> Result<()> {
         let mut table_ids = regions
             .iter()
             .map(|region| region.table_id())
@@ -463,20 +453,47 @@ impl WriteDispatcher {
             .into_iter()
             .map(CacheIdent::TableId)
             .collect::<Vec<_>>();
-        invalidator.invalidate(&Context::default(), &caches).await
+        self.cache_invalidator
+            .invalidate(&Context::default(), &caches)
+            .await
     }
 }
 
-struct RemoteRetry {
-    clients: Arc<NodeClients>,
-    options: WriteRetryOptions,
-    table_info_cache: TableInfoCacheRef,
-    cache_invalidator: CacheInvalidatorRef,
-}
-
-struct PendingWrite {
-    peer: Peer,
-    request: Arc<RegionRequest>,
+async fn resolve_peers(
+    partition_manager: &PartitionRuleManager,
+    regions: &[RegionId],
+) -> partition::error::Result<HashMap<RegionId, Peer>> {
+    let table_ids = regions
+        .iter()
+        .map(|region| region.table_id())
+        .collect::<HashSet<_>>();
+    let mut physical_tables = HashMap::new();
+    let mut routes = HashMap::new();
+    for table_id in table_ids {
+        let (physical_id, route) = partition_manager
+            .find_physical_table_route_with_id(table_id)
+            .await?;
+        physical_tables.insert(table_id, physical_id);
+        routes.entry(physical_id).or_insert(route);
+    }
+    let mut peers = HashMap::with_capacity(regions.len());
+    for region in regions {
+        if peers.contains_key(region) {
+            continue;
+        }
+        let peer = physical_tables
+            .get(&region.table_id())
+            .and_then(|physical_id| routes.get(physical_id))
+            .and_then(|route| {
+                router::find_region_leader(&route.region_routes, region.region_number())
+            })
+            .context(partition::error::FindLeaderSnafu {
+                region_id: *region,
+                table_id: region.table_id(),
+            })?;
+        peers.insert(*region, peer);
+    }
+    Ok(peers)
 }
 
 fn get_peer(peers: &HashMap<RegionId, Peer>, region: RegionId) -> Result<Peer> {

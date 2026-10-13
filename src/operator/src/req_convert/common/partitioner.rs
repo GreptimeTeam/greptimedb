@@ -106,69 +106,9 @@ impl TablePartitioner {
         let bodies = match body.context(error::UnexpectedSnafu {
             violated: "Cannot rebuild a request without a body",
         })? {
-            Body::Inserts(inserts) => {
-                let mut bodies = Vec::new();
-                for insert in inserts.requests {
-                    let region_id = RegionId::from_u64(insert.region_id);
-                    if self.matches_region(region_id, insert.partition_expr_version) {
-                        bodies.push(Body::Inserts(InsertRequests {
-                            requests: vec![insert],
-                        }));
-                        continue;
-                    }
-                    let rows = insert.rows.context(error::UnexpectedSnafu {
-                        violated: "Cannot rebuild an insert without rows",
-                    })?;
-                    for request in self.partition_insert_requests(rows, insert.skip_wal)? {
-                        bodies.push(Body::Inserts(InsertRequests {
-                            requests: vec![request],
-                        }));
-                    }
-                }
-                bodies
-            }
-            Body::Deletes(deletes) => {
-                let mut bodies = Vec::new();
-                for delete in deletes.requests {
-                    let region_id = RegionId::from_u64(delete.region_id);
-                    if self.matches_region(region_id, delete.partition_expr_version) {
-                        bodies.push(Body::Deletes(DeleteRequests {
-                            requests: vec![delete],
-                        }));
-                        continue;
-                    }
-                    let rows = delete.rows.context(error::UnexpectedSnafu {
-                        violated: "Cannot rebuild a delete without rows",
-                    })?;
-                    for request in self.partition_delete_requests(rows)? {
-                        bodies.push(Body::Deletes(DeleteRequests {
-                            requests: vec![request],
-                        }));
-                    }
-                }
-                bodies
-            }
-            Body::BulkInsert(bulk) => {
-                let region_id = RegionId::from_u64(bulk.region_id);
-                if self.matches_region(region_id, bulk.partition_expr_version) {
-                    vec![Body::BulkInsert(bulk)]
-                } else {
-                    let bulk_insert_request::Body::ArrowIpc(ipc) =
-                        bulk.body.context(error::UnexpectedSnafu {
-                            violated: "Cannot rebuild a bulk insert without Arrow IPC data",
-                        })?;
-                    let batch = FlightDecoder::try_from_schema_bytes(&ipc.schema)
-                        .and_then(|mut decoder| {
-                            decoder.try_decode_record_batch(&ipc.data_header, &ipc.payload)
-                        })
-                        .map_err(BoxedError::new)
-                        .context(error::ExternalSnafu)?;
-                    self.partition_bulk_insert_requests(batch, Some(ipc), bulk.skip_wal)?
-                        .into_iter()
-                        .map(Body::BulkInsert)
-                        .collect()
-                }
-            }
+            Body::Inserts(inserts) => self.rebuild_insert_requests(inserts)?,
+            Body::Deletes(deletes) => self.rebuild_delete_requests(deletes)?,
+            Body::BulkInsert(bulk) => self.rebuild_bulk_insert_request(bulk)?,
             _ => {
                 return error::UnexpectedSnafu {
                     violated: "Only writes can be rebuilt",
@@ -269,8 +209,80 @@ impl TablePartitioner {
         Ok(requests)
     }
 
-    /// Whether an earlier request still matches this partition snapshot.
-    fn matches_region(&self, region_id: RegionId, version: Option<PartitionExprVersion>) -> bool {
+    fn rebuild_insert_requests(&self, inserts: InsertRequests) -> Result<Vec<Body>> {
+        let mut bodies = Vec::new();
+        for insert in inserts.requests {
+            let region_id = RegionId::from_u64(insert.region_id);
+            if self.is_partition_expr_unchanged(region_id, insert.partition_expr_version) {
+                bodies.push(Body::Inserts(InsertRequests {
+                    requests: vec![insert],
+                }));
+                continue;
+            }
+            let rows = insert.rows.context(error::UnexpectedSnafu {
+                violated: "Cannot rebuild an insert without rows",
+            })?;
+            for request in self.partition_insert_requests(rows, insert.skip_wal)? {
+                bodies.push(Body::Inserts(InsertRequests {
+                    requests: vec![request],
+                }));
+            }
+        }
+        Ok(bodies)
+    }
+
+    fn rebuild_delete_requests(&self, deletes: DeleteRequests) -> Result<Vec<Body>> {
+        let mut bodies = Vec::new();
+        for delete in deletes.requests {
+            let region_id = RegionId::from_u64(delete.region_id);
+            if self.is_partition_expr_unchanged(region_id, delete.partition_expr_version) {
+                bodies.push(Body::Deletes(DeleteRequests {
+                    requests: vec![delete],
+                }));
+                continue;
+            }
+            let rows = delete.rows.context(error::UnexpectedSnafu {
+                violated: "Cannot rebuild a delete without rows",
+            })?;
+            for request in self.partition_delete_requests(rows)? {
+                bodies.push(Body::Deletes(DeleteRequests {
+                    requests: vec![request],
+                }));
+            }
+        }
+        Ok(bodies)
+    }
+
+    fn rebuild_bulk_insert_request(&self, bulk: BulkInsertRequest) -> Result<Vec<Body>> {
+        let region_id = RegionId::from_u64(bulk.region_id);
+        if self.is_partition_expr_unchanged(region_id, bulk.partition_expr_version) {
+            return Ok(vec![Body::BulkInsert(bulk)]);
+        }
+        let bulk_insert_request::Body::ArrowIpc(ipc) =
+            bulk.body.context(error::UnexpectedSnafu {
+                violated: "Cannot rebuild a bulk insert without Arrow IPC data",
+            })?;
+        let batch = FlightDecoder::try_from_schema_bytes(&ipc.schema)
+            .and_then(|mut decoder| decoder.try_decode_record_batch(&ipc.data_header, &ipc.payload))
+            .map_err(BoxedError::new)
+            .context(error::ExternalSnafu)?;
+        Ok(self
+            .partition_bulk_insert_requests(batch, Some(ipc), bulk.skip_wal)?
+            .into_iter()
+            .map(Body::BulkInsert)
+            .collect())
+    }
+
+    /// Whether the request's region still exists with the same partition expression version.
+    ///
+    /// A leader change leaves the partition unchanged, so the original payload can be
+    /// sent to the new peer. A removed region or changed partition expression version
+    /// requires rebuilding the request using this snapshot's partition rule.
+    fn is_partition_expr_unchanged(
+        &self,
+        region_id: RegionId,
+        version: Option<PartitionExprVersion>,
+    ) -> bool {
         region_id.table_id() == self.table_id
             && self.versions.get(&region_id.region_number()) == Some(&version)
     }
@@ -630,6 +642,7 @@ mod tests {
             pointers
         );
     }
+
     #[tokio::test]
     async fn test_rebuild_logical_table_preserves_logical_region_ids() {
         let (manager, cache) = create_fixture().await;

@@ -40,7 +40,7 @@ use crate::error::Result;
 use crate::insert::Inserter;
 use crate::req_convert::TablePartitioner;
 use crate::req_convert::insert;
-use crate::write_dispatcher::WriteOutcome;
+use crate::write_dispatcher::WriteAttempt;
 use crate::{error, metrics};
 
 impl Inserter {
@@ -246,7 +246,7 @@ impl Inserter {
             } else {
                 None
             };
-            let handle: common_runtime::JoinHandle<Result<WriteOutcome>> =
+            let handle: common_runtime::JoinHandle<Result<WriteAttempt>> =
                 common_runtime::spawn_global(async move {
                     let (header, payload) = if mask.select_all() {
                         // SAFETY: raw data must be present, we can avoid re-encoding.
@@ -302,7 +302,7 @@ impl Inserter {
                     };
 
                     Ok(dispatcher
-                        .dispatch_initial(
+                        .dispatch_once(
                             peer,
                             request,
                             Some(
@@ -320,10 +320,10 @@ impl Inserter {
             let results = future::try_join_all(handles)
                 .await
                 .context(error::JoinTaskSnafu)?;
-            let outcomes = results.into_iter().collect::<Result<Vec<_>>>()?;
+            let attempts = results.into_iter().collect::<Result<Vec<_>>>()?;
             dispatcher
-                .finish_dispatch(
-                    outcomes,
+                .finish(
+                    attempts,
                     Some(
                         &metrics::HANDLE_BULK_INSERT_ELAPSED
                             .with_label_values(&["datanode_handle"]),

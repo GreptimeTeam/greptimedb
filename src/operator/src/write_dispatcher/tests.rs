@@ -68,7 +68,7 @@ use crate::test_util;
 #[derive(Clone, Default)]
 struct RecordingRegionService {
     requests: Arc<Mutex<Vec<RegionRequest>>>,
-    failures: Arc<Mutex<HashMap<u64, VecDeque<RetryHint>>>>,
+    rejections: Arc<Mutex<HashMap<u64, VecDeque<RetryHint>>>>,
 }
 
 #[async_trait::async_trait]
@@ -81,7 +81,7 @@ impl Region for RecordingRegionService {
         let region_id = write_region_id(&request).unwrap().as_u64();
         self.requests.lock().unwrap().push(request);
         if let Some(hint) = self
-            .failures
+            .rejections
             .lock()
             .unwrap()
             .get_mut(&region_id)
@@ -186,7 +186,7 @@ impl RegionTestServer {
     }
 
     fn fail_region(&self, region_number: u32, hints: impl IntoIterator<Item = RetryHint>) {
-        self.service.failures.lock().unwrap().insert(
+        self.service.rejections.lock().unwrap().insert(
             RegionId::new(1, region_number).as_u64(),
             hints.into_iter().collect(),
         );
@@ -333,6 +333,28 @@ async fn test_write_retry_attempt_budget_and_nonretryable_errors() {
 }
 
 #[tokio::test]
+async fn test_write_retry_stops_when_a_sibling_is_nonretryable() {
+    for hint in [RetryHint::Retryable, RetryHint::RetryAfterRouteRefresh] {
+        let server = RegionTestServer::start().await;
+        server.fail_region(1, [hint]);
+        server.fail_region(2, [RetryHint::NonRetryable]);
+        let dispatcher = server.create_dispatcher(2).await;
+        dispatcher
+            .dispatch(vec![build_insert_request(&[1, 2])])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            server.attempt_counts(),
+            HashMap::from([
+                (RegionId::new(1, 1).as_u64(), 1),
+                (RegionId::new(1, 2).as_u64(), 1),
+            ])
+        );
+        assert!(server.invalidator.calls.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
 async fn test_write_retry_refreshes_routes_once_per_failed_round() {
     let server = RegionTestServer::start().await;
     for region in [1, 2] {
@@ -355,7 +377,7 @@ async fn test_write_retry_refreshes_routes_once_per_failed_round() {
 }
 
 #[tokio::test]
-async fn test_finish_dispatch_retries_initial_failures_in_one_round() {
+async fn test_finish_retries_initial_failures_in_one_round() {
     let server = RegionTestServer::start().await;
     for region in [2, 3] {
         server.fail_region(region, [RetryHint::RetryAfterRouteRefresh]);
@@ -380,13 +402,13 @@ async fn test_finish_dispatch_retries_initial_failures_in_one_round() {
         table_info_cache,
         invalidator.clone(),
     );
-    let mut outcomes = Vec::new();
+    let mut attempts = Vec::new();
     for (region, value) in [(1, 101), (2, 11), (3, 1)] {
         let request =
-            build_partitioned_request(WriteKind::Bulk, region, versions[&region], &[value]);
-        outcomes.push(
+            build_partitioned_request(WriteKind::BulkInsert, region, versions[&region], &[value]);
+        attempts.push(
             dispatcher
-                .dispatch_initial(server.peer.clone(), request, None)
+                .dispatch_once(server.peer.clone(), request, None)
                 .await,
         );
     }
@@ -399,7 +421,7 @@ async fn test_finish_dispatch_retries_initial_failures_in_one_round() {
             (RegionId::new(1, 3).as_u64(), 1),
         ])
     );
-    let response = dispatcher.finish_dispatch(outcomes, None).await.unwrap();
+    let response = dispatcher.finish(attempts, None).await.unwrap();
     assert_eq!(response.affected_rows, 3);
     assert_eq!(
         server.attempt_counts(),
@@ -493,7 +515,7 @@ async fn test_write_retry_refreshes_stale_route_and_sends_only_failed_region_to_
 enum WriteKind {
     Insert,
     Delete,
-    Bulk,
+    BulkInsert,
 }
 
 fn build_partitioned_request(
@@ -535,7 +557,7 @@ fn build_partitioned_request(
                 rows: Some(rows),
             }],
         }),
-        WriteKind::Bulk => {
+        WriteKind::BulkInsert => {
             let batch = RecordBatch::try_new(
                 Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)])),
                 vec![Arc::new(Int32Array::from(values.to_vec()))],
@@ -563,7 +585,7 @@ fn build_partitioned_request(
     }
 }
 
-fn request_values(request: &RegionRequest) -> (u32, Option<u64>, Vec<i32>) {
+fn request_parts(request: &RegionRequest) -> (u32, Option<u64>, Vec<i32>) {
     let region = write_region_id(request).unwrap().region_number();
     let (version, rows) = match request.body.as_ref().unwrap() {
         Body::Inserts(inserts) => {
@@ -617,7 +639,7 @@ fn request_values(request: &RegionRequest) -> (u32, Option<u64>, Vec<i32>) {
 
 #[tokio::test]
 async fn test_write_retry_rebuilds_only_failed_rows_after_route_refresh() {
-    for kind in [WriteKind::Insert, WriteKind::Delete, WriteKind::Bulk] {
+    for kind in [WriteKind::Insert, WriteKind::Delete, WriteKind::BulkInsert] {
         let old_server = RegionTestServer::start().await;
         let new_server = RegionTestServer::start().await;
         old_server.fail_region(2, [RetryHint::RetryAfterRouteRefresh]);
@@ -708,7 +730,7 @@ async fn test_write_retry_rebuilds_only_failed_rows_after_route_refresh() {
             .lock()
             .unwrap()
             .iter()
-            .map(request_values)
+            .map(request_parts)
             .collect::<Vec<_>>();
         writes.sort_by_key(|write| write.0);
         assert_eq!(
@@ -1016,20 +1038,113 @@ async fn test_resolve_peers_cache_lookup_ablation() {
 }
 
 #[tokio::test]
+async fn test_write_retry_rebuilds_logical_rows_in_mixed_table_envelope() {
+    for kind in [WriteKind::Insert, WriteKind::Delete] {
+        let server = RegionTestServer::start().await;
+        let backend = test_util::prepare_mocked_backend().await;
+        test_util::create_partition_rule_manager(backend.clone()).await;
+        TableMetadataManager::new(backend.clone())
+            .create_table_metadata(
+                test_util::new_test_table_info(42, "retry_logical", [1, 2, 3].into_iter()),
+                TableRouteValue::logical(1),
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        update_table_leader(&backend, &server.peer).await;
+        let (partition_manager, table_info_cache, registry) = create_routing_caches(backend);
+        let table_info = table_info_cache.get(1).await.unwrap().unwrap();
+        let (_, versions) = partition_manager
+            .find_table_partition_rule(&table_info)
+            .await
+            .unwrap();
+        let invalidator = Arc::new(RecordingCacheInvalidator {
+            inner: Some(registry),
+            ..Default::default()
+        });
+        let clients = Arc::new(NodeClients::new(ChannelConfig::default()));
+        let dispatcher = WriteDispatcher::new(clients.clone(), partition_manager).with_retry(
+            clients,
+            build_retry_options(2),
+            table_info_cache,
+            invalidator.clone(),
+        );
+        let physical_id = RegionId::new(1, 1).as_u64();
+        let stale_logical_id = RegionId::new(42, 2).as_u64();
+        let rebuilt_logical_id = RegionId::new(42, 3).as_u64();
+        server.service.rejections.lock().unwrap().insert(
+            stale_logical_id,
+            VecDeque::from([RetryHint::RetryAfterRouteRefresh]),
+        );
+
+        let header = Some(RegionRequestHeader {
+            dbname: "greptime.public".to_string(),
+            ..Default::default()
+        });
+        let mut physical = build_partitioned_request(kind, 1, versions[&1], &[70]);
+        physical.header = header.clone();
+        // The stale logical request must move to region 3 while keeping table 42.
+        let mut logical = build_partitioned_request(kind, 2, Some(0), &[1]);
+        let mut rebuilt = build_partitioned_request(kind, 3, versions[&3], &[1]);
+        for request in [&mut logical, &mut rebuilt] {
+            request.header = header.clone();
+            let region_id = match request.body.as_mut().unwrap() {
+                Body::Inserts(inserts) => &mut inserts.requests[0].region_id,
+                Body::Deletes(deletes) => &mut deletes.requests[0].region_id,
+                _ => unreachable!(),
+            };
+            *region_id = RegionId::new(42, RegionId::from_u64(*region_id).region_number()).as_u64();
+        }
+        let mut envelope = physical.clone();
+        match (
+            envelope.body.as_mut().unwrap(),
+            logical.body.clone().unwrap(),
+        ) {
+            (Body::Inserts(physical), Body::Inserts(logical)) => {
+                physical.requests.extend(logical.requests);
+            }
+            (Body::Deletes(physical), Body::Deletes(logical)) => {
+                physical.requests.extend(logical.requests);
+            }
+            _ => unreachable!(),
+        }
+        let response = dispatcher.dispatch(vec![envelope]).await.unwrap();
+        assert_eq!(response.affected_rows, 2, "{kind:?}");
+        assert_eq!(
+            server.attempt_counts(),
+            HashMap::from([
+                (physical_id, 1),
+                (stale_logical_id, 1),
+                (rebuilt_logical_id, 1)
+            ]),
+            "{kind:?}"
+        );
+        let mut requests = server.service.requests.lock().unwrap().clone();
+        requests.sort_by_key(|request| write_region_id(request).unwrap().as_u64());
+        assert_eq!(requests, vec![physical, logical, rebuilt], "{kind:?}");
+        let calls = invalidator.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "{kind:?}");
+        assert_eq!(calls[0].len(), 2, "{kind:?}");
+        assert!(calls[0].contains(&CacheIdent::TableId(1)));
+        assert!(calls[0].contains(&CacheIdent::TableId(42)));
+    }
+}
+
+#[tokio::test]
 async fn test_with_retry_can_disable_previously_enabled_retries() {
     let server = RegionTestServer::start().await;
     let dispatcher = server.create_dispatcher(1).await;
-    let remote = dispatcher.remote.as_ref().unwrap();
-    let clients = remote.clients.clone();
-    let table_info_cache = remote.table_info_cache.clone();
-    let cache_invalidator = remote.cache_invalidator.clone();
+    let retry = dispatcher.retry.as_ref().unwrap();
+    let clients = retry.clients.clone();
+    let table_info_cache = retry.table_info_cache.clone();
+    let cache_invalidator = retry.cache_invalidator.clone();
     let dispatcher = dispatcher.with_retry(
         clients,
         build_retry_options(0),
         table_info_cache,
         cache_invalidator,
     );
-    assert!(dispatcher.remote.is_none());
+    assert!(dispatcher.retry.is_none());
     server.fail_region(1, [RetryHint::Retryable]);
     assert!(
         dispatcher
