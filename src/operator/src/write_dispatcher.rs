@@ -113,10 +113,16 @@ impl WriteDispatcher {
         &self,
         requests: Vec<RegionRequest>,
     ) -> error::Result<Vec<(PeerRef, RegionRequest)>> {
-        let requests = requests.into_iter().map(split_request).collect::<Vec<_>>();
+        let requests = requests
+            .into_iter()
+            .map(|mut request| {
+                let header = request.header.take();
+                (header, split_request(request))
+            })
+            .collect::<Vec<_>>();
         let regions = requests
             .iter()
-            .flatten()
+            .flat_map(|(_, requests)| requests)
             .map(write_region_id)
             .collect::<Result<Vec<_>>>()
             .context(RequestRegionSnafu)?;
@@ -126,7 +132,7 @@ impl WriteDispatcher {
             .context(FindRegionLeaderSnafu)?;
         let mut writes = Vec::new();
         // Preserve each original envelope and peer batching when retries are disabled.
-        for requests in requests {
+        for (header, requests) in requests {
             let mut by_peer: HashMap<PeerRef, RegionRequest> = HashMap::new();
             for request in requests {
                 let peer = get_peer(
@@ -155,7 +161,10 @@ impl WriteDispatcher {
                     },
                 }
             }
-            writes.extend(by_peer);
+            for (peer, mut request) in by_peer {
+                request.header = header.clone();
+                writes.push((peer, request));
+            }
         }
         Ok(writes)
     }
@@ -468,15 +477,6 @@ async fn resolve_peers(
         physical_tables.insert(table_id, physical_id);
         routes.entry(physical_id).or_insert(route);
     }
-    let leaders = routes
-        .iter()
-        .map(|(table_id, route)| {
-            (
-                *table_id,
-                router::convert_to_region_leader_map(&route.region_routes),
-            )
-        })
-        .collect::<HashMap<_, _>>();
     let mut shared_peers: HashMap<&Peer, PeerRef> = HashMap::new();
     let mut peers = HashMap::with_capacity(regions.len());
     for region in regions {
@@ -485,9 +485,10 @@ async fn resolve_peers(
         }
         let peer = physical_tables
             .get(&region.table_id())
-            .and_then(|physical_id| leaders.get(physical_id))
-            .and_then(|leaders| leaders.get(&region.region_number()))
-            .copied()
+            .and_then(|physical_id| routes.get(physical_id))
+            .and_then(|route| {
+                router::find_region_leader_ref(&route.region_routes, region.region_number())
+            })
             .context(partition::error::FindLeaderSnafu {
                 region_id: *region,
                 table_id: region.table_id(),
