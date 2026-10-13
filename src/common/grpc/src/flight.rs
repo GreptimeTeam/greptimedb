@@ -37,6 +37,35 @@ use vec1::{Vec1, vec1};
 use crate::error;
 use crate::error::{DecodeFlightDataSnafu, InvalidFlightDataSnafu, Result};
 
+/// Encodes a batch into the schema, record-batch header and payload used by bulk inserts.
+///
+/// Uses the default Flight compression and rejects dictionary batches, whose
+/// additional Flight messages cannot be represented by this three-part format.
+pub fn record_batch_to_ipc(
+    record_batch: DfRecordBatch,
+) -> Result<(bytes::Bytes, bytes::Bytes, bytes::Bytes)> {
+    let mut encoder = FlightEncoder::default();
+    let schema = encoder.encode_schema(record_batch.schema().as_ref());
+    let mut iter = encoder
+        .encode(FlightMessage::RecordBatch(record_batch))
+        .into_iter();
+    let flight_data = iter.next().context(InvalidFlightDataSnafu {
+        reason: "Failed to encode empty flight data",
+    })?;
+    if iter.next().is_some() {
+        return error::NotSupportedSnafu {
+            feat: "bulk insert RecordBatch with dictionary arrays",
+        }
+        .fail();
+    }
+
+    Ok((
+        schema.data_header,
+        flight_data.data_header,
+        flight_data.data_body,
+    ))
+}
+
 /// Flight metadata key used to carry flow query extensions as JSON pairs.
 pub const FLOW_EXTENSIONS_METADATA_KEY: &str = "x-greptime-flow-extensions";
 /// Flight metadata key used to carry query snapshot read upper bounds as JSON.
