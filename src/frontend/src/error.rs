@@ -323,6 +323,13 @@ pub enum Error {
         name: String,
     },
 
+    #[snafu(display("Invalid write retry config: {}", reason))]
+    InvalidWriteRetryConfig {
+        reason: &'static str,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid tls config"))]
     InvalidTlsConfig {
         #[snafu(source)]
@@ -391,7 +398,8 @@ impl ErrorExt for Error {
             | Error::IllegalAuthConfig { .. }
             | Error::ColumnNoneDefaultValue { .. }
             | Error::IncompleteGrpcRequest { .. }
-            | Error::InvalidTlsConfig { .. } => StatusCode::InvalidArguments,
+            | Error::InvalidTlsConfig { .. }
+            | Error::InvalidWriteRetryConfig { .. } => StatusCode::InvalidArguments,
 
             Error::NotSupported { .. } => StatusCode::Unsupported,
 
