@@ -354,6 +354,58 @@ async fn computed_alias_projection_keeps_the_baseline_plan() {
     );
     let rows = query_output(&enabled, sql).await;
     assert_eq!(baseline_rows, rows);
+
+    let unchanged_groups_sql = "SELECT m.mhost, n.zone, AVG(mval * wgt) AS score FROM (SELECT m.mhost, n.zone, m.mval + 1 AS mval, n.wgt FROM metrics m JOIN nodes n ON m.mhost = n.nhost) GROUP BY m.mhost, n.zone";
+    let plan = query_plan(&enabled, unchanged_groups_sql).await;
+    assert!(
+        !plan.contains("partial_nv"),
+        "computed payload must not rewrite even when grouping columns pass through unchanged:\n{plan}"
+    );
+}
+
+#[tokio::test]
+async fn projected_product_rewrites_and_matches_baseline() {
+    let (metrics, nodes) = metrics_and_nodes();
+    let sql = "SELECT mhost, zone, AVG(p) AS score FROM (SELECT m.mhost, n.zone, m.mval * n.wgt AS p, n.wgt AS mval, m.mval AS wgt FROM metrics m JOIN nodes n ON m.mhost = n.nhost) GROUP BY mhost, zone";
+    let baseline = engine_over(metrics.clone(), nodes.clone(), false);
+    let rewritten = engine_over(metrics, nodes, true);
+    let plan = query_plan(&rewritten, sql).await;
+    assert!(
+        plan.contains("partial_nv"),
+        "projected product should rewrite:\n{plan}"
+    );
+    let plan_lower = plan.to_lowercase();
+    assert!(
+        plan_lower.contains("m.mval"),
+        "fact payload source missing:\n{plan}"
+    );
+    assert!(
+        plan_lower.contains("n.wgt"),
+        "dim payload source missing:\n{plan}"
+    );
+    assert_eq!(
+        query_output(&baseline, sql).await,
+        query_output(&rewritten, sql).await
+    );
+}
+
+#[tokio::test]
+async fn sum_and_reversed_product_rewrites_match_baseline() {
+    let (metrics, nodes) = metrics_and_nodes();
+    let cases = [
+        "SELECT m.mhost, n.zone, SUM(m.mval * n.wgt) AS score FROM metrics m JOIN nodes n ON m.mhost = n.nhost GROUP BY m.mhost, n.zone",
+        "SELECT m.mhost, n.zone, AVG(n.wgt * m.mval) AS score FROM metrics m JOIN nodes n ON m.mhost = n.nhost GROUP BY m.mhost, n.zone",
+    ];
+    for sql in cases {
+        let baseline = engine_over(metrics.clone(), nodes.clone(), false);
+        let rewritten = engine_over(metrics.clone(), nodes.clone(), true);
+        let plan = query_plan(&rewritten, sql).await;
+        assert!(plan.contains("partial_nv"), "should rewrite {sql}:\n{plan}");
+        assert_eq!(
+            query_output(&baseline, sql).await,
+            query_output(&rewritten, sql).await
+        );
+    }
 }
 
 #[tokio::test]
