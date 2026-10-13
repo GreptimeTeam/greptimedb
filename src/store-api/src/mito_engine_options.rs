@@ -35,6 +35,8 @@ pub const COMPACTION_TYPE: &str = "compaction.type";
 pub const COMPACTION_OVERRIDE: &str = "compaction.override";
 /// TWCS compaction strategy.
 pub const COMPACTION_TYPE_TWCS: &str = "twcs";
+/// Prefix for TWCS compaction options.
+pub const COMPACTION_TWCS_PREFIX: &str = "compaction.twcs.";
 /// Option key for twcs min file num to trigger a compaction.
 pub const TWCS_TRIGGER_FILE_NUM: &str = "compaction.twcs.trigger_file_num";
 /// Option key for twcs min file num to trigger compaction in the active window.

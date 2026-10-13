@@ -65,8 +65,8 @@ use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
 use store_api::mito_engine_options::{
-    APPEND_MODE_KEY, COMPACTION_OPTION_KEYS, COMPACTION_TYPE, COMPACTION_TYPE_TWCS, MERGE_MODE_KEY,
-    TTL_KEY,
+    APPEND_MODE_KEY, COMPACTION_OPTION_KEYS, COMPACTION_TWCS_PREFIX, COMPACTION_TYPE,
+    COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, TTL_KEY,
 };
 use store_api::storage::{RegionId, TableId};
 use table::TableRef;
@@ -1872,7 +1872,7 @@ pub fn fill_table_options_for_create(
         let mut has_twcs_option = false;
         for key in COMPACTION_OPTION_KEYS {
             if let Some(value) = ctx.extension(key) {
-                has_twcs_option |= key.starts_with("compaction.twcs.");
+                has_twcs_option |= key.starts_with(COMPACTION_TWCS_PREFIX);
                 table_options.insert(key.to_string(), value.to_string());
             }
         }

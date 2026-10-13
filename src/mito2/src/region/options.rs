@@ -33,7 +33,7 @@ use store_api::metric_engine_consts::{
     MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, PRIMARY_KEY_ENCODING,
 };
 use store_api::mito_engine_options::{
-    COMPACTION_OVERRIDE, FloatFieldEncoding, MAX_ROW_GROUP_ROW_COUNT_LIMIT,
+    COMPACTION_OVERRIDE, COMPACTION_TWCS_PREFIX, FloatFieldEncoding, MAX_ROW_GROUP_ROW_COUNT_LIMIT,
 };
 use store_api::storage::{ColumnId, RegionId};
 use strum::EnumString;
@@ -44,7 +44,6 @@ use crate::sst::FormatType;
 use crate::sst::parquet::DEFAULT_ROW_GROUP_SIZE;
 
 const DEFAULT_INDEX_SEGMENT_ROW_COUNT: usize = 1024;
-const COMPACTION_TWCS_PREFIX: &str = "compaction.twcs.";
 const MEMTABLE_PARTITION_TREE_PREFIX: &str = "memtable.partition_tree.";
 const MEMTABLE_BULK_PREFIX: &str = "memtable.bulk.";
 const MEMTABLE_BULK_ENCODE_BYTES_THRESHOLD: &str = "memtable.bulk.encode_bytes_threshold";
