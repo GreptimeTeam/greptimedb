@@ -97,14 +97,14 @@ impl TablePartitioner {
         })
     }
 
-    /// Repartitions a rejected write after the caller refreshes the routing caches.
+    /// Rebuilds write requests using this partition snapshot after a route refresh.
     ///
     /// Takes ownership so row payloads can move into their new regions. Requests whose
     /// region and partition version still match retain their original payloads.
-    pub fn repartition_request(&self, request: RegionRequest) -> Result<Vec<RegionRequest>> {
+    pub fn rebuild_write_requests(&self, request: RegionRequest) -> Result<Vec<RegionRequest>> {
         let RegionRequest { header, body } = request;
         let bodies = match body.context(error::UnexpectedSnafu {
-            violated: "Cannot reroute a request without a body",
+            violated: "Cannot rebuild a request without a body",
         })? {
             Body::Inserts(inserts) => {
                 let mut bodies = Vec::new();
@@ -117,7 +117,7 @@ impl TablePartitioner {
                         continue;
                     }
                     let rows = insert.rows.context(error::UnexpectedSnafu {
-                        violated: "Cannot reroute an insert without rows",
+                        violated: "Cannot rebuild an insert without rows",
                     })?;
                     for request in self.partition_insert_requests(rows, insert.skip_wal)? {
                         bodies.push(Body::Inserts(InsertRequests {
@@ -138,7 +138,7 @@ impl TablePartitioner {
                         continue;
                     }
                     let rows = delete.rows.context(error::UnexpectedSnafu {
-                        violated: "Cannot reroute a delete without rows",
+                        violated: "Cannot rebuild a delete without rows",
                     })?;
                     for request in self.partition_delete_requests(rows)? {
                         bodies.push(Body::Deletes(DeleteRequests {
@@ -155,7 +155,7 @@ impl TablePartitioner {
                 } else {
                     let bulk_insert_request::Body::ArrowIpc(ipc) =
                         bulk.body.context(error::UnexpectedSnafu {
-                            violated: "Cannot reroute a bulk insert without Arrow IPC data",
+                            violated: "Cannot rebuild a bulk insert without Arrow IPC data",
                         })?;
                     let batch = FlightDecoder::try_from_schema_bytes(&ipc.schema)
                         .and_then(|mut decoder| {
@@ -171,7 +171,7 @@ impl TablePartitioner {
             }
             _ => {
                 return error::UnexpectedSnafu {
-                    violated: "Only writes can be rerouted",
+                    violated: "Only writes can be rebuilt",
                 }
                 .fail();
             }
@@ -463,7 +463,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_repartition_rows_updates_partitions_without_losing_rows() {
+    async fn test_rebuild_rows_updates_partitions_without_losing_rows() {
         let (manager, cache) = create_fixture().await;
         let table_info = cache.get(1).await.unwrap().unwrap();
         let (_, versions) = manager
@@ -473,7 +473,7 @@ mod tests {
         for insert in [true, false] {
             let request = build_row_request(build_rows(&[1, 20, 70]), insert, 99, Some(0));
             let header = request.header.clone();
-            let rerouted = repartition_with_cached_table(&manager, &cache, request)
+            let rerouted = rebuild_with_cached_table(&manager, &cache, request)
                 .await
                 .unwrap();
             assert_eq!(rerouted.len(), 3);
@@ -513,7 +513,7 @@ mod tests {
             let original_rows = row_request_parts(&request).2;
             let row_ptr = original_rows.rows.as_ptr();
             let value_ptr = original_rows.rows[0].values.as_ptr();
-            let rerouted = repartition_with_cached_table(&manager, &cache, request)
+            let rerouted = rebuild_with_cached_table(&manager, &cache, request)
                 .await
                 .unwrap();
             assert_eq!(rerouted.len(), 1);
@@ -547,7 +547,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_repartition_bulk_reencodes_only_changed_partitions() {
+    async fn test_rebuild_bulk_reencodes_only_changed_partitions() {
         let (manager, cache) = create_fixture().await;
         let table_info = cache.get(1).await.unwrap().unwrap();
         let (_, versions) = manager
@@ -556,7 +556,7 @@ mod tests {
             .unwrap();
         let request = build_bulk_request(99, Some(0), vec![1, 20, 70]);
         let header = request.header.clone();
-        let rerouted = repartition_with_cached_table(&manager, &cache, request)
+        let rerouted = rebuild_with_cached_table(&manager, &cache, request)
             .await
             .unwrap();
         assert_eq!(rerouted.len(), 3);
@@ -605,7 +605,7 @@ mod tests {
             ipc.data_header.as_ptr(),
             ipc.payload.as_ptr(),
         );
-        let rerouted = repartition_with_cached_table(&manager, &cache, request)
+        let rerouted = rebuild_with_cached_table(&manager, &cache, request)
             .await
             .unwrap();
         assert_eq!(rerouted.len(), 1);
@@ -631,7 +631,7 @@ mod tests {
         );
     }
     #[tokio::test]
-    async fn test_repartition_logical_table_preserves_logical_region_ids() {
+    async fn test_rebuild_logical_table_preserves_logical_region_ids() {
         let (manager, cache) = create_fixture().await;
         for insert in [true, false] {
             let mut request = build_row_request(build_rows(&[1, 20, 70]), insert, 99, Some(0));
@@ -644,7 +644,7 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
-            let rerouted = repartition_with_cached_table(&manager, &cache, request)
+            let rerouted = rebuild_with_cached_table(&manager, &cache, request)
                 .await
                 .unwrap();
             assert_eq!(rerouted.len(), 3);
@@ -661,7 +661,7 @@ mod tests {
         }
     }
 
-    async fn repartition_with_cached_table(
+    async fn rebuild_with_cached_table(
         manager: &PartitionRuleManager,
         cache: &TableInfoCache,
         request: RegionRequest,
@@ -677,6 +677,6 @@ mod tests {
         let partitioner = TablePartitioner::try_new(manager, &table_info)
             .await
             .context(error::InvalidPartitionSnafu)?;
-        partitioner.repartition_request(request)
+        partitioner.rebuild_write_requests(request)
     }
 }

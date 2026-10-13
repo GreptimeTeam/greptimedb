@@ -383,7 +383,7 @@ impl WriteDispatcher {
                 .context(ExternalSnafu)?;
             partitioners.insert(table_id, partitioner);
         }
-        let mut repartitioned = Vec::new();
+        let mut rebuilt_requests = Vec::new();
         for write in writes {
             let request = Arc::try_unwrap(write.request).map_err(|_| {
                 UnexpectedSnafu {
@@ -396,12 +396,12 @@ impl WriteDispatcher {
                 err_msg: "Refreshed write has no partition snapshot",
             })?;
             let requests = partitioner
-                .repartition_request(request)
+                .rebuild_write_requests(request)
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?;
-            repartitioned.extend(requests);
+            rebuilt_requests.extend(requests);
         }
-        self.prepare_writes(repartitioned).await
+        self.prepare_writes(rebuilt_requests).await
     }
 
     async fn prepare_writes(&self, requests: Vec<RegionRequest>) -> Result<Vec<PendingWrite>> {

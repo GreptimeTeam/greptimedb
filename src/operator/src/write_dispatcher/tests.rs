@@ -616,7 +616,7 @@ fn request_values(request: &RegionRequest) -> (u32, Option<u64>, Vec<i32>) {
 }
 
 #[tokio::test]
-async fn test_write_retry_repartitions_only_failed_rows_after_route_refresh() {
+async fn test_write_retry_rebuilds_only_failed_rows_after_route_refresh() {
     for kind in [WriteKind::Insert, WriteKind::Delete, WriteKind::Bulk] {
         let old_server = RegionTestServer::start().await;
         let new_server = RegionTestServer::start().await;
