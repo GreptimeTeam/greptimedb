@@ -29,8 +29,8 @@ use datafusion::sql::sqlparser::dialect::GenericDialect;
 use datafusion::sql::sqlparser::tokenizer::{Token, Tokenizer};
 use pgwire::error::PgWireResult;
 
-use super::options::{CopyOptionSet, CopyOptionValue};
-use super::{bad_copy_data, copy_in_must_run_alone_error};
+use crate::postgres::copy_in::options::{CopyOptionSet, CopyOptionValue};
+use crate::postgres::copy_in::{bad_copy_data, copy_in_must_run_alone_error};
 
 /// Identifier case is kept as written (`COPY T` addresses `T`), matching
 /// what sqlparser-based paths in this codebase do; PostgreSQL itself folds

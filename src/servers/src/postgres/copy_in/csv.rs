@@ -39,9 +39,9 @@ use datatypes::schema::{ColumnSchema, Schema as GreptimeSchema};
 use datatypes::vectors::Helper;
 use pgwire::error::{PgWireError, PgWireResult};
 
-use super::codec::{CopyInCodec, ParsedRow, RecordParser};
-use super::options::CopyOptionSet;
-use super::{COPY_IN_FLUSH_ROWS, bad_copy_data, invalid_text_repr, unsupported};
+use crate::postgres::copy_in::codec::{CopyInCodec, ParsedRow, RecordParser};
+use crate::postgres::copy_in::options::CopyOptionSet;
+use crate::postgres::copy_in::{COPY_IN_FLUSH_ROWS, bad_copy_data, invalid_text_repr, unsupported};
 
 /// The validated `csv` format configuration.
 #[derive(Debug)]
