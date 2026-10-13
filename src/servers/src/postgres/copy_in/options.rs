@@ -25,7 +25,7 @@
 
 use pgwire::error::{PgWireError, PgWireResult};
 
-use super::bad_copy_data;
+use crate::postgres::copy_in::bad_copy_data;
 use crate::postgres::types::PgErrorCode;
 
 /// The value of one COPY option.
