@@ -118,7 +118,9 @@ impl CopyOptionSet {
         }
     }
 
-    /// Takes a single one-byte character option.
+    /// Takes a single one-byte character option. A tab is a legal (and
+    /// common) CSV delimiter; newlines and other control characters are
+    /// not, matching PostgreSQL's rules.
     pub(crate) fn take_single_byte(&mut self, key: &str) -> PgWireResult<Option<u8>> {
         let Some(value) = self.take_string(key)? else {
             return Ok(None);
@@ -126,11 +128,12 @@ impl CopyOptionSet {
         let mut chars = value.chars();
         let (c, rest) = (chars.next(), chars.as_str());
         match c {
+            Some('\t') if rest.is_empty() => Ok(Some(b'\t')),
             Some(c) if rest.is_empty() && c.is_ascii() && !c.is_ascii_control() => {
                 Ok(Some(c as u8))
             }
             _ => Err(bad_copy_data(format!(
-                "COPY option {} must be a single one-byte non-newline character",
+                "COPY option {} must be a single one-byte character other than a newline or carriage return",
                 key.to_uppercase()
             ))),
         }
@@ -194,6 +197,22 @@ mod tests {
             .insert("format".to_string(), CopyOptionValue::Ident("text".into()))
             .unwrap_err();
         assert!(err.to_string().contains("redundant FORMAT"));
+    }
+
+    #[test]
+    fn test_take_single_byte_tab_allowed() {
+        // A literal tab is a legal delimiter (PostgreSQL permits it).
+        let mut set = new_set(&[("delimiter", CopyOptionValue::String("\t".into()))]);
+        assert_eq!(set.take_single_byte("DELIMITER").unwrap(), Some(b'\t'));
+
+        // Newlines and other control characters stay rejected.
+        for bad in ["\n", "\r", "\0"] {
+            let mut set = new_set(&[("delimiter", CopyOptionValue::String(bad.into()))]);
+            assert!(
+                set.take_single_byte("DELIMITER").is_err(),
+                "{bad:?} must be rejected"
+            );
+        }
     }
 
     #[test]
