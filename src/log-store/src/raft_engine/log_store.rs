@@ -27,6 +27,8 @@ use store_api::logstore::entry::{Entry, Id as EntryId, NaiveEntry};
 use store_api::logstore::provider::{Provider, RaftEngineProvider};
 use store_api::logstore::{AppendBatchResponse, LogStore, SendableEntryStream, WalIndex};
 use store_api::storage::RegionId;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::error::{
     AddEntryLogBatchSnafu, DiscontinuousLogIndexSnafu, Error, FetchEntrySnafu,
@@ -49,6 +51,10 @@ pub struct RaftEngineLogStore {
     /// so `stop` releases it instead of relying on the last reference going away
     /// (which may never happen before the process exits).
     engine: RwLock<Option<Arc<Engine>>>,
+    /// Tasks feeding the streams returned by [LogStore::read]. Each holds the engine until its
+    /// stream is drained, so `stop` cancels them and waits for them before closing it.
+    readers: TaskTracker,
+    readers_cancel: CancellationToken,
     gc_task: RepeatedTask<Error>,
     sync_task: RepeatedTask<Error>,
 }
@@ -155,6 +161,8 @@ impl RaftEngineLogStore {
             sync_period: config.sync_period,
             read_batch_size: config.read_batch_size,
             engine: RwLock::new(Some(engine)),
+            readers: TaskTracker::new(),
+            readers_cancel: CancellationToken::new(),
             gc_task,
             sync_task,
         };
@@ -199,7 +207,6 @@ impl RaftEngineLogStore {
     /// Returns the `LogBatch` converted along with the last entry id
     /// to append in each namespace(region).
     fn entries_to_batch(
-        &self,
         engine: &Engine,
         entries: Vec<Entry>,
     ) -> Result<(LogBatch, HashMap<RegionId, EntryId>)> {
@@ -292,8 +299,14 @@ impl LogStore for RaftEngineLogStore {
             .await
             .context(StopWalTaskSnafu { name: "sync_task" })?;
 
-        // With both tasks stopped, this is the last reference to the engine unless a
-        // read stream is still draining; dropping it closes the active log file.
+        // Readers hold the engine until their streams are drained, which a caller that keeps
+        // a stream may never do: cancel them and wait for them to finish.
+        self.readers_cancel.cancel();
+        self.readers.close();
+        self.readers.wait().await;
+
+        // With the tasks and readers stopped, this is the last reference to the engine;
+        // dropping it closes the active log file.
         let engine = self.engine.write().unwrap().take();
         match engine {
             Some(engine) => close_engine(engine).await,
@@ -318,7 +331,7 @@ impl LogStore for RaftEngineLogStore {
         }
 
         let engine = self.engine()?;
-        let (mut batch, last_entry_ids) = self.entries_to_batch(&engine, entries)?;
+        let (mut batch, last_entry_ids) = Self::entries_to_batch(&engine, entries)?;
         let _ = engine
             .write(&mut batch, self.sync_write)
             .context(RaftEngineSnafu)?;
@@ -358,7 +371,8 @@ impl LogStore for RaftEngineLogStore {
         );
         let max_batch_size = self.read_batch_size;
         let (tx, mut rx) = tokio::sync::mpsc::channel(max_batch_size);
-        let _handle = common_runtime::spawn_global(async move {
+        let cancel = self.readers_cancel.clone();
+        let _handle = common_runtime::spawn_global(self.readers.track_future(async move {
             while start_index <= last_index {
                 let mut vec = Vec::with_capacity(max_batch_size);
                 match engine
@@ -379,18 +393,25 @@ impl LogStore for RaftEngineLogStore {
                         if let Some(last_entry) = vec.last() {
                             start_index = last_entry.id + 1;
                         }
-                        // reader side closed, cancel following reads
-                        if tx.send(Ok(vec)).await.is_err() {
+                        // Stop on shutdown, or when the reader side is closed.
+                        let sent = tokio::select! {
+                            _ = cancel.cancelled() => false,
+                            sent = tx.send(Ok(vec)) => sent.is_ok(),
+                        };
+                        if !sent {
                             break;
                         }
                     }
                     Err(e) => {
-                        let _ = tx.send(Err(e)).await;
+                        tokio::select! {
+                            _ = cancel.cancelled() => {}
+                            _ = tx.send(Err(e)) => {}
+                        }
                         break;
                     }
                 }
             }
-        });
+        }));
 
         let s = stream!({
             while let Some(res) = rx.recv().await {
@@ -581,7 +602,7 @@ mod tests {
     use crate::error::Error;
     use crate::raft_engine::log_store::RaftEngineLogStore;
     use crate::raft_engine::protos::logstore::EntryImpl;
-    use crate::raft_engine::{PREALLOCATED_LEN, log_files_len};
+    use crate::raft_engine::{PREALLOCATION_THRESHOLD, log_files_size};
 
     #[tokio::test]
     async fn test_open_logstore() {
@@ -696,6 +717,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_stop_with_retained_read_stream() {
+        let dir = create_temp_dir("raft-engine-logstore-retained-reader-test");
+        // One entry per batch and a one-batch channel: the reader blocks on its second send.
+        let config = RaftEngineConfig {
+            read_batch_size: 1,
+            ..Default::default()
+        };
+        let logstore =
+            RaftEngineLogStore::try_new(dir.path().to_str().unwrap().to_string(), &config)
+                .await
+                .unwrap();
+        for id in 1..=4 {
+            logstore
+                .append(EntryImpl::create(id, 1, id.to_string().into_bytes()).into())
+                .await
+                .unwrap();
+        }
+        // Kept but never consumed, as a caller that holds a stream across shutdown would.
+        let stream = logstore
+            .read(&Provider::raft_engine_provider(1), 1, None)
+            .await
+            .unwrap();
+        let preallocated = log_files_size(dir.path()) >= PREALLOCATION_THRESHOLD;
+
+        tokio::time::timeout(Duration::from_secs(10), logstore.stop())
+            .await
+            .expect("stop must not wait for the stream to be consumed")
+            .unwrap();
+        if preallocated {
+            assert!(log_files_size(dir.path()) < PREALLOCATION_THRESHOLD);
+        }
+
+        // The reader released the engine, so the directory can be reopened with all entries.
+        let reopened =
+            RaftEngineLogStore::try_new(dir.path().to_str().unwrap().to_string(), &config)
+                .await
+                .unwrap();
+        let entries = collect_entries(
+            reopened
+                .read(&Provider::raft_engine_provider(1), 1, None)
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(4, entries.len());
+        drop(stream);
+        reopened.stop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_stop_closes_active_log_file() {
         let dir = create_temp_dir("raft-engine-logstore-stop-test");
         let logstore = RaftEngineLogStore::try_new(
@@ -708,13 +779,13 @@ mod tests {
             .append(EntryImpl::create(1, 1, "1".as_bytes().to_vec()).into())
             .await
             .unwrap();
-        let preallocated = log_files_len(dir.path()) >= PREALLOCATED_LEN;
+        let preallocated = log_files_size(dir.path()) >= PREALLOCATION_THRESHOLD;
 
         // The log store is still referenced, as regions do at shutdown: stop alone has
         // to close the engine so the preallocated tail is trimmed.
         logstore.stop().await.unwrap();
         if preallocated {
-            assert!(log_files_len(dir.path()) < PREALLOCATED_LEN);
+            assert!(log_files_size(dir.path()) < PREALLOCATION_THRESHOLD);
         }
         assert!(
             logstore

@@ -1227,6 +1227,16 @@ mod tests {
     }
 
     /// Returns true if the store rejects even an empty append, which it does only once stopped.
+    /// Opens the raft-engine WAL under `data_home` again, which only succeeds once the previous
+    /// engine was released (raft-engine holds a lock on its directory while open).
+    async fn assert_raft_engine_wal_reopens(data_home: &str) {
+        let reopened =
+            DatanodeBuilder::build_raft_engine_log_store(data_home, &RaftEngineConfig::default())
+                .await
+                .unwrap();
+        reopened.stop().await.unwrap();
+    }
+
     async fn is_stopped(log_store: &ObjectStoreLogStore) -> bool {
         matches!(
             log_store.append_batch(vec![]).await,
@@ -1484,6 +1494,7 @@ mod tests {
         assert!(datanode.object_store_log_store.is_none());
         assert!(data_home.path().join("wal").exists());
         datanode.shutdown().await.unwrap();
+        assert_raft_engine_wal_reopens(data_home.path().to_str().unwrap()).await;
     }
 
     #[tokio::test]
@@ -1556,6 +1567,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_shutdown_closes_raft_engine_wal_after_engine_failures() {
+        common_telemetry::init_default_ut_logging();
+        let data_home = create_temp_dir("raft-engine-wal-shutdown-failure");
+        let builder = datanode_builder(
+            data_home.path().to_str().unwrap(),
+            DatanodeWalConfig::RaftEngine(RaftEngineConfig::default()),
+            Arc::new(MemoryKvBackend::new()),
+        );
+        let mut datanode = builder.build().await.unwrap();
+        let (engine, _) = MockRegionEngine::with_custom_apply_fn("failing", |engine| {
+            engine.handle_stop_mock_fn = Some(Box::new(|| {
+                error::UnexpectedSnafu {
+                    violated: "stop failed",
+                }
+                .fail()
+            }));
+        });
+        datanode.region_server().register_engine(engine);
+
+        let err = datanode.shutdown().await.unwrap_err();
+
+        assert_matches!(err, Error::StopRegionEngine { .. });
+        assert_raft_engine_wal_reopens(data_home.path().to_str().unwrap()).await;
+    }
+
+    #[tokio::test]
     async fn test_failed_build_stops_object_store_log_store() {
         common_telemetry::init_default_ut_logging();
         let data_home = create_temp_dir("object-store-wal-failed-build");
@@ -1593,14 +1630,7 @@ mod tests {
 
         let log_store = builder.raft_engine_log_store.as_ref().unwrap();
         assert!(!log_store.started());
-        // The engine was released, so the WAL directory can be opened again.
-        let reopened = DatanodeBuilder::build_raft_engine_log_store(
-            data_home.path().to_str().unwrap(),
-            &RaftEngineConfig::default(),
-        )
-        .await
-        .unwrap();
-        reopened.stop().await.unwrap();
+        assert_raft_engine_wal_reopens(data_home.path().to_str().unwrap()).await;
     }
 
     #[test]

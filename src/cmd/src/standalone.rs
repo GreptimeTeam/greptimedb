@@ -280,7 +280,7 @@ impl App for Instance {
     /// ones; the first error is returned and the rest are logged.
     async fn stop(&mut self) -> Result<()> {
         let mut first_error = None;
-        let mut record = |result: Result<()>| {
+        let mut record_shutdown_error = |result: Result<()>| {
             if let Err(err) = result {
                 if first_error.is_none() {
                     first_error = Some(err);
@@ -290,14 +290,14 @@ impl App for Instance {
             }
         };
 
-        record(
+        record_shutdown_error(
             self.frontend
                 .shutdown()
                 .await
                 .context(error::ShutdownFrontendSnafu),
         );
 
-        record(
+        record_shutdown_error(
             self.leader_services_controller
                 .stop(
                     self.procedure_manager.clone(),
@@ -306,22 +306,22 @@ impl App for Instance {
                 .await,
         );
 
-        record(
+        record_shutdown_error(
             self.datanode
                 .shutdown()
                 .await
                 .context(error::ShutdownDatanodeSnafu),
         );
 
-        record(
+        record_shutdown_error(
             self.flownode
                 .shutdown()
                 .await
                 .context(error::ShutdownFlownodeSnafu),
         );
 
-        // Last, once nothing else uses the metadata.
-        record(
+        // Close the metadata after attempting to stop all components.
+        record_shutdown_error(
             self.metadata_kv_backend
                 .close()
                 .await
@@ -1171,6 +1171,7 @@ mod tests {
         opts.storage.data_home = data_home.path().to_str().unwrap().to_string();
         let creator = InstanceCreator::default()
             .with_leader_services_controller(Box::new(FailingLeaderServices));
+        let metadata_dir = metadata_store_dir(&opts.storage.data_home);
         let (mut instance, _) = StartCommand::build_with(opts, vec![], creator)
             .await
             .unwrap();
@@ -1191,6 +1192,11 @@ mod tests {
             log_store.append_batch(vec![]).await,
             Err(log_store::error::Error::ObjectStoreWalStopped { .. })
         ));
+        // The metadata backend was closed although earlier steps failed: raft-engine locks its
+        // directory while open, so reopening it only succeeds once it was released.
+        let metadata =
+            standalone::open_metadata_kvbackend(metadata_dir, Default::default()).unwrap();
+        metadata.close().await.unwrap();
     }
 
     #[tokio::test]

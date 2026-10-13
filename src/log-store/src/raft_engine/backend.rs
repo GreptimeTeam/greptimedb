@@ -147,7 +147,7 @@ impl TxnService for RaftEngineBackend {
         // the variable is not "mut". Suppress the clippy warning because of this.
         #[allow(clippy::readonly_write_lock)]
         let guard = self.engine.write().unwrap();
-        let engine = opened(&guard)?;
+        let engine = get_open_engine(&guard)?;
 
         for cmp in compare {
             let existing_value = engine_get(engine, &cmp.key)?.map(|kv| kv.value);
@@ -240,7 +240,7 @@ impl KvBackend for RaftEngineBackend {
         let mut more = false;
         let mut iter = 0;
 
-        opened(&self.engine.read().unwrap())?
+        get_open_engine(&self.engine.read().unwrap())?
             .scan_raw_messages(
                 SYSTEM_NAMESPACE,
                 start_key.as_deref(),
@@ -278,7 +278,7 @@ impl KvBackend for RaftEngineBackend {
         // Engine::write assures that one batch is written atomically. The read/write lock is
         // just to prevent race condition between put and txn.
         let guard = self.engine.read().unwrap();
-        let engine = opened(&guard)?;
+        let engine = get_open_engine(&guard)?;
         if prev_kv {
             prev = engine_get(engine, &key)?;
         }
@@ -297,7 +297,7 @@ impl KvBackend for RaftEngineBackend {
         };
 
         let guard = self.engine.read().unwrap();
-        let engine = opened(&guard)?;
+        let engine = get_open_engine(&guard)?;
         for kv in kvs {
             if prev_kv && let Some(kv) = engine_get(engine, &kv.key)? {
                 prev_kvs.push(kv);
@@ -323,7 +323,8 @@ impl KvBackend for RaftEngineBackend {
             kvs: Vec::with_capacity(req.keys.len()),
         };
         for key in req.keys {
-            let Some(value) = opened(&self.engine.read().unwrap())?.get(SYSTEM_NAMESPACE, &key)
+            let Some(value) =
+                get_open_engine(&self.engine.read().unwrap())?.get(SYSTEM_NAMESPACE, &key)
             else {
                 continue;
             };
@@ -354,7 +355,7 @@ impl KvBackend for RaftEngineBackend {
         let mut deleted = 0;
 
         let guard = self.engine.read().unwrap();
-        let engine = opened(&guard)?;
+        let engine = get_open_engine(&guard)?;
         for kv in range_resp.kvs {
             engine_delete(engine, &kv.key)?;
             if prev_kv {
@@ -379,7 +380,7 @@ impl KvBackend for RaftEngineBackend {
         };
         let mut batch = LogBatch::with_capacity(keys.len());
         let guard = self.engine.read().unwrap();
-        let engine = opened(&guard)?;
+        let engine = get_open_engine(&guard)?;
         for key in keys {
             if prev_kv && let Some(prev) = engine_get(engine, &key)? {
                 prev_kvs.push(prev);
@@ -395,16 +396,16 @@ impl KvBackend for RaftEngineBackend {
     }
 
     async fn get(&self, key: &[u8]) -> Result<Option<KeyValue>, Self::Error> {
-        engine_get(opened(&self.engine.read().unwrap())?, key)
+        engine_get(get_open_engine(&self.engine.read().unwrap())?, key)
     }
 
     async fn exists(&self, key: &[u8]) -> Result<bool, Self::Error> {
-        Ok(engine_get(opened(&self.engine.read().unwrap())?, key)?.is_some())
+        Ok(engine_get(get_open_engine(&self.engine.read().unwrap())?, key)?.is_some())
     }
 
     async fn delete(&self, key: &[u8], prev_kv: bool) -> Result<Option<KeyValue>, Self::Error> {
         let guard = self.engine.read().unwrap();
-        let engine = opened(&guard)?;
+        let engine = get_open_engine(&guard)?;
         let prev = if prev_kv {
             engine_get(engine, key)?
         } else {
@@ -416,7 +417,7 @@ impl KvBackend for RaftEngineBackend {
 }
 
 /// Returns the engine, or an error once the backend is closed.
-fn opened(engine: &Option<Arc<Engine>>) -> meta_error::Result<&Engine> {
+fn get_open_engine(engine: &Option<Arc<Engine>>) -> meta_error::Result<&Engine> {
     engine
         .as_deref()
         .context(error::IllegalStateSnafu)
@@ -471,7 +472,7 @@ mod tests {
     use common_test_util::temp_dir::create_temp_dir;
 
     use super::*;
-    use crate::raft_engine::{PREALLOCATED_LEN, log_files_len};
+    use crate::raft_engine::{PREALLOCATION_THRESHOLD, log_files_size};
 
     fn build_kv_backend(dir: String) -> RaftEngineBackend {
         RaftEngineBackend::try_open_with_cfg(dir, &KvBackendConfig::default()).unwrap()
@@ -489,11 +490,11 @@ mod tests {
             })
             .await
             .unwrap();
-        let preallocated = log_files_len(dir.path()) >= PREALLOCATED_LEN;
+        let preallocated = log_files_size(dir.path()) >= PREALLOCATION_THRESHOLD;
 
         backend.close().await.unwrap();
         if preallocated {
-            assert!(log_files_len(dir.path()) < PREALLOCATED_LEN);
+            assert!(log_files_size(dir.path()) < PREALLOCATION_THRESHOLD);
         }
         assert!(backend.get(b"key").await.is_err());
 
@@ -518,13 +519,13 @@ mod tests {
             })
             .await
             .unwrap();
-        let preallocated = log_files_len(dir.path()) >= PREALLOCATED_LEN;
+        let preallocated = log_files_size(dir.path()) >= PREALLOCATION_THRESHOLD;
 
         // Callers that own the backend, like the CLI tools, close it by dropping it: the
         // purge task on the global runtime must not keep the engine alive.
         drop(backend);
         if preallocated {
-            assert!(log_files_len(dir.path()) < PREALLOCATED_LEN);
+            assert!(log_files_size(dir.path()) < PREALLOCATION_THRESHOLD);
         }
         let reopened = build_kv_backend(dir.path().to_str().unwrap().to_string());
         assert_eq!(
