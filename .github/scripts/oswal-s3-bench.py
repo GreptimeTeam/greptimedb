@@ -47,6 +47,7 @@ DEPTHS = {"GREPTIMEDB_OSWAL_MAX_IN_FLIGHT_CREATES": 4, "GREPTIMEDB_OSWAL_MAX_SEA
           "GREPTIMEDB_OSWAL_RECOVERY_CONCURRENCY": 8}
 # Restart cells seal ten times as often as the default so recovery has thousands of objects.
 RESTART_FLUSH_INTERVAL = "10ms"
+RESERVED_ENV = ("GREPTIMEDB_STANDALONE__STORAGE__", "GREPTIMEDB_STANDALONE__WAL__")
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 IMAGE = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+"
                    r"(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?")
@@ -94,7 +95,7 @@ def build_manifest(plan: dict, greptimedb_inspect: list, runtime_image: str,
 
 
 def parse_extra_env(text: str) -> dict:
-    """A JSON object or K=V lines; the storage settings stay the benchmark's own."""
+    """A JSON object or K=V lines; the storage and WAL settings that define a cell stay the benchmark's own."""
     if text.strip().startswith("{"):
         parsed = json.loads(text)
         if not all(isinstance(v, (str, int)) and not isinstance(v, bool) for v in parsed.values()):
@@ -108,7 +109,7 @@ def parse_extra_env(text: str) -> dict:
                 raise ValueError(f"extra_env line is not a new K=V: {line!r}")
             env[name.strip()] = value.strip()
     for name, value in env.items():
-        if not ENV_NAME.fullmatch(name) or name.startswith("GREPTIMEDB_STANDALONE__STORAGE__") or "\n" in value:
+        if not ENV_NAME.fullmatch(name) or name.startswith(RESERVED_ENV) or "\n" in value:
             raise ValueError(f"extra_env may not set {name!r}")
         if name in DEPTHS:
             positive(name, value, 4096)
@@ -161,7 +162,8 @@ def build_plan(concurrency: str, rows: str, batch_rows: str, rounds: str, smoke:
         for level in levels:
             for config, point in series if round_number % 2 else reversed(series):
                 cell_env = env | ({swept: str(point)} if point is not None else {})
-                check_depths(cell_env)
+                if config not in BASELINES:
+                    check_depths(cell_env)
                 wal = WAL_CONFIGS[config] | ({"FLUSH_INTERVAL": RESTART_FLUSH_INTERVAL} if restart and config not in BASELINES else {})
                 cells.append({
                     "id": f"{round_number}-{level}-{config}" + (f"-{point}" if point is not None else ""),
