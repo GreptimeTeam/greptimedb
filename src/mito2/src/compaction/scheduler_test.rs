@@ -1033,7 +1033,7 @@ async fn test_remote_fallback_uses_new_execution_plan_id() {
     assert_eq!(job_scheduler.num_jobs(), 1);
     assert!(matches!(
         &scheduler.region_status[&region_id].active.phase,
-        CompactionPhase::Local { .. }
+        CompactionPhase::Units(_)
     ));
     assert!(
         !scheduler.region_status[&region_id]
