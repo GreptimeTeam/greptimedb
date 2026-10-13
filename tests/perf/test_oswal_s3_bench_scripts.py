@@ -87,6 +87,10 @@ class PlanTest(unittest.TestCase):
         self.assertEqual((cells["1-8-R0"]["env"], cells["1-8-R0"]["sweep_value"]), ({}, None))
         self.assertEqual(cells["1-8-R0"]["wal"], {"PROVIDER": "raft_engine", "SYNC_WRITE": "false", "DIR": "/wal"})
         self.assertEqual(plan["sweep"], {"name": "GREPTIMEDB_OSWAL_MAX_IN_FLIGHT_CREATES", "values": [1, 4]})
+        # The Raft Engine controls ignore the depths, so only the object store points are checked.
+        plan = bench.build_plan("8", "6000", "1000", "1", smoke=False, configs="R,R0,D,E",
+                                extra_env="GREPTIMEDB_OSWAL_MAX_SEALED_BATCHES=4", sweep="MAX_IN_FLIGHT_CREATES=1,2")
+        self.assertEqual(len(plan["cells"]), 6)
 
     def test_extra_env_and_restart_reach_every_cell(self):
         for extra in ('{"GREPTIMEDB_OSWAL_MAX_IN_FLIGHT_CREATES": 4, "RUST_LOG": "info"}',
@@ -108,6 +112,9 @@ class PlanTest(unittest.TestCase):
                        {"extra_env": "GREPTIMEDB_OSWAL_MAX_IN_FLIGHT_CREATES=8", "sweep": "MAX_SEALED_BATCHES=8"},
                        {"extra_env": "GREPTIMEDB_OSWAL_RECOVERY_CONCURRENCY=8", "sweep": "RECOVERY_CONCURRENCY=2"},
                        {"extra_env": "GREPTIMEDB_STANDALONE__STORAGE__BUCKET=other"}, {"extra_env": "NO_VALUE"},
+                       {"extra_env": "GREPTIMEDB_STANDALONE__WAL__FLUSH_INTERVAL=100ms", "restart": True},
+                       {"extra_env": "GREPTIMEDB_STANDALONE__WAL__SYNC_WRITE=false"},
+                       {"extra_env": "GREPTIMEDB_OSWAL_MAX_SEALED_BATCHES=4", "sweep": "MAX_IN_FLIGHT_CREATES=2,3"},
                        {"extra_env": "A=1\nA=2"}, {"extra_env": '{"A": true}'}, {"extra_env": "1A=x"},
                        {"extra_env": "GREPTIMEDB_OSWAL_MAX_IN_FLIGHT_CREATES=many"}, {"configs": "R,X"},
                        {"configs": "D,D"}):
