@@ -81,8 +81,15 @@ const CREATE_RETRY_DELAY: Duration = Duration::from_millis(100);
 /// append from its channel only while two more fit: a stalled object store
 /// holds callers back instead of growing the backlog.
 const MAX_SEALED_BATCHES: usize = 2 * MAX_IN_FLIGHT_CREATES;
-/// Number of objects whose footers recovery fetches at a time.
-const RECOVERY_CONCURRENCY: usize = 8;
+/// Number of objects whose footers recovery fetches at a time. On S3 an
+/// object costs two reads, its header and its tail, about 57 to 91 ms per
+/// object per lane on 4, 8 and 16 vCPUs alike, and recovery time scales with
+/// objects divided by concurrency up to 128 lanes without throttling: about
+/// 9,500 objects took 99 s at 8 and 10.5 s at 64. At 64 recovery issues about
+/// 1,800 reads per second, a third of S3's request rate per prefix, which
+/// leaves room for the data file reads of start-up. Each lane holds one
+/// [`RECOVERY_TAIL_WINDOW`], 4 MiB in all.
+const RECOVERY_CONCURRENCY: usize = 64;
 /// Number of segments a read fetches ahead of the one whose entries it
 /// yields. On S3 a replay that fetched each segment after the previous one
 /// spent about 30 ms per object; with eight fetches in flight a segment
@@ -3673,7 +3680,8 @@ mod tests {
     async fn test_store_recovery_bounds_concurrency_and_orders_by_sequence() {
         let _serialized = SERIALIZED.lock().await;
         let object_store = memory_store();
-        populate(&object_store, 16, 3).await;
+        let depth = RECOVERY_CONCURRENCY as u64;
+        populate(&object_store, 2 * RECOVERY_CONCURRENCY, 3).await;
         let (io, mut parked) = ParkedIo::over(object_store);
         let objects = io.list().await.unwrap();
 
@@ -3694,12 +3702,12 @@ mod tests {
             wave.push(timeout(WAIT, parked.recv()).await.unwrap().unwrap());
         }
         assert_eq!(
-            (0..8).collect::<Vec<_>>(),
+            (0..depth).collect::<Vec<_>>(),
             wave.iter()
                 .map(|(object_seq, _)| *object_seq)
                 .collect::<Vec<_>>()
         );
-        // No ninth fetch can start while eight are parked.
+        // No further fetch can start while a full wave is parked.
         for _ in 0..16 {
             tokio::task::yield_now().await;
         }
@@ -3707,7 +3715,7 @@ mod tests {
 
         // Complete the initial wave in reverse order, parking each replacement.
         let mut replacements = Vec::new();
-        for (expected_next, (_, release)) in (8..16).zip(wave.into_iter().rev()) {
+        for (expected_next, (_, release)) in (depth..2 * depth).zip(wave.into_iter().rev()) {
             release.send(true).unwrap();
             let (object_seq, release) = timeout(WAIT, parked.recv()).await.unwrap().unwrap();
             assert_eq!(expected_next, object_seq);
@@ -3718,17 +3726,21 @@ mod tests {
             release.send(true).unwrap();
         }
         assert_eq!(
-            (0..16).collect::<Vec<u64>>(),
+            (0..2 * depth).collect::<Vec<u64>>(),
             timeout(WAIT, &mut fetch).await.unwrap().unwrap()
         );
-        assert_eq!(8, io.max_in_flight.load(Ordering::SeqCst));
+        assert_eq!(
+            RECOVERY_CONCURRENCY,
+            io.max_in_flight.load(Ordering::SeqCst)
+        );
     }
 
     #[tokio::test]
     async fn test_store_recovery_abandons_pending_fetches_on_failure() {
         let _serialized = SERIALIZED.lock().await;
         let object_store = memory_store();
-        populate(&object_store, 16, 3).await;
+        let objects = 2 * RECOVERY_CONCURRENCY as u64;
+        populate(&object_store, objects as usize, 3).await;
         let (io, mut parked) = ParkedIo::over(object_store.clone());
         let fetch = {
             let io = io.clone();
@@ -3753,9 +3765,13 @@ mod tests {
         }
         assert!(parked.try_recv().is_err());
         let store = open(object_store, &eager()).await;
-        assert_eq!(id(15, 1), latest(&store, region(1)));
-        // Sequence 16 holds the object that started the epoch of the store.
-        assert_eq!(17, store.catalog.read().unwrap().next_object_seq().unwrap());
+        assert_eq!(id(objects - 1, 1), latest(&store, region(1)));
+        // The sequence after the populated objects holds the object that
+        // started the epoch of the store.
+        assert_eq!(
+            objects + 1,
+            store.catalog.read().unwrap().next_object_seq().unwrap()
+        );
         store.stop().await.unwrap();
     }
 
