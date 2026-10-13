@@ -1826,6 +1826,14 @@ async fn check_two_phase_series_scan(
     // Exhausting the scan budget must fail even with an unbounded query pool.
     scanner.reset_state();
     let scan_tracker = &engine.inner.scan_memory_tracker;
+    // Cancelled background readers release their reservations asynchronously.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while scan_tracker.current() > 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     let scan_guard = scan_tracker.reserve(scan_tracker.limit()).await.unwrap();
     let fresh_context = store_api::region_engine::QueryScanContext::default();
     let failed = try_join_all((0..3).map(|partition| {
