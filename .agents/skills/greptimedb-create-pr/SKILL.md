@@ -66,6 +66,8 @@ allocations when building bloom indexes", not "improve index performance").
 
 ## Step 4: Body
 
+The title and body are public and always in English.
+
 Keep the template's CLA line, headings, and checklist. Put the issue link under
 "Refer to a related PR or issue link" (`Closes #N` when it closes it). Under
 "What's changed and what's your intention?" write these fields, all present,
@@ -171,10 +173,11 @@ With `full`:
    - Parts agents must not change, and why.
    - Where the author is unsure, or what reviewers should check first.
 
-   English, short and concrete; reviewers read it after their own blind review. Do not
-   write credentials, endpoints, IP addresses, hostnames, customer names, or
-   personal data; refer to them abstractly ("a customer's S3-compatible
-   store"). Show it to the author and apply their edits before publishing.
+   In the author's language, short and concrete; reviewers read it after their
+   own blind review. Do not write credentials, endpoints, IP addresses,
+   hostnames, customer names, or personal data; refer to them abstractly ("a
+   customer's S3-compatible store"). Show it to the author and apply their
+   edits before publishing.
 2. Publish:
    ```
    python3 $S publish --pr <n> --rationale <file> --agent <claude|codex|opencode>
@@ -203,7 +206,7 @@ With `full`:
 
 ## Step 7: Report
 
-Report in English: the PR URL and title; pre-flight checks that failed or were skipped; for the
+Report in the user's language: the PR URL and title; pre-flight checks that failed or were skipped; for the
 private part, either "skipped" or the published path, the sessions included,
 the redactions made, and that internal hostnames, customer names, and personal
 data are not scanned automatically; only the rationale was reviewed by hand.

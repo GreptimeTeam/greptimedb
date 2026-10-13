@@ -530,6 +530,12 @@ def cmd_prepare(args):
         raise Abort(f"PR head moved from {head[:7]} to {fetched[:7]} during prepare; run prepare again")
     run(["git", "worktree", "add", "--quiet", "--detach", str(workdir / "src"), head], cwd=REPO_ROOT)
     shutil.copyfile(REVIEW_CRITERIA, workdir / "criteria.md")
+    # Personal review preferences live in the reviewer's own checkout, which
+    # is not necessarily where this script is installed.
+    toplevel = run(["git", "rev-parse", "--show-toplevel"]).stdout.strip()
+    preferences = Path(toplevel) / ".local" / "review.md"
+    if preferences.is_file():
+        shutil.copyfile(preferences, workdir / "preferences.md")
 
     mode = "full" if has_private_access() else "blind-only"
     state = {
@@ -540,7 +546,12 @@ def cmd_prepare(args):
         "prefix": args.prefix,
     }
     save_state(workdir, state)
-    print(json.dumps({"workdir": str(workdir), "head": head, "mode": mode}, indent=2))
+    print(json.dumps({
+        "workdir": str(workdir),
+        "head": head,
+        "mode": mode,
+        "preferences": str(preferences) if preferences.is_file() else None,
+    }, indent=2))
 
 
 def credential_free_env(workdir, agent):
@@ -599,11 +610,11 @@ def assert_private_unreachable(env, cwd):
             raise Abort(f"isolation check failed: `{name}` can still reach {PRIVATE}; blind review not started")
 
 
-def blind_prompt(workdir):
+def blind_prompt(workdir, language):
     text = BLIND_REVIEWER.read_text(encoding="utf-8")
     if text.startswith("---"):
         text = text.split("---", 2)[2]
-    return f"{text.strip()}\n\nWorkdir: {workdir}\n"
+    return f"{text.strip()}\n\nWorkdir: {workdir}\nLanguage: {language}\n"
 
 
 def cmd_blind_run(args):
@@ -612,7 +623,7 @@ def cmd_blind_run(args):
     env = credential_free_env(workdir, args.agent)
     assert_private_unreachable(env, workdir)
     out = workdir / "blind.md"
-    prompt = blind_prompt(workdir)
+    prompt = blind_prompt(workdir, args.language)
     if args.agent == "codex":
         run([
             # The user config and ChatGPT app connectors add MCP tools (session
@@ -771,6 +782,7 @@ def main():
     p = sub.add_parser("blind-run", help="run the blind reviewer in a credential-free subprocess")
     p.add_argument("--workdir", required=True)
     p.add_argument("--agent", choices=("codex", "opencode"), required=True)
+    p.add_argument("--language", default="English", help="language of the blind review, e.g. Chinese")
     p.set_defaults(func=cmd_blind_run)
 
     p = sub.add_parser("record-blind", help="record <workdir>/blind.md before anything private is read")

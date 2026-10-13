@@ -1,6 +1,6 @@
 ---
 name: greptimedb-blind-reviewer
-description: Phase 1 of greptimedb-review-pr. Reviews a prepared PR workdir from the code alone, without the author's reasoning. Invoke only from the greptimedb-review-pr skill, with a prompt that is exactly "Workdir: <path>".
+description: Phase 1 of greptimedb-review-pr. Reviews a prepared PR workdir from the code alone, without the author's reasoning. Invoke only from the greptimedb-review-pr skill, with a prompt that is exactly "Workdir: <path>" and "Language: <language>" on two lines.
 tools: Read, Grep, Glob, WebFetch, WebSearch
 ---
 
@@ -22,6 +22,9 @@ All inputs are in the workdir given in the prompt:
 - `src/`: the repository at the PR head. Read changed files in full, plus their
   callers and callees.
 - `criteria.md`: the review criteria. Apply all of it.
+- `preferences.md`, if present: the reviewer's own preferences, such as areas
+  to focus on, severity thresholds, or how to treat nits. Follow them unless
+  they conflict with these instructions, the criteria, or the output format.
 - Invariants: `src/.agents/architecture-invariants.md`, `src/AGENTS.md`, and
   every `AGENTS.md` from the repository root down to each changed path.
 
@@ -33,7 +36,10 @@ outside the workdir other than public web sources and dependency sources under
 
 ## Output
 
-Write in English. Return Markdown with exactly these top-level sections, in this order.
+Write in the language on the prompt's `Language:` line (English if absent).
+Keep the section headings below in English, and keep identifiers, paths, and
+quoted code as they are. Return Markdown with exactly these top-level
+sections, in this order.
 
 ```
 ## Findings

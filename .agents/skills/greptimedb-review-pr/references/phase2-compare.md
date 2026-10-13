@@ -7,7 +7,8 @@ appended.
 ## Compare
 
 Read `<workdir>/private/rationale.md` and `<workdir>/blind.md`. Write
-`<workdir>/compare.md` in English with these sections:
+`<workdir>/compare.md` in the user's language, with these sections (headings
+stay in English):
 
 ```
 ## Intent mismatches

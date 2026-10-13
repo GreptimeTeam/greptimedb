@@ -19,6 +19,16 @@ S=.agents/review-context/review_context.py
 Read-only on the PR: do not push to the PR branch, do not switch the current
 branch, and post nothing to GitHub unless the user asks.
 
+Language: everything posted to GitHub (inline comments, review body) is
+English. The blind review, the comparison, and the report to the user use the
+user's language.
+
+Preferences: a reviewer may keep personal review preferences in
+`.local/review.md` (gitignored). `prepare` copies it into the workdir as
+`preferences.md`; follow it in every step. It can change focus, severity
+thresholds, and style, but not the phase order, the isolation, the evidence
+requirement, the output sections, or English on GitHub.
+
 The order of the phases is the point of this skill. The blind phase must form
 its findings before anything about the author's reasoning is read; otherwise
 the review follows the author's line of thought and inherits its blind spots.
@@ -28,7 +38,7 @@ Until `record-blind` succeeds:
   private review repository;
 - do not read PR comments or review threads, which often carry the author's
   reasoning;
-- do not pass the reviewer anything beyond the workdir path.
+- do not pass the reviewer anything beyond the workdir path and the language.
 
 ## Step 1: Prepare
 
@@ -36,9 +46,10 @@ Until `record-blind` succeeds:
 python3 $S prepare --pr <n>
 ```
 
-It prints `workdir`, `head`, and `mode`. The workdir holds `pr.md` (title and
+It prints `workdir`, `head`, `mode`, and `preferences`. The workdir holds `pr.md` (title and
 description), `diff.patch`, `src/` (a worktree at the PR head), and
-`criteria.md`. `mode` is `full` when you can access the private repository and
+`criteria.md`, plus `preferences.md` when `.local/review.md` exists. `mode`
+is `full` when you can access the private repository and
 `blind-only` otherwise (external contributors). In `blind-only` mode the review
 ends after Step 2; nothing is written to the private repository.
 
@@ -50,9 +61,9 @@ has no GitHub credentials, then record its output.
 
 | Agent | Run | `--isolation` |
 |---|---|---|
-| Claude Code | Agent tool, `subagent_type: greptimedb-blind-reviewer`, prompt exactly `Workdir: <workdir>`. Write the returned text to `<workdir>/blind.md` unchanged. | `claude-subagent` |
-| Codex | `python3 $S blind-run --workdir <workdir> --agent codex` (writes `blind.md`) | `codex-exec` |
-| OpenCode | `python3 $S blind-run --workdir <workdir> --agent opencode` (writes `blind.md`; not yet verified) | `opencode-run` |
+| Claude Code | Agent tool, `subagent_type: greptimedb-blind-reviewer`, prompt exactly `Workdir: <workdir>` and `Language: <user's language>` on two lines. Write the returned text to `<workdir>/blind.md` unchanged. | `claude-subagent` |
+| Codex | `python3 $S blind-run --workdir <workdir> --agent codex --language <user's language>` (writes `blind.md`) | `codex-exec` |
+| OpenCode | `python3 $S blind-run --workdir <workdir> --agent opencode --language <user's language>` (writes `blind.md`; not yet verified) | `opencode-run` |
 
 `blind-run` strips every GitHub credential from the subprocess environment,
 does not load the agent's user configuration (and so its MCP servers), and
@@ -138,17 +149,22 @@ English only. The problem, why it breaks, what to do. Nothing else.
 
 ## Step 5: Report
 
-Report in English, like every file and draft this skill produces.
+Report in the user's language; inline comment and review body drafts stay in
+English.
 
-1. Conclusion: approve / request changes / comment, and the main reason.
-2. Findings by severity, each with `path:line`, the problem, the evidence, and
+1. Introduction: what the PR changes and which problem it solves, in a few
+   sentences, from the code and the PR description (and the rationale in full
+   mode). Describe, do not judge; a reader who has not opened the PR should
+   know what it is about.
+2. Conclusion: approve / request changes / comment, and the main reason.
+3. Findings by severity, each with `path:line`, the problem, the evidence, and
    its invariant class. Mark anything unverified.
-3. Comparison result (full mode): intent mismatches and what they say about the
+4. Comparison result (full mode): intent mismatches and what they say about the
    code.
-4. Proposed invariants: the rule text and target file for each `undocumented`
+5. Proposed invariants: the rule text and target file for each `undocumented`
    finding.
-5. Inline comment drafts and, if needed, a two-to-five-line review body draft.
-6. Commands you ran beyond this skill's script, and their results.
+6. Inline comment drafts and, if needed, a two-to-five-line review body draft.
+7. Commands you ran beyond this skill's script, and their results.
 
 Then `python3 $S cleanup --workdir <workdir>`.
 
