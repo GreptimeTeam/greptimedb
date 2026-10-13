@@ -64,7 +64,7 @@ use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use store_api::metric_engine_consts;
 use store_api::storage::{RegionId, consts};
 use tokio::net::TcpListener;
-use tokio::sync::{Barrier, Notify};
+use tokio::sync::{Barrier, Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Code, Request, Response, Status};
@@ -77,6 +77,7 @@ use crate::test_util;
 struct RecordingRegionService {
     requests: Arc<Mutex<Vec<RegionRequest>>>,
     rejections: Arc<Mutex<HashMap<u64, VecDeque<Status>>>>,
+    release: Arc<Mutex<Option<Arc<Semaphore>>>>,
 }
 
 #[async_trait::async_trait]
@@ -88,6 +89,10 @@ impl Region for RecordingRegionService {
         let request = request.into_inner();
         let region_id = write_region_id(&request).unwrap().as_u64();
         self.requests.lock().unwrap().push(request);
+        let release = self.release.lock().unwrap().clone();
+        if let Some(release) = release {
+            release.acquire().await.unwrap().forget();
+        }
         if let Some(status) = self
             .rejections
             .lock()
@@ -493,6 +498,96 @@ async fn test_should_retry_requires_a_retained_request_and_budget() {
 }
 
 #[tokio::test]
+async fn test_write_retry_cancellation_stops_backoff() {
+    for hint in [RetryHint::Retryable, RetryHint::RetryAfterRouteRefresh] {
+        let server = RegionTestServer::start().await;
+        server.fail_region(1, [hint]);
+        let mut dispatcher = server.create_dispatcher(2).await;
+        let options = &mut dispatcher.retry.as_mut().unwrap().options;
+        options.initial_backoff = Duration::from_secs(60);
+        options.max_backoff = Duration::from_secs(60);
+        let attempt = dispatcher
+            .send(
+                Arc::new(server.peer.clone()),
+                build_insert_request(&[1]),
+                None,
+            )
+            .await;
+        let cancellation = CancellationToken::new();
+        let guard = cancellation.clone().drop_guard();
+        let finish = dispatcher.finish(vec![attempt], None, Some(&cancellation));
+        tokio::pin!(finish);
+        futures::future::poll_fn(|cx| {
+            assert!(finish.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(guard);
+        let error = tokio::time::timeout(Duration::from_secs(1), finish)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.retry_hint(), hint);
+        assert_eq!(
+            server.attempt_counts(),
+            HashMap::from([(RegionId::new(1, 1).as_u64(), 1)])
+        );
+        assert!(server.invalidator.calls.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn test_write_retry_cancellation_drains_inflight_requests() {
+    let server = RegionTestServer::start().await;
+    server.fail_region(2, [RetryHint::RetryAfterRouteRefresh]);
+    let release = Arc::new(Semaphore::new(0));
+    *server.service.release.lock().unwrap() = Some(release.clone());
+    let dispatcher = server.create_dispatcher(2).await;
+    let writes = dispatcher
+        .prepare(vec![build_insert_request(&[1, 2])])
+        .await
+        .unwrap();
+    let cancellation = CancellationToken::new();
+    let guard = cancellation.clone().drop_guard();
+    let execute = dispatcher.execute(writes, None, Some(&cancellation));
+    tokio::pin!(execute);
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        futures::future::poll_fn(|cx| {
+            assert!(execute.as_mut().poll(cx).is_pending());
+            if server.service.requests.lock().unwrap().len() == 2 {
+                Poll::Ready(())
+            } else {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    drop(guard);
+    futures::future::poll_fn(|cx| {
+        assert!(execute.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    release.add_permits(2);
+    let error = tokio::time::timeout(Duration::from_secs(1), execute)
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.retry_hint(), RetryHint::RetryAfterRouteRefresh);
+    assert_eq!(
+        server.attempt_counts(),
+        HashMap::from([
+            (RegionId::new(1, 1).as_u64(), 1),
+            (RegionId::new(1, 2).as_u64(), 1),
+        ])
+    );
+    assert!(server.invalidator.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn test_write_retry_refreshes_routes_once_per_failed_round() {
     let server = RegionTestServer::start().await;
     for region in [1, 2] {
@@ -558,7 +653,7 @@ async fn test_finish_retries_initial_failures_in_one_round() {
             (RegionId::new(1, 3).as_u64(), 1),
         ])
     );
-    let response = dispatcher.finish(attempts, None).await.unwrap();
+    let response = dispatcher.finish(attempts, None, None).await.unwrap();
     assert_eq!(response.affected_rows, 3);
     assert_eq!(
         server.attempt_counts(),
@@ -1197,7 +1292,7 @@ async fn test_dispatch_preserves_write_payloads_and_envelopes() {
         });
         let writes = dispatcher.prepare(requests.to_vec()).await.unwrap();
         assert!(received.try_recv().is_err());
-        let response = dispatcher.execute(writes, None).await.unwrap();
+        let response = dispatcher.execute(writes, None, None).await.unwrap();
         assert_eq!(response.affected_rows, 2);
         for request in requests {
             assert_eq!(received.try_recv().unwrap(), (Peer::new(1, ""), request));
