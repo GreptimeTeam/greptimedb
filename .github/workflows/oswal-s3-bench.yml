@@ -76,7 +76,7 @@ env:
   EXTRA_ENV: ${{ inputs.extra_env }}
   SWEEP: ${{ inputs.sweep }}
   RESTART: ${{ inputs.restart }}
-  GROUPS: ${{ inputs.groups }}
+  OSWAL_GROUPS: ${{ inputs.groups }}
   REQUESTED_INSTANCE_TYPE: ${{ inputs.instance_type }}
   CONCURRENCY: ${{ inputs.concurrency }}
   ROWS: ${{ inputs.rows }}
@@ -107,7 +107,7 @@ jobs:
       run: |
         python3 greptimedb/.github/scripts/oswal-s3-bench.py plan --smoke "$SMOKE" \
           --concurrency "$CONCURRENCY" --rows "$ROWS" --batch-rows "$BATCH_ROWS" --rounds "$ROUNDS" \
-          --configs "$CONFIGS" --extra-env "$EXTRA_ENV" --sweep "$SWEEP" --restart "$RESTART" --groups "$GROUPS" \
+          --configs "$CONFIGS" --extra-env "$EXTRA_ENV" --sweep "$SWEEP" --restart "$RESTART" --groups "$OSWAL_GROUPS" \
           --timeout-minutes "$BENCHMARK_TIMEOUT_MINUTES" --ttl-hours "$JANITOR_TTL_HOURS"
         python3 greptimedb/.github/scripts/oswal-s3-bench.py image --tag "$GREPTIMEDB_TAG" --image "$GREPTIMEDB_IMAGE_INPUT"
     - name: Resolve CI runner
@@ -193,7 +193,7 @@ jobs:
         bash greptimedb/.github/scripts/oswal-s3-bench-run.sh pull
         python3 greptimedb/.github/scripts/oswal-s3-bench.py plan --smoke "$SMOKE" --output "$PLAN" \
           --concurrency "$CONCURRENCY" --rows "$ROWS" --batch-rows "$BATCH_ROWS" --rounds "$ROUNDS" \
-          --configs "$CONFIGS" --extra-env "$EXTRA_ENV" --sweep "$SWEEP" --restart "$RESTART" --groups "$GROUPS"
+          --configs "$CONFIGS" --extra-env "$EXTRA_ENV" --sweep "$SWEEP" --restart "$RESTART" --groups "$OSWAL_GROUPS"
         python3 greptimedb/.github/scripts/oswal-s3-bench.py manifest --results "$RESULTS" \
           --runtime-image "$RUNTIME_IMAGE" --instance-type "$INSTANCE_TYPE" --region "$S3_REGION" --prefix "$RUN_PREFIX"
     - name: Probe the bucket

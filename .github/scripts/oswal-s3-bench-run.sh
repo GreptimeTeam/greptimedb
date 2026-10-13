@@ -73,6 +73,13 @@ scrape_metrics() {
     case "$phase" in "") metrics_scraped=true ;; -restart) restart_scraped=true ;; esac
 }
 
+# A crash cycle cannot repeat a scrape once its server is killed, so it retries.
+scrape_retry() {
+    local attempt
+    for attempt in 1 2 3; do scrape_metrics && return 0; sleep 1; done
+    return 1
+}
+
 sql() { curl --noproxy '*' -fsS --max-time 30 --data-urlencode "sql=$1" 'http://127.0.0.1:4000/v1/sql?db=public'; }
 now_ns() { python3 -c 'import time; print(time.time_ns())'; }
 
@@ -146,6 +153,7 @@ sample_objects() {
 # against what was acknowledged. Nothing is cleaned between cycles.
 crash_cycles() {
     local writers rows cycles kill_min kill_max cycle cdir wpid spid= delay before after started restart_s query_s next=0 pin_count
+    local load_start complete sql_url=${OSWAL_SQL_URL:-http://127.0.0.1:4000/v1/sql?db=public}
     writers=$(jq -r .concurrency <<< "$spec") rows=$(jq -r .batch_rows "$PLAN") cycles=$(jq -r .cycles <<< "$spec")
     kill_min=$(jq -r '.kill_after[0]' <<< "$spec") kill_max=$(jq -r '.kill_after[1]' <<< "$spec")
     if jq -e .pin <<< "$spec" >/dev/null; then
@@ -154,14 +162,17 @@ crash_cycles() {
     fi
     sql "CREATE TABLE crash (seq BIGINT, ts TIMESTAMP TIME INDEX) WITH (append_mode = 'true')" >/dev/null
     for ((cycle = 1; cycle <= cycles; cycle++)); do
-        cdir="$dir/cycle-$cycle"; mkdir -p "$cdir"
-        python3 "$here/oswal-s3-bench-crash.py" write --dir "$cdir" --url 'http://127.0.0.1:4000/v1/sql?db=public' \
+        cdir="$dir/cycle-$cycle" complete=true; mkdir -p "$cdir"
+        # The counters of this server process before its writers start are the cycle's baseline.
+        phase=-start-$cycle; scrape_retry || complete=false
+        load_start=$(now_ns)
+        python3 "$here/oswal-s3-bench-crash.py" write --dir "$cdir" --url "$sql_url" \
             --writers "$writers" --first-seq "$next" --rows "$rows" &
         wpid=$!
         if jq -e .pin <<< "$spec" >/dev/null; then sample_objects & spid=$!; fi
         delay=$(awk -v a="$kill_min" -v b="$kill_max" 'BEGIN {srand(); printf "%.3f", a + rand() * (b - a)}')
         sleep "$delay"
-        phase=-cycle-$cycle; scrape_metrics || true
+        phase=-cycle-$cycle; scrape_retry || complete=false
         before=$(now_ns); docker kill --signal KILL "$cid" >/dev/null; after=$(now_ns)
         wait "$wpid"
         [[ -z "$spid" ]] || { kill "$spid" 2>/dev/null; wait "$spid" 2>/dev/null || true; spid=; }
@@ -174,7 +185,7 @@ crash_cycles() {
             sleep 0.2
         done
         query_s=$(elapsed "$started")
-        scrape_metrics || true
+        scrape_retry || complete=false
         pin_count=null
         if jq -e .pin <<< "$spec" >/dev/null; then
             pin_count=$(sql "SELECT count(*) FROM pin" | jq -er '.output[0].records.rows[0][0]')
@@ -184,9 +195,14 @@ crash_cycles() {
             --mode "$(jq -r .wal.ACK_MODE <<< "$spec")" --writers "$writers" --rows "$rows" \
             --before-ns "$before" --after-ns "$after" --window-max-ms 2000 > "$cdir/check.json" || verdict=$?
         jq -c --arg delay "$delay" --arg restart "$restart_s" --arg query "$query_s" --argjson pin "$pin_count" \
-            '. + {kill_after_seconds: ($delay | tonumber), restart_seconds: ($restart | tonumber),
-                  restart_query_seconds: ($query | tonumber), pin_rows: $pin}' "$cdir/check.json" >> "$dir/cycles.jsonl"
+            --argjson load "$(awk -v a="$load_start" -v b="$before" 'BEGIN {printf "%.3f", (b - a) / 1e9}')" \
+            --argjson complete "$complete" \
+            '. + {kill_after_seconds: ($delay | tonumber), load_seconds: $load, restart_seconds: ($restart | tonumber),
+                  restart_query_seconds: ($query | tonumber), pin_rows: $pin, metrics_complete: $complete}' \
+            "$cdir/check.json" >> "$dir/cycles.jsonl"
         ((verdict == 0)) || { echo "$id: cycle $cycle failed its check" >&2; exit 6; }
+        # A cycle without its scrapes is not a measurement, whatever the table held.
+        [[ "$complete" == true ]] || { echo "$id: cycle $cycle lost a metrics scrape" >&2; exit 4; }
         next=$(cat "$cdir"/attempted-*.log | sort -n | tail -1); next=$((next + 1))
     done
 }
