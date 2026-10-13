@@ -49,7 +49,8 @@ DEPTHS = {"GREPTIMEDB_OSWAL_MAX_IN_FLIGHT_CREATES": 4, "GREPTIMEDB_OSWAL_MAX_SEA
 RESTART_FLUSH_INTERVAL = "10ms"
 RESERVED_ENV = ("GREPTIMEDB_STANDALONE__STORAGE__", "GREPTIMEDB_STANDALONE__WAL__")
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-IMAGE = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+"
+# Docker's reference grammar: path components separated by ".", "_", "__" or runs of "-".
+IMAGE = re.compile(r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?::[0-9]+)?(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)+"
                    r"(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[0-9a-f]{64})?")
 NIGHTLY = re.compile(r"v\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?-nightly-(\d{8})")
 TAG = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
