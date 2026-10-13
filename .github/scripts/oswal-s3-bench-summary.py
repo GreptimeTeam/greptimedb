@@ -32,14 +32,15 @@ SAMPLE = re.compile(r'([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{([^}]*)\})?\s+(\S+)')
 
 
 def parse_metrics(text: str) -> dict:
-    """Map each unlabeled sample to its value, each histogram to its buckets, and the
-    object store requests (data files and WAL together) to their count per operation."""
+    """Map each unlabeled sample to its value, each histogram to its buckets, and the S3
+    requests (data files and WAL together) to their count per operation; the local cache
+    stores report through the same layer under another scheme and are left out."""
     samples, buckets, requests = {}, {}, {}
     for line in text.splitlines():
         match = SAMPLE.fullmatch(line.strip())
         if match and match.group(1) == "opendal_operation_duration_seconds_count":
             operation = re.search(r'operation="([^"]+)"', match.group(2) or "")
-            if operation:
+            if operation and re.search(r'scheme="s3"', match.group(2) or ""):
                 requests[operation.group(1)] = requests.get(operation.group(1), 0) + float(match.group(3))
             continue
         if not match or not match.group(1).startswith(PREFIX):
@@ -153,6 +154,7 @@ def load_cell(path: Path, spec: dict | None = None) -> dict:
             "recovery_seconds": restarted["samples"].get("recovery_seconds_sum") if count == 1 else None,
             "recovered_objects": restarted["samples"].get("recovered_objects_total")
             if cell.get("restart_scraped") else None,
+            "indexed_before_kill": cell.get("indexed_before_kill"), "min_objects": cell.get("min_objects", 0),
         }
     # The counters register on their first event, so a scrape of an object store WAL
     # that created objects omits the ones that never moved: those are zero, not unknown.
@@ -296,13 +298,16 @@ def render(run: dict, rows: list, pairs: list) -> str:
                              f"| {sum(s[1] is None for s in samples)} | {fmt(last[2])} | {fmt(last[3])} |")
     restarts = [r for r in rows if "restart" in r]
     if restarts:
-        lines += ["", "| Cell | Overrides | Objects created | Restart to /health s | Restart to count s "
+        lines += ["", "| Cell | Overrides | Objects created | Indexed at kill | Restart to /health s | Restart to count s "
                   "| Recovery s | Recovered objects | Rows after restart |",
-                  "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"]
+                  "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"]
         for r in restarts:
             x = r["restart"]
+            short = x["min_objects"] and (x["indexed_before_kill"] or 0) < x["min_objects"]
             lines.append(" | ".join([
-                f"| {r['id']}", overrides(r["env"]), fmt(r["created_objects_total"]), fmt(x["wall_seconds"], 2),
+                f"| {label(r)}", overrides(r["env"]), fmt(r["created_objects_total"]),
+                fmt(x["indexed_before_kill"]) + (f" (under {x['min_objects']:,})" if short else ""),
+                fmt(x["wall_seconds"], 2),
                 fmt(x["query_seconds"], 2), fmt(x["recovery_seconds"], 3), fmt(x["recovered_objects"]),
                 f"{fmt(x['rows'])} |"]))
     lines += ["", "| Group | Concurrency | Ratio | Swept value | Per round | Geometric mean |",

@@ -160,6 +160,11 @@ class PlanTest(unittest.TestCase):
         pin = next(c for c in smoke["cells"] if c["group"] == "pin")
         self.assertEqual((pin["cycles"], pin["kill_after"]), (1, [60, 60]))
         self.assertEqual([c["rows"] for c in smoke["corpora"]], [50_000])
+        recovery = [{"name": "rec", "configs": "D", "restart": True, "min_objects": 6000}]
+        self.assertEqual(bench.build_plan("8", "4000000", "1000", "1", smoke=False,
+                                          groups=json.dumps(recovery))["cells"][0]["min_objects"], 6000)
+        self.assertEqual(bench.build_plan("8", "4000000", "1000", "1", smoke=True,
+                                          groups=json.dumps(recovery))["cells"][0]["min_objects"], 0)
 
     def test_the_workflow_passes_groups_through_bash_unchanged(self):
         workflow = (SCRIPTS.parent / "workflows" / "oswal-s3-bench.yml").read_text()
@@ -178,7 +183,9 @@ class PlanTest(unittest.TestCase):
                        [{"name": "a", "colour": "red"}], [{"name": "a", "mode": "crash", "configs": "R"}],
                        [{"name": "a", "mode": "crash", "configs": "D", "restart": True}],
                        [{"name": "a", "mode": "crash", "configs": "D", "kill_after": [9, 5]}],
-                       [{"name": "a", "mode": "soak"}], [{"name": "a", "idle_seconds": 601}]):
+                       [{"name": "a", "mode": "soak"}], [{"name": "a", "idle_seconds": 601}],
+                       [{"name": "a", "configs": "D", "min_objects": 6000}],
+                       [{"name": "a", "configs": "D", "restart": True, "min_objects": -1}]):
             with self.subTest(groups=groups), self.assertRaises(ValueError):
                 bench.build_plan("8", "6000", "1000", "1", smoke=False, groups=json.dumps(groups))
 
@@ -371,7 +378,8 @@ class SummaryTest(unittest.TestCase):
     def test_sweep_ratios_cover_both_controls_and_restart_cells_report_recovery(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            restart = {"restart": True, "restart_scraped": True, "restart_seconds": 3.5,
+            restart = {"restart": True, "restart_scraped": True, "restart_seconds": 3.5, "indexed_before_kill": 117,
+                       "min_objects": 6000,
                        "restart_query_seconds": 4.25, "restart_count": 6000,
                        "server_cpu_seconds": 122.0, "host_cpu_busy": 0.5, "host_cpus": 8}
             self.write_cell(root, "1-8-R", 100.0)
@@ -387,10 +395,12 @@ class SummaryTest(unittest.TestCase):
             self.assertEqual(pairs, {("D/R", 2): 0.5, ("D/R0", 2): 0.4, ("D/R", 16): 0.75, ("D/R0", 16): 0.6})
             cell = next(r for r in rows if r["id"] == "1-8-D-2")
             self.assertEqual(cell["restart"], {"wall_seconds": 3.5, "query_seconds": 4.25, "rows": 6000,
-                                               "recovery_seconds": 1.5, "recovered_objects": 118})
+                                               "recovery_seconds": 1.5, "recovered_objects": 118,
+                                               "indexed_before_kill": 117, "min_objects": 6000})
             self.assertEqual(cell["server_cpu_cores"], 2.0)
             output = summary.render({}, rows, summary.ratios(rows))
-            self.assertIn("| 1-8-D-2 | MAX_IN_FLIGHT_CREATES=2 | 120 | 3.50 | 4.25 | 1.500 | 118 | 6,000 |", output)
+            self.assertIn("| 1-8-D-2 | MAX_IN_FLIGHT_CREATES=2 | 120 | 117 (under 6,000) | 3.50 | 4.25 | 1.500 | 118 "
+                          "| 6,000 |", output)
             self.assertIn("| 2.00 | 50% of 8 |", output)
             self.assertIn("| 8 | D/R0 | 16 | 0.600 | 0.600 |", output)
 
@@ -429,7 +439,8 @@ class SummaryTest(unittest.TestCase):
                 "greptime_logstore_object_store_wal_created_objects_total 5401\n"
                 "greptime_logstore_object_store_wal_object_bytes_sum 10800000000\n"
                 "greptime_logstore_object_store_wal_object_bytes_count 5400\n"
-                'opendal_operation_duration_seconds_count{operation="write"} 9000\n')
+                'opendal_operation_duration_seconds_count{scheme="s3",operation="write"} 9000\n'
+                'opendal_operation_duration_seconds_count{scheme="fs",operation="write"} 70\n')
             (path / "metrics-restart-1.prom").write_text(
                 "greptime_logstore_object_store_wal_recovery_seconds_sum 2.5\n"
                 "greptime_logstore_object_store_wal_recovery_seconds_count 1\n"
@@ -516,7 +527,11 @@ for arg in "$@"; do
     [[ "$arg" != */v1/sql* ]] || { echo "{\"output\": [{\"records\": {\"rows\": [[${FAKE_COUNT:-6000}]]}}]}"; exit 0; }
     [[ "$arg" != */metrics ]] || {
         [[ "$FAKE_METRICS_RC" == 0 ]] || exit "$FAKE_METRICS_RC"
-        printf '%s\n' 'greptime_logstore_object_store_wal_poisoned_total 1' 'other_total 2'; exit 0;
+        printf '%s\n' 'greptime_logstore_object_store_wal_poisoned_total 1' 'other_total 2'
+        [[ -z "${FAKE_FULL_METRICS:-}" ]] || printf '%s\n' \
+            "greptime_logstore_object_store_wal_indexed_objects $FAKE_FULL_METRICS" \
+            'greptime_logstore_object_store_wal_recovery_seconds_count 1'
+        exit 0;
     }
 done
 """
@@ -648,7 +663,7 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
             self.assertEqual(log.count("/metrics"), 2)
             self.assertIn(f"type=bind,src={root}/corpus/corpus-6000,dst=/work/corpus,readonly", log)
 
-    def run_crash(self, root, metrics_rc=0, pin=False, sample_rc=0):
+    def run_crash(self, root, metrics_rc=0, pin=False, sample_rc=0, full_metrics="5"):
         """A crash cell against fake docker and a stub SQL endpoint that the fake kill takes down."""
         import http.server
         import threading
@@ -682,7 +697,8 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
         old = os.environ.copy()
         os.environ.update({"OSWAL_SQL_URL": f"http://127.0.0.1:{server.server_port}/v1/sql",
                            "FAKE_KILL_FLAG": str(flag), "FAKE_FOUND": str(found), "FAKE_BATCH_ROWS": "1000",
-                           "OSWAL_SAMPLE_SECONDS": "0.2", "FAKE_SAMPLE_RC": str(sample_rc)})
+                           "OSWAL_SAMPLE_SECONDS": "0.2", "FAKE_SAMPLE_RC": str(sample_rc),
+                           "FAKE_FULL_METRICS": full_metrics})
         try:
             return self.run_cells(root, load_rc=0, metrics_rc=metrics_rc, groups=groups)
         finally:
@@ -719,6 +735,32 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
             self.assertTrue(samples and all(line.split()[1:] == ["missing"] for line in samples), samples)
             self.assertIn("sql=INSERT INTO pin VALUES (1, 0)", log)
             self.assertEqual(len((cell / "cycles.jsonl").read_text().splitlines()), 2)
+
+    def test_a_scrape_without_the_wal_samples_is_incomplete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cells, _, _, _ = self.run_crash(root, full_metrics="")
+            self.assertNotEqual(cells.returncode, 0)
+            cell = root / "results" / "cells" / "crash-1-8-D"
+            cycle = json.loads((cell / "cycles.jsonl").read_text().splitlines()[0])
+            self.assertEqual((cycle["passed"], cycle["metrics_complete"]), (True, False))
+            self.assertEqual(json.loads((cell / "cell.json").read_text())["exit_code"], 4)
+
+    def test_a_restart_cell_must_leave_its_minimum_objects_indexed(self):
+        for minimum, exit_code in ((5, 0), (6, 7)):
+            with self.subTest(minimum=minimum), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                groups = json.dumps([{"name": "rec", "configs": "D", "restart": True, "min_objects": minimum}])
+                old = os.environ.copy()
+                os.environ["FAKE_FULL_METRICS"] = "5"
+                try:
+                    cells, _, _, _ = self.run_cells(root, load_rc=0, groups=groups)
+                finally:
+                    os.environ.clear()
+                    os.environ.update(old)
+                recorded = json.loads((root / "results" / "cells" / "rec-1-8-D" / "cell.json").read_text())
+                self.assertEqual((recorded["exit_code"], recorded["indexed_before_kill"], recorded["restart_count"]),
+                                 (exit_code, 5, 6000))
 
     def test_a_crash_cycle_without_its_scrapes_fails_the_cell(self):
         with tempfile.TemporaryDirectory() as directory:

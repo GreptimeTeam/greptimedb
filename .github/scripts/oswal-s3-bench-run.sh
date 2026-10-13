@@ -74,9 +74,13 @@ scrape_metrics() {
 }
 
 # A crash cycle cannot repeat a scrape once its server is killed, so it retries.
+# The named WAL sample must be in the scrape, or it does not count.
 scrape_retry() {
-    local attempt
-    for attempt in 1 2 3; do scrape_metrics && return 0; sleep 1; done
+    local required=$1 attempt
+    for attempt in 1 2 3; do
+        scrape_metrics && grep -q "^greptime_logstore_object_store_wal_$required " "$dir/metrics$phase.prom" && return 0
+        sleep 1
+    done
     return 1
 }
 
@@ -121,6 +125,8 @@ restart() {
     local table count started deadline
     table=$(jq -er .table "$dir/greptimedb-1/load-result.json")
     scrape_metrics || { echo "$id: metrics scrape failed" >&2; exit 4; }
+    # The objects recovery has to read are those still indexed at the kill.
+    indexed_before_kill=$(awk '/^greptime_logstore_object_store_wal_indexed_objects / {print $2}' "$dir/metrics.prom")
     stop_server kill
     phase=-restart started=$(now)
     start_server
@@ -134,6 +140,9 @@ restart() {
     done
     restart_query_seconds=$(elapsed "$started") restart_count=$count
     [[ "$count" == "$(jq .rows <<< "$spec")" ]] || { echo "$id: $count rows after restart" >&2; exit 5; }
+    # The restart was measured, but on fewer objects than the cell asked for.
+    awk -v n="${indexed_before_kill:-0}" -v min="$(jq -r '.min_objects // 0' <<< "$spec")" 'BEGIN {exit !(n >= min)}' \
+        || { echo "$id: ${indexed_before_kill:-no} objects indexed at the kill, fewer than min_objects" >&2; exit 7; }
 }
 
 # Pins the WAL with one row in a second table before the writers start, if asked,
@@ -172,7 +181,7 @@ crash_cycles() {
     for ((cycle = 1; cycle <= cycles; cycle++)); do
         cdir="$dir/cycle-$cycle" complete=true; mkdir -p "$cdir"
         # The counters of this server process before its writers start are the cycle's baseline.
-        phase=-start-$cycle; scrape_retry || complete=false
+        phase=-start-$cycle; scrape_retry indexed_objects || complete=false
         load_start=$(now_ns)
         python3 "$here/oswal-s3-bench-crash.py" write --dir "$cdir" --url "$sql_url" \
             --writers "$writers" --first-seq "$next" --rows "$rows" &
@@ -180,7 +189,7 @@ crash_cycles() {
         if jq -e .pin <<< "$spec" >/dev/null; then sample_objects & spid=$!; fi
         delay=$(awk -v a="$kill_min" -v b="$kill_max" 'BEGIN {srand(); printf "%.3f", a + rand() * (b - a)}')
         sleep "$delay"
-        phase=-cycle-$cycle; scrape_retry || complete=false
+        phase=-cycle-$cycle; scrape_retry indexed_objects || complete=false
         before=$(now_ns); docker kill --signal KILL "$cid" >/dev/null; after=$(now_ns)
         wait "$wpid"
         if [[ -n "$spid" ]]; then kill "$spid" 2>/dev/null || true; wait "$spid" 2>/dev/null || true; spid=; fi
@@ -193,7 +202,7 @@ crash_cycles() {
             sleep 0.2
         done
         query_s=$(elapsed "$started")
-        scrape_retry || complete=false
+        scrape_retry recovery_seconds_count || complete=false
         pin_count=null
         if jq -e .pin <<< "$spec" >/dev/null; then
             pin_count=$(sql "SELECT count(*) FROM pin" | jq -er '.output[0].records.rows[0][0]')
@@ -230,6 +239,7 @@ finish() {
         --arg load_seconds "$load_seconds" --argjson exit_code "$rc" --argjson scraped "$metrics_scraped" \
         --argjson restart_scraped "$restart_scraped" --arg restart_seconds "$restart_seconds" \
         --arg restart_query_seconds "$restart_query_seconds" --arg restart_count "$restart_count" \
+        --arg indexed_before_kill "$indexed_before_kill" \
         --arg server_cpu_seconds "$server_cpu_seconds" --arg host_cpu_busy "$host_cpu_busy" --arg host_cpus "$(nproc 2>/dev/null)" \
         '$spec + {wal_device: $device, version: $version, exit_code: $exit_code, metrics_scraped: $scraped,
           load_wall_seconds: ($load_seconds | tonumber? // null),
@@ -237,7 +247,8 @@ finish() {
           host_cpu_busy: ($host_cpu_busy | tonumber? // null), host_cpus: ($host_cpus | tonumber? // null),
           restart_scraped: $restart_scraped, restart_seconds: ($restart_seconds | tonumber? // null),
           restart_query_seconds: ($restart_query_seconds | tonumber? // null),
-          restart_count: ($restart_count | tonumber? // null)}' > "$dir/cell.json"
+          restart_count: ($restart_count | tonumber? // null),
+          indexed_before_kill: ($indexed_before_kill | tonumber? // null)}' > "$dir/cell.json"
     exit "$rc"
 }
 
@@ -248,6 +259,7 @@ cell() {
     : "${RUN_PREFIX:?}" "${WAL_ROOT:?}" "${S3_BUCKET:?}" "${S3_REGION:?}" "${AWS_ACCESS_KEY_ID:?}" "${AWS_SECRET_ACCESS_KEY:?}"
     spec=$1 cid= wal_dir= home_dir= version= load_seconds= metrics_scraped=false id= phase=
     restart_scraped=false restart_seconds= restart_query_seconds= restart_count= server_cpu_seconds= host_cpu_busy=
+    indexed_before_kill=
     local concurrency setting started cpu_before host_before host_after
     id=$(jq -r .id <<< "$spec"); concurrency=$(jq -r .concurrency <<< "$spec")
     dir="$RESULTS/cells/$id" name="$OWNER-$id"
