@@ -35,7 +35,7 @@ use store_api::logstore::entry::{Entry, NaiveEntry};
 use store_api::logstore::provider::{ObjectStoreProvider, Provider};
 use store_api::logstore::{AppendBatchResponse, EntryId, LogStore, SendableEntryStream, WalIndex};
 use store_api::storage::RegionId;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::time::MissedTickBehavior;
 
 use crate::error::{
@@ -93,12 +93,17 @@ const RECOVERY_CONCURRENCY: usize = 64;
 /// Number of segments a read fetches ahead of the one whose entries it
 /// yields. On S3 a replay that fetched each segment after the previous one
 /// spent about 30 ms per object; with eight fetches in flight a segment
-/// arrives about every 4 ms. A read holds at most this many decoded segments
-/// besides the one it yields, each up to about `max_batch_bytes` (64 MiB in
-/// all at the default 8 MiB), or more for one oversized append. A fetch keeps
-/// the downloaded segment while it copies the payloads out of it, so for a
-/// moment it holds the segment twice: up to 128 MiB in all at the default.
+/// arrives about every 4 ms. The segments fetched ahead also take their bytes
+/// from [`READ_PREFETCH_BYTES`].
 const READ_PREFETCH_DEPTH: usize = 8;
+/// Bytes of segments that all reads of a store together fetch ahead. A read
+/// always fetches the segment it yields next, as a read that fetched one
+/// segment at a time did, and a later segment only while its length fits in
+/// what is left, so regions replayed in parallel hold one segment each plus at
+/// most these bytes, however many regions open at once. A fetch keeps the
+/// downloaded segment while it copies the payloads out of it, so for a moment
+/// it holds the segment twice.
+const READ_PREFETCH_BYTES: usize = 64 * 1024 * 1024;
 /// Bytes recovery reads from the end of an object in one request. The window
 /// holds the trailer and the footer of an object with up to 1364 regions of
 /// 48 bytes each, so a second request for the footer is rare.
@@ -129,6 +134,8 @@ pub struct ObjectStoreLogStore {
     wal_holes: WalHoles,
     /// Objects with a delete in flight, which a read consults.
     deleting: Arc<DeletingObjects>,
+    /// Bytes the reads may fetch ahead, see [`READ_PREFETCH_BYTES`].
+    read_prefetch_budget: Arc<Semaphore>,
     terminal_error: TerminalError,
     stopped: Arc<AtomicBool>,
     command_tx: mpsc::Sender<Command>,
@@ -409,6 +416,7 @@ impl ObjectStoreLogStore {
             obsolete_entry_ids,
             wal_holes,
             deleting,
+            read_prefetch_budget: Arc::new(Semaphore::new(READ_PREFETCH_BYTES)),
             terminal_error,
             stopped,
             command_tx,
@@ -737,8 +745,9 @@ impl LogStore for ObjectStoreLogStore {
     /// An object collected after the read listed it is skipped. Otherwise a
     /// segment that does not decode fails the read or is skipped and recorded
     /// as a hole, as `on_corrupted_segment` says; a failed fetch always fails
-    /// the read. Up to [`READ_PREFETCH_DEPTH`] segments are fetched ahead,
-    /// and each outcome is handled in sequence order.
+    /// the read. Up to [`READ_PREFETCH_DEPTH`] segments are fetched ahead
+    /// while [`READ_PREFETCH_BYTES`] allows, and each outcome is handled in
+    /// sequence order.
     async fn read(
         &self,
         provider: &Provider,
@@ -777,16 +786,37 @@ impl LogStore for ObjectStoreLogStore {
         let provider = provider.clone();
         let on_corrupted_segment = self.on_corrupted_segment;
         let wal_holes = self.wal_holes.clone();
+        let prefetch_budget = self.read_prefetch_budget.clone();
         Ok(Box::pin(try_stream! {
             let started_at = Instant::now();
-            let mut fetches = futures::stream::iter(objects)
-                .map(|(object_seq, footer_entry)| {
+            let mut objects = objects.into_iter().peekable();
+            let mut fetches = VecDeque::new();
+            loop {
+                // The next segment is always fetched, a later one only with
+                // its bytes reserved from the budget.
+                while fetches.len() < READ_PREFETCH_DEPTH {
+                    let Some((_, entry)) = objects.peek() else {
+                        break;
+                    };
+                    let permit = if fetches.is_empty() {
+                        None
+                    } else {
+                        match reserve_prefetch(&prefetch_budget, entry) {
+                            Some(permit) => Some(permit),
+                            None => break,
+                        }
+                    };
+                    let Some((object_seq, footer_entry)) = objects.next() else {
+                        break;
+                    };
                     let fetch = spawn_fetch_segment(io.clone(), object_seq, footer_entry.clone());
-                    async move { (object_seq, footer_entry, fetch.await) }
-                })
-                .buffered(READ_PREFETCH_DEPTH);
-            while let Some((object_seq, footer_entry, fetched)) = fetches.next().await {
-                let records = match fetched {
+                    fetches.push_back((object_seq, footer_entry, fetch, permit));
+                }
+                // The permit is held until the entries of the segment are yielded.
+                let Some((object_seq, footer_entry, fetch, _permit)) = fetches.pop_front() else {
+                    break;
+                };
+                let records = match fetch.await {
                     Ok(records) => records,
                     Err(error) if is_collected(&catalog, &deleting, object_seq).await => {
                         debug!(
@@ -2156,6 +2186,13 @@ async fn fetch_segment(
     decode_segment(&fetch().await?, entry).with_context(|_| InvalidWalObjectSnafu {
         path: io.object_path(object_seq),
     })
+}
+
+/// Takes the bytes of the segment `entry` describes from `budget` if they are
+/// free.
+fn reserve_prefetch(budget: &Arc<Semaphore>, entry: &FooterEntry) -> Option<OwnedSemaphorePermit> {
+    let bytes = u32::try_from(entry.segment_len).ok()?;
+    budget.clone().try_acquire_many_owned(bytes).ok()
 }
 
 /// Runs [`fetch_segment`] on a task of its own, so the fetch proceeds while
@@ -3598,6 +3635,7 @@ mod tests {
             obsolete_entry_ids: ObsoleteEntryIds::default(),
             wal_holes: WalHoles::default(),
             deleting: Arc::default(),
+            read_prefetch_budget: Arc::new(Semaphore::new(READ_PREFETCH_BYTES)),
             terminal_error: Arc::default(),
             stopped: Arc::new(AtomicBool::new(false)),
             command_tx,
@@ -4496,6 +4534,59 @@ mod tests {
         assert_eq!(
             reads,
             METRIC_OBJECT_STORE_WAL_READ_SECONDS.get_sample_count()
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_reads_fetch_ahead_within_a_shared_budget() {
+        let _serialized = SERIALIZED.lock().await;
+        let depth = READ_PREFETCH_DEPTH as u64;
+        let objects = depth + 4;
+        let (store, _io, mut parked) = open_parking_range_reads(objects).await;
+
+        // While other reads hold the whole budget, a read fetches only the
+        // segment it yields next.
+        let held = store
+            .read_prefetch_budget
+            .clone()
+            .try_acquire_many_owned(READ_PREFETCH_BYTES as u32)
+            .unwrap();
+        let mut stream = store.read(&provider(region(1)), 0, None).await.unwrap();
+        assert!(stream.next().now_or_never().is_none());
+        let (object_seq, release) = next_parked_operation(&mut parked).await;
+        assert_eq!(0, object_seq);
+        assert_nothing_parks(&mut parked).await;
+        release.send(true).unwrap();
+        assert_eq!(object_entries([0]), next_batch(&mut stream).await);
+
+        // Once the budget is free, the next poll fetches ahead up to the depth.
+        drop(held);
+        assert!(stream.next().now_or_never().is_none());
+        let wave = parked_operations(&mut parked, READ_PREFETCH_DEPTH).await;
+        assert_eq!(
+            (1..=depth).collect::<BTreeSet<_>>(),
+            wave.keys().copied().collect()
+        );
+        assert_nothing_parks(&mut parked).await;
+        for release in wave.into_values() {
+            release.send(true).unwrap();
+        }
+        let rest = tokio::spawn(stream.try_collect::<Vec<_>>());
+        for release in parked_operations(&mut parked, (objects - depth - 1) as usize)
+            .await
+            .into_values()
+        {
+            release.send(true).unwrap();
+        }
+        let rest = timeout(WAIT, rest).await.unwrap().unwrap().unwrap();
+        assert_eq!(
+            object_entries(1..objects),
+            rest.into_iter().flatten().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            READ_PREFETCH_BYTES,
+            store.read_prefetch_budget.available_permits()
         );
         store.stop().await.unwrap();
     }
