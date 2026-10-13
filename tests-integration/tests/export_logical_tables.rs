@@ -1587,7 +1587,6 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
     });
     plugins.insert::<SqlQueryInterceptorRef<frontend::error::Error>>(faults.clone());
     let source = GreptimeDbStandaloneBuilder::new("metric_v2_source")
-        .with_experimental_metric_export()
         .with_plugin(plugins)
         .build()
         .await;
@@ -2094,8 +2093,8 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool, older: bool) {
 }
 
 #[tokio::test]
-async fn metric_export_v2_disabled_and_legacy_cli() {
-    let source = GreptimeDbStandaloneBuilder::new("metric_v2_disabled")
+async fn metric_export_v2_requires_parquet_and_keeps_default_layout() {
+    let source = GreptimeDbStandaloneBuilder::new("metric_v2_default")
         .build()
         .await;
     let (addr, server) = export_http(source.fe_instance().clone()).await;
@@ -2113,12 +2112,15 @@ async fn metric_export_v2_disabled_and_legacy_cli() {
         "--to",
         &uri,
         "--force",
+        "--format",
+        "csv",
         "--pack-metric-data",
         "--no-proxy",
         "--progress",
         "never",
     ];
-    assert!(run_data_cli(&args).await.is_err());
+    let error = run_data_cli(&args).await.unwrap_err();
+    assert!(error.to_string().contains("requires Parquet"), "{error}");
     assert_eq!(
         std::fs::read(&manifest).unwrap(),
         b"preserve-before-capability-check"
@@ -2148,6 +2150,10 @@ async fn metric_export_v2_disabled_and_legacy_cli() {
     run_data_cli(&["export-v2", "verify", "--snapshot", &uri])
         .await
         .unwrap();
+    let saved: cli::export_v2::manifest::Manifest =
+        serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+    assert_eq!(saved.version, 1);
+    assert!(!saved.is_packed());
     server.abort();
 }
 
@@ -2156,80 +2162,18 @@ async fn metric_export_v2_refuses_missing_or_malformed_capability_before_force()
     use axum::http::StatusCode;
     use common_error::ext::ErrorExt;
     use serde_json::json;
-    let column = json!({"name": "EXPERIMENTAL_METRIC_EXPORT", "data_type": "String"});
-    let records = |rows, columns| {
-        json!({"records": {
-            "schema": {"column_schemas": columns},
-            "rows": rows
-        }})
-    };
-    let valid = records(json!([["true"]]), json!([column.clone()]));
-    let mut responses = [
-        (StatusCode::BAD_REQUEST, json!([])),
-        (StatusCode::OK, json!([])),
-        (StatusCode::OK, json!([["false"]])),
-        (StatusCode::OK, json!([[true]])),
-        (StatusCode::OK, json!([["true", "extra"]])),
-        (StatusCode::OK, json!([["true"], ["true"]])),
-    ]
-    .map(|(status, rows)| (status, json!([records(rows, json!([column.clone()]))])))
-    .to_vec();
-    responses.extend([
-        (
-            StatusCode::OK,
-            json!([
-                valid.clone(),
-                records(json!([["false"]]), json!([column.clone()]))
-            ]),
-        ),
-        (
-            StatusCode::OK,
-            json!([records(json!([["true"]]), json!([]))]),
-        ),
-        (
-            StatusCode::OK,
-            json!([records(json!([["true"]]), json!([column.clone(), column]))]),
-        ),
-        (
-            StatusCode::OK,
-            json!([records(
-                json!([["true"]]),
-                json!([{"name": "EXPERIMENTAL_METRIC_EXPORT", "data_type": "Boolean"}])
-            )]),
-        ),
-        (
-            StatusCode::OK,
-            json!([records(
-                json!([["true"]]),
-                json!([{"name": "OTHER", "data_type": "String"}])
-            )]),
-        ),
-    ]);
-    responses.push((StatusCode::OK, json!([valid.clone()])));
-    for (status, output) in responses {
-        let gate_enabled = output == json!([valid.clone()]);
-        let app = axum::Router::new()
-            .route(
-                "/v1/sql",
-                axum::routing::post(
-                    move |axum::Form(form): axum::Form<
-                        std::collections::HashMap<String, String>,
-                    >| async move {
-                        assert_eq!(form["sql"], "SHOW VARIABLES experimental_metric_export");
-                        (
-                            status,
-                            axum::Json(json!({
-                                "execution_time_ms": 0,
-                                "output": output
-                            })),
-                        )
-                    },
-                ),
-            )
-            .route(
-                "/v1/capabilities",
-                axum::routing::get(|| async { axum::Json(json!({})) }),
-            );
+    for (status, capability) in [
+        (StatusCode::NOT_FOUND, json!({})),
+        (StatusCode::OK, json!({})),
+        (StatusCode::OK, json!({"metric_packed_export": 0})),
+        (StatusCode::OK, json!({"metric_packed_export": 2})),
+        (StatusCode::OK, json!({"metric_packed_export": true})),
+        (StatusCode::OK, json!({"metric_packed_export": "1"})),
+    ] {
+        let app = axum::Router::new().route(
+            "/v1/capabilities",
+            axum::routing::get(move || async move { (status, axum::Json(capability)) }),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -2251,14 +2195,10 @@ async fn metric_export_v2_refuses_missing_or_malformed_capability_before_force()
         ];
         let error = run_data_cli(&args).await.unwrap_err();
         let cause = error.root_cause().unwrap_or(&error).to_string();
-        if gate_enabled {
-            assert!(cause.contains("metric_packed_export"), "{error:?}");
-        } else if status == StatusCode::OK {
-            assert!(
-                error.to_string().contains("Metric export requires"),
-                "{error}"
-            );
-        }
+        assert!(
+            cause.contains("metric_packed_export") || cause.contains("invalid capability version"),
+            "{error:?}"
+        );
         assert!(!snapshot.exists());
         std::fs::create_dir(&snapshot).unwrap();
         let manifest = snapshot.join("manifest.json");

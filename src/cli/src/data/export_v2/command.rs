@@ -20,11 +20,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use clap::{Parser, Subcommand};
-use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_error::ext::BoxedError;
 use common_telemetry::info;
 use serde_json::Value;
-use servers::http::{ColumnSchema, GreptimeQueryOutput, OutputSchema};
 use snafu::ResultExt;
 
 use crate::Tool;
@@ -32,8 +30,9 @@ use crate::common::ObjectStoreConfig;
 use crate::data::export_v2::coordinator::{ExportDataOptions, export_data};
 use crate::data::export_v2::error::{
     ChunkTimeWindowRequiresBoundsSnafu, DatabaseSnafu, IoSnafu, ManifestVersionMismatchSnafu,
-    Result, ResumeConfigMismatchSnafu, SchemaOnlyArgsNotAllowedSnafu, SchemaOnlyModeMismatchSnafu,
-    SnapshotVerifyFailedSnafu, UnexpectedValueTypeSnafu,
+    MetricExportRequiresParquetSnafu, Result, ResumeConfigMismatchSnafu,
+    SchemaOnlyArgsNotAllowedSnafu, SchemaOnlyModeMismatchSnafu, SnapshotVerifyFailedSnafu,
+    UnexpectedValueTypeSnafu,
 };
 use crate::data::export_v2::extractor::SchemaExtractor;
 use crate::data::export_v2::manifest::{
@@ -408,9 +407,7 @@ impl ExportCreateCommand {
 
         // The filesystem storage constructor can create the snapshot root.
         if self.pack_metric_data {
-            require_metric_export_enabled(&database_client, self.format)
-                .await
-                .map_err(BoxedError::new)?;
+            require_metric_export_format(self.format).map_err(BoxedError::new)?;
             if !self.schema_only {
                 database_client
                     .require_packed_export()
@@ -508,7 +505,7 @@ impl ExportCreate {
 
                 validate_resume_config(&manifest, &self.config)?;
                 if manifest.is_packed() {
-                    require_metric_export_enabled(&self.database_client, manifest.format).await?;
+                    require_metric_export_format(manifest.format)?;
                     self.database_client
                         .require_packed_export()
                         .await
@@ -727,26 +724,9 @@ impl ExportCreate {
     }
 }
 
-async fn require_metric_export_enabled(client: &DatabaseClient, format: DataFormat) -> Result<()> {
+fn require_metric_export_format(format: DataFormat) -> Result<()> {
     if format != DataFormat::Parquet {
-        return crate::data::export_v2::error::MetricExportUnavailableSnafu.fail();
-    }
-    let capability = client
-        .sql_response(
-            "SHOW VARIABLES experimental_metric_export",
-            DEFAULT_SCHEMA_NAME,
-        )
-        .await
-        .context(DatabaseSnafu)?;
-    let expected_schema = OutputSchema::new(vec![ColumnSchema::new(
-        "EXPERIMENTAL_METRIC_EXPORT".to_string(),
-        "String".to_string(),
-    )]);
-    if !matches!(capability.output(), [GreptimeQueryOutput::Records(records)]
-        if records.schema() == &expected_schema
-            && records.rows() == &vec![vec![Value::String("true".to_string())]])
-    {
-        return crate::data::export_v2::error::MetricExportUnavailableSnafu.fail();
+        return MetricExportRequiresParquetSnafu.fail();
     }
     Ok(())
 }
@@ -1756,7 +1736,7 @@ mod tests {
 
     #[test]
     fn test_schema_only_mode_mismatch_error_message() {
-        let error = crate::data::export_v2::error::SchemaOnlyModeMismatchSnafu {
+        let error = SchemaOnlyModeMismatchSnafu {
             existing_schema_only: false,
             requested_schema_only: true,
         }

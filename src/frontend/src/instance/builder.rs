@@ -399,7 +399,6 @@ impl FrontendBuilder {
         Ok(Instance {
             logical_batcher: Default::default(),
             frontend_peer_addr,
-            experimental_metric_export: self.options.experimental_metric_export,
             catalog_manager: self.catalog_manager,
             pipeline_operator,
             statement_executor,
