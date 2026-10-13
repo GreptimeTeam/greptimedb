@@ -23,19 +23,19 @@
 //!
 //! `AVG(value * weight)` / `SUM(value * weight)`: the aggregate over the
 //! pairwise products is replaced by `SUM(value) * SUM(weight)` divided by
-//! `COUNT(value) * COUNT(weight)` (`AVG`) or used as it is (`SUM`).
+//! `COUNT(value) * COUNT(weight)` (`AVG`) or used as it is (`SUM`). The counts
+//! are checked individually for zero; for `AVG` they are cast to `Float64`
+//! before multiplication to avoid overflowing their `Int64` representation.
 //!
 //! # Approximation contract
 //!
 //! The payload rewrite is opt-in rule state and **shape-based**: it does not
 //! inspect the payloads, so it cannot know how well they factorize.
 //!
-//! - For well-conditioned inputs the factorized result matches the unrewritten
-//!   pairwise baseline to within ordinary floating-point rounding, roughly
-//!   `1e-9` relative.
-//! - On inputs with heavy cancellation, intermediate overflow, or
-//!   subnormal/extreme magnitudes the factorized `AVG`/`SUM` can differ from the
-//!   baseline arbitrarily, in magnitude and in sign.
+//! - Floating-point reassociation means the factorized result can differ from
+//!   the pairwise baseline; on inputs with heavy cancellation, intermediate
+//!   overflow, or subnormal/extreme magnitudes, it can differ arbitrarily, in
+//!   magnitude and in sign.
 //!
 //! That difference is accepted in this opt-in experiment mode: the opt-in
 //! switch and this documentation are the guard, not an admission classifier.
@@ -46,8 +46,8 @@
 //! `+0.0` cannot surface here as `-0.0`.
 //!
 //! The rule is intentionally narrow: it matches only the join and group shapes
-//! described by `matching_payload_shape`. It is not
-//! registered in the default optimizer list and gated by a session extension.
+//! described by `matching_payload_shape`. It is registered in the optimizer but
+//! remains inert unless enabled by config/session extension state.
 
 use std::sync::Arc;
 
@@ -110,21 +110,21 @@ impl OptimizerRule for FactorizedJoinAggRule {
 /// aggregate into a join of two partial aggregates whose projection
 /// reconstructs the payload function from them.
 ///
-/// The projection computes, from the branch `nf`/`nv`/`sv` (fact) and
-/// `nd`/`nw`/`sw` (dim) outputs:
+/// The projection computes, from the branch `nv`/`sv` (fact) and `nw`/`sw`
+/// (dim) outputs:
 ///
 /// ```text
-/// valid = nv * nw
-/// total = CASE WHEN sv * sw = 0.0 THEN 0.0 ELSE sv * sw END
-/// AVG   = CASE WHEN valid = 0 THEN NULL ELSE total / CAST(valid AS Float64) END
-/// SUM   = CASE WHEN valid = 0 THEN NULL ELSE total END
+/// no_products = (nv = 0) OR (nw = 0)
+/// total       = CASE WHEN sv * sw = 0.0 THEN 0.0 ELSE sv * sw END
+/// AVG         = CASE WHEN no_products THEN NULL ELSE total / (CAST(nv AS Float64) * CAST(nw AS Float64)) END
+/// SUM         = CASE WHEN no_products THEN NULL ELSE total END
 /// ```
 ///
 /// Both reconstructions return `NULL` for a group without a single non-null
-/// product, which is exactly when `valid` is zero: `nv` and `nw` are payload
-/// counts, so their product is zero iff one side has no non-null payload and the
-/// join therefore has no non-null product. `AVG` over an empty pair set is
-/// `NULL` and so is `SUM`.
+/// product, which is exactly when either payload count is zero. `AVG` over an
+/// empty pair set is `NULL` and so is `SUM`. Counts are never multiplied as
+/// `Int64`: `AVG` casts each count before multiplication, and `SUM` does not
+/// compute a count product.
 ///
 /// `total` normalizes a zero numerator to `+0.0` because the pairwise numerator
 /// it must match can only cancel to `+0.0`: for facts `[1, -1]` with weight
@@ -207,7 +207,13 @@ fn rewrite_payload(
     )?;
 
     let partial = |name: &str| Expr::Column(Column::new_unqualified(name));
-    let valid = partial(&fact_payloads_name) * partial(&dim_payloads_name);
+    let fact_count = partial(&fact_payloads_name);
+    let dim_count = partial(&dim_payloads_name);
+    let no_products = Expr::BinaryExpr(BinaryExpr::new(
+        Box::new(is_zero(fact_count.clone(), int_literal(0))),
+        Operator::Or,
+        Box::new(is_zero(dim_count.clone(), int_literal(0))),
+    ));
     let product = partial(&fact_sum_name) * partial(&dim_sum_name);
     // `total`: the signed-zero normalization described on this function.
     let total = Expr::Case(Case::new(
@@ -221,14 +227,17 @@ fn rewrite_payload(
     let numerator = Expr::Case(Case::new(
         None,
         vec![(
-            Box::new(is_zero(valid.clone(), int_literal(0))),
+            Box::new(no_products),
             Box::new(Expr::Literal(ScalarValue::Float64(None), None)),
         )],
         Some(Box::new(match function {
             PayloadFunction::Avg => Expr::BinaryExpr(BinaryExpr::new(
                 Box::new(total),
                 Operator::Divide,
-                Box::new(Expr::Cast(Cast::new(Box::new(valid), DataType::Float64))),
+                Box::new(
+                    Expr::Cast(Cast::new(Box::new(fact_count), DataType::Float64))
+                        * Expr::Cast(Cast::new(Box::new(dim_count), DataType::Float64)),
+                ),
             )),
             PayloadFunction::Sum => total,
         })),
@@ -368,6 +377,7 @@ fn matching_payload_shape(agg: &Aggregate, function: PayloadFunction) -> Option<
     let left_key = resolve_through_projection(left_key, None)?;
     let right_key = resolve_through_projection(right_key, None)?;
     if left_group != left_key
+        || right_group == right_key
         || !join.left.schema().has_column(&left_group)
         || !join.right.schema().has_column(&right_group)
     {
