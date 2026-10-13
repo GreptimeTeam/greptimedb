@@ -135,3 +135,25 @@ iterations = 3
 
 [scenario.queries.thresholds]
 max_candidate_latency_regression_pct = 50
+
+# Volatile variant: the dim side contains random(), so the nested MergeScan
+# rewrite (path B) rejects it. With experimental_dist_join=true the candidate
+# uses the materialized broadcast path (path C): the small side is materialized
+# once on the frontend, then dispatched to the probe regions.
+# The base runs the same query without the opt-in, so it joins on the frontend.
+#
+# candidate_remote_operator is intentionally absent: the C hook runs after the
+# analyzer but EXPLAIN ANALYZE bypasses it, so the preflight would not see the
+# C-path plan. The require_region_statistics wait is still needed so the
+# dist_join planner fires at all.
+[[scenario.queries]]
+name = "join_dist_broadcast_volatile"
+kind = "sql"
+query = "SELECT f.host, d.zone, avg(f.value * d.weight * d.rand_factor) AS score FROM sql_join_dist_fact f JOIN (SELECT host, zone, weight, random() AS rand_factor FROM sql_join_dist_dim WHERE ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND ts < '2024-01-01 01:00:00+0000'::TIMESTAMP AND zone IN ('zone1', 'zone2')) d ON f.host = d.host WHERE f.ts >= '2024-01-01 00:00:00+0000'::TIMESTAMP AND f.ts < '2024-01-05 00:00:00+0000'::TIMESTAMP GROUP BY f.host, d.zone ORDER BY score DESC LIMIT 10"
+candidate_session_sql = ["SET experimental_dist_join = true"]
+require_region_statistics = true
+warmup = 1
+iterations = 3
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 50
