@@ -1,0 +1,110 @@
+-- EXPLAIN-level regression: a datafusion.optimizer.filter_null_join_keys=false
+-- override must reach the actual plan, not only SET/SHOW round-trips. The
+-- historical default keeps the pre-MergeScan null-key filters, so the default
+-- plan keeps the IS NOT NULL filters while the explicit override drops them.
+-- All statements run on the MySQL protocol so SET/SHOW/EXPLAIN share one session.
+CREATE TABLE fnjk_l (ts TIMESTAMP TIME INDEX, k INT DEFAULT NULL, v INT);
+
+Affected Rows: 0
+
+CREATE TABLE fnjk_r (ts TIMESTAMP TIME INDEX, k INT DEFAULT NULL, v INT);
+
+Affected Rows: 0
+
+INSERT INTO fnjk_l VALUES (0, 1, 10), (0, NULL, 20);
+
+Affected Rows: 2
+
+INSERT INTO fnjk_r VALUES (0, 1, 100), (0, NULL, 200);
+
+Affected Rows: 2
+
+-- SQLNESS PROTOCOL MYSQL
+SET datafusion.optimizer.filter_null_join_keys = false;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SHOW VARIABLES datafusion.optimizer.filter_null_join_keys;
+
++--------------------------------------------+
+| datafusion.optimizer.filter_null_join_keys |
++--------------------------------------------+
+| false                                      |
++--------------------------------------------+
+
+-- SQLNESS PROTOCOL MYSQL
+EXPLAIN SELECT l.k, l.v, r.v FROM fnjk_l l JOIN fnjk_r r ON l.k = r.k;
+
++---------------+----------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                         |
++---------------+----------------------------------------------------------------------------------------------+
+| logical_plan  | Projection: l.k, l.v, r.v                                                                    |
+|               |   Inner Join: l.k = r.k                                                                      |
+|               |     Projection: l.k, l.v                                                                     |
+|               |       MergeScan [is_placeholder=false, remote_input=[                                        |
+|               | SubqueryAlias: l                                                                             |
+|               |   TableScan: fnjk_l                                                                          |
+|               | ]]                                                                                           |
+|               |     Projection: r.k, r.v                                                                     |
+|               |       MergeScan [is_placeholder=false, remote_input=[                                        |
+|               | SubqueryAlias: r                                                                             |
+|               |   TableScan: fnjk_r                                                                          |
+|               | ]]                                                                                           |
+| physical_plan | HashJoinExec: mode=Partitioned, join_type=Inner, on=[(k@0, k@0)], projection=[k@0, v@1, v@3] |
+|               |   RepartitionExec: partitioning=Hash([k@0], 4), input_partitions=1                           |
+|               |     ProjectionExec: expr=[k@1 as k, v@2 as v]                                                |
+|               |       MergeScanExec: peers=[4398046511104(1024, 0), ]                                        |
+|               |   RepartitionExec: partitioning=Hash([k@0], 4), input_partitions=1                           |
+|               |     ProjectionExec: expr=[k@1 as k, v@2 as v]                                                |
+|               |       MergeScanExec: peers=[4402341478400(1025, 0), ]                                        |
+|               |                                                                                              |
++---------------+----------------------------------------------------------------------------------------------+
+
+-- Inner-join results are unchanged either way (NULL never matches NULL).
+-- SQLNESS PROTOCOL MYSQL
+SELECT l.k, l.v, r.v FROM fnjk_l l JOIN fnjk_r r ON l.k = r.k;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SET datafusion.optimizer.filter_null_join_keys = true;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+EXPLAIN SELECT l.k, l.v, r.v FROM fnjk_l l JOIN fnjk_r r ON l.k = r.k;
+
++---------------+----------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                         |
++---------------+----------------------------------------------------------------------------------------------+
+| logical_plan  | Projection: l.k, l.v, r.v                                                                    |
+|               |   Inner Join: l.k = r.k                                                                      |
+|               |     Filter: l.k IS NOT NULL                                                                  |
+|               |       Projection: l.k, l.v                                                                   |
+|               |         MergeScan [is_placeholder=false, remote_input=[                                      |
+|               | SubqueryAlias: l                                                                             |
+|               |   Filter: fnjk_l.k IS NOT NULL                                                               |
+|               |     TableScan: fnjk_l, partial_filters=[fnjk_l.k IS NOT NULL]                                |
+|               | ]]                                                                                           |
+|               |     Filter: r.k IS NOT NULL                                                                  |
+|               |       Projection: r.k, r.v                                                                   |
+|               |         MergeScan [is_placeholder=false, remote_input=[                                      |
+|               | SubqueryAlias: r                                                                             |
+|               |   Filter: fnjk_r.k IS NOT NULL                                                               |
+|               |     TableScan: fnjk_r, partial_filters=[fnjk_r.k IS NOT NULL]                                |
+|               | ]]                                                                                           |
+| physical_plan | HashJoinExec: mode=Partitioned, join_type=Inner, on=[(k@0, k@0)], projection=[k@0, v@1, v@3] |
+|               |   RepartitionExec: partitioning=Hash([k@0], 4), input_partitions=4                           |
+|               |     FilterExec: k@0 IS NOT NULL                                                              |
+|               |       RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1                   |
+|               |         ProjectionExec: expr=[k@1 as k, v@2 as v]                                            |
+|               |           MergeScanExec: peers=[4398046511104(1024, 0), ]                                    |
+|               |   RepartitionExec: partitioning=Hash([k@0], 4), input_partitions=4                           |
+|               |     FilterExec: k@0 IS NOT NULL                                                              |
+|               |       RepartitionExec: partitioning=RoundRobinBatch(4), input_partitions=1                   |
+|               |         ProjectionExec: expr=[k@1 as k, v@2 as v]                                            |
+|               |           MergeScanExec: peers=[4402341478400(1025, 0), ]                                    |
+|               |                                                                                              |
++---------------+----------------------------------------------------------------------------------------------+
+
