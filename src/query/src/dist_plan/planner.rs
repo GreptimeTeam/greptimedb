@@ -48,6 +48,7 @@ pub use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
 use table::table_name::TableName;
 
+use crate::dist_plan::MaterializedBroadcastNode;
 use crate::dist_plan::PredicateExtractor;
 use crate::dist_plan::dist_join_planner::{expected_region_ids, nested_broadcast_join_probe_input};
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
@@ -180,6 +181,53 @@ impl ExtensionPlanner for DistExtensionPlanner {
         session: &dyn Session,
         _planning_ctx: &PhysicalPlanningContext,
     ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        if let Some(materialized) = node.as_any().downcast_ref::<MaterializedBroadcastNode>() {
+            use datafusion::physical_plan::memory::{LazyBatchGenerator, LazyMemoryExec};
+            use parking_lot::RwLock;
+            use std::fmt;
+
+            #[derive(Debug)]
+            struct VecBatchGenerator {
+                batches: Vec<arrow::array::RecordBatch>,
+                next: usize,
+            }
+            impl fmt::Display for VecBatchGenerator {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    write!(f, "VecBatchGenerator")
+                }
+            }
+            impl LazyBatchGenerator for VecBatchGenerator {
+                fn as_any(&self) -> &dyn std::any::Any {
+                    self
+                }
+                fn generate_next_batch(&mut self) -> Result<Option<arrow::array::RecordBatch>> {
+                    let batch = self.batches.get(self.next).cloned();
+                    self.next += usize::from(batch.is_some());
+                    Ok(batch)
+                }
+                fn reset_state(&self) -> Arc<RwLock<dyn LazyBatchGenerator>> {
+                    Arc::new(RwLock::new(Self {
+                        batches: self.batches.clone(),
+                        next: 0,
+                    }))
+                }
+            }
+
+            let schema = materialized
+                .batches()
+                .first()
+                .map(|batch| batch.schema())
+                .unwrap_or_else(|| materialized.arrow_schema());
+            let generator: Arc<RwLock<dyn LazyBatchGenerator>> =
+                Arc::new(RwLock::new(VecBatchGenerator {
+                    batches: materialized.batches().to_vec(),
+                    next: 0,
+                }));
+            return Ok(Some(Arc::new(LazyMemoryExec::try_new(
+                schema,
+                vec![generator],
+            )?)));
+        }
         let Some(merge_scan) = node.as_any().downcast_ref::<MergeScanLogicalPlan>() else {
             return Ok(None);
         };

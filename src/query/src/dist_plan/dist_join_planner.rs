@@ -463,7 +463,10 @@ fn strip_merge_scan(plan: &LogicalPlan) -> Option<(LogicalPlan, MergeScanLogical
 
 /// Wraps a swapped join in a projection restoring the original schema, only when each
 /// original output column uniquely addresses its corresponding swapped input position.
-fn restore_join_schema(join: Join, schema: datafusion_common::DFSchemaRef) -> Option<LogicalPlan> {
+pub(crate) fn restore_join_schema(
+    join: Join,
+    schema: datafusion_common::DFSchemaRef,
+) -> Option<LogicalPlan> {
     let left_len = join.right.schema().fields().len();
     let right_len = join.left.schema().fields().len();
     if schema.fields().len() != left_len + right_len {
@@ -500,7 +503,7 @@ fn restore_join_schema(join: Join, schema: datafusion_common::DFSchemaRef) -> Op
 ///
 /// The small side is re-executed on every large-side region, so volatile expressions there
 /// would change result semantics within a single query.
-fn contains_volatile_expr(plan: &LogicalPlan) -> bool {
+pub(crate) fn contains_volatile_expr(plan: &LogicalPlan) -> bool {
     if plan.expressions().iter().any(Expr::is_volatile) {
         return true;
     }

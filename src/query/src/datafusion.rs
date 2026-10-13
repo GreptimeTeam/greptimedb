@@ -165,6 +165,156 @@ impl DatafusionQueryEngine {
     /// and never reaches the shared engine state. The rewrite is an optimization, so a table
     /// whose statistics are unusable (missing, duplicate, zero-sized or overflowing) is left out
     /// instead of failing the query.
+    async fn maybe_materialize_volatile_broadcast(
+        &self,
+        analyzed_plan: &LogicalPlan,
+        ctx: &QueryEngineContext,
+    ) -> Result<LogicalPlan> {
+        use crate::dist_plan::{
+            MaterializedBroadcastNode, MergeScanLogicalPlan, contains_volatile_expr,
+            restore_join_schema,
+        };
+        use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
+        use datafusion_expr::{Join, LogicalPlan as DfLogicalPlan};
+
+        fn strip_merge_scan(plan: &LogicalPlan) -> Option<(LogicalPlan, MergeScanLogicalPlan)> {
+            match plan {
+                DfLogicalPlan::Extension(extension) => {
+                    let merge_scan = extension
+                        .node
+                        .as_any()
+                        .downcast_ref::<MergeScanLogicalPlan>()?;
+                    Some((merge_scan.input().clone(), merge_scan.clone()))
+                }
+                DfLogicalPlan::Projection(projection) => {
+                    let (input, merge_scan) = strip_merge_scan(&projection.input)?;
+                    let plan = plan
+                        .with_new_exprs(projection.expr.clone(), vec![input])
+                        .ok()?;
+                    Some((plan, merge_scan))
+                }
+                _ => None,
+            }
+        }
+
+        fn find_volatile_small(
+            plan: &LogicalPlan,
+        ) -> Option<(
+            Join,
+            LogicalPlan,
+            MergeScanLogicalPlan,
+            LogicalPlan,
+            MergeScanLogicalPlan,
+        )> {
+            if let DfLogicalPlan::Join(join) = plan
+                && join.join_type == datafusion_expr::JoinType::Inner
+                && !join.on.is_empty()
+                && let Some((large_plan, large)) = strip_merge_scan(&join.left)
+                && let Some((small_plan, small)) = strip_merge_scan(&join.right)
+                && contains_volatile_expr(&small_plan)
+                && !large.is_placeholder()
+                && !small.is_placeholder()
+            {
+                return Some((join.clone(), large_plan, large, small_plan, small));
+            }
+            for input in plan.inputs() {
+                if let Some(found) = find_volatile_small(input) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+
+        if !ctx
+            .query_ctx()
+            .configuration_parameter()
+            .experimental_dist_join()
+        {
+            return Ok(analyzed_plan.clone());
+        }
+        let Some((original_join, large_plan, large, _small_plan, _small_scan)) =
+            find_volatile_small(analyzed_plan)
+        else {
+            return Ok(analyzed_plan.clone());
+        };
+        let small_output = self
+            .execute(_small_plan.clone(), ctx.query_ctx().clone())
+            .await?;
+        let batches = match small_output.data {
+            common_query::OutputData::RecordBatches(batches) => batches
+                .iter()
+                .map(|batch| batch.df_record_batch().clone())
+                .collect::<Vec<_>>(),
+            common_query::OutputData::Stream(stream) => {
+                let collected = common_recordbatch::util::collect_batches(stream)
+                    .await
+                    .map_err(|e| datafusion_common::DataFusionError::External(Box::new(e)))?;
+                collected
+                    .iter()
+                    .map(|batch| batch.df_record_batch().clone())
+                    .collect::<Vec<_>>()
+            }
+            common_query::OutputData::AffectedRows(_) => {
+                return Err(datafusion_common::DataFusionError::Internal(
+                    "small side materialization must produce record batches".to_string(),
+                )
+                .into());
+            }
+        };
+        let node = MaterializedBroadcastNode::new(_small_plan.schema().clone(), batches);
+        if !node.within_cap() {
+            return Ok(analyzed_plan.clone());
+        }
+        let swapped_join = Join::try_new(
+            Arc::new(node.into_logical_plan()),
+            Arc::new(large_plan),
+            original_join
+                .on
+                .iter()
+                .map(|(left, right)| (right.clone(), left.clone()))
+                .collect(),
+            original_join.filter.clone(),
+            original_join.join_type,
+            original_join.join_constraint,
+            original_join.null_equality,
+            original_join.null_aware,
+        )?;
+        let Some(restored_plan) = restore_join_schema(swapped_join, original_join.schema.clone())
+        else {
+            return Ok(analyzed_plan.clone());
+        };
+        let mut outer = MergeScanLogicalPlan::new(restored_plan, false);
+        if let Some(id) = large.remote_dyn_filter_producer_id() {
+            outer = outer.with_remote_dyn_filter_producer_id(id);
+        }
+
+        struct Replace {
+            original: Join,
+            replacement: LogicalPlan,
+        }
+        impl TreeNodeRewriter for Replace {
+            type Node = LogicalPlan;
+            fn f_up(
+                &mut self,
+                plan: LogicalPlan,
+            ) -> datafusion_common::Result<Transformed<LogicalPlan>> {
+                if let LogicalPlan::Join(join) = &plan
+                    && *join == self.original
+                {
+                    return Ok(Transformed::yes(self.replacement.clone()));
+                }
+                Ok(Transformed::no(plan))
+            }
+        }
+        Ok(analyzed_plan
+            .clone()
+            .rewrite(&mut Replace {
+                original: original_join,
+                replacement: outer.into_logical_plan(),
+            })?
+            .data)
+    }
+
     async fn dist_join_stats(
         &self,
         ctx: &QueryEngineContext,
@@ -525,7 +675,9 @@ impl DatafusionQueryEngine {
             state.config_options(),
             |_, _| {},
         )?;
-
+        let analyzed_plan = self
+            .maybe_materialize_volatile_broadcast(&analyzed_plan, ctx)
+            .await?;
         logger.after_analyze = Some(analyzed_plan.clone());
 
         common_telemetry::debug!("Create physical plan, analyzed plan: {analyzed_plan}");

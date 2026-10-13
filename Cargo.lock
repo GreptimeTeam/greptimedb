@@ -11875,6 +11875,7 @@ dependencies = [
  "nalgebra",
  "object-store",
  "once_cell",
+ "parking_lot 0.12.4",
  "partition",
  "paste",
  "pretty_assertions",

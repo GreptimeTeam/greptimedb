@@ -136,6 +136,71 @@ async fn test_nested_merge_scan_capability_join_across_datanodes() {
     assert_cross_datanode_region_query(&cluster, &remote_datanodes, &baseline_requests);
 }
 
+/// Volatile SMALL-side values are materialized once per query and broadcast to BIG regions.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_volatile_small_join_is_materialized_and_dispatched() {
+    common_telemetry::init_default_ut_logging();
+
+    let cluster = build_cluster("test_volatile_small_join_is_materialized_and_dispatched").await;
+    let frontend = cluster.fe_instance().clone();
+    prepare_tables(&frontend).await;
+
+    let query_ctx = query_ctx();
+    run_sql(
+        &frontend,
+        "SET experimental_dist_join = true",
+        query_ctx.clone(),
+    )
+    .await;
+    let sql = format!(
+        "SELECT p.a_id, s.random_value FROM {PROBE_TABLE} p JOIN \
+         (SELECT build_key, random() AS random_value FROM {BUILD_TABLE}) s \
+         ON p.probe_key = s.build_key WHERE p.probe_key = 10"
+    );
+    let first = run_sql(&frontend, &sql, query_ctx.clone()).await;
+    let physical = first
+        .meta
+        .plan
+        .clone()
+        .expect("query output must include its physical plan");
+    let merge_scan = find_merge_scan_exec(&physical)
+        .unwrap_or_else(|| panic!("expected DN-dispatched MergeScan, got {physical:?}"));
+    let first_batches = output_batches(first).await;
+    let first_pretty = first_batches
+        .pretty_print()
+        .expect("result should render as a table");
+    let first_rows = table_cells(&first_pretty);
+    assert_eq!(4, first_rows.len());
+    let mut random_value_counts = BTreeMap::new();
+    for row in &first_rows {
+        *random_value_counts.entry(row[1].clone()).or_insert(0) += 1;
+    }
+    assert_eq!(
+        vec![2, 2],
+        random_value_counts.values().copied().collect::<Vec<_>>(),
+        "the two materialized random build values must each be reused for matching BIG rows"
+    );
+
+    let stages = merge_scan.sub_stage_metrics();
+    let hash_joins = stages
+        .iter()
+        .flat_map(|stage| &stage.plan_metrics)
+        .filter(|metric| metric.plan_name == "HashJoinExec")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        merge_scan.regions().len(),
+        hash_joins.len(),
+        "each dispatched BIG region must report its DN HashJoinExec: {stages:?}"
+    );
+    assert!(
+        hash_joins.iter().all(|metric| metric
+            .metrics
+            .iter()
+            .any(|(name, value)| *name == "build_input_rows" && *value == 2)),
+        "each DN must build the two materialized SMALL rows (filtered by join key): {hash_joins:?}"
+    );
+}
+
 /// The SQL setting and region statistics select the nested plan through the production frontend
 /// path. An unfiltered BIG-table case proves the local probe and remote build roles, complete
 /// output, and schema; a separate filtered query verifies BIG-region pruning. Both exercise the
