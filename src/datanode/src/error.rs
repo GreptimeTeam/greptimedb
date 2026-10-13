@@ -554,8 +554,8 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
+            RegionNotReady { .. } | RegionNotFound { .. } => RetryHint::RetryAfterRouteRefresh,
             RegionBusy { .. }
-            | RegionNotReady { .. }
             | ConcurrentQueryLimiterClosed { .. }
             | ConcurrentQueryLimiterTimeout { .. } => RetryHint::Retryable,
             NewPlanDecoder { source, .. } | ExecuteLogicalPlan { source, .. } => {
@@ -595,14 +595,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_region_state_hints_are_retryable() {
+    fn test_region_state_retry_hints() {
         let region_id = RegionId::new(1024, 1);
-
-        let err = RegionBusySnafu { region_id }.build();
-        assert_eq!(err.retry_hint(), RetryHint::Retryable);
-
-        let err = RegionNotReadySnafu { region_id }.build();
-        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+        for (error, status, hint) in [
+            (
+                RegionBusySnafu { region_id }.build(),
+                StatusCode::RegionBusy,
+                RetryHint::Retryable,
+            ),
+            (
+                RegionNotReadySnafu { region_id }.build(),
+                StatusCode::RegionNotReady,
+                RetryHint::RetryAfterRouteRefresh,
+            ),
+            (
+                RegionNotFoundSnafu { region_id }.build(),
+                StatusCode::RegionNotFound,
+                RetryHint::RetryAfterRouteRefresh,
+            ),
+        ] {
+            assert_eq!(error.status_code(), status);
+            assert_eq!(error.retry_hint(), hint);
+        }
     }
 
     #[test]

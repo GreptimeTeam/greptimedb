@@ -164,6 +164,15 @@ fn test_transparent_flag() {
 #[test]
 fn test_retry_hint_helpers() {
     assert!(RetryHint::Retryable.is_retryable());
+    assert!(RetryHint::RetryAfterRouteRefresh.is_retryable());
+    assert_eq!(
+        RetryHint::RetryAfterRouteRefresh.as_str(),
+        "retry_after_route_refresh"
+    );
+    assert_eq!(
+        RetryHint::from_str("retry_after_route_refresh").unwrap(),
+        RetryHint::RetryAfterRouteRefresh
+    );
     assert!(!RetryHint::NonRetryable.is_retryable());
 
     assert_eq!(RetryHint::Retryable.as_str(), "retryable");
