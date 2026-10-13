@@ -37,4 +37,17 @@ tql analyze (0, 10, '10s') histogram_quantile(0.5, sum by (le) (histogram_gap_bu
 -- SQLNESS SORT_RESULT 2 1
 tql eval (0, 10, '10s') histogram_quantile(0.5, sum by (le) (histogram_gap_bucket));
 
+-- Keep the outer aggregation above the histogram fold while preserving the correct quantiles.
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE Hash\(\[ts@1\],.* Hash([ts@1],REDACTED
+-- SQLNESS REPLACE Hash\(\[le@0,\sts@1\],.* Hash([le@0, ts@1],REDACTED
+tql analyze (0, 10, '10s') sum(histogram_quantile(0.5, sum by (le) (histogram_gap_bucket)));
+
+-- SQLNESS SORT_RESULT 2 1
+tql eval (0, 10, '10s') sum(histogram_quantile(0.5, sum by (le) (histogram_gap_bucket)));
+
 drop table histogram_gap_bucket;
