@@ -20,9 +20,11 @@ import json
 import os
 import subprocess
 import sys
+import re
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 SCRIPTS = Path(__file__).parents[2] / ".github/scripts"
 
@@ -35,6 +37,7 @@ def load(name, filename):
 
 
 bench = load("oswal_s3_bench", "oswal-s3-bench.py")
+crash = load("oswal_s3_bench_crash", "oswal-s3-bench-crash.py")
 summary = load("oswal_s3_bench_summary", "oswal-s3-bench-summary.py")
 
 ACK_BUCKETS = """# TYPE greptime_logstore_object_store_wal_append_ack_seconds histogram
@@ -57,8 +60,9 @@ class PlanTest(unittest.TestCase):
         self.assertEqual([c["id"] for c in plan["cells"]], [
             "1-1-R", "1-1-D", "1-1-E", "1-8-R", "1-8-D", "1-8-E",
             "2-1-E", "2-1-D", "2-1-R", "2-8-E", "2-8-D", "2-8-R"])
-        self.assertEqual(plan["generator_args"], ["--data-profile", "D"])
-        self.assertEqual((plan["rows"], plan["batch_rows"], plan["data_profile"]), (2_000_000, 1000, "D"))
+        self.assertEqual(plan["corpora"], [{"rows": 2_000_000, "dir": "corpus-2000000", "data_profile": "D",
+                                            "generator_args": ["--data-profile", "D"]}])
+        self.assertEqual((plan["rows"], plan["batch_rows"]), (2_000_000, 1000))
         self.assertEqual({c["config"]: c["wal"] for c in plan["cells"]}, {
             "R": {"PROVIDER": "raft_engine", "SYNC_WRITE": "true", "DIR": "/wal"},
             "D": {"PROVIDER": "experimental_object_store", "ACK_MODE": "durable"},
@@ -66,8 +70,8 @@ class PlanTest(unittest.TestCase):
 
     def test_smoke_overrides_rows_and_rounds(self):
         plan = bench.build_plan("8", "2000000", "1000", "2", smoke=True)
-        self.assertEqual((plan["rows"], plan["rounds"], plan["data_profile"]), (50_000, 1, "custom"))
-        self.assertEqual(plan["generator_args"], ["--line-count", "50000"])
+        self.assertEqual((plan["rows"], plan["rounds"], plan["corpora"][0]["data_profile"]), (50_000, 1, "custom"))
+        self.assertEqual(plan["corpora"][0]["generator_args"], ["--line-count", "50000"])
         self.assertEqual([c["id"] for c in plan["cells"]], ["1-8-R", "1-8-D", "1-8-E"])
 
     def test_invalid_inputs_are_rejected(self):
@@ -134,6 +138,37 @@ class PlanTest(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 bench.resolve_image(bad, "nightly")
 
+    def test_groups_inherit_the_inputs_and_keep_their_own_settings(self):
+        groups = [{"name": "recovery", "configs": "D", "rows": 4000000, "rounds": 1, "restart": True,
+                   "sweep": "RECOVERY_CONCURRENCY=2,32"},
+                  {"name": "crashe", "mode": "crash", "configs": "E", "rounds": 1, "cycles": 3, "kill_after": [5, 9]},
+                  {"name": "pin", "mode": "crash", "configs": "D", "rounds": 1, "cycles": 1,
+                   "kill_after": [540, 540], "pin": True},
+                  {"name": "idle", "configs": "D", "rounds": 1, "idle_seconds": 180}]
+        plan = bench.build_plan("8", "2000000", "1000", "2", smoke=False, groups=json.dumps(groups))
+        self.assertEqual([c["id"] for c in plan["cells"]], [
+            "recovery-1-8-D-2", "recovery-1-8-D-32", "crashe-1-8-E", "pin-1-8-D", "idle-1-8-D"])
+        self.assertEqual([c["rows"] for c in plan["corpora"]], [4_000_000, 2_000_000])
+        cells = {c["id"]: c for c in plan["cells"]}
+        self.assertEqual(cells["recovery-1-8-D-2"]["wal"]["FLUSH_INTERVAL"], "10ms")
+        self.assertEqual((cells["crashe-1-8-E"]["cycles"], cells["crashe-1-8-E"]["kill_after"]), (3, [5, 9]))
+        self.assertTrue(cells["pin-1-8-D"]["pin"])
+        self.assertNotIn("FLUSH_INTERVAL", cells["pin-1-8-D"]["wal"])
+        self.assertEqual(cells["idle-1-8-D"]["idle_seconds"], 180)
+        smoke = bench.build_plan("8", "2000000", "1000", "2", smoke=True, groups=json.dumps(groups))
+        pin = next(c for c in smoke["cells"] if c["group"] == "pin")
+        self.assertEqual((pin["cycles"], pin["kill_after"]), (1, [60, 60]))
+        self.assertEqual([c["rows"] for c in smoke["corpora"]], [50_000])
+
+    def test_invalid_groups_are_rejected(self):
+        for groups in ([], [{"configs": "D"}], [{"name": "Bad"}], [{"name": "a"}, {"name": "a"}],
+                       [{"name": "a", "colour": "red"}], [{"name": "a", "mode": "crash", "configs": "R"}],
+                       [{"name": "a", "mode": "crash", "configs": "D", "restart": True}],
+                       [{"name": "a", "mode": "crash", "configs": "D", "kill_after": [9, 5]}],
+                       [{"name": "a", "mode": "soak"}], [{"name": "a", "idle_seconds": 601}]):
+            with self.subTest(groups=groups), self.assertRaises(ValueError):
+                bench.build_plan("8", "6000", "1000", "1", smoke=False, groups=json.dumps(groups))
+
     def test_nightly_tag_is_the_newest_by_date(self):
         tags = ["latest", "v1.3.0-alpha.1-nightly-20260907", "v1.4.0-nightly-20261012",
                 "v1.4.0-nightly-20261005", "nightly-arm64"]
@@ -163,6 +198,102 @@ class PlanTest(unittest.TestCase):
         self.assertEqual((manifest["rows"], manifest["rounds"], manifest["concurrency"]), (2_000_000, 2, [1, 8]))
         with self.assertRaises(ValueError):
             bench.build_manifest(plan, [{"RepoDigests": []}], "", "", "", "")
+
+
+def write_lines(path, lines):
+    path.write_text("".join(f"{line}\n" for line in lines))
+
+
+def crash_cycle(root, cycle, stripes, acked, requests, exits):
+    """One cycle of two writers: attempted stripes, acked batches, requests and exit times per writer."""
+    directory = root / f"cycle-{cycle}"
+    directory.mkdir(parents=True)
+    for index in range(2):
+        write_lines(directory / f"attempted-{index}.log", stripes[index])
+        write_lines(directory / f"acked-{index}.log", acked[index])
+        write_lines(directory / f"requests-{index}.log", requests[index])
+        (directory / f"exit-{index}.log").write_text(f"{exits[index]}\n")
+    return directory
+
+
+class CrashOracleTest(unittest.TestCase):
+    # Writer 0 got batches 0 and 2 acknowledged and lost 4 in flight; writer 1 got 1 and lost 3.
+    STRIPES = ([0, 2, 4], [1, 3])
+    ACKED = ([0, 2], [1])
+    REQUESTS = (["0 200 10", "2 200 20", "4 000 105"], ["1 200 15", "3 000 101"])
+
+    def check(self, root, found, mode="durable", requests=REQUESTS, exits=(106, 102)):
+        crash_cycle(root, 1, self.STRIPES, self.ACKED, requests, exits)
+        result = crash.check_kill(root / "cycle-1", 2, 100, 104, 2000)
+        return result | crash.verify(root, found, 10, mode == "enqueued")
+
+    def test_acked_batches_present_once_and_an_in_flight_extra_pass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.check(Path(directory), {0: 10, 1: 10, 2: 10, 4: 10})
+            self.assertEqual((result["kill_errors"], result["verify_errors"]), ([], []))
+            self.assertEqual((result["in_flight"], result["writers_at_kill"], result["extra_batches"],
+                              result["lost_batches"]), (2, 2, 1, 0))
+
+    def test_durable_violations_are_reported(self):
+        cases = {"acknowledged but absent": {0: 10, 1: 10}, "present more than once": {0: 20, 1: 10, 2: 10},
+                 "present in part": {0: 10, 1: 10, 2: 7}, "never attempted": {0: 10, 1: 10, 2: 10, 9: 10}}
+        for error, found in cases.items():
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as directory:
+                result = self.check(Path(directory), found)
+                self.assertTrue(any(error in e for e in result["verify_errors"]), result["verify_errors"])
+
+    def test_enqueued_loses_acked_batches_without_failing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = self.check(Path(directory), {0: 10}, mode="enqueued")
+            self.assertEqual(result["verify_errors"], [])
+            self.assertEqual((result["lost_batches"], result["lost_rows"]), (2, 20))
+
+    def test_a_connection_lost_before_the_kill_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            requests = (["0 200 10", "2 200 20", "4 000 50"], ["1 200 15", "3 500 101"])
+            result = self.check(Path(directory), {0: 10, 1: 10, 2: 10}, requests=requests, exits=(51, 99))
+            self.assertEqual(len(result["kill_errors"]), 3, result["kill_errors"])
+
+    def test_the_writer_stops_each_stripe_at_its_first_unacknowledged_batch(self):
+        import http.server
+        import threading
+        inserted, lock = [], threading.Lock()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers["Content-Length"])).decode()
+                with lock:
+                    if len(inserted) >= 6:
+                        self.close_connection = True
+                        self.connection.close()
+                        return
+                    inserted.append(body)
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                run = Path(directory)
+                args = SimpleNamespace(dir=str(run / "cycle-1"), url=f"http://127.0.0.1:{server.server_port}/v1/sql",
+                                       table="crash", writers=2, first_seq=0, rows=3)
+                crash.write(args)
+                found = {}
+                for body in inserted:
+                    for seq in set(re.findall(r"%28(\d+)%2C", body)):
+                        found[int(seq)] = 3
+                result = crash.verify(run, found, 3, False)
+                self.assertEqual((result["verify_errors"], result["acked_batches"]), ([], 6))
+                for index in range(2):
+                    attempted = (run / "cycle-1" / f"attempted-{index}.log").read_text().split()
+                    self.assertEqual([int(seq) % 2 for seq in attempted], [index] * len(attempted))
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 class SummaryTest(unittest.TestCase):
@@ -237,6 +368,46 @@ class SummaryTest(unittest.TestCase):
             self.assertIn("| 1-8-D-2 | MAX_IN_FLIGHT_CREATES=2 | 120 | 3.50 | 4.25 | 1.500 | 118 | 6,000 |", output)
             self.assertIn("| 2.00 | 50% of 8 |", output)
             self.assertIn("| 8 | D/R0 | 16 | 0.600 | 0.600 |", output)
+
+    def test_traffic_idle_crash_and_pinned_cells_are_summarized(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            traffic = ("greptime_logstore_object_store_wal_created_objects_total 600\n"
+                       "greptime_logstore_object_store_wal_object_bytes_sum 3000000000\n"
+                       "greptime_logstore_object_store_wal_object_bytes_count 600\n"
+                       'opendal_operation_duration_seconds_count{scheme="s3",operation="write"} 650\n'
+                       'opendal_operation_duration_seconds_count{scheme="s3",operation="read"} 40\n')
+            self.write_cell(root, "1-32-E", 90.0, metrics=traffic, idle_seconds=180, group="")
+            (root / "cells" / "1-32-E" / "metrics-idle.prom").write_text(
+                traffic.replace(" 600\n", " 598\n", 1).replace("} 650", "} 648"))
+            cell = summary.load_cell(root / "cells" / "1-32-E")
+            self.assertEqual((cell["objects_per_second"], cell["mean_object_bytes"], cell["sealed_on_size"]),
+                             (10.0, 5e6, False))
+            self.assertAlmostEqual(cell["wal_mb_per_second"], 50.0)
+            self.assertEqual(cell["idle"], {"seconds": 180, "creates": 2, "requests": {"write": 2}})
+            path = root / "cells" / "pin-1-8-D"
+            path.mkdir(parents=True)
+            (path / "cell.json").write_text(json.dumps({
+                "id": "pin-1-8-D", "group": "pin", "mode": "crash", "round": 1, "concurrency": 8, "config": "D",
+                "wal": bench.WAL_CONFIGS["D"], "exit_code": 0, "metrics_scraped": True}))
+            (path / "cycles.jsonl").write_text(json.dumps({
+                "cycle": 1, "kill_after_seconds": 540.0, "cycle_acked_batches": 4000, "in_flight": 8,
+                "found_batches": 4003, "acked_batches": 4000, "lost_batches": 0, "lost_rows": 0, "extra_batches": 3,
+                "restart_seconds": 4.5, "pin_rows": 1, "passed": True, "kill_errors": [], "verify_errors": []}) + "\n")
+            (path / "metrics-cycle-1.prom").write_text(
+                "greptime_logstore_object_store_wal_indexed_objects 5400\n"
+                "greptime_logstore_object_store_wal_created_objects_total 5401\n")
+            (path / "metrics-restart-1.prom").write_text(
+                "greptime_logstore_object_store_wal_recovery_seconds_sum 2.5\n"
+                "greptime_logstore_object_store_wal_recovery_seconds_count 1\n"
+                "greptime_logstore_object_store_wal_recovered_objects_total 5399\n")
+            (path / "objects.tsv").write_text("100 300 0 301\n130 600 0 601\n")
+            rows = [summary.load_cell(p) for p in sorted((root / "cells").iterdir())]
+            output = summary.render({}, rows, summary.ratios(rows))
+            self.assertIn("| 1-32-E | 50.0 | 10.0 | 4.77 | no | read 40, write 650 | — | 180 | 2 | write 2 |", output)
+            self.assertIn("| pin-1-8-D | 1 | 540.0 | 4,000 | 8 | 4,003 | 4,000 | 0 | 0 | 3 | 5,400 | 4.50 | 2.500 "
+                          "| 5,399 | 1 | pass |", output)
+            self.assertIn("| pin-1-8-D | 300, 600 | 0 | 601 |", output)
 
     def test_untouched_counters_are_zero_only_for_an_active_object_store_wal(self):
         with tempfile.TemporaryDirectory() as directory:

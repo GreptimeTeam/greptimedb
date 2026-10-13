@@ -46,27 +46,35 @@ wal_disk() {
     findmnt -no SOURCE,FSTYPE -T "$root" | tee "$RESULTS/wal-disk.txt"
 }
 
+# One corpus per row count the load cells use; crash cells write their own rows.
 generate() {
     : "${PLAN:?}" "${RESULTS:?}" "${CORPUS_DIR:?}" "${OWNER:?}" "${RUNTIME_IMAGE:?}"
-    local args=() arg
-    while IFS= read -r arg; do args+=("$arg"); done < <(jq -r '.generator_args[]' "$PLAN")
-    mkdir -p "$CORPUS_DIR"
-    runtime --name "$OWNER-generator" --mount "type=bind,src=$CORPUS_DIR,dst=/work/corpus" \
-        "$RUNTIME_IMAGE" scripts/generate_agent_observations.py "${args[@]}" \
-        --output /work/corpus/agent_observations.jsonl \
-        --summary-output /work/corpus/summary.json --evidence-output /work/corpus/evidence.json \
-        > "$RESULTS/generator.log" 2>&1
-    jq -e --argjson rows "$(jq .rows "$PLAN")" '.line_count == $rows' "$CORPUS_DIR/summary.json" >/dev/null
+    local corpus args arg dir rows
+    while IFS= read -r corpus; do
+        args=() dir="$CORPUS_DIR/$(jq -r .dir <<< "$corpus")" rows=$(jq .rows <<< "$corpus")
+        while IFS= read -r arg; do args+=("$arg"); done < <(jq -r '.generator_args[]' <<< "$corpus")
+        mkdir -p "$dir"
+        runtime --name "$OWNER-generator-$rows" --mount "type=bind,src=$dir,dst=/work/corpus" \
+            "$RUNTIME_IMAGE" scripts/generate_agent_observations.py "${args[@]}" \
+            --output /work/corpus/agent_observations.jsonl \
+            --summary-output /work/corpus/summary.json --evidence-output /work/corpus/evidence.json \
+            >> "$RESULTS/generator.log" 2>&1
+        jq -e --argjson rows "$rows" '.line_count == $rows' "$dir/summary.json" >/dev/null
+    done < <(jq -c '.corpora[]' "$PLAN")
 }
 
 # Scrape once per server, after the load succeeded or failed, while it still runs:
 # the loaded server into metrics.prom, a restarted one into metrics-restart.prom.
 scrape_metrics() {
     curl --noproxy '*' -fsS --max-time 30 http://127.0.0.1:4000/metrics > "$dir/metrics.all" || { rm -f "$dir/metrics.all"; return 1; }
-    grep -E '^(# (HELP|TYPE) )?greptime_logstore_object_store_wal_' "$dir/metrics.all" > "$dir/metrics$phase.prom" || true
+    grep -E '^(# (HELP|TYPE) )?(greptime_logstore_object_store_wal_|opendal_operation_(duration_seconds_count|errors_total))' \
+        "$dir/metrics.all" > "$dir/metrics$phase.prom" || true
     rm -f "$dir/metrics.all"
-    if [[ -z "$phase" ]]; then metrics_scraped=true; else restart_scraped=true; fi
+    case "$phase" in "") metrics_scraped=true ;; -restart) restart_scraped=true ;; esac
 }
+
+sql() { curl --noproxy '*' -fsS --max-time 30 --data-urlencode "sql=$1" 'http://127.0.0.1:4000/v1/sql?db=public'; }
+now_ns() { python3 -c 'import time; print(time.time_ns())'; }
 
 now() { date +%s.%N; }
 elapsed() { awk -v a="$1" -v b="$(now)" 'BEGIN {printf "%.3f", b - a}'; }
@@ -112,7 +120,69 @@ restart() {
         sleep 0.2
     done
     restart_query_seconds=$(elapsed "$started") restart_count=$count
-    [[ "$count" == "$(jq .rows "$PLAN")" ]] || { echo "$id: $count rows after restart" >&2; exit 5; }
+    [[ "$count" == "$(jq .rows <<< "$spec")" ]] || { echo "$id: $count rows after restart" >&2; exit 5; }
+}
+
+# Pins the WAL with one row in a second table before the writers start, if asked,
+# and samples the object counts every 30 s while they run.
+sample_objects() {
+    while sleep 30; do
+        curl --noproxy '*' -fsS --max-time 10 http://127.0.0.1:4000/metrics 2>/dev/null | awk -v t="$(date +%s)" '
+            /^greptime_logstore_object_store_wal_indexed_objects / {i = $2}
+            /^greptime_logstore_object_store_wal_deleted_objects_total / {d = $2}
+            /^greptime_logstore_object_store_wal_created_objects_total / {c = $2}
+            END {print t, i + 0, d + 0, c + 0}' >> "$dir/objects.tsv"
+    done
+}
+
+# Writers insert striped batches until a SIGKILL at a random point stops the
+# server; it restarts on the same prefix and data home and the table is checked
+# against what was acknowledged. Nothing is cleaned between cycles.
+crash_cycles() {
+    local writers rows cycles kill_min kill_max cycle cdir wpid spid= delay before after started restart_s query_s next=0 pin_count
+    writers=$(jq -r .concurrency <<< "$spec") rows=$(jq -r .batch_rows "$PLAN") cycles=$(jq -r .cycles <<< "$spec")
+    kill_min=$(jq -r '.kill_after[0]' <<< "$spec") kill_max=$(jq -r '.kill_after[1]' <<< "$spec")
+    if jq -e .pin <<< "$spec" >/dev/null; then
+        sql "CREATE TABLE pin (v BIGINT, ts TIMESTAMP TIME INDEX)" >/dev/null
+        sql "INSERT INTO pin VALUES (1, 0)" >/dev/null
+    fi
+    sql "CREATE TABLE crash (seq BIGINT, ts TIMESTAMP TIME INDEX) WITH (append_mode = 'true')" >/dev/null
+    for ((cycle = 1; cycle <= cycles; cycle++)); do
+        cdir="$dir/cycle-$cycle"; mkdir -p "$cdir"
+        python3 "$here/oswal-s3-bench-crash.py" write --dir "$cdir" --url 'http://127.0.0.1:4000/v1/sql?db=public' \
+            --writers "$writers" --first-seq "$next" --rows "$rows" &
+        wpid=$!
+        if jq -e .pin <<< "$spec" >/dev/null; then sample_objects & spid=$!; fi
+        delay=$(awk -v a="$kill_min" -v b="$kill_max" 'BEGIN {srand(); printf "%.3f", a + rand() * (b - a)}')
+        sleep "$delay"
+        phase=-cycle-$cycle; scrape_metrics || true
+        before=$(now_ns); docker kill --signal KILL "$cid" >/dev/null; after=$(now_ns)
+        wait "$wpid"
+        [[ -z "$spid" ]] || { kill "$spid" 2>/dev/null; wait "$spid" 2>/dev/null || true; spid=; }
+        stop_server kill
+        phase=-restart-$cycle started=$(now)
+        start_server
+        restart_s=$(elapsed "$started")
+        until sql "SELECT seq, count(*) FROM crash GROUP BY seq" > "$cdir/found.json" 2>/dev/null; do
+            (($(elapsed "$started" | cut -d. -f1) < 300)) || { echo "$id: crash not readable after restart $cycle" >&2; exit 5; }
+            sleep 0.2
+        done
+        query_s=$(elapsed "$started")
+        scrape_metrics || true
+        pin_count=null
+        if jq -e .pin <<< "$spec" >/dev/null; then
+            pin_count=$(sql "SELECT count(*) FROM pin" | jq -er '.output[0].records.rows[0][0]')
+        fi
+        local verdict=0
+        python3 "$here/oswal-s3-bench-crash.py" check --run-dir "$dir" --cycle "$cycle" --found "$cdir/found.json" \
+            --mode "$(jq -r .wal.ACK_MODE <<< "$spec")" --writers "$writers" --rows "$rows" \
+            --before-ns "$before" --after-ns "$after" --window-max-ms 2000 > "$cdir/check.json" || verdict=$?
+        jq -c --arg delay "$delay" --arg restart "$restart_s" --arg query "$query_s" --argjson pin "$pin_count" \
+            '. + {kill_after_seconds: ($delay | tonumber), restart_seconds: ($restart | tonumber),
+                  restart_query_seconds: ($query | tonumber), pin_rows: $pin}' "$cdir/check.json" >> "$dir/cycles.jsonl"
+        ((verdict == 0)) || { echo "$id: cycle $cycle failed its check" >&2; exit 6; }
+        next=$(cat "$cdir"/attempted-*.log | sort -n | tail -1); next=$((next + 1))
+    done
 }
 
 finish() {
@@ -157,7 +227,7 @@ cell() {
         "STORAGE__ROOT=$RUN_PREFIX/$id")
     [[ -z "${S3_CONTAINER_ENDPOINT:-}" ]] || settings+=("STORAGE__ENDPOINT=$S3_CONTAINER_ENDPOINT")
     # A restarted server needs the metadata the loaded one kept in its data home.
-    jq -e '.restart' <<< "$spec" >/dev/null && settings+=(STORAGE__DATA_HOME=/oswal_home)
+    jq -e '.restart or .mode == "crash"' <<< "$spec" >/dev/null && settings+=(STORAGE__DATA_HOME=/oswal_home)
     while IFS= read -r setting; do settings+=("$setting"); done \
         < <(jq -r '.wal | to_entries[] | "WAL__\(.key)=\(.value)"' <<< "$spec")
     docker_env=() mounts=()
@@ -181,7 +251,7 @@ cell() {
     else
         wal_device="s3://$S3_BUCKET/$RUN_PREFIX/$id/wal"
     fi
-    if jq -e '.restart' <<< "$spec" >/dev/null; then
+    if jq -e '.restart or .mode == "crash"' <<< "$spec" >/dev/null; then
         home_dir="$WAL_ROOT/$id-home"; mkdir -p "$home_dir"
         mounts+=(--mount "type=bind,src=$home_dir,dst=/oswal_home")
     fi
@@ -189,12 +259,14 @@ cell() {
     start_server
     version=$(docker exec "$cid" greptime --version | sed -n 's/^version: //p')
     [[ -n "$version" ]]
+    if jq -e '.mode == "crash"' <<< "$spec" >/dev/null; then crash_cycles; return; fi
     cpu_before=$(server_cpu) host_before=$(host_cpu)
     started=$(now)
     # Only the load phase, run exactly as run-agent-observability.sh runs it.
     runtime --name "$name-load" --network host \
-        --mount "type=bind,src=$CORPUS_DIR,dst=/work/corpus,readonly" --mount "type=bind,src=$dir,dst=/results" \
-        -e GRPC_ENDPOINT=127.0.0.1:4001 -e "DATA_PROFILE=$(jq -r .data_profile "$PLAN")" -e RESULT_NAME=greptimedb-1 \
+        --mount "type=bind,src=$CORPUS_DIR/corpus-$(jq -r .rows <<< "$spec"),dst=/work/corpus,readonly" \
+        --mount "type=bind,src=$dir,dst=/results" \
+        -e GRPC_ENDPOINT=127.0.0.1:4001 -e "DATA_PROFILE=$(jq -r .data_profile <<< "$spec")" -e RESULT_NAME=greptimedb-1 \
         -e "ENDPOINT=http://127.0.0.1:4000/v1/sql?db=public&format=greptimedb_v1" \
         -e "TARGET_IMAGE=$GREPTIMEDB_IMAGE" -e "TARGET_VERSION=$version" -e "TARGET_DIGEST=${GREPTIMEDB_IMAGE##*@}" \
         -e "TARGET_ID=$name" -e TARGET_HOST=127.0.0.1 -e PREPARE_WORKERS= -e "MAX_IN_FLIGHT=$concurrency" \
@@ -206,8 +278,13 @@ cell() {
     # Busy share of all host CPUs during the load, the loader included.
     host_cpu_busy=$(awk -v a="$host_before" -v b="$host_after" \
         'BEGIN {split(a, x, " "); split(b, y, " "); if (y[2] > x[2]) printf "%.4f", (y[1] - x[1]) / (y[2] - x[2])}')
-    jq -e --argjson rows "$(jq .rows "$PLAN")" '.count_before == 0 and .count_after == $rows' \
+    jq -e --argjson rows "$(jq .rows <<< "$spec")" '.count_before == 0 and .count_after == $rows' \
         "$dir/greptimedb-1/load-result.json" >/dev/null
+    # An idle window: what the server sends with no writes, between two scrapes.
+    if jq -e '.idle_seconds > 0' <<< "$spec" >/dev/null; then
+        phase=-idle; scrape_metrics || { echo "$id: metrics scrape failed" >&2; exit 4; }; phase=
+        sleep "$(jq -r .idle_seconds <<< "$spec")"
+    fi
     if jq -e '.restart' <<< "$spec" >/dev/null; then restart; fi
 }
 

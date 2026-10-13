@@ -32,10 +32,16 @@ SAMPLE = re.compile(r'([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{([^}]*)\})?\s+(\S+)')
 
 
 def parse_metrics(text: str) -> dict:
-    """Map each unlabeled sample to its value and each histogram to its buckets."""
-    samples, buckets = {}, {}
+    """Map each unlabeled sample to its value, each histogram to its buckets, and the
+    object store requests (data files and WAL together) to their count per operation."""
+    samples, buckets, requests = {}, {}, {}
     for line in text.splitlines():
         match = SAMPLE.fullmatch(line.strip())
+        if match and match.group(1) == "opendal_operation_duration_seconds_count":
+            operation = re.search(r'operation="([^"]+)"', match.group(2) or "")
+            if operation:
+                requests[operation.group(1)] = requests.get(operation.group(1), 0) + float(match.group(3))
+            continue
         if not match or not match.group(1).startswith(PREFIX):
             continue
         name, labels, value = match.group(1)[len(PREFIX):], match.group(2) or "", float(match.group(3))
@@ -44,7 +50,8 @@ def parse_metrics(text: str) -> dict:
             buckets.setdefault(name[:-len("_bucket")], []).append((float(le.group(1)), value))
         else:
             samples[name] = value
-    return {"samples": samples, "buckets": {name: sorted(items) for name, items in buckets.items()}}
+    return {"samples": samples, "buckets": {name: sorted(items) for name, items in buckets.items()},
+            "requests": requests}
 
 
 def quantile(q: float, buckets: list) -> float | None:
@@ -70,6 +77,27 @@ def read_metrics(path: Path) -> dict:
     return parse_metrics(path.read_text() if path.exists() else "")
 
 
+def interval_seconds(wal: dict) -> float:
+    value = wal.get("FLUSH_INTERVAL", "100ms")
+    return float(value[:-2]) / 1000 if value.endswith("ms") else float(value.rstrip("s"))
+
+
+def crash_cycles(path: Path) -> list:
+    """Each cycle's check plus the loaded server's metrics before the kill and the restarted one's after."""
+    cycles = [json.loads(line) for line in (path / "cycles.jsonl").read_text().splitlines()
+              if line.strip()] if (path / "cycles.jsonl").exists() else []
+    for cycle in cycles:
+        before = read_metrics(path / f"metrics-cycle-{cycle['cycle']}.prom")["samples"]
+        after = read_metrics(path / f"metrics-restart-{cycle['cycle']}.prom")
+        once = after["samples"].get("recovery_seconds_count") == 1
+        cycle |= {"created_before_kill": before.get("created_objects_total"),
+                  "indexed_before_kill": before.get("indexed_objects"),
+                  "recovery_seconds": after["samples"].get("recovery_seconds_sum") if once else None,
+                  "recovered_objects": after["samples"].get("recovered_objects_total", 0 if once else None),
+                  "restart_requests": after["requests"]}
+    return cycles
+
+
 def load_cell(path: Path, spec: dict | None = None) -> dict:
     """One cell's row; a planned cell that never recorded a result has no values, so no ratio uses its round."""
     recorded = path / "cell.json"
@@ -80,7 +108,8 @@ def load_cell(path: Path, spec: dict | None = None) -> dict:
     load_seconds = result.get("load_seconds")
     wall, cpu = cell.get("load_wall_seconds"), cell.get("server_cpu_seconds")
     row = {
-        "id": cell["id"], "round": cell["round"], "concurrency": cell["concurrency"],
+        "id": cell["id"], "group": cell.get("group", ""), "mode": cell.get("mode", "load"),
+        "round": cell["round"], "concurrency": cell["concurrency"],
         "config": cell["config"], "exit_code": cell["exit_code"], "wal_device": cell.get("wal_device"),
         "missing": cell.get("missing", False), "env": cell.get("env", {}), "sweep_value": cell.get("sweep_value"),
         "version": cell.get("version"), "load_wall_seconds": wall,
@@ -111,29 +140,59 @@ def load_cell(path: Path, spec: dict | None = None) -> dict:
         row[counter] = metrics["samples"].get(counter, 0 if active else None)
     created = row["created_objects_total"]
     row["creates_per_minute"] = created * 60 / load_seconds if created is not None and load_seconds else None
+    # WAL traffic of the load; more objects than seal ticks, or objects near the
+    # 8 MiB threshold, mean batches sealed on size rather than on the timer.
+    written, objects = metrics["samples"].get("object_bytes_sum"), metrics["samples"].get("object_bytes_count")
+    per_second = created / load_seconds if created and load_seconds else None
+    mean = written / objects if written and objects else None
+    row |= {"wal_mb_per_second": written / load_seconds / 1e6 if written and load_seconds else None,
+            "objects_per_second": per_second, "mean_object_bytes": mean,
+            "sealed_on_size": None if per_second is None else
+            per_second > 1.05 / interval_seconds(cell.get("wal", {})) or (mean or 0) >= 0.9 * 8 * 2**20,
+            "requests": metrics["requests"], "restart_requests": restarted["requests"]}
+    if cell.get("idle_seconds"):
+        idle = read_metrics(path / "metrics-idle.prom")
+        start = idle["samples"].get("created_objects_total", 0)
+        row["idle"] = {"seconds": cell["idle_seconds"],
+                       "creates": None if created is None else created - start,
+                       "requests": {op: n - idle["requests"].get(op, 0) for op, n in metrics["requests"].items()
+                                    if n != idle["requests"].get(op, 0)}}
+    if row["mode"] == "crash":
+        row["cycles"] = crash_cycles(path)
+        if (path / "objects.tsv").exists():
+            row["objects_samples"] = [[int(float(v)) for v in line.split()]
+                                      for line in (path / "objects.tsv").read_text().splitlines() if line.strip()]
     return row
 
 
 def ratios(rows: list) -> list:
     """Each object store WAL cell over each Raft Engine control per swept value and round, and their geometric mean over the rounds, per concurrency."""
-    speed = {(r["round"], r["concurrency"], r["config"], r["sweep_value"]): r["rows_per_second"] for r in rows}
-    series = sorted({(r["config"], r["sweep_value"]) for r in rows if r["config"] not in BASELINES},
-                    key=lambda s: (s[0], s[1] or 0))
-    baselines = [b for b in BASELINES if any(r["config"] == b for r in rows)]
+    rows = [r for r in rows if r["mode"] == "load"]
+    speed = {(r["group"], r["round"], r["concurrency"], r["config"], r["sweep_value"]): r["rows_per_second"]
+             for r in rows}
     result = []
-    for concurrency in sorted({r["concurrency"] for r in rows}):
-        rounds = sorted({r["round"] for r in rows if r["concurrency"] == concurrency})
-        for (config, value), baseline in ((s, b) for s in series for b in baselines):
-            per_round = []
-            for round_number in rounds:
-                base = speed.get((round_number, concurrency, baseline, None))
-                measured = speed.get((round_number, concurrency, config, value))
-                per_round.append(measured / base if base and measured else None)
-            complete = [ratio for ratio in per_round if ratio is not None]
-            result.append({"concurrency": concurrency, "ratio": f"{config}/{baseline}", "sweep_value": value,
-                           "per_round": per_round,
-                           "geomean": geomean(complete) if len(complete) == len(per_round) else None})
+    for group in dict.fromkeys(r["group"] for r in rows):
+        members = [r for r in rows if r["group"] == group]
+        series = sorted({(r["config"], r["sweep_value"]) for r in members if r["config"] not in BASELINES},
+                        key=lambda s: (s[0], s[1] or 0))
+        baselines = [b for b in BASELINES if any(r["config"] == b for r in members)]
+        for concurrency in sorted({r["concurrency"] for r in members}):
+            rounds = sorted({r["round"] for r in members if r["concurrency"] == concurrency})
+            for (config, value), baseline in ((s, b) for s in series for b in baselines):
+                per_round = []
+                for round_number in rounds:
+                    base = speed.get((group, round_number, concurrency, baseline, None))
+                    measured = speed.get((group, round_number, concurrency, config, value))
+                    per_round.append(measured / base if base and measured else None)
+                complete = [ratio for ratio in per_round if ratio is not None]
+                result.append({"group": group, "concurrency": concurrency, "ratio": f"{config}/{baseline}",
+                               "sweep_value": value, "per_round": per_round,
+                               "geomean": geomean(complete) if len(complete) == len(per_round) else None})
     return result
+
+
+def operations(requests: dict) -> str:
+    return ", ".join(f"{op} {n:,.0f}" for op, n in sorted(requests.items())) or "—"
 
 
 def overrides(env: dict) -> str:
@@ -157,9 +216,12 @@ def render(run: dict, rows: list, pairs: list) -> str:
               "| Server CPUs | Host busy | WAL on |",
               "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: "
               "| ---: | ---: | --- |"]
-    for r in rows:
-        cell = f"{r['id']} (not run)" if r["missing"] else r["id"] if r["exit_code"] == 0 \
+    def label(r):
+        return f"{r['id']} (not run)" if r["missing"] else r["id"] if r["exit_code"] == 0 \
             else f"{r['id']} (failed, exit {r['exit_code']})"
+    loads = [r for r in rows if r["mode"] == "load"]
+    for r in loads:
+        cell = label(r)
         lines.append(" | ".join([
             f"| {cell}", overrides(r["env"]), fmt(r["rows_per_second"]), fmt(r["load_seconds"], 1),
             fmt(r["load_wall_seconds"], 1), pair(r["append_ack_p50"], r["append_ack_p99"], 1, 1000),
@@ -169,6 +231,42 @@ def render(run: dict, rows: list, pairs: list) -> str:
             *(fmt(r[c]) for c in COUNTERS[1:]), fmt(r["server_cpu_cores"], 2),
             "—" if r["host_cpu_busy"] is None else f"{r['host_cpu_busy']:.0%} of {r['host_cpus'] or '?'}",
             f"`{r['wal_device'] or '—'}` |"]))
+    lines += ["", "| Cell | WAL MB/s | Objects/s | Mean object MiB | Sealed on size | Requests during the load "
+              "| Requests of the restart | Idle s | Idle creates | Idle requests |",
+              "| --- | ---: | ---: | ---: | --- | --- | --- | ---: | ---: | --- |"]
+    for r in loads:
+        idle = r.get("idle") or {}
+        lines.append(" | ".join([
+            f"| {label(r)}", fmt(r["wal_mb_per_second"], 1), fmt(r["objects_per_second"], 1),
+            fmt(r["mean_object_bytes"], 2, 1 / 2**20),
+            "—" if r["sealed_on_size"] is None else ("yes" if r["sealed_on_size"] else "no"),
+            operations(r["requests"]), operations(r["restart_requests"]) if "restart" in r else "—",
+            fmt(idle.get("seconds")), fmt(idle.get("creates")), operations(idle["requests"]) if idle else "—"]) + " |")
+    crashes = [r for r in rows if r["mode"] == "crash"]
+    if crashes:
+        lines += ["", "| Cell | Cycle | Kill after s | Acked batches | In flight | Found | Acked so far | Lost batches "
+                  "| Lost rows | Extra | Indexed at kill | Restart to /health s | Recovery s | Recovered objects "
+                  "| Pin rows | Verdict |",
+                  "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: "
+                  "| ---: | --- |"]
+        for r in crashes:
+            for c in r["cycles"] or [{}]:
+                lines.append(" | ".join([
+                    f"| {label(r)}", fmt(c.get("cycle")), fmt(c.get("kill_after_seconds"), 1),
+                    fmt(c.get("cycle_acked_batches")), fmt(c.get("in_flight")), fmt(c.get("found_batches")),
+                    fmt(c.get("acked_batches")), fmt(c.get("lost_batches")), fmt(c.get("lost_rows")),
+                    fmt(c.get("extra_batches")), fmt(c.get("indexed_before_kill")), fmt(c.get("restart_seconds"), 2),
+                    fmt(c.get("recovery_seconds"), 3), fmt(c.get("recovered_objects")), fmt(c.get("pin_rows")),
+                    "—" if not c else "pass" if c.get("passed") else "FAIL: " + "; ".join(
+                        c.get("kill_errors", []) + c.get("verify_errors", []))]) + " |")
+        pinned = [r for r in crashes if r.get("objects_samples")]
+        if pinned:
+            lines += ["", "| Cell | Indexed objects every 30 s | Deleted objects at the end | Created objects at the end |",
+                      "| --- | --- | ---: | ---: |"]
+            for r in pinned:
+                samples = r["objects_samples"]
+                lines.append(f"| {r['id']} | {', '.join(str(s[1]) for s in samples)} | {samples[-1][2]:,} "
+                             f"| {samples[-1][3]:,} |")
     restarts = [r for r in rows if "restart" in r]
     if restarts:
         lines += ["", "| Cell | Overrides | Objects created | Restart to /health s | Restart to count s "
@@ -180,9 +278,10 @@ def render(run: dict, rows: list, pairs: list) -> str:
                 f"| {r['id']}", overrides(r["env"]), fmt(r["created_objects_total"]), fmt(x["wall_seconds"], 2),
                 fmt(x["query_seconds"], 2), fmt(x["recovery_seconds"], 3), fmt(x["recovered_objects"]),
                 f"{fmt(x['rows'])} |"]))
-    lines += ["", "| Concurrency | Ratio | Swept value | Per round | Geometric mean |", "| ---: | --- | ---: | --- | ---: |"]
+    lines += ["", "| Group | Concurrency | Ratio | Swept value | Per round | Geometric mean |",
+              "| --- | ---: | --- | ---: | --- | ---: |"]
     for p in pairs:
-        lines.append(f"| {p['concurrency']} | {p['ratio']} | {fmt(p['sweep_value'])} "
+        lines.append(f"| {p['group'] or '—'} | {p['concurrency']} | {p['ratio']} | {fmt(p['sweep_value'])} "
                      f"| {', '.join(fmt(v, 3) for v in p['per_round'])} | {fmt(p['geomean'], 3)} |")
     return "\n".join(lines) + "\n"
 
