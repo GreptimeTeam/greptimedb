@@ -316,6 +316,12 @@ impl Inserter {
         }
     }
 
+    /// Installs the shared dispatcher used by direct writes and batch flushes.
+    pub fn with_write_dispatcher(mut self, dispatcher: WriteDispatcherRef) -> Self {
+        self.write_dispatcher = dispatcher;
+        self
+    }
+
     /// Installs the shared batcher; callers explicitly select its ingestion entry point.
     pub fn with_pending_rows_batcher(
         mut self,
@@ -832,13 +838,12 @@ impl Inserter {
         let dispatcher = self.write_dispatcher.clone();
         let request = request_factory.build_insert(normal_requests);
         let writes = dispatcher.prepare(vec![request]).await?;
-        let affected_rows = common_runtime::spawn_global(async move {
-            dispatcher.dispatch_prepared(writes, None).await
-        })
-        .await
-        .context(JoinTaskSnafu)?
-        .context(RequestInsertsSnafu)?
-        .affected_rows;
+        let affected_rows =
+            common_runtime::spawn_global(async move { dispatcher.execute(writes, None).await })
+                .await
+                .context(JoinTaskSnafu)?
+                .context(RequestInsertsSnafu)?
+                .affected_rows;
         crate::metrics::DIST_INGEST_ROW_COUNT
             .with_label_values(&[ctx.get_db_string().as_str()])
             .inc_by(affected_rows as u64);
@@ -1670,12 +1675,6 @@ impl Inserter {
                 Err(err)
             }
         }
-    }
-
-    /// Installs the shared dispatcher used by direct writes and batch flushes.
-    pub fn with_write_dispatcher(mut self, dispatcher: WriteDispatcherRef) -> Self {
-        self.write_dispatcher = dispatcher;
-        self
     }
 
     /// Returns the dispatcher shared with batching execution paths.
