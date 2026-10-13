@@ -37,6 +37,7 @@ use store_api::logstore::{AppendBatchResponse, EntryId, LogStore, SendableEntryS
 use store_api::storage::RegionId;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::time::MissedTickBehavior;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::error::{
     CorruptedWalObjectSnafu, Error, IncompleteWalEntrySnafu, InvalidProviderSnafu,
@@ -2213,12 +2214,12 @@ fn spawn_fetch_segment(
     permit: Option<OwnedSemaphorePermit>,
 ) -> impl Future<Output = (Result<Vec<Record>>, Option<OwnedSemaphorePermit>)> + Send + 'static {
     let task_io = io.clone();
-    let mut task = AbortOnDrop(common_runtime::spawn_global(async move {
+    let task = AbortOnDropHandle::new(common_runtime::spawn_global(async move {
         let fetched = fetch_segment(task_io.as_ref(), object_seq, &entry).await;
         (fetched, permit)
     }));
     async move {
-        match (&mut task.0).await {
+        match task.await {
             Ok(fetched) => fetched,
             Err(error) => (
                 Err(error).context(WalSegmentFetchSnafu {
@@ -2227,14 +2228,6 @@ fn spawn_fetch_segment(
                 None,
             ),
         }
-    }
-}
-
-struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
-
-impl<T> Drop for AbortOnDrop<T> {
-    fn drop(&mut self) {
-        self.0.abort();
     }
 }
 
