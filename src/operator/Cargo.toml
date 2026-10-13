@@ -24,6 +24,7 @@ api.workspace = true
 arrow.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
+backon.workspace = true
 bytes.workspace = true
 catalog.workspace = true
 chrono.workspace = true
@@ -54,6 +55,7 @@ file-engine.workspace = true
 futures.workspace = true
 futures-util.workspace = true
 humantime.workspace = true
+humantime-serde.workspace = true
 itertools.workspace = true
 jsonb.workspace = true
 lazy_static.workspace = true
@@ -86,8 +88,10 @@ url.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+cache.workspace = true
 catalog = { workspace = true, features = ["testing"] }
 common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 object-store = { workspace = true, features = ["testing"] }
 path-slash = "0.2"
+tokio-stream = { workspace = true, features = ["net"] }

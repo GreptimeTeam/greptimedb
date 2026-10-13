@@ -22,6 +22,9 @@ use crate::cluster::NodeInfo;
 use crate::error::Error;
 use crate::{DatanodeId, FlownodeId};
 
+/// Shared reference to a [`Peer`].
+pub type PeerRef = Arc<Peer>;
+
 /// [`PeerResolver`] provides methods to look up peer information by node ID.
 ///
 /// This trait allows resolving both datanode and flownode peers, regardless of their current activity status.
