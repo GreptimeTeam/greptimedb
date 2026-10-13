@@ -29,6 +29,8 @@ use datafusion::common::{DFSchema, DFSchemaRef, Statistics};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::TaskContext;
 use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion::physical_expr::equivalence::ProjectionMapping;
+use datafusion::physical_expr::projection::ProjectionTargets;
 use datafusion::physical_expr::{
     EquivalenceProperties, LexRequirement, OrderingRequirements, PhysicalSortRequirement,
 };
@@ -53,6 +55,48 @@ use snafu::ResultExt;
 
 use crate::error::{DeserializeSnafu, Result};
 use crate::extension_plan::{resolve_column_name, serialize_column_index};
+
+fn project_input_partitioning(
+    input: &Arc<dyn ExecutionPlan>,
+    output_schema: &SchemaRef,
+    le_column_index: usize,
+    field_column_index: usize,
+    histogram_column_index: Option<usize>,
+) -> Partitioning {
+    let input_schema = input.schema();
+    let mut mappings = Vec::new();
+    for (output_index, field) in output_schema.fields().iter().enumerate() {
+        let Ok(input_index) = input_schema.index_of(field.name()) else {
+            return Partitioning::UnknownPartitioning(
+                input.output_partitioning().partition_count(),
+            );
+        };
+        if input_index == le_column_index
+            || input_index == field_column_index
+            || Some(input_index) == histogram_column_index
+        {
+            continue;
+        }
+
+        let source = Arc::new(PhyColumn::new(field.name(), input_index)) as Arc<dyn PhysicalExpr>;
+        let target = Arc::new(PhyColumn::new(field.name(), output_index)) as Arc<dyn PhysicalExpr>;
+        let targets = ProjectionTargets::from(vec![(target, output_index)]);
+        mappings.push((source, targets));
+    }
+    let mapping = mappings.into_iter().collect::<ProjectionMapping>();
+
+    let partitioning = input
+        .output_partitioning()
+        .project(&mapping, input.equivalence_properties());
+    if let Partitioning::Hash(exprs, _) = &partitioning
+        && exprs
+            .iter()
+            .any(|expr| expr.is::<datafusion::physical_plan::expressions::UnKnownColumn>())
+    {
+        return Partitioning::UnknownPartitioning(input.output_partitioning().partition_count());
+    }
+    partitioning
+}
 
 /// `HistogramFold` will fold the conventional (non-native) histogram ([1]) for later
 /// computing.
@@ -385,7 +429,13 @@ impl HistogramFold {
         let output_schema: SchemaRef = self.output_schema.inner().clone();
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
-            Partitioning::UnknownPartitioning(exec_input.output_partitioning().partition_count()),
+            project_input_partitioning(
+                &exec_input,
+                &output_schema,
+                le_column_index,
+                field_column_index,
+                histogram_column_index,
+            ),
             EmissionType::Incremental,
             Boundedness::Bounded,
         ));
@@ -601,7 +651,13 @@ impl ExecutionPlan for HistogramFoldExec {
         let new_input = children[0].clone();
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(self.output_schema.clone()),
-            Partitioning::UnknownPartitioning(new_input.output_partitioning().partition_count()),
+            project_input_partitioning(
+                &new_input,
+                &self.output_schema,
+                self.le_column_index,
+                self.field_column_index,
+                self.histogram_column_index,
+            ),
             EmissionType::Incremental,
             Boundedness::Bounded,
         ));
@@ -1436,7 +1492,8 @@ mod test {
     use datafusion::datasource::memory::MemorySourceConfig;
     use datafusion::datasource::source::DataSourceExec;
     use datafusion::logical_expr::EmptyRelation;
-    use datafusion::physical_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
+    use datafusion::physical_plan::repartition::RepartitionExec;
+    use datafusion::physical_plan::{ChildrenPropertiesMode, Partitioning, ReplaceChildrenOptions};
     use datafusion::prelude::SessionContext;
     use datatypes::arrow_array::StringArray;
     use futures::FutureExt;
@@ -1456,8 +1513,7 @@ mod test {
         RecordBatch::try_new(schema, columns).unwrap()
     }
 
-    /// The batches and schema shared by [`prepare_test_data`] and
-    /// [`prepare_test_data_with_two_partitions`].
+    /// Nonempty batches and schema for the fold execution tests.
     fn prepare_test_data_batches() -> (Vec<RecordBatch>, SchemaRef) {
         let schema = Arc::new(Schema::new(vec![
             Field::new("host", DataType::Utf8, true),
@@ -1521,14 +1577,11 @@ mod test {
         ))
     }
 
-    /// The batches from [`prepare_test_data_batches`], laid out over two
-    /// partitions, so that partitioning metadata is checked against a real
-    /// multi-partition input.
-    fn prepare_test_data_with_two_partitions() -> DataSourceExec {
-        let (mut batches, schema) = prepare_test_data_batches();
-        let first_partition = vec![batches.remove(0)];
+    /// Two schema-only partitions for checking partitioning properties without executing rows.
+    fn prepare_test_data_with_two_partitions(schema: SchemaRef) -> DataSourceExec {
+        let batch = RecordBatch::new_empty(schema.clone());
         DataSourceExec::new(Arc::new(
-            MemorySourceConfig::try_new(&[first_partition, batches], schema, None).unwrap(),
+            MemorySourceConfig::try_new(&[vec![batch.clone()], vec![batch]], schema, None).unwrap(),
         ))
     }
 
@@ -1616,9 +1669,7 @@ mod test {
 
         let properties = PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
-            Partitioning::UnknownPartitioning(
-                input.properties().output_partitioning().partition_count(),
-            ),
+            project_input_partitioning(input, &output_schema, 1, 2, None),
             EmissionType::Incremental,
             Boundedness::Bounded,
         );
@@ -1821,36 +1872,171 @@ mod test {
     }
 
     #[test]
-    fn fold_does_not_claim_hash_partitioning() {
-        let input: Arc<dyn ExecutionPlan> = Arc::new(prepare_test_data_with_two_partitions());
-        let logical_input = LogicalPlan::EmptyRelation(EmptyRelation {
-            produce_one_row: false,
-            schema: Arc::new(input.schema().to_dfschema().unwrap()),
-        });
-        let logical_fold = HistogramFold::new(
+    fn fold_projects_only_preserved_partitioning_keys() {
+        let classic_schema = Arc::new(Schema::new(vec![
+            Field::new("host", DataType::Utf8, true),
+            Field::new("le", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, true),
+            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+        ]));
+        let mixed_schema = Arc::new(Schema::new(vec![
+            Field::new("host", DataType::Utf8, true),
+            Field::new("le", DataType::Utf8, true),
+            Field::new("val", DataType::Float64, true),
+            Field::new("ts", DataType::Timestamp(TimeUnit::Millisecond, None), true),
+            Field::new(
+                "histogram",
+                DataType::Struct(Vec::<Field>::new().into()),
+                true,
+            ),
+        ]));
+
+        let make_input = |schema: SchemaRef| -> Arc<dyn ExecutionPlan> {
+            Arc::new(prepare_test_data_with_two_partitions(schema))
+        };
+        let classic_input = make_input(classic_schema.clone());
+        let classic_logical = HistogramFold::new(
             "le".to_string(),
             "val".to_string(),
-            "host".to_string(),
+            "ts".to_string(),
             0.5,
-            logical_input,
+            LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: Arc::new(classic_input.schema().to_dfschema().unwrap()),
+            }),
         )
         .unwrap();
-        let constructed = logical_fold.to_execution_plan(input.clone());
+        let unknown = classic_logical.to_execution_plan(classic_input.clone());
         assert!(matches!(
-            constructed.output_partitioning(),
+            unknown.output_partitioning(),
             Partitioning::UnknownPartitioning(2)
         ));
 
-        let rebuilt = constructed
+        let preserved_hash = |source: Arc<dyn ExecutionPlan>| {
+            Arc::new(
+                RepartitionExec::try_new(
+                    source,
+                    Partitioning::Hash(
+                        vec![
+                            Arc::new(PhyColumn::new("host", 0)),
+                            Arc::new(PhyColumn::new("ts", 3)),
+                        ],
+                        2,
+                    ),
+                )
+                .unwrap(),
+            ) as Arc<dyn ExecutionPlan>
+        };
+        let hash_input = preserved_hash(make_input(classic_schema.clone()));
+        let constructed = classic_logical.to_execution_plan(hash_input.clone());
+        assert_partitioning_keys(constructed.output_partitioning(), &[("host", 0), ("ts", 2)]);
+
+        // Recompute using a different same-schema child, transitioning Unknown -> Hash.
+        let rebuilt = unknown
             .replace_children(
-                vec![input],
+                vec![hash_input],
                 ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
             )
             .unwrap();
-        assert!(matches!(
-            rebuilt.output_partitioning(),
-            Partitioning::UnknownPartitioning(2)
-        ));
+        assert_partitioning_keys(rebuilt.output_partitioning(), &[("host", 0), ("ts", 2)]);
+
+        for excluded in [("val", 2), ("le", 1)] {
+            let field_input = Arc::new(
+                RepartitionExec::try_new(
+                    make_input(classic_schema.clone()),
+                    Partitioning::Hash(vec![Arc::new(PhyColumn::new(excluded.0, excluded.1))], 2),
+                )
+                .unwrap(),
+            ) as Arc<dyn ExecutionPlan>;
+            let constructed = classic_logical.to_execution_plan(field_input.clone());
+            assert!(matches!(
+                constructed.output_partitioning(),
+                Partitioning::UnknownPartitioning(2)
+            ));
+            let rebuilt = constructed
+                .replace_children(
+                    vec![field_input],
+                    ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+                )
+                .unwrap();
+            assert!(matches!(
+                rebuilt.output_partitioning(),
+                Partitioning::UnknownPartitioning(2)
+            ));
+        }
+
+        let mixed_input = make_input(mixed_schema.clone());
+        let mixed_logical = HistogramFold::new_with_operation(
+            "le".to_string(),
+            "val".to_string(),
+            "ts".to_string(),
+            HistogramFoldOperation::Quantile(0.5.into()),
+            Some("histogram".to_string()),
+            LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: Arc::new(mixed_input.schema().to_dfschema().unwrap()),
+            }),
+        )
+        .unwrap();
+        for excluded in [("le", 1), ("val", 2), ("histogram", 4)] {
+            let mixed_hash = Arc::new(
+                RepartitionExec::try_new(
+                    make_input(mixed_schema.clone()),
+                    Partitioning::Hash(vec![Arc::new(PhyColumn::new(excluded.0, excluded.1))], 2),
+                )
+                .unwrap(),
+            ) as Arc<dyn ExecutionPlan>;
+            let constructed = mixed_logical.to_execution_plan(mixed_hash.clone());
+            assert!(matches!(
+                constructed.output_partitioning(),
+                Partitioning::UnknownPartitioning(2)
+            ));
+            let rebuilt = constructed
+                .replace_children(
+                    vec![mixed_hash],
+                    ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+                )
+                .unwrap();
+            assert!(matches!(
+                rebuilt.output_partitioning(),
+                Partitioning::UnknownPartitioning(2)
+            ));
+        }
+        let mixed_hash = Arc::new(
+            RepartitionExec::try_new(
+                make_input(mixed_schema),
+                Partitioning::Hash(
+                    vec![
+                        Arc::new(PhyColumn::new("host", 0)),
+                        Arc::new(PhyColumn::new("ts", 3)),
+                    ],
+                    2,
+                ),
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>;
+        let mixed = mixed_logical.to_execution_plan(mixed_hash.clone());
+        assert_partitioning_keys(mixed.output_partitioning(), &[("host", 0), ("ts", 3)]);
+        let rebuilt = mixed
+            .replace_children(
+                vec![mixed_hash],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )
+            .unwrap();
+        assert_partitioning_keys(rebuilt.output_partitioning(), &[("host", 0), ("ts", 3)]);
+    }
+
+    fn assert_partitioning_keys(partitioning: &Partitioning, expected: &[(&str, usize)]) {
+        let Partitioning::Hash(exprs, count) = partitioning else {
+            panic!("expected hash partitioning, got {partitioning:?}");
+        };
+        assert_eq!(*count, 2);
+        assert_eq!(exprs.len(), expected.len());
+        for (expr, (expected_name, expected_index)) in exprs.iter().zip(expected) {
+            let column = expr.downcast_ref::<PhyColumn>().unwrap();
+            assert_eq!(column.name(), *expected_name);
+            assert_eq!(column.index(), *expected_index);
+        }
     }
 
     #[test]
