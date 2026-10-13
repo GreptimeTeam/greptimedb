@@ -768,6 +768,20 @@ mod tests {
             Ok(DataType::Float64)
         }
 
+        fn return_field_from_args(
+            &self,
+            args: datafusion_expr::ReturnFieldArgs<'_>,
+        ) -> datafusion_common::Result<datafusion_common::arrow::datatypes::FieldRef> {
+            let _ = args;
+            Ok(std::sync::Arc::new(
+                datafusion_common::arrow::datatypes::Field::new(
+                    self.name(),
+                    DataType::Float64,
+                    false, // non-nullable
+                ),
+            ))
+        }
+
         fn invoke_with_args(
             &self,
             _args: ScalarFunctionArgs,
@@ -834,6 +848,23 @@ mod tests {
                 &ConfigOptions::default(),
             )
             .unwrap();
+
+        // Verify the test premise: after the analyzer, the small sub-plan must
+        // NOT contain volatile expressions (they must only be in the JOIN key).
+        // This ensures the test exercises the join-key guard, not the small-plan guard.
+        if let LogicalPlan::Join(join) = &plan {
+            let (small_plan, _) = strip_merge_scan(&join.right).unwrap();
+            assert!(
+                !contains_volatile_expr(&small_plan),
+                "small plan must not contain volatile expressions"
+            );
+            assert!(
+                join.on.iter().any(|(_, key)| key.is_volatile()),
+                "join key must contain volatile expression"
+            );
+        } else {
+            panic!("expected Join plan after analyzer");
+        }
 
         let result = rewrite(plan.clone());
         assert_eq!(plan.to_string(), result.to_string());
