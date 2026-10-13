@@ -316,6 +316,12 @@ impl Inserter {
         }
     }
 
+    /// Installs the shared dispatcher used by direct writes and batch flushes.
+    pub fn with_write_dispatcher(mut self, dispatcher: WriteDispatcherRef) -> Self {
+        self.write_dispatcher = dispatcher;
+        self
+    }
+
     /// Installs the shared batcher; callers explicitly select its ingestion entry point.
     pub fn with_pending_rows_batcher(
         mut self,
@@ -1673,12 +1679,6 @@ impl Inserter {
                 Err(err)
             }
         }
-    }
-
-    /// Installs the shared dispatcher used by direct writes and batch flushes.
-    pub fn with_write_dispatcher(mut self, dispatcher: WriteDispatcherRef) -> Self {
-        self.write_dispatcher = dispatcher;
-        self
     }
 
     /// Returns the dispatcher shared with batching execution paths.
