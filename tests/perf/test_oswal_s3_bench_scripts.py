@@ -434,14 +434,14 @@ class SummaryTest(unittest.TestCase):
                 "greptime_logstore_object_store_wal_recovery_seconds_sum 2.5\n"
                 "greptime_logstore_object_store_wal_recovery_seconds_count 1\n"
                 "greptime_logstore_object_store_wal_recovered_objects_total 5399\n")
-            (path / "objects.tsv").write_text("100 300 0 301\n130 600 0 601\n")
+            (path / "objects.tsv").write_text("100 300 0 301\n130 600 0 601\n160 missing\n")
             rows = [summary.load_cell(p) for p in sorted((root / "cells").iterdir())]
             output = summary.render({}, rows, summary.ratios(rows))
             self.assertIn("| 1-32-E | 50.0 | 10.0 | 4.77 | no | read 40, write 648 | — | 180 | 2 | write 4 |", output)
             self.assertIn("| pin-1-8-D | 1 | 540.0 | 4,000 | 4,003 | 0 | 0 | 3 | 8 | 4,003 | 4,000 | 0 | 5,400 "
                           "| 4.50 | 2.500 | 5,399 | 1 | pass |", output)
             self.assertIn("| pin-1-8-D | 1 | 540.0 | 20.0 | 10.0 | 1.91 | no | write 9,000 | — |", output)
-            self.assertIn("| pin-1-8-D | 300, 600 | 0 | 601 |", output)
+            self.assertIn("| pin-1-8-D | 300, 600, missing | 1 | 0 | 601 |", output)
 
     def test_untouched_counters_are_zero_only_for_an_active_object_store_wal(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -505,6 +505,7 @@ esac
 """
 FAKE_CURL = r"""#!/usr/bin/env bash
 printf '%s\n' "curl $*" >> "$FAKE_LOG"
+[[ "$*" != *"--max-time 10"* || "${FAKE_SAMPLE_RC:-0}" == 0 ]] || exit "$FAKE_SAMPLE_RC"
 for arg in "$@"; do
     [[ "$arg" != *"GROUP BY seq"* ]] || { python3 -c 'import collections, json, sys
 counts = collections.Counter(int(l) for l in open(sys.argv[1]) if l.strip())
@@ -647,7 +648,7 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
             self.assertEqual(log.count("/metrics"), 2)
             self.assertIn(f"type=bind,src={root}/corpus/corpus-6000,dst=/work/corpus,readonly", log)
 
-    def run_crash(self, root, metrics_rc=0):
+    def run_crash(self, root, metrics_rc=0, pin=False, sample_rc=0):
         """A crash cell against fake docker and a stub SQL endpoint that the fake kill takes down."""
         import http.server
         import threading
@@ -676,10 +677,12 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
 
         server = Server(("127.0.0.1", 0), Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
-        groups = json.dumps([{"name": "crash", "configs": "D", "mode": "crash", "cycles": 2, "kill_after": [1, 1]}])
+        groups = json.dumps([{"name": "crash", "configs": "D", "mode": "crash", "cycles": 2, "kill_after": [1, 1],
+                              "pin": pin}])
         old = os.environ.copy()
         os.environ.update({"OSWAL_SQL_URL": f"http://127.0.0.1:{server.server_port}/v1/sql",
-                           "FAKE_KILL_FLAG": str(flag), "FAKE_FOUND": str(found), "FAKE_BATCH_ROWS": "1000"})
+                           "FAKE_KILL_FLAG": str(flag), "FAKE_FOUND": str(found), "FAKE_BATCH_ROWS": "1000",
+                           "OSWAL_SAMPLE_SECONDS": "0.2", "FAKE_SAMPLE_RC": str(sample_rc)})
         try:
             return self.run_cells(root, load_rc=0, metrics_rc=metrics_rc, groups=groups)
         finally:
@@ -705,6 +708,17 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
             self.assertIn("GREPTIMEDB_STANDALONE__STORAGE__DATA_HOME=/oswal_home", (cell / "config.env").read_text())
             for name in ("metrics-start-1.prom", "metrics-cycle-2.prom", "metrics-restart-2.prom", "server-cycle-1.log"):
                 self.assertTrue((cell / name).exists(), name)
+
+    def test_failed_pinned_samples_are_missing_not_zero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cells, _, log, _ = self.run_crash(root, pin=True, sample_rc=28)
+            self.assertEqual(cells.returncode, 0, cells.stdout + cells.stderr)
+            cell = root / "results" / "cells" / "crash-1-8-D"
+            samples = (cell / "objects.tsv").read_text().splitlines()
+            self.assertTrue(samples and all(line.split()[1:] == ["missing"] for line in samples), samples)
+            self.assertIn("sql=INSERT INTO pin VALUES (1, 0)", log)
+            self.assertEqual(len((cell / "cycles.jsonl").read_text().splitlines()), 2)
 
     def test_a_crash_cycle_without_its_scrapes_fails_the_cell(self):
         with tempfile.TemporaryDirectory() as directory:

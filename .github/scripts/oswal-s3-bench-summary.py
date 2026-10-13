@@ -172,8 +172,10 @@ def load_cell(path: Path, spec: dict | None = None) -> dict:
     if row["mode"] == "crash":
         row["cycles"] = crash_cycles(path, cell.get("wal", {}))
         if (path / "objects.tsv").exists():
-            row["objects_samples"] = [[int(float(v)) for v in line.split()]
-                                      for line in (path / "objects.tsv").read_text().splitlines() if line.strip()]
+            # A sample is time, indexed, deleted, created; a failed scrape is time and "missing".
+            row["objects_samples"] = [[int(float(line.split()[0]))] + (
+                [None] * 3 if line.split()[1:] == ["missing"] else [int(float(v)) for v in line.split()[1:]])
+                for line in (path / "objects.tsv").read_text().splitlines() if line.strip()]
     return row
 
 
@@ -285,12 +287,13 @@ def render(run: dict, rows: list, pairs: list) -> str:
                     operations(c["requests"]), operations(c["restart_requests"])]) + " |")
         pinned = [r for r in crashes if r.get("objects_samples")]
         if pinned:
-            lines += ["", "| Cell | Indexed objects every 30 s | Deleted objects at the end | Created objects at the end |",
-                      "| --- | --- | ---: | ---: |"]
+            lines += ["", "| Cell | Indexed objects every 30 s | Missing samples | Deleted objects at the end "
+                      "| Created objects at the end |", "| --- | --- | ---: | ---: | ---: |"]
             for r in pinned:
                 samples = r["objects_samples"]
-                lines.append(f"| {r['id']} | {', '.join(str(s[1]) for s in samples)} | {samples[-1][2]:,} "
-                             f"| {samples[-1][3]:,} |")
+                last = next((s for s in reversed(samples) if s[1] is not None), [None] * 4)
+                lines.append(f"| {r['id']} | {', '.join('missing' if s[1] is None else str(s[1]) for s in samples)} "
+                             f"| {sum(s[1] is None for s in samples)} | {fmt(last[2])} | {fmt(last[3])} |")
     restarts = [r for r in rows if "restart" in r]
     if restarts:
         lines += ["", "| Cell | Overrides | Objects created | Restart to /health s | Restart to count s "
