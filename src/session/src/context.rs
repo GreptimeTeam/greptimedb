@@ -487,6 +487,14 @@ impl QueryContext {
             if crate::hints::is_reserved_extension_key(key) {
                 continue;
             }
+            // Older Frontends and Flownodes forward `query_parallelism=0` (their
+            // "use the server default" encoding) untouched inside the wire
+            // query context, so accept it as unset instead of failing the
+            // query on the Datanode side. The canonical
+            // `query.parallelism = 0` stays rejected.
+            if key.eq_ignore_ascii_case("query_parallelism") && value == "0" {
+                continue;
+            }
             if let Some((canonical, normalized)) =
                 crate::query_options::parse_query_option(key, value)?
             {
@@ -1058,7 +1066,7 @@ mod test {
         assert!(!other.extensions().contains_key("query.parallelism"));
 
         let api_context: api::v1::QueryContext = (&snapshot).into();
-        let restored = QueryContext::from(api_context);
+        let restored = QueryContext::try_from(api_context).unwrap();
         let restored_snapshot = restored.query_option_snapshot().unwrap();
         assert_eq!(
             restored_snapshot.effective_query_options().unwrap(),
@@ -1482,5 +1490,27 @@ mod test {
             .unwrap();
         let snapshot = ctx.query_option_snapshot().unwrap();
         assert!(!snapshot.extensions().contains_key("query_parallelism"));
+    }
+
+    #[test]
+    fn test_legacy_zero_parallelism_survives_wire_round_trip() {
+        // An old Frontend forwards `query_parallelism=0` untouched inside the
+        // wire query context; a new Datanode must restore it and treat the
+        // option as unset instead of rejecting the whole region query.
+        let mut ctx = QueryContextBuilder::default().build();
+        ctx.set_extension("query_parallelism", "0");
+        let wire: api::v1::QueryContext = (&ctx).into();
+        let restored = QueryContext::try_from(wire).unwrap();
+
+        let snapshot = restored.query_option_snapshot().unwrap();
+        assert!(
+            !snapshot.extensions().contains_key("query.parallelism"),
+            "legacy zero parallelism is treated as unset"
+        );
+
+        // The canonical key keeps strict validation.
+        let mut ctx = QueryContextBuilder::default().build();
+        ctx.set_extension("query.parallelism", "0");
+        assert!(ctx.query_option_snapshot().is_err());
     }
 }

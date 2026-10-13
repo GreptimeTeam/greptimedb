@@ -156,16 +156,13 @@ impl QueryEngineState {
         if options.parallelism > 0 {
             session_config = session_config.with_target_partitions(options.parallelism);
         }
-        // Preserve the historical GreptimeDB behavior of enabling null-key join
-        // filtering by default; the session default remains overridable through
-        // `datafusion.optimizer.filter_null_join_keys`.
-        session_config.options_mut().optimizer.filter_null_join_keys = true;
         if options.allow_query_fallback {
             session_config
                 .options_mut()
                 .extensions
                 .insert(DistPlannerOptions {
                     allow_query_fallback: true,
+                    ..Default::default()
                 });
         }
 
@@ -358,26 +355,48 @@ impl QueryEngineState {
             *state.config_mut() = state.config().clone().with_target_partitions(partitions);
         }
         if let Some(fallback) = options.get("query.allow_query_fallback") {
+            let mut planner_options = state
+                .config()
+                .options()
+                .extensions
+                .get::<DistPlannerOptions>()
+                .cloned()
+                .unwrap_or_default();
+            planner_options.allow_query_fallback = fallback == "true";
             state
                 .config_mut()
                 .options_mut()
                 .extensions
-                .insert(DistPlannerOptions {
-                    allow_query_fallback: fallback == "true",
-                });
+                .insert(planner_options);
         }
         // `datafusion.optimizer.filter_null_join_keys` historically defaults to
-        // enabled inside the pre-MergeScan pass; mark an explicit override so the
-        // analyzer can honor it while keeping the historical default otherwise.
+        // enabled inside the pre-MergeScan pass (while DataFusion itself defaults
+        // to false). Reflect that effective default in the state so `SHOW`
+        // reports it, and remember an explicit override so the analyzer honors
+        // the user's value instead of the historical default.
         if options
             .get_key_value("datafusion.optimizer.filter_null_join_keys")
-            .is_some()
+            .is_none()
         {
             state
                 .config_mut()
                 .options_mut()
+                .optimizer
+                .filter_null_join_keys = true;
+        } else {
+            let mut planner_options = state
+                .config()
+                .options()
                 .extensions
-                .insert(crate::dist_plan::ExplicitNullJoinKeys { set: true });
+                .get::<DistPlannerOptions>()
+                .cloned()
+                .unwrap_or_default();
+            planner_options.explicit_filter_null_join_keys = true;
+            state
+                .config_mut()
+                .options_mut()
+                .extensions
+                .insert(planner_options);
         }
         Ok(query_ctx)
     }
@@ -957,13 +976,13 @@ mod tests {
         assert!(provider.configure_called.load(Ordering::SeqCst));
         assert_eq!(7, state.session_state().config().target_partitions());
         assert!(
-            state
+            !state
                 .session_state()
                 .config()
                 .options()
                 .optimizer
                 .filter_null_join_keys,
-            "null-key join filtering stays enabled by default for compatibility"
+            "DataFusion's main optimizer default remains disabled"
         );
         assert_eq!(
             SpillCompression::Zstd,

@@ -68,9 +68,12 @@ pub(crate) use utils::AliasMapping;
 /// Placeholder for other physical partition columns that are not in logical table
 const OTHER_PHY_PART_COL_PLACEHOLDER: &str = "__OTHER_PHYSICAL_PART_COLS_PLACEHOLDER__";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DistPlannerOptions {
     pub allow_query_fallback: bool,
+    /// The user explicitly set `datafusion.optimizer.filter_null_join_keys`;
+    /// when unset the pre-MergeScan pass keeps the historical default on.
+    pub explicit_filter_null_join_keys: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -134,11 +137,18 @@ impl ExtensionOptions for DistPlannerOptions {
     }
 
     fn entries(&self) -> Vec<datafusion::config::ConfigEntry> {
-        vec![datafusion::config::ConfigEntry {
-            key: "allow_query_fallback".to_string(),
-            value: Some(self.allow_query_fallback.to_string()),
-            description: "Allow query fallback to fallback plan rewriter",
-        }]
+        vec![
+            datafusion::config::ConfigEntry {
+                key: "allow_query_fallback".to_string(),
+                value: Some(self.allow_query_fallback.to_string()),
+                description: "Allow query fallback to fallback plan rewriter",
+            },
+            datafusion::config::ConfigEntry {
+                key: "explicit_filter_null_join_keys".to_string(),
+                value: Some(self.explicit_filter_null_join_keys.to_string()),
+                description: "The user explicitly set datafusion.optimizer.filter_null_join_keys",
+            },
+        ]
     }
 }
 
@@ -162,8 +172,8 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         // the session wins instead.
         if !config
             .extensions
-            .get::<ExplicitNullJoinKeys>()
-            .is_some_and(|e| e.set)
+            .get::<DistPlannerOptions>()
+            .is_some_and(|o| o.explicit_filter_null_join_keys)
         {
             config.optimizer.filter_null_join_keys = true;
         }

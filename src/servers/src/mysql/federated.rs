@@ -288,22 +288,23 @@ fn check_show_variables(query: &str) -> Option<Output> {
         if remainder.is_empty() {
             Some(show_variables("", ""))
         } else {
-            // Only let the named query-option forms through to the query handler;
-            // keep other MySQL filter syntax (`WHERE`, `LIKE` split across lines,
-            // unquoted LIKE patterns, ...) on the legacy compatibility result so
-            // variable-probing clients keep working.
-            let looks_like_option = remainder.split_whitespace().next().is_some_and(|token| {
-                let token = token.trim_end_matches(',');
-                token.starts_with("query.")
-                    || token.starts_with("datafusion.")
-                    || token.eq_ignore_ascii_case("query_parallelism")
-                    || token.eq_ignore_ascii_case("query_fallback")
-                    || token.eq_ignore_ascii_case("allow_query_fallback")
-            });
-            if looks_like_option {
-                None
-            } else {
+            // Named variables (MAX_EXECUTION_TIME, query.parallelism, ...) reach
+            // the query handler for real values; keep MySQL filter syntax
+            // (`WHERE expr`, `LIKE 'pattern'`, including forms glued to the
+            // keyword like `WHERE(...)` or `WHERE/* probe */ expr`) on the
+            // legacy compatibility result so variable-probing clients keep
+            // working.
+            let looks_like_filter = remainder
+                .trim_start_matches(|c: char| !c.is_alphanumeric())
+                .split(|c: char| !c.is_alphanumeric())
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let looks_like_filter = matches!(looks_like_filter.as_str(), "where" | "like" | "in");
+            if looks_like_filter {
                 Some(show_variables("", ""))
+            } else {
+                None
             }
         }
     } else {
@@ -649,27 +650,34 @@ mod test {
 +---------------+-------+";
         test(query, expected);
 
-        // Non-option filter forms keep the legacy compatibility result instead of
-        // failing on the regular parser (`SHOW VARIABLES WHERE ...` used to work).
+        // Named variables and query options reach the query handler; MySQL
+        // filter syntax keeps the legacy compatibility result instead of
+        // failing on the regular parser.
         for query in [
             "show variables where Variable_name = 'sql_mode'",
             "show global variables where Variable_name='sql_mode'",
             "show variables\nlike 'sql_mode'",
             "show variables like sql_mode",
             "show variables LIKE 'event_scheduler'",
+            "show variables where(Variable_name='sql_mode')",
+            "show variables where/* probe */ Variable_name='sql_mode'",
         ] {
             test(query, expected);
         }
 
-        // Named query options still reach the query handler for real values.
+        // Named variables and query options still reach the query handler for real values.
         let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
         for query in [
             "SHOW VARIABLES query.parallelism",
             "SHOW GLOBAL VARIABLES datafusion.optimizer.prefer_hash_join",
             "SHOW SESSION VARIABLES query.allow_query_fallback",
             "SHOW VARIABLES query_parallelism",
+            "SHOW VARIABLES MAX_EXECUTION_TIME",
+            "SHOW VARIABLES TIME_ZONE",
             "SHOW VARIABLES; SELECT 1",
             "SHOW VARIABLES; /* comment */; SELECT 1",
+            "SHOW VARIABLES WHERE_FOO",
+            "SELECT 1",
         ] {
             assert!(
                 check(query, QueryContext::arc(), session.clone()).is_none(),
@@ -719,6 +727,15 @@ mod test {
             "SHOW VARIABLES datafusion.optimizer.prefer_hash_join",
             "SHOW VARIABLES query.allow_query_fallback",
             "SHOW VARIABLES query.enable_remote_dynamic_filter_pushdown",
+            "SHOW VARIABLES WHERE_FOO",
+            "SHOW VARIABLES WHERE$foo",
+            "SHOW VARIABLES WHERE1",
+            "SHOW VARIABLES LIKE_FOO",
+            "SHOW VARIABLES `WHERE`",
+            "SHOW VARIABLES \"WHERE\"",
+            "SHOW VARIABLES MAX_EXECUTION_TIME",
+            "SHOW VARIABLES query.*",
+            "SHOW VARIABLES datafusion.*",
             "SHOW GLOBAL VARIABLES datafusion.optimizer.prefer_hash_join",
             "SHOW SESSION VARIABLES query.parallelism",
             "SHOW LOCAL VARIABLES query.allow_query_fallback",

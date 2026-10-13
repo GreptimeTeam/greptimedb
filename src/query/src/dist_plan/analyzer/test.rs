@@ -745,6 +745,7 @@ fn expand_sort_alias_conflict_limit() {
     let mut config = ConfigOptions::default();
     config.extensions.insert(DistPlannerOptions {
         allow_query_fallback: true,
+        ..Default::default()
     });
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
 

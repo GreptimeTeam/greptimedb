@@ -1079,6 +1079,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_zero_parallelism_wire_hint_uses_engine_default() {
+        let engine = create_test_engine().await;
+        let default_partitions = engine
+            .engine_context(QueryContext::arc())
+            .unwrap()
+            .state()
+            .config()
+            .target_partitions();
+        assert!(default_partitions > 0);
+
+        let mut wire = api::v1::QueryContext::default();
+        wire.extensions
+            .insert("query_parallelism".to_string(), "0".to_string());
+        let restored = QueryContext::try_from(wire).unwrap();
+        let engine_ctx = engine.engine_context(Arc::new(restored)).unwrap();
+        assert_eq!(
+            engine_ctx.state().config().target_partitions(),
+            default_partitions,
+            "legacy zero query_parallelism must use the engine default"
+        );
+
+        let mut wire = api::v1::QueryContext::default();
+        wire.extensions
+            .insert("query.parallelism".to_string(), "0".to_string());
+        assert!(QueryContext::try_from(wire).is_err());
+    }
+
+    #[tokio::test]
     async fn query_option_snapshot_survives_query_context_wire_round_trip() {
         let engine = create_test_engine().await;
         let mut ctx = QueryContextBuilder::default().build();
@@ -1114,9 +1142,10 @@ mod tests {
             .configuration_parameter()
             .set_query_option("query.parallelism", "9")
             .unwrap();
-        let remote_ctx = QueryContext::from(api::v1::QueryContext::from(
+        let remote_ctx = QueryContext::try_from(api::v1::QueryContext::from(
             first.query_ctx().as_ref().clone(),
-        ));
+        ))
+        .unwrap();
         let remote = engine.engine_context(Arc::new(remote_ctx)).unwrap();
         let config = remote.state().config_options();
         assert!(config.optimizer.repartition_joins);
