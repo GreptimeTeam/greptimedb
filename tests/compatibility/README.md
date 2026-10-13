@@ -15,6 +15,17 @@ read-preference defaulting and unrelated metadata preservation:
 cargo nextest run -p session -E 'test(test_legacy_query_context_wire_defaults_to_leader)'
 ```
 
+## Object store WAL fixtures
+
+Frozen objects of the object store WAL, one per format version, are exercised by the format
+tests of `log-store`, which decode them and encode them again byte for byte. The SQL runner
+cannot cover the object store WAL: it owns `wal.provider`. See the
+[fixture notes](wal/object_store/README.md):
+
+```shell
+cargo nextest run -p log-store -E 'test(test_format_matches_version_1_fixture) | test(test_format_matches_version_2_fixture)'
+```
+
 ## Quick Start
 
 ```shell

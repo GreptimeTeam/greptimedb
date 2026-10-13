@@ -407,6 +407,7 @@ impl ObjectStoreLogStore {
             reclaim_boundary: writer_reclaim_boundary,
             durable_reclaim_boundary: reclaim_boundary,
             unindexed: unindexed.into_iter().chain(moved_past).collect(),
+            failed_releases: BTreeMap::new(),
             creating: HashSet::new(),
             deleting: deleting.clone(),
             deletes: FuturesUnordered::new(),
@@ -532,7 +533,8 @@ impl ObjectStoreLogStore {
     /// acknowledgement modes, or with the error that failed it. A `full`
     /// release reaches [`EntryId::MAX`]; any other the largest id the store
     /// handed out for the region, which every entry of the region it holds is
-    /// at or below. Recovery seeds the watermark from the record, so a store
+    /// at or below. When the object fails, the next sealed batch carries the
+    /// record again. Recovery seeds the watermark from the record, so a store
     /// opened later collects the objects of a region that is never opened
     /// again.
     async fn release(&self, region_id: RegionId, full: bool) -> Result<()> {
@@ -1106,8 +1108,8 @@ struct SealedBatch {
     reclaim_boundary: u64,
     bytes: Bytes,
     footer: Vec<FooterEntry>,
-    /// Number of release records the object carries.
-    releases: usize,
+    /// The release records the object carries.
+    releases: Vec<Release>,
     first_admitted_at: Instant,
     sealed_at: Instant,
     /// Number of creates that were attempted for the batch.
@@ -1275,6 +1277,11 @@ struct Actor {
     /// Sequences of objects that may be present but are not indexed: the
     /// objects recovery listed off the chain and the batches that failed.
     unindexed: BTreeSet<u64>,
+    /// Release records of batches that failed, which the next sealed batch
+    /// carries again, so a release whose call failed still becomes durable
+    /// while the store runs. A timer tick seals them when no entry is
+    /// admitted.
+    failed_releases: BTreeMap<RegionId, EntryId>,
     /// Sequences whose create is in flight.
     creating: HashSet<u64>,
     deleting: Arc<DeletingObjects>,
@@ -1510,11 +1517,12 @@ impl Actor {
         self.seal(Vec::new())
     }
 
-    /// Seals the open batch together with `releases` as the object
-    /// `next_object_seq`, even when the open batch holds no entry, and starts
-    /// its create when a slot is free. Returns whether a batch was sealed.
+    /// Seals the open batch together with `releases` and the release records
+    /// of failed batches as the object `next_object_seq`, even when the open
+    /// batch holds no entry, and starts its create when a slot is free.
+    /// Returns whether a batch was sealed.
     fn seal(&mut self, releases: Vec<Release>) -> bool {
-        if self.open_batch.is_empty() && releases.is_empty() {
+        if self.open_batch.is_empty() && releases.is_empty() && self.failed_releases.is_empty() {
             return false;
         }
         if let Some(error) = terminal(&self.terminal_error) {
@@ -1546,6 +1554,18 @@ impl Actor {
             ),
             reclaim_boundary: self.reclaim_boundary,
         };
+        let mut records = std::mem::take(&mut self.failed_releases);
+        for release in releases {
+            let entry_id = records.entry(release.region_id).or_insert(release.entry_id);
+            *entry_id = (*entry_id).max(release.entry_id);
+        }
+        let releases = records
+            .into_iter()
+            .map(|(region_id, entry_id)| Release {
+                region_id,
+                entry_id,
+            })
+            .collect::<Vec<_>>();
         let encoded = match encode_batch(header, entries, &releases) {
             Ok(encoded) => encoded,
             Err(error) => {
@@ -1574,7 +1594,7 @@ impl Actor {
             reclaim_boundary: self.reclaim_boundary,
             bytes: encoded.bytes,
             footer: encoded.footer,
-            releases: releases.len(),
+            releases,
             first_admitted_at,
             sealed_at: Instant::now(),
             attempts: 0,
@@ -1838,7 +1858,7 @@ impl Actor {
             .catalog
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert_object(front.object_seq, front.footer.clone(), front.releases);
+            .insert_object(front.object_seq, front.footer.clone(), front.releases.len());
         if let Err(error) = indexed {
             self.poison(error);
             return false;
@@ -1848,7 +1868,7 @@ impl Actor {
         };
         METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS.inc();
         METRIC_OBJECT_STORE_WAL_INDEXED_BYTES.add(batch.bytes.len() as i64);
-        METRIC_OBJECT_STORE_WAL_RELEASE_RECORDS_TOTAL.inc_by(batch.releases as u64);
+        METRIC_OBJECT_STORE_WAL_RELEASE_RECORDS_TOTAL.inc_by(batch.releases.len() as u64);
         self.last_indexed = ChainLink {
             object_seq: batch.object_seq,
             epoch: self.epoch,
@@ -1924,8 +1944,15 @@ impl Actor {
                 shared(&error)
             }
         };
-        for batch in self.sealed.drain(..) {
+        for mut batch in self.sealed.drain(..) {
             self.unindexed.insert(batch.object_seq);
+            for release in batch.releases.drain(..) {
+                let entry_id = self
+                    .failed_releases
+                    .entry(release.region_id)
+                    .or_insert(release.entry_id);
+                *entry_id = (*entry_id).max(release.entry_id);
+            }
             batch.fail(failure);
         }
         self.reset_open_batch();
@@ -8248,9 +8275,9 @@ mod tests {
         let _serialized = SERIALIZED.lock().await;
         let region_id = region(1);
 
-        // `durable`: the release fails like an append, its watermark stays in
-        // memory, and the next object links past its object, so a restart
-        // does not seed it.
+        // `durable`: the release fails like an append and its watermark stays
+        // in memory; the next sealed batch carries the record again, so a
+        // restart seeds it.
         let object_store = memory_store();
         let (io, _) = RecordingIo::over(object_store.clone());
         let store = open_over(io.clone(), &eager()).await;
@@ -8266,12 +8293,22 @@ mod tests {
         );
         assert_eq!(Some(id(1, 1)), watermark(&store, region_id));
         // Object 3 carries the boundary that watermark allows, past object
-        // 1; object 2, which the failed create wrote, is an orphan.
+        // 1, and the record; object 2, which the failed create wrote, is an
+        // orphan.
+        let records = METRIC_OBJECT_STORE_WAL_RELEASE_RECORDS_TOTAL.get();
         append(&store, region(2), "b3").await.unwrap();
+        assert_eq!(
+            records + 1,
+            METRIC_OBJECT_STORE_WAL_RELEASE_RECORDS_TOTAL.get()
+        );
         assert_eq!(vec![2, 3], collected_object_seqs(&store).await);
+        assert_eq!(
+            vec![release(region_id, id(1, 1))],
+            decode_object(&io.get(3).await.unwrap()).unwrap().releases
+        );
         store.stop().await.unwrap();
         let store = open(object_store, &eager()).await;
-        assert_eq!(None, watermark(&store, region_id));
+        assert_eq!(Some(id(1, 1)), watermark(&store, region_id));
         store.stop().await.unwrap();
 
         // `enqueued`: the store repeats the create, and the release returns
@@ -8330,6 +8367,33 @@ mod tests {
             vec![provider(one), provider(two)],
             store.list_namespaces().await.unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn test_store_seals_a_failed_release_at_the_next_tick() {
+        let _serialized = SERIALIZED.lock().await;
+        let region_id = region(1);
+        let (io, _) = RecordingIo::over(memory_store());
+        let store = open_over(io.clone(), &config(MIN_FLUSH_INTERVAL, u64::MAX)).await;
+        io.fail_next_put_persistently();
+        store
+            .release_region(&provider(region_id), region_id)
+            .await
+            .unwrap_err();
+
+        // Nothing is appended, yet a tick seals the record again.
+        timeout(WAIT, async {
+            while !store.catalog.read().unwrap().contains_object(2) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            vec![release(region_id, 0)],
+            releases_of(io.as_ref(), 2).await
+        );
+        store.stop().await.unwrap();
     }
 
     #[tokio::test]

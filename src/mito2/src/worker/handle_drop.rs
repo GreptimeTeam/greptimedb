@@ -130,8 +130,8 @@ where
             )
             .await?;
         // Makes the release outlive a restart, which never opens the region again. A failure
-        // leaves the region removed like a failed `obsolete` does, while the watermark
-        // `obsolete` recorded still lets the WAL reclaim the region's entries until a restart.
+        // leaves the region removed like a failed `obsolete` does; a log store that persists
+        // releases keeps the record and writes it with its next object.
         self.wal.release_region(region_id, &region.provider).await?;
 
         if let Some(store) = &self.series_index_store {

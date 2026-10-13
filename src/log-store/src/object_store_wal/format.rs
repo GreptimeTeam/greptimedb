@@ -1233,74 +1233,14 @@ mod tests {
     }
 
     /// A version 1 object holding entries 1, 2 and 3 of region 1 and entries
-    /// 10 and 11 of region 2. The bytes were derived from the layout described in
-    /// the module documentation, independently of [`encode_object`], so a change
-    /// to field order, endianness or checksum coverage fails this test even when
-    /// the encoder and the decoder change together.
-    const FIXTURE_V1_HEX: &str = concat!(
-        // Header: magic, version 1, object sequence 7, epoch 3, predecessor
-        // sequence 6, predecessor epoch 2, reclaim boundary 5, header CRC32.
-        "475457414c4f424a",
-        "0001",
-        "0000000000000007",
-        "0000000000000003",
-        "0000000000000006",
-        "0000000000000002",
-        "0000000000000005",
-        "118e773f",
-        // Segment of region 1 at offset 54: region id, entry count, then
-        // (entry id, payload length, payload) per entry.
-        "0000000100000001",
-        "00000003",
-        "0000000000000001",
-        "00000001",
-        "61",
-        "0000000000000002",
-        "00000002",
-        "6262",
-        "0000000000000003",
-        "00000003",
-        "636363",
-        // Segment of region 2 at offset 108.
-        "0000000200000001",
-        "00000002",
-        "000000000000000a",
-        "00000001",
-        "78",
-        "000000000000000b",
-        "00000002",
-        "7979",
-        // Footer at offset 147: entry count, then per segment region id, min and
-        // max entry id, entry count, segment offset, length and CRC32.
-        "00000002",
-        "0000000100000001",
-        "0000000000000001",
-        "0000000000000003",
-        "00000003",
-        "0000000000000036",
-        "0000000000000036",
-        "25ac0486",
-        "0000000200000001",
-        "000000000000000a",
-        "000000000000000b",
-        "00000002",
-        "000000000000006c",
-        "0000000000000027",
-        "65dc08ec",
-        // Trailer: footer offset, footer length, footer CRC32, object CRC32, magic.
-        "0000000000000093",
-        "0000000000000064",
-        "d80c9f07",
-        "65c91839",
-        "475457414c54524c",
-    );
-
-    fn fixture_bytes(hex: &str) -> Vec<u8> {
-        let hex = hex.as_bytes();
-        hex.chunks(2)
-            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
-            .collect()
-    }
+    /// 10 and 11 of region 2. The bytes, frozen with their layout annotated
+    /// under `tests/compatibility/wal/object_store`, were derived from the
+    /// layout described in the module documentation, independently of
+    /// [`encode_object`], so a change to field order, endianness or checksum
+    /// coverage fails this test even when the encoder and the decoder change
+    /// together.
+    const FIXTURE_V1: &[u8] =
+        include_bytes!("../../../../tests/compatibility/wal/object_store/version_1.wal");
 
     fn fixture_records() -> Vec<Record> {
         [
@@ -1321,7 +1261,7 @@ mod tests {
 
     #[test]
     fn test_format_matches_version_1_fixture() {
-        let fixture = fixture_bytes(FIXTURE_V1_HEX);
+        let fixture = FIXTURE_V1.to_vec();
         let header = Header {
             object_seq: 7,
             epoch: 3,
@@ -1379,57 +1319,14 @@ mod tests {
     }
 
     /// A version 2 object holding entries 1 and 2 of region 1, and the
-    /// release records of region 1 through entry 2 and of region 2 in full.
-    /// The bytes were derived from the layout described in the module
-    /// documentation, independently of [`encode_object`], as those of
-    /// [`FIXTURE_V1_HEX`] were.
-    const FIXTURE_V2_HEX: &str = concat!(
-        // Header: magic, version 2, object sequence 9, epoch 3, predecessor
-        // sequence 8, predecessor epoch 3, reclaim boundary 6, header CRC32.
-        "475457414c4f424a",
-        "0002",
-        "0000000000000009",
-        "0000000000000003",
-        "0000000000000008",
-        "0000000000000003",
-        "0000000000000006",
-        "e75b9e01",
-        // Segment of region 1 at offset 54.
-        "0000000100000001",
-        "00000002",
-        "0000000000000001",
-        "00000001",
-        "61",
-        "0000000000000002",
-        "00000002",
-        "6262",
-        // Footer at offset 93: entry count and the entry of the segment as in
-        // version 1, then the release record count and, per record, the
-        // region id and the entry id the region is released through.
-        "00000001",
-        "0000000100000001",
-        "0000000000000001",
-        "0000000000000002",
-        "00000002",
-        "0000000000000036",
-        "0000000000000027",
-        "b79527ef",
-        "00000002",
-        "0000000100000001",
-        "0000000000000002",
-        "0000000200000001",
-        "ffffffffffffffff",
-        // Trailer: footer offset, footer length, footer CRC32, object CRC32, magic.
-        "000000000000005d",
-        "0000000000000058",
-        "fab0fe5b",
-        "30f82508",
-        "475457414c54524c",
-    );
+    /// release records of region 1 through entry 2 and of region 2 in full,
+    /// frozen and derived like [`FIXTURE_V1`].
+    const FIXTURE_V2: &[u8] =
+        include_bytes!("../../../../tests/compatibility/wal/object_store/version_2.wal");
 
     #[test]
     fn test_format_matches_version_2_fixture() {
-        let fixture = fixture_bytes(FIXTURE_V2_HEX);
+        let fixture = FIXTURE_V2.to_vec();
         let header = Header {
             object_seq: 9,
             epoch: 3,
