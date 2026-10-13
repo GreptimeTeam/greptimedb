@@ -222,12 +222,19 @@ impl Import {
         manifest.validate_layout().map_err(|reason| {
             crate::data::import_v2::error::InvalidPackedSnapshotSnafu { reason }.build()
         })?;
-        if manifest.is_packed() {
-            self.database_client
-                .require_packed_import()
+        let capabilities = if manifest.is_packed() {
+            let capabilities = self
+                .database_client
+                .capabilities()
                 .await
                 .context(crate::data::import_v2::error::DatabaseSnafu)?;
-        }
+            capabilities
+                .require("metric_packed_import")
+                .context(crate::data::import_v2::error::DatabaseSnafu)?;
+            Some(capabilities)
+        } else {
+            None
+        };
 
         info!("Snapshot contains {} schema(s)", manifest.schemas.len());
 
@@ -279,6 +286,15 @@ impl Import {
             return Ok(());
         }
 
+        let capabilities = match capabilities {
+            Some(capabilities) => capabilities,
+            None => self
+                .database_client
+                .capabilities()
+                .await
+                .context(crate::data::import_v2::error::DatabaseSnafu)?,
+        };
+
         let mut resume_session = if !data_tasks.is_empty() {
             let state_path = resolve_state_path(
                 self.state_path.as_deref(),
@@ -316,7 +332,9 @@ impl Import {
             false
         } else {
             let executor = DdlExecutor::new(&self.database_client);
-            executor.execute_strict(&ddl_statements).await?;
+            executor
+                .execute_strict(&ddl_statements, capabilities.supports("metric_batch_ddl"))
+                .await?;
             if let Some(session) = resume_session.as_mut() {
                 session.mark_ddl_completed().await?;
             }
@@ -356,9 +374,7 @@ impl Import {
                 .await
                 .context(SnapshotStorageSnafu)?;
             statements.extend(
-                parse_ddl_statements(&content)
-                    .into_iter()
-                    .map(|sql| ddl_statement_for_schema(schema, sql)),
+                iter_ddl_statements(&content).map(|sql| ddl_statement_for_schema(schema, sql)),
             );
         }
 
@@ -402,90 +418,92 @@ impl ImportTaskExecutor for CopyDatabaseImportTaskExecutor<'_> {
     }
 }
 
+#[cfg(test)]
 fn parse_ddl_statements(content: &str) -> Vec<String> {
-    let mut statements = Vec::new();
-    let mut current = String::new();
+    iter_ddl_statements(content).collect()
+}
+
+pub(crate) fn iter_ddl_statements(content: &str) -> impl Iterator<Item = String> + '_ {
     let mut chars = content.chars().peekable();
     let mut in_single_quote = false;
     let mut in_double_quote = false;
     let mut in_line_comment = false;
     let mut in_block_comment = false;
 
-    while let Some(ch) = chars.next() {
-        if in_line_comment {
-            if ch == '\n' {
-                in_line_comment = false;
-                current.push('\n');
-            }
-            continue;
-        }
-
-        if in_block_comment {
-            if ch == '*' && chars.peek() == Some(&'/') {
-                chars.next();
-                in_block_comment = false;
-            }
-            continue;
-        }
-
-        if in_single_quote {
-            current.push(ch);
-            if ch == '\'' {
-                if chars.peek() == Some(&'\'') {
-                    current.push(chars.next().expect("peeked quote must exist"));
-                } else {
-                    in_single_quote = false;
+    std::iter::from_fn(move || {
+        let mut current = String::new();
+        while let Some(ch) = chars.next() {
+            if in_line_comment {
+                if ch == '\n' {
+                    in_line_comment = false;
+                    current.push('\n');
                 }
+                continue;
             }
-            continue;
-        }
 
-        if in_double_quote {
-            current.push(ch);
-            if ch == '"' {
-                if chars.peek() == Some(&'"') {
-                    current.push(chars.next().expect("peeked quote must exist"));
-                } else {
-                    in_double_quote = false;
+            if in_block_comment {
+                if ch == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    in_block_comment = false;
                 }
+                continue;
             }
-            continue;
-        }
 
-        match ch {
-            '-' if chars.peek() == Some(&'-') => {
-                chars.next();
-                in_line_comment = true;
-            }
-            '/' if chars.peek() == Some(&'*') => {
-                chars.next();
-                in_block_comment = true;
-            }
-            '\'' => {
-                in_single_quote = true;
+            if in_single_quote {
                 current.push(ch);
-            }
-            '"' => {
-                in_double_quote = true;
-                current.push(ch);
-            }
-            ';' => {
-                let statement = current.trim();
-                if !statement.is_empty() {
-                    statements.push(statement.to_string());
+                if ch == '\'' {
+                    if chars.peek() == Some(&'\'') {
+                        current.push(chars.next().expect("peeked quote must exist"));
+                    } else {
+                        in_single_quote = false;
+                    }
                 }
-                current.clear();
+                continue;
             }
-            _ => current.push(ch),
+
+            if in_double_quote {
+                current.push(ch);
+                if ch == '"' {
+                    if chars.peek() == Some(&'"') {
+                        current.push(chars.next().expect("peeked quote must exist"));
+                    } else {
+                        in_double_quote = false;
+                    }
+                }
+                continue;
+            }
+
+            match ch {
+                '-' if chars.peek() == Some(&'-') => {
+                    chars.next();
+                    in_line_comment = true;
+                }
+                '/' if chars.peek() == Some(&'*') => {
+                    chars.next();
+                    in_block_comment = true;
+                }
+                '\'' => {
+                    in_single_quote = true;
+                    current.push(ch);
+                }
+                '"' => {
+                    in_double_quote = true;
+                    current.push(ch);
+                }
+                ';' => {
+                    let statement = current.trim();
+                    if !statement.is_empty() {
+                        return Some(statement.to_string());
+                    }
+                    current.clear();
+                }
+                _ => current.push(ch),
+            }
         }
-    }
 
-    let statement = current.trim();
-    if !statement.is_empty() {
-        statements.push(statement.to_string());
-    }
-
-    statements
+        let statement = current.trim();
+        (!statement.is_empty()).then(|| statement.to_string())
+    })
 }
 
 fn ddl_statement_for_schema(schema: &str, sql: String) -> DdlStatement {

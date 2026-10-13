@@ -341,8 +341,7 @@ pub(crate) fn build_bulk_filter_plan(
     predicate: Option<&Predicate>,
 ) -> BulkFilterPlan {
     let metadata = read_format.metadata();
-    // Bulk memtable only needs simple binary filters here. Any filter that
-    // cannot be reduced to a SimpleFilterContext stays out of this fast path.
+    // Filters not recognized by SimpleFilterContext stay out of this fast path.
     let simple_filters: Vec<SimpleFilterContext> = predicate
         .into_iter()
         .flat_map(|predicate| {

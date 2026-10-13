@@ -27,8 +27,10 @@ use store_api::storage::{ScanRequest, TableId};
 use crate::CatalogManager;
 use crate::error::{ProjectSchemaSnafu, Result};
 use crate::information_schema::{
-    DatanodeInspectKind, DatanodeInspectRequest, InformationTable, REGION_INFO,
+    DatanodeInspectKind, DatanodeInspectRequest, InformationSchemaTableScope, InformationTable,
+    REGION_INFO,
 };
+use crate::system_schema::SystemTable;
 use crate::system_schema::utils;
 
 /// Information schema table for region info.
@@ -47,6 +49,12 @@ impl InformationSchemaRegionInfo {
 }
 
 impl InformationTable for InformationSchemaRegionInfo {
+    fn scope(&self) -> InformationSchemaTableScope {
+        InformationSchemaTableScope::Global
+    }
+}
+
+impl SystemTable for InformationSchemaRegionInfo {
     fn table_id(&self) -> TableId {
         INFORMATION_SCHEMA_REGION_INFO_TABLE_ID
     }

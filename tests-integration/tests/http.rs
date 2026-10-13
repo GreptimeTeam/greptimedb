@@ -228,6 +228,7 @@ macro_rules! http_tests {
                 test_splunk_raw,
                 test_log_query,
                 test_jaeger_query_api,
+                test_jaeger_v3_query_api,
                 test_jaeger_query_api_for_trace_v1,
                 test_jaeger_query_api_for_trace_v2,
 
@@ -516,6 +517,459 @@ async fn test_sql_skip_wal(distributed: bool) {
         case.expected_written_nodes = distributed.then_some(2);
     }
     check_http_skip_wal("sql", &cases, distributed).await;
+}
+
+fn logical_ddl(name: &str) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {name} (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val DOUBLE) ENGINE=metric WITH (on_physical_table='phy.dot')"
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_ddl_http_standalone() {
+    check_logical_ddl_http(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_ddl_http_distributed() {
+    check_logical_ddl_http(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "manual logical DDL throughput measurement"]
+async fn logical_ddl_http_benchmark() {
+    common_telemetry::init_default_ut_logging();
+    let count: usize = std::env::var("GT_LOGICAL_DDL_BENCH_TABLES")
+        .unwrap_or_else(|_| "1000".to_string())
+        .parse()
+        .unwrap();
+    for (name, endpoint, batch_size) in [
+        ("single", "/v1/sql", 1),
+        ("multi_sql", "/v1/sql", 128),
+        ("batch", "/v1/ddl/logical-tables", 128),
+    ] {
+        let mut instance =
+            MockInstanceImpl::Standalone(
+                tests_integration::standalone::GreptimeDbStandaloneBuilder::new(&format!(
+                    "logical_ddl_bench_{name}"
+                ))
+                .with_event_recorder_options(
+                    tests_integration::test_util::test_event_recorder_options(),
+                )
+                .build()
+                .await,
+            );
+        let server = HttpServerBuilder::new(HttpOptions::default())
+            .with_sql_handler(instance.frontend())
+            .build();
+        let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+        let response = execute_sql(&client, "CREATE TABLE \"phy.dot\" (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val DOUBLE) ENGINE=metric WITH (physical_metric_table='')").await;
+        assert!(response.status().is_success(), "{}", response.text().await);
+        let statements = (0..count)
+            .map(|i| logical_ddl(&format!("bench_{i}")))
+            .collect::<Vec<_>>();
+        let start = std::time::Instant::now();
+        for chunk in statements.chunks(batch_size) {
+            let response = client
+                .post(endpoint)
+                .form(&[("sql", chunk.join(";"))])
+                .send()
+                .await;
+            assert!(response.status().is_success(), "{}", response.text().await);
+            assert_eq!(
+                response.json::<Value>().await["output"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                chunk.len()
+            );
+        }
+        let elapsed = start.elapsed();
+        let requests = count.div_ceil(batch_size);
+        let procedures = if name == "batch" { requests } else { count };
+        wait_for_event_data(&client,
+            "SELECT count(DISTINCT procedure_id), count(DISTINCT table_name) FROM greptime_private.events WHERE type='create_logical_tables' AND json_get_string(procedure_trigger, 'type')='Submitted' AND table_name LIKE 'bench_%'",
+            &format!("[[{procedures},{count}]]")).await;
+        common_telemetry::info!(
+            "Logical DDL: mode={name}, tables={count}, concurrency=1, HTTP requests={requests}, procedures={procedures}, elapsed={elapsed:?}"
+        );
+        instance.shutdown().await;
+    }
+}
+
+async fn check_logical_ddl_http(distributed: bool) {
+    common_telemetry::init_default_ut_logging();
+    let events = tests_integration::test_util::test_event_recorder_options();
+    let mut instance = if distributed {
+        MockInstanceImpl::Distributed(
+            tests_integration::cluster::GreptimeDbClusterBuilder::new("batch_logical_ddl")
+                .await
+                .with_event_recorder_options(events)
+                .with_datanodes(3)
+                .build(true)
+                .await,
+        )
+    } else {
+        MockInstanceImpl::Standalone(
+            tests_integration::standalone::GreptimeDbStandaloneBuilder::new("batch_logical_ddl")
+                .with_event_recorder_options(events)
+                .build()
+                .await,
+        )
+    };
+    let frontend = instance.frontend();
+    let server = HttpServerBuilder::new(HttpOptions::default())
+        .with_sql_handler(frontend.clone())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+    assert_eq!(
+        client
+            .get("/v1/capabilities")
+            .send()
+            .await
+            .json::<Value>()
+            .await["metric_batch_ddl"],
+        1
+    );
+    let response = execute_sql(&client, "CREATE TABLE \"phy.dot\" (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val DOUBLE) ENGINE=metric WITH (physical_metric_table='')").await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+
+    for sql in [
+        String::new(),
+        format!("{}; SELECT 1", logical_ddl("rejected")),
+        format!("{}; CREATE VIEW v AS SELECT 1", logical_ddl("rejected")),
+        format!(
+            "{}; CREATE TABLE copy LIKE batch_0",
+            logical_ddl("rejected")
+        ),
+        format!("{}; CREATE TABLE copy AS SELECT 1", logical_ddl("rejected")),
+        logical_ddl("rejected").replace("WITH (", "WITH (physical_metric_table='', "),
+        format!(
+            "{}; CREATE TABLE ordinary (ts TIMESTAMP TIME INDEX)",
+            logical_ddl("rejected")
+        ),
+        format!(
+            "{};{}",
+            logical_ddl("rejected"),
+            logical_ddl("public.rejected")
+        ),
+        format!("{};{}", logical_ddl("rejected"), logical_ddl("other.t")),
+        format!(
+            "{};{}",
+            logical_ddl("rejected"),
+            logical_ddl("other_physical").replace("phy.dot", "other")
+        ),
+        (0..129)
+            .map(|i| logical_ddl(&format!("rejected_{i}")))
+            .collect::<Vec<_>>()
+            .join(";"),
+    ] {
+        let response = client
+            .post("/v1/ddl/logical-tables")
+            .form(&[("sql", sql)])
+            .send()
+            .await;
+        assert!(!response.status().is_success(), "{}", response.text().await);
+    }
+    validate_data(
+        "batch_rejected",
+        &client,
+        "SELECT count(*) FROM information_schema.tables WHERE table_name LIKE 'rejected%'",
+        "[[0]]",
+    )
+    .await;
+
+    let sql = (0..128)
+        .map(|i| logical_ddl(&format!("batch_{i}")))
+        .collect::<Vec<_>>()
+        .join(";");
+    let response = client
+        .post("/v1/ddl/logical-tables")
+        .form(&[("sql", sql)])
+        .send()
+        .await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+    assert_eq!(
+        response.json::<Value>().await["output"],
+        json!(vec![json!({"affectedrows": 0}); 128])
+    );
+    wait_for_event_data(&client,
+        "SELECT count(DISTINCT procedure_id), count(DISTINCT table_name) FROM greptime_private.events WHERE type='create_logical_tables' AND json_get_string(procedure_trigger, 'type')='Submitted' AND table_name LIKE 'batch_%'",
+        "[[1,128]]").await;
+
+    let physical_id = frontend
+        .catalog_manager()
+        .table("greptime", "public", "phy.dot", None)
+        .await
+        .unwrap()
+        .unwrap()
+        .table_info()
+        .table_id();
+    let mut ids = std::collections::HashSet::new();
+    for i in 0..128 {
+        let table = frontend
+            .catalog_manager()
+            .table("greptime", "public", &format!("batch_{i}"), None)
+            .await
+            .unwrap()
+            .unwrap();
+        let id = table.table_info().table_id();
+        assert!(ids.insert(id));
+        assert_ne!(id, physical_id);
+        let bound_physical_id = frontend
+            .table_metadata_manager()
+            .table_route_manager()
+            .get_physical_table_id(id)
+            .await
+            .unwrap();
+        assert_eq!(bound_physical_id, physical_id);
+        assert_eq!(
+            table
+                .table_info()
+                .meta
+                .options
+                .extra_options
+                .get("on_physical_table")
+                .map(String::as_str),
+            Some("phy.dot")
+        );
+        assert_eq!(table.schema().column_schemas().len(), 3);
+    }
+    let sql = logical_ddl("one_at_byte_limit");
+    let padded = format!("{sql}{}", " ".repeat(1024 * 1024 - sql.len()));
+    let response = client
+        .post("/v1/ddl/logical-tables")
+        .form(&[("sql", padded)])
+        .send()
+        .await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+
+    let response = execute_sql(&client, "CREATE DATABASE inherited WITH ('skip_wal'='true', ttl='1h', 'compaction.type'='twcs'); CREATE TABLE inherited.phy (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val DOUBLE) ENGINE=metric WITH (physical_metric_table='')").await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+    let inherited = logical_ddl("inherited.ordinary").replace("phy.dot", "phy");
+    let response = execute_sql(&client, &inherited).await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+    let sql = format!(
+        "{};{}",
+        logical_ddl("batched").replace("phy.dot", "phy"),
+        logical_ddl("explicit")
+            .replace("phy.dot", "phy")
+            .replace("WITH (", "WITH (skip_wal='false', ")
+    );
+    let response = client
+        .post("/v1/ddl/logical-tables")
+        .form(&[("sql", sql.as_str()), ("db", "greptime-inherited")])
+        .send()
+        .await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+    let catalog = frontend.catalog_manager();
+    let ordinary = catalog
+        .table("greptime", "inherited", "ordinary", None)
+        .await
+        .unwrap()
+        .unwrap();
+    let batched = catalog
+        .table("greptime", "inherited", "batched", None)
+        .await
+        .unwrap()
+        .unwrap();
+    let explicit = catalog
+        .table("greptime", "inherited", "explicit", None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ordinary.table_info().meta.options,
+        batched.table_info().meta.options
+    );
+    assert!(batched.table_info().meta.options.skip_wal);
+    assert!(!explicit.table_info().meta.options.skip_wal);
+    assert!(
+        !batched
+            .table_info()
+            .meta
+            .options
+            .extra_options
+            .contains_key("compaction.type")
+    );
+
+    let response = execute_sql(&client, "CREATE TABLE partitioned (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val DOUBLE) PARTITION ON COLUMNS (host) (host < 'm', host >= 'm') ENGINE=metric WITH (physical_metric_table='')").await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+    let partitioned = logical_ddl("bad_partition")
+        .replace("phy.dot", "partitioned")
+        .replace(
+            "ENGINE=",
+            "PARTITION ON COLUMNS (host) (host < 'n', host >= 'n') ENGINE=",
+        );
+    let response = execute_sql(&client, &partitioned).await;
+    assert!(!response.status().is_success());
+    let sql = format!(
+        "{};{partitioned}",
+        logical_ddl("before_bad_partition").replace("phy.dot", "partitioned")
+    );
+    let response = client
+        .post("/v1/ddl/logical-tables")
+        .form(&[("sql", sql)])
+        .send()
+        .await;
+    assert!(!response.status().is_success());
+    assert!(
+        catalog
+            .table("greptime", "public", "before_bad_partition", None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let matching = partitioned
+        .replace("bad_partition", "matching_partition")
+        .replace("'n'", "'m'");
+    let response = execute_sql(&client, &matching).await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+    let sql = format!(
+        "{};{}",
+        matching.replace("matching_partition", "batch_matching_partition"),
+        logical_ddl("batch_inherited_partition").replace("phy.dot", "partitioned")
+    );
+    let response = client
+        .post("/v1/ddl/logical-tables")
+        .form(&[("sql", sql)])
+        .send()
+        .await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+
+    let original_id = frontend
+        .catalog_manager()
+        .table("greptime", "public", "batch_0", None)
+        .await
+        .unwrap()
+        .unwrap()
+        .table_info()
+        .table_id();
+    let sql = format!("{};{}", logical_ddl("batch_0"), logical_ddl("batch_new"));
+    for _ in 0..2 {
+        let response = client
+            .post("/v1/ddl/logical-tables")
+            .form(&[("sql", &sql)])
+            .send()
+            .await;
+        assert!(response.status().is_success(), "{}", response.text().await);
+    }
+    let old = frontend
+        .catalog_manager()
+        .table("greptime", "public", "batch_0", None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(original_id, old.table_info().table_id());
+    let response = execute_sql(
+        &client,
+        "INSERT INTO batch_0 (ts, host, val) VALUES (1, 'a', 2.0); INSERT INTO batch_new (ts, host, val) VALUES (2, 'b', 3.0)",
+    )
+    .await;
+    assert!(response.status().is_success(), "{}", response.text().await);
+    validate_data(
+        "batch_values",
+        &client,
+        "SELECT val FROM batch_0 UNION ALL SELECT val FROM batch_new ORDER BY val",
+        "[[2.0],[3.0]]",
+    )
+    .await;
+    let ctx = session::context::QueryContext::arc();
+    let provider =
+        auth::static_user_provider_from_option("static_user_provider:cmd:readonly:ro=password")
+            .unwrap();
+    let user = auth::UserProvider::authenticate(
+        &provider,
+        auth::Identity::UserId("readonly", None),
+        auth::Password::PlainText("password".to_string().into()),
+    )
+    .await
+    .unwrap();
+    ctx.set_current_user(user);
+    frontend
+        .plugins()
+        .get_or_insert::<auth::PermissionCheckerRef, _>(auth::DefaultPermissionChecker::arc);
+    let result = servers::query_handler::sql::SqlQueryHandler::create_logical_tables(
+        frontend.as_ref(),
+        &logical_ddl("read_only_denied"),
+        ctx,
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(
+        frontend
+            .catalog_manager()
+            .table("greptime", "public", "read_only_denied", None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    struct FailAfterExecution(&'static str);
+    impl servers::interceptor::SqlQueryInterceptor for FailAfterExecution {
+        type Error = frontend::error::Error;
+        fn post_execute(
+            &self,
+            _: common_query::Output,
+            _: QueryContextRef,
+        ) -> frontend::error::Result<common_query::Output> {
+            use common_query::Output;
+            match self.0 {
+                "rows" => Ok(Output::new_with_affected_rows(1)),
+                "records" => Ok(Output::new_with_record_batches(
+                    common_recordbatch::RecordBatches::empty(),
+                )),
+                "stream" => Ok(Output::new_with_stream(Box::pin(
+                    common_recordbatch::RecordBatchStreamWrapper::new(
+                        Arc::new(datatypes::schema::Schema::new(vec![])),
+                        futures::stream::iter([Err::<common_recordbatch::RecordBatch, _>(
+                            common_recordbatch::error::CreateRecordBatchesSnafu {
+                                reason: "sensitive-option-value",
+                            }
+                            .build(),
+                        )]),
+                    ),
+                ))),
+                _ => frontend::error::InvalidSqlSnafu {
+                    err_msg: "sensitive-option-value",
+                }
+                .fail(),
+            }
+        }
+    }
+    frontend
+        .plugins()
+        .insert::<servers::interceptor::SqlQueryInterceptorRef<frontend::error::Error>>(Arc::new(
+            FailAfterExecution("error"),
+        ));
+    for mode in ["error", "rows", "records", "stream"] {
+        frontend
+            .plugins()
+            .map_mut::<servers::interceptor::SqlQueryInterceptorRef<frontend::error::Error>, _, _>(
+                |plugin| *plugin.unwrap() = Arc::new(FailAfterExecution(mode)),
+            );
+        let name = format!("created_before_error_{mode}");
+        let response = client
+            .post("/v1/ddl/logical-tables")
+            .form(&[("sql", logical_ddl(&name))])
+            .send()
+            .await;
+        assert!(!response.status().is_success(), "{mode}");
+        assert!(!format!("{:?}", response.headers()).contains("sensitive-option-value"));
+        let body = response.json::<Value>().await;
+        assert!(body.get("output").is_none());
+        assert_eq!(body["error"], "logical-table batch failed");
+        assert!(
+            frontend
+                .catalog_manager()
+                .table("greptime", "public", &name, None)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    instance.shutdown().await;
 }
 
 pub async fn test_sql_api(store_type: StorageType) {
@@ -2023,6 +2477,7 @@ pub async fn test_promql_over_non_millisecond_physical_tables(store_type: Storag
         "query_range?query=unit_gauge&start=0&end=5&step=1",
         "query?query=avg_over_time(unit_gauge[1m])&time=2",
         "query?query=rate(unit_gauge[1m])&time=2",
+        "query?query=unit_gauge[1m]&time=2",
     ];
     for path in query_paths {
         let mut baseline: Option<(String, PrometheusResponse)> = None;
@@ -2085,6 +2540,24 @@ pub async fn test_promql_over_non_millisecond_physical_tables(store_type: Storag
                 "values": [
                     [1.0, "1.0"], [2.0, "2.0"], [3.0, "2.0"], [4.0, "2.0"], [5.0, "2.0"]
                 ]
+            }]
+        }))
+        .unwrap()
+    );
+
+    let res = client
+        .get("/v1/prometheus/api/v1/query?db=promql_units_ms&query=unit_gauge[1m]&time=2")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!({
+            "resultType": "matrix",
+            "result": [{
+                "metric": {"__name__": "unit_gauge", "job": "demo"},
+                "values": [[1.0, "1.0"], [2.0, "2.0"]]
             }]
         }))
         .unwrap()
@@ -2811,7 +3284,6 @@ providers = []"#,
         r#"
 enable_telemetry = true
 auto_create_table = true
-experimental_metric_export = false
 max_in_flight_write_bytes = "0KiB"
 write_bytes_exhausted_policy = "wait"
 init_regions_in_background = false
@@ -3071,6 +3543,7 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "disable_ec2_metadata =",
         "cache_path =",
         "cache_capacity =",
+        "trace_aux_cache_size =",
         "memory_pool_size =",
         "scan_memory_limit =",
         "sas_token =",
@@ -4755,6 +5228,43 @@ pub async fn test_prometheus_remote_write_with_ttl_hint(store_type: StorageType)
     assert!(
         !resp.contains("ttl = '7d'") && !resp.contains("ttl = '7days'"),
         "did not expect retention ttl in SHOW CREATE TABLE output for logical table, got: {resp}"
+    );
+
+    // Once the physical table exists, a retention hint cannot be applied and must fail.
+    let write_request = WriteRequest {
+        timeseries: vec![TimeSeries {
+            labels: vec![
+                Label {
+                    name: prom_store::METRIC_NAME_LABEL.to_string(),
+                    value: "ttl_hint_metric_again".to_string(),
+                },
+                Label {
+                    name: "host".to_string(),
+                    value: "host2".to_string(),
+                },
+            ],
+            samples: vec![Sample {
+                value: 2.0f64,
+                timestamp: 1664370459458,
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let compressed_request = prom_store::snappy_compress(&write_request.encode_to_vec())
+        .expect("failed to encode snappy");
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header("x-greptime-hints", "ttl=1d")
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    let resp = res.text().await;
+    assert!(
+        resp.contains("already exists"),
+        "expected retention TTL rejection when the physical table exists, got: {resp}"
     );
 
     guard.remove_all().await;
@@ -11094,6 +11604,324 @@ pub async fn test_log_query(store_type: StorageType) {
     assert_eq!(get_output_row_count(&res.text().await), 17);
 
     guard.remove_all().await;
+}
+
+pub async fn test_jaeger_v3_query_api(
+    store_type: StorageType,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_jaeger_v3_query_api").await;
+    let client = TestClient::new(app).await;
+    for (path, expected_status, expected) in [
+        ("services", StatusCode::OK, json!({"services":[]})),
+        (
+            "trace-summaries?query.startTimeMin=2026-01-01T00:00:00Z&query.startTimeMax=2026-01-02T00:00:00Z",
+            StatusCode::OK,
+            json!({"summaries":[]}),
+        ),
+        (
+            "operations?service=checkout",
+            StatusCode::OK,
+            json!({"operations":[]}),
+        ),
+        (
+            "traces/00000000000000000000000000000001",
+            StatusCode::NOT_FOUND,
+            json!({"error":{"httpCode":404,"message":"No traces found"}}),
+        ),
+    ] {
+        let response = client
+            .get(&format!("/v1/jaeger/api/v3/{path}"))
+            .send()
+            .await;
+        assert_eq!(response.status(), expected_status, "{path}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&response.text().await)?,
+            expected
+        );
+    }
+    for path in [
+        "operations",
+        "traces",
+        "traces/not-hex",
+        "traces/0000000000000001?startTime=invalid",
+        "traces/0000000000000001?rawTraces=invalid",
+        "traces?query.startTimeMin=2026-01-01T00:00:00Z&query.startTimeMax=2026-01-02T00:00:00Z&query.searchDepth=10001",
+        "trace-summaries?query.startTimeMin=2026-01-01T00:00:00Z&query.startTimeMax=2026-01-02T00:00:00Z&query.searchDepth=10001",
+    ] {
+        let response = client
+            .get(&format!("/v1/jaeger/api/v3/{path}"))
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        let body: Value = serde_json::from_str(&response.text().await)?;
+        assert_eq!(body["error"]["httpCode"], 400);
+    }
+
+    // The parent starts before the search window. A matching child must return the whole trace.
+    let start = chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .ok_or("Timestamp out of range")? as u64;
+    let start = start / 1_000_000_000 * 1_000_000_000 + 123;
+    let timestamp = |ns: u64| {
+        chrono::DateTime::from_timestamp_nanos(ns as i64)
+            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+    };
+    let request: ExportTraceServiceRequest = serde_json::from_value(json!({"resourceSpans":[
+        {"resource":{"attributes":[make_string_attr("service.name","checkout"), make_string_attr("service.instance.id","one")]},
+         "scopeSpans":[{"scope":{"name":"sdk","version":"1.0","attributes":[make_string_attr("scope.key","value"), {"key":"scope.bytes","value":{"bytesValue":"AQID/w=="}}]},"spans":[{
+            "traceId":"000000000000000000000000000000ab", "spanId":"0000000000000001", "name":"parent", "kind":2,
+            "startTimeUnixNano":start.to_string(), "endTimeUnixNano":(start+2000).to_string()
+         }]}]},
+        {"resource":{"attributes":[make_string_attr("service.name","checkout"), make_string_attr("service.instance.id","two"), {"key":"resource.bytes","value":{"bytesValue":"AQID/w=="}}]},
+         "scopeSpans":[{"scope":{"name":"sdk","version":"1.0","attributes":[make_string_attr("scope.key","value"), {"key":"scope.bytes","value":{"bytesValue":"AQID/w=="}}]},"spans":[{
+            "traceId":"000000000000000000000000000000ab", "spanId":"0000000000000002", "parentSpanId":"0000000000000001", "name":"child", "kind":3,
+            "traceState":"vendor=value", "startTimeUnixNano":(start+1000).to_string(), "endTimeUnixNano":(start+1999).to_string(),
+            "attributes":[make_int_attr("http.status_code",500),make_bool_attr("failed",true),
+                {"key":"bytes","value":{"bytesValue":"AQID/w=="}},
+                {"key":"integers","value":{"arrayValue":{"values":[{"intValue":"1"},{"intValue":"2"},{"intValue":"3"},{"intValue":"255"}]}}},
+                {"key":"nested","value":{"arrayValue":{"values":[{"intValue":"9223372036854775807"},{"kvlistValue":{"values":[make_string_attr("key","value")]}}]}}}],
+            "events":[{"name":"exception","timeUnixNano":(start+1011).to_string(),"attributes":[make_string_attr("message","failure")]}],
+            "links":[{"traceId":"000000000000000000000000000000cd","spanId":"0000000000000003","traceState":"link=value","attributes":[make_bool_attr("remote",true)]}],
+            "status":{"code":2,"message":"failure"}
+         }, {
+            "traceId":"000000000000000000000000000000cd", "spanId":"0000000000000003", "name":"boundary", "kind":2,
+            "startTimeUnixNano":(start+2000).to_string(), "endTimeUnixNano":(start+3000).to_string()
+         }]}]}
+    ]}))?;
+    for pipeline in [
+        "greptime_trace_v0",
+        GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME,
+        GREPTIME_INTERNAL_TRACE_PIPELINE_V2_NAME,
+    ] {
+        let table = format!("jaeger_api_v3_{pipeline}");
+        let response = send_req(
+            &client,
+            vec![
+                (
+                    HeaderName::from_static("content-type"),
+                    HeaderValue::from_static("application/x-protobuf"),
+                ),
+                (
+                    HeaderName::from_static("x-greptime-pipeline-name"),
+                    HeaderValue::from_str(pipeline)?,
+                ),
+                (
+                    HeaderName::from_static("x-greptime-trace-table-name"),
+                    HeaderValue::from_str(&table)?,
+                ),
+            ],
+            "/v1/otlp/v1/traces",
+            request.encode_to_vec(),
+            false,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        for (path, expected) in [
+            ("services", json!({"services":["checkout"]})),
+            (
+                "operations?service=checkout&span_kind=client",
+                json!({"operations":[{"name":"child","spanKind":"client"}]}),
+            ),
+            (
+                "operations?service=checkout&spanKind=client",
+                json!({"operations":[{"name":"child","spanKind":"client"}]}),
+            ),
+        ] {
+            let response = client
+                .get(&format!("/v1/jaeger/api/v3/{path}"))
+                .header("x-greptime-trace-table-name", &table)
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                serde_json::from_str::<Value>(&response.text().await)?,
+                expected
+            );
+        }
+        for flushed in [false, true] {
+            if flushed {
+                let response = client
+                    .post("/v1/sql")
+                    .form(&[("sql", format!("ADMIN FLUSH_TABLE('{table}')"))])
+                    .send()
+                    .await;
+                assert_eq!(response.status(), StatusCode::OK);
+            }
+            let response = client.get(&format!(
+                "/v1/jaeger/api/v3/trace-summaries?query.serviceName=checkout&query.startTimeMin={}&query.startTimeMax={}",
+                timestamp(start+1000), timestamp(start+2000),
+            )).header("x-greptime-trace-table-name", &table).send().await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: Value = serde_json::from_str(&response.text().await)?;
+            assert_eq!(
+                body,
+                json!({"summaries":[{
+                    "traceId":"000000000000000000000000000000ab",
+                    "rootServiceName":"checkout", "rootOperationName":"parent",
+                    "minStartTimeUnixNano":start.to_string(), "maxEndTimeUnixNano":(start+2000).to_string(),
+                    "spanCount":2, "errorSpanCount":1, "orphanSpanCount":0,
+                    "services":[{"name":"checkout", "spanCount":2, "errorSpanCount":1}],
+                }]})
+            );
+            for path in [
+                "traces/00000000000000AB".to_string(),
+                format!(
+                    "traces/00000000000000AB?startTime={}",
+                    timestamp(start + 1000)
+                ),
+                format!("traces/00000000000000AB?endTime={}", timestamp(start + 500)),
+                format!(
+                    "traces/00000000000000AB?start_time={}&end_time={}",
+                    timestamp(start + 500),
+                    timestamp(start + 999)
+                ),
+                format!(
+                    "traces?query.startTimeMin={}&query.startTimeMax={}&query.searchDepth=0",
+                    timestamp(start + 1000),
+                    timestamp(start + 2000)
+                ),
+                format!(
+                    "traces?query.service_name=checkout&query.operation_name=child&query.start_time_min={}&query.start_time_max={}&query.num_traces=1&query.duration_min=999ns&query.duration_max=999ns&query.attributes={}",
+                    timestamp(start + 1000),
+                    timestamp(start + 2000),
+                    encode(r#"{"http.status_code":"500","failed":"true"}"#)
+                ),
+                format!(
+                    "traces?query.startTimeMin={}&query.startTimeMax={}&query.attributes={}",
+                    timestamp(start + 1000),
+                    timestamp(start + 2000),
+                    encode(r#"{"service.instance.id":"two"}"#)
+                ),
+            ] {
+                let response = client
+                    .get(&format!("/v1/jaeger/api/v3/{path}"))
+                    .header("x-greptime-trace-table-name", &table)
+                    .send()
+                    .await;
+                let status = response.status();
+                let body: Value = serde_json::from_str(&response.text().await)?;
+                assert_eq!(status, StatusCode::OK, "{pipeline}: {path}: {body}");
+                let resources = body["result"]["resourceSpans"]
+                    .as_array()
+                    .ok_or("Missing resource spans")?;
+                let spans: Vec<_> = resources
+                    .iter()
+                    .flat_map(|r| r["scopeSpans"][0]["spans"].as_array().unwrap())
+                    .collect();
+                assert_eq!(spans.len(), 2, "{body}");
+                assert!(
+                    spans
+                        .iter()
+                        .all(|span| span["traceId"] == "000000000000000000000000000000ab")
+                );
+                let child = spans
+                    .iter()
+                    .find(|span| span["name"] == "child")
+                    .ok_or("Missing child span")?;
+                assert_eq!(child["startTimeUnixNano"], (start + 1000).to_string());
+                assert_eq!(child["endTimeUnixNano"], (start + 1999).to_string());
+                assert_eq!(child["parentSpanId"], "0000000000000001");
+                assert_eq!(child["kind"], 3);
+                assert_eq!(child["status"]["code"], 2);
+                assert_eq!(child["traceState"], "vendor=value");
+                assert_eq!(
+                    child["events"][0]["timeUnixNano"],
+                    (start + 1011).to_string()
+                );
+                assert_eq!(child["links"][0]["traceState"], "link=value");
+                assert_eq!(
+                    child["links"][0]["attributes"][0]["value"]["boolValue"],
+                    true
+                );
+                let nested = child["attributes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|attr| attr["key"] == "nested")
+                    .unwrap();
+                assert_eq!(
+                    nested["value"]["arrayValue"]["values"][0]["intValue"],
+                    "9223372036854775807"
+                );
+                let attribute = |values: &Value, key: &str| {
+                    values
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|attr| attr["key"] == key)
+                        .unwrap()["value"]
+                        .clone()
+                };
+                assert_eq!(
+                    attribute(&child["attributes"], "integers"),
+                    json!({"arrayValue":{"values":[{"intValue":"1"},{"intValue":"2"},{"intValue":"3"},{"intValue":"255"}]}})
+                );
+                if pipeline == GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME {
+                    assert_eq!(
+                        attribute(&child["attributes"], "bytes"),
+                        json!({"bytesValue":"AQID/w=="})
+                    );
+                }
+                for resource in resources {
+                    let span = &resource["scopeSpans"][0]["spans"][0];
+                    let attrs = resource["resource"]["attributes"].as_array().unwrap();
+                    let instance = attrs
+                        .iter()
+                        .find(|attr| attr["key"] == "service.instance.id")
+                        .unwrap();
+                    assert_eq!(
+                        instance["value"]["stringValue"],
+                        if span["name"] == "parent" {
+                            "one"
+                        } else {
+                            "two"
+                        }
+                    );
+                    let scope_attrs = &resource["scopeSpans"][0]["scope"]["attributes"];
+                    assert_eq!(
+                        attribute(scope_attrs, "scope.key"),
+                        json!({"stringValue":"value"})
+                    );
+                    if pipeline == GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME {
+                        assert_eq!(
+                            attribute(scope_attrs, "scope.bytes"),
+                            json!({"bytesValue":"AQID/w=="})
+                        );
+                        if span["name"] == "child" {
+                            assert_eq!(
+                                attribute(&resource["resource"]["attributes"], "resource.bytes"),
+                                json!({"bytesValue":"AQID/w=="})
+                            );
+                        }
+                    }
+                }
+            }
+            // Instance `one` is on the parent, which starts before the search window.
+            let response = client
+                .get(&format!(
+                    "/v1/jaeger/api/v3/traces?query.startTimeMin={}&query.startTimeMax={}&query.attributes={}",
+                    timestamp(start + 1000),
+                    timestamp(start + 2000),
+                    encode(r#"{"service.instance.id":"one"}"#)
+                ))
+                .header("x-greptime-trace-table-name", &table)
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{pipeline}");
+        }
+        // Legacy clients continue receiving Jaeger JSON at the old URL.
+        let response = client
+            .get("/v1/jaeger/api/traces/000000000000000000000000000000ab")
+            .header("x-greptime-trace-table-name", &table)
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_str(&response.text().await)?;
+        assert_eq!(body["data"][0]["spans"].as_array().unwrap().len(), 2);
+    }
+    guard.remove_all().await;
+    Ok(())
 }
 
 pub async fn test_jaeger_query_api(store_type: StorageType) {

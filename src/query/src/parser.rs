@@ -224,11 +224,31 @@ impl QueryLanguageParser {
             // also report rfc3339 error if float parsing fails
             .map_err(|_| rfc3339_result.unwrap_err())?;
 
-        let duration =
-            Duration::try_from_secs_f64(secs).context(TryIntoDurationSnafu { raw: timestamp })?;
-        SystemTime::UNIX_EPOCH
-            .checked_add(duration)
-            .context(AddSystemTimeOverflowSnafu { duration })
+        // Prometheus accepts timestamps before the Unix epoch. Follow the arithmetic of its
+        // `parseTime` and `timestamp.FromTime` step by step: the float fraction is rounded to
+        // milliseconds before any conversion to nanoseconds, which decides boundary values
+        // like 1.0005, whose fraction is just below 0.0005.
+        let magnitude = Duration::try_from_secs_f64(secs.abs())
+            .context(TryIntoDurationSnafu { raw: timestamp })?;
+        let whole = secs.trunc();
+        let fraction = ((secs - whole) * 1000.0).round() / 1000.0;
+        let nanos = whole as i128 * 1_000_000_000 + (fraction * 1e9) as i128;
+        let millis = nanos.div_euclid(1_000_000);
+        let duration = u64::try_from(millis.unsigned_abs())
+            .ok()
+            .map(Duration::from_millis)
+            .context(AddSystemTimeOverflowSnafu {
+                duration: magnitude,
+            })?;
+        if millis < 0 {
+            SystemTime::UNIX_EPOCH
+                .checked_sub(duration)
+                .context(AddSystemTimeOverflowSnafu { duration })
+        } else {
+            SystemTime::UNIX_EPOCH
+                .checked_add(duration)
+                .context(AddSystemTimeOverflowSnafu { duration })
+        }
     }
 }
 
@@ -377,6 +397,31 @@ mod test {
                 assert_eq!(eval.query, "http_requests_total");
             }
             _ => panic!("Expected TQL eval statement, got {stmt:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_promql_timestamp_matches_prometheus_millis() {
+        // Expected values are Prometheus' `timestamp.FromTime(parseTime(input))`.
+        for (input, millis) in [
+            ("-30000.5", -30_000_500),
+            ("-0.001", -1),
+            ("-0.0006", -1),
+            ("-1.2346", -1235),
+            ("1.2346", 1235),
+            ("0.0004", 0),
+            ("1.0005", 1000),
+            ("-1.0005", -1000),
+            ("0.0004999999", 0),
+            ("1969-12-31T23:59:59.9999Z", -1),
+            ("1970-01-01T00:00:00.0009Z", 0),
+        ] {
+            let result = QueryLanguageParser::parse_promql_timestamp(input).unwrap();
+            assert_eq!(
+                crate::promql::label_values::signed_millis_since_epoch(result).unwrap(),
+                millis,
+                "{input}"
+            );
         }
     }
 

@@ -21,13 +21,13 @@ mod set_operator;
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
 
 use arrow::datatypes::IntervalDayTime;
 use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_function::aggrs::extremum::Extremum;
 use common_function::function::FunctionContext;
 use common_query::native_histogram::native_histogram_value_type;
 use common_query::prelude::{
@@ -48,7 +48,7 @@ use datafusion::functions_window::row_number::RowNumber;
 use datafusion::logical_expr::expr::{Alias, ScalarFunction, WindowFunction};
 use datafusion::logical_expr::expr_rewriter::normalize_cols;
 use datafusion::logical_expr::{
-    BinaryExpr, Cast, Extension, LogicalPlan, LogicalPlanBuilder, Operator,
+    BinaryExpr, Cast, EmptyRelation, Extension, LogicalPlan, LogicalPlanBuilder, Operator,
     ScalarUDF as ScalarUdfDef, WindowFrame, WindowFunctionDefinition,
 };
 use datafusion::prelude as df_prelude;
@@ -70,18 +70,18 @@ use promql::extension_plan::{
 };
 use promql::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
-    IDelta, Increase, LastOverTime, MatchGroupViolation, MaxOverTime, MinOverTime, MixedRange,
-    NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
-    NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime, NativeHistogramChanges,
-    NativeHistogramCount, NativeHistogramCountOverTime, NativeHistogramDelta,
-    NativeHistogramDivScalar, NativeHistogramDrop, NativeHistogramEq, NativeHistogramIDelta,
-    NativeHistogramIRate, NativeHistogramIncrease, NativeHistogramLastOverTime,
-    NativeHistogramMulScalar, NativeHistogramNeg, NativeHistogramNotEq,
-    NativeHistogramPresentOverTime, NativeHistogramRate, NativeHistogramResets,
-    NativeHistogramScalarMul, NativeHistogramStddev, NativeHistogramStdvar, NativeHistogramSub,
-    NativeHistogramSum, NativeHistogramSumOverTime, NativeHistogramToString, PredictLinear,
-    PresentOverTime, PromqlFloatToString, QuantileOverTime, Rate, Resets, Round, StddevOverTime,
-    StdvarOverTime, SumOverTime, UniqueMatchGroup, quantile_udaf,
+    IDelta, IeeeComparison, IeeeSqrt, Increase, LastOverTime, MatchGroupViolation, MaxOverTime,
+    MinOverTime, MixedRange, NativeHistogramAbsentOverTime, NativeHistogramAdd,
+    NativeHistogramAggAvg, NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime,
+    NativeHistogramChanges, NativeHistogramCount, NativeHistogramCountOverTime,
+    NativeHistogramDelta, NativeHistogramDivScalar, NativeHistogramDrop, NativeHistogramEq,
+    NativeHistogramIDelta, NativeHistogramIRate, NativeHistogramIncrease,
+    NativeHistogramLastOverTime, NativeHistogramMulScalar, NativeHistogramNeg,
+    NativeHistogramNotEq, NativeHistogramPresentOverTime, NativeHistogramRate,
+    NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev, NativeHistogramStdvar,
+    NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime, NativeHistogramToString,
+    PredictLinear, PresentOverTime, PromqlFloatToString, QuantileOverTime, Rate, Resets, Round,
+    StddevOverTime, StdvarOverTime, SumOverTime, UniqueMatchGroup, quantile_udaf,
 };
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
 use promql_parser::parser::token::TokenType;
@@ -107,12 +107,17 @@ use crate::promql::error::{
     CatalogSnafu, ColumnNotFoundSnafu, DataFusionPlanningSnafu, ExpectRangeSelectorSnafu,
     FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu, InvalidRegularExpressionSnafu,
     InvalidTimeRangeSnafu, MultiFieldsNotSupportedSnafu, MultipleMetricMatchersSnafu,
-    MultipleVectorSnafu, NoMetricMatcherSnafu, Result, TableNameNotFoundSnafu,
-    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
-    UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    MultipleVectorSnafu, NoMetricMatcherSnafu, RangeVectorInRangeQuerySnafu, Result,
+    SubqueryTimestampOutOfRangeSnafu, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu,
+    UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu,
+    UnsupportedMatcherOpSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu, ZeroSubqueryStepSnafu,
 };
+use crate::promql::label_values::signed_millis_since_epoch;
 use crate::query_engine::QueryEngineState;
 
+/// Step of a subquery without an explicit one (`x[5m:]`). Prometheus uses the global
+/// evaluation interval, whose default is one minute, rather than the query step.
+const DEFAULT_SUBQUERY_STEP_MS: Millisecond = 60_000;
 /// `time()` function in PromQL.
 const SPECIAL_TIME_FUNCTION: &str = "time";
 /// `scalar()` function in PromQL.
@@ -240,10 +245,11 @@ impl BinaryResultLabels {
 }
 
 impl PromPlannerContext {
-    fn from_eval_stmt(stmt: &EvalStmt) -> Self {
-        let start = stmt.start.duration_since(UNIX_EPOCH).unwrap().as_millis() as Millisecond;
-        let end = stmt.end.duration_since(UNIX_EPOCH).unwrap().as_millis() as Millisecond;
-        Self {
+    fn from_eval_stmt(stmt: &EvalStmt) -> Result<Self> {
+        // Evaluation times before the Unix epoch are valid in Prometheus.
+        let start = signed_millis_since_epoch(stmt.start)?;
+        let end = signed_millis_since_epoch(stmt.end)?;
+        Ok(Self {
             start,
             end,
             interval: stmt.interval.as_millis() as _,
@@ -251,7 +257,7 @@ impl PromPlannerContext {
             stmt_start: start,
             stmt_end: end,
             ..Default::default()
-        }
+        })
     }
 
     /// Reset all planner states
@@ -308,12 +314,12 @@ impl PromPlanner {
     ) -> Result<LogicalPlan> {
         let mut planner = Self {
             table_provider,
-            ctx: PromPlannerContext::from_eval_stmt(stmt),
+            ctx: PromPlannerContext::from_eval_stmt(stmt)?,
             promql_annotations,
         };
 
         let plan = planner
-            .prom_expr_to_plan(&stmt.expr, query_engine_state)
+            .prom_root_expr_to_plan(&stmt.expr, query_engine_state)
             .await?;
 
         // Never leak internal series identifier to output.
@@ -397,6 +403,170 @@ impl PromPlanner {
         Ok(res)
     }
 
+    /// Plans the root expression of a statement, or the expression wrapped by a root extension
+    /// such as `EXPLAIN` or an alias.
+    ///
+    /// Prometheus only accepts a range-vector expression in an instant query, whose result is
+    /// the matrix of samples the expression selects.
+    async fn prom_root_expr_to_plan(
+        &mut self,
+        prom_expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<LogicalPlan> {
+        if matches!(prom_expr, PromExpr::Extension(_))
+            || prom_expr.value_type() != ValueType::Matrix
+        {
+            return self.prom_expr_to_plan(prom_expr, query_engine_state).await;
+        }
+        ensure!(self.ctx.start == self.ctx.end, RangeVectorInRangeQuerySnafu);
+        self.prom_range_vector_result_to_plan(prom_expr, query_engine_state)
+            .await
+    }
+
+    /// Plans the result of a range-vector expression in an instant query: the raw samples of a
+    /// range selector, or the evaluation points of a subquery, with their own timestamps.
+    ///
+    /// Range functions consume the same expressions through [`RangeManipulate`], whose range
+    /// arrays are an internal representation that must not reach the query output.
+    async fn prom_range_vector_result_to_plan(
+        &mut self,
+        prom_expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<LogicalPlan> {
+        let mut expr = prom_expr;
+        while let PromExpr::Paren(ParenExpr { expr: inner }) = expr {
+            expr = inner;
+        }
+        match expr {
+            PromExpr::MatrixSelector(selector) => {
+                self.prom_range_selector_samples_to_plan(selector).await
+            }
+            PromExpr::Subquery(subquery) => {
+                self.prom_subquery_samples_to_plan(subquery, query_engine_state)
+                    .await
+            }
+            _ => UnsupportedExprSnafu {
+                name: format!("range vector result of {expr:?}"),
+            }
+            .fail(),
+        }
+    }
+
+    /// Selects the samples of `selector` in `(t - offset - range, t - offset]`, where `t` is the
+    /// evaluation time or the `@` anchor. Stale markers are dropped and timestamps are kept.
+    async fn prom_range_selector_samples_to_plan(
+        &mut self,
+        selector: &MatrixSelector,
+    ) -> Result<LogicalPlan> {
+        let MatrixSelector { vs, range } = selector;
+        let VectorSelector {
+            name,
+            offset,
+            matchers,
+            at,
+        } = vs;
+        let matchers = self.preprocess_label_matchers(matchers, name)?;
+        ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
+        self.ctx.range = Some(range.as_millis() as _);
+        let offset_ms = match self.at_modifier_offset(at, offset)? {
+            Some(at_offset) => at_offset,
+            None => Self::offset_millis(offset),
+        };
+        if let Some(empty_plan) = self.setup_context().await? {
+            return Ok(empty_plan);
+        }
+        let plan = self
+            .selector_to_series_normalize_plan(offset_ms, matchers, true)
+            .await?;
+        self.millisecond_time_index_plan(plan)
+    }
+
+    /// Casts a microsecond or nanosecond time index to milliseconds, the precision of every
+    /// other PromQL result and the only one the Prometheus HTTP API encodes.
+    fn millisecond_time_index_plan(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
+        let time_index =
+            self.ctx
+                .time_index_column
+                .as_deref()
+                .with_context(|| TimeIndexNotFoundSnafu {
+                    table: self.ctx.table_name.clone().unwrap_or_default(),
+                })?;
+        let (_, field) = plan
+            .schema()
+            .qualified_field_with_unqualified_name(time_index)
+            .context(DataFusionPlanningSnafu)?;
+        let millis = match field.data_type() {
+            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, _) => return Ok(plan),
+            ArrowDataType::Timestamp(_, timezone) => {
+                ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, timezone.clone())
+            }
+            other => unreachable!("time index is a timestamp, got {other}"),
+        };
+        let exprs = plan
+            .schema()
+            .iter()
+            .map(|(qualifier, field)| {
+                let column = DfExpr::Column(Column::new(qualifier.cloned(), field.name()));
+                if field.name() == time_index {
+                    column
+                        .cast_to(&millis, plan.schema())
+                        .map(|cast| cast.alias_qualified(qualifier.cloned(), field.name().clone()))
+                } else {
+                    Ok(column)
+                }
+            })
+            .collect::<datafusion::error::Result<Vec<_>>>()
+            .context(DataFusionPlanningSnafu)?;
+        LogicalPlanBuilder::from(plan)
+            .project(exprs)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)
+    }
+
+    /// Evaluates the inner expression of `subquery` at the multiples of its step in
+    /// `(t - offset - range, t - offset]`, where `t` is the evaluation time or the `@` anchor.
+    async fn prom_subquery_samples_to_plan(
+        &mut self,
+        subquery: &SubqueryExpr,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<LogicalPlan> {
+        let SubqueryExpr {
+            expr,
+            range,
+            step,
+            offset,
+            at,
+            ..
+        } = subquery;
+        ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
+        let end = match self.at_ref_time(at, offset)? {
+            Some(anchor) => anchor,
+            None => Self::anchor_sub(self.ctx.end, Self::offset_millis(offset))?,
+        };
+        self.ctx.interval = match step {
+            Some(step) => step.as_millis() as _,
+            None => DEFAULT_SUBQUERY_STEP_MS,
+        };
+        let interval = self.ctx.interval;
+        ensure!(interval > 0, ZeroSubqueryStepSnafu);
+        let window = Self::subquery_child_window(end, end, 0, 0, range.as_millis() as _, interval)?;
+        let Some((start, end)) = window else {
+            // No step multiple falls in the window; plan the inner expression only for its
+            // schema.
+            self.ctx.start = end;
+            self.ctx.end = end;
+            let plan = self.prom_expr_to_plan(expr, query_engine_state).await?;
+            return Ok(LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: plan.schema().clone(),
+            }));
+        };
+        self.ctx.start = start;
+        self.ctx.end = end;
+        self.prom_expr_to_plan(expr, query_engine_state).await
+    }
+
     async fn prom_subquery_expr_to_plan(
         &mut self,
         query_engine_state: &QueryEngineState,
@@ -410,9 +580,7 @@ impl PromPlanner {
             ..
         } = subquery_expr;
 
-        // Prometheus evaluates the inner expression over `(start - offset - range, end - offset]`
-        // (`subqueryTimeRange`). Shift the inner window back here; `RangeManipulate` maps the
-        // samples forward again by the same offset.
+        // Shift the child window back; `RangeManipulate` restores the outer timeline.
         let offset_ms = match offset {
             Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
             Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
@@ -420,17 +588,46 @@ impl PromPlanner {
         };
 
         let current_interval = self.ctx.interval;
-        if let Some(step) = step {
-            self.ctx.interval = step.as_millis() as _;
-        }
+        self.ctx.interval = match step {
+            Some(step) => step.as_millis() as _,
+            None => DEFAULT_SUBQUERY_STEP_MS,
+        };
+        ensure!(self.ctx.interval > 0, ZeroRangeSelectorSnafu);
         let current_start = self.ctx.start;
         let current_end = self.ctx.end;
-        self.ctx.start -= offset_ms + range.as_millis() as i64 - self.ctx.interval;
-        self.ctx.end -= offset_ms;
+        // Reject an invalid parent window rather than treating it as empty.
+        ensure!(
+            current_start <= current_end,
+            InvalidTimeRangeSnafu {
+                start: current_start,
+                end: current_end,
+            }
+        );
+        // An empty child needs only its schema; plan it over the valid caller window.
+        let child_window = Self::subquery_child_window(
+            current_start,
+            current_end,
+            current_interval,
+            offset_ms,
+            range.as_millis() as Millisecond,
+            self.ctx.interval,
+        )?;
+        if let Some((child_start, child_end)) = child_window {
+            self.ctx.start = child_start;
+            self.ctx.end = child_end;
+        }
         let input = self.prom_expr_to_plan(expr, query_engine_state).await?;
         self.ctx.interval = current_interval;
         self.ctx.start = current_start;
         self.ctx.end = current_end;
+        // Return no rows with the child schema so enclosing fallbacks still work.
+        let input = match child_window {
+            Some(_) => input,
+            None => LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: input.schema().clone(),
+            }),
+        };
 
         ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
         let range_ms = range.as_millis() as _;
@@ -1230,6 +1427,18 @@ impl PromPlanner {
                     }
                 } else if right_is_empty_metric && !left_is_empty_metric {
                     self.ctx = left_context.clone();
+                } else if rhs.value_type() == ValueType::Scalar
+                    && lhs.value_type() == ValueType::Vector
+                {
+                    // A computed scalar on the right (`time()`, `scalar(...)`) has no labels;
+                    // the result keeps the labels of the vector on the left.
+                    self.ctx = left_context.clone();
+                }
+                // An operand without a table name, such as a comparison filter's projection, is
+                // joined under the `""` qualifier; resolve the projected columns against it.
+                // Otherwise a time index present on both sides is ambiguous.
+                if self.ctx.table_name.is_none() {
+                    self.ctx.table_name = Some(String::new());
                 }
                 // Computed scalars reach this join path instead of the literal projection paths.
                 // Broadcast them for arithmetic in the same way as literal scalars.
@@ -1654,6 +1863,47 @@ impl PromPlanner {
             Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
             None => 0,
         }
+    }
+
+    /// Returns the first absolute step multiple strictly after `start - offset - range`
+    /// through the last parent evaluation instant minus `offset`. Requires a positive step.
+    /// Returns `None` for an empty window; an unrepresentable nonempty bound is an error.
+    fn subquery_child_window(
+        start: Millisecond,
+        end: Millisecond,
+        interval: Millisecond,
+        offset: Millisecond,
+        range: Millisecond,
+        step: Millisecond,
+    ) -> Result<Option<(Millisecond, Millisecond)>> {
+        let window_start = i128::from(start) - i128::from(offset) - i128::from(range);
+        let grid_start = (window_start.div_euclid(i128::from(step)) + 1) * i128::from(step);
+        let grid_end = if interval > 0 {
+            let steps = (i128::from(end) - i128::from(start)) / i128::from(interval);
+            i128::from(start) + steps * i128::from(interval)
+        } else {
+            i128::from(end)
+        } - i128::from(offset);
+        // Check emptiness before converting bounds to i64.
+        if grid_start > grid_end {
+            return Ok(None);
+        }
+        let bound = |name: &str, value: i128| {
+            i64::try_from(value).map_err(|_| {
+                SubqueryTimestampOutOfRangeSnafu {
+                    timestamp: format!(
+                        "subquery child window {name} = {value} ms (start = {start} ms, \
+                         end = {end} ms, interval = {interval} ms, offset = {offset} ms, \
+                         range = {range} ms, step = {step} ms)"
+                    ),
+                }
+                .build()
+            })
+        };
+        Ok(Some((
+            bound("grid start", grid_start)?,
+            bound("grid end", grid_end)?,
+        )))
     }
 
     /// The columns that identify one series, which is the series key expected by the PromQL plan
@@ -2145,7 +2395,7 @@ impl PromPlanner {
         let expr = &ext_expr.expr;
         let children = expr.children();
         let plan = self
-            .prom_expr_to_plan(&children[0], query_engine_state)
+            .prom_root_expr_to_plan(&children[0], query_engine_state)
             .await?;
         // Wrapper for the explanation/analyze of the existing plan
         // https://docs.rs/datafusion-expr/latest/datafusion_expr/logical_plan/builder/struct.LogicalPlanBuilder.html#method.explain
@@ -2557,28 +2807,21 @@ impl PromPlanner {
             // for it, or the column exists but is NULL on that row — the latter
             // is the norm for logical metrics sharing a physical table, which
             // holds the union of their label columns.
+            let mut null_label = None;
             let col = if let Some(column_name) = column_name {
                 let column = DfExpr::Column(Column::from_name(&column_name));
                 let field = table_schema
                     .index_of_column_by_name(None, &column_name)
                     .map(|index| table_schema.field(index));
                 if accepts_empty
-                    && let Some(data_type) = field
-                        .filter(|field| {
-                            field.is_nullable()
-                                && Self::string_value_data_type(field.data_type()).is_some()
-                        })
-                        .map(|field| field.data_type())
-                {
-                    let empty = Self::string_scalar_value(data_type, Some(String::new()))
-                        .expect("nullable label has a string type");
-                    DfExpr::ScalarFunction(ScalarFunction {
-                        func: coalesce(),
-                        args: vec![column, DfExpr::Literal(empty, None)],
+                    && field.is_some_and(|field| {
+                        field.is_nullable()
+                            && Self::string_value_data_type(field.data_type()).is_some()
                     })
-                } else {
-                    column
+                {
+                    null_label = Some(column.clone().is_null());
                 }
+                column
             } else {
                 DfExpr::Literal(ScalarValue::Utf8(Some(String::new())), None)
             };
@@ -2630,6 +2873,10 @@ impl PromPlanner {
                         })
                     }
                 }
+            };
+            let expr = match null_label {
+                Some(null_label) => null_label.or(expr),
+                None => expr,
             };
             exprs.push(expr);
         }
@@ -3717,9 +3964,13 @@ impl PromPlanner {
             }
             "round" => {
                 if other_input_exprs.is_empty() {
-                    other_input_exprs.push_front(0.0f64.lit());
+                    other_input_exprs.push_front(1.0f64.lit());
                 }
                 ScalarFunc::DataFusionUdf(Arc::new(Round::scalar_udf()))
+            }
+            // DataFusion's `sqrt` rejects negative input; PromQL returns NaN for it.
+            "sqrt" if !self.all_field_columns_are_native_histograms(input_schema) => {
+                ScalarFunc::DataFusionUdf(Arc::new(IeeeSqrt::scalar_udf()))
             }
             "rad" | "deg" | "sgn" if self.all_field_columns_are_native_histograms(input_schema) => {
                 ScalarFunc::DataFusionUdf(native_histogram_drop_udf(func.name))
@@ -4428,17 +4679,39 @@ impl PromPlanner {
             vec![]
         };
 
-        // update value column name according to the aggregators,
-        let mut new_field_columns = Vec::with_capacity(self.ctx.field_columns.len());
+        // The alias is built from normalized columns so it matches the builtin's
+        // qualified name.
+        let exprs = normalize_cols(exprs, input_plan)
+            .context(DataFusionPlanningSnafu)?
+            .into_iter()
+            .map(Self::alias_extremum_as_builtin)
+            .collect::<Vec<_>>();
 
-        let normalized_exprs =
-            normalize_cols(exprs.iter().cloned(), input_plan).context(DataFusionPlanningSnafu)?;
-        for expr in normalized_exprs {
-            new_field_columns.push(expr.schema_name().to_string());
-        }
-        self.ctx.field_columns = new_field_columns;
+        // update value column name according to the aggregators,
+        self.ctx.field_columns = exprs
+            .iter()
+            .map(|expr| expr.schema_name().to_string())
+            .collect();
 
         Ok((exprs, prev_field_exprs))
+    }
+
+    /// `prom_min`/`prom_max` keep their own names so SQL can use them next to `min`/`max`
+    /// in one aggregate. PromQL output columns keep the builtin names.
+    fn alias_extremum_as_builtin(expr: DfExpr) -> DfExpr {
+        let DfExpr::AggregateFunction(aggr) = &expr else {
+            return expr;
+        };
+        let builtin = match aggr.func.name() {
+            Extremum::MIN_NAME => min_udaf(),
+            Extremum::MAX_NAME => max_udaf(),
+            _ => return expr,
+        };
+        let name = builtin
+            .call(aggr.params.args.clone())
+            .schema_name()
+            .to_string();
+        expr.alias(name)
     }
 
     fn create_numeric_aggregate_expr(
@@ -4458,8 +4731,8 @@ impl PromPlanner {
             }
             token::T_AVG => avg_udaf().call(vec![input]),
             token::T_COUNT_VALUES | token::T_COUNT => count_udaf().call(vec![input]),
-            token::T_MIN => min_udaf().call(vec![input]),
-            token::T_MAX => max_udaf().call(vec![input]),
+            token::T_MIN => Extremum::min_udaf().call(vec![input]),
+            token::T_MAX => Extremum::max_udaf().call(vec![input]),
             // PromQL's `group()` aggregator produces 1 for each group.
             // Use `max(1.0)` (per-group) to match semantics and output type (Float64).
             token::T_GROUP => max_udaf().call(vec![lit(1_f64)]),
@@ -4803,7 +5076,15 @@ impl PromPlanner {
             .field_columns
             .iter()
             .map(|col| {
-                let mut sort_exprs = Vec::with_capacity(self.ctx.tag_columns.len() + 1);
+                let mut sort_exprs = Vec::with_capacity(self.ctx.tag_columns.len() + 2);
+                // PromQL ranks NaN last for both `topk` and `bottomk`, while DataFusion
+                // orders NaN above every number.
+                sort_exprs.push(
+                    datafusion_functions::math::expr_fn::isnan(DfExpr::Column(Column::from_name(
+                        col,
+                    )))
+                    .sort(true, true),
+                );
                 // Order by value in the specific order
                 sort_exprs.push(DfExpr::Column(Column::from_name(col)).sort(asc, true));
                 // Then tags if the values are equal,
@@ -4994,12 +5275,24 @@ impl PromPlanner {
             token::T_MOD => Ok(Box::new(move |lhs: DfExpr, rhs| {
                 Ok(cast_float(lhs) % cast_float(rhs))
             })),
-            token::T_EQLC => Ok(Box::new(|lhs, rhs| Ok(lhs.eq(rhs)))),
-            token::T_NEQ => Ok(Box::new(|lhs, rhs| Ok(lhs.not_eq(rhs)))),
-            token::T_GTR => Ok(Box::new(|lhs, rhs| Ok(lhs.gt(rhs)))),
-            token::T_LSS => Ok(Box::new(|lhs, rhs| Ok(lhs.lt(rhs)))),
-            token::T_GTE => Ok(Box::new(|lhs, rhs| Ok(lhs.gt_eq(rhs)))),
-            token::T_LTE => Ok(Box::new(|lhs, rhs| Ok(lhs.lt_eq(rhs)))),
+            token::T_EQLC => Ok(Box::new(|lhs, rhs| {
+                Ok(Self::ieee_comparison(lhs, Operator::Eq, rhs))
+            })),
+            token::T_NEQ => Ok(Box::new(|lhs, rhs| {
+                Ok(Self::ieee_comparison(lhs, Operator::NotEq, rhs))
+            })),
+            token::T_GTR => Ok(Box::new(|lhs, rhs| {
+                Ok(Self::ieee_comparison(lhs, Operator::Gt, rhs))
+            })),
+            token::T_LSS => Ok(Box::new(|lhs, rhs| {
+                Ok(Self::ieee_comparison(lhs, Operator::Lt, rhs))
+            })),
+            token::T_GTE => Ok(Box::new(|lhs, rhs| {
+                Ok(Self::ieee_comparison(lhs, Operator::GtEq, rhs))
+            })),
+            token::T_LTE => Ok(Box::new(|lhs, rhs| {
+                Ok(Self::ieee_comparison(lhs, Operator::LtEq, rhs))
+            })),
             token::T_POW => Ok(Box::new(move |lhs, rhs| {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
                     func: datafusion_functions::math::power(),
@@ -5014,6 +5307,14 @@ impl PromPlanner {
             })),
             _ => UnexpectedTokenSnafu { token }.fail(),
         }
+    }
+
+    /// Compares two expressions with IEEE 754 semantics, as PromQL does; see [`IeeeComparison`].
+    fn ieee_comparison(lhs: DfExpr, op: Operator, rhs: DfExpr) -> DfExpr {
+        DfExpr::ScalarFunction(ScalarFunction {
+            func: Arc::new(IeeeComparison::scalar_udf(op)),
+            args: vec![lhs, rhs],
+        })
     }
 
     /// Check if the given op is a [comparison operator](https://prometheus.io/docs/prometheus/latest/querying/operators/#comparison-binary-operators).

@@ -93,7 +93,9 @@ use sql::statements::create::{
 };
 use sql::statements::statement::Statement;
 use sqlparser::ast::{Expr, Ident, UnaryOperator, Value as ParserValue};
-use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
+use store_api::metric_engine_consts::{
+    LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
+};
 use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::TableRef;
@@ -112,10 +114,10 @@ use crate::error::{
     DeserializePartitionExprSnafu, EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu,
     FlowNotFoundSnafu, InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu,
     InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, NotSupportedSnafu,
-    PartitionExprToPbSnafu, Result, SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu,
-    SerializePartitionExprSnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
-    TableDdlReservedSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu, TableReadOnlySnafu,
-    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
+    PartitionExprToPbSnafu, Result, RetentionTtlOnLogicalTableSnafu, SchemaInUseSnafu,
+    SchemaNotFoundSnafu, SchemaReadOnlySnafu, SerializePartitionExprSnafu, SubstraitCodecSnafu,
+    TableAlreadyExistsSnafu, TableDdlReservedSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    TableReadOnlySnafu, UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper::{self, RepartitionRequest, RepartitionSource};
 use crate::insert::is_instant_ttl;
@@ -342,7 +344,22 @@ impl StatementExecutor {
 
     #[tracing::instrument(skip_all)]
     pub async fn create_table(&self, stmt: CreateTable, ctx: QueryContextRef) -> Result<TableRef> {
-        let (catalog, schema, _table) = table_idents_to_full_name(&stmt.name, &ctx)
+        let mut create_expr = self.prepare_create_table(&stmt, &ctx).await?;
+        self.create_table_inner(
+            &mut create_expr,
+            stmt.partitions,
+            ctx,
+            TriggerReason::Manual,
+        )
+        .await
+    }
+
+    async fn prepare_create_table(
+        &self,
+        stmt: &CreateTable,
+        ctx: &QueryContextRef,
+    ) -> Result<CreateTableExpr> {
+        let (catalog, schema, _table) = table_idents_to_full_name(&stmt.name, ctx)
             .map_err(BoxedError::new)
             .context(error::ExternalSnafu)?;
 
@@ -357,7 +374,7 @@ impl StatementExecutor {
             .context(TableMetadataManagerSnafu)?
             .map(|v| v.into_inner());
 
-        let create_expr = &mut expr_helper::create_to_expr(&stmt, &ctx)?;
+        let mut create_expr = expr_helper::create_to_expr(stmt, ctx)?;
         // TTL and compaction options are handled separately; ingestion quota is database-only.
         if let Some(schema_options) = schema_options {
             for (key, value) in schema_options.extra_options.iter() {
@@ -371,8 +388,81 @@ impl StatementExecutor {
             }
         }
 
-        self.create_table_inner(create_expr, stmt.partitions, ctx, TriggerReason::Manual)
-            .await
+        Ok(create_expr)
+    }
+
+    /// Prepares every explicit logical CREATE before submitting one batch procedure.
+    pub async fn batch_create_logical_tables(
+        &self,
+        statements: Vec<CreateTable>,
+        ctx: QueryContextRef,
+    ) -> Result<()> {
+        let mut expressions = Vec::with_capacity(statements.len());
+        let mut targets = std::collections::HashSet::new();
+        let mut group = None;
+        for statement in statements {
+            ensure!(
+                statement.engine == METRIC_ENGINE_NAME
+                    && statement.options.get(LOGICAL_TABLE_METADATA_KEY).is_some()
+                    && statement
+                        .options
+                        .value(PHYSICAL_TABLE_METADATA_KEY)
+                        .is_none(),
+                InvalidSqlSnafu {
+                    err_msg: "batch requires explicit Metric logical CREATE TABLE statements"
+                }
+            );
+            let expr = self.prepare_create_table(&statement, &ctx).await?;
+            let key = (
+                expr.catalog_name.clone(),
+                expr.schema_name.clone(),
+                expr.table_options.get(LOGICAL_TABLE_METADATA_KEY).cloned(),
+            );
+            ensure!(
+                group.as_ref().is_none_or(|group| group == &key),
+                InvalidSqlSnafu {
+                    err_msg: "batch must share catalog, schema and literal on_physical_table"
+                }
+            );
+            group = Some(key);
+            ensure!(
+                targets.insert(expr.table_name.clone()),
+                InvalidSqlSnafu {
+                    err_msg: "duplicate target in logical-table batch"
+                }
+            );
+            self.validate_logical_create(&expr, statement.partitions.as_ref(), &ctx)
+                .await?;
+            expressions.push(expr);
+        }
+        self.create_logical_tables(&expressions, ctx, TriggerReason::Manual)
+            .await?;
+        Ok(())
+    }
+
+    async fn validate_logical_create(
+        &self,
+        expr: &CreateTableExpr,
+        partitions: Option<&Partitions>,
+        ctx: &QueryContextRef,
+    ) -> Result<()> {
+        ensure_table_definition_writable(&expr.schema_name, &expr.table_name)?;
+        // `ttl='instant'` stays on logical tables so the Inserter can forward
+        // rows to flows. Retention TTL is enforced by the physical table.
+        if expr
+            .table_options
+            .get(TTL_KEY)
+            .is_some_and(|ttl| !is_instant_ttl(ttl))
+        {
+            return RetentionTtlOnLogicalTableSnafu.fail();
+        }
+        if let Some(partitions) = partitions
+            && !partitions.exprs.is_empty()
+        {
+            self.validate_logical_table_partition_rule(expr, partitions, ctx)
+                .await?;
+        }
+        Ok(())
     }
 
     #[tracing::instrument(skip_all)]
@@ -473,24 +563,8 @@ impl StatementExecutor {
                 .table_options
                 .contains_key(LOGICAL_TABLE_METADATA_KEY)
         {
-            if create_table
-                .table_options
-                .get(TTL_KEY)
-                .is_some_and(|ttl| !is_instant_ttl(ttl))
-            {
-                return CreateLogicalTablesSnafu {
-                    reason: format!(
-                        "Retention TTL is not supported on metric logical tables; set `{TTL_KEY}` on the physical table instead"
-                    ),
-                }
-                .fail();
-            }
-            if let Some(partitions) = partitions.as_ref()
-                && !partitions.exprs.is_empty()
-            {
-                self.validate_logical_table_partition_rule(create_table, partitions, &query_ctx)
-                    .await?;
-            }
+            self.validate_logical_create(create_table, partitions.as_ref(), &query_ctx)
+                .await?;
             // Create logical tables
             self.create_logical_tables(
                 std::slice::from_ref(create_table),
@@ -2061,12 +2135,7 @@ impl StatementExecutor {
                 _ => false,
             });
             if alters_retention_ttl {
-                return CreateLogicalTablesSnafu {
-                    reason: format!(
-                        "Retention TTL is not supported on metric logical tables; set `{TTL_KEY}` on the physical table instead"
-                    ),
-                }
-                .fail();
+                return RetentionTtlOnLogicalTableSnafu.fail();
             }
             let annotation_alter = match expr.kind.as_ref() {
                 Some(kind) => common_grpc_expr::annotation_alter_family(kind)

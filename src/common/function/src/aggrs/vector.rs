@@ -25,8 +25,8 @@ pub(crate) struct VectorFunction;
 
 impl VectorFunction {
     pub fn register(registry: &FunctionRegistry) {
-        registry.register_aggr(VectorSum::uadf_impl());
-        registry.register_aggr(VectorProduct::uadf_impl());
-        registry.register_aggr(VectorAvg::uadf_impl());
+        registry.register_aggr(VectorSum::udf_impl());
+        registry.register_aggr(VectorProduct::udf_impl());
+        registry.register_aggr(VectorAvg::udf_impl());
     }
 }

@@ -41,14 +41,14 @@ use table::requests::{validate_database_option, validate_database_option_value};
 use crate::ast::{ColumnDef, Ident, ObjectNamePartExt};
 use crate::error::{
     self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidDatabaseOptionValueSnafu,
-    InvalidFlowQuerySnafu, InvalidIntervalSnafu, InvalidSqlSnafu, InvalidTimeIndexSnafu,
-    MissingTimeIndexSnafu, Result, SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
+    InvalidFlowQuerySnafu, InvalidIntervalSnafu, InvalidTimeIndexSnafu, MissingTimeIndexSnafu,
+    Result, SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::parser::{FLOW, ParserContext};
 use crate::parsers::tql_parser;
 use crate::parsers::utils::{
-    self, parse_with_options, validate_column_fulltext_create_option,
-    validate_column_skipping_index_create_option,
+    self, parse_with_options, validate_column_compression_create_option,
+    validate_column_fulltext_create_option, validate_column_skipping_index_create_option,
 };
 use crate::statements::create::{
     Column, ColumnExtensions, CreateDatabase, CreateExternalTable, CreateFlow, CreateTable,
@@ -685,7 +685,7 @@ impl<'a> ParserContext<'a> {
         columns: &mut Vec<Column>,
         constraints: &mut Vec<TableConstraint>,
     ) -> Result<()> {
-        let mut column = self.parse_column_def()?;
+        let mut column = self.parse_column_def(false)?;
 
         let mut time_index_opt_idx = None;
         for (index, opt) in column.options().iter().enumerate() {
@@ -768,28 +768,22 @@ impl<'a> ParserContext<'a> {
         {
             return Err(ParserError::ParserError(format!(
                 "Cannot use keyword '{}' as column name. Hint: add quotes to the name.",
-                &name.value
+                name.value
             )));
         }
 
         Ok(name)
     }
 
-    pub fn parse_column_def(&mut self) -> Result<Column> {
-        let name = self.parse_column_name().context(SyntaxSnafu)?;
+    /// Parses a column definition, optionally allowing unquoted keyword names
+    /// for compatibility with ALTER TABLE ADD COLUMN.
+    pub fn parse_column_def(&mut self, allow_keyword_name: bool) -> Result<Column> {
+        let name = if allow_keyword_name {
+            self.parser.parse_identifier().context(SyntaxSnafu)?
+        } else {
+            self.parse_column_name().context(SyntaxSnafu)?
+        };
         let parser = &mut self.parser;
-
-        ensure!(
-            !(name.quote_style.is_none() &&
-            // "ALL_KEYWORDS" are sorted.
-            ALL_KEYWORDS.binary_search(&name.value.to_uppercase().as_str()).is_ok()),
-            InvalidSqlSnafu {
-                msg: format!(
-                    "Cannot use keyword '{}' as column name. Hint: add quotes to the name.",
-                    &name.value
-                ),
-            }
-        );
 
         let mut extensions = ColumnExtensions::default();
 
@@ -897,6 +891,7 @@ impl<'a> ParserContext<'a> {
     /// This function will handle:
     /// - Vector type
     /// - Indexes
+    /// - SST compression options
     fn parse_column_extensions(
         parser: &mut Parser<'_>,
         column_name: &Ident,
@@ -929,7 +924,7 @@ impl<'a> ParserContext<'a> {
         }
 
         // parse index options in column definition
-        let mut is_index_declared = false;
+        let mut is_extension_declared = false;
 
         // skipping index
         if let Token::Word(word) = parser.peek_token().token
@@ -971,7 +966,7 @@ impl<'a> ParserContext<'a> {
 
             let options = OptionMap::new(options);
             column_extensions.skipping_index_options = Some(options);
-            is_index_declared |= true;
+            is_extension_declared |= true;
         }
 
         // fulltext index
@@ -1022,7 +1017,7 @@ impl<'a> ParserContext<'a> {
 
             let options = OptionMap::new(options);
             column_extensions.fulltext_index_options = Some(options);
-            is_index_declared |= true;
+            is_extension_declared |= true;
         }
 
         // inverted index
@@ -1064,10 +1059,54 @@ impl<'a> ParserContext<'a> {
             );
 
             column_extensions.inverted_index_options = Some(OptionMap::default());
-            is_index_declared |= true;
+            is_extension_declared |= true;
         }
 
-        Ok(is_index_declared)
+        // SST compression
+        if parser.parse_keyword(Keyword::COMPRESSION) {
+            ensure!(
+                column_extensions.compression_options.is_none(),
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: "duplicated COMPRESSION option",
+                }
+            );
+
+            let options = parser
+                .parse_options(Keyword::WITH)
+                .context(error::SyntaxSnafu)?
+                .into_iter()
+                .map(parse_option_string)
+                .collect::<Result<Vec<_>>>()?;
+            ensure!(
+                !options.is_empty(),
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: "expect WITH (...) after COMPRESSION keyword",
+                }
+            );
+            for (key, value) in options.iter() {
+                ensure!(
+                    value.as_string().is_some(),
+                    InvalidColumnOptionSnafu {
+                        name: column_name.to_string(),
+                        msg: format!("COMPRESSION option {key} requires a scalar value"),
+                    }
+                );
+                ensure!(
+                    validate_column_compression_create_option(key),
+                    InvalidColumnOptionSnafu {
+                        name: column_name.to_string(),
+                        msg: format!("invalid COMPRESSION option: {key}"),
+                    }
+                );
+            }
+
+            column_extensions.compression_options = Some(OptionMap::new(options));
+            is_extension_declared |= true;
+        }
+
+        Ok(is_extension_declared)
     }
 
     fn parse_optional_table_constraint(&mut self) -> Result<Option<TableConstraint>> {
@@ -2924,11 +2963,16 @@ ENGINE=mito";
 
     #[test]
     fn test_invalid_column_name() {
-        let sql = "create table foo(user string, i timestamp time index)";
-        let result =
-            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default());
-        let err = result.unwrap_err().output_msg();
-        assert!(err.contains("Cannot use keyword 'user' as column name"));
+        for name in ["user", "at", "value", "select"] {
+            let sql = format!("create table foo({name} string, i timestamp time index)");
+            let result = ParserContext::create_with_dialect(
+                &sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            );
+            let err = result.unwrap_err().output_msg();
+            assert!(err.contains(&format!("Cannot use keyword '{name}' as column name")));
+        }
 
         // If column name is quoted, it's valid even same with keyword.
         let sql = r#"
@@ -3192,6 +3236,82 @@ CREATE TABLE log (
             });
         } else {
             panic!("should be create_table statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_table_compression_options() {
+        let parse = |sql: &str| {
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+        };
+
+        for value in ["[3]", "NULL", "['zstd']"] {
+            for key in ["type", "level", "page_size"] {
+                let sql = format!(
+                    "CREATE TABLE t (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH ({key}={value}))"
+                );
+                let err = parse(&sql).unwrap_err();
+                assert!(
+                    err.to_string().contains("requires a scalar value"),
+                    "{sql}: {err}"
+                );
+            }
+        }
+
+        let sql = r"
+CREATE TABLE spans (
+    ts TIMESTAMP TIME INDEX,
+    prompt STRING COMPRESSION WITH (type='zstd', level='3', page_size='8MiB') SKIPPING INDEX,
+    reply STRING NULL COMPRESSION WITH (level='9'),
+)";
+        let result = parse(sql).unwrap();
+        let Statement::CreateTable(c) = &result[0] else {
+            panic!("should be create_table statement");
+        };
+        let prompt = &c.columns[1];
+        assert_eq!(
+            vec!["level=3", "page_size=8MiB", "type=zstd"],
+            prompt
+                .extensions
+                .compression_options
+                .as_ref()
+                .unwrap()
+                .kv_pairs()
+                .into_iter()
+                .map(|kv| kv.replace(['\'', ' '], ""))
+                .sorted()
+                .collect::<Vec<_>>()
+        );
+        assert!(prompt.extensions.skipping_index_options.is_some());
+        // Display must produce SQL that parses back to the same column.
+        let reparsed = parse(&format!(
+            "CREATE TABLE t (ts TIMESTAMP TIME INDEX, {prompt})"
+        ))
+        .unwrap();
+        let Statement::CreateTable(r) = &reparsed[0] else {
+            panic!("should be create_table statement");
+        };
+        assert_eq!(prompt.extensions, r.columns[1].extensions);
+
+        for (sql, err) in [
+            (
+                "CREATE TABLE t (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION)",
+                "expect WITH (...) after COMPRESSION keyword",
+            ),
+            (
+                "CREATE TABLE t (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (codec='zstd'))",
+                "invalid COMPRESSION option: codec",
+            ),
+            (
+                "CREATE TABLE t (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (level='3') COMPRESSION WITH (level='5'))",
+                "duplicated COMPRESSION option",
+            ),
+        ] {
+            let result = parse(sql);
+            assert!(
+                result.as_ref().is_err_and(|e| e.to_string().contains(err)),
+                "{sql}: {result:?}"
+            );
         }
     }
 

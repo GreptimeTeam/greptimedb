@@ -1,0 +1,8 @@
+name = "column_compression"
+reason = "Read legacy column metadata after upgrade, then persist compression options and read compressed SSTs across restart."
+introduced_by = "PR #9426"
+topologies = ["distributed", "standalone"]
+from_range = ["*"]
+to_range = [">=v1.3.0-beta.1"]
+features = ["table", "compression", "write", "read"]
+owner = "storage"

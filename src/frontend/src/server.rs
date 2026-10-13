@@ -455,7 +455,8 @@ fn effective_prom_store_options(opts: &FrontendOptions) -> PromStoreOptions {
     prom_store
 }
 
-fn effective_http_options(opts: &FrontendOptions) -> HttpOptions {
+/// Resolves HTTP options, allowing synchronous batches enough time to flush.
+pub fn effective_http_options(opts: &FrontendOptions) -> HttpOptions {
     effective_http_options_with_sync(opts, pending_rows_batch_sync_enabled())
 }
 
@@ -555,6 +556,11 @@ mod tests {
                 .await
                 .unwrap(),
         );
+        let mut disabled_options = options.clone();
+        disabled_options.otlp.enable = false;
+        instance.init_logical_batcher(&disabled_options);
+        assert!(instance.logical_batcher().is_none());
+
         let services = Services::new(options.clone(), instance.clone(), Plugins::default());
         let batcher = instance.logical_batcher().unwrap().clone();
         instance.init_logical_batcher(&options);

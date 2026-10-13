@@ -1143,7 +1143,7 @@ impl TableMeta {
                             .with_context(|_| error::CastDefaultValueSnafu {
                                 reason: format!(
                                     "Failed to cast default value from {:?} to type {:?}",
-                                    default_value, &change_column.target_type
+                                    default_value, change_column.target_type
                                 ),
                             })?,
                     )

@@ -47,7 +47,7 @@ impl JsonEncodePathAccumulator {
         Self::default()
     }
 
-    pub fn uadf_impl() -> AggregateUDF {
+    pub fn udf_impl() -> AggregateUDF {
         create_udaf(
             JSON_ENCODE_PATH_NAME,
             // Input types: lat, lng, timestamp

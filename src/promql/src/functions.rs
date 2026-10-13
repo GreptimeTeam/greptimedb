@@ -19,6 +19,7 @@ mod double_exponential_smoothing;
 mod edge_count;
 mod extrapolate_rate;
 mod idelta;
+mod ieee_float;
 mod native_histogram;
 mod predict_linear;
 mod quantile;
@@ -45,6 +46,7 @@ pub use deriv::Deriv;
 pub use double_exponential_smoothing::DoubleExponentialSmoothing;
 pub use extrapolate_rate::{Delta, Increase, Rate};
 pub use idelta::IDelta;
+pub use ieee_float::{IeeeComparison, IeeeSqrt};
 pub use native_histogram::{
     MixedRange, NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
     NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime, NativeHistogramChanges,

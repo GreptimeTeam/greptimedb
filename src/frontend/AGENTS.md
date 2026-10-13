@@ -34,11 +34,17 @@ remote datanodes via `operator`/`client`.
 | `heartbeat` | `src/frontend/src/heartbeat.rs` | Heartbeat to metasrv; handles suspend / cache invalidation |
 | `service_config` | `src/frontend/src/service_config/` | Per-protocol option structs |
 
+Shared frontend cache counters live in `src/common/frontend/src/metrics.rs`,
+including caches owned by pipeline and protocol handlers.
+
 ## Request lifecycles
 
 - **SQL query** (`instance.rs`): `do_query_inner` handles parsing, interceptors,
   permission checks, timeout/cancellation, and delegates planning/execution to
   `StatementExecutor`. Distributed scans enter through `region_query.rs`.
+- **Logical-table batch DDL** (`instance.rs`): dedicated SQL handler → bounded
+  parse/interception → all-member permissions → operator CREATE preparation →
+  one logical-table batch procedure. Keep pre-submission validation side-effect free.
 - **Insert** (`instance/grpc.rs`): `handle_inserts` / `handle_row_inserts` →
   `check_permission` → `operator`'s `Inserter` (schema validation, optional
   auto-create, partition routing, meter admission) → local `RegionServer`
@@ -55,9 +61,22 @@ remote datanodes via `operator`/`client`.
   the lazy schema handshake; checks permissions and reconciles missing columns
   through `Inserter` once per stream, then reuses the refreshed table.
 
+- **OTLP trace lookup tables** (`instance/otlp/trace_ingest.rs`): `Instance` owns
+  a shared cache of confirmed service/operation writes, which bypass batching.
+  `otlp.trace_aux_cache_size` sets its estimated byte budget at startup; zero disables it.
+  Async main writes retain completion results; a frontend task writes auxiliary
+  rows only for confirmed chunks before populating the cache.
+  Cold async trace requests reserve a shared auxiliary slot before main writes,
+  bounded separately by the table batcher's `max_inflight_requests`; confirmed
+  cache hits bypass this admission. The slot lasts through auxiliary completion.
+  These tables are ingestion-managed; manual mutation requires restarting
+  serving frontends.
+
 - **Logical-table batching** (`instance/logical_batcher.rs`): `Services` initializes
   one shared batcher for opted-in HTTP Prom and nonlegacy OTLP metric-engine
-  writes. OTLP checks operator eligibility and falls back for incompatible tables.
+  writes. Downstream routers can initialize it when enabling replacement endpoints.
+  `Instance::handle_otlp_metric_row_inserts` shares OTLP eligibility and dispatch
+  between converters and falls back for incompatible tables.
   The schema adapter holds a weak instance reference to avoid an ownership cycle.
 
 - **Table batching** (`instance/builder.rs`): protocol entry points opt in through

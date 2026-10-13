@@ -27,11 +27,13 @@ pub const LIVE_ANALYZE_METRICS_EXTENSION_KEY: &str = "query.live_analyze_metrics
 pub const INSERT_SKIP_WAL_HINT: &str = "insert_skip_wal";
 
 pub const READ_PREFERENCE_HINT: &str = "read_preference";
-pub const RESERVED_EXTENSION_KEYS: [&str; 4] = [
+pub const READ_PREFERENCE_EXTENSION_KEY: &str = "query.read_preference";
+pub const RESERVED_EXTENSION_KEYS: [&str; 5] = [
     REMOTE_QUERY_ID_EXTENSION_KEY,
     INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
     SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
     LIVE_ANALYZE_METRICS_EXTENSION_KEY,
+    READ_PREFERENCE_EXTENSION_KEY,
 ];
 
 /// Deprecated, use `HINTS_KEY` instead.
@@ -65,6 +67,7 @@ mod tests {
         assert!(is_reserved_extension_key(
             LIVE_ANALYZE_METRICS_EXTENSION_KEY
         ));
+        assert!(is_reserved_extension_key(READ_PREFERENCE_EXTENSION_KEY));
         assert!(!is_reserved_extension_key(READ_PREFERENCE_HINT));
     }
 }

@@ -257,13 +257,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         } else {
             None
         };
-        let new_mutable = Arc::new(
-            region
-                .version()
-                .memtables
-                .mutable
-                .new_with_part_duration(version.compaction_time_window, memtable_builder),
-        );
+        let new_mutable = version
+            .memtables
+            .mutable
+            .new_with_part_duration(version.compaction_time_window, memtable_builder);
         // Here it assumes the leader has backfilled the partition_expr of the metadata.
         let metadata = manifest.metadata.clone();
 

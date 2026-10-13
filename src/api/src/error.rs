@@ -60,6 +60,14 @@ pub enum Error {
         source: datatypes::error::Error,
     },
 
+    #[snafu(display("Invalid compression options for column {column}"))]
+    InvalidColumnCompression {
+        column: String,
+        #[snafu(implicit)]
+        location: Location,
+        source: datatypes::error::Error,
+    },
+
     #[snafu(display("Failed to serialize JSON"))]
     SerializeJson {
         #[snafu(source)]
@@ -93,7 +101,8 @@ impl ErrorExt for Error {
                 StatusCode::Unexpected
             }
             Error::ConvertColumnDefaultConstraint { source, .. }
-            | Error::InvalidColumnDefaultConstraint { source, .. } => source.status_code(),
+            | Error::InvalidColumnDefaultConstraint { source, .. }
+            | Error::InvalidColumnCompression { source, .. } => source.status_code(),
         }
     }
 

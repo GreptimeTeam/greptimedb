@@ -641,7 +641,13 @@ impl Iter {
                 predicate
                     .exprs()
                     .iter()
-                    .filter_map(SimpleFilterEvaluator::try_new)
+                    .filter_map(|expr| {
+                        SimpleFilterEvaluator::try_new_with_column_type(expr, &|name| {
+                            metadata
+                                .column_by_name(name)
+                                .map(|column| column.column_schema.data_type.as_arrow_type())
+                        })
+                    })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();

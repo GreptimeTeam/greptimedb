@@ -35,8 +35,10 @@ use crate::CatalogManager;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
+use crate::system_schema::SystemTable;
 use crate::system_schema::information_schema::{
-    InformationTable, KEY_COLUMN_USAGE, Predicates, primary_key_encoding_index_type,
+    InformationSchemaTableScope, InformationTable, KEY_COLUMN_USAGE, Predicates,
+    primary_key_encoding_index_type,
 };
 
 pub const CONSTRAINT_SCHEMA: &str = "constraint_schema";
@@ -148,6 +150,12 @@ impl InformationSchemaKeyColumnUsage {
 }
 
 impl InformationTable for InformationSchemaKeyColumnUsage {
+    fn scope(&self) -> InformationSchemaTableScope {
+        InformationSchemaTableScope::Catalog
+    }
+}
+
+impl SystemTable for InformationSchemaKeyColumnUsage {
     fn table_id(&self) -> TableId {
         INFORMATION_SCHEMA_KEY_COLUMN_USAGE_TABLE_ID
     }

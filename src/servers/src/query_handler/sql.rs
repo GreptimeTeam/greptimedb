@@ -26,8 +26,30 @@ use crate::error::Result;
 
 pub type ServerSqlQueryHandlerRef = Arc<dyn SqlQueryHandler + Send + Sync>;
 
+/// Maximum decoded SQL size accepted by the logical-table batch operation.
+pub const MAX_LOGICAL_TABLE_DDL_BYTES: usize = 1024 * 1024;
+/// Maximum number of CREATE statements in one logical-table batch.
+pub const MAX_LOGICAL_TABLE_DDL_STATEMENTS: usize = 128;
+
 #[async_trait]
 pub trait SqlQueryHandler {
+    /// Whether this handler implements the bounded logical-table DDL operation.
+    fn supports_metric_batch_ddl(&self) -> bool {
+        false
+    }
+
+    /// Validates and authorizes the whole batch before submitting one procedure.
+    async fn create_logical_tables(
+        &self,
+        _query: &str,
+        _query_ctx: QueryContextRef,
+    ) -> Result<Vec<Output>> {
+        crate::error::UnsupportedOperationSnafu {
+            operation: "metric batch DDL",
+        }
+        .fail()
+    }
+
     async fn do_query(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>>;
 
     /// Executes an HTTP analyze-stream query.

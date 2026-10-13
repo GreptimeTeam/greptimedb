@@ -206,17 +206,25 @@ impl PartitionRuleManager {
             .iter()
             .map(|r| (r.id.region_number(), r.partition_expr_version))
             .collect::<HashMap<RegionNumber, Option<u64>>>();
-        let regions = partition_info
+        let (mut regions, exprs): (Vec<_>, Vec<_>) = partition_info
             .partitions
             .iter()
-            .map(|x| x.id.region_number())
-            .collect::<Vec<RegionNumber>>();
-        let exprs = partition_info
-            .partitions
-            .iter()
-            .filter_map(|x| x.partition_expr.as_ref())
-            .cloned()
-            .collect::<Vec<_>>();
+            .filter_map(|partition| {
+                partition
+                    .partition_expr
+                    .as_ref()
+                    .map(|expr| (partition.id.region_number(), expr.clone()))
+            })
+            .unzip();
+        // Empty expressions belong to the default region. Keep it after the
+        // explicit regions so expression indices still identify the right region.
+        regions.extend(
+            partition_info
+                .partitions
+                .iter()
+                .filter(|partition| partition.partition_expr.is_none())
+                .map(|partition| partition.id.region_number()),
+        );
         let partition_rule = Arc::new(MultiDimPartitionRule::try_new(
             partition_columns,
             regions,

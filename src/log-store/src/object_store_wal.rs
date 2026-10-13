@@ -24,9 +24,9 @@
 //!
 //! The header carries the magic `GTWALOBJ`, the format version, the object
 //! sequence, the epoch of the instance that wrote the object, the link to the
-//! object it extends, and a CRC32 of the header. Each segment holds the
-//! entries of exactly one region, ordered by entry id, and segments are ordered
-//! by region id. The footer indexes every segment with its region id, entry id
+//! object it extends, the reclaim boundary, and a CRC32 of the header. Each
+//! segment holds the entries of exactly one region, ordered by entry id, and
+//! segments are ordered by region id. The footer indexes every segment with its region id, entry id
 //! range, byte range and CRC32. The fixed-size trailer points at the footer and
 //! carries the CRC32 of the footer and of the whole object, so a reader locates
 //! the footer by reading the fixed-length trailer at the end of the object.
@@ -40,17 +40,25 @@
 //! object it extends by sequence and epoch, and recovery replays only the chain
 //! that ends at the complete object with the largest epoch and sequence. An
 //! object is complete when every link on its chain names a present object of
-//! the recorded epoch, back to an object that starts the chain. Objects off the
-//! chain are orphans, which are never replayed but keep their sequences. Each
-//! open writes an object without segments above every present object before
-//! it accepts writes, and its epoch is one above the sequence of that object,
-//! so no two instances share an epoch and a late object of an earlier
-//! instance never ends the chain.
+//! the recorded epoch, back to an object that starts the chain or to a link
+//! below the reclaim boundary of the object. Objects off the chain are
+//! orphans, which are never replayed but keep their sequences. Each open
+//! writes an object without segments above every present object before it
+//! accepts writes, and its epoch is one above the sequence of that object, so
+//! no two instances share an epoch and a late object of an earlier instance
+//! never ends the chain.
+//!
+//! The reclaim boundary of an object states that every object with a lower
+//! sequence was fully flushed when the object was sealed, so the chain need
+//! not reach below it. Every present object below the boundary of the last
+//! indexed object is deleted, on the chain or not.
 //!
 //! Recovery lists the objects, reads and verifies only the header, trailer and
 //! footer of each, and indexes the footers of the chain in sequence order to
 //! rebuild the object catalog, which rejects a sequence it already holds.
-//! Segments are read and checksummed only when a read decodes them.
+//! Segments are read and checksummed only when a read decodes them; a segment
+//! that does not decode is fetched once more and then skipped as a hole of its
+//! region or fails the read, as `on_corrupted_segment` says.
 //!
 //! Entry ids are object-sequence-major, see [`entry_id`]: the high bits of an
 //! id name the object that holds the entry, the low bits its position among
@@ -63,4 +71,4 @@ mod io;
 mod store;
 
 pub use batch::entry_id;
-pub use store::ObjectStoreLogStore;
+pub use store::{ObjectStoreLogStore, WalHole};

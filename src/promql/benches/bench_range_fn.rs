@@ -17,25 +17,14 @@
 use std::sync::Arc;
 
 use criterion::{BenchmarkId, Criterion, criterion_group};
-use datafusion::arrow::array::{
-    Array, ArrayRef, DictionaryArray, Float64Array, TimestampMillisecondArray,
-};
-use datafusion::arrow::datatypes::{
-    DataType as ArrowDataType, Field as ArrowField, Int64Type, Schema,
-};
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::ToDFSchema;
-use datafusion::datasource::memory::MemorySourceConfig;
-use datafusion::datasource::source::DataSourceExec;
-use datafusion::execution::context::TaskContext;
-use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
-use datafusion::physical_plan::{ColumnarValue, ExecutionPlan};
+use datafusion::arrow::array::{Array, Float64Array, TimestampMillisecondArray};
+use datafusion::arrow::datatypes::TimeUnit;
+use datafusion::physical_plan::ColumnarValue;
 use datafusion_common::ScalarValue;
 use datafusion_common::config::ConfigOptions;
 use datafusion_expr::ScalarFunctionArgs;
 use datatypes::arrow::datatypes::{DataType, Field};
-use futures::StreamExt;
-use promql::extension_plan::RangeManipulate;
+use promql::extension_plan::RangeManipulateStream;
 use promql::functions::{
     AbsentOverTime, Changes, CountOverTime, Delta, DoubleExponentialSmoothing, IDelta, Increase,
     LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime, QuantileOverTime, Rate,
@@ -964,223 +953,294 @@ fn bench_edge_count_functions(c: &mut Criterion) {
     group.finish();
 }
 
-const RANGE_MANIPULATE_CADENCE_MS: i64 = 15_000;
+/// One cursor-scan workload: the timeline, the window and the aligned instants to visit.
+#[derive(Clone, Debug)]
+struct CursorScanWorkload {
+    time_unit: TimeUnit,
+    offset_ms: i64,
+    timestamps: Vec<i64>,
+    window_ms: i64,
+    interval_ms: i64,
+    start_ms: i64,
+    end_ms: i64,
+}
 
-fn make_range_manipulate_batch(timestamps: Vec<i64>, field_count: usize) -> RecordBatch {
-    let mut fields = Vec::with_capacity(field_count + 1);
-    let mut columns: Vec<ArrayRef> = Vec::with_capacity(field_count + 1);
-    fields.push(ArrowField::new(
-        "timestamp",
-        ArrowDataType::Timestamp(datafusion::arrow::datatypes::TimeUnit::Millisecond, None),
-        false,
-    ));
-    columns.push(Arc::new(TimestampMillisecondArray::from(timestamps)) as _);
-
-    for field_index in 0..field_count {
-        fields.push(ArrowField::new(
-            format!("value_{field_index}"),
-            ArrowDataType::Float64,
-            false,
-        ));
-        let values = (0..columns[0].len())
-            .map(|row| row as f64 + field_index as f64 * 0.01)
-            .collect::<Vec<_>>();
-        columns.push(Arc::new(Float64Array::from(values)) as _);
+impl CursorScanWorkload {
+    /// The workload through the narrow `i64` carrier, or `None` when production would fall
+    /// back to `i128` for it.
+    ///
+    /// For the fallback cases the fast path is timed on a twin workload: the same shape
+    /// translated onto a timeline the narrow carrier holds, which keeps the number of sample
+    /// and window comparisons identical to the fallback run.
+    fn bench_scan_narrow(&self) -> Option<Vec<(u32, u32)>> {
+        RangeManipulateStream::bench_scan_narrow(
+            self.time_unit,
+            self.offset_ms,
+            self.window_ms,
+            self.interval_ms,
+            &self.timestamps,
+            self.start_ms,
+            self.end_ms,
+        )
     }
 
-    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
-}
-
-async fn execute_and_drain(
-    plan: Arc<dyn ExecutionPlan>,
-    task_ctx: Arc<TaskContext>,
-) -> Vec<RecordBatch> {
-    let mut stream = plan.execute(0, task_ctx).unwrap();
-    let mut output = Vec::new();
-    while let Some(batch) = stream.next().await {
-        output.push(batch.unwrap());
+    /// The workload through the exact `i128` carrier, the fallback production takes
+    /// whenever [`Self::bench_scan_narrow`] returns `None`.
+    fn bench_scan_wide(&self) -> Vec<(u32, u32)> {
+        RangeManipulateStream::bench_scan_wide(
+            self.time_unit,
+            self.offset_ms,
+            self.window_ms,
+            self.interval_ms,
+            &self.timestamps,
+            self.start_ms,
+            self.end_ms,
+        )
     }
-    output
+
+    fn evaluations(&self) -> usize {
+        ((self.end_ms - self.start_ms) / self.interval_ms) as usize + 1
+    }
+
+    fn label(&self) -> String {
+        format!(
+            "N{}_eval{}_window{}x{}ms",
+            self.timestamps.len(),
+            self.evaluations(),
+            self.window_ms / self.interval_ms,
+            self.interval_ms
+        )
+    }
 }
 
-fn range_keys(batch: &RecordBatch, index: usize) -> Vec<(u32, u32)> {
-    let ranges = batch
-        .column(index)
-        .as_any()
-        .downcast_ref::<DictionaryArray<Int64Type>>()
-        .unwrap()
-        .clone();
-    RangeArray::try_new(ranges)
-        .unwrap()
-        .ranges()
-        .map(Option::unwrap)
-        .collect()
+/// Cadence of the cursor-scan benchmarks: PromQL's usual 15s step.
+const CURSOR_SCAN_CADENCE_MS: i64 = 15_000;
+
+/// Milliseconds of a one-hour window, the widest window benchmarked here.
+const CURSOR_SCAN_HOUR_MS: i64 = 3_600_000;
+
+/// Builds a workload from a first timestamp and a sample count.
+///
+/// `sample_spacing_native` is the distance between samples in native ticks: 15s worth, so
+/// every native-precision workload has the same shape (one sample per cadence, 20 samples
+/// per 300s window). The aligned instants start at the first shifted sample, so every
+/// window overlaps the input the same way in both arms of the A/B comparison.
+fn cursor_scan_workload(
+    time_unit: TimeUnit,
+    offset_ms: i64,
+    first_timestamp: i64,
+    samples: usize,
+    window_ms: i64,
+    sample_spacing_native: i64,
+) -> CursorScanWorkload {
+    let interval_ms = CURSOR_SCAN_CADENCE_MS;
+    let timestamps = (0..samples as i64)
+        .map(|index| first_timestamp + index * sample_spacing_native)
+        .collect::<Vec<_>>();
+    // `Millisecond` instants of the first shifted sample, flooring like `calculate_range`.
+    let start_ms = shifted_floor_millis(time_unit, offset_ms, first_timestamp);
+    let evaluations = samples - 1;
+    CursorScanWorkload {
+        time_unit,
+        offset_ms,
+        timestamps,
+        window_ms,
+        interval_ms,
+        start_ms,
+        end_ms: start_ms + evaluations as i64 * interval_ms,
+    }
 }
 
-fn brute_force_range_keys(
-    timestamps: &[i64],
-    evaluations: usize,
-    window_points: usize,
-) -> Vec<(u32, u32)> {
-    let range = window_points as i64 * RANGE_MANIPULATE_CADENCE_MS;
-    (0..evaluations)
-        .map(|evaluation| {
-            let current = evaluation as i64 * RANGE_MANIPULATE_CADENCE_MS;
-            let mut offset = None;
-            let mut length = 0;
-            for (index, timestamp) in timestamps.iter().enumerate() {
-                if *timestamp > current - range && *timestamp <= current {
-                    offset.get_or_insert(index as u32);
-                    length += 1;
-                }
-            }
-            (offset.unwrap_or(0), length)
-        })
-        .collect()
+/// Native ticks of one benchmark cadence, i.e. 15s in the given precision.
+fn cadence_in_native_ticks(time_unit: TimeUnit) -> i64 {
+    match time_unit {
+        TimeUnit::Second => CURSOR_SCAN_CADENCE_MS / 1_000,
+        TimeUnit::Millisecond => CURSOR_SCAN_CADENCE_MS,
+        TimeUnit::Microsecond => CURSOR_SCAN_CADENCE_MS * 1_000,
+        TimeUnit::Nanosecond => CURSOR_SCAN_CADENCE_MS * 1_000_000,
+    }
 }
 
-fn validate_range_manipulate_output(
-    output: &[RecordBatch],
-    field_count: usize,
-    expected_range_keys: Option<&[(u32, u32)]>,
-) {
-    let Some(expected_range_keys) = expected_range_keys else {
-        assert!(output.is_empty());
-        return;
+/// Floor of a shifted sample in milliseconds, in exact `i128` native precision.
+fn shifted_floor_millis(time_unit: TimeUnit, offset_ms: i64, timestamp: i64) -> i64 {
+    let scale = match time_unit {
+        TimeUnit::Second => 1_000_000_000i128,
+        TimeUnit::Millisecond => 1_000_000i128,
+        TimeUnit::Microsecond => 1_000i128,
+        TimeUnit::Nanosecond => 1i128,
+    };
+    i64::try_from(
+        ((timestamp as i128) * scale + (offset_ms as i128) * 1_000_000).div_euclid(1_000_000),
+    )
+    .expect("the shifted millisecond must stay legal")
+}
+
+/// A/B benchmark of the cursor-scan carriers behind `RangeManipulate::scan_ranges`.
+///
+/// `RangeManipulate` scans the aligned instants in `i64` nanoseconds whenever
+/// `narrow_scan` proves the batch and the bounds fit, and in exact `i128` nanoseconds
+/// otherwise. Both arms below drive the production scan through the carrier the operator
+/// would pick, so the numbers isolate the carrier and not the surrounding operator work:
+///
+/// - `ms_zero_offset`: millisecond batch with no offset, the `i64` fast path. The same
+///   workload is also timed through `i128` to price the fallback on this input.
+/// - `ms_zero_offset_long_window`: same, with a one-hour window, where the scan advances
+///   both cursors much further per evaluation.
+/// - `ms_large_offset`: an offset whose nanosecond product overflows `i64`, so production
+///   falls back to `i128`. The `i64` arm times the identical workload shape translated onto
+///   a narrow timeline, which keeps the selections and thus the work identical.
+/// - `ns_native_floor`: nanosecond batch at the `i64::MIN` floor, where the shifted start
+///   bound underflows `i64` nanoseconds, so production falls back to `i128`. The `i64` arm
+///   again times the translated narrow shape.
+///
+/// Every arm asserts that both carriers selected the same ranges, so the comparison cannot
+/// be won by doing less work. The fallback triggers themselves are pinned by the unit tests
+/// in `range_manipulate.rs` (`scan_falls_back_to_i128_when_only_the_sample_tail_overflows`
+/// and `scan_carriers_split_at_the_nanosecond_boundaries`).
+fn bench_cursor_scan_carriers(c: &mut Criterion) {
+    const SAMPLES: usize = 4_096;
+    const SHORT_WINDOW_MS: i64 = 20 * CURSOR_SCAN_CADENCE_MS;
+    // `i64::MAX` milliseconds is ~9.22e18 ms; one microsecond past it in the nanosecond
+    // product makes `narrow_scan` reject the offset, while the shifted millisecond stays legal.
+    const LARGE_OFFSET_MS: i64 = 9_223_372_036_855;
+    const LARGE_OFFSET_BASE_MS: i64 = 1_000_000_000_000_000;
+    const NANOSECOND_FLOOR_SHIFT_NS: i64 = 9_223_372_036_000_000_000;
+    const NANOSECOND_FLOOR_SAMPLES: usize = 4_096;
+
+    let ms_zero_offset = cursor_scan_workload(
+        TimeUnit::Millisecond,
+        0,
+        0,
+        SAMPLES,
+        SHORT_WINDOW_MS,
+        cadence_in_native_ticks(TimeUnit::Millisecond),
+    );
+    let ms_zero_offset_long_window = cursor_scan_workload(
+        TimeUnit::Millisecond,
+        0,
+        0,
+        SAMPLES,
+        CURSOR_SCAN_HOUR_MS,
+        cadence_in_native_ticks(TimeUnit::Millisecond),
+    );
+    // The large offset is shifted inside one millisecond of the nanosecond ceiling, so the
+    // payload stays legal: the fallback is driven by the product, not by an illegal instant.
+    let ms_large_offset = cursor_scan_workload(
+        TimeUnit::Millisecond,
+        LARGE_OFFSET_MS,
+        LARGE_OFFSET_BASE_MS,
+        SAMPLES,
+        SHORT_WINDOW_MS,
+        cadence_in_native_ticks(TimeUnit::Millisecond),
+    );
+    // The narrow twin of `ms_large_offset`: the same batch shape without the offset.
+    let ms_large_offset_narrow = cursor_scan_workload(
+        TimeUnit::Millisecond,
+        0,
+        0,
+        SAMPLES,
+        SHORT_WINDOW_MS,
+        cadence_in_native_ticks(TimeUnit::Millisecond),
+    );
+
+    // Nanosecond batch on the native floor: samples at `i64::MIN + i * 15s`, whose shifted
+    // start bound underflows `i64` nanoseconds.
+    let nanosecond_floor_first = i64::MIN;
+    let nanosecond_floor = cursor_scan_workload(
+        TimeUnit::Nanosecond,
+        0,
+        nanosecond_floor_first,
+        NANOSECOND_FLOOR_SAMPLES,
+        SHORT_WINDOW_MS,
+        cadence_in_native_ticks(TimeUnit::Nanosecond),
+    );
+    // The narrow twin: the same shape translated by a multiple of one millisecond, so both
+    // the samples and the aligned instants keep their relative geometry.
+    let nanosecond_floor_narrow = CursorScanWorkload {
+        time_unit: TimeUnit::Nanosecond,
+        offset_ms: 0,
+        timestamps: nanosecond_floor
+            .timestamps
+            .iter()
+            .map(|timestamp| timestamp + NANOSECOND_FLOOR_SHIFT_NS)
+            .collect(),
+        window_ms: nanosecond_floor.window_ms,
+        interval_ms: nanosecond_floor.interval_ms,
+        start_ms: nanosecond_floor.start_ms + NANOSECOND_FLOOR_SHIFT_NS / 1_000_000,
+        end_ms: nanosecond_floor.end_ms + NANOSECOND_FLOOR_SHIFT_NS / 1_000_000,
     };
 
-    assert_eq!(output.len(), 1);
-    let batch = &output[0];
-    assert_eq!(batch.num_rows(), expected_range_keys.len());
-
-    let timestamp_range_keys = range_keys(batch, field_count + 1);
-    assert_eq!(timestamp_range_keys, expected_range_keys);
-
-    for field_index in 0..field_count {
-        assert_eq!(range_keys(batch, field_index + 1), expected_range_keys);
-    }
-}
-
-fn bench_range_manipulate_wall_time(c: &mut Criterion) {
-    let mut group = c.benchmark_group("range_manipulate_wall_time");
-    let primary_points = 4_096;
-    let sparse_evaluations = primary_points - 1;
-    let mut cases = vec![
+    let cases = [
         (
-            "one_field",
-            (0..primary_points)
-                .map(|point| point as i64 * RANGE_MANIPULATE_CADENCE_MS)
-                .collect::<Vec<_>>(),
-            primary_points,
-            4,
-            1,
+            "ms_zero_offset",
+            ms_zero_offset.clone(),
+            ms_zero_offset,
             false,
         ),
         (
-            "one_field",
-            (0..primary_points)
-                .map(|point| point as i64 * RANGE_MANIPULATE_CADENCE_MS)
-                .collect::<Vec<_>>(),
-            primary_points,
-            20,
-            1,
+            "ms_zero_offset_long_window",
+            ms_zero_offset_long_window.clone(),
+            ms_zero_offset_long_window,
             false,
         ),
         (
-            "one_field",
-            (0..primary_points)
-                .map(|point| point as i64 * RANGE_MANIPULATE_CADENCE_MS)
-                .collect::<Vec<_>>(),
-            primary_points,
-            240,
-            1,
-            false,
-        ),
-        (
-            "regular_sparse",
-            (0..sparse_evaluations)
-                .step_by(2)
-                .map(|point| point as i64 * RANGE_MANIPULATE_CADENCE_MS)
-                .collect::<Vec<_>>(),
-            sparse_evaluations,
-            20,
-            1,
-            false,
-        ),
-        (
-            "all_empty_pathological",
-            (0..primary_points)
-                .map(|point| {
-                    (primary_points as i64 + 21 + point as i64) * RANGE_MANIPULATE_CADENCE_MS
-                })
-                .collect::<Vec<_>>(),
-            primary_points,
-            20,
-            1,
+            "ms_large_offset",
+            ms_large_offset_narrow,
+            ms_large_offset,
             true,
         ),
         (
-            "multi_field_control",
-            (0..primary_points)
-                .map(|point| point as i64 * RANGE_MANIPULATE_CADENCE_MS)
-                .collect::<Vec<_>>(),
-            primary_points,
-            20,
-            4,
-            false,
+            "ns_native_floor",
+            nanosecond_floor_narrow,
+            nanosecond_floor,
+            true,
         ),
     ];
 
-    for (case_name, timestamps, evaluations, window_points, field_count, expect_empty) in
-        cases.drain(..)
-    {
-        let expected_range_keys = (!expect_empty)
-            .then(|| brute_force_range_keys(&timestamps, evaluations, window_points));
-        let input_batch = make_range_manipulate_batch(timestamps, field_count);
-        let input_rows = input_batch.num_rows();
-        let input_schema = input_batch.schema();
-        let logical_input = LogicalPlan::EmptyRelation(EmptyRelation {
-            produce_one_row: false,
-            schema: input_schema.clone().to_dfschema_ref().unwrap(),
-        });
-        let field_columns = (0..field_count)
-            .map(|field_index| format!("value_{field_index}"))
-            .collect::<Vec<_>>();
-        let logical_plan = RangeManipulate::new(
-            0,
-            (evaluations as i64 - 1) * RANGE_MANIPULATE_CADENCE_MS,
-            RANGE_MANIPULATE_CADENCE_MS,
-            0,
-            window_points as i64 * RANGE_MANIPULATE_CADENCE_MS,
-            "timestamp".to_string(),
-            field_columns,
-            logical_input,
-        )
-        .unwrap();
-        let physical_input: Arc<dyn ExecutionPlan> = Arc::new(DataSourceExec::new(Arc::new(
-            MemorySourceConfig::try_new(&[vec![input_batch]], input_schema, None).unwrap(),
-        )));
-        let execution_plan = logical_plan.to_execution_plan(physical_input);
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let task_ctx = datafusion::prelude::SessionContext::new().task_ctx();
+    let mut group = c.benchmark_group("cursor_scan_carriers");
+    group.warm_up_time(std::time::Duration::from_millis(500));
+    group.measurement_time(std::time::Duration::from_secs(2));
+    group.sample_size(50);
 
-        // Validate the public operator output and RangeArray keys before timing.
-        let output = runtime.block_on(execute_and_drain(execution_plan.clone(), task_ctx.clone()));
-        validate_range_manipulate_output(&output, field_count, expected_range_keys.as_deref());
+    for (case_name, narrow, wide, wide_falls_back) in cases {
+        // Both arms must be timed on work the operator would really do: the narrow arm in
+        // `i64`, and the wide arm in `i128` exactly when the narrow baselines overflow.
+        let narrow_expected = narrow
+            .bench_scan_narrow()
+            .unwrap_or_else(|| panic!("{case_name}: the i64 arm must fit the narrow carrier"));
+        assert_eq!(
+            wide.bench_scan_narrow().is_none(),
+            wide_falls_back,
+            "{case_name}: the i128 arm's fallback trigger"
+        );
+        // Fairness check before timing: both carriers have to select the same ranges, which
+        // makes the sample and window comparisons of the two arms identical.
+        assert_eq!(
+            wide.bench_scan_wide(),
+            narrow_expected,
+            "{case_name}: the two carriers must select the same ranges"
+        );
+        assert_eq!(
+            narrow_expected.len(),
+            narrow.evaluations(),
+            "{case_name}: one range per aligned evaluation instant"
+        );
 
-        // This measures public RangeManipulate execution wall time, including stream draining.
+        group.throughput(criterion::Throughput::Elements(
+            narrow.timestamps.len() as u64
+        ));
         group.bench_with_input(
-            BenchmarkId::new(
-                case_name,
-                format!("N{input_rows}_eval{evaluations}_window{window_points}x15s"),
-            ),
-            &(),
-            |b, _| {
-                b.iter(|| {
-                    let output = runtime
-                        .block_on(execute_and_drain(execution_plan.clone(), task_ctx.clone()));
-                    std::hint::black_box(output);
-                })
+            BenchmarkId::new(format!("{case_name}/i64"), narrow.label()),
+            &narrow,
+            |b, workload| {
+                b.iter(|| std::hint::black_box(workload.bench_scan_narrow()));
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new(format!("{case_name}/i128"), wide.label()),
+            &wide,
+            |b, workload| {
+                b.iter(|| std::hint::black_box(workload.bench_scan_wide()));
             },
         );
     }
@@ -1196,5 +1256,5 @@ criterion_group!(
     bench_rate_window_steps,
     bench_edge_count_functions,
     bench_extrema_functions,
-    bench_range_manipulate_wall_time
+    bench_cursor_scan_carriers
 );

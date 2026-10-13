@@ -121,6 +121,17 @@ impl TestEnv {
         self.metric.clone()
     }
 
+    /// Restarts Mito without closing regions and recreates the metric metadata cache.
+    /// Callers stop the old metric engine's metadata flush task before restarting.
+    pub async fn reopen_engine(&mut self, config: EngineConfig) {
+        let mito_config = self.mito.mito_config().clone();
+        self.mito = self
+            .mito_env
+            .reopen_engine(self.mito.clone(), mito_config)
+            .await;
+        self.metric = MetricEngine::try_new(self.mito.clone(), config).unwrap();
+    }
+
     /// Creates a new follower engine with the same config as the leader engine.
     pub async fn create_follower_engine(&mut self) -> (MitoEngine, MetricEngine) {
         let mito = self

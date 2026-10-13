@@ -58,7 +58,7 @@ use crate::error::{
 use crate::manifest::action::RegionManifest;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::memtable::bulk::part::BulkPart;
-use crate::memtable::time_partition::{TimePartitions, TimePartitionsRef};
+use crate::memtable::time_partition::TimePartitions;
 use crate::memtable::{MemtableBuilderProvider, ensure_json2_not_use_time_series_memtable};
 use crate::metrics::{CACHE_FILL_DOWNLOADED_FILES, CACHE_FILL_PENDING_FILES};
 use crate::read::series_candidate::is_sparse_metric_metadata;
@@ -68,7 +68,7 @@ use crate::region::{
     ManifestContext, ManifestStats, MitoRegion, MitoRegionRef, RegionLeaderState, RegionRoleState,
     RegionStats,
 };
-use crate::region_write_ctx::RegionWriteCtx;
+use crate::region_write_ctx::{RegionWriteCtx, WriteSource};
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::series_index::{IndexFilePurger, load_version_control};
@@ -384,6 +384,7 @@ impl RegionOpener {
             FormatType::PrimaryKey
         };
         ensure_json2_not_use_time_series_memtable(&metadata, &options)?;
+        options.validate_column_compression(&metadata)?;
         // Create a manifest manager for this region and writes regions to the manifest file.
         let mut region_manifest_options =
             RegionManifestOptions::new(config, &region_dir, &object_store);
@@ -410,12 +411,8 @@ impl RegionOpener {
         let memtable_builder = self.memtable_builder_provider.builder_for_options(&options);
         let part_duration = options.compaction.time_window();
         // Initial memtable id is 0.
-        let mutable = Arc::new(TimePartitions::new(
-            metadata.clone(),
-            memtable_builder.clone(),
-            0,
-            part_duration,
-        ));
+        let mutable =
+            TimePartitions::new(metadata.clone(), memtable_builder.clone(), 0, part_duration);
 
         debug!(
             "Create region {} with options: {:?}, default_flat_format: {}",
@@ -543,6 +540,7 @@ impl RegionOpener {
         // Updates the region options with the manifest.
         sanitize_region_options(&manifest, &mut region_options);
         ensure_json2_not_use_time_series_memtable(&metadata, &region_options)?;
+        region_options.validate_column_compression(&metadata)?;
 
         let region_id = self.region_id;
         let provider = self.provider::<S>(&region_options.wal_options)?;
@@ -587,12 +585,8 @@ impl RegionOpener {
             .time_window()
             .or(manifest.compaction_time_window);
         // Initial memtable id is 0.
-        let mutable = Arc::new(TimePartitions::new(
-            metadata.clone(),
-            memtable_builder.clone(),
-            0,
-            part_duration,
-        ));
+        let mutable =
+            TimePartitions::new(metadata.clone(), memtable_builder.clone(), 0, part_duration);
 
         // Updates region options by manifest before creating version.
         let version_builder = version_builder_from_manifest(
@@ -785,7 +779,7 @@ pub(crate) fn version_builder_from_manifest(
     manifest: &RegionManifest,
     metadata: RegionMetadataRef,
     file_purger: FilePurgerRef,
-    mutable: TimePartitionsRef,
+    mutable: TimePartitions,
     region_options: RegionOptions,
 ) -> VersionBuilder {
     VersionBuilder::new(metadata, mutable)
@@ -961,6 +955,7 @@ where
             provider.clone(),
             // For WAL replay, we don't need to track the write bytes rate.
             None,
+            WriteSource::WalReplay,
         );
         for mutation in entry.mutations {
             rows_replayed += mutation
@@ -1009,11 +1004,9 @@ where
 
         // set next_entry_id and write to memtable.
         region_write_ctx.set_next_entry_id(last_entry_id + 1);
-        region_write_ctx.write_memtable().await;
-        region_write_ctx.write_bulk().await;
         // Publish the replayed sequences only after all rows (including bulk
         // parts) are installed, matching the write path ordering.
-        region_write_ctx.publish_sequence_and_entry_id();
+        region_write_ctx.write_memtables().await;
     }
 
     // TODO(weny): We need to update `flushed_entry_id` in the region manifest

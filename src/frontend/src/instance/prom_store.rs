@@ -37,7 +37,8 @@ use common_recordbatch::RecordBatches;
 use common_telemetry::{debug, tracing};
 use operator::insert::{
     AutoCreateTableType, InserterRef, PerTableSemanticIndex, apply_per_table_semantic_options,
-    build_create_table_expr, fill_table_options_for_create, parse_per_table_semantic_index,
+    apply_retention_ttl_hint, build_create_table_expr, fill_table_options_for_create,
+    parse_per_table_semantic_index, retention_ttl_hint,
 };
 use operator::statement::StatementExecutor;
 use prost::Message;
@@ -54,7 +55,7 @@ use servers::query_handler::{
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
-use store_api::mito_engine_options::{SST_FORMAT_KEY, TTL_KEY};
+use store_api::mito_engine_options::SST_FORMAT_KEY;
 use table::TableRef;
 use table::table_reference::TableReference;
 use tracing::instrument;
@@ -670,6 +671,14 @@ impl Instance {
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
         if table.is_some() {
+            if retention_ttl_hint(&ctx).is_some() {
+                return error::InvalidPromRemoteRequestSnafu {
+                    msg: format!(
+                        "Retention TTL hint cannot be applied because physical table `{physical_table}` already exists; set `ttl` when that physical table is created"
+                    ),
+                }
+                .fail();
+            }
             return Ok(());
         }
 
@@ -698,13 +707,9 @@ impl Instance {
         .map_err(BoxedError::new)
         .context(error::ExecuteGrpcQuerySnafu)?;
         create_table_expr.engine = METRIC_ENGINE_NAME.to_string();
-        // Apply the ingest TTL hint so the auto-created physical metric table
-        // carries the retention TTL from `x-greptime-hints: ttl=...`.
-        if let Some(ttl) = ctx.extension(TTL_KEY) {
-            create_table_expr
-                .table_options
-                .insert(TTL_KEY.to_string(), ttl.to_string());
-        }
+        // Retention hints apply only when this physical table is created.
+        // `ttl=instant` stays on the logical table.
+        apply_retention_ttl_hint(&mut create_table_expr.table_options, &ctx);
         fill_metric_physical_table_options(&mut create_table_expr.table_options);
 
         self.statement_executor

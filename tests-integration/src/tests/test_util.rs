@@ -263,15 +263,8 @@ pub(crate) async fn standalone_with_kafka_wal() -> Option<Box<dyn RebuildableMoc
         .map(|s| s.trim().to_string())
         .collect::<Vec<_>>();
     let test_name = uuid::Uuid::new_v4().to_string();
-    let builder = GreptimeDbStandaloneBuilder::new(&test_name)
-        .with_datanode_wal_config(DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
-            connection: KafkaConnectionConfig {
-                broker_endpoints: endpoints.clone(),
-                ..Default::default()
-            },
-            ..Default::default()
-        }))
-        .with_metasrv_wal_config(MetasrvWalConfig::Kafka(MetasrvKafkaConfig {
+    let builder = GreptimeDbStandaloneBuilder::new(&test_name).with_datanode_wal_config(
+        DatanodeWalConfig::Kafka(DatanodeKafkaConfig {
             connection: KafkaConnectionConfig {
                 broker_endpoints: endpoints,
                 ..Default::default()
@@ -282,7 +275,8 @@ pub(crate) async fn standalone_with_kafka_wal() -> Option<Box<dyn RebuildableMoc
                 ..Default::default()
             },
             ..Default::default()
-        }));
+        }),
+    );
     let instance = TestContext::new(MockInstanceBuilder::Standalone(builder)).await;
     Some(Box::new(instance))
 }

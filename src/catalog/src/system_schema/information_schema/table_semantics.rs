@@ -59,7 +59,10 @@ use crate::CatalogManager;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
-use crate::system_schema::information_schema::{InformationTable, Predicates, TABLE_SEMANTICS};
+use crate::system_schema::SystemTable;
+use crate::system_schema::information_schema::{
+    InformationSchemaTableScope, InformationTable, Predicates, TABLE_SEMANTICS,
+};
 use crate::system_schema::semantic_graph::{EntityGraphProviderRef, TableEntityDeclaration};
 use crate::system_schema::utils;
 
@@ -235,6 +238,12 @@ impl InformationSchemaTableSemantics {
 }
 
 impl InformationTable for InformationSchemaTableSemantics {
+    fn scope(&self) -> InformationSchemaTableScope {
+        InformationSchemaTableScope::Catalog
+    }
+}
+
+impl SystemTable for InformationSchemaTableSemantics {
     fn table_id(&self) -> TableId {
         INFORMATION_SCHEMA_TABLE_SEMANTICS_TABLE_ID
     }
@@ -512,6 +521,17 @@ mod tests {
             row.options_json.as_deref(),
             Some(r#"{"metric.type":"counter","metric.unit":"By"}"#)
         );
+    }
+
+    #[test]
+    fn extract_system_table_scope() {
+        let info = table_info(&[(table::requests::SEMANTIC_TABLE_SCOPE, "catalog")]);
+        let row = SemanticRow::extract(&info).unwrap();
+        assert_eq!(
+            row.options_json.as_deref(),
+            Some(r#"{"table_scope":"catalog"}"#)
+        );
+        assert!(row.signal_type.is_none());
     }
 
     #[test]
