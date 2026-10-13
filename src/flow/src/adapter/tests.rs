@@ -373,15 +373,19 @@ impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError for R
     }
 }
 
-struct StreamingHarness {
-    engine: StreamingEngine,
-    metadata: TableMetadataManagerRef,
-    catalog: Arc<catalog::memory::MemoryCatalogManager>,
+/// Mock harness for stateless streaming flows, shared with the dual-engine tests in
+/// [`crate::adapter::flownode_impl`].
+///
+/// The sink stays private: tests observe writes through [`StreamingHarness::take_numbers`].
+pub(crate) struct StreamingHarness {
+    pub(crate) engine: Arc<StreamingEngine>,
+    pub(crate) metadata: TableMetadataManagerRef,
+    pub(crate) catalog: Arc<catalog::memory::MemoryCatalogManager>,
     sink: Arc<RecordingSink>,
 }
 
 impl StreamingHarness {
-    async fn new() -> Self {
+    pub(crate) async fn new() -> Self {
         let metadata = Arc::new(common_meta::key::TableMetadataManager::new(Arc::new(
             common_meta::kv_backend::memory::MemoryKvBackend::new(),
         )));
@@ -404,14 +408,19 @@ impl StreamingHarness {
         let frontend =
             FrontendClient::from_grpc_handler(Arc::downgrade(&handler), QueryOptions::default());
         Self {
-            engine: StreamingEngine::new(None, query, metadata.clone(), Arc::new(frontend)),
+            engine: Arc::new(StreamingEngine::new(
+                None,
+                query,
+                metadata.clone(),
+                Arc::new(frontend),
+            )),
             metadata,
             catalog,
             sink,
         }
     }
 
-    async fn table(&self, id: u32, name: &str) -> TableInfo {
+    pub(crate) async fn table(&self, id: u32, name: &str) -> TableInfo {
         let info = new_test_table_info_with_name(id, name, []);
         self.metadata
             .create_table_metadata(
@@ -457,7 +466,7 @@ impl StreamingHarness {
             .unwrap();
     }
 
-    fn take_numbers(&self) -> Vec<(String, Vec<i32>)> {
+    pub(crate) fn take_numbers(&self) -> Vec<(String, Vec<i32>)> {
         let inserts = std::mem::take(&mut *self.sink.inserts.lock().unwrap());
         inserts
             .into_iter()
@@ -483,7 +492,11 @@ impl StreamingHarness {
     }
 }
 
-fn mirror_request(table: u32, region: u32, values: &[i32]) -> api::v1::region::InsertRequest {
+pub(crate) fn mirror_request(
+    table: u32,
+    region: u32,
+    values: &[i32],
+) -> api::v1::region::InsertRequest {
     use api::v1::value::ValueData;
     api::v1::region::InsertRequest {
         region_id: RegionId::new(table, region).as_u64(),

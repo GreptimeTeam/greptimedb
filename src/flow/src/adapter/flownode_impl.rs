@@ -1030,6 +1030,7 @@ mod tests {
     use super::{
         ConsistentCheckTask, FlowDualEngine, SrcTableToFlow, decode_internal_eval_schedule,
     };
+    use crate::adapter::tests::{StreamingHarness, mirror_request};
     use crate::batching_mode::BatchingModeOptions;
     use crate::batching_mode::engine::BatchingEngine;
     use crate::batching_mode::frontend_client::FrontendClient;
@@ -1139,7 +1140,7 @@ mod tests {
         let noop_args = CreateFlowArgs {
             create_if_not_exists: true,
             source_table_ids: vec![999],
-            ..args
+            ..args.clone()
         };
         assert!(
             FlowEngine::create_flow(dual_engine.as_ref(), noop_args)
@@ -1153,6 +1154,33 @@ mod tests {
                 routing.flow_infos.get(&9424),
                 Some(&(FlowType::Batching, vec![1]))
             );
+            assert!(!routing.in_batch(999));
+        }
+        {
+            let mut routing = dual_engine.src_table2flow.write().await;
+            routing.remove_flow(9424);
+        }
+        // Batching mode short-circuits before planning, so a replayed no-op create with a
+        // stale source id must repair the route from the engine's registered flow (source 1)
+        // instead of trusting the request args.
+        let replay_noop_args = CreateFlowArgs {
+            create_if_not_exists: true,
+            source_table_ids: vec![999],
+            ..args.clone()
+        };
+        assert!(
+            FlowEngine::create_flow(dual_engine.as_ref(), replay_noop_args)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        {
+            let routing = dual_engine.src_table2flow.read().await;
+            assert_eq!(
+                routing.flow_infos.get(&9424),
+                Some(&(FlowType::Batching, vec![1]))
+            );
+            assert!(routing.in_batch(1));
             assert!(!routing.in_batch(999));
         }
         {
@@ -1231,6 +1259,168 @@ mod tests {
         drop(routing);
 
         dual_engine.stop_flow_consistent_check_task().await.unwrap();
+    }
+
+    /// A streaming create that is cancelled after the streaming engine published the flow, but
+    /// before the dual engine recorded the source route, leaves the flow visible while mirror
+    /// input for its source table is dropped. Replaying the create is a no-op for the engine, so
+    /// it must repair the route from the engine's flow rather than from the request args.
+    #[tokio::test]
+    async fn test_streaming_create_replay_repairs_route_after_cancellation() {
+        const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+        const FLOW_ID: u64 = 9425;
+
+        for replay_source in [1u32, 2u32] {
+            let h = StreamingHarness::new().await;
+            h.table(1, "source_original").await;
+            h.table(2, "source_replay").await;
+            h.table(3, "sink").await;
+
+            let flow_metadata_manager =
+                Arc::new(FlowMetadataManager::new(Arc::new(MemoryKvBackend::new())));
+            let catalog_manager: catalog::CatalogManagerRef = h.catalog.clone();
+            let batching_engine = Arc::new(BatchingEngine::new(
+                h.engine.frontend_client.clone(),
+                h.engine.query_engine.clone(),
+                flow_metadata_manager.clone(),
+                h.metadata.clone(),
+                catalog_manager.clone(),
+                BatchingModeOptions::default(),
+            ));
+            let dual_engine = Arc::new(FlowDualEngine::new(
+                h.engine.clone(),
+                batching_engine,
+                flow_metadata_manager,
+                catalog_manager,
+                Plugins::new(),
+            ));
+            dual_engine.set_done_recovering();
+
+            let args = CreateFlowArgs {
+                flow_id: FLOW_ID,
+                sink_table_name: ["greptime".into(), "public".into(), "sink".into()],
+                source_table_ids: vec![1],
+                create_if_not_exists: true,
+                or_replace: false,
+                expire_after: None,
+                eval_interval: None,
+                comment: None,
+                sql: "SELECT number, ts FROM source_original".to_string(),
+                flow_options: HashMap::from([(
+                    FlowType::FLOW_TYPE_KEY.to_string(),
+                    FlowType::STREAMING.to_string(),
+                )]),
+                query_ctx: Some(QueryContext::arc().as_ref().clone()),
+                eval_schedule: None,
+            };
+
+            // Cancel the create while it waits for the routing write lock: the streaming engine
+            // has published the flow, but no route is ever installed.
+            let guard = dual_engine.src_table2flow.write().await;
+            let mut cancelled = tokio::spawn({
+                let dual_engine = dual_engine.clone();
+                let args = args.clone();
+                async move { FlowEngine::create_flow(dual_engine.as_ref(), args).await }
+            });
+            tokio::time::timeout(TEST_TIMEOUT, async {
+                while !h.engine.flow_exist_inner(FLOW_ID).await.unwrap() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("create should publish the flow before blocking on the routing lock");
+            assert!(
+                !cancelled.is_finished(),
+                "create must still be blocked on the routing write guard"
+            );
+            assert!(!guard.flow_infos.contains_key(&FLOW_ID));
+            cancelled.abort();
+            let join_err = tokio::time::timeout(TEST_TIMEOUT, &mut cancelled)
+                .await
+                .expect("aborted create should settle")
+                .expect_err("aborted create must not return a flow");
+            assert!(join_err.is_cancelled());
+            assert!(h.engine.flow_exist_inner(FLOW_ID).await.unwrap());
+            drop(guard);
+
+            // Replaying the create is a no-op for the engine and must restore the route.
+            let replay_args = if replay_source == 1 {
+                args.clone()
+            } else {
+                CreateFlowArgs {
+                    source_table_ids: vec![replay_source],
+                    sql: "SELECT number, ts FROM source_replay".to_string(),
+                    ..args.clone()
+                }
+            };
+            assert!(
+                FlowEngine::create_flow(dual_engine.as_ref(), replay_args)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+
+            // Routing is the only path to the engine, so the mirror input must land in the sink.
+            FlowEngine::handle_flow_inserts(
+                dual_engine.as_ref(),
+                api::v1::region::InsertRequests {
+                    requests: vec![mirror_request(1, 0, &[7])],
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(h.take_numbers(), vec![("sink".into(), vec![7])]);
+            {
+                let routing = dual_engine.src_table2flow.read().await;
+                assert_eq!(
+                    routing.flow_infos.get(&FLOW_ID),
+                    Some(&(FlowType::Streaming, vec![1])),
+                    "the replay must restore the original source route"
+                );
+                assert!(routing.in_stream(1));
+                assert!(!routing.in_batch(1));
+                if replay_source != 1 {
+                    assert!(!routing.in_stream(replay_source));
+                    assert!(!routing.in_batch(replay_source));
+                }
+            }
+            assert!(
+                FlowEngine::flow_exist(dual_engine.as_ref(), FLOW_ID)
+                    .await
+                    .unwrap()
+            );
+
+            // A later full create of the same flow from another valid source is still a no-op and
+            // must leave the original route intact.
+            let noop_args = CreateFlowArgs {
+                source_table_ids: vec![2],
+                sql: "SELECT number, ts FROM source_replay".to_string(),
+                ..args.clone()
+            };
+            assert!(
+                FlowEngine::create_flow(dual_engine.as_ref(), noop_args)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            {
+                let routing = dual_engine.src_table2flow.read().await;
+                assert_eq!(
+                    routing.flow_infos.get(&FLOW_ID),
+                    Some(&(FlowType::Streaming, vec![1]))
+                );
+                assert!(!routing.in_stream(2));
+            }
+            FlowEngine::handle_flow_inserts(
+                dual_engine.as_ref(),
+                api::v1::region::InsertRequests {
+                    requests: vec![mirror_request(1, 0, &[8])],
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(h.take_numbers(), vec![("sink".into(), vec![8])]);
+        }
     }
 
     #[test]
