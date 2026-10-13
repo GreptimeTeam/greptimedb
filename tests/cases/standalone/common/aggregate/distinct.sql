@@ -25,6 +25,7 @@ SELECT DISTINCT ON (a) * FROM test ORDER BY a, t DESC;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT DISTINCT a FROM test ORDER BY a;
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
@@ -34,6 +35,7 @@ EXPLAIN ANALYZE SELECT DISTINCT a FROM test ORDER BY a;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT DISTINCT a, b FROM test ORDER BY a;
 
 DROP TABLE test;
@@ -55,6 +57,7 @@ SELECT DISTINCT a, b FROM test ORDER BY a, b;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT DISTINCT a FROM test ORDER BY a;
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
@@ -64,6 +67,7 @@ EXPLAIN ANALYZE SELECT DISTINCT a FROM test ORDER BY a;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT DISTINCT a, b FROM test ORDER BY a;
 
 DROP TABLE test;

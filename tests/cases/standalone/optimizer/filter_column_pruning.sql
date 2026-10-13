@@ -33,6 +33,7 @@ SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' ORDER BY ts;
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' ORDER BY ts;
 
 -- Filter on multiple columns (host, region) but only select value columns
@@ -46,6 +47,7 @@ SELECT mem_usage, cpu_usage FROM filter_prune_test WHERE host = 'host1' AND `reg
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT mem_usage, cpu_usage FROM filter_prune_test WHERE host = 'host1' AND `region` = 'us-east' ORDER BY ts;
 
 -- Filter on value column (cpu_usage) not in projection
@@ -59,6 +61,7 @@ SELECT host, `region` FROM filter_prune_test WHERE cpu_usage > 20.0 ORDER BY ts;
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT host, `region` FROM filter_prune_test WHERE cpu_usage > 20.0 ORDER BY ts;
 
 -- Filter on time index but time index not in projection
@@ -72,6 +75,7 @@ SELECT host, cpu_usage FROM filter_prune_test WHERE ts > 2000 ORDER BY ts;
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT host, cpu_usage FROM filter_prune_test WHERE ts > 2000 ORDER BY ts;
 
 -- Complex filter: multiple columns in WHERE, only one in SELECT
@@ -85,6 +89,7 @@ SELECT mem_usage FROM filter_prune_test WHERE host = 'host1' AND cpu_usage > 10.
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT mem_usage FROM filter_prune_test WHERE host = 'host1' AND cpu_usage > 10.0 AND `region` = 'us-east' ORDER BY ts;
 
 -- Aggregation with filter on non-projected column
@@ -98,6 +103,7 @@ SELECT SUM(cpu_usage) as total_cpu FROM filter_prune_test WHERE host = 'host1';
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT SUM(cpu_usage) as total_cpu FROM filter_prune_test WHERE host = 'host1';
 
 -- GROUP BY with filter on column not in projection or grouping
@@ -111,6 +117,7 @@ SELECT `region`, AVG(cpu_usage) as avg_cpu FROM filter_prune_test WHERE mem_usag
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT `region`, AVG(cpu_usage) as avg_cpu FROM filter_prune_test WHERE mem_usage > 25.0 GROUP BY `region` ORDER BY `region`;
 
 -- Filter with IN clause on non-projected column
@@ -124,6 +131,7 @@ SELECT cpu_usage FROM filter_prune_test WHERE host IN ('host1', 'host2') ORDER B
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host IN ('host1', 'host2') ORDER BY ts;
 
 -- Filter with BETWEEN on non-projected column
@@ -137,6 +145,7 @@ SELECT host FROM filter_prune_test WHERE cpu_usage BETWEEN 15.0 AND 30.0 ORDER B
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT host FROM filter_prune_test WHERE cpu_usage BETWEEN 15.0 AND 30.0 ORDER BY ts;
 
 -- Filter with LIKE on non-projected column
@@ -150,6 +159,7 @@ SELECT cpu_usage FROM filter_prune_test WHERE host LIKE 'host%' AND `region` LIK
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host LIKE 'host%' AND `region` LIKE 'us-%' ORDER BY ts;
 
 -- Filter with OR conditions on non-projected columns
@@ -163,6 +173,7 @@ SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' OR `region` = 'eu-w
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' OR `region` = 'eu-west' ORDER BY ts;
 
 -- Subquery with filter on non-projected column
@@ -176,6 +187,7 @@ SELECT cpu_usage FROM (SELECT * FROM filter_prune_test WHERE host = 'host1') sub
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM (SELECT * FROM filter_prune_test WHERE host = 'host1') sub WHERE `region` = 'us-east' ORDER BY ts;
 
 -- Repeat with data flushed to verify column pruning works with on-disk data
@@ -194,6 +206,7 @@ SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' ORDER BY ts;
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' ORDER BY ts;
 
 -- Filter on multiple columns (host, region) but only select value columns
@@ -208,6 +221,7 @@ SELECT mem_usage, cpu_usage FROM filter_prune_test WHERE host = 'host1' AND `reg
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT mem_usage, cpu_usage FROM filter_prune_test WHERE host = 'host1' AND `region` = 'us-east' ORDER BY ts;
 
 -- Filter on value column (cpu_usage) not in projection
@@ -222,6 +236,7 @@ SELECT host, `region` FROM filter_prune_test WHERE cpu_usage > 20.0 ORDER BY ts;
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT host, `region` FROM filter_prune_test WHERE cpu_usage > 20.0 ORDER BY ts;
 
 -- Filter on time index but time index not in projection
@@ -236,6 +251,7 @@ SELECT host, cpu_usage FROM filter_prune_test WHERE ts > 2000 ORDER BY ts;
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT host, cpu_usage FROM filter_prune_test WHERE ts > 2000 ORDER BY ts;
 
 -- Complex filter: multiple columns in WHERE, only one in SELECT
@@ -250,6 +266,7 @@ SELECT mem_usage FROM filter_prune_test WHERE host = 'host1' AND cpu_usage > 10.
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT mem_usage FROM filter_prune_test WHERE host = 'host1' AND cpu_usage > 10.0 AND `region` = 'us-east' ORDER BY ts;
 
 -- Aggregation with filter on non-projected column
@@ -264,6 +281,7 @@ SELECT SUM(cpu_usage) as total_cpu FROM filter_prune_test WHERE host = 'host1';
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT SUM(cpu_usage) as total_cpu FROM filter_prune_test WHERE host = 'host1';
 
 -- GROUP BY with filter on column not in projection or grouping
@@ -278,6 +296,7 @@ SELECT `region`, AVG(cpu_usage) as avg_cpu FROM filter_prune_test WHERE mem_usag
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT `region`, AVG(cpu_usage) as avg_cpu FROM filter_prune_test WHERE mem_usage > 25.0 GROUP BY `region` ORDER BY `region`;
 
 -- Filter with IN clause on non-projected column
@@ -292,6 +311,7 @@ SELECT cpu_usage FROM filter_prune_test WHERE host IN ('host1', 'host2') ORDER B
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host IN ('host1', 'host2') ORDER BY ts;
 
 -- Filter with BETWEEN on non-projected column
@@ -306,6 +326,7 @@ SELECT host FROM filter_prune_test WHERE cpu_usage BETWEEN 15.0 AND 30.0 ORDER B
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT host FROM filter_prune_test WHERE cpu_usage BETWEEN 15.0 AND 30.0 ORDER BY ts;
 
 -- Filter with LIKE on non-projected column
@@ -320,6 +341,7 @@ SELECT cpu_usage FROM filter_prune_test WHERE host LIKE 'host%' AND `region` LIK
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host LIKE 'host%' AND `region` LIKE 'us-%' ORDER BY ts;
 
 -- Filter with OR conditions on non-projected columns
@@ -334,6 +356,7 @@ SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' OR `region` = 'eu-w
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM filter_prune_test WHERE host = 'host1' OR `region` = 'eu-west' ORDER BY ts;
 
 -- Subquery with filter on non-projected column
@@ -348,6 +371,7 @@ SELECT cpu_usage FROM (SELECT * FROM filter_prune_test WHERE host = 'host1') sub
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT cpu_usage FROM (SELECT * FROM filter_prune_test WHERE host = 'host1') sub WHERE `region` = 'us-east' ORDER BY ts;
 
 DROP TABLE filter_prune_test;
@@ -392,6 +416,7 @@ SELECT field1 FROM filter_prune_files WHERE tag_key = 'a' ORDER BY ts;
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT field1 FROM filter_prune_files WHERE tag_key = 'a' ORDER BY ts;
 
 -- Query: filter on field2 (not in projection), select only field1
@@ -406,6 +431,7 @@ SELECT field1 FROM filter_prune_files WHERE field2 > 5.0 ORDER BY ts;
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT field1 FROM filter_prune_files WHERE field2 > 5.0 ORDER BY ts;
 
 -- Complex: filter on tag and field2, select only field3
@@ -420,6 +446,7 @@ SELECT field3 FROM filter_prune_files WHERE tag_key = 'b' AND field2 > 7.0 ORDER
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT field3 FROM filter_prune_files WHERE tag_key = 'b' AND field2 > 7.0 ORDER BY ts;
 
 DROP TABLE filter_prune_files;

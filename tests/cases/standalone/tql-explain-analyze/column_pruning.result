@@ -29,6 +29,7 @@ Affected Rows: 9
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE (0, 10, '5s') sum(promql_column_pruning);
 
 +-+-+-+
@@ -45,7 +46,7 @@ TQL ANALYZE (0, 10, '5s') sum(promql_column_pruning);
 |_|_|_ProjectionExec: expr=[ts@0 as ts, greptime_value@4 as greptime_value] REDACTED
 |_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["job", "instance", "region"] REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries", "mode":"legacy" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries", "projection": ["ts", "job", "instance", "region", "greptime_value"], "filters": ["ts >= TimestampMillisecond(-299999, None)", "ts <= TimestampMillisecond(10000, None)"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
 +-+-+-+
@@ -57,6 +58,7 @@ TQL ANALYZE (0, 10, '5s') sum(promql_column_pruning);
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE (0, 10, '5s') sum(rate(promql_column_pruning[5s]));
 
 +-+-+-+
@@ -75,7 +77,7 @@ TQL ANALYZE (0, 10, '5s') sum(rate(promql_column_pruning[5s]));
 |_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[5000], eval range=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[ts], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["job", "instance", "region"] REDACTED
-|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries", "mode":"legacy" REDACTED
+|_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries", "projection": ["ts", "job", "instance", "region", "greptime_value"], "filters": ["ts >= TimestampMillisecond(-4999, None)", "ts <= TimestampMillisecond(10000, None)"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+

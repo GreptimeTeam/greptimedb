@@ -46,6 +46,7 @@ TQL EXPLAIN (1, 1, '1s', '1ms') native_time_us{series="exact"};
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (flat_format.*) REDACTED
 -- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE VERBOSE (1, 1, '1s', '1ms') native_time_us{series="exact"};
 
 -- The same-series future tick is in the memtable, while exact 1s remains selected.
@@ -136,6 +137,7 @@ TQL EXPLAIN (1, 1, '1s', '1ms') native_time_ns{series="exact"};
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (flat_format.*) REDACTED
 -- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE VERBOSE (1, 1, '1s', '1ms') native_time_ns{series="exact"};
 
 -- The same-series future tick is in the memtable, while exact 1s remains selected.
@@ -206,6 +208,7 @@ TQL EXPLAIN (0, 0, '1s', '2d') native_time_ns_lower_overflow{series="exact"} off
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (flat_format.*) REDACTED
 -- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE VERBOSE (0, 0, '1s', '2d') native_time_ns_lower_overflow{series="exact"} offset 106750d;
 
 -- The representable upper bound selects only the exact row.

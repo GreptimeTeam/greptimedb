@@ -123,6 +123,7 @@ Affected Rows: 3
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT
     rack
 FROM
@@ -138,7 +139,7 @@ WHERE
 |_|_|_|
 | 1_| 0_|_FilterExec: usage_small@1 >= 10, projection=[rack@0] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_UnorderedScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["rack", "usage_small"], "filters": ["usage_small >= Int16(10)"], "flat_format": REDACTED, "REDACTED
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["rack", "usage_small"], "filters": ["usage_small >= Int16(10)"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 3_|
 +-+-+-+

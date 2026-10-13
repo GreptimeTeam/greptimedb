@@ -84,6 +84,7 @@ select * from demo where collector='disk' order by ts;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze select * from demo where idc='idc1';
 
 +-+-+-+
@@ -93,7 +94,7 @@ explain analyze select * from demo where idc='idc1';
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "value", "host", "idc", "collector"], "filters": ["idc = Dictionary(UInt32, Utf8(\"idc1\"))"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|
 +-+-+-+
@@ -112,6 +113,7 @@ SELECT * FROM demo where host in ('test1');
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze SELECT * FROM demo where host in ('test1');
 
 +-+-+-+
@@ -121,7 +123,7 @@ explain analyze SELECT * FROM demo where host in ('test1');
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["ts", "value", "host", "idc", "collector"], "filters": ["host = Dictionary(UInt32, Utf8(\"test1\"))"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
 +-+-+-+

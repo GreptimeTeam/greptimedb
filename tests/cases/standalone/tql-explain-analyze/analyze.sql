@@ -11,6 +11,7 @@ INSERT INTO test VALUES (1, 1, "a"), (1, 1, "b"), (2, 2, "a");
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE (0, 10, '5s') test;
 
 -- 'lookback' parameter is not fully supported, the test has to be updated
@@ -22,6 +23,7 @@ TQL ANALYZE (0, 10, '5s') test;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE (0, 10, '1s', '2s') test;
 
 -- analyze at 0s, 5s and 10s. No point at 0s.
@@ -32,6 +34,7 @@ TQL ANALYZE (0, 10, '1s', '2s') test;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp + '10 seconds'::interval, '5s') test;
 
 -- analyze verbose at 0s, 5s and 10s. No point at 0s.
@@ -45,6 +48,7 @@ TQL ANALYZE ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp 
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE (flat_format.*) REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE VERBOSE (0, 10, '5s') test;
 
 DROP TABLE test;
@@ -59,6 +63,7 @@ CREATE TABLE test(i DOUBLE, j TIMESTAMP TIME INDEX, k STRING, l STRING, PRIMARY 
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE (0, 10, '5s') test;
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
@@ -68,6 +73,7 @@ TQL ANALYZE (0, 10, '5s') test;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE (0, 10, '5s') rate(test[10s]);
 
 -- Test new FORMAT functionality for ANALYZE
@@ -79,6 +85,7 @@ TQL ANALYZE (0, 10, '5s') rate(test[10s]);
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE FORMAT JSON (0, 10, '5s') test;
 
 -- analyze verbose with JSON format
@@ -91,6 +98,7 @@ TQL ANALYZE FORMAT JSON (0, 10, '5s') test;
 -- SQLNESS REPLACE (Duration.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (flat_format.*) REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE VERBOSE FORMAT JSON (0, 10, '5s') test;
 
 -- analyze with TEXT format (should be same as default)
@@ -101,6 +109,7 @@ TQL ANALYZE VERBOSE FORMAT JSON (0, 10, '5s') test;
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE FORMAT TEXT (0, 10, '5s') test;
 
 drop table test;
@@ -126,6 +135,7 @@ TQL EVAL sum(test2);
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE sum(test2);
 
 DROP TABLE test2;

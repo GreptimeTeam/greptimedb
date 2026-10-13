@@ -39,6 +39,7 @@ ORDER BY
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT
   collect_time_utc AS collect_time,
   peak_current,
@@ -61,6 +62,7 @@ ORDER BY
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT
   collect_time_utc AS collect_time_0,
   peak_current,
@@ -85,6 +87,7 @@ ORDER BY
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT
   collect_time AS true_collect_time,
   collect_time_utc AS collect_time,
@@ -110,6 +113,7 @@ ORDER BY
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT
   collect_time_utc AS collect_time,
   collect_time AS true_collect_time,
@@ -144,6 +148,7 @@ TQL EVAL('2023-10-01 00:00:00.000'::TIMESTAMP, '2023-10-01 00:00:05.000'::TIMEST
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE('2023-10-01 00:00:00.000'::TIMESTAMP, '2023-10-01 00:00:05.000'::TIMESTAMP, '1s') sum(instance_job_metrics);
 
 DROP TABLE IF EXISTS `instance_job_metrics`;

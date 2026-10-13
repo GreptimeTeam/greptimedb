@@ -235,6 +235,7 @@ Affected Rows: 0
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT * FROM valid_rule;
 
 +-+-+-+
@@ -244,19 +245,19 @@ EXPLAIN ANALYZE SELECT * FROM valid_rule;
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "ts"], "filters": ["a < Int32(10) OR a IS NULL"], "time_range":REDACTED
 |_|_|_|
 | 1_| 1_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "ts"], "filters": ["a = Int32(10) AND (b < Utf8(\"a\") OR b IS NULL)"], "time_range":REDACTED
 |_|_|_|
 | 1_| 2_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "ts"], "filters": ["a = Int32(10) AND b >= Utf8(\"a\") AND b IS NOT NULL AND (b < Utf8(\"o\") OR b IS NULL)"], "time_range":REDACTED
 |_|_|_|
 | 1_| 3_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "ts"], "filters": ["a = Int32(10) AND b >= Utf8(\"o\") AND b IS NOT NULL"], "time_range":REDACTED
 |_|_|_|
 | 1_| 4_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "ts"], "filters": ["a > Int32(10) AND a IS NOT NULL"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+
@@ -268,6 +269,7 @@ EXPLAIN ANALYZE SELECT * FROM valid_rule;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT * FROM valid_rule
 WHERE a < 10;
 
@@ -278,7 +280,7 @@ WHERE a < 10;
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "ts"], "filters": ["a < Int32(10)", "a < Int32(10) OR a IS NULL"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+
@@ -290,6 +292,7 @@ WHERE a < 10;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT * FROM valid_rule
 WHERE a = 10 AND b= 'z';
 
@@ -300,7 +303,7 @@ WHERE a = 10 AND b= 'z';
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "ts"], "filters": ["a = Int32(10)", "b = Dictionary(UInt32, Utf8(\"z\"))", "a = Int32(10) AND b >= Utf8(\"o\") AND b IS NOT NULL"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+
@@ -312,6 +315,7 @@ WHERE a = 10 AND b= 'z';
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT * FROM valid_rule
 WHERE a = 10 OR b= 'z';
 
@@ -323,23 +327,23 @@ WHERE a = 10 OR b= 'z';
 |_|_|_|
 | 1_| 0_|_FilterExec: a@0 = 10 OR b@1 = z REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "ts"], "filters": ["a = Int32(10) OR b = Dictionary(UInt32, Utf8(\"z\"))", "a < Int32(10) OR a IS NULL"], "time_range":REDACTED
 |_|_|_|
 | 1_| 1_|_FilterExec: a@0 = 10 OR b@1 = z REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "ts"], "filters": ["a = Int32(10) OR b = Dictionary(UInt32, Utf8(\"z\"))", "a = Int32(10) AND (b < Utf8(\"a\") OR b IS NULL)"], "time_range":REDACTED
 |_|_|_|
 | 1_| 2_|_FilterExec: a@0 = 10 OR b@1 = z REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "ts"], "filters": ["a = Int32(10) OR b = Dictionary(UInt32, Utf8(\"z\"))", "a = Int32(10) AND b >= Utf8(\"a\") AND b IS NOT NULL AND (b < Utf8(\"o\") OR b IS NULL)"], "time_range":REDACTED
 |_|_|_|
 | 1_| 3_|_FilterExec: a@0 = 10 OR b@1 = z REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "ts"], "filters": ["a = Int32(10) OR b = Dictionary(UInt32, Utf8(\"z\"))", "a = Int32(10) AND b >= Utf8(\"o\") AND b IS NOT NULL"], "time_range":REDACTED
 |_|_|_|
 | 1_| 4_|_FilterExec: a@0 = 10 OR b@1 = z REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "ts"], "filters": ["a = Int32(10) OR b = Dictionary(UInt32, Utf8(\"z\"))", "a > Int32(10) AND a IS NOT NULL"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+
@@ -351,6 +355,7 @@ WHERE a = 10 OR b= 'z';
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT * FROM valid_rule
 WHERE a = 10 OR ts > 1;
 
@@ -362,23 +367,23 @@ WHERE a = 10 OR ts > 1;
 |_|_|_|
 | 1_| 0_|_FilterExec: a@0 = 10 OR ts@2 > 1 REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "ts"], "filters": ["a = Int32(10) OR ts > TimestampMillisecond(1, None)", "a < Int32(10) OR a IS NULL"], "time_range":REDACTED
 |_|_|_|
 | 1_| 1_|_FilterExec: a@0 = 10 OR ts@2 > 1 REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "ts"], "filters": ["a = Int32(10) OR ts > TimestampMillisecond(1, None)", "a = Int32(10) AND (b < Utf8(\"a\") OR b IS NULL)"], "time_range":REDACTED
 |_|_|_|
 | 1_| 2_|_FilterExec: a@0 = 10 OR ts@2 > 1 REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "ts"], "filters": ["a = Int32(10) OR ts > TimestampMillisecond(1, None)", "a = Int32(10) AND b >= Utf8(\"a\") AND b IS NOT NULL AND (b < Utf8(\"o\") OR b IS NULL)"], "time_range":REDACTED
 |_|_|_|
 | 1_| 3_|_FilterExec: a@0 = 10 OR ts@2 > 1 REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "ts"], "filters": ["a = Int32(10) OR ts > TimestampMillisecond(1, None)", "a = Int32(10) AND b >= Utf8(\"o\") AND b IS NOT NULL"], "time_range":REDACTED
 |_|_|_|
 | 1_| 4_|_FilterExec: a@0 = 10 OR ts@2 > 1 REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "ts"], "filters": ["a = Int32(10) OR ts > TimestampMillisecond(1, None)", "a > Int32(10) AND a IS NOT NULL"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+
@@ -390,6 +395,7 @@ WHERE a = 10 OR ts > 1;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT * FROM valid_rule
 WHERE a = 10 OR (ts > 1 AND b ='h');
 
@@ -401,23 +407,23 @@ WHERE a = 10 OR (ts > 1 AND b ='h');
 |_|_|_|
 | 1_| 0_|_FilterExec: a@0 = 10 OR ts@2 > 1 AND b@1 = h REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "ts"], "filters": ["a = Int32(10) OR ts > TimestampMillisecond(1, None) AND b = Dictionary(UInt32, Utf8(\"h\"))", "a < Int32(10) OR a IS NULL"], "time_range":REDACTED
 |_|_|_|
 | 1_| 1_|_FilterExec: a@0 = 10 OR ts@2 > 1 AND b@1 = h REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "ts"], "filters": ["a = Int32(10) OR ts > TimestampMillisecond(1, None) AND b = Dictionary(UInt32, Utf8(\"h\"))", "a = Int32(10) AND (b < Utf8(\"a\") OR b IS NULL)"], "time_range":REDACTED
 |_|_|_|
 | 1_| 2_|_FilterExec: a@0 = 10 OR ts@2 > 1 AND b@1 = h REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "ts"], "filters": ["a = Int32(10) OR ts > TimestampMillisecond(1, None) AND b = Dictionary(UInt32, Utf8(\"h\"))", "a = Int32(10) AND b >= Utf8(\"a\") AND b IS NOT NULL AND (b < Utf8(\"o\") OR b IS NULL)"], "time_range":REDACTED
 |_|_|_|
 | 1_| 3_|_FilterExec: a@0 = 10 OR ts@2 > 1 AND b@1 = h REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "ts"], "filters": ["a = Int32(10) OR ts > TimestampMillisecond(1, None) AND b = Dictionary(UInt32, Utf8(\"h\"))", "a = Int32(10) AND b >= Utf8(\"o\") AND b IS NOT NULL"], "time_range":REDACTED
 |_|_|_|
 | 1_| 4_|_FilterExec: a@0 = 10 OR ts@2 > 1 AND b@1 = h REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "projection": ["a", "b", "ts"], "filters": ["a = Int32(10) OR ts > TimestampMillisecond(1, None) AND b = Dictionary(UInt32, Utf8(\"h\"))", "a > Int32(10) AND a IS NOT NULL"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+

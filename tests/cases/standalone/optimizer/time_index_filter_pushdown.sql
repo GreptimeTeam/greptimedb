@@ -81,6 +81,7 @@ VALUES
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT
     rack
 FROM

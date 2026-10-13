@@ -22,6 +22,7 @@ select to_timestamp_nanos(ts) as ts, status, value from `a_ms` where ts >= '2026
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
+-- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE select to_timestamp_nanos(ts) as ts, status, value from `a_ms` where ts >= '2026-03-12T08:00:00.000+08:00' and ts < '2026-03-12T08:02:01.000+08:00' order by ts asc;
 
 DROP TABLE `a_ms`;
