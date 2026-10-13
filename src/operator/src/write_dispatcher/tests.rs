@@ -44,17 +44,25 @@ use common_meta::instruction::CacheIdent;
 use common_meta::key::TableMetadataManager;
 use common_meta::key::table_route::{TableRouteManager, TableRouteValue};
 use common_meta::kv_backend::KvBackendRef;
+use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
+use common_meta::rpc::router::{self, RegionRoute};
 use common_meta::test_util::{MockDatanodeHandler, MockDatanodeManager};
 use common_query::request::QueryRequest;
 use common_recordbatch::SendableRecordBatchStream;
-use datatypes::arrow::array::Int32Array;
+use datatypes::arrow::array::{BinaryArray, Int32Array, StringArray};
 use datatypes::arrow::datatypes::{DataType, Field, Schema};
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::data_type::ConcreteDataType;
+use datatypes::schema;
+use datatypes::value::{self, ValueRef};
+use mito_codec::row_converter::sparse;
+use mito_codec::row_converter::{PrimaryKeyCodec, SparsePrimaryKeyCodec};
 use partition::cache::PartitionInfoCacheRef;
-use partition::expr::{Operand, PartitionExpr, RestrictedOp};
+use partition::expr::{self, Operand, PartitionExpr, RestrictedOp};
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
-use store_api::storage::RegionId;
+use store_api::metric_engine_consts;
+use store_api::storage::{RegionId, consts};
 use tokio::net::TcpListener;
 use tokio::sync::{Barrier, Notify};
 use tokio::task::JoinHandle;
@@ -868,6 +876,188 @@ async fn test_write_retry_rebuilds_only_failed_rows_after_route_refresh() {
             *invalidator.calls.lock().unwrap(),
             vec![vec![CacheIdent::TableId(1)]]
         );
+    }
+}
+
+fn build_sparse_bulk_request(
+    region: u32,
+    version: Option<u64>,
+    tags: &[(&str, &str)],
+) -> (RegionRequest, RecordBatch) {
+    let codec = SparsePrimaryKeyCodec::schemaless();
+    let keys = tags
+        .iter()
+        .enumerate()
+        .map(|(index, (host, zone))| {
+            let mut key = Vec::new();
+            codec
+                .encode_value_refs(
+                    &[
+                        (sparse::RESERVED_COLUMN_ID_TABLE_ID, ValueRef::UInt32(42)),
+                        (
+                            sparse::RESERVED_COLUMN_ID_TSID,
+                            ValueRef::UInt64(index as u64),
+                        ),
+                        (10, ValueRef::String(host)),
+                        (20, ValueRef::String(zone)),
+                    ],
+                    &mut key,
+                )
+                .unwrap();
+            key
+        })
+        .collect::<Vec<_>>();
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new(consts::PRIMARY_KEY_COLUMN_NAME, DataType::Binary, false),
+            Field::new("host", DataType::Utf8, false),
+        ])),
+        vec![
+            Arc::new(BinaryArray::from_iter_values(keys)),
+            Arc::new(StringArray::from_iter_values(
+                tags.iter().map(|(host, _)| *host),
+            )),
+        ],
+    )
+    .unwrap();
+    let (schema, data_header, payload) = flight::record_batch_to_ipc(batch.clone()).unwrap();
+    let request = RegionRequest {
+        body: Some(Body::BulkInsert(BulkInsertRequest {
+            region_id: RegionId::new(1, region).as_u64(),
+            partition_expr_version: version.map(|value| PartitionExprVersion { value }),
+            body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
+                schema,
+                data_header,
+                payload,
+            })),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    (request, batch)
+}
+
+#[tokio::test]
+async fn test_write_retry_restores_changed_partition_tags_for_failed_regions() {
+    let old_server = RegionTestServer::start().await;
+    let new_server = RegionTestServer::start().await;
+    old_server.fail_region(2, [RetryHint::RetryAfterRouteRefresh]);
+    let backend: KvBackendRef = Arc::new(MemoryKvBackend::new());
+    let metadata = TableMetadataManager::new(backend.clone());
+    let mut table_info = test_util::new_test_table_info(1, "physical", [1, 2].into_iter());
+    table_info.meta.schema = Arc::new(schema::Schema::new(vec![
+        schema::ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+        schema::ColumnSchema::new("zone", ConcreteDataType::string_datatype(), true),
+    ]));
+    table_info.meta.primary_key_indices = vec![0, 1];
+    table_info.meta.partition_key_indices = vec![0];
+    table_info.meta.column_ids = vec![10, 20];
+    table_info.meta.options.extra_options.insert(
+        metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY.to_string(),
+        String::new(),
+    );
+    let routes = [
+        expr::col("host").lt(value::Value::String("m".into())),
+        expr::col("host").gt_eq(value::Value::String("m".into())),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, expr)| RegionRoute {
+        region: router::Region {
+            id: RegionId::new(1, index as u32 + 1),
+            partition_expr: expr.as_json_str().unwrap(),
+            ..Default::default()
+        },
+        leader_peer: Some(old_server.peer.clone()),
+        ..Default::default()
+    })
+    .collect();
+    metadata
+        .create_table_metadata(
+            table_info,
+            TableRouteValue::physical(routes),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let (partition_manager, table_info_cache, registry) = create_routing_caches(backend.clone());
+    let cached_info = table_info_cache.get(1).await.unwrap().unwrap();
+    let (_, old_versions) = partition_manager
+        .find_table_partition_rule(&cached_info)
+        .await
+        .unwrap();
+    let current_info = metadata.table_info_manager().get(1).await.unwrap().unwrap();
+    let mut updated_info = current_info.table_info.clone();
+    updated_info.meta.partition_key_indices = vec![1];
+    metadata
+        .update_table_info(&current_info, None, updated_info)
+        .await
+        .unwrap();
+    let current_route = metadata
+        .table_route_manager()
+        .table_route_storage()
+        .get_with_raw_bytes(1)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut routes = current_route.region_routes().unwrap().clone();
+    for (route, expr) in routes.iter_mut().zip([
+        expr::col("zone").lt(value::Value::String("m".into())),
+        expr::col("zone").gt_eq(value::Value::String("m".into())),
+    ]) {
+        route.region.partition_expr = expr.as_json_str().unwrap();
+        route.leader_peer = Some(new_server.peer.clone());
+    }
+    let invalidator = Arc::new(RecordingCacheInvalidator {
+        calls: Mutex::default(),
+        inner: Some(registry),
+        route_update: Mutex::new(Some((backend, current_route.update(routes).unwrap()))),
+    });
+    let clients = Arc::new(NodeClients::new(ChannelConfig::default()));
+    let dispatcher = WriteDispatcher::new(clients, partition_manager.clone()).with_retry(
+        build_retry_options(1),
+        table_info_cache.clone(),
+        invalidator.clone(),
+    );
+    // The successful row would move under the new rule, but must not be replayed.
+    let (successful, _) = build_sparse_bulk_request(1, old_versions[&1], &[("a", "west")]);
+    let (failed, batch) =
+        build_sparse_bulk_request(2, old_versions[&2], &[("z", "east"), ("z", "west")]);
+    dispatcher.dispatch(vec![successful, failed]).await.unwrap();
+    let counts = HashMap::from([
+        (RegionId::new(1, 1).as_u64(), 1),
+        (RegionId::new(1, 2).as_u64(), 1),
+    ]);
+    assert_eq!(old_server.attempt_counts(), counts);
+    assert_eq!(new_server.attempt_counts(), counts);
+    assert_eq!(
+        *invalidator.calls.lock().unwrap(),
+        vec![vec![CacheIdent::TableId(1)]]
+    );
+    let refreshed_info = table_info_cache.get(1).await.unwrap().unwrap();
+    assert_eq!(refreshed_info.meta.partition_key_indices, vec![1]);
+    let (_, versions) = partition_manager
+        .find_table_partition_rule(&refreshed_info)
+        .await
+        .unwrap();
+    for request in new_server.service.requests.lock().unwrap().iter() {
+        let Some(Body::BulkInsert(bulk)) = &request.body else {
+            unreachable!()
+        };
+        let region = RegionId::from_u64(bulk.region_id).region_number();
+        assert_eq!(
+            bulk.partition_expr_version.map(|version| version.value),
+            versions[&region]
+        );
+        let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = &bulk.body else {
+            unreachable!()
+        };
+        let actual = FlightDecoder::try_from_schema_bytes(&ipc.schema)
+            .unwrap()
+            .try_decode_record_batch(&ipc.data_header, &ipc.payload)
+            .unwrap();
+        assert_eq!(actual, batch.slice(region as usize - 1, 1));
+        assert!(actual.column_by_name("zone").is_none());
     }
 }
 

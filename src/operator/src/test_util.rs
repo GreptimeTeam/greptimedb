@@ -17,3 +17,8 @@ mod partition_manager;
 
 pub use crate::test_util::kv_backend::prepare_mocked_backend;
 pub use crate::test_util::partition_manager::{create_partition_rule_manager, new_test_table_info};
+
+#[cfg(test)]
+pub(crate) use self::partition_manager::{
+    test_new_partition_info_cache, test_new_table_route_cache,
+};

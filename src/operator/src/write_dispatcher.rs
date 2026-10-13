@@ -385,7 +385,7 @@ impl WriteRetry {
                 .await
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?;
-            partitioners.insert(table_id, partitioner);
+            partitioners.insert(table_id, (table_info, partitioner));
         }
         let mut rebuilt_requests = Vec::new();
         for write in writes {
@@ -396,11 +396,12 @@ impl WriteRetry {
                 .build()
             })?;
             let table_id = write_region_id(&request)?.table_id();
-            let partitioner = partitioners.get(&table_id).context(UnexpectedSnafu {
-                err_msg: "Refreshed write has no partition snapshot",
-            })?;
+            let (table_info, partitioner) =
+                partitioners.get(&table_id).context(UnexpectedSnafu {
+                    err_msg: "Refreshed write has no partition snapshot",
+                })?;
             let requests = partitioner
-                .rebuild_write_requests(request)
+                .rebuild_write_requests(request, table_info)
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?;
             rebuilt_requests.extend(requests);

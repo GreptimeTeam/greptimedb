@@ -10135,6 +10135,7 @@ dependencies = [
  "meta-client",
  "meter-core",
  "meter-macros",
+ "mito-codec",
  "moka",
  "object-store",
  "partition",
