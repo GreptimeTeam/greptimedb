@@ -804,7 +804,7 @@ impl LogStore for ObjectStoreLogStore {
                     let permit = if fetches.is_empty() {
                         None
                     } else {
-                        match reserve_prefetch(&prefetch_budget, entry) {
+                        match try_reserve_prefetch_bytes(&prefetch_budget, entry) {
                             Some(permit) => Some(permit),
                             None => break,
                         }
@@ -2195,7 +2195,10 @@ async fn fetch_segment(
 
 /// Takes from `budget` the bytes the segment `entry` describes holds once
 /// decoded, if they are free: its length plus a [`Record`] per entry.
-fn reserve_prefetch(budget: &Arc<Semaphore>, entry: &FooterEntry) -> Option<OwnedSemaphorePermit> {
+fn try_reserve_prefetch_bytes(
+    budget: &Arc<Semaphore>,
+    entry: &FooterEntry,
+) -> Option<OwnedSemaphorePermit> {
     let records = u64::from(entry.entry_count) * std::mem::size_of::<Record>() as u64;
     let bytes = u32::try_from(entry.segment_len.checked_add(records)?).ok()?;
     budget.clone().try_acquire_many_owned(bytes).ok()
