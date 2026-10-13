@@ -59,7 +59,7 @@ pub(crate) struct CompactionTask {
 
 impl Debug for CompactionTask {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TwcsCompactionTask")
+        f.debug_struct("CompactionTask")
             .field("region_id", &self.compaction_context.region_id)
             .field("unit", &self.unit)
             .field(
