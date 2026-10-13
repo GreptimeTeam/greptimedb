@@ -95,8 +95,14 @@ start_server() {
     done
 }
 
+# kill sends SIGKILL, killed collects a server the caller already killed, and
+# no argument stops it gracefully.
 stop_server() {
-    if [[ "${1:-}" == kill ]]; then docker kill --signal KILL "$cid" >/dev/null; else docker stop -t 120 "$cid" >/dev/null; fi
+    case "${1:-}" in
+        kill) docker kill --signal KILL "$cid" >/dev/null ;;
+        killed) docker wait "$cid" >/dev/null ;;
+        *) docker stop -t 120 "$cid" >/dev/null ;;
+    esac
     docker logs "$cid" > "$dir/server$phase.log" 2>&1
     docker rm -fv "$cid" >/dev/null
     cid=
@@ -159,7 +165,7 @@ crash_cycles() {
         before=$(now_ns); docker kill --signal KILL "$cid" >/dev/null; after=$(now_ns)
         wait "$wpid"
         [[ -z "$spid" ]] || { kill "$spid" 2>/dev/null; wait "$spid" 2>/dev/null || true; spid=; }
-        stop_server kill
+        stop_server killed
         phase=-restart-$cycle started=$(now)
         start_server
         restart_s=$(elapsed "$started")
