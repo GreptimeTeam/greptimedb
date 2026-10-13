@@ -31,13 +31,21 @@ includes reports of exports taking days for roughly 100,000 logical tables with
 only several GiB of data. Table count, physical schema width and data volume must
 be measured separately; total database bytes do not describe the transfer cost.
 
-The [experiment conclusions](2026-09-11-metric-export-import/experiment-results.md)
-support shared scans, batch DDL, explicit-file COPY and packed-object transfer.
-Packing with a bounded range reader substantially reduces storage requests and
-improves full export and restore for many small logical tables. Benefits depend
-on request latency, and memory use increases. Remaining CREATE work makes batch
-DDL part of the first release. These local experiments establish direction;
-production V2 recovery and release performance still require acceptance tests.
+Local standalone experiments with development builds, local files and Docker
+MinIO support shared scans, batch DDL, explicit-file COPY and packed-object
+transfer. Packing with a bounded range reader reduces storage requests and
+improves full export and restore for many small logical tables; low-latency
+export gains are smaller. CPU and request overhead fell while peak process
+memory increased. Remaining CREATE work makes batch DDL part of the first
+release. Explicit-file COPY removes repeated directory traversal while retaining
+ordinary per-table insertion, independently of merged database writes.
+
+The exercised fixtures preserved schemas, DDL and typed values. Standalone-file
+experiments used the existing importer; packing used an independent driver and
+prototype range reader. These experiments establish design direction, not
+production packed-format compatibility, V2 recovery safety or release performance.
+The 8 MiB write/part limit was a design choice, not a measured optimum. Current
+acceptance status is maintained in the [tracking issue](https://github.com/GreptimeTeam/greptimedb/issues/9120).
 
 # Terminology
 
@@ -184,6 +192,12 @@ Packed Metric exports write manifest version 2 with a required data-layout marke
 `metric-parquet-packs`. Parquet remains the encoding of each table. Ordinary
 exports can keep version 1. A version-2 snapshot indexes all data in its schema
 chunks, including ordinary tables stored as standalone Parquet objects.
+
+`export-v2 create --pack-metric-data` selects shared physical scans and
+packed output. Omitting the flag keeps the default version-1 export path;
+schema-only snapshots also retain version 1. The source frontend or standalone
+server must enable `experimental_metric_export = true`. Resume derives the layout
+from the manifest, so packed snapshots do not need the flag repeated.
 
 Before creating or replacing a snapshot, the CLI checks the source server's
 explicit packed-export capability. Before target DDL or data writes, the importer
@@ -552,18 +566,39 @@ batching, still writing standalone table objects; (C) B plus packing and its
 reader, with identical DDL handling; (D) C plus batch DDL. If general restore
 request deduplication is available, include it in B as well.
 
-The proposed release target is at least 3x faster full export and full restore
-for D versus A on 10,000 and 100,000 small logical tables with MinIO request
-latency increased by 5 ms. Fix this target during RFC review, before running
-release measurements. The independent local C-versus-B experiment establishes
-neither this comparison nor proof of that target.
+The release target is at least 3x faster full export and full restore for D
+versus A on both 10,000 and 100,000 small logical tables at both +50 ms and
++100 ms added MinIO request latency. Populate every selected table with the same
+deterministic data across controls, initially 32 rows per table. Include schema
+export, metadata discovery and CLI startup/shutdown in complete wall duration.
+The independent local C-versus-B experiment establishes neither this comparison
+nor proof of that target. Keep production improvements already shared by all
+controls in A, and identify which increments can actually be isolated.
 
-Use Linux release builds and at least three alternating rounds for primary
-comparisons. Report medians/spread, schema/data/full durations, CPU, RSS, bytes,
-objects, request counts and queue/cache peaks. Include zero-added-latency,
-local-file, mixed small/large-table and wide-schema controls. Investigate and
-remeasure full-duration regressions exceeding 5% versus A; do not generalize the
-latency-injected speedup to these cases. Check values and schemas outside timing.
+Start with native optimized release builds on macOS. Record hardware, OS,
+MinIO placement, container/VM CPU and memory limits, and connection/storage
+settings. Linux deployment-side performance confirmation can follow separately;
+Linux root/non-root and Windows correctness checks remain distinct requirements.
+Earlier development-build diagnostics, runs with paging interference and sparse
+fixtures with only one populated table do not establish this acceptance.
+
+Calibrate one added delay per object-store HTTP request, including HEAD, GET
+(and range GET), PUT, LIST, DELETE and each multipart operation. Do not delay
+individual packets, streaming body chunks or database SQL/DDL. Route CLI and
+server object access through the same controlled endpoint and report measured
+per-method latency distributions. Synthetic delay is not a cloud provider profile.
+
+Use a small calibration pilot before each scale and at least three alternating
+A/B/C/D rounds for primary comparisons, with fresh restore namespaces, equal
+concurrency and comparable cache/compaction conditions. Report medians/spread,
+schema/data/full durations, CPU, RSS, swap activity, bytes, objects, requests and
+queue/cache peaks. Check RAM, disk and MinIO health before large runs; do not
+compile concurrently. Fix interfering paging/load or report the scale unverified.
+Retain local-file and MinIO 0/+5 ms controls, mixed small/large tables, wide
+physical column unions and multiple physical groups. Add +20 ms only if needed
+to explain sensitivity. Investigate and remeasure full-duration regressions
+exceeding 5% versus A. Check table membership, schemas and typed values outside
+timing, and report B/A, C/B and D/C independently where comparable.
 
 Validate actual write/part sizes at or below 8 MiB, aggregate concurrency across
 groups/chunks, and resource release after success, cancellation and failure.

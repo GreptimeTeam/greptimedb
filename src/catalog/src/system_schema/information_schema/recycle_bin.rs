@@ -31,7 +31,10 @@ use store_api::storage::{ScanRequest, TableId};
 
 use crate::CatalogManager;
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result, TableMetadataManagerSnafu};
-use crate::system_schema::information_schema::{InformationTable, Predicates, RECYCLE_BIN};
+use crate::system_schema::SystemTable;
+use crate::system_schema::information_schema::{
+    InformationSchemaTableScope, InformationTable, Predicates, RECYCLE_BIN,
+};
 use crate::system_schema::utils;
 
 const OBJECT_ID: &str = "object_id";
@@ -118,6 +121,12 @@ impl InformationSchemaRecycleBin {
 }
 
 impl InformationTable for InformationSchemaRecycleBin {
+    fn scope(&self) -> InformationSchemaTableScope {
+        InformationSchemaTableScope::Catalog
+    }
+}
+
+impl SystemTable for InformationSchemaRecycleBin {
     fn table_id(&self) -> TableId {
         INFORMATION_SCHEMA_RECYCLE_BIN_TABLE_ID
     }

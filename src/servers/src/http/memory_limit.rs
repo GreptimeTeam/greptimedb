@@ -127,16 +127,18 @@ fn quota_exceeded_response(accounting: &BodyMemoryAccounting, response: Response
     response
 }
 
-/// Route-local counterpart of [`memory_limit_middleware`] for routes that
-/// install `RequestDecompressionLayer`: it must be layered *inside* the
+/// Route-local accounting for routes that install `RequestDecompressionLayer`:
+/// it must be layered *inside* the
 /// decompression layer, so the body it wraps is the **decompressed** stream.
+/// It requires the global accounting installed by [`crate::http::HttpServer`]
+/// and must use the same [`ServerMemoryLimiter`].
 ///
-/// Only requests marked [`ContentEncoded`] by the global middleware are
+/// Only encoded requests marked by the global middleware are
 /// accounted; plain (uncompressed) requests are already covered by the global
 /// wire-byte accounting, and charging them here as well would double-count.
 /// For decompressed requests the `Content-Length` header has been stripped by
 /// the decompression layer, so the full decoded size is charged as it streams.
-pub(crate) async fn decoded_body_accounting_middleware(
+pub async fn decoded_body_accounting_middleware(
     State(limiter): State<ServerMemoryLimiter>,
     req: Request,
     next: Next,

@@ -17,13 +17,15 @@ use std::env;
 use std::net::TcpListener;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use api::v1::health_check_server::HealthCheckServer;
 use api::v1::region::region_server::RegionServer;
 use arrow_flight::flight_service_server::FlightServiceServer;
 use cache::{
-    build_datanode_cache_registry, build_fundamental_cache_registry,
+    build_datanode_layered_cache_registry, build_fundamental_cache_registry,
     with_default_composite_cache_registry,
 };
 use catalog::information_extension::DistributedInformationExtension;
@@ -74,9 +76,11 @@ use servers::grpc::{GrpcOptions, HealthCheckHandler};
 use servers::server::ServerHandlers;
 use store_api::storage::RegionId;
 use tempfile::TempDir;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tonic::codec::CompressionEncoding;
 use tonic::transport::Server;
-use tower::service_fn;
+use tonic::transport::server::Connected;
+use tower::{Layer, Service, service_fn};
 use uuid::Uuid;
 
 use crate::test_util::{
@@ -84,11 +88,31 @@ use crate::test_util::{
     create_tmp_dir_and_datanode_opts,
 };
 
+/// Flight `DoGet` requests another node sent to a datanode over its network address (see
+/// [`GreptimeDbClusterBuilder::with_real_datanode_grpc_addr`]).
+///
+/// The frontend and datanodes inside the test process use in-process clients, so counted requests
+/// come from remote nodes querying regions owned by this datanode.
+#[derive(Debug, Default)]
+pub struct DatanodeRpcStats {
+    do_get_requests: AtomicUsize,
+}
+
+impl DatanodeRpcStats {
+    /// The number of Flight `DoGet` requests another node sent to the datanode.
+    pub fn requests(&self) -> usize {
+        self.do_get_requests.load(Ordering::Relaxed)
+    }
+}
+
 pub struct GreptimeDbCluster {
     pub guards: Vec<TestGuard>,
     pub datanode_options: Vec<DatanodeOptions>,
 
     pub datanode_instances: HashMap<DatanodeId, Datanode>,
+    /// The stats of the network address of every datanode, empty unless the cluster serves the
+    /// datanodes at their own addresses.
+    pub datanode_rpc_stats: HashMap<DatanodeId, Arc<DatanodeRpcStats>>,
     pub kv_backend: KvBackendRef,
     pub metasrv: Arc<Metasrv>,
     pub frontend: Arc<Frontend>,
@@ -97,6 +121,13 @@ pub struct GreptimeDbCluster {
 impl GreptimeDbCluster {
     pub fn fe_instance(&self) -> &Arc<FeInstance> {
         &self.frontend.instance
+    }
+
+    /// The stats of the network address of the datanode `datanode_id`, if the cluster serves the
+    /// datanodes at their own addresses (see
+    /// [`GreptimeDbClusterBuilder::with_real_datanode_grpc_addr`]).
+    pub fn datanode_rpc_stats(&self, datanode_id: DatanodeId) -> Option<&Arc<DatanodeRpcStats>> {
+        self.datanode_rpc_stats.get(&datanode_id)
     }
 
     /// List all SST files from all datanodes.
@@ -177,6 +208,7 @@ pub struct GreptimeDbClusterBuilder {
     plugins: Plugins,
     local_file_access: LocalFileAccess,
     event_recorder_options: EventRecorderOptions,
+    real_datanode_grpc_addr: bool,
 }
 
 impl GreptimeDbClusterBuilder {
@@ -214,6 +246,7 @@ impl GreptimeDbClusterBuilder {
             plugins: Plugins::default(),
             local_file_access: LocalFileAccess::default(),
             event_recorder_options: EventRecorderOptions::default(),
+            real_datanode_grpc_addr: false,
         }
     }
 
@@ -299,6 +332,21 @@ impl GreptimeDbClusterBuilder {
         self
     }
 
+    /// Serves every datanode on its own real localhost TCP port and registers that
+    /// address in metasrv, instead of the default in-process duplex placeholder address
+    /// that all datanodes share.
+    ///
+    /// Datanodes serve the region queries of the plans they execute by querying the
+    /// leader of every region of the plan (see `DatanodeRegionQueryHandler`), so a test
+    /// that exercises a datanode-to-datanode region query needs each datanode to be
+    /// reachable at the address recorded in the table route, i.e. the address the
+    /// datanode registers with its heartbeat.
+    #[must_use]
+    pub fn with_real_datanode_grpc_addr(mut self, real_datanode_grpc_addr: bool) -> Self {
+        self.real_datanode_grpc_addr = real_datanode_grpc_addr;
+        self
+    }
+
     pub async fn build_with(
         &self,
         datanode_options: Vec<DatanodeOptions>,
@@ -346,7 +394,22 @@ impl GreptimeDbClusterBuilder {
             .build_datanodes_with_options(&metasrv, &datanode_options)
             .await;
 
-        build_datanode_clients(datanode_clients.clone(), &datanode_instances).await;
+        let datanode_rpc_stats = if self.real_datanode_grpc_addr {
+            datanode_options
+                .iter()
+                .map(|opts| (opts.node_id.unwrap(), Arc::new(DatanodeRpcStats::default())))
+                .collect::<HashMap<_, _>>()
+        } else {
+            HashMap::new()
+        };
+
+        build_datanode_clients(
+            datanode_clients.clone(),
+            &datanode_instances,
+            &datanode_options,
+            &datanode_rpc_stats,
+        )
+        .await;
 
         self.wait_datanodes_alive(metasrv.metasrv.meta_peer_client(), datanodes)
             .await;
@@ -365,6 +428,7 @@ impl GreptimeDbClusterBuilder {
             datanode_options,
             guards,
             datanode_instances,
+            datanode_rpc_stats,
             kv_backend: self.kv_backend.clone(),
             metasrv: metasrv.metasrv,
             frontend: Arc::new(frontend),
@@ -421,10 +485,26 @@ impl GreptimeDbClusterBuilder {
                 opts
             };
             opts.node_id = Some(datanode_id);
-
+            if self.real_datanode_grpc_addr {
+                // Give every datanode its own address, so that the other datanodes can
+                // reach it (see `with_real_datanode_grpc_addr`).
+                let addr = self.choose_datanode_grpc_addr();
+                opts.grpc.bind_addr = addr.clone();
+                opts.grpc.server_addr = addr;
+            }
             options.push(opts);
         }
         (options, guards)
+    }
+
+    /// Chooses a free localhost port for a datanode.
+    ///
+    /// Uses a port range disjoint from the one of the frontend servers
+    /// (see [`Self::build_frontend_options`]).
+    fn choose_datanode_grpc_addr(&self) -> String {
+        let localhost = "127.0.0.1";
+        let port = self.choose_random_unused_port(24000..=34000, 20, localhost);
+        format!("{}:{}", localhost, port)
     }
 
     async fn build_datanodes_with_options(
@@ -436,7 +516,8 @@ impl GreptimeDbClusterBuilder {
 
         for opts in options {
             let datanode = self.create_datanode(opts.clone(), metasrv.clone()).await;
-            instances.insert(opts.node_id.unwrap(), datanode);
+            let datanode_id = opts.node_id.unwrap();
+            instances.insert(datanode_id, datanode);
         }
 
         instances
@@ -474,15 +555,12 @@ impl GreptimeDbClusterBuilder {
 
         let meta_backend = new_read_only_meta_kv_backend(meta_client.clone());
 
-        let layered_cache_registry = Arc::new(
-            LayeredCacheRegistryBuilder::default()
-                .add_cache_registry(build_datanode_cache_registry(meta_backend.clone()))
-                .build(),
-        );
+        let layered_cache_registry =
+            Arc::new(build_datanode_layered_cache_registry(meta_backend.clone()));
 
         let mut builder = DatanodeBuilder::new(opts.clone(), Plugins::default(), meta_backend);
         builder
-            .with_cache_registry(layered_cache_registry)
+            .with_cache_registry(layered_cache_registry.clone())
             .with_meta_client(meta_client);
         let mut datanode = builder.build().await.unwrap();
 
@@ -630,18 +708,34 @@ impl GreptimeDbClusterBuilder {
 async fn build_datanode_clients(
     clients: Arc<NodeClients>,
     instances: &HashMap<DatanodeId, Datanode>,
+    options: &[DatanodeOptions],
+    rpc_stats: &HashMap<DatanodeId, Arc<DatanodeRpcStats>>,
 ) {
-    for (&datanode_id, instance) in instances {
-        let (addr, client) = create_datanode_client(instance).await;
+    for opts in options {
+        let datanode_id = opts.node_id.unwrap();
+        let instance = &instances[&datanode_id];
+        let (addr, client) = create_datanode_client(
+            instance,
+            &opts.grpc.server_addr,
+            rpc_stats.get(&datanode_id).cloned(),
+        )
+        .await;
         clients
             .insert_client(Peer::new(datanode_id, addr), client)
             .await;
     }
 }
 
-async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
-    let (client, server) = tokio::io::duplex(1024);
-
+/// Runs a gRPC server that serves the region server of `datanode` over `incoming` until the
+/// cluster is dropped.
+fn serve_datanode_region_server<I, IO>(
+    datanode: &Datanode,
+    incoming: I,
+    rpc_stats: Option<Arc<DatanodeRpcStats>>,
+) where
+    I: futures::Stream<Item = Result<IO, std::io::Error>> + Send + 'static,
+    IO: AsyncRead + AsyncWrite + Connected + Unpin + Send + 'static,
+{
     let runtime = RuntimeBuilder::default()
         .worker_threads(2)
         .thread_name("grpc-handlers")
@@ -652,8 +746,9 @@ async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
     let region_server_handler =
         RegionServerRequestHandler::new(Arc::new(datanode.region_server()), runtime);
 
-    let _handle = tokio::spawn(async move {
+    tokio::spawn(async move {
         Server::builder()
+            .layer(CountRequestsLayer { rpc_stats })
             .add_service(
                 FlightServiceServer::new(flight_handler)
                     .accept_compressed(CompressionEncoding::Gzip)
@@ -669,12 +764,40 @@ async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
                     .send_compressed(CompressionEncoding::Zstd),
             )
             .add_service(HealthCheckServer::new(HealthCheckHandler))
-            .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]))
+            .serve_with_incoming(incoming)
             .await
     });
+}
+
+/// Serves the region server of `datanode` and returns the address and the client of the address.
+///
+/// The returned client is always an in-process client: the frontend and the datanodes of the test
+/// process reach the region server through a duplex stream, no matter which address they use. This
+/// keeps the in-process traffic out of `rpc_stats`.
+///
+/// [`test_util::PEER_PLACEHOLDER_ADDR`] is not a real address, so it cannot be served over the
+/// network at all. Any other address is a real one: the region server is additionally served on
+/// its local TCP port (`rpc_stats` counts the requests of the remote nodes that reach it, e.g. the
+/// region query that a datanode sends for the regions of another datanode).
+async fn create_datanode_client(
+    datanode: &Datanode,
+    addr: &str,
+    rpc_stats: Option<Arc<DatanodeRpcStats>>,
+) -> (String, Client) {
+    let (client, server) = tokio::io::duplex(1024);
+    serve_datanode_region_server(
+        datanode,
+        futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]),
+        None,
+    );
+
+    if addr != test_util::PEER_PLACEHOLDER_ADDR {
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        serve_datanode_region_server(datanode, incoming, rpc_stats);
+    }
 
     let mut client = Some(client);
-    let addr = test_util::PEER_PLACEHOLDER_ADDR;
     let channel_manager = ChannelManager::new();
     channel_manager
         .reset_with_connector(
@@ -697,6 +820,52 @@ async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
         // intentionally share it (same semantics as the legacy constructor).
         Client::with_query_and_control_managers(channel_manager.clone(), channel_manager, [addr]),
     )
+}
+
+/// Counts Flight `DoGet` requests received by the wrapped server.
+#[derive(Clone)]
+struct CountRequests<S> {
+    inner: S,
+    rpc_stats: Option<Arc<DatanodeRpcStats>>,
+}
+
+impl<S, ReqBody> Service<http::Request<ReqBody>> for CountRequests<S>
+where
+    S: Service<http::Request<ReqBody>>,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = S::Future;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: http::Request<ReqBody>) -> Self::Future {
+        if request.uri().path() == "/arrow.flight.protocol.FlightService/DoGet"
+            && let Some(rpc_stats) = &self.rpc_stats
+        {
+            rpc_stats.do_get_requests.fetch_add(1, Ordering::Relaxed);
+        }
+
+        self.inner.call(request)
+    }
+}
+
+#[derive(Clone)]
+struct CountRequestsLayer {
+    rpc_stats: Option<Arc<DatanodeRpcStats>>,
+}
+
+impl<S> Layer<S> for CountRequestsLayer {
+    type Service = CountRequests<S>;
+
+    fn layer(&self, inner: S) -> Self::Service {
+        CountRequests {
+            inner,
+            rpc_stats: self.rpc_stats.clone(),
+        }
+    }
 }
 
 // Mock connectors are registered on a shared channel manager.
@@ -993,13 +1162,41 @@ mod tests {
 
         // Assert: the inactive peer was rejected and the production Flow service handled the RPC.
         assert_eq!(
-            (vec![active_peer.addr], vec![inactive_peer.addr]),
+            (vec![active_peer.addr.clone()], vec![inactive_peer.addr]),
             client.peer_addresses_by_state()
         );
         assert_eq!(
             StatusCode::InvalidArguments,
             response.unwrap_err().status_code()
         );
+
+        for value in ["", "unknown", "follower"] {
+            let mut query_context =
+                api::v1::QueryContext::from(session::context::QueryContext::arc().as_ref());
+            query_context.extensions.insert(
+                session::hints::READ_PREFERENCE_EXTENSION_KEY.to_string(),
+                value.to_string(),
+            );
+            let error = clients
+                .flownode(&active_peer)
+                .await
+                .handle(FlowRequest {
+                    header: Some(api::v1::flow::FlowRequestHeader {
+                        tracing_context: Default::default(),
+                        query_context: Some(query_context),
+                    }),
+                    body: None,
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(StatusCode::InvalidArguments, error.status_code());
+            let message = error.output_msg();
+            assert!(message.contains("read_preference"), "{message}");
+            if !value.is_empty() {
+                assert!(message.contains(value), "{message}");
+            }
+        }
+
         flownode.shutdown().await.unwrap();
     }
 }

@@ -354,7 +354,17 @@ impl RegionServer {
             None
         };
 
-        let ctx = request.header.as_ref().map(|h| h.into());
+        let ctx = request
+            .header
+            .as_ref()
+            .map(QueryContext::try_from)
+            .transpose()
+            .map_err(|err| {
+                crate::error::InvalidQueryContextSnafu {
+                    reason: err.to_string(),
+                }
+                .build()
+            })?;
         let query_ctx = Arc::new(ctx.unwrap_or_else(|| QueryContextBuilder::default().build()));
 
         let region_id = request.region_id;
@@ -977,7 +987,15 @@ impl FlightCraft for RegionServer {
         let query_ctx = request
             .header
             .as_ref()
-            .map(|h| Arc::new(QueryContext::from(h)))
+            .map(QueryContext::try_from)
+            .transpose()
+            .map_err(|err| {
+                servers_error::InvalidParameterSnafu {
+                    reason: err.to_string(),
+                }
+                .build()
+            })?
+            .map(Arc::new)
             .unwrap_or(QueryContext::arc());
 
         let region_server = self.clone();

@@ -21,5 +21,6 @@ checkout = true
 list_files = true
 internal_use_git2 = false
 
-[env]
-CARGO_WORKSPACE_DIR = { value = "", relative = true }
+# Avoid globally injecting a checkout-specific workspace path. The version build script
+# resolves the absolute workspace path from layout at build time; set CARGO_WORKSPACE_DIR
+# explicitly when this repo is built as a submodule.

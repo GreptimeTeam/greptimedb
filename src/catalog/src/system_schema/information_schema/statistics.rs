@@ -39,12 +39,14 @@ use crate::CatalogManager;
 use crate::error::{
     CreateRecordBatchSnafu, InternalSnafu, Result, UpgradeWeakCatalogManagerRefSnafu,
 };
+use crate::system_schema::SystemTable;
 use crate::system_schema::information_schema::key_column_usage::{
     CONSTRAINT_NAME_FULLTEXT_INDEX, CONSTRAINT_NAME_INVERTED_INDEX, CONSTRAINT_NAME_PRI,
     CONSTRAINT_NAME_SKIPPING_INDEX, CONSTRAINT_NAME_TIME_INDEX,
 };
 use crate::system_schema::information_schema::{
-    InformationTable, Predicates, STATISTICS, primary_key_encoding_index_type,
+    InformationSchemaTableScope, InformationTable, Predicates, STATISTICS,
+    primary_key_encoding_index_type,
 };
 
 pub const TABLE_CATALOG: &str = "table_catalog";
@@ -135,6 +137,12 @@ impl InformationSchemaStatistics {
 }
 
 impl InformationTable for InformationSchemaStatistics {
+    fn scope(&self) -> InformationSchemaTableScope {
+        InformationSchemaTableScope::Catalog
+    }
+}
+
+impl SystemTable for InformationSchemaStatistics {
     fn table_id(&self) -> TableId {
         INFORMATION_SCHEMA_STATISTICS_TABLE_ID
     }

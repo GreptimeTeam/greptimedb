@@ -826,7 +826,16 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
         let query_ctx = request
             .header
             .and_then(|h| h.query_context)
-            .map(|ctx| ctx.into());
+            .map(session::context::QueryContext::try_from)
+            .transpose()
+            .map_err(|err| {
+                to_meta_err(snafu::location!())(
+                    crate::error::InvalidQuerySnafu {
+                        reason: err.to_string(),
+                    }
+                    .build(),
+                )
+            })?;
         match request.body {
             Some(flow_request::Body::Create(CreateRequest {
                 flow_id: Some(task_id),
