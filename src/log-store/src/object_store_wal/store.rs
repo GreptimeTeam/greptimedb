@@ -4368,7 +4368,7 @@ mod tests {
         let objects = depth + 4;
         let (store, io, mut parked) = open_parking_range_reads(objects).await;
         let reads = METRIC_OBJECT_STORE_WAL_READ_SECONDS.get_sample_count();
-        let mut stream = store.read(&provider(region(1)), 0, None).await.unwrap();
+        let mut stream = store.read(&provider(region(1)), 0).await.unwrap();
 
         // The first poll starts the fetches of the first `depth` objects.
         assert!(stream.next().now_or_never().is_none());
@@ -4423,7 +4423,7 @@ mod tests {
         let failed = 5;
         let (store, io, mut parked) = open_parking_range_reads(objects).await;
         let reads = METRIC_OBJECT_STORE_WAL_READ_SECONDS.get_sample_count();
-        let mut stream = store.read(&provider(region(1)), 0, None).await.unwrap();
+        let mut stream = store.read(&provider(region(1)), 0).await.unwrap();
         assert!(stream.next().now_or_never().is_none());
         let mut wave = parked_operations(&mut parked, READ_PREFETCH_DEPTH).await;
 
@@ -4490,7 +4490,7 @@ mod tests {
         let skipped = METRIC_OBJECT_STORE_WAL_SKIPPED_SEGMENTS_TOTAL.get();
 
         // A collection removes object 9 after the read listed it.
-        let stream = store.read(&provider(region(1)), 0, None).await.unwrap();
+        let stream = store.read(&provider(region(1)), 0).await.unwrap();
         store.catalog.write().unwrap().remove_object(collected);
         object_store
             .delete(&object_path(&object_store, collected))
@@ -4529,7 +4529,7 @@ mod tests {
         let objects = READ_PREFETCH_DEPTH as u64 + 4;
         let (store, _io, mut parked) = open_parking_range_reads(objects).await;
         let reads = METRIC_OBJECT_STORE_WAL_READ_SECONDS.get_sample_count();
-        let mut stream = store.read(&provider(region(1)), 0, None).await.unwrap();
+        let mut stream = store.read(&provider(region(1)), 0).await.unwrap();
         assert!(stream.next().now_or_never().is_none());
         let mut wave = parked_operations(&mut parked, READ_PREFETCH_DEPTH).await;
         wave.remove(&0).unwrap().send(true).unwrap();
@@ -4555,7 +4555,7 @@ mod tests {
         let (io, _) = RecordingIo::over(object_store);
         let store = open_over(io.clone(), &eager()).await;
         *io.panic_range_read_of.lock().unwrap() = Some(1);
-        let mut stream = store.read(&provider(region(1)), 0, None).await.unwrap();
+        let mut stream = store.read(&provider(region(1)), 0).await.unwrap();
         assert_eq!(object_entries([0]), next_batch(&mut stream).await);
         let error = timeout(WAIT, stream.next())
             .await
@@ -4584,7 +4584,7 @@ mod tests {
             .clone()
             .try_acquire_many_owned(READ_PREFETCH_BYTES as u32)
             .unwrap();
-        let mut stream = store.read(&provider(region(1)), 0, None).await.unwrap();
+        let mut stream = store.read(&provider(region(1)), 0).await.unwrap();
         assert!(stream.next().now_or_never().is_none());
         let (object_seq, release) = next_parked_operation(&mut parked).await;
         assert_eq!(0, object_seq);
@@ -4637,7 +4637,7 @@ mod tests {
 
         // The first poll fetches object 0, and object 1 with its bytes
         // reserved; the read of object 1 blocks its thread.
-        let mut stream = store.read(&provider(region(1)), 0, None).await.unwrap();
+        let mut stream = store.read(&provider(region(1)), 0).await.unwrap();
         let _ = stream.next().now_or_never();
         began_rx.recv_timeout(WAIT).unwrap();
         assert!(budget.available_permits() < READ_PREFETCH_BYTES);
