@@ -129,6 +129,10 @@ where
                 &region.provider,
             )
             .await?;
+        // Makes the release outlive a restart, which never opens the region again. A failure
+        // leaves the region removed like a failed `obsolete` does, while the watermark
+        // `obsolete` recorded still lets the WAL reclaim the region's entries until a restart.
+        self.wal.release_region(region_id, &region.provider).await?;
 
         if let Some(store) = &self.series_index_store {
             crate::series_index::delete_catalogs(store, region_id).await;

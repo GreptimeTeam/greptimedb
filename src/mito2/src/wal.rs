@@ -220,6 +220,18 @@ impl<S: LogStore> Wal<S> {
             .context(DeleteWalSnafu { region_id })
     }
 
+    /// Releases every WAL entry of a dropped region, see [LogStore::release_region].
+    pub async fn release_region(&self, region_id: RegionId, provider: &Provider) -> Result<()> {
+        if let Provider::Noop = provider {
+            return Ok(());
+        }
+        self.store
+            .release_region(provider, region_id)
+            .await
+            .map_err(BoxedError::new)
+            .context(DeleteWalSnafu { region_id })
+    }
+
     /// Marks all WAL entries of a region as obsolete and removes its dedicated namespace when
     /// supported by the backend.
     pub async fn obsolete_all(&self, region_id: RegionId, provider: &Provider) -> Result<()> {

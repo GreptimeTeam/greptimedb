@@ -111,6 +111,13 @@ lazy_static! {
         "object store logstore failed object deletes total",
     )
     .unwrap();
+    /// Counter of release records the object store logstore made durable,
+    /// one per region release that returned.
+    pub static ref METRIC_OBJECT_STORE_WAL_RELEASE_RECORDS_TOTAL: IntCounter = register_int_counter!(
+        "greptime_logstore_object_store_wal_release_records_total",
+        "object store logstore release records made durable total",
+    )
+    .unwrap();
 
     /// How long an object of the object store logstore takes to become durable
     /// once its batch is sealed, sampled for every conditional create that

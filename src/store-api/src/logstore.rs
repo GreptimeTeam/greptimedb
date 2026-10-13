@@ -106,6 +106,22 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     ) -> Result<(), Self::Error> {
         Ok(())
     }
+
+    /// Releases every entry of a region the caller dropped, after `obsolete`
+    /// marked them obsolete, so that the log store keeps none of them even
+    /// across a restart, which never opens the region again to mark its
+    /// entries obsolete.
+    ///
+    /// The default does nothing and keeps each log store's existing handling
+    /// of a dropped region. A log store that keeps obsolete marks only in
+    /// memory overrides this method and returns once the release is durable.
+    async fn release_region(
+        &self,
+        _provider: &Provider,
+        _region_id: RegionId,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 /// The response of an `append` operation.

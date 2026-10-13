@@ -29,7 +29,11 @@
 //! segments are ordered by region id. The footer indexes every segment with its region id, entry id
 //! range, byte range and CRC32. The fixed-size trailer points at the footer and
 //! carries the CRC32 of the footer and of the whole object, so a reader locates
-//! the footer by reading the fixed-length trailer at the end of the object.
+//! the footer by reading the fixed-length trailer at the end of the object. An
+//! object that carries release records, described below, has format version 2:
+//! its footer ends with the number of release records and, per record ordered
+//! by region id, the region id and the entry id the region is released
+//! through. Every other object has format version 1.
 //!
 //! Object sequences increase monotonically within one prefix and may leave
 //! gaps, so recovery continues after the largest sequence present. An object is
@@ -51,7 +55,11 @@
 //! The reclaim boundary of an object states that every object with a lower
 //! sequence was fully flushed when the object was sealed, so the chain need
 //! not reach below it. Every present object below the boundary of the last
-//! indexed object is deleted, on the chain or not.
+//! indexed object is deleted, on the chain or not. A region that is dropped,
+//! or whose entries are all made obsolete, is released: a release record of
+//! the region goes into an object sealed at once, and recovery seeds the
+//! obsolete watermarks from the release records of the chain, so a store
+//! opened later collects the objects of a region that is never opened again.
 //!
 //! Recovery lists the objects, reads and verifies only the header, trailer and
 //! footer of each, and indexes the footers of the chain in sequence order to

@@ -25,29 +25,38 @@ use crate::error::{
     CorruptedWalObjectSnafu, InvalidWalEntryRangeSnafu, Result, WalObjectSequenceExhaustedSnafu,
 };
 use crate::object_store_wal::batch::{OBJECT_SEQ_LIMIT, sequence_floor};
-use crate::object_store_wal::format::FooterEntry;
+use crate::object_store_wal::format::{FooterEntry, object_len};
 
 /// Indexes objects by sequence and, per region, the objects that hold entries
 /// of that region.
 #[derive(Debug, Default)]
 pub(crate) struct ObjectCatalog {
-    objects: BTreeMap<u64, Vec<FooterEntry>>,
+    objects: BTreeMap<u64, IndexedObject>,
     regions: BTreeMap<RegionId, BTreeMap<u64, FooterEntry>>,
     /// Largest entry id ever indexed per region, kept after the object that
     /// held it was removed.
     max_entry_ids: HashMap<RegionId, EntryId>,
 }
 
+/// The segments of an indexed object and its length in bytes.
+#[derive(Debug)]
+struct IndexedObject {
+    footer: Vec<FooterEntry>,
+    len: u64,
+}
+
 impl ObjectCatalog {
-    /// Indexes the footer of the object `object_seq`. Objects may be inserted
-    /// in any order, which lets recovery index them as it discovers them.
-    /// Inserting a sequence that is already indexed is rejected, whether or not
-    /// the footer matches the indexed one. An object without segments holds no
+    /// Indexes the footer of the object `object_seq`, which carries
+    /// `releases` release records. Objects may be inserted in any order,
+    /// which lets recovery index them as it discovers them. Inserting a
+    /// sequence that is already indexed is rejected, whether or not the
+    /// footer matches the indexed one. An object without segments holds no
     /// entries but still takes its sequence.
     pub(crate) fn insert_object(
         &mut self,
         object_seq: u64,
         mut footer: Vec<FooterEntry>,
+        releases: usize,
     ) -> Result<()> {
         footer.sort_unstable_by_key(|entry| entry.region_id);
         for entries in footer.windows(2) {
@@ -132,15 +141,17 @@ impl ObjectCatalog {
                 .and_modify(|max| *max = (*max).max(entry.max_entry_id))
                 .or_insert(entry.max_entry_id);
         }
-        self.objects.insert(object_seq, footer);
+        let len = object_len(&footer, releases);
+        self.objects
+            .insert(object_seq, IndexedObject { footer, len });
         Ok(())
     }
 
     /// Removes the object `object_seq` from the index once it was deleted and
-    /// returns the footer it held, or `None` if it was not indexed. The
-    /// largest entry id of every region it held is kept.
-    pub(crate) fn remove_object(&mut self, object_seq: u64) -> Option<Vec<FooterEntry>> {
-        let footer = self.objects.remove(&object_seq)?;
+    /// returns the footer it held and its length, or `None` if it was not
+    /// indexed. The largest entry id of every region it held is kept.
+    pub(crate) fn remove_object(&mut self, object_seq: u64) -> Option<(Vec<FooterEntry>, u64)> {
+        let IndexedObject { footer, len } = self.objects.remove(&object_seq)?;
         for entry in &footer {
             if let Some(objects) = self.regions.get_mut(&entry.region_id) {
                 objects.remove(&object_seq);
@@ -149,7 +160,12 @@ impl ObjectCatalog {
                 }
             }
         }
-        Some(footer)
+        Some((footer, len))
+    }
+
+    /// Returns the bytes of the indexed objects.
+    pub(crate) fn indexed_bytes(&self) -> u64 {
+        self.objects.values().map(|object| object.len).sum()
     }
 
     /// Returns true while the object `object_seq` is indexed.
@@ -174,8 +190,8 @@ impl ObjectCatalog {
         from: u64,
         obsolete_entry_ids: &HashMap<RegionId, EntryId>,
     ) -> u64 {
-        let live = self.objects.range(from..).find(|(_, footer)| {
-            footer.iter().any(|entry| {
+        let live = self.objects.range(from..).find(|(_, object)| {
+            object.footer.iter().any(|entry| {
                 obsolete_entry_ids
                     .get(&entry.region_id)
                     .is_none_or(|obsolete| entry.max_entry_id > *obsolete)
@@ -265,7 +281,7 @@ impl ObjectCatalog {
     pub(crate) fn objects_in_order(&self) -> impl Iterator<Item = (u64, &[FooterEntry])> + '_ {
         self.objects
             .iter()
-            .map(|(&object_seq, footer)| (object_seq, footer.as_slice()))
+            .map(|(&object_seq, object)| (object_seq, object.footer.as_slice()))
     }
 }
 
@@ -301,13 +317,14 @@ mod tests {
                     footer_entry(region_one, 4, 6),
                     footer_entry(region_two, 8, 9),
                 ],
+                0,
             )
             .unwrap();
         catalog
-            .insert_object(1, vec![footer_entry(region_one, 1, 3)])
+            .insert_object(1, vec![footer_entry(region_one, 1, 3)], 0)
             .unwrap();
         catalog
-            .insert_object(4, vec![footer_entry(region_one, 10, 12)])
+            .insert_object(4, vec![footer_entry(region_one, 10, 12)], 0)
             .unwrap();
 
         assert_eq!(Some(12), catalog.region_max_entry_id(region_one));
@@ -333,19 +350,19 @@ mod tests {
         let second = footer_entry(RegionId::new(2, 1), 4, 5);
 
         catalog
-            .insert_object(1, vec![first.clone(), second.clone()])
+            .insert_object(1, vec![first.clone(), second.clone()], 0)
             .unwrap();
 
         // An identical footer is rejected just like a conflicting one.
         assert_corrupted(
-            catalog.insert_object(1, vec![second, first.clone()]),
+            catalog.insert_object(1, vec![second, first.clone()], 0),
             "object 1 is already indexed",
         );
 
         let mut conflicting = first;
         conflicting.segment_offset += 1;
         assert_corrupted(
-            catalog.insert_object(1, vec![conflicting]),
+            catalog.insert_object(1, vec![conflicting], 0),
             "object 1 is already indexed",
         );
         assert_eq!(1, catalog.objects_in_order().count());
@@ -359,16 +376,16 @@ mod tests {
 
         // Recovery may discover objects out of order.
         catalog
-            .insert_object(4, vec![footer_entry(region_id, 10, 12)])
+            .insert_object(4, vec![footer_entry(region_id, 10, 12)], 0)
             .unwrap();
         catalog
-            .insert_object(1, vec![footer_entry(region_id, 1, 3)])
+            .insert_object(1, vec![footer_entry(region_id, 1, 3)], 0)
             .unwrap();
 
         assert_eq!(5, catalog.next_object_seq().unwrap());
 
         // An object without segments takes its sequence all the same.
-        catalog.insert_object(7, Vec::new()).unwrap();
+        catalog.insert_object(7, Vec::new(), 0).unwrap();
         assert_eq!(8, catalog.next_object_seq().unwrap());
         assert_eq!(Some(12), catalog.region_max_entry_id(region_id));
     }
@@ -381,12 +398,13 @@ mod tests {
 
         // Ids that fit below the ids of the next sequence leave it alone.
         catalog
-            .insert_object(0, vec![footer_entry(region_one, 1, 3)])
+            .insert_object(0, vec![footer_entry(region_one, 1, 3)], 0)
             .unwrap();
         catalog
             .insert_object(
                 1,
                 vec![footer_entry(region_two, entry_id(1, 1), entry_id(1, 2))],
+                0,
             )
             .unwrap();
         assert_eq!(2, catalog.next_object_seq().unwrap());
@@ -394,13 +412,14 @@ mod tests {
         // A contiguous id past them names a later object: the sequence
         // resumes above it, whichever region holds it.
         catalog
-            .insert_object(2, vec![footer_entry(region_one, 5_000_000, 5_000_000)])
+            .insert_object(2, vec![footer_entry(region_one, 5_000_000, 5_000_000)], 0)
             .unwrap();
         assert_eq!(5, catalog.next_object_seq().unwrap());
         catalog
             .insert_object(
                 3,
                 vec![footer_entry(region_two, entry_id(7, 4), entry_id(7, 4))],
+                0,
             )
             .unwrap();
         assert_eq!(8, catalog.next_object_seq().unwrap());
@@ -420,25 +439,25 @@ mod tests {
         // The last sequence that fits an entry id is indexed.
         let mut catalog = ObjectCatalog::default();
         catalog
-            .insert_object(OBJECT_SEQ_LIMIT - 2, vec![footer_entry(region_id, 1, 2)])
+            .insert_object(OBJECT_SEQ_LIMIT - 2, vec![footer_entry(region_id, 1, 2)], 0)
             .unwrap();
         assert_eq!(OBJECT_SEQ_LIMIT - 1, catalog.next_object_seq().unwrap());
         catalog
-            .insert_object(OBJECT_SEQ_LIMIT - 1, vec![footer_entry(region_id, 3, 4)])
+            .insert_object(OBJECT_SEQ_LIMIT - 1, vec![footer_entry(region_id, 3, 4)], 0)
             .unwrap();
         assert_exhausted(&catalog);
 
         // A sequence that does not fit was written by an earlier scheme.
         let mut catalog = ObjectCatalog::default();
         catalog
-            .insert_object(u64::MAX, vec![footer_entry(region_id, 1, 2)])
+            .insert_object(u64::MAX, vec![footer_entry(region_id, 1, 2)], 0)
             .unwrap();
         assert_exhausted(&catalog);
 
         // An entry id that leaves no sequence above it.
         let mut catalog = ObjectCatalog::default();
         catalog
-            .insert_object(0, vec![footer_entry(region_id, u64::MAX, u64::MAX)])
+            .insert_object(0, vec![footer_entry(region_id, u64::MAX, u64::MAX)], 0)
             .unwrap();
         assert_exhausted(&catalog);
     }
@@ -448,19 +467,19 @@ mod tests {
         let region_id = RegionId::new(1, 1);
         let mut catalog = ObjectCatalog::default();
         catalog
-            .insert_object(2, vec![footer_entry(region_id, 10, 20)])
+            .insert_object(2, vec![footer_entry(region_id, 10, 20)], 0)
             .unwrap();
 
         assert_corrupted(
-            catalog.insert_object(3, vec![footer_entry(region_id, 20, 30)]),
+            catalog.insert_object(3, vec![footer_entry(region_id, 20, 30)], 0),
             "are not strictly increasing",
         );
         assert_corrupted(
-            catalog.insert_object(3, vec![footer_entry(region_id, 5, 9)]),
+            catalog.insert_object(3, vec![footer_entry(region_id, 5, 9)], 0),
             "are not strictly increasing",
         );
         assert_corrupted(
-            catalog.insert_object(1, vec![footer_entry(region_id, 15, 19)]),
+            catalog.insert_object(1, vec![footer_entry(region_id, 15, 19)], 0),
             "are not strictly increasing",
         );
         assert_eq!(1, catalog.objects_in_order().count());
@@ -474,13 +493,14 @@ mod tests {
             catalog.insert_object(
                 1,
                 vec![footer_entry(region_id, 1, 1), footer_entry(region_id, 2, 2)],
+                0,
             ),
             "duplicate footer entries",
         );
         let mut invalid = footer_entry(region_id, 2, 1);
         invalid.entry_count = 0;
         assert_corrupted(
-            catalog.insert_object(1, vec![invalid]),
+            catalog.insert_object(1, vec![invalid], 0),
             "has invalid entry range 2..=1",
         );
 
@@ -498,7 +518,7 @@ mod tests {
         let region_one = RegionId::new(1, 1);
         let region_two = RegionId::new(2, 1);
         let mut catalog = ObjectCatalog::default();
-        catalog.insert_object(0, Vec::new()).unwrap();
+        catalog.insert_object(0, Vec::new(), 0).unwrap();
         catalog
             .insert_object(
                 1,
@@ -506,18 +526,21 @@ mod tests {
                     footer_entry(region_one, entry_id(1, 1), entry_id(1, 2)),
                     footer_entry(region_two, entry_id(1, 1), entry_id(1, 1)),
                 ],
+                0,
             )
             .unwrap();
         catalog
             .insert_object(
                 2,
                 vec![footer_entry(region_one, entry_id(2, 1), entry_id(2, 1))],
+                0,
             )
             .unwrap();
         catalog
             .insert_object(
                 3,
                 vec![footer_entry(region_two, entry_id(3, 1), entry_id(3, 1))],
+                0,
             )
             .unwrap();
         let boundary = |catalog: &ObjectCatalog, obsolete: &[(RegionId, EntryId)]| {
@@ -583,6 +606,36 @@ mod tests {
         );
         assert_eq!(3, boundary(&catalog, &[]));
         assert_eq!(4, catalog.next_object_seq().unwrap());
+    }
+
+    #[test]
+    fn test_catalog_counts_the_bytes_of_release_records() {
+        let region_id = RegionId::new(1, 1);
+        let mut catalog = ObjectCatalog::default();
+        let first = vec![footer_entry(region_id, 1, 2)];
+        let second = vec![footer_entry(region_id, 3, 4)];
+        catalog.insert_object(1, first.clone(), 0).unwrap();
+        catalog.insert_object(2, second.clone(), 2).unwrap();
+        catalog.insert_object(3, Vec::new(), 1).unwrap();
+        let lens = [
+            object_len(&first, 0),
+            object_len(&second, 2),
+            object_len(&[], 1),
+        ];
+        assert_eq!(lens.iter().sum::<u64>(), catalog.indexed_bytes());
+
+        // An object of release records alone holds no entries of a region.
+        assert_eq!(
+            vec![1, 2],
+            object_seqs(
+                &catalog
+                    .objects_for_entry_range(region_id, 0, u64::MAX)
+                    .unwrap()
+            )
+        );
+        assert_eq!(Some((second, lens[1])), catalog.remove_object(2));
+        assert_eq!(Some((Vec::new(), lens[2])), catalog.remove_object(3));
+        assert_eq!(lens[0], catalog.indexed_bytes());
     }
 
     fn footer_entry(region_id: RegionId, min_entry_id: u64, max_entry_id: u64) -> FooterEntry {
