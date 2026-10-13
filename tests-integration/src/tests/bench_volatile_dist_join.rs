@@ -129,7 +129,9 @@ async fn bench_volatile_dist_join() {
 
     // --- Path C: dist_join=true (materialized broadcast) ---
     let ctx_c = QueryContext::arc();
-    ctx_c.configuration_parameter().set_experimental_dist_join(true);
+    ctx_c
+        .configuration_parameter()
+        .set_experimental_dist_join(true);
     let latencies_c = measure(&frontend, &sql, &ctx_c, "C (materialized broadcast)").await;
 
     // Report

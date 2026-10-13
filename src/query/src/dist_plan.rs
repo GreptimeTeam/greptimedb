@@ -32,7 +32,7 @@ pub use dist_join_planner::DistJoinPlanner;
 pub(crate) use dist_join_planner::DistJoinTableStats;
 pub(crate) use dist_join_planner::{
     DIST_JOIN_PLANNER_RULE_NAME, DistJoinStats, aggregate_region_stats, candidate_joins,
-    contains_volatile_expr, expected_region_ids, restore_join_schema,
+    expected_region_ids, restore_join_schema, side_base_table_id,
 };
 pub use filter_id::{FilterFingerprint, FilterId, ParseFilterIdError, RemoteDynFilterProducerId};
 pub(crate) use materialized_broadcast::MaterializedBroadcastNode;
