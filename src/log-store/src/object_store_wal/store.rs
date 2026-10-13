@@ -636,6 +636,12 @@ impl ObjectStoreLogStore {
         self.creates_fail.store(true, Ordering::Release);
     }
 
+    /// Lets the creates that run from now on write again after
+    /// [`fail_creates`](Self::fail_creates).
+    pub fn allow_creates(&self) {
+        self.creates_fail.store(false, Ordering::Release);
+    }
+
     /// Makes the next create that writes its object report a transient object
     /// store error afterwards, so the object exists although its create
     /// failed.
@@ -1609,11 +1615,13 @@ impl Actor {
     /// Starts the creates of pending batches in sequence order while fewer
     /// than [`MAX_IN_FLIGHT_CREATES`] are in flight, counting the creates of
     /// batches that already failed. Nothing starts once stop began, except
-    /// the backlog of the `enqueued` mode. A failing store only schedules the
+    /// the backlog of the `enqueued` mode and, once the stop command was
+    /// handled, the release records [`handle_stop`](Self::handle_stop)
+    /// seals in the `durable` mode. A failing store only schedules the
     /// next attempt once nothing is in flight, see [`Failing`]; after stop
     /// began it uploads its backlog at once.
     fn start_creates(&mut self) {
-        if self.is_stopped() && self.ack_mode == AckMode::Durable {
+        if self.is_stopped() && self.ack_mode == AckMode::Durable && self.stop.is_empty() {
             return;
         }
         if !self.is_stopped()
@@ -1944,15 +1952,9 @@ impl Actor {
                 shared(&error)
             }
         };
-        for mut batch in self.sealed.drain(..) {
+        for mut batch in std::mem::take(&mut self.sealed) {
             self.unindexed.insert(batch.object_seq);
-            for release in batch.releases.drain(..) {
-                let entry_id = self
-                    .failed_releases
-                    .entry(release.region_id)
-                    .or_insert(release.entry_id);
-                *entry_id = (*entry_id).max(release.entry_id);
-            }
+            self.keep_releases(&mut batch);
             batch.fail(failure);
         }
         self.reset_open_batch();
@@ -1965,6 +1967,18 @@ impl Actor {
             self.stop_error.get_or_insert(error);
         }
         self.leave_failing("its backlog was dropped");
+    }
+
+    /// Keeps the release records of a batch that failed for the next sealed
+    /// batch.
+    fn keep_releases(&mut self, batch: &mut SealedBatch) {
+        for release in batch.releases.drain(..) {
+            let entry_id = self
+                .failed_releases
+                .entry(release.region_id)
+                .or_insert(release.entry_id);
+            *entry_id = (*entry_id).max(release.entry_id);
+        }
     }
 
     /// Records `error` as terminal and fails every waiter that is not
@@ -2276,7 +2290,8 @@ impl Actor {
 
     /// Begins stopping. Nothing is admitted from now on and the append held
     /// back is refused; the `durable` mode drops the open batch and the
-    /// batches whose create has not started, the `enqueued` mode seals its
+    /// batches whose create has not started, and seals the release records of
+    /// failed and dropped batches once more; the `enqueued` mode seals its
     /// backlog and uploads it, a failing store included. Stop is answered by
     /// [`finish_stop`](Self::finish_stop) once nothing is in flight.
     fn handle_stop(&mut self, response: oneshot::Sender<Result<()>>) {
@@ -2297,10 +2312,12 @@ impl Actor {
                     .iter()
                     .position(|batch| matches!(batch.state, CreateState::Pending))
                 {
-                    for batch in self.sealed.drain(index..) {
+                    for mut batch in self.sealed.split_off(index) {
+                        self.keep_releases(&mut batch);
                         batch.fail(|| ObjectStoreWalStoppedSnafu.build());
                     }
                 }
+                self.seal(Vec::new());
             }
             AckMode::Enqueued => {
                 self.flush_open_batch();
@@ -8393,6 +8410,32 @@ mod tests {
             vec![release(region_id, 0)],
             releases_of(io.as_ref(), 2).await
         );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_stop_creates_the_records_of_failed_releases() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let region_id = region(1);
+        let store = open(object_store.clone(), &eager()).await;
+        append(&store, region_id, "a1").await.unwrap();
+        store.fail_creates();
+        store
+            .release_region(&provider(region_id), region_id)
+            .await
+            .unwrap_err();
+        store.allow_creates();
+        assert_eq!(vec![1], collected_object_seqs(&store).await);
+
+        // Nothing else is written: the stop creates object 3 with the record.
+        store.stop().await.unwrap();
+        assert_eq!(
+            vec![release(region_id, id(1, 1))],
+            releases_of(store.io.as_ref(), 3).await
+        );
+        let store = open(object_store, &eager()).await;
+        assert_eq!(Some(id(1, 1)), watermark(&store, region_id));
         store.stop().await.unwrap();
     }
 

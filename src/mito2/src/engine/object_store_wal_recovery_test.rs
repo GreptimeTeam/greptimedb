@@ -1547,7 +1547,7 @@ async fn test_enqueued_writes_fail_fast_while_the_object_store_refuses_the_backl
 }
 
 #[tokio::test]
-async fn test_failed_release_of_a_dropped_region_lands_with_the_next_object() {
+async fn test_drop_with_a_failed_release_completes_and_the_stop_persists_it() {
     let mut env = TestEnv::with_prefix("object-store-wal-drop-failed-release").await;
     let object_store = memory_store();
     let store = open_store(&object_store, AckMode::Durable).await;
@@ -1556,8 +1556,8 @@ async fn test_failed_release_of_a_dropped_region_lands_with_the_next_object() {
     let (table_dir_b, schema_b) = create_region(&engine, REGION_B, &[]).await;
 
     // Object 1 holds entries of both regions and object 2 of region A. The
-    // create of the release object 3 writes it but reports a failure, so the
-    // drop fails and object 3 is an orphan; region A is gone from the engine.
+    // create of the release object fails before it writes anything: the drop
+    // completes and reports the failure.
     let mut writer = SealedWriter::new(&store);
     writer
         .put_and_seal(
@@ -1571,7 +1571,7 @@ async fn test_failed_release_of_a_dropped_region_lands_with_the_next_object() {
     writer
         .put_and_seal(&engine, vec![(REGION_A, rows(&schema_a, 2, 4))])
         .await;
-    store.fail_next_create_after_write();
+    store.fail_creates();
     assert!(
         tokio::time::timeout(WAIT, spawn_drop(&engine, REGION_A))
             .await
@@ -1580,28 +1580,29 @@ async fn test_failed_release_of_a_dropped_region_lands_with_the_next_object() {
             .is_err()
     );
     assert!(!engine.is_region_exists(REGION_A));
+    assert_eq!(vec![1, 2], wal_object_seqs(&object_store).await);
+    store.allow_creates();
 
-    // The next object, written for region B, carries the release record.
-    writer
-        .put_and_seal(&engine, vec![(REGION_B, rows(&schema_b, 3, 5))])
-        .await;
+    // Nothing else is written; stopping the store creates object 4 with the
+    // release record.
     drop(writer);
     engine.stop().await.unwrap();
     drop(engine);
+    store.stop().await.unwrap();
     drop(store);
+    assert_eq!(vec![1, 2, 4], wal_object_seqs(&object_store).await);
 
     let store = open_store(&object_store, AckMode::Durable).await;
     let engine = new_engine(&mut env, store.clone()).await;
     open_region(&engine, REGION_B, &table_dir_b, &[])
         .await
         .unwrap();
-    assert_eq!(vec![1, 2, 3, 4, 5], wal_object_seqs(&object_store).await);
     flush_region(&engine, REGION_B, None).await;
     let mut writer = SealedWriter::new(&store);
     writer
-        .put_and_seal(&engine, vec![(REGION_B, rows(&schema_b, 5, 6))])
+        .put_and_seal(&engine, vec![(REGION_B, rows(&schema_b, 3, 5))])
         .await;
     wait_for_collection(&store).await;
     assert_eq!(vec![6], wal_object_seqs(&object_store).await);
-    assert_eq!(6, engine.get_region_statistic(REGION_B).unwrap().num_rows);
+    assert_eq!(5, engine.get_region_statistic(REGION_B).unwrap().num_rows);
 }
