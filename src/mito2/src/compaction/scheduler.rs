@@ -762,7 +762,14 @@ impl CompactionScheduler {
         Some(self.finish_compaction_on_cancel(region_id))
     }
 
-    /// Wraps DDL replies so compaction stays paused until every handed-off request completes.
+    /// Hands off a drained batch of DDLs and fences new compaction until every reply lands.
+    ///
+    /// Installs the fence, intercepts each DDL's reply, and returns the same batch so the caller
+    /// can execute it. The real result of each DDL is still forwarded to its original sender.
+    ///
+    /// # Constraints
+    /// Must only be called from a compaction terminal transition, and only by the worker that owns
+    /// `region_id`.
     fn fence_ddl_replies(
         &mut self,
         region_id: RegionId,
@@ -773,9 +780,14 @@ impl CompactionScheduler {
         }
         let generation = Self::next_plan_id(&mut self.next_plan_id);
         if let Some(status) = self.region_status.get_mut(&region_id) {
+            // Set region status to "executing DDLs" so future compaction won't be scheduled.
             status.executing_ddl = Some(DdlExecution::new(generation, ddls.len()));
         }
+
         for (request_id, ddl) in ddls.iter_mut().enumerate() {
+            // Swap the DDL's real reply sender for a temporary one so we can observe it. The
+            // spawned task forwards the observed result to the original caller and, in between,
+            // notifies the scheduler that this slot of the batch has completed.
             let (tx, rx) = tokio::sync::oneshot::channel();
             let reply = std::mem::replace(&mut ddl.sender, tx.into());
             let sender = self.request_sender.clone();
@@ -785,6 +797,16 @@ impl CompactionScheduler {
                     .await
                     .context(crate::error::RecvSnafu)
                     .and_then(|result| result);
+                // Route the completion through the worker channel so `on_ddl_complete` sees it
+                // serialized with other region state transitions.
+                //
+                // At most one batch can be outstanding per region: [`CompactionStatus::has_ddl`] blocks
+                // compaction admission while `executing_ddl` is set, so `fence_ddl_replies` cannot run again
+                // for the same region before the current batch drains. A single `(generation, request_id)`
+                // pair therefore identifies every reply. `generation` comes from the scheduler-wide counter,
+                // which outlives region statuses, so a late reply from a previous incarnation cannot clear the
+                // current fence. Inside the batch `request_id` makes completion idempotent: only the last
+                // distinct reply releases the fence.
                 let _ = sender
                     .send(WorkerRequestWithTime::new(
                         crate::request::WorkerRequest::Background {
@@ -812,6 +834,9 @@ impl CompactionScheduler {
         let Some(status) = self.region_status.get_mut(&region_id) else {
             return;
         };
+        // `complete` returns false for a stale generation or a duplicate `request_id`, so a late or
+        // repeated notify cannot end the batch early. It only clears the fence on the last distinct
+        // reply, which is what lets `has_ddl` unblock compaction admission again.
         if let Some(ddl) = &mut status.executing_ddl
             && ddl.complete(generation, request_id)
         {
