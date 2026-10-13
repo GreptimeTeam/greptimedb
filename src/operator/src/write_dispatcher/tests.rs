@@ -87,7 +87,7 @@ impl Region for RecordingRegionService {
             .get_mut(&region_id)
             .and_then(VecDeque::pop_front)
         {
-            let mut status = Status::unavailable("scripted write rejection");
+            let mut status = Status::unavailable(format!("region {region_id} rejected the write"));
             status.metadata_mut().insert(
                 common_error::GREPTIME_DB_HEADER_ERROR_RETRY_HINT,
                 hint.as_str().parse().unwrap(),
@@ -335,22 +335,70 @@ async fn test_write_retry_attempt_budget_and_nonretryable_errors() {
 #[tokio::test]
 async fn test_write_retry_stops_when_a_sibling_is_nonretryable() {
     for hint in [RetryHint::Retryable, RetryHint::RetryAfterRouteRefresh] {
-        let server = RegionTestServer::start().await;
-        server.fail_region(1, [hint]);
-        server.fail_region(2, [RetryHint::NonRetryable]);
-        let dispatcher = server.create_dispatcher(2).await;
-        dispatcher
-            .dispatch(vec![build_insert_request(&[1, 2])])
-            .await
-            .unwrap_err();
-        assert_eq!(
-            server.attempt_counts(),
-            HashMap::from([
-                (RegionId::new(1, 1).as_u64(), 1),
-                (RegionId::new(1, 2).as_u64(), 1),
-            ])
-        );
-        assert!(server.invalidator.calls.lock().unwrap().is_empty());
+        for regions in [[1, 2], [2, 1]] {
+            let server = RegionTestServer::start().await;
+            server.fail_region(1, [hint]);
+            server.fail_region(2, [RetryHint::NonRetryable]);
+            let dispatcher = server.create_dispatcher(2).await;
+            let error = dispatcher
+                .dispatch(vec![build_insert_request(&regions)])
+                .await
+                .unwrap_err();
+            let terminal_region = RegionId::new(1, 2).as_u64();
+            assert!(
+                format!("{error:?}")
+                    .contains(&format!("region {terminal_region} rejected the write")),
+                "{error:?}"
+            );
+            assert_eq!(
+                server.attempt_counts(),
+                HashMap::from([(RegionId::new(1, 1).as_u64(), 1), (terminal_region, 1),])
+            );
+            assert!(server.invalidator.calls.lock().unwrap().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_should_retry_requires_a_retained_request_and_budget() {
+    let backend = test_util::prepare_mocked_backend().await;
+    let (partition_manager, table_info_cache, cache_invalidator) = create_routing_caches(backend);
+    let retry = WriteRetry {
+        clients: Arc::new(NodeClients::default()),
+        partition_manager,
+        options: build_retry_options(2),
+        table_info_cache,
+        cache_invalidator,
+    };
+    let failure = |request| {
+        // The converted error alone cannot distinguish an explicitly nonretryable attempt.
+        let error: client::Error = Status::unavailable("write rejected").into();
+        WriteAttempt::Failed {
+            error: error.into(),
+            request,
+        }
+    };
+    let retryable = || {
+        failure(Some(RoutedWrite {
+            peer: Arc::new(Peer::new(1, "peer")),
+            request: Arc::new(build_insert_request(&[1])),
+        }))
+    };
+    for (name, attempts, retries, expected) in [
+        ("empty", vec![], 0, false),
+        (
+            "all succeeded",
+            vec![WriteAttempt::Success(RegionResponse::new(1))],
+            0,
+            false,
+        ),
+        ("retryable", vec![retryable()], 0, true),
+        ("last retry", vec![retryable()], 1, true),
+        ("budget exhausted", vec![retryable()], 2, false),
+        ("terminal first", vec![failure(None), retryable()], 0, false),
+        ("terminal last", vec![retryable(), failure(None)], 0, false),
+    ] {
+        assert_eq!(retry.should_retry(&attempts, retries), expected, "{name}");
     }
 }
 
@@ -408,7 +456,7 @@ async fn test_finish_retries_initial_failures_in_one_round() {
             build_partitioned_request(WriteKind::BulkInsert, region, versions[&region], &[value]);
         attempts.push(
             dispatcher
-                .dispatch_once(server.peer.clone(), request, None)
+                .send(Arc::new(server.peer.clone()), request, None)
                 .await,
         );
     }
@@ -770,11 +818,14 @@ async fn test_resolve_peers_batches_logical_and_physical_regions() {
     assert_eq!(peers.len(), 4);
     for region in regions {
         assert_eq!(
-            peers[&region],
-            partition_manager.find_region_leader(region).await.unwrap()
+            peers[&region].as_ref(),
+            &partition_manager.find_region_leader(region).await.unwrap()
         );
     }
-    assert_eq!(peers[&RegionId::new(1, 1)], peers[&RegionId::new(42, 1)]);
+    assert!(Arc::ptr_eq(
+        &peers[&RegionId::new(1, 1)],
+        &peers[&RegionId::new(42, 1)],
+    ));
     let missing = RegionId::new(42, 999);
     let expected = partition_manager
         .find_region_leader(missing)
@@ -784,6 +835,38 @@ async fn test_resolve_peers_batches_logical_and_physical_regions() {
     assert_eq!(actual.status_code(), expected.status_code());
     assert_eq!(actual.retry_hint(), expected.retry_hint());
     assert!(dispatcher.resolve_peers(&[]).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_resolve_peers_shares_only_identical_peers() {
+    let backend = test_util::prepare_mocked_backend().await;
+    test_util::create_partition_rule_manager(backend.clone()).await;
+    let manager = TableRouteManager::new(backend.clone());
+    let storage = manager.table_route_storage();
+    let current = storage.get_with_raw_bytes(1).await.unwrap().unwrap();
+    let mut routes = current.region_routes().unwrap().clone();
+    let peer = Peer::new(7, "same-address");
+    let other = Peer::new(7, "other-address");
+    for route in &mut routes {
+        route.leader_peer = Some(if route.region.id.region_number() == 3 {
+            other.clone()
+        } else {
+            peer.clone()
+        });
+    }
+    let updated = current.update(routes).unwrap();
+    let (txn, _) = storage.build_update_txn(1, &current, &updated).unwrap();
+    assert!(backend.txn(txn).await.unwrap().succeeded);
+    let (partition_manager, _, _) = create_routing_caches(backend);
+    let dispatcher = WriteDispatcher::new(Arc::new(NodeClients::default()), partition_manager);
+    let regions = [1, 2, 3].map(|region| RegionId::new(1, region));
+    let peers = dispatcher.resolve_peers(&regions).await.unwrap();
+    assert_eq!(peers.len(), 3);
+    assert_eq!(peers[&regions[0]].as_ref(), &peer);
+    assert_eq!(peers[&regions[1]].as_ref(), &peer);
+    assert_eq!(peers[&regions[2]].as_ref(), &other);
+    assert!(Arc::ptr_eq(&peers[&regions[0]], &peers[&regions[1]]));
+    assert!(!Arc::ptr_eq(&peers[&regions[0]], &peers[&regions[2]]));
 }
 
 #[tokio::test]
@@ -846,7 +929,7 @@ async fn test_dispatch_preserves_write_payloads_and_envelopes() {
         });
         let writes = dispatcher.prepare(requests.to_vec()).await.unwrap();
         assert!(received.try_recv().is_err());
-        let response = dispatcher.dispatch_prepared(writes, None).await.unwrap();
+        let response = dispatcher.execute(writes, None).await.unwrap();
         assert_eq!(response.affected_rows, 2);
         for request in requests {
             assert_eq!(received.try_recv().unwrap(), (Peer::new(1, ""), request));
@@ -1003,8 +1086,9 @@ async fn test_resolve_peers_cache_lookup_ablation() {
         for mode in modes {
             let before = counter.get();
             let started = Instant::now();
-            let peers = if mode == "batched" {
-                dispatcher.resolve_peers(&regions).await.unwrap()
+            let (elapsed, peers_match) = if mode == "batched" {
+                let peers = dispatcher.resolve_peers(&regions).await.unwrap();
+                (started.elapsed(), peers == expected)
             } else {
                 let mut peers = HashMap::new();
                 for region in &regions {
@@ -1016,11 +1100,17 @@ async fn test_resolve_peers_cache_lookup_ablation() {
                         partition_manager.find_region_leader(*region).await.unwrap(),
                     );
                 }
-                peers
+                let elapsed = started.elapsed();
+                let peers_match = peers.len() == expected.len()
+                    && peers.iter().all(|(region, peer)| {
+                        expected
+                            .get(region)
+                            .is_some_and(|expected| expected.as_ref() == peer)
+                    });
+                (elapsed, peers_match)
             };
-            let elapsed = started.elapsed();
             let gets = counter.get() - before;
-            assert_eq!(peers, expected);
+            assert!(peers_match, "{mode}");
             let expected_gets = match mode {
                 "delete" => 384,
                 "insert" => 9,

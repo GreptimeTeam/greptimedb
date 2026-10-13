@@ -72,7 +72,7 @@ impl Inserter {
         let writes = self.write_dispatcher.prepare(writes).await?;
         Ok(self
             .write_dispatcher
-            .dispatch_prepared(writes, None)
+            .execute(writes, None)
             .await
             .context(error::RequestInsertsSnafu)?
             .affected_rows)
@@ -186,7 +186,7 @@ impl Inserter {
             let writes = self.write_dispatcher.prepare(vec![request]).await?;
             let result = self
                 .write_dispatcher
-                .dispatch_prepared(
+                .execute(
                     writes,
                     Some(
                         metrics::HANDLE_BULK_INSERT_ELAPSED.with_label_values(&["datanode_handle"]),
@@ -302,7 +302,7 @@ impl Inserter {
                     };
 
                     Ok(dispatcher
-                        .dispatch_once(
+                        .send(
                             peer,
                             request,
                             Some(

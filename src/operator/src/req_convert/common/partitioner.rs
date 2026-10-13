@@ -101,7 +101,10 @@ impl TablePartitioner {
     ///
     /// Takes ownership so row payloads can move into their new regions. Requests whose
     /// region and partition version still match retain their original payloads.
-    pub fn rebuild_write_requests(&self, request: RegionRequest) -> Result<Vec<RegionRequest>> {
+    pub(crate) fn rebuild_write_requests(
+        &self,
+        request: RegionRequest,
+    ) -> Result<Vec<RegionRequest>> {
         let RegionRequest { header, body } = request;
         let bodies = match body.context(error::UnexpectedSnafu {
             violated: "Cannot rebuild a request without a body",
