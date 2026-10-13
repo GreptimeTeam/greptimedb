@@ -373,9 +373,15 @@ fn matching_payload_shape(agg: &Aggregate, function: PayloadFunction) -> Option<
     {
         return None;
     }
-    let (first, second) = product_operands(&params.args[0], projection)?;
-    let first = resolve_expr_through_projection(first, projection)?;
-    let second = resolve_expr_through_projection(second, projection)?;
+    let (first, second, operands_from_projection_expr) =
+        product_operands(&params.args[0], projection)?;
+    let (first, second) = match operands_from_projection_expr {
+        true => (column_expr(first)?, column_expr(second)?),
+        false => (
+            resolve_expr_through_projection(first, projection)?,
+            resolve_expr_through_projection(second, projection)?,
+        ),
+    };
     let (fact_payload, dim_payload) =
         if join.left.schema().has_column(&first) && join.right.schema().has_column(&second) {
             (first, second)
@@ -410,35 +416,33 @@ fn matching_payload_shape(agg: &Aggregate, function: PayloadFunction) -> Option<
 fn product_operands<'a>(
     argument: &'a Expr,
     projection: Option<&'a Projection>,
-) -> Option<(&'a Expr, &'a Expr)> {
-    let entry = match argument {
-        Expr::BinaryExpr(binary) => binary,
+) -> Option<(&'a Expr, &'a Expr, bool)> {
+    let (entry, operands_from_projection_expr) = match argument {
+        Expr::BinaryExpr(binary) => (binary, false),
         Expr::Column(column) => {
             let projection = projection?;
-            let index = projection
-                .schema
-                .maybe_index_of_column(column)
-                .or_else(|| {
-                    projection
-                        .schema
-                        .index_of_column_by_name(None, &column.name)
-                })?;
+            let index = projection.schema.maybe_index_of_column(column)?;
             let entry = projection.expr.get(index)?;
-            match entry {
+            let binary = match entry {
                 Expr::BinaryExpr(binary) => binary,
                 Expr::Alias(alias) => match alias.expr.as_ref() {
                     Expr::BinaryExpr(binary) => binary,
                     _ => return None,
                 },
                 _ => return None,
-            }
+            };
+            (binary, true)
         }
         _ => return None,
     };
     if entry.op != Operator::Multiply {
         return None;
     }
-    Some((entry.left.as_ref(), entry.right.as_ref()))
+    Some((
+        entry.left.as_ref(),
+        entry.right.as_ref(),
+        operands_from_projection_expr,
+    ))
 }
 
 fn is_scan_input(plan: &LogicalPlan) -> bool {
@@ -462,6 +466,13 @@ fn is_scan_input(plan: &LogicalPlan) -> bool {
 }
 
 /// Resolve columns through projections only when they are exact pass-throughs.
+fn column_expr(expr: &Expr) -> Option<Column> {
+    let Expr::Column(column) = expr else {
+        return None;
+    };
+    Some(column.clone())
+}
+
 fn resolve_expr_through_projection(expr: &Expr, projection: Option<&Projection>) -> Option<Column> {
     let Expr::Column(column) = expr else {
         return None;
@@ -470,14 +481,7 @@ fn resolve_expr_through_projection(expr: &Expr, projection: Option<&Projection>)
 }
 fn resolve_through_projection(column: &Column, projection: Option<&Projection>) -> Option<Column> {
     if let Some(projection) = projection {
-        let idx = projection
-            .schema
-            .maybe_index_of_column(column)
-            .or_else(|| {
-                projection
-                    .schema
-                    .index_of_column_by_name(None, &column.name)
-            })?;
+        let idx = projection.schema.maybe_index_of_column(column)?;
         let expr = projection.expr.get(idx)?;
         let Expr::Column(c) = expr else {
             return None;
