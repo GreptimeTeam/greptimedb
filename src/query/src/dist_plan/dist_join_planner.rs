@@ -359,7 +359,12 @@ impl NestedBroadcastJoinRewriter<'_> {
 
         let (large_plan, large_merge_scan) = strip_merge_scan(&join.left)?;
         let (small_plan, small_merge_scan) = strip_merge_scan(&join.right)?;
-        if contains_volatile_expr(&small_plan) {
+        // The small sub-plan is re-executed per large region, so reject volatile
+        // expressions there. Join keys are not part of either input plan, so
+        // check the small-side keys explicitly as well.
+        if contains_volatile_expr(&small_plan)
+            || join.on.iter().any(|(_, small_key)| small_key.is_volatile())
+        {
             return None;
         }
         if large_merge_scan.is_placeholder() || small_merge_scan.is_placeholder() {
@@ -805,6 +810,27 @@ mod tests {
                     col("t1.number"),
                     col("t2.number"),
                 ),
+                &ConfigOptions::default(),
+            )
+            .unwrap();
+
+        let result = rewrite(plan.clone());
+        assert_eq!(plan.to_string(), result.to_string());
+        assert!(matches!(result, LogicalPlan::Join(_)));
+    }
+
+    #[test]
+    fn nested_broadcast_join_rewrite_rejects_volatile_join_key() {
+        let volatile = Expr::ScalarFunction(datafusion_expr::expr::ScalarFunction::new_udf(
+            Arc::new(ScalarUDF::new_from_impl(VolatileTestUdf)),
+            vec![col("t2.number")],
+        ));
+        // The small-side plan has no volatile expressions — the volatile
+        // expression only appears in the JOIN key.
+        let small = table_scan("t2", 2, "t2");
+        let plan = DistPlannerAnalyzer {}
+            .analyze(
+                inner_join(table_scan("t1", 1, "t1"), small, col("t1.number"), volatile),
                 &ConfigOptions::default(),
             )
             .unwrap();
