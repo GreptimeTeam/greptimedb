@@ -1138,7 +1138,7 @@ mod test {
                 !unrestricted
                     .properties
                     .equivalence_properties()
-                    .ordering_satisfy(tsid_then_time)
+                    .ordering_satisfy(tsid_then_time.clone())
                     .unwrap()
             );
             for names in [
@@ -1161,6 +1161,55 @@ mod test {
                         .unwrap()
                 );
             }
+
+            let mut metric_metadata =
+                RegionMetadataBuilder::from_existing(metadata.as_ref().clone());
+            metric_metadata
+                .push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                        ConcreteDataType::uint32_datatype(),
+                        false,
+                    ),
+                    semantic_type: SemanticType::Tag,
+                    column_id: ReservedColumnId::table_id(),
+                })
+                .primary_key(vec![
+                    ReservedColumnId::table_id(),
+                    ReservedColumnId::tsid(),
+                    2,
+                ]);
+            let metric_metadata = Arc::new(metric_metadata.build().unwrap());
+            let scanner = Box::new(RepeatableScanner {
+                batches: RecordBatches::try_new(schema.clone(), vec![]).unwrap(),
+                properties: ScannerProperties::new(vec![vec![], vec![]], false, 0),
+                metadata: metric_metadata,
+                dynamic_filters: Arc::new(Mutex::new(Vec::new())),
+            });
+            let metric_projection = RegionScanExec::new(
+                scanner,
+                ScanRequest {
+                    distribution: Some(TimeSeriesDistribution::PerSeries),
+                    filters: vec![],
+                    ..Default::default()
+                },
+                None,
+            )
+            .unwrap();
+            let partitioning = metric_projection.properties().output_partitioning();
+            let Partitioning::UnknownPartitioning(actual_count) = partitioning else {
+                panic!(
+                    "a metric projection without `__table_id` must not claim TSID partitioning, got {partitioning:?}"
+                );
+            };
+            assert_eq!(*actual_count, 2);
+            assert!(
+                !metric_projection
+                    .properties
+                    .equivalence_properties()
+                    .ordering_satisfy(tsid_then_time.clone())
+                    .unwrap()
+            );
 
             // A scan that projects away the reserved `__tsid` column must not claim
             // the per-series hash distribution: the hash column is absent from the
