@@ -83,6 +83,15 @@ const CREATE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const MAX_SEALED_BATCHES: usize = 2 * MAX_IN_FLIGHT_CREATES;
 /// Number of objects whose footers recovery fetches at a time.
 const RECOVERY_CONCURRENCY: usize = 8;
+/// Number of segments a read fetches ahead of the one whose entries it
+/// yields. On S3 a replay that fetched each segment after the previous one
+/// spent about 30 ms per object; with eight fetches in flight a segment
+/// arrives about every 4 ms. A read holds at most this many decoded segments
+/// besides the one it yields, each up to about `max_batch_bytes` (64 MiB in
+/// all at the default 8 MiB), or more for one oversized append. A fetch keeps
+/// the downloaded segment while it copies the payloads out of it, so for a
+/// moment it holds the segment twice: up to 128 MiB in all at the default.
+const READ_PREFETCH_DEPTH: usize = 8;
 /// Bytes recovery reads from the end of an object in one request. The window
 /// holds the trailer and the footer of an object with up to 1364 regions of
 /// 48 bytes each, so a second request for the footer is rare.
@@ -721,7 +730,8 @@ impl LogStore for ObjectStoreLogStore {
     /// An object collected after the read listed it is skipped. Otherwise a
     /// segment that does not decode fails the read or is skipped and recorded
     /// as a hole, as `on_corrupted_segment` says; a failed fetch always fails
-    /// the read.
+    /// the read. Up to [`READ_PREFETCH_DEPTH`] segments are fetched ahead,
+    /// and each outcome is handled in sequence order.
     async fn read(
         &self,
         provider: &Provider,
@@ -762,8 +772,14 @@ impl LogStore for ObjectStoreLogStore {
         let wal_holes = self.wal_holes.clone();
         Ok(Box::pin(try_stream! {
             let started_at = Instant::now();
-            for (object_seq, footer_entry) in objects {
-                let records = match fetch_segment(io.as_ref(), object_seq, &footer_entry).await {
+            let mut fetches = futures::stream::iter(objects)
+                .map(|(object_seq, footer_entry)| {
+                    let fetch = spawn_fetch_segment(io.clone(), object_seq, footer_entry.clone());
+                    async move { (object_seq, footer_entry, fetch.await) }
+                })
+                .buffered(READ_PREFETCH_DEPTH);
+            while let Some((object_seq, footer_entry, fetched)) = fetches.next().await {
+                let records = match fetched {
                     Ok(records) => records,
                     Err(error) if is_collected(&catalog, &deleting, object_seq).await => {
                         debug!(
@@ -2133,6 +2149,34 @@ async fn fetch_segment(
     decode_segment(&fetch().await?, entry).with_context(|_| InvalidWalObjectSnafu {
         path: io.object_path(object_seq),
     })
+}
+
+/// Runs [`fetch_segment`] on a task of its own, so the fetch proceeds while
+/// the read is busy with earlier segments. Dropping the returned future, as a
+/// dropped read does, aborts the task.
+fn spawn_fetch_segment(
+    io: Arc<dyn WalObjectIo>,
+    object_seq: u64,
+    entry: FooterEntry,
+) -> impl Future<Output = Result<Vec<Record>>> + Send + 'static {
+    let mut task = AbortOnDrop(common_runtime::spawn_global(async move {
+        fetch_segment(io.as_ref(), object_seq, &entry).await
+    }));
+    async move {
+        match (&mut task.0).await {
+            Ok(records) => records,
+            // The task is only aborted with this future, so it ended in a panic.
+            Err(error) => std::panic::resume_unwind(error.into_panic()),
+        }
+    }
+}
+
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// Records the segment `entry` describes in the object `object_seq` as a hole
@@ -3846,7 +3890,10 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             assert_eq!(expected, entries);
-            assert_eq!(expected_ranges[&region(number)], *reads.lock().unwrap());
+            // Segments are fetched concurrently, so in no particular order.
+            let mut reads = reads.lock().unwrap().clone();
+            reads.sort_unstable();
+            assert_eq!(expected_ranges[&region(number)], reads);
         }
         reads.lock().unwrap().clear();
         assert_eq!(
@@ -3950,6 +3997,18 @@ mod tests {
         store.stop().await.unwrap();
     }
 
+    /// The range reads of object `object_seq` among `reads`, in the order
+    /// they were issued.
+    fn range_reads_of(reads: &RangeReads, object_seq: u64) -> Vec<(u64, u64, u64)> {
+        reads
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|read| read.0 == object_seq)
+            .copied()
+            .collect()
+    }
+
     /// Writes object 0 with one entry of region 1 and one of region 2 and
     /// object 1 with an entry of region 2, then flips a byte in the segment of
     /// region 2 in object 0. Returns the key of object 0 and its footer.
@@ -4018,8 +4077,7 @@ mod tests {
             read_entries(&store, region(2), 0).await
         );
         let corrupt = (0, footer[1].segment_offset, footer[1].segment_len);
-        assert_eq!(corrupt, reads.lock().unwrap()[0]);
-        assert_eq!(corrupt, reads.lock().unwrap()[1]);
+        assert_eq!(vec![corrupt, corrupt], range_reads_of(&reads, 0));
         let hole = WalHole {
             path,
             object_seq: 0,
@@ -4087,7 +4145,7 @@ mod tests {
             &format!("segment of region {} checksum mismatch", region(2)),
         );
         let corrupt = (0, footer[1].segment_offset, footer[1].segment_len);
-        assert_eq!(vec![corrupt, corrupt], *reads.lock().unwrap());
+        assert_eq!(vec![corrupt, corrupt], range_reads_of(&reads, 0));
         assert!(store.wal_holes(&provider(region(2))).unwrap().is_empty());
         assert_eq!(
             skipped,
@@ -4156,6 +4214,274 @@ mod tests {
             );
             store.stop().await.unwrap();
         }
+    }
+
+    /// The entries of region 1 that [`put_object_per_entry`] wrote to the
+    /// objects `object_seqs`.
+    fn object_entries(object_seqs: impl IntoIterator<Item = u64>) -> Vec<Entry> {
+        object_seqs
+            .into_iter()
+            .map(|object_seq| {
+                let entry_id = object_seq + 1;
+                Entry::Naive(NaiveEntry {
+                    provider: provider(region(1)),
+                    region_id: region(1),
+                    entry_id,
+                    data: format!("e{entry_id}").into_bytes(),
+                })
+            })
+            .collect()
+    }
+
+    /// Writes objects 0 to `objects - 1`, object `n` with entry `n + 1` of
+    /// region 1.
+    async fn put_object_per_entry(object_store: &ObjectStore, objects: u64) {
+        for object_seq in 0..objects {
+            put_object(object_store, object_seq, region(1), &[object_seq + 1]).await;
+        }
+    }
+
+    /// Opens a store over [`put_object_per_entry`] objects, releasing every
+    /// read of recovery; range reads park from then on.
+    async fn open_parking_range_reads(
+        objects: u64,
+    ) -> (
+        Arc<ObjectStoreLogStore>,
+        Arc<ParkedIo>,
+        mpsc::UnboundedReceiver<(u64, oneshot::Sender<bool>)>,
+    ) {
+        let object_store = memory_store();
+        put_object_per_entry(&object_store, objects).await;
+        let (io, mut parked) = ParkedIo::over(object_store);
+        let mut opening = {
+            let io = io.clone();
+            tokio::spawn(async move {
+                ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string()).await
+            })
+        };
+        let store = loop {
+            tokio::select! {
+                opened = &mut opening => break opened.unwrap().unwrap(),
+                Some((_, release)) = parked.recv() => release.send(true).unwrap(),
+            }
+        };
+        io.range_reads_parked.store(true, Ordering::SeqCst);
+        io.max_in_flight.store(0, Ordering::SeqCst);
+        (store, io, parked)
+    }
+
+    async fn wait_for_in_flight(io: &ParkedIo, count: usize) {
+        timeout(WAIT, async {
+            while io.in_flight.load(Ordering::SeqCst) != count {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn assert_nothing_parks(
+        parked: &mut mpsc::UnboundedReceiver<(u64, oneshot::Sender<bool>)>,
+    ) {
+        assert!(
+            timeout(Duration::from_millis(100), parked.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    async fn next_batch(stream: &mut SendableEntryStream<'static, Entry, Error>) -> Vec<Entry> {
+        timeout(WAIT, stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_store_read_prefetches_up_to_the_depth_in_order() {
+        let _serialized = SERIALIZED.lock().await;
+        let depth = READ_PREFETCH_DEPTH as u64;
+        let objects = depth + 4;
+        let (store, io, mut parked) = open_parking_range_reads(objects).await;
+        let reads = METRIC_OBJECT_STORE_WAL_READ_SECONDS.get_sample_count();
+        let mut stream = store.read(&provider(region(1)), 0, None).await.unwrap();
+
+        // The first poll starts the fetches of the first `depth` objects.
+        assert!(stream.next().now_or_never().is_none());
+        let mut wave = parked_operations(&mut parked, READ_PREFETCH_DEPTH).await;
+        assert_eq!(
+            (0..depth).collect::<BTreeSet<_>>(),
+            wave.keys().copied().collect()
+        );
+        assert_nothing_parks(&mut parked).await;
+
+        // Later objects complete first: they wait for object 0 and still
+        // count toward the depth.
+        for object_seq in (1..depth).rev() {
+            wave.remove(&object_seq).unwrap().send(true).unwrap();
+        }
+        wait_for_in_flight(&io, 1).await;
+        assert!(stream.next().now_or_never().is_none());
+        assert_nothing_parks(&mut parked).await;
+        wave.remove(&0).unwrap().send(true).unwrap();
+        assert_eq!(object_entries([0]), next_batch(&mut stream).await);
+
+        // No fetch starts while the caller holds the entries of object 0;
+        // each later poll starts the fetch of the next object.
+        assert_nothing_parks(&mut parked).await;
+        let rest = tokio::spawn(stream.try_collect::<Vec<_>>());
+        let refills = parked_operations(&mut parked, (objects - depth) as usize).await;
+        assert_eq!(
+            (depth..objects).collect::<BTreeSet<_>>(),
+            refills.keys().copied().collect()
+        );
+        for release in refills.into_values() {
+            release.send(true).unwrap();
+        }
+        let rest = timeout(WAIT, rest).await.unwrap().unwrap().unwrap();
+        assert_eq!(
+            object_entries(1..objects),
+            rest.into_iter().flatten().collect::<Vec<_>>()
+        );
+        assert_eq!(READ_PREFETCH_DEPTH, io.max_in_flight.load(Ordering::SeqCst));
+        assert_eq!(
+            reads + 1,
+            METRIC_OBJECT_STORE_WAL_READ_SECONDS.get_sample_count()
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_read_fails_at_a_prefetched_object_in_order() {
+        let _serialized = SERIALIZED.lock().await;
+        let depth = READ_PREFETCH_DEPTH as u64;
+        let objects = depth + 4;
+        let failed = 5;
+        let (store, io, mut parked) = open_parking_range_reads(objects).await;
+        let reads = METRIC_OBJECT_STORE_WAL_READ_SECONDS.get_sample_count();
+        let mut stream = store.read(&provider(region(1)), 0, None).await.unwrap();
+        assert!(stream.next().now_or_never().is_none());
+        let mut wave = parked_operations(&mut parked, READ_PREFETCH_DEPTH).await;
+
+        // The fetch of object 5 fails before any earlier fetch completes.
+        wave.remove(&failed).unwrap().send(false).unwrap();
+        wait_for_in_flight(&io, READ_PREFETCH_DEPTH - 1).await;
+        for release in wave.into_values() {
+            release.send(true).unwrap();
+        }
+        let mut refills = Vec::new();
+        for object_seq in 0..failed {
+            assert_eq!(object_entries([object_seq]), next_batch(&mut stream).await);
+            if object_seq > 0 {
+                refills.push(next_parked_operation(&mut parked).await);
+            }
+        }
+        let error = timeout(WAIT, stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::WalObjectStore { operation: "read", path, .. }
+                if *path == io.object_path(failed)),
+            "unexpected error: {error:?}"
+        );
+        assert!(timeout(WAIT, stream.next()).await.unwrap().is_none());
+
+        // The fetches started meanwhile are abandoned.
+        assert_eq!(
+            (depth..objects).collect::<Vec<_>>(),
+            refills
+                .iter()
+                .map(|(object_seq, _)| *object_seq)
+                .collect::<Vec<_>>()
+        );
+        for (_, mut release) in refills {
+            timeout(WAIT, release.closed()).await.unwrap();
+        }
+        assert_nothing_parks(&mut parked).await;
+        assert_eq!(
+            reads,
+            METRIC_OBJECT_STORE_WAL_READ_SECONDS.get_sample_count()
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_read_skips_prefetched_collected_and_corrupted_objects() {
+        let _serialized = SERIALIZED.lock().await;
+        let objects = READ_PREFETCH_DEPTH as u64 + 4;
+        let (corrupted, collected) = (3, 9);
+        let object_store = memory_store();
+        put_object_per_entry(&object_store, objects).await;
+        let path = object_path(&object_store, corrupted);
+        let bytes = object_store.read(&path).await.unwrap().to_vec();
+        let segment = footer_of(&bytes).1.remove(0);
+        corrupt_object(&object_store, &path, |bytes| {
+            bytes[(segment.segment_offset + segment.segment_len - 1) as usize] ^= 1;
+        })
+        .await;
+        let store = open(object_store.clone(), &eager()).await;
+        assert_eq!(CorruptedSegmentAction::Skip, store.on_corrupted_segment);
+        let skipped = METRIC_OBJECT_STORE_WAL_SKIPPED_SEGMENTS_TOTAL.get();
+
+        // A collection removes object 9 after the read listed it.
+        let stream = store.read(&provider(region(1)), 0, None).await.unwrap();
+        store.catalog.write().unwrap().remove_object(collected);
+        object_store
+            .delete(&object_path(&object_store, collected))
+            .await
+            .unwrap();
+        let entries = timeout(WAIT, stream.try_collect::<Vec<_>>())
+            .await
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            object_entries((0..objects).filter(|seq| ![corrupted, collected].contains(seq))),
+            entries
+        );
+        assert_eq!(
+            vec![WalHole {
+                path,
+                object_seq: corrupted,
+                min_entry_id: corrupted + 1,
+                max_entry_id: corrupted + 1,
+            }],
+            store.wal_holes(&provider(region(1))).unwrap()
+        );
+        assert_eq!(
+            skipped + 1,
+            METRIC_OBJECT_STORE_WAL_SKIPPED_SEGMENTS_TOTAL.get()
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_dropped_read_abandons_its_prefetches() {
+        let _serialized = SERIALIZED.lock().await;
+        let objects = READ_PREFETCH_DEPTH as u64 + 4;
+        let (store, _io, mut parked) = open_parking_range_reads(objects).await;
+        let reads = METRIC_OBJECT_STORE_WAL_READ_SECONDS.get_sample_count();
+        let mut stream = store.read(&provider(region(1)), 0, None).await.unwrap();
+        assert!(stream.next().now_or_never().is_none());
+        let mut wave = parked_operations(&mut parked, READ_PREFETCH_DEPTH).await;
+        wave.remove(&0).unwrap().send(true).unwrap();
+        assert_eq!(object_entries([0]), next_batch(&mut stream).await);
+
+        drop(stream);
+        for (_, mut release) in wave {
+            timeout(WAIT, release.closed()).await.unwrap();
+        }
+        assert_nothing_parks(&mut parked).await;
+        assert_eq!(
+            reads,
+            METRIC_OBJECT_STORE_WAL_READ_SECONDS.get_sample_count()
+        );
+        store.stop().await.unwrap();
     }
 
     #[tokio::test]
