@@ -850,12 +850,17 @@ pub fn show_query_option(
     query_ctx: QueryContextRef,
     engine: &dyn crate::QueryEngine,
 ) -> Result<Option<Output>> {
-    let name = stmt.variable.to_string();
+    let name = sql::ast::object_name_to_string_unquoted(&stmt.variable);
     let Some(canonical) = session::query_options::canonical_query_option_name(&name) else {
         if name.to_ascii_lowercase().starts_with("query.")
             || name.to_ascii_lowercase().starts_with("datafusion.")
         {
-            session::query_options::parse_query_option(&name, "").map_err(|error| {
+            session::query_options::parse_query_option(
+                &name,
+                "",
+                session::query_options::MAX_PUBLIC_PARALLELISM,
+            )
+            .map_err(|error| {
                 error::InvalidQueryContextExtensionSnafu {
                     reason: error.to_string(),
                 }
@@ -881,6 +886,20 @@ pub fn show_query_option(
             .to_string()
         }
         "query.parallelism" => context.state().config().target_partitions().to_string(),
+        "datafusion.optimizer.filter_null_join_keys"
+            if context
+                .state()
+                .analyzer()
+                .rules
+                .iter()
+                .any(|rule| rule.name() == "DistPlannerAnalyzer")
+                && context
+                    .query_ctx()
+                    .extension("datafusion.optimizer.filter_null_join_keys")
+                    .is_none() =>
+        {
+            "true".to_string()
+        }
         _ => context
             .state()
             .config_options()

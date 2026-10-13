@@ -30,8 +30,15 @@ pub fn canonical_query_option_name(key: &str) -> Option<String> {
     }
 }
 
+/// Maximum query parallelism accepted through public query-option inputs.
+pub const MAX_PUBLIC_PARALLELISM: u16 = 1024;
+
 /// Validate a query option, returning its canonical name and normalized value.
-pub fn parse_query_option(key: &str, value: &str) -> Result<Option<(String, String)>, Error> {
+pub fn parse_query_option(
+    key: &str,
+    value: &str,
+    max_parallelism: u16,
+) -> Result<Option<(String, String)>, Error> {
     let key_lower = key.to_ascii_lowercase();
     let canonical = match canonical_query_option_name(key) {
         Some(name) => name,
@@ -48,7 +55,7 @@ pub fn parse_query_option(key: &str, value: &str) -> Result<Option<(String, Stri
 
     let normalized = if canonical == "query.parallelism" {
         match value.parse::<u16>() {
-            Ok(n @ 1..=1024) => n.to_string(),
+            Ok(n) if (1..=max_parallelism).contains(&n) => n.to_string(),
             _ => {
                 return InvalidConfigValueSnafu {
                     name: key,

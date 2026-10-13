@@ -527,7 +527,8 @@ impl StatementExecutor {
     }
 
     fn set_variables(&self, set_var: SetVariables, query_ctx: QueryContextRef) -> Result<Output> {
-        let var_name = set_var.variable.to_string().to_uppercase();
+        let variable = sql::ast::object_name_to_string_unquoted(&set_var.variable);
+        let var_name = variable.to_uppercase();
 
         debug!(
             "Trying to set {}={} for session: {} ",
@@ -536,11 +537,7 @@ impl StatementExecutor {
             query_ctx.conn_info()
         );
 
-        if set_query_option(
-            &set_var.variable.to_string(),
-            set_var.value.clone(),
-            query_ctx.clone(),
-        )? {
+        if set_query_option(&variable, set_var.value.clone(), query_ctx.clone())? {
             return Ok(Output::new_with_affected_rows(0));
         }
 

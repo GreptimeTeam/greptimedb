@@ -162,7 +162,6 @@ impl QueryEngineState {
                 .extensions
                 .insert(DistPlannerOptions {
                     allow_query_fallback: true,
-                    ..Default::default()
                 });
         }
 
@@ -355,48 +354,13 @@ impl QueryEngineState {
             *state.config_mut() = state.config().clone().with_target_partitions(partitions);
         }
         if let Some(fallback) = options.get("query.allow_query_fallback") {
-            let mut planner_options = state
-                .config()
-                .options()
-                .extensions
-                .get::<DistPlannerOptions>()
-                .cloned()
-                .unwrap_or_default();
-            planner_options.allow_query_fallback = fallback == "true";
             state
                 .config_mut()
                 .options_mut()
                 .extensions
-                .insert(planner_options);
-        }
-        // `datafusion.optimizer.filter_null_join_keys` historically defaults to
-        // enabled inside the pre-MergeScan pass (while DataFusion itself defaults
-        // to false). Reflect that effective default in the state so `SHOW`
-        // reports it, and remember an explicit override so the analyzer honors
-        // the user's value instead of the historical default.
-        if options
-            .get_key_value("datafusion.optimizer.filter_null_join_keys")
-            .is_none()
-        {
-            state
-                .config_mut()
-                .options_mut()
-                .optimizer
-                .filter_null_join_keys = true;
-        } else {
-            let mut planner_options = state
-                .config()
-                .options()
-                .extensions
-                .get::<DistPlannerOptions>()
-                .cloned()
-                .unwrap_or_default();
-            planner_options.explicit_filter_null_join_keys = true;
-            state
-                .config_mut()
-                .options_mut()
-                .extensions
-                .insert(planner_options);
+                .insert(DistPlannerOptions {
+                    allow_query_fallback: fallback == "true",
+                });
         }
         Ok(query_ctx)
     }

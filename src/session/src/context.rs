@@ -495,8 +495,9 @@ impl QueryContext {
             if key.eq_ignore_ascii_case("query_parallelism") && value == "0" {
                 continue;
             }
+            // Wire decoding preserves legacy frontend nonzero values; public entry points enforce the limit.
             if let Some((canonical, normalized)) =
-                crate::query_options::parse_query_option(key, value)?
+                crate::query_options::parse_query_option(key, value, u16::MAX)?
             {
                 if request_options
                     .get(&canonical)
@@ -862,13 +863,17 @@ impl ConfigurationVariables {
         key: &str,
         value: &str,
     ) -> Result<(), crate::session_config::Error> {
-        let (canonical, normalized) = crate::query_options::parse_query_option(key, value)?
-            .ok_or_else(|| crate::session_config::Error::InvalidConfigValue {
-                name: key.to_string(),
-                value: value.to_string(),
-                hint: "Not a supported query option".to_string(),
-                location: snafu::Location::new(file!(), line!(), column!()),
-            })?;
+        let (canonical, normalized) = crate::query_options::parse_query_option(
+            key,
+            value,
+            crate::query_options::MAX_PUBLIC_PARALLELISM,
+        )?
+        .ok_or_else(|| crate::session_config::Error::InvalidConfigValue {
+            name: key.to_string(),
+            value: value.to_string(),
+            hint: "Not a supported query option".to_string(),
+            location: snafu::Location::new(file!(), line!(), column!()),
+        })?;
         self.query_options
             .write()
             .unwrap()
@@ -890,7 +895,9 @@ mod test {
 
     use crate::Session;
     use crate::context::{Channel, *};
-    use crate::query_options::{canonical_query_option_name, parse_query_option};
+    use crate::query_options::{
+        MAX_PUBLIC_PARALLELISM, canonical_query_option_name, parse_query_option,
+    };
 
     #[test]
     fn query_options_snapshot_validates_and_overlays_request_options() {
@@ -901,11 +908,10 @@ mod test {
         ctx.set_extension("query_parallelism", "4");
         ctx.set_extension("flow.return_region_seq", "true");
         let mut expected_extensions = ctx.extensions();
-        expected_extensions.remove("query_parallelism");
         expected_extensions.insert("query.parallelism".to_string(), "4".to_string());
         let snapshot = ctx.query_option_snapshot().unwrap();
         assert_eq!(snapshot.extension("query.parallelism"), Some("4"));
-        assert_eq!(snapshot.extension("query_parallelism"), None);
+        assert_eq!(snapshot.extension("query_parallelism"), Some("4"));
         assert_eq!(snapshot.extension("flow.return_region_seq"), Some("true"));
         ctx.configuration_parameter()
             .set_query_option("query.parallelism", "16")
@@ -1074,6 +1080,37 @@ mod test {
         );
         assert_eq!(restored_snapshot.extensions(), expected_extensions);
         assert!(restored_snapshot.live_analyze_metrics_enabled());
+    }
+
+    #[test]
+    fn test_query_parallelism_wire_accepts_legacy_value() {
+        let mut context = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        context.set_extension("query_parallelism", "2048");
+
+        assert_eq!(
+            context
+                .effective_query_options()
+                .unwrap()
+                .get("query.parallelism"),
+            Some(&"2048".to_string())
+        );
+    }
+
+    #[test]
+    fn test_set_query_parallelism_public_limit() {
+        let context = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        assert!(
+            context
+                .configuration_parameter()
+                .set_query_option("query.parallelism", "1025")
+                .is_err()
+        );
+        assert!(
+            context
+                .configuration_parameter()
+                .set_query_option("query.parallelism", "1024")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1378,22 +1415,22 @@ mod test {
     #[test]
     fn canonicalizes_and_validates_query_options() {
         assert_eq!(
-            parse_query_option("QUERY_PARALLELISM", "1024").unwrap(),
+            parse_query_option("QUERY_PARALLELISM", "1024", MAX_PUBLIC_PARALLELISM).unwrap(),
             Some(("query.parallelism".into(), "1024".into()))
         );
         assert_eq!(
-            parse_query_option("query.parallelism", "1").unwrap(),
+            parse_query_option("query.parallelism", "1", MAX_PUBLIC_PARALLELISM).unwrap(),
             Some(("query.parallelism".into(), "1".into()))
         );
         for value in ["", "-1", "0", "1025", "65536", "18446744073709551615"] {
-            assert!(parse_query_option("query.parallelism", value).is_err());
+            assert!(parse_query_option("query.parallelism", value, MAX_PUBLIC_PARALLELISM).is_err());
         }
-        assert!(parse_query_option("query.unknown", "true").is_err());
+        assert!(parse_query_option("query.unknown", "true", MAX_PUBLIC_PARALLELISM).is_err());
         assert_eq!(
-            parse_query_option("query_fallback", "TRUE").unwrap(),
+            parse_query_option("query_fallback", "TRUE", MAX_PUBLIC_PARALLELISM).unwrap(),
             Some(("query.allow_query_fallback".into(), "true".into()))
         );
-        assert!(parse_query_option("query.allow_query_fallback", "yes").is_err());
+        assert!(parse_query_option("query.allow_query_fallback", "yes", MAX_PUBLIC_PARALLELISM).is_err());
         assert_eq!(
             canonical_query_option_name("datafusion.optimizer.prefer_hash_join"),
             Some("datafusion.optimizer.prefer_hash_join".to_string())
@@ -1416,16 +1453,16 @@ mod test {
             "datafusion.optimizer.enable_topk_dynamic_filter_pushdown",
         ] {
             assert_eq!(
-                parse_query_option(key, "TRUE").unwrap(),
+                parse_query_option(key, "TRUE", MAX_PUBLIC_PARALLELISM).unwrap(),
                 Some((key.to_string(), "true".to_string())),
                 "{key} should accept uppercase true"
             );
             assert_eq!(
-                parse_query_option(key, "FALSE").unwrap(),
+                parse_query_option(key, "FALSE", MAX_PUBLIC_PARALLELISM).unwrap(),
                 Some((key.to_string(), "false".to_string())),
                 "{key} should accept uppercase false"
             );
-            assert!(parse_query_option(key, "yes").is_err(), "{key}");
+            assert!(parse_query_option(key, "yes", MAX_PUBLIC_PARALLELISM).is_err(), "{key}");
         }
         for (key, input, expected) in [
             ("datafusion.optimizer.max_passes", "05", "5"),
@@ -1441,7 +1478,7 @@ mod test {
             ),
         ] {
             assert_eq!(
-                parse_query_option(key, input).unwrap(),
+                parse_query_option(key, input, MAX_PUBLIC_PARALLELISM).unwrap(),
                 Some((key.to_string(), expected.to_string()))
             );
         }
@@ -1451,15 +1488,15 @@ mod test {
             ("datafusion.optimizer.unknown", "true"),
             ("datafusion.optimizer.max_passes.extra", "5"),
         ] {
-            assert!(parse_query_option(key, value).is_err(), "{key}={value}");
+            assert!(parse_query_option(key, value, MAX_PUBLIC_PARALLELISM).is_err(), "{key}={value}");
         }
-        assert!(parse_query_option("datafusion.execution.batch_size", "12").is_err());
+        assert!(parse_query_option("datafusion.execution.batch_size", "12", MAX_PUBLIC_PARALLELISM).is_err());
         assert_eq!(
-            parse_query_option("custom.extension", "value").unwrap(),
+            parse_query_option("custom.extension", "value", MAX_PUBLIC_PARALLELISM).unwrap(),
             None
         );
         assert_eq!(
-            parse_query_option("flow.return_region_seq", "true").unwrap(),
+            parse_query_option("flow.return_region_seq", "true", MAX_PUBLIC_PARALLELISM).unwrap(),
             None
         );
     }

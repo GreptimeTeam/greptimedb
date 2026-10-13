@@ -1037,11 +1037,9 @@ impl HttpServer {
     /// Attaches middlewares and debug routes to the router.
     /// Callers should call this method after [HttpServer::make_app()].
     pub fn build(&self, router: Router) -> Result<Router> {
-        let timeout_layer = Some(
-            ServiceBuilder::new().layer(
-                DynamicTimeoutLayer::new(self.options.timeout)
-                    .with_status_code_fn(Self::request_timeout_status_code),
-            ),
+        let timeout_layer = ServiceBuilder::new().layer(
+            DynamicTimeoutLayer::new(self.options.timeout)
+                .with_status_code_fn(Self::request_timeout_status_code),
         );
         let body_limit_layer = if self.options.body_limit != ReadableSize(0) {
             Some(
@@ -1078,7 +1076,7 @@ impl HttpServer {
                     // and we have impl IntoResponse for Error. It will print out more detailed error messages
                     .layer(TraceLayer::new_for_http().on_failure(()))
                     .option_layer(cors_layer)
-                    .option_layer(timeout_layer)
+                    .layer(timeout_layer)
                     .option_layer(body_limit_layer)
                     // memory limit layer - must be before body is consumed
                     .layer(middleware::from_fn_with_state(

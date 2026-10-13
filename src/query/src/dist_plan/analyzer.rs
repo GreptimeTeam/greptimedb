@@ -15,6 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
+use common_function::function::FunctionContext;
 use common_telemetry::debug;
 use datafusion::config::{ConfigExtension, ExtensionOptions};
 use datafusion::datasource::DefaultTableSource;
@@ -68,12 +69,9 @@ pub(crate) use utils::AliasMapping;
 /// Placeholder for other physical partition columns that are not in logical table
 const OTHER_PHY_PART_COL_PLACEHOLDER: &str = "__OTHER_PHYSICAL_PART_COLS_PLACEHOLDER__";
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct DistPlannerOptions {
     pub allow_query_fallback: bool,
-    /// The user explicitly set `datafusion.optimizer.filter_null_join_keys`;
-    /// when unset the pre-MergeScan pass keeps the historical default on.
-    pub explicit_filter_null_join_keys: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -137,18 +135,11 @@ impl ExtensionOptions for DistPlannerOptions {
     }
 
     fn entries(&self) -> Vec<datafusion::config::ConfigEntry> {
-        vec![
-            datafusion::config::ConfigEntry {
-                key: "allow_query_fallback".to_string(),
-                value: Some(self.allow_query_fallback.to_string()),
-                description: "Allow query fallback to fallback plan rewriter",
-            },
-            datafusion::config::ConfigEntry {
-                key: "explicit_filter_null_join_keys".to_string(),
-                value: Some(self.explicit_filter_null_join_keys.to_string()),
-                description: "The user explicitly set datafusion.optimizer.filter_null_join_keys",
-            },
-        ]
+        vec![datafusion::config::ConfigEntry {
+            key: "allow_query_fallback".to_string(),
+            value: Some(self.allow_query_fallback.to_string()),
+            description: "Allow query fallback to fallback plan rewriter",
+        }]
     }
 }
 
@@ -166,15 +157,17 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         config: &ConfigOptions,
     ) -> datafusion_common::Result<LogicalPlan> {
         let mut config = config.clone();
-        // The pre-MergeScan pass has always forced null-key join filtering on
-        // (mirroring `OptimizerContext::new()`), so keep that default here; an
-        // explicit `datafusion.optimizer.filter_null_join_keys` override from
-        // the session wins instead.
-        if !config
+        // Preserve the historical pre-MergeScan default unless explicitly set.
+        let explicit = config
             .extensions
-            .get::<DistPlannerOptions>()
-            .is_some_and(|o| o.explicit_filter_null_join_keys)
-        {
+            .get::<FunctionContext>()
+            .is_some_and(|context| {
+                context
+                    .query_ctx
+                    .extension("datafusion.optimizer.filter_null_join_keys")
+                    .is_some()
+            });
+        if !explicit {
             config.optimizer.filter_null_join_keys = true;
         }
         let config = Arc::new(config);

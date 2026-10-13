@@ -288,19 +288,17 @@ fn check_show_variables(query: &str) -> Option<Output> {
         if remainder.is_empty() {
             Some(show_variables("", ""))
         } else {
-            // Named variables (MAX_EXECUTION_TIME, query.parallelism, ...) reach
-            // the query handler for real values; keep MySQL filter syntax
-            // (`WHERE expr`, `LIKE 'pattern'`, including forms glued to the
-            // keyword like `WHERE(...)` or `WHERE/* probe */ expr`) on the
-            // legacy compatibility result so variable-probing clients keep
-            // working.
-            let looks_like_filter = remainder
-                .trim_start_matches(|c: char| !c.is_alphanumeric())
-                .split(|c: char| !c.is_alphanumeric())
-                .next()
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            let looks_like_filter = matches!(looks_like_filter.as_str(), "where" | "like" | "in");
+            let remainder = remainder.trim_start();
+            // Filter keywords need an identifier boundary; named variables do not.
+            let looks_like_filter = ["WHERE", "LIKE"].iter().any(|keyword| {
+                remainder
+                    .get(..keyword.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(keyword))
+                    && remainder[keyword.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|c| !(c == '_' || c == '$' || c.is_alphanumeric()))
+            });
             if looks_like_filter {
                 Some(show_variables("", ""))
             } else {
@@ -580,6 +578,44 @@ mod test {
     use super::*;
 
     #[test]
+    fn test_show_variables_where_filter_is_absorbed() {
+        // Old Connector/J `loadServerVariables` issues `SHOW VARIABLES WHERE
+        // Variable_name = '...'`; the federated path answers with an empty table
+        // instead of falling through to our parser, which would reject it.
+        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
+        let output = check(
+            "show variables where Variable_name = 'sql_mode'",
+            QueryContext::arc(),
+            session,
+        )
+        .expect("WHERE-filtered SHOW VARIABLES should be absorbed");
+        assert!(matches!(output.data, OutputData::RecordBatches(_)));
+    }
+
+    #[test]
+    fn test_show_variables_named_variable_falls_back() {
+        // A named variable (e.g. `SHOW VARIABLES MAX_EXECUTION_TIME`,
+        // `SHOW VARIABLES query.parallelism`) reaches the real handler.
+        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
+        assert!(
+            check(
+                "show variables max_execution_time",
+                QueryContext::arc(),
+                session.clone()
+            )
+            .is_none()
+        );
+        assert!(
+            check(
+                "show variables query.parallelism",
+                QueryContext::arc(),
+                session
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn test_check_abnormal() {
         let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
         let query = "🫣一点不正常的东西🫣";
@@ -661,6 +697,7 @@ mod test {
             "show variables LIKE 'event_scheduler'",
             "show variables where(Variable_name='sql_mode')",
             "show variables where/* probe */ Variable_name='sql_mode'",
+            "show variables WHERE--comment\nVariable_name='sql_mode'",
         ] {
             test(query, expected);
         }

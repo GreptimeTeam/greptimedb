@@ -301,7 +301,12 @@ impl RegionServer {
             .inner
             .query_engine
             .engine_context(query_ctx)
-            .context(NewPlanDecoderSnafu)?;
+            .map_err(|error| {
+                crate::error::InvalidQueryContextSnafu {
+                    reason: error.to_string(),
+                }
+                .build()
+            })?;
         let query_ctx = engine_ctx.query_ctx();
         let catalog_list = Arc::new(NameAwareCatalogList::new(
             self.clone(),
