@@ -14,9 +14,15 @@
 
 use std::sync::Arc;
 
+use arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
+use arrow::record_batch::RecordBatch as ArrowRecordBatch;
 use catalog::RegisterTableRequest;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_recordbatch::RecordBatch;
+use datafusion_common::ScalarValue;
+use datafusion_expr::execution_props::ExecutionProps;
+use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
+use datafusion_physical_expr::create_physical_expr;
 use datatypes::prelude::*;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector};
@@ -100,16 +106,35 @@ fn engine(enabled: bool, with_dist_planner: bool) -> crate::query_engine::QueryE
     .query_engine()
 }
 
-async fn optimized_plan(engine: &crate::query_engine::QueryEngineRef) -> String {
+async fn optimized_plan_for(engine: &crate::query_engine::QueryEngineRef, sql: &str) -> String {
     let context = QueryContext::arc();
-    let statement = QueryLanguageParser::parse_sql(
-        "SELECT f.host, d.area, AVG(f.value * d.weight) AS score FROM fact f JOIN dim d ON f.host = d.host GROUP BY f.host, d.area",
-        &context,
-    )
-    .unwrap();
+    let statement = QueryLanguageParser::parse_sql(sql, &context).unwrap();
     let plan = engine.planner().plan(&statement, context).await.unwrap();
     let plan = engine.engine_state().optimize_logical_plan(plan).unwrap();
     plan.display_indent().to_string()
+}
+
+async fn optimized_plan_schema_for(
+    engine: &crate::query_engine::QueryEngineRef,
+    sql: &str,
+) -> Vec<(String, arrow_schema::DataType)> {
+    let context = QueryContext::arc();
+    let statement = QueryLanguageParser::parse_sql(sql, &context).unwrap();
+    let plan = engine.planner().plan(&statement, context).await.unwrap();
+    let plan = engine.engine_state().optimize_logical_plan(plan).unwrap();
+    plan.schema()
+        .fields()
+        .iter()
+        .map(|field| (field.name().clone(), field.data_type().clone()))
+        .collect()
+}
+
+async fn optimized_plan(engine: &crate::query_engine::QueryEngineRef) -> String {
+    optimized_plan_for(
+        engine,
+        "SELECT f.host, d.area, AVG(f.value * d.weight) AS score FROM fact f JOIN dim d ON f.host = d.host GROUP BY f.host, d.area",
+    )
+    .await
 }
 
 #[tokio::test]
@@ -118,6 +143,155 @@ async fn factorized_join_agg_matches_with_dist_planner() {
     let rewritten = optimized_plan(&engine(true, true)).await;
     assert_ne!(baseline, rewritten, "{rewritten}");
     assert!(rewritten.contains("partial_nv"), "{rewritten}");
+}
+
+#[tokio::test]
+async fn duplicate_right_group_key_keeps_baseline() {
+    let query_engine = engine(true, false);
+    for aggregate in ["AVG", "SUM"] {
+        let sql = format!(
+            "SELECT f.host AS left_host, d.host AS right_host, {aggregate}(f.value * d.weight) AS score FROM fact f JOIN dim d ON f.host = d.host GROUP BY f.host, d.host"
+        );
+        let plan = optimized_plan_for(&query_engine, &sql).await;
+        let baseline = optimized_plan_for(&engine(false, false), &sql).await;
+        assert!(!plan.contains("partial_nv"), "{plan}");
+        assert_eq!(plan, baseline);
+        assert_eq!(
+            optimized_plan_schema_for(&query_engine, &sql).await,
+            vec![
+                ("left_host".to_string(), arrow_schema::DataType::Utf8),
+                ("right_host".to_string(), arrow_schema::DataType::Utf8),
+                ("score".to_string(), arrow_schema::DataType::Float64),
+            ]
+        );
+        let rows = query_output(&query_engine, &sql).await;
+        assert_eq!(
+            rows,
+            vec![vec!["a".to_string(), "a".to_string(), "6".to_string()]]
+        );
+    }
+}
+
+#[tokio::test]
+async fn reconstruction_uses_float_counts_and_nulls_empty_products() {
+    use datafusion_common::tree_node::TreeNode;
+    use datafusion_expr::{Expr, LogicalPlan};
+    use datafusion_optimizer::OptimizerRule;
+
+    let engine = engine(true, false);
+    for aggregate in ["AVG", "SUM"] {
+        let sql = format!(
+            "SELECT f.host, d.area, {aggregate}(f.value * d.weight) AS score FROM fact f JOIN dim d ON f.host = d.host GROUP BY f.host, d.area"
+        );
+        let context = QueryContext::arc();
+        let statement = QueryLanguageParser::parse_sql(&sql, &context).unwrap();
+        let logical = engine
+            .planner()
+            .plan(&statement, context.clone())
+            .await
+            .unwrap();
+        let mut optimizer_options = datafusion::config::ConfigOptions::default();
+        optimizer_options
+            .extensions
+            .insert(crate::options::FactorizedJoinAggOptions { enabled: true });
+        let optimizer_config = datafusion_optimizer::OptimizerContext::new_with_config_options(
+            Arc::new(optimizer_options),
+        );
+        let logical = logical
+            .transform_up(|plan| {
+                datafusion_optimizer::extract_equijoin_predicate::ExtractEquijoinPredicate::new()
+                    .rewrite(plan, &optimizer_config)
+            })
+            .unwrap()
+            .data;
+        let LogicalPlan::Projection(planner_projection) = logical else {
+            panic!("expected planner projection after equijoin extraction");
+        };
+        let LogicalPlan::Aggregate(agg) = planner_projection.input.as_ref() else {
+            panic!("expected aggregate below planner projection");
+        };
+        let agg = agg.clone();
+        let transformed = crate::optimizer::factorized_join_agg::FactorizedJoinAggRule
+            .rewrite(LogicalPlan::Aggregate(agg), &optimizer_config)
+            .unwrap();
+        assert!(
+            transformed.transformed,
+            "factorized rule did not rewrite {sql}"
+        );
+        let rewritten = transformed.data;
+        let LogicalPlan::Projection(projection) = &rewritten else {
+            panic!("expected reconstruction projection: {rewritten:?}");
+        };
+        let expression = match projection.expr.last().unwrap() {
+            Expr::Alias(alias) => alias.expr.as_ref(),
+            expr => expr,
+        };
+        let input_schema = projection.input.schema();
+        let physical = create_physical_expr(
+            expression,
+            input_schema,
+            &ExecutionProps::new(),
+            &PhysicalPlanningContext::default(),
+        )
+        .unwrap();
+
+        let cases = [
+            (1_i64 << 32, 1_i64 << 32, false),
+            (1_i64 << 32, 1_i64 << 31, false),
+            (0, 1_i64 << 32, true),
+            (1_i64 << 32, 0, true),
+        ];
+        for (left_count, right_count, empty) in cases {
+            let schema = Arc::new(input_schema.as_arrow().clone());
+            let columns: Vec<ArrayRef> = input_schema
+                .fields()
+                .iter()
+                .map(|field| match field.name() {
+                    name if name.contains("partial_nv") => {
+                        Arc::new(Int64Array::from(vec![left_count])) as ArrayRef
+                    }
+                    name if name.contains("partial_nw") => {
+                        Arc::new(Int64Array::from(vec![right_count])) as ArrayRef
+                    }
+                    name if name.contains("partial_sv") => {
+                        Arc::new(Float64Array::from(vec![if left_count == 0 {
+                            None
+                        } else {
+                            Some(left_count as f64 * 2.0)
+                        }])) as ArrayRef
+                    }
+                    name if name.contains("partial_sw") => {
+                        Arc::new(Float64Array::from(vec![if right_count == 0 {
+                            None
+                        } else {
+                            Some(right_count as f64 * 3.0)
+                        }])) as ArrayRef
+                    }
+                    _ if field.data_type() == &arrow_schema::DataType::Utf8 => {
+                        Arc::new(StringArray::from(vec![Some("a")])) as ArrayRef
+                    }
+                    _ => panic!("unexpected reconstruction input field: {field:?}"),
+                })
+                .collect();
+            let batch = ArrowRecordBatch::try_new(schema, columns).unwrap();
+            let result = physical.evaluate(&batch).unwrap().into_array(1).unwrap();
+            let value = ScalarValue::try_from_array(result.as_ref(), 0).unwrap();
+            if empty {
+                assert_eq!(value, ScalarValue::Float64(None), "{aggregate}");
+            } else {
+                let ScalarValue::Float64(Some(value)) = value else {
+                    panic!("expected Float64 result, got {value:?}");
+                };
+                assert!(value >= 0.0, "{aggregate}: {value}");
+                let expected = if aggregate == "AVG" {
+                    6.0
+                } else {
+                    6.0 * left_count as f64 * right_count as f64
+                };
+                assert_eq!(value, expected, "{aggregate}");
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -459,9 +633,8 @@ async fn near_miss_shapes_stay_on_the_baseline() {
     }
 }
 
-/// The per-query session config that `engine_context` builds is where the
-/// rewrite reads its switch, so the contract is asserted on that state
-/// directly (the logical `optimize_logical_plan` path never sees SET).
+/// Optimize through the per-query state so session SET overrides exercise the
+/// actual optimizer extension, not just the option value.
 #[tokio::test]
 async fn session_set_false_overrides_server_true() {
     use crate::options::FactorizedJoinAggOptions;
@@ -484,6 +657,20 @@ async fn session_set_false_overrides_server_true() {
         .expect("server default present")
         .enabled;
     assert!(inherited_on);
+    let statement = QueryLanguageParser::parse_sql(METRIC_AVG_SQL, &ctx).unwrap();
+    let logical = engine
+        .planner()
+        .plan(&statement, ctx.clone())
+        .await
+        .unwrap();
+    let inherited_plan = inherited.optimize(&logical).unwrap();
+    assert!(
+        inherited_plan
+            .display_indent()
+            .to_string()
+            .contains("partial_nv"),
+        "server true must rewrite"
+    );
 
     // Session SET false: the same state now reports disabled.
     ctx.configuration_parameter()
@@ -498,6 +685,14 @@ async fn session_set_false_overrides_server_true() {
         .expect("extension present after SET")
         .enabled;
     assert!(!now, "session SET false must override server true");
+    let overridden_plan = overridden.optimize(&logical).unwrap();
+    assert!(
+        !overridden_plan
+            .display_indent()
+            .to_string()
+            .contains("partial_nv"),
+        "session false must keep baseline plan"
+    );
 
     // Session SET true on a server-OFF engine: enabled.
     let (metrics2, nodes2) = metrics_and_nodes();
@@ -510,7 +705,7 @@ async fn session_set_false_overrides_server_true() {
     ctx2.configuration_parameter()
         .set_experimental_enable_factorized_join_agg(true);
     let enabled = df_engine_off
-        .engine_context_for_tests(ctx2)
+        .engine_context_for_tests(ctx2.clone())
         .state()
         .config()
         .options()
@@ -519,4 +714,20 @@ async fn session_set_false_overrides_server_true() {
         .expect("extension present after SET true")
         .enabled;
     assert!(enabled);
+    let statement2 = QueryLanguageParser::parse_sql(METRIC_AVG_SQL, &ctx2).unwrap();
+    let logical2 = engine_off
+        .planner()
+        .plan(&statement2, ctx2.clone())
+        .await
+        .unwrap();
+    let enabled_ctx = df_engine_off.engine_context_for_tests(ctx2);
+    let enabled_state = enabled_ctx.state();
+    let enabled_plan = enabled_state.optimize(&logical2).unwrap();
+    assert!(
+        enabled_plan
+            .display_indent()
+            .to_string()
+            .contains("partial_nv"),
+        "session true must rewrite"
+    );
 }

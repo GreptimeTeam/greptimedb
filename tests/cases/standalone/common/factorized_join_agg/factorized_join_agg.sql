@@ -52,6 +52,12 @@ SELECT m.mhost, n.area, SUM(m.mval * n.wgt) AS total
 FROM ffx_metrics m JOIN ffx_nodes n ON m.mhost = n.nhost
 GROUP BY m.mhost, n.area ORDER BY m.mhost, n.area;
 
+-- Grouping by the right-side join key keeps the matching key pair intact.
+-- SQLNESS PROTOCOL MYSQL
+SELECT m.mhost AS left_host, n.nhost AS right_host, AVG(m.mval * n.wgt) AS score
+FROM ffx_metrics m JOIN ffx_nodes n ON m.mhost = n.nhost
+GROUP BY m.mhost, n.nhost ORDER BY m.mhost, n.nhost;
+
 -- The rewrite appears in the plan as partial count/sum aggregates joined.
 -- SQLNESS PROTOCOL MYSQL
 EXPLAIN SELECT m.mhost, n.area, AVG(m.mval * n.wgt) AS score
@@ -72,6 +78,12 @@ SET experimental_enable_factorized_join_agg = false;
 SELECT m.mhost, n.area, AVG(m.mval * n.wgt) AS score
 FROM ffx_metrics m JOIN ffx_nodes n ON m.mhost = n.nhost
 GROUP BY m.mhost, n.area ORDER BY m.mhost, n.area;
+
+-- SET false restores the plain aggregate plan without partial aliases.
+-- SQLNESS PROTOCOL MYSQL
+EXPLAIN SELECT m.mhost, n.area, AVG(m.mval * n.wgt) AS score
+FROM ffx_metrics m JOIN ffx_nodes n ON m.mhost = n.nhost
+GROUP BY m.mhost, n.area;
 
 -- SQLNESS PROTOCOL MYSQL
 DROP TABLE ffx_metrics;
