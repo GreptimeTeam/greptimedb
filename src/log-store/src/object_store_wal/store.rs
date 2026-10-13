@@ -4335,14 +4335,13 @@ mod tests {
         (store, io, parked)
     }
 
-    async fn wait_for_in_flight(io: &ParkedIo, count: usize) {
-        timeout(WAIT, async {
-            while io.in_flight.load(Ordering::SeqCst) != count {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+    /// Polls until `settled` holds.
+    async fn wait_until(settled: impl Fn() -> bool) {
+        let deadline = Instant::now() + WAIT;
+        while !settled() {
+            assert!(Instant::now() < deadline, "the condition never held");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
     }
 
     async fn assert_nothing_parks(
@@ -4386,7 +4385,7 @@ mod tests {
         for object_seq in (1..depth).rev() {
             wave.remove(&object_seq).unwrap().send(true).unwrap();
         }
-        wait_for_in_flight(&io, 1).await;
+        wait_until(|| io.in_flight.load(Ordering::SeqCst) == 1).await;
         assert!(stream.next().now_or_never().is_none());
         assert_nothing_parks(&mut parked).await;
         wave.remove(&0).unwrap().send(true).unwrap();
@@ -4431,7 +4430,7 @@ mod tests {
 
         // The fetch of object 5 fails before any earlier fetch completes.
         wave.remove(&failed).unwrap().send(false).unwrap();
-        wait_for_in_flight(&io, READ_PREFETCH_DEPTH - 1).await;
+        wait_until(|| io.in_flight.load(Ordering::SeqCst) == READ_PREFETCH_DEPTH - 1).await;
         for release in wave.into_values() {
             release.send(true).unwrap();
         }
@@ -4651,13 +4650,7 @@ mod tests {
         }
         assert!(budget.available_permits() < READ_PREFETCH_BYTES);
         release_tx.send(()).unwrap();
-        timeout(WAIT, async {
-            while budget.available_permits() != READ_PREFETCH_BYTES {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        wait_until(|| budget.available_permits() == READ_PREFETCH_BYTES).await;
         store.stop().await.unwrap();
     }
 
@@ -7921,15 +7914,6 @@ mod tests {
                 matches!(&error, Error::ObjectStoreWal { source, .. } if Arc::ptr_eq(source, &terminal)),
                 "unexpected error: {error:?}"
             );
-        }
-
-        /// Polls until `settled` holds.
-        async fn wait_until(settled: impl Fn() -> bool) {
-            let deadline = Instant::now() + WAIT;
-            while !settled() {
-                assert!(Instant::now() < deadline, "the actor never settled");
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
         }
 
         #[tokio::test]
