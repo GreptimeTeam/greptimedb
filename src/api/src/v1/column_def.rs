@@ -94,8 +94,14 @@ pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         }
     }
 
-    ColumnSchema::new(&column_def.name, data_type.into(), column_def.is_nullable)
-        .with_metadata(metadata)
+    let schema = ColumnSchema::new(&column_def.name, data_type.into(), column_def.is_nullable)
+        .with_metadata(metadata);
+    schema
+        .compression_options()
+        .context(error::InvalidColumnCompressionSnafu {
+            column: &column_def.name,
+        })?;
+    schema
         .with_time_index(column_def.semantic_type() == SemanticType::Timestamp)
         .with_default_constraint(constraint)
         .context(error::InvalidColumnDefaultConstraintSnafu {
@@ -336,6 +342,35 @@ mod tests {
 
         let metadata = collect_column_options(column_def.options.as_ref());
         assert!(metadata.contains_key(COMPRESSION_KEY));
+    }
+
+    #[test]
+    fn test_reject_invalid_compression_metadata() {
+        use common_error::ext::ErrorExt;
+        use common_error::status_code::StatusCode;
+
+        for (data_type, json) in [
+            (ConcreteDataType::string_datatype(), r#"{"level":23}"#),
+            (ConcreteDataType::string_datatype(), r#"{"level":0}"#),
+            (ConcreteDataType::string_datatype(), r#"{"page_size":"0B"}"#),
+            (ConcreteDataType::string_datatype(), r#"{"type":"lz4"}"#),
+            (ConcreteDataType::string_datatype(), "not json"),
+            (
+                ConcreteDataType::list_datatype(std::sync::Arc::new(
+                    ConcreteDataType::string_datatype(),
+                )),
+                r#"{"level":3}"#,
+            ),
+        ] {
+            let schema =
+                ColumnSchema::new("test", data_type, true).with_metadata(HashMap::from([(
+                    COMPRESSION_KEY.to_string(),
+                    json.to_string(),
+                )]));
+            let column_def = try_as_column_def(&schema, false).unwrap();
+            let err = try_as_column_schema(&column_def).unwrap_err();
+            assert_eq!(StatusCode::InvalidArguments, err.status_code(), "{json}");
+        }
     }
 
     #[test]

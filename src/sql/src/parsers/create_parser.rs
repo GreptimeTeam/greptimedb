@@ -1091,7 +1091,14 @@ impl<'a> ParserContext<'a> {
                     msg: "expect WITH (...) after COMPRESSION keyword",
                 }
             );
-            for (key, _) in options.iter() {
+            for (key, value) in options.iter() {
+                ensure!(
+                    value.as_string().is_some(),
+                    InvalidColumnOptionSnafu {
+                        name: column_name.to_string(),
+                        msg: format!("COMPRESSION option {key} requires a scalar value"),
+                    }
+                );
                 ensure!(
                     validate_column_compression_create_option(key),
                     InvalidColumnOptionSnafu {
@@ -3238,6 +3245,19 @@ CREATE TABLE log (
         let parse = |sql: &str| {
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
         };
+
+        for value in ["[3]", "NULL", "['zstd']"] {
+            for key in ["type", "level", "page_size"] {
+                let sql = format!(
+                    "CREATE TABLE t (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH ({key}={value}))"
+                );
+                let err = parse(&sql).unwrap_err();
+                assert!(
+                    err.to_string().contains("requires a scalar value"),
+                    "{sql}: {err}"
+                );
+            }
+        }
 
         let sql = r"
 CREATE TABLE spans (

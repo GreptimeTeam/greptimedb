@@ -77,3 +77,25 @@ CREATE TABLE bad (ts TIMESTAMP TIME INDEX, j JSON2 COMPRESSION WITH (level = 3))
 
 Error: 1004(InvalidArguments), Invalid compression option: compression options are not supported on column j of type Json2"<Null>"
 
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (level = [3]));
+
+Error: 1004(InvalidArguments), Invalid column option, column name: s, error: COMPRESSION option level requires a scalar value
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (page_size = NULL));
+
+Error: 1004(InvalidArguments), Invalid column option, column name: s, error: COMPRESSION option page_size requires a scalar value
+
+CREATE TABLE bad (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY COMPRESSION WITH (level = 3)
+) WITH ('sst_format' = 'primary_key', 'memtable.type' = 'time_series');
+
+Error: 1004(InvalidArguments), Invalid region options, COMPRESSION on tag column host requires flat SST format and dense primary key encoding
+
+CREATE TABLE bad (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY COMPRESSION WITH (level = 3)
+) WITH ('primary_key_encoding' = 'sparse');
+
+Error: 1004(InvalidArguments), Invalid region options, COMPRESSION on tag column host requires flat SST format and dense primary key encoding
+

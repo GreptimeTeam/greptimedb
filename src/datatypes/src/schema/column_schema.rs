@@ -440,8 +440,13 @@ impl ColumnSchema {
         match self.metadata.get(COMPRESSION_KEY) {
             None => Ok(None),
             Some(json) => {
-                let options =
-                    serde_json::from_str(json).context(error::DeserializeSnafu { json })?;
+                let options = serde_json::from_str(json).map_err(|e| {
+                    error::InvalidCompressionOptionSnafu {
+                        msg: format!("invalid compression metadata for column {}: {e}", self.name),
+                    }
+                    .build()
+                })?;
+                self.validate_compression_options(&options)?;
                 Ok(Some(options))
             }
         }
@@ -450,6 +455,16 @@ impl ColumnSchema {
     /// Sets the SST compression options. Nested types are rejected: their values are
     /// stored in child columns that the options would not reach.
     pub fn with_compression_options(mut self, options: CompressionOptions) -> Result<Self> {
+        self.validate_compression_options(&options)?;
+        self.metadata.insert(
+            COMPRESSION_KEY.to_string(),
+            serde_json::to_string(&options).context(error::SerializeSnafu)?,
+        );
+        Ok(self)
+    }
+
+    fn validate_compression_options(&self, options: &CompressionOptions) -> Result<()> {
+        options.validate()?;
         ensure!(
             !self.data_type.as_arrow_type().is_nested(),
             error::InvalidCompressionOptionSnafu {
@@ -459,11 +474,7 @@ impl ColumnSchema {
                 ),
             }
         );
-        self.metadata.insert(
-            COMPRESSION_KEY.to_string(),
-            serde_json::to_string(&options).context(error::SerializeSnafu)?,
-        );
-        Ok(self)
+        Ok(())
     }
 
     pub fn extension_type<E>(&self) -> Result<Option<E>>
@@ -1019,6 +1030,26 @@ pub struct CompressionOptions {
 }
 
 impl CompressionOptions {
+    fn validate(&self) -> Result<()> {
+        if let Some(level) = self.level {
+            ensure!(
+                ZSTD_LEVELS.contains(&level),
+                error::InvalidCompressionOptionSnafu {
+                    msg: format!("invalid level: {level}, expected: an integer in 1..=22"),
+                }
+            );
+        }
+        if let Some(page_size) = self.page_size {
+            ensure!(
+                page_size.as_bytes() > 0,
+                error::InvalidCompressionOptionSnafu {
+                    msg: "page_size must be positive",
+                }
+            );
+        }
+        Ok(())
+    }
+
     /// Returns the options as `COMPRESSION WITH (...)` key-value pairs.
     pub fn to_options_map(&self) -> HashMap<String, String> {
         let mut map = HashMap::from([(

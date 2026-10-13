@@ -28,3 +28,17 @@ CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (page_size 
 CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (codec = 'zstd'));
 
 CREATE TABLE bad (ts TIMESTAMP TIME INDEX, j JSON2 COMPRESSION WITH (level = 3));
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (level = [3]));
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (page_size = NULL));
+
+CREATE TABLE bad (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY COMPRESSION WITH (level = 3)
+) WITH ('sst_format' = 'primary_key', 'memtable.type' = 'time_series');
+
+CREATE TABLE bad (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY COMPRESSION WITH (level = 3)
+) WITH ('primary_key_encoding' = 'sparse');
