@@ -148,14 +148,6 @@ struct CsvRecordParser {
 
 impl RecordParser for CsvRecordParser {
     fn feed(&mut self, data: &[u8]) -> PgWireResult<Vec<ParsedRow>> {
-        // Strict arrow-csv decoder protocol: `flush()` may ONLY be called
-        // after `decode()` returned 0 (a full batch of complete records is
-        // buffered) — flushing a partial batch mid-stream, or calling it
-        // while a record spans the chunk boundary, corrupts subsequent
-        // decoding (verified against arrow-csv 56.2.0: chunked feeds
-        // mis-parse fields whenever boundaries land unluckily). Records
-        // therefore surface only in full `COPY_IN_FLUSH_ROWS` batches
-        // here; a trailing partial batch is emitted by `finish`.
         let mut buf = data;
         let mut rows = Vec::new();
         while !buf.is_empty() {
