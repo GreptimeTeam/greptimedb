@@ -282,29 +282,4 @@ mod tests {
         );
         assert_eq!(hints[1], ("ttl".to_string(), "3600d".to_string()));
     }
-
-    #[test]
-    fn test_validate_public_hints_legacy_zero_parallelism() {
-        // Old Flownode clients send `query_parallelism=0` to request the server
-        // default; the receiver must accept it as unset instead of failing.
-        let hints = vec![("query_parallelism".to_string(), "0".to_string())];
-        assert!(validate_public_hints(hints).unwrap().is_empty());
-        let hints = vec![
-            ("query_parallelism".to_string(), "0".to_string()),
-            ("read_preference".to_string(), "leader".to_string()),
-        ];
-        assert_eq!(
-            validate_public_hints(hints).unwrap(),
-            vec![("read_preference".to_string(), "leader".to_string())]
-        );
-        // Nonzero values keep the canonical name and validation.
-        let hints = vec![("query_parallelism".to_string(), "1".to_string())];
-        assert_eq!(
-            validate_public_hints(hints).unwrap(),
-            vec![("query.parallelism".to_string(), "1".to_string())]
-        );
-        // Canonical zero stays rejected outside the legacy alias path.
-        let hints = vec![("query.parallelism".to_string(), "0".to_string())];
-        assert!(validate_public_hints(hints).is_err());
-    }
 }

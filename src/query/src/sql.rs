@@ -881,6 +881,20 @@ pub fn show_query_option(
             .to_string()
         }
         "query.parallelism" => context.state().config().target_partitions().to_string(),
+        "datafusion.optimizer.filter_null_join_keys"
+            if context
+                .state()
+                .analyzer()
+                .rules
+                .iter()
+                .any(|rule| rule.name() == "DistPlannerAnalyzer")
+                && context
+                    .query_ctx()
+                    .extension("datafusion.optimizer.filter_null_join_keys")
+                    .is_none() =>
+        {
+            "true".to_string()
+        }
         _ => context
             .state()
             .config_options()

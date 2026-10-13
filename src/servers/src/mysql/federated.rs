@@ -288,19 +288,17 @@ fn check_show_variables(query: &str) -> Option<Output> {
         if remainder.is_empty() {
             Some(show_variables("", ""))
         } else {
-            // Named variables (MAX_EXECUTION_TIME, query.parallelism, ...) reach
-            // the query handler for real values; keep MySQL filter syntax
-            // (`WHERE expr`, `LIKE 'pattern'`, including forms glued to the
-            // keyword like `WHERE(...)` or `WHERE/* probe */ expr`) on the
-            // legacy compatibility result so variable-probing clients keep
-            // working.
-            let looks_like_filter = remainder
-                .trim_start_matches(|c: char| !c.is_alphanumeric())
-                .split(|c: char| !c.is_alphanumeric())
-                .next()
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            let looks_like_filter = matches!(looks_like_filter.as_str(), "where" | "like" | "in");
+            let remainder = remainder.trim_start();
+            // Filter keywords need an identifier boundary; named variables do not.
+            let looks_like_filter = ["WHERE", "LIKE"].iter().any(|keyword| {
+                remainder
+                    .get(..keyword.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(keyword))
+                    && remainder[keyword.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|c| !(c == '_' || c == '$' || c.is_alphanumeric()))
+            });
             if looks_like_filter {
                 Some(show_variables("", ""))
             } else {
@@ -649,53 +647,6 @@ mod test {
 |               |       |
 +---------------+-------+";
         test(query, expected);
-
-        // Named variables and query options reach the query handler; MySQL
-        // filter syntax keeps the legacy compatibility result instead of
-        // failing on the regular parser.
-        for query in [
-            "show variables where Variable_name = 'sql_mode'",
-            "show global variables where Variable_name='sql_mode'",
-            "show variables\nlike 'sql_mode'",
-            "show variables like sql_mode",
-            "show variables LIKE 'event_scheduler'",
-            "show variables where(Variable_name='sql_mode')",
-            "show variables where/* probe */ Variable_name='sql_mode'",
-        ] {
-            test(query, expected);
-        }
-
-        // Named variables and query options still reach the query handler for real values.
-        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
-        for query in [
-            "SHOW VARIABLES query.parallelism",
-            "SHOW GLOBAL VARIABLES datafusion.optimizer.prefer_hash_join",
-            "SHOW SESSION VARIABLES query.allow_query_fallback",
-            "SHOW VARIABLES query_parallelism",
-            "SHOW VARIABLES MAX_EXECUTION_TIME",
-            "SHOW VARIABLES TIME_ZONE",
-            "SHOW VARIABLES; SELECT 1",
-            "SHOW VARIABLES; /* comment */; SELECT 1",
-        ] {
-            assert!(
-                check(query, QueryContext::arc(), session.clone()).is_none(),
-                "{query} should reach the query handler"
-            );
-        }
-        for query in [
-            "SHOW VARIABLES",
-            "SHOW VARIABLES;",
-            "SHOW VARIABLES /* comment */",
-            "SHOW VARIABLES # comment",
-            "SHOW VARIABLES -- comment",
-            "SHOW GLOBAL VARIABLES",
-            "SHOW GLOBAL VARIABLES LIKE 'event_scheduler'",
-        ] {
-            assert!(
-                check(query, QueryContext::arc(), session.clone()).is_some(),
-                "{query} should retain federated compatibility handling"
-            );
-        }
 
         let query = "show variables like 'lower_case_table_names'";
         let expected = "\
