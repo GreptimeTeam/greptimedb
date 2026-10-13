@@ -674,68 +674,39 @@ async fn test_windowed_sort_sort_column_cast_time_unit_mismatch(instance: Arc<dy
         check_output_stream(output, rows_by_cast).await;
     }
 
-    // The regression itself: ordering by the cast, or by a function wrapper that casts inside the
-    // function, has to return exactly the same rows as the controls above. Every combination is
-    // collected first so that a single run reports the whole scope of the bug.
-    let mut failures = Vec::new();
+    // Ordering by the cast or a function wrapper that casts inside the function returns the same
+    // rows as the controls above.
     for table in ["f05_mito_wc", "f05_metric_wc"] {
         for parallelism in [1, 4] {
-            for (sql, range_side, expected) in [
+            for (sql, expected) in [
                 (
                     format!("SELECT CAST(ts AS TIMESTAMP(0)) AS t, host FROM {table} ORDER BY t"),
-                    "left side",
                     rows_by_cast,
                 ),
                 (
                     format!(
                         "SELECT CAST(ts AS TIMESTAMP(0)) AS t, host FROM {table} ORDER BY t DESC"
                     ),
-                    "right side",
                     rows_by_cast_desc,
                 ),
                 (
                     format!("SELECT to_timestamp_seconds(ts) AS t, host FROM {table} ORDER BY t"),
-                    "left side",
                     rows_by_seconds_wrapper,
                 ),
                 (
                     format!(
                         "SELECT to_timestamp_seconds(ts) AS t, host FROM {table} ORDER BY t DESC"
                     ),
-                    "right side",
                     rows_by_seconds_wrapper_desc,
                 ),
             ] {
-                match try_execute_sql_with_query_parallelism(&frontend, &sql, parallelism).await {
-                    Ok(output) => check_output_stream(output, expected).await,
-                    Err((code, message)) => {
-                        // Only this exact error is the bug under test, anything else is a
-                        // different regression.
-                        assert_eq!(
-                            StatusCode::EngineExecuteQuery,
-                            code,
-                            "`{sql}` (query_parallelism={parallelism}) failed with an unexpected error: {message}"
-                        );
-                        assert!(
-                            message.contains("working range") && message.contains(range_side),
-                            "`{sql}` (query_parallelism={parallelism}) failed with an unexpected error: {message}"
-                        );
-                        failures.push(format!(
-                            "`{sql}` (query_parallelism={parallelism}, {range_side}): code {} {message}",
-                            code as u32
-                        ));
-                    }
-                }
+                let output = execute_sql_with_query_parallelism(&frontend, &sql, parallelism)
+                    .await
+                    .data;
+                check_output_stream(output, expected).await;
             }
         }
     }
-    assert!(
-        failures.is_empty(),
-        "the sort column of the windowed sort must keep its own time unit, but it reported a \
-         working range error for {} queries:\n{}",
-        failures.len(),
-        failures.join("\n")
-    );
 }
 
 #[apply(both_instances_cases)]
@@ -3506,31 +3477,6 @@ async fn execute_sql_with_query_parallelism(
     let mut query_ctx = QueryContext::with_db_name(None);
     query_ctx.set_extension(QUERY_PARALLELISM_HINT, parallelism.to_string());
     execute_sql_with(instance, sql, Arc::new(query_ctx)).await
-}
-
-/// Executes `sql` with the given query parallelism and returns its output, or the status code and
-/// message of the error it failed with.
-///
-/// The output stream is collected, as execution errors (the windowed sort only fails once its
-/// input is consumed) are raised while polling the stream instead of while querying.
-async fn try_execute_sql_with_query_parallelism(
-    instance: &Arc<Instance>,
-    sql: &str,
-    parallelism: usize,
-) -> Result<OutputData, (StatusCode, String)> {
-    let mut query_ctx = QueryContext::with_db_name(None);
-    query_ctx.set_extension(QUERY_PARALLELISM_HINT, parallelism.to_string());
-
-    match instance.do_query(sql, Arc::new(query_ctx)).await.remove(0) {
-        Ok(output) => match output.data {
-            OutputData::Stream(stream) => match util::collect_batches(stream).await {
-                Ok(batches) => Ok(OutputData::RecordBatches(batches)),
-                Err(err) => Err((err.status_code(), err.output_msg())),
-            },
-            data => Ok(data),
-        },
-        Err(err) => Err((err.status_code(), err.output_msg())),
-    }
 }
 
 async fn try_execute_sql(instance: &Arc<Instance>, sql: &str) -> server_error::Result<Output> {

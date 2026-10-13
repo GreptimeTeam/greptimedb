@@ -256,9 +256,9 @@ fn is_time_index_expr(
 ///
 /// A cast (or a hidden cast inside a function wrapper) that changes the time unit changes the
 /// values of the sort column, so the working ranges derived from the time index, which keep the
-/// unit of the time index, no longer apply. A cast adding a timezone to a naive timestamp
-/// re-interprets the underlying values in the same way. Only a target that keeps both the unit
-/// and the values of its source can still be the time index.
+/// unit of the time index, no longer apply. The optimizer conservatively rejects every cast that
+/// adds a timezone to a naive timestamp, including UTC, even though UTC has a zero offset. Only a
+/// target that keeps both the unit and the values of its source can still be the time index.
 fn preserves_timestamp_values(target: &DataType, source: &DataType) -> bool {
     matches!(
         (target, source),
@@ -539,8 +539,7 @@ mod test {
     fn test_is_time_index_expr_rejects_timezone_adding_cast() {
         let scan = new_region_scan();
 
-        // The cast keeps the time unit but adds a timezone, which re-interprets the
-        // underlying values, so it is no longer the time index.
+        // The optimizer conservatively rejects casts adding any timezone to a naive timestamp.
         let adds_timezone = Arc::new(CastExpr::new(
             Arc::new(PhysicalColumn::new("ts", 1)),
             DataType::Timestamp(TimeUnit::Nanosecond, Some(Arc::from("+07:00"))),
@@ -548,8 +547,7 @@ mod test {
         )) as Arc<dyn PhysicalExpr>;
         assert!(!is_time_index_expr(&scan, &adds_timezone).unwrap());
 
-        // Adding the `UTC` timezone also shifts the underlying values, so it is rejected
-        // as well.
+        // UTC has a zero offset, but naive-to-aware timestamp casts are all rejected.
         let adds_utc_timezone = Arc::new(CastExpr::new(
             Arc::new(PhysicalColumn::new("ts", 1)),
             DataType::Timestamp(TimeUnit::Nanosecond, Some(Arc::from("UTC"))),
@@ -637,8 +635,8 @@ mod test {
             &naive_nanosecond
         ));
 
-        // Dropping the timezone of an aware timestamp keeps the underlying values, so it is
-        // value-preserving; only the reverse direction re-interprets them.
+        // Dropping an aware timestamp's timezone keeps the underlying values. Adding one to a
+        // naive timestamp is conservatively treated as non-preserving by the predicate.
         assert!(preserves_timestamp_values(
             &naive_nanosecond,
             &aware_nanosecond
@@ -809,12 +807,7 @@ mod test {
     }
 
     fn new_region_scan_with_unit(unit: TimeUnit) -> Arc<dyn ExecutionPlan> {
-        let timestamp_type = match unit {
-            TimeUnit::Second => ConcreteDataType::timestamp_second_datatype(),
-            TimeUnit::Millisecond => ConcreteDataType::timestamp_millisecond_datatype(),
-            TimeUnit::Microsecond => ConcreteDataType::timestamp_microsecond_datatype(),
-            TimeUnit::Nanosecond => ConcreteDataType::timestamp_nanosecond_datatype(),
-        };
+        let timestamp_type = ConcreteDataType::timestamp_datatype(unit.into());
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new("value", ConcreteDataType::int32_datatype(), false),
             ColumnSchema::new("ts", timestamp_type.clone(), false),
