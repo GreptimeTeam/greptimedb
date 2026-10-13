@@ -416,7 +416,7 @@ mod tests {
     /// Regression test for chunk-boundary corruption: CopyData chunking is
     /// arbitrary (records may split mid-field), and an earlier feed loop
     /// flushed partial batches at record-boundary chunk ends, which
-    /// arrow-csv does not permit mid-stream — fields then mis-parse
+    /// arrow-csv does not permit mid-stream — fields then parse
     /// ("00001h,ost-001u,..."). Feed the same payload at many chunk sizes
     /// and verify EVERY cell.
     #[test]
