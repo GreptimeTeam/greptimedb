@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::{iter, mem};
 
@@ -20,10 +20,8 @@ use api::v1::region::{DeleteRequests as RegionDeleteRequests, RegionRequestHeade
 use api::v1::{DeleteRequests, RowDeleteRequests};
 use catalog::CatalogManagerRef;
 use common_meta::node_manager::{AffectedRows, NodeManagerRef};
-use common_meta::peer::Peer;
 use common_query::Output;
 use common_telemetry::tracing_context::TracingContext;
-use futures_util::future;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -31,32 +29,43 @@ use table::TableRef;
 use table::requests::DeleteRequest as TableDeleteRequest;
 
 use crate::error::{
-    CatalogSnafu, FindRegionLeaderSnafu, InvalidDeleteRequestSnafu, JoinTaskSnafu,
-    MissingTimeIndexColumnSnafu, RequestDeletesSnafu, Result, TableNotFoundSnafu,
+    CatalogSnafu, InvalidDeleteRequestSnafu, JoinTaskSnafu, MissingTimeIndexColumnSnafu,
+    RequestDeletesSnafu, Result, TableNotFoundSnafu,
 };
 use crate::region_req_factory::RegionRequestFactory;
 use crate::req_convert::common::preprocess_row_delete_requests;
 use crate::req_convert::delete::{ColumnToRow, RowToRegion, TableToRegion};
+use crate::write_dispatcher::{WriteDispatcher, WriteDispatcherRef};
 
 pub struct Deleter {
     catalog_manager: CatalogManagerRef,
     partition_manager: PartitionRuleManagerRef,
-    node_manager: NodeManagerRef,
+    write_dispatcher: WriteDispatcherRef,
 }
 
 pub type DeleterRef = Arc<Deleter>;
 
 impl Deleter {
+    /// Creates a row deleter with the default write dispatcher.
     pub fn new(
         catalog_manager: CatalogManagerRef,
         partition_manager: PartitionRuleManagerRef,
         node_manager: NodeManagerRef,
     ) -> Self {
         Self {
+            write_dispatcher: Arc::new(WriteDispatcher::new(
+                node_manager,
+                partition_manager.clone(),
+            )),
             catalog_manager,
             partition_manager,
-            node_manager,
         }
+    }
+
+    /// Installs the dispatcher shared with the other write paths.
+    pub fn with_write_dispatcher(mut self, dispatcher: WriteDispatcherRef) -> Self {
+        self.write_dispatcher = dispatcher;
+        self
     }
 
     pub async fn handle_column_deletes(
@@ -129,50 +138,20 @@ impl Deleter {
             ..Default::default()
         });
 
-        let tasks = self
-            .group_requests_by_peer(requests)
-            .await?
-            .into_iter()
-            .map(|(peer, deletes)| {
-                let request = request_factory.build_delete(deletes);
-                let node_manager = self.node_manager.clone();
-                common_runtime::spawn_global(async move {
-                    node_manager
-                        .datanode(&peer)
-                        .await
-                        .handle(request)
-                        .await
-                        .context(RequestDeletesSnafu)
-                })
-            });
-        let results = future::try_join_all(tasks).await.context(JoinTaskSnafu)?;
-
-        let affected_rows = results
-            .into_iter()
-            .map(|resp| resp.map(|r| r.affected_rows))
-            .sum::<Result<AffectedRows>>()?;
+        let dispatcher = self.write_dispatcher.clone();
+        let request = request_factory.build_delete(requests);
+        let writes = dispatcher.prepare(vec![request]).await?;
+        let affected_rows = common_runtime::spawn_global(async move {
+            dispatcher.dispatch_prepared(writes, None).await
+        })
+        .await
+        .context(JoinTaskSnafu)?
+        .context(RequestDeletesSnafu)?
+        .affected_rows;
         crate::metrics::DIST_DELETE_ROW_COUNT
             .with_label_values(&[ctx.get_db_string().as_str()])
             .inc_by(affected_rows as u64);
         Ok(affected_rows)
-    }
-
-    async fn group_requests_by_peer(
-        &self,
-        requests: RegionDeleteRequests,
-    ) -> Result<HashMap<Peer, RegionDeleteRequests>> {
-        let mut deletes: HashMap<Peer, RegionDeleteRequests> = HashMap::new();
-
-        for req in requests.requests {
-            let peer = self
-                .partition_manager
-                .find_region_leader(req.region_id.into())
-                .await
-                .context(FindRegionLeaderSnafu)?;
-            deletes.entry(peer).or_default().requests.push(req);
-        }
-
-        Ok(deletes)
     }
 
     async fn trim_columns(
