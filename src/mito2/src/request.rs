@@ -1051,7 +1051,9 @@ pub(crate) struct CompactionFinished {
 impl CompactionFinished {
     pub fn on_success(self) {
         // only update compaction time on success
-        COMPACTION_ELAPSED_TOTAL.observe(self.start_time.elapsed().as_secs_f64());
+        COMPACTION_ELAPSED_TOTAL
+            .with_label_values(&["remote"])
+            .observe(self.start_time.elapsed().as_secs_f64());
 
         for sender in self.senders {
             sender.send(Ok(0));

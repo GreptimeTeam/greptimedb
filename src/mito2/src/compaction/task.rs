@@ -197,7 +197,9 @@ impl CompactionTask {
         }
         // This keeps the execution slot and inputs alive through worker apply.
         if receiver.await.is_ok() && succeeded {
-            crate::metrics::COMPACTION_ELAPSED_TOTAL.observe(start.elapsed().as_secs_f64());
+            crate::metrics::COMPACTION_ELAPSED_TOTAL
+                .with_label_values(&["local"])
+                .observe(start.elapsed().as_secs_f64());
         }
     }
 
