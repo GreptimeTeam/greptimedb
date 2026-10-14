@@ -2667,7 +2667,8 @@ fn record_skipped_segment(
 }
 
 /// Encodes the entries of a batch, and its release records as the single
-/// entry of [`RELEASE_REGION_ID`] at the first position of the object.
+/// entry of [`RELEASE_REGION_ID`], whose id is at position 1 of the object;
+/// segments are ordered by region id, so it is the last segment.
 fn encode_batch(
     header: Header,
     entries: Vec<Entry>,
@@ -9228,6 +9229,11 @@ mod tests {
                     run: || Box::pin(release_create_fails_transiently_durable()),
                 },
                 Case {
+                    fault: "a release whose create fails transiently, `enqueued` mode",
+                    row: Some(Row::TransientEnqueued),
+                    run: || Box::pin(release_create_fails_transiently_enqueued()),
+                },
+                Case {
                     fault: "a release whose create the object store refuses with an error that requires intervention, `enqueued` mode",
                     row: Some(Row::InterventionEnqueued),
                     run: || Box::pin(release_create_refused_enqueued()),
@@ -9520,6 +9526,52 @@ mod tests {
                     create_failures: 1,
                     sealed_objects: 2,
                     object_bytes: 2 * release_object(),
+                    deleted_objects: 1,
+                    release_records: 1,
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+            store.stop().await.unwrap();
+        }
+
+        /// The store repeats the create, and the release waits for the repeat.
+        async fn release_create_fails_transiently_enqueued() {
+            let (store, io, mut parked) =
+                open_parking_creates(memory_store(), &enqueued(eager())).await;
+            let before = Counters::sample();
+            let region_id = region(1);
+            let released = spawn_release(&store, region_id);
+            let (object_seq, create) = next_parked_operation(&mut parked).await;
+            assert_eq!(1, object_seq);
+            create.send(false).unwrap();
+            let (object_seq, repeat) = next_parked_operation(&mut parked).await;
+            assert_eq!(1, object_seq);
+            assert!(!released.is_finished());
+            assert_eq!(0, failing_stores());
+            assert_eq!(vec![0], object_seqs(io.as_ref()).await);
+            assert_indexed(io.as_ref(), &[0]).await;
+            assert_eq!(
+                Counters {
+                    create_failures: 1,
+                    sealed_objects: 1,
+                    object_bytes: release_object(),
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+
+            repeat.send(true).unwrap();
+            timeout(WAIT, released).await.unwrap().unwrap().unwrap();
+            assert_eq!(vec![1], collected_object_seqs(&store).await);
+            assert_indexed(io.as_ref(), &[1]).await;
+            assert_eq!(
+                Counters {
+                    created_objects: 1,
+                    seal_to_durable: 1,
+                    create_failures: 1,
+                    sealed_objects: 1,
+                    object_bytes: release_object(),
                     deleted_objects: 1,
                     release_records: 1,
                     ..Counters::default()
