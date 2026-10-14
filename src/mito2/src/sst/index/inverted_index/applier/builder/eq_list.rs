@@ -26,10 +26,11 @@ use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBui
 impl InvertedIndexApplierBuilder<'_> {
     /// Collects an eq expression in the form of `column = lit`.
     pub(crate) fn collect_eq(&mut self, left: &DfExpr, right: &DfExpr) -> Result<()> {
-        let Some((target, data_type)) = self
-            .expr_to_index_target(left)?
-            .or(self.expr_to_index_target(right)?)
-        else {
+        let resolved = match self.expr_to_index_target(left)? {
+            Some(target) => Some(target),
+            None => self.expr_to_index_target(right)?,
+        };
+        let Some((target, data_type)) = resolved else {
             return Ok(());
         };
         let Some(lit) = Self::nonnull_lit(right).or_else(|| Self::nonnull_lit(left)) else {
@@ -54,10 +55,11 @@ impl InvertedIndexApplierBuilder<'_> {
             return Ok(());
         };
 
-        let Some((target, data_type)) = self
-            .expr_to_index_target(left)?
-            .or(self.expr_to_index_target(right)?)
-        else {
+        let resolved = match self.expr_to_index_target(left)? {
+            Some(target) => Some(target),
+            None => self.expr_to_index_target(right)?,
+        };
+        let Some((target, data_type)) = resolved else {
             return Ok(());
         };
         let Some(lit) = Self::nonnull_lit(right).or_else(|| Self::nonnull_lit(left)) else {
@@ -105,10 +107,11 @@ impl InvertedIndexApplierBuilder<'_> {
         }
 
         if op == &Operator::Eq {
-            let Some((candidate, _)) = self
-                .expr_to_index_target(left)?
-                .or(self.expr_to_index_target(right)?)
-            else {
+            let resolved = match self.expr_to_index_target(left)? {
+                Some(target) => Some(target),
+                None => self.expr_to_index_target(right)?,
+            };
+            let Some((candidate, _)) = resolved else {
                 return Ok(false);
             };
             if target != &candidate {

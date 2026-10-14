@@ -20,9 +20,14 @@ use crate::error::Result;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
 
 impl InvertedIndexApplierBuilder<'_> {
-    /// Collects a comparison expression in the form of
-    /// `column < lit`, `column > lit`, `column <= lit`, `column >= lit`,
-    /// `lit < column`, `lit > column`, `lit <= column`, `lit >= column`.
+    /// Collects `<`, `<=`, `>`, or `>=` comparisons between an indexed column or
+    /// JSON path expression and a non-null literal.
+    ///
+    /// The literal may appear on either side; comparisons with the literal on
+    /// the left are reversed before building the index predicate.
+    ///
+    /// For example, `42 < col` becomes `col > 42`, and
+    /// `42 < json_get(attrs, '$.value')` becomes `json_get(attrs, '$.value') > 42`.
     pub(crate) fn collect_comparison_expr(
         &mut self,
         left: &DfExpr,
