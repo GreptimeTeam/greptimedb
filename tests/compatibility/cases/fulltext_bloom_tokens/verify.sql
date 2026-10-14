@@ -42,15 +42,30 @@ ORDER BY is_v2;
 
 SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg @@ 'world' ORDER BY ts;
 
-ADMIN COMPACT_TABLE('t_fulltext_bloom_tokens');
+DROP TABLE t_fulltext_bloom_tokens;
 
+-- Two SSTs written by the old binary.
 SELECT meta_json LIKE '%"bloom_version":2%' AS is_v2, count(*) AS ssts
 FROM information_schema.ssts_index_meta
-WHERE table_id = (SELECT table_id FROM information_schema.tables WHERE table_name = 't_fulltext_bloom_tokens')
+WHERE table_id = (SELECT table_id FROM information_schema.tables WHERE table_name = 't_fulltext_bloom_compact')
   AND index_type = 'fulltext_bloom'
 GROUP BY is_v2
 ORDER BY is_v2;
 
-SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg @@ '农业' ORDER BY ts;
+SELECT ts, msg FROM t_fulltext_bloom_compact WHERE msg @@ 'world' ORDER BY ts;
 
-DROP TABLE t_fulltext_bloom_tokens;
+-- Merges both SSTs into one with a current bloom blob.
+ADMIN COMPACT_TABLE('t_fulltext_bloom_compact', 'strict_window', 'window=3600');
+
+SELECT meta_json LIKE '%"bloom_version":2%' AS is_v2, count(*) AS ssts
+FROM information_schema.ssts_index_meta
+WHERE table_id = (SELECT table_id FROM information_schema.tables WHERE table_name = 't_fulltext_bloom_compact')
+  AND index_type = 'fulltext_bloom'
+GROUP BY is_v2
+ORDER BY is_v2;
+
+SELECT ts, msg FROM t_fulltext_bloom_compact WHERE msg @@ 'world' ORDER BY ts;
+
+SELECT ts, msg FROM t_fulltext_bloom_compact WHERE msg @@ '农业' ORDER BY ts;
+
+DROP TABLE t_fulltext_bloom_compact;
