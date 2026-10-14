@@ -22,8 +22,8 @@ use common_batcher::flush_policy::FlushTrigger;
 use common_batcher::flush_policy::timing::TimingFlushPolicy;
 use common_batcher::pending_worker::PendingWorker as PendingCore;
 use common_batcher::worker_registry::WorkerRegistry;
-use common_meta::node_manager::NodeManagerRef;
 use common_telemetry::debug;
+use operator::write_dispatcher::WriteDispatcherRef;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use table::metadata::TableId;
@@ -31,7 +31,7 @@ use tokio::sync::{OwnedSemaphorePermit, broadcast, mpsc, oneshot};
 
 use crate::batcher::flow_notifier::FlowNotifier;
 use crate::batcher::logical_table::BatchKey;
-use crate::batcher::logical_table::batch::{Batch, flush_batch_with_managers, spawn_flush};
+use crate::batcher::logical_table::batch::{self, Batch};
 use crate::batcher::logical_table::batch_convert::{RecordBatchWithTsIdx, TableBatch};
 use crate::error::Error;
 use crate::metrics::{PENDING_BATCHES, PENDING_ROWS, PENDING_WORKERS};
@@ -53,7 +53,8 @@ pub(in crate::batcher::logical_table) struct PendingWorker {
     pub(in crate::batcher::logical_table) tx: mpsc::Sender<WorkerCommand>,
 }
 
-pub(in crate::batcher::logical_table) enum WorkerCommand {
+/// Commands accepted by a logical-table batching worker.
+pub(crate) enum WorkerCommand {
     Submit {
         table_batches: Vec<(String, u32, RecordBatchWithTsIdx)>,
         total_rows: usize,
@@ -92,15 +93,16 @@ impl PendingBatch {
     }
 }
 
+/// Starts a worker that accumulates logical rows and dispatches physical flushes.
 #[allow(clippy::too_many_arguments)]
-pub(in crate::batcher::logical_table) fn start_worker(
+pub(crate) fn start_worker(
     key: BatchKey,
     worker_tx: mpsc::Sender<WorkerCommand>,
     workers: Arc<WorkerRegistry<BatchKey, WorkerCommand>>,
     mut rx: mpsc::Receiver<WorkerCommand>,
     shutdown: broadcast::Sender<()>,
     partition_manager: PartitionRuleManagerRef,
-    node_manager: NodeManagerRef,
+    write_dispatcher: WriteDispatcherRef,
     catalog_manager: CatalogManagerRef,
     flow_notification_tx: FlowNotifier,
     worker_idle_timeout: Duration,
@@ -140,10 +142,10 @@ pub(in crate::batcher::logical_table) fn start_worker(
                             PENDING_ROWS.add(total_rows as i64);
 
                             if let Some(flush) = drain_batch(&mut batch, &mut pending_flush, Some(FlushTrigger::Submission)) {
-                                spawn_flush(
+                                batch::spawn_flush(
                                     flush,
                                     partition_manager.clone(),
-                                    node_manager.clone(),
+                                    write_dispatcher.clone(),
                                     catalog_manager.clone(),
                                     flow_notification_tx.clone(),
                                     flush_limiter.clone(),
@@ -152,10 +154,10 @@ pub(in crate::batcher::logical_table) fn start_worker(
                         }
                         None => {
                             if let Some(flush) = drain_batch(&mut batch, &mut pending_flush, None) {
-                                flush_batch_with_managers(
+                                batch::flush_batch_with_managers(
                                     flush,
                                     partition_manager.clone(),
-                                    node_manager.clone(),
+                                    write_dispatcher.clone(),
                                     catalog_manager.clone(),
                                     flow_notification_tx.clone(),
                                 ).await;
@@ -189,10 +191,10 @@ pub(in crate::batcher::logical_table) fn start_worker(
                 }
                 _ = pending_flush.wait_flush() => {
                     if let Some(flush) = drain_batch(&mut batch, &mut pending_flush, Some(FlushTrigger::Deadline)) {
-                        spawn_flush(
+                        batch::spawn_flush(
                             flush,
                             partition_manager.clone(),
-                            node_manager.clone(),
+                            write_dispatcher.clone(),
                             catalog_manager.clone(),
                             flow_notification_tx.clone(),
                             flush_limiter.clone(),
@@ -201,10 +203,10 @@ pub(in crate::batcher::logical_table) fn start_worker(
                 }
                 _ = shutdown_rx.recv() => {
                     if let Some(flush) = drain_batch(&mut batch, &mut pending_flush, None) {
-                        flush_batch_with_managers(
+                        batch::flush_batch_with_managers(
                             flush,
                             partition_manager.clone(),
-                            node_manager.clone(),
+                            write_dispatcher.clone(),
                             catalog_manager.clone(),
                             flow_notification_tx.clone(),
                         ).await;
@@ -286,6 +288,7 @@ mod tests {
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::node_manager::NodeManagerRef;
     use moka::future::CacheBuilder;
+    use operator::write_dispatcher::WriteDispatcher;
     use partition::cache::new_partition_info_cache;
     use partition::manager::PartitionRuleManager;
     use tokio::sync::{Semaphore, broadcast, mpsc, oneshot};
@@ -502,6 +505,10 @@ mod tests {
         let node_manager: NodeManagerRef = Arc::new(ConcurrentMockNodeManager {
             datanodes: Arc::new(HashMap::new()),
         });
+        let write_dispatcher = Arc::new(WriteDispatcher::new(
+            node_manager,
+            partition_manager.clone(),
+        ));
         let catalog_manager = MemoryCatalogManager::with_default_setup();
         let (flow_notification_tx, _flow_notification_rx) =
             FlowNotifier::try_new(1, FLOW_NOTIFICATION_DROPPED.clone()).unwrap();
@@ -515,7 +522,7 @@ mod tests {
             worker_rx,
             shutdown.clone(),
             partition_manager,
-            node_manager,
+            write_dispatcher,
             catalog_manager,
             flow_notification_tx,
             worker_idle_timeout,

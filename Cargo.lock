@@ -2312,6 +2312,7 @@ dependencies = [
  "bytes",
  "common-test-util",
  "futures",
+ "icu_properties",
  "lazy_static",
  "pin-project",
  "regex",
@@ -2507,7 +2508,6 @@ dependencies = [
  "geohash",
  "h3o",
  "hyperloglogplus",
- "icu_properties",
  "jsonb",
  "memchr",
  "mito-codec",
@@ -4622,15 +4622,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bef552e6f588e446098f6ba40d89ac146c8c7b64aade83c051ee00bb5d2bc18d"
 dependencies = [
  "uuid",
-]
-
-[[package]]
-name = "delta-encoding"
-version = "0.4.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cabe72c7de5725dcd4597e7d2bc8a4b7a4698879481607385fbc50a23203eeb9"
-dependencies = [
- "num-traits",
 ]
 
 [[package]]
@@ -6963,8 +6954,6 @@ dependencies = [
  "futures",
  "greptime-proto",
  "itertools 0.14.0",
- "jieba-rs",
- "lazy_static",
  "mockall",
  "pin-project",
  "prost 0.14.1",
@@ -8119,7 +8108,6 @@ dependencies = [
  "common-wal",
  "crc32fast",
  "dashmap",
- "delta-encoding",
  "derive_builder 0.20.2",
  "futures",
  "futures-util",
@@ -10136,6 +10124,7 @@ dependencies = [
  "meta-client",
  "meter-core",
  "meter-macros",
+ "mito-codec",
  "moka",
  "object-store",
  "partition",

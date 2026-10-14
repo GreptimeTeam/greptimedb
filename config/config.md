@@ -391,6 +391,11 @@
 | `query.experimental_spill_path` | String | Unset | Spill directory path. Ignored unless mode is "custom". |
 | `query.experimental_spill_max_temp_directory_size` | String | `1GiB` | Maximum total size of spill directory (default: "1GiB").<br/>Ignored unless mode is "custom". |
 | `query.experimental_spill_compression` | String | `uncompressed` | Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".<br/>Ignored unless mode is "custom". |
+| `write_retry` | -- | -- | Retry retryable distributed write failures.<br/>Backoff grows exponentially, with jitter to spread concurrent retries. |
+| `write_retry.max_retries` | Integer | `3` | Maximum retries after the initial write attempt. Set to 0 to disable retries. |
+| `write_retry.initial_backoff` | String | `1500ms` | Initial backoff before jitter is applied. Must be positive. |
+| `write_retry.max_backoff` | String | `10s` | Maximum backoff before jitter is applied. Must be at least initial_backoff. |
+| `write_retry.backoff_multiplier` | Float | `2.0` | Backoff multiplier. Must be finite and at least 1. |
 | `datanode` | -- | -- | Datanode options. |
 | `datanode.client` | -- | -- | Datanode client options. |
 | `datanode.client.connect_timeout` | String | 1s | Connect server timeout. Defaults to `1s`; this example sets it to `10s`. |
@@ -599,8 +604,6 @@
 | `wal.timeout` | String | `5s` | The total request timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.max_batch_bytes` | String | `1MB` | The max size of a single producer batch.<br/>Warning: Kafka has a default limit of 1MB per message in a topic.<br/>Defaults to `8MB` when the provider is `experimental_object_store`.<br/>**It's only used when the provider is `kafka` or `experimental_object_store`**. |
 | `wal.consumer_wait_timeout` | String | `100ms` | The consumer wait timeout.<br/>**It's only used when the provider is `kafka`**. |
-| `wal.create_index` | Bool | `false` | Whether to enable WAL index creation.<br/>**It's only used when the provider is `kafka`**. |
-| `wal.dump_index_interval` | String | `60s` | The interval for dumping WAL indexes.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.overwrite_entry_start_id` | Bool | `false` | Ignore missing entries during read WAL.<br/>**It's only used when the provider is `kafka`**.<br/><br/>This option ensures that when Kafka messages are deleted, the system<br/>can still successfully replay memtable data without throwing an<br/>out-of-range error.<br/>However, enabling this option might lead to unexpected data loss,<br/>as the system will skip over missing entries instead of treating<br/>them as critical errors. |
 | `wal.storage_provider` | String | `""` | The name of the storage provider that holds the WAL objects, an empty name selects the default object store.<br/>**It's only used when the provider is `experimental_object_store`**. |
 | `wal.prefix` | String | `wal` | The path prefix of the WAL objects inside the storage provider.<br/>The objects are written under `<prefix>/datanodes/<node_id>/epochs/<generation>`, which is derived from this prefix.<br/>**It's only used when the provider is `experimental_object_store`**. |

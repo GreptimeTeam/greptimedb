@@ -30,21 +30,7 @@ use datafusion::execution::{FunctionRegistry, SessionStateBuilder};
 use datafusion::logical_expr::{Extension, LogicalPlan};
 use datafusion_expr::{Expr, UserDefinedLogicalNode};
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
-use promql::functions::{
-    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
-    IDelta, IeeeComparison, IeeeSqrt, Increase, LastOverTime, MaxOverTime, MinOverTime, MixedRange,
-    NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
-    NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime, NativeHistogramChanges,
-    NativeHistogramCount, NativeHistogramCountOverTime, NativeHistogramDelta,
-    NativeHistogramDivScalar, NativeHistogramDrop, NativeHistogramEq, NativeHistogramFraction,
-    NativeHistogramIDelta, NativeHistogramIRate, NativeHistogramIncrease,
-    NativeHistogramLastOverTime, NativeHistogramMulScalar, NativeHistogramNeg,
-    NativeHistogramNotEq, NativeHistogramPresentOverTime, NativeHistogramQuantile,
-    NativeHistogramRate, NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev,
-    NativeHistogramStdvar, NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime,
-    NativeHistogramToString, PredictLinear, PresentOverTime, PromqlFloatToString, QuantileOverTime,
-    Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime, quantile_udaf,
-};
+use promql::functions::register_promql_functions;
 use prost::Message;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::ResultExt;
@@ -333,83 +319,7 @@ fn register_greptime_functions(
             .context(RegisterUdfSnafu { name })?;
     }
 
-    let _ = session_state.register_udaf(quantile_udaf());
-    for udf in IeeeComparison::all() {
-        let _ = session_state.register_udf(Arc::new(udf));
-    }
-    let _ = session_state.register_udf(Arc::new(IeeeSqrt::scalar_udf()));
-
-    let _ = session_state.register_udf(Arc::new(IDelta::<false>::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(IDelta::<true>::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(Rate::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(Increase::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(Delta::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(Resets::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(Changes::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(Deriv::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(Round::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(AvgOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(MinOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(MaxOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(SumOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(CountOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(LastOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(AbsentOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(PresentOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(StddevOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(StdvarOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(QuantileOverTime::scalar_udf()));
-    let _ = session_state.register_udf(Arc::new(PredictLinear::scalar_udf()));
-    let double_exponential_smoothing_udf =
-        DoubleExponentialSmoothing::scalar_udf().with_aliases(["prom_holt_winters"]);
-    let _ = session_state.register_udf(Arc::new(double_exponential_smoothing_udf));
-
-    for udf in [
-        NativeHistogramAbsentOverTime::scalar_udf(),
-        NativeHistogramAdd::scalar_udf(),
-        NativeHistogramAvg::scalar_udf(),
-        NativeHistogramAvgOverTime::scalar_udf(),
-        NativeHistogramChanges::scalar_udf(),
-        NativeHistogramCount::scalar_udf(),
-        NativeHistogramCountOverTime::scalar_udf(),
-        NativeHistogramDelta::scalar_udf(),
-        NativeHistogramDivScalar::scalar_udf(),
-        NativeHistogramDrop::bool_false_udf(String::new(), None),
-        NativeHistogramDrop::bool_true_udf(String::new(), None),
-        NativeHistogramDrop::float_null_udf(String::new(), None),
-        NativeHistogramEq::scalar_udf(),
-        NativeHistogramFraction::scalar_udf(),
-        NativeHistogramIDelta::scalar_udf(),
-        NativeHistogramIRate::scalar_udf(),
-        NativeHistogramIncrease::scalar_udf(),
-        NativeHistogramLastOverTime::scalar_udf(),
-        MixedRange::float_udf(None),
-        MixedRange::histogram_udf(None),
-        NativeHistogramMulScalar::scalar_udf(),
-        NativeHistogramNeg::scalar_udf(),
-        NativeHistogramNotEq::scalar_udf(),
-        NativeHistogramPresentOverTime::scalar_udf(),
-        NativeHistogramQuantile::scalar_udf(),
-        NativeHistogramRate::scalar_udf(),
-        NativeHistogramResets::scalar_udf(),
-        NativeHistogramScalarMul::scalar_udf(),
-        NativeHistogramStddev::scalar_udf(),
-        NativeHistogramStdvar::scalar_udf(),
-        NativeHistogramSub::scalar_udf(),
-        NativeHistogramSum::scalar_udf(),
-        NativeHistogramSumOverTime::scalar_udf(),
-        NativeHistogramToString::scalar_udf(),
-        PromqlFloatToString::scalar_udf(),
-    ] {
-        let _ = session_state.register_udf(Arc::new(udf));
-    }
-
-    for udaf in [
-        NativeHistogramAggAvg::aggregate_udf(),
-        NativeHistogramAggSum::aggregate_udf(),
-    ] {
-        let _ = session_state.register_udaf(Arc::new(udaf));
-    }
+    register_promql_functions(session_state);
 
     Ok(())
 }
@@ -471,6 +381,10 @@ mod tests {
     use datatypes::data_type::DataType;
     use futures::stream::BoxStream;
     use promql::extension_plan::{RangeManipulate, SeriesNormalize, UnionDistinctOn};
+    use promql::functions::{
+        MixedRange, NativeHistogramAggAvg, NativeHistogramAggSum, NativeHistogramCount,
+        NativeHistogramDrop, PromqlFloatToString,
+    };
     use session::context::QueryContext;
     use table::TableRef;
     use table::metadata::{TableId, TableInfoRef};

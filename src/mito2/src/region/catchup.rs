@@ -31,7 +31,6 @@ pub struct RegionCatchupTask<S> {
     replay_checkpoint_entry_id: Option<u64>,
     expected_last_entry_id: Option<u64>,
     allow_stale_entries: bool,
-    location_id: Option<u64>,
     wal: Wal<S>,
 }
 
@@ -43,15 +42,8 @@ impl<S: LogStore> RegionCatchupTask<S> {
             replay_checkpoint_entry_id: None,
             expected_last_entry_id: None,
             allow_stale_entries,
-            location_id: None,
             wal,
         }
-    }
-
-    /// Sets the location id.
-    pub(crate) fn with_location_id(mut self, location_id: Option<u64>) -> Self {
-        self.location_id = location_id;
-        self
     }
 
     /// Sets the expected last entry id.
@@ -102,10 +94,7 @@ impl<S: LogStore> RegionCatchupTask<S> {
             .entry_receiver
             .take()
             .map(|r| Box::new(r) as _)
-            .unwrap_or_else(|| {
-                self.wal
-                    .wal_entry_reader(&self.region.provider, region_id, self.location_id)
-            });
+            .unwrap_or_else(|| self.wal.wal_entry_reader(&self.region.provider, region_id));
         let on_region_opened = self.wal.on_region_opened();
         let last_entry_id = replay_memtable(
             &self.region.provider,
