@@ -298,7 +298,7 @@ level = "info"
                   "--end-time", "1970-01-01T00:00:01Z", "--timeout", "1h",
                   "--no-proxy", "--progress", "always"], "export")
         if not self.local_smoke:
-            command(["uv", "run", str(HERE / "metric-snapshot-s3-ops.py"), "inventory",
+            command(["uv", "run", str(HERE / "metric-snapshot-s3-ops.py"), "inventory", "--round", label,
                      "--output", str(self.round_dir / "s3-inventory.json")])
         self.stop_server("source")
         self.cli(["export-v2", "verify", "--snapshot", location], "verify")

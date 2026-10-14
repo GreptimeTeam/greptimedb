@@ -40,8 +40,10 @@ class FakeS3:
 
         class Paginator:
             def paginate(self, **kwargs):
-                assert kwargs == {"Bucket": "bucket", "Prefix": PREFIX}
-                return iter([{"Contents": parent.objects.copy()}])
+                assert kwargs["Bucket"] == "bucket" and kwargs["Prefix"].startswith(PREFIX)
+                # Keys outside the run prefix model a misbehaving listing and are always returned.
+                return iter([{"Contents": [item for item in parent.objects if not item["Key"].startswith(PREFIX)
+                                           or item["Key"].startswith(kwargs["Prefix"])]}])
 
         return Paginator()
 
@@ -152,7 +154,26 @@ class OperationsTest(unittest.TestCase):
         self.assertEqual(job_if, "if: ${{ always() && needs.validate.outputs.run_id != '' }}")
         ec2 = teardown.split("    - name: Delete EC2, its temporary disks and runner registration\n", 1)[1]
         self.assertEqual(ec2.splitlines()[0].strip(), "if: ${{ always() && needs.provision.result != 'skipped' }}")
+        self.assertIn("      RUN_PREFIX: ${{ needs.validate.outputs.run_prefix }}\n", teardown.split("    steps:", 1)[0])
+        s3_cleanup = teardown.split("    - name: Remove and verify only this run's S3 prefix\n", 1)[1].split("    - ", 1)[0]
+        self.assertEqual(s3_cleanup.splitlines()[0].strip(), "if: always()")
+        self.assertIn("run: uv run greptimedb/.github/scripts/metric-snapshot-s3-ops.py cleanup\n", s3_cleanup)
         self.assertEqual(ops.cleanup(s3, "bucket", PREFIX)["objects"], 0)
+
+    def test_round_inventory_excludes_other_rounds_while_cleanup_covers_the_run(self):
+        s3 = FakeS3()
+        s3.objects = [{"Key": PREFIX + "smoke/pack-000000.bin", "Size": 3},
+                      {"Key": PREFIX + "full/pack-000000.bin", "Size": 5},
+                      {"Key": PREFIX + "full/index.json", "Size": 2}]
+        full = ops.inventory(s3, "bucket", PREFIX, "full")
+        self.assertEqual((full["prefix"], full["objects"], full["bytes"]), (PREFIX + "full/", 2, 7))
+        self.assertEqual(ops.inventory(s3, "bucket", PREFIX, "smoke")["bytes"], 3)
+        self.assertEqual(ops.inventory(s3, "bucket", PREFIX)["objects"], 3)
+        for round in ("", "../full", "full/"):
+            with self.subTest(round=round), self.assertRaises(ValueError):
+                ops.inventory(s3, "bucket", PREFIX, round)
+        self.assertEqual(ops.cleanup(s3, "bucket", PREFIX)["objects"], 0)
+        self.assertEqual(len(s3.deleted), 3)
 
     def test_bad_prefix_and_out_of_scope_response_cannot_delete(self):
         for prefix in ("", "metric-snapshot-bench/", "metric-snapshot-bench/123-1", PREFIX + "../", "oswal-bench/123-1/"):
@@ -162,6 +183,8 @@ class OperationsTest(unittest.TestCase):
             self.assertEqual(s3.deleted, [])
         s3 = FakeS3()
         s3.objects[0]["Key"] = "other-run/current"
+        with self.assertRaises(ValueError):
+            ops.inventory(s3, "bucket", PREFIX, "full")
         with self.assertRaises(ValueError):
             ops.cleanup(s3, "bucket", PREFIX)
         self.assertEqual(s3.deleted, [])

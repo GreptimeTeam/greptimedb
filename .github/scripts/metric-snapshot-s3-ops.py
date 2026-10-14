@@ -77,19 +77,23 @@ def client(region):
         connect_timeout=10, read_timeout=30, retries={"mode": "standard", "max_attempts": 3}))
 
 
-def entries(s3, operation, bucket, prefix, fields):
-    owned_prefix(prefix)
-    for page in s3.get_paginator(operation).paginate(Bucket=bucket, Prefix=prefix):
+def entries(s3, operation, bucket, prefix, fields, scope=""):
+    listed = owned_prefix(prefix) + scope
+    for page in s3.get_paginator(operation).paginate(Bucket=bucket, Prefix=listed):
         for field in fields:
             for item in page.get(field, []):
-                if not item["Key"].startswith(prefix):
+                if not item["Key"].startswith(listed):
                     raise ValueError("S3 returned an object outside the owned prefix")
                 yield item
 
 
-def inventory(s3, bucket, prefix):
-    objects = list(entries(s3, "list_objects_v2", bucket, prefix, ("Contents",)))
-    return {"prefix": prefix, "objects": len(objects), "bytes": sum(item["Size"] for item in objects),
+def inventory(s3, bucket, prefix, round=None):
+    # A round's snapshot lives under <run prefix><round>/; earlier rounds stay until cleanup.
+    if round not in (None, "smoke", "full"):
+        raise ValueError("round must be smoke or full")
+    scope = round + "/" if round else ""
+    objects = list(entries(s3, "list_objects_v2", bucket, prefix, ("Contents",), scope))
+    return {"prefix": prefix + scope, "objects": len(objects), "bytes": sum(item["Size"] for item in objects),
             "measurement": "S3 listing inventory; not request counts or transferred bytes."}
 
 
@@ -172,7 +176,10 @@ def main():
     parser.add_argument("command", choices=("plan", "probe", "inventory", "cleanup", "scrub", "cost", "wait-for-benchmark"))
     parser.add_argument("--output")
     parser.add_argument("--started-at", type=int)
+    parser.add_argument("--round")
     args = parser.parse_args()
+    if args.round is not None and args.command != "inventory":
+        parser.error("--round applies only to inventory")
     if args.command == "plan":
         result = plan(os.environ)
     elif args.command == "scrub":
@@ -193,7 +200,11 @@ def main():
                   "note": "Allocation wall-time estimate plus $1.50 reserve for S3, disk and IPv4; not an AWS bill."}
     else:
         prefix = owned_prefix(os.environ["RUN_PREFIX"])
-        result = globals()[args.command](client(os.environ["S3_REGION"]), os.environ["S3_BUCKET"], prefix)
+        s3, bucket = client(os.environ["S3_REGION"]), os.environ["S3_BUCKET"]
+        if args.command == "inventory":
+            result = inventory(s3, bucket, prefix, args.round)
+        else:
+            result = globals()[args.command](s3, bucket, prefix)
     rendered = json.dumps(result, indent=2) + "\n"
     if args.output:
         destination = Path(args.output)
