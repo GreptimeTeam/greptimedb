@@ -1360,6 +1360,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     sender.send(Ok(0));
                 }
             }
+            BackgroundNotify::CompactionUnit(req) => {
+                self.handle_compaction_unit(region_id, req).await;
+            }
             BackgroundNotify::CompactionDdlComplete {
                 generation,
                 request_index,
@@ -1389,9 +1392,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             BackgroundNotify::CompactionFinished(req) => {
                 self.handle_compaction_finished(region_id, req).await
-            }
-            BackgroundNotify::CompactionCancelled(req) => {
-                self.handle_compaction_cancelled(region_id, req).await
             }
             BackgroundNotify::CompactionFailed(req) => self.handle_compaction_failure(req).await,
             BackgroundNotify::Truncate(req) => self.handle_truncate_result(req).await,
@@ -1590,6 +1590,34 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_compaction_commit_begin(_region_id).await;
+        }
+    }
+
+    /// Exposes a per-unit test gate before merge starts.
+    pub(crate) async fn on_compaction_unit_merge_begin(&self, _region_id: RegionId, _plan_id: u64) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener
+                .on_compaction_unit_merge_begin(_region_id, _plan_id)
+                .await;
+        }
+    }
+
+    /// Exposes a per-unit test gate between manifest commit and worker notification.
+    pub(crate) async fn on_compaction_unit_committed(&self, _region_id: RegionId, _plan_id: u64) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener
+                .on_compaction_unit_committed(_region_id, _plan_id)
+                .await;
+        }
+    }
+
+    /// Reports unit visibility to the test listener independently of request completion.
+    pub(crate) fn on_compaction_unit_applied(&self, _region_id: RegionId, _plan_id: u64) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_compaction_unit_applied(_region_id, _plan_id);
         }
     }
 
