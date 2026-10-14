@@ -31,9 +31,10 @@ use store_api::storage::ColumnId;
 /// # Encoding
 ///
 /// - Column: `<column_id>` as a decimal integer, e.g. `42`.
-/// - JSON path: `j:1:<column_id>:<payload>`, where `j` denotes a JSON path and
+/// - JSON path: `j.1.<column_id>.<payload>`, where `j` denotes a JSON path and
 ///   `1` is the encoding version. The payload is the URL-safe, unpadded Base64
-///   encoding of the JSON-serialized `(path, data_type)` tuple.
+///   encoding of the JSON-serialized `(path, data_type)` tuple. Dots are absent
+///   from the payload alphabet and safe in Windows file names.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum IndexTarget {
     ColumnId(ColumnId),
@@ -77,7 +78,7 @@ impl Display for IndexTarget {
                     .map_err(|_| fmt::Error)?;
                 write!(
                     f,
-                    "j:1:{}:{}",
+                    "j.1.{}.{}",
                     target.column_id,
                     URL_SAFE_NO_PAD.encode(json)
                 )
@@ -104,9 +105,9 @@ impl IndexTarget {
 
     /// Parse a target key string back into an index target description.
     pub fn decode(key: &str) -> Result<Self, TargetKeyError> {
-        if let Some(json_key) = key.strip_prefix("j:1:") {
+        if let Some(json_key) = key.strip_prefix("j.1.") {
             let invalid = || InvalidJsonTargetSnafu { target_key: key }.build();
-            let (column, payload) = json_key.split_once(':').ok_or_else(invalid)?;
+            let (column, payload) = json_key.split_once('.').ok_or_else(invalid)?;
             validate_column_key(column)?;
             let column_id = column.parse::<ColumnId>().map_err(|_| invalid())?;
             let bytes = URL_SAFE_NO_PAD.decode(payload).map_err(|_| invalid())?;
@@ -226,15 +227,15 @@ mod tests {
         for (data_type, key) in [
             (
                 ConcreteDataType::int32_datatype(),
-                "j:1:7:W1sicmVzb3VyY2UiLCJzZXJ2aWNlLm5hbWUiXSx7IkludDMyIjp7fX1d",
+                "j.1.7.W1sicmVzb3VyY2UiLCJzZXJ2aWNlLm5hbWUiXSx7IkludDMyIjp7fX1d",
             ),
             (
                 ConcreteDataType::int64_datatype(),
-                "j:1:7:W1sicmVzb3VyY2UiLCJzZXJ2aWNlLm5hbWUiXSx7IkludDY0Ijp7fX1d",
+                "j.1.7.W1sicmVzb3VyY2UiLCJzZXJ2aWNlLm5hbWUiXSx7IkludDY0Ijp7fX1d",
             ),
             (
                 ConcreteDataType::string_datatype(),
-                "j:1:7:W1sicmVzb3VyY2UiLCJzZXJ2aWNlLm5hbWUiXSx7IlN0cmluZyI6eyJzaXplX3R5cGUiOiJVdGY4In19XQ",
+                "j.1.7.W1sicmVzb3VyY2UiLCJzZXJ2aWNlLm5hbWUiXSx7IlN0cmluZyI6eyJzaXplX3R5cGUiOiJVdGY4In19XQ",
             ),
         ] {
             let target = IndexTarget::new_json_path(7, path.clone(), data_type).unwrap();
@@ -297,7 +298,7 @@ mod tests {
                     .is_err()
             );
             let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&(path, data_type)).unwrap());
-            assert!(IndexTarget::decode(&format!("j:1:7:{payload}")).is_err());
+            assert!(IndexTarget::decode(&format!("j.1.7.{payload}")).is_err());
         }
         assert!(
             serde_json::from_value::<JsonPathTarget>(serde_json::json!({
@@ -307,7 +308,7 @@ mod tests {
             }))
             .is_err()
         );
-        for key in ["j:2:7:e30", "j:1:7", "j:1:7:!", "j:1:x:e30", "j:1:7:e30"] {
+        for key in ["j.2.7.e30", "j.1.7", "j.1.7.!", "j.1.x.e30", "j.1.7.e30"] {
             assert!(IndexTarget::decode(key).is_err(), "{key}");
         }
     }
