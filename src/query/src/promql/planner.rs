@@ -3623,15 +3623,17 @@ impl PromPlanner {
             "minute" | "hour" | "month" | "year" | "day_of_month" | "day_of_week"
             | "day_of_year" | "days_in_month" => {
                 let date_part = match func.name {
-                    "minute" => "minute",
-                    "hour" => "hour",
-                    "month" => "month",
-                    "year" => "year",
-                    "day_of_month" => "day",
-                    "day_of_week" => "dow",
-                    "day_of_year" => "doy",
-                    // days_in_month
-                    _ => "day",
+                    "minute" => Some("minute"),
+                    "hour" => Some("hour"),
+                    "month" => Some("month"),
+                    "year" => Some("year"),
+                    "day_of_month" => Some("day"),
+                    "day_of_week" => Some("dow"),
+                    "day_of_year" => Some("doy"),
+                    // `days_in_month` is built by `days_in_month_expr` and selects
+                    // no `date_part` unit.
+                    "days_in_month" => None,
+                    _ => unreachable!("not a date function: {func.name}"),
                 };
                 if has_input_arg {
                     // With an argument, Prometheus reads each sample value as a Unix
@@ -3653,24 +3655,21 @@ impl PromPlanner {
                             Box::new(DfExpr::Column(Column::from_name(value))),
                             ArrowDataType::Timestamp(ArrowTimeUnit::Second, None),
                         ));
-                        if func.name == "days_in_month" {
-                            exprs.push(Self::days_in_month_expr(timestamp_expr));
-                        } else {
-                            exprs.push(DfExpr::ScalarFunction(ScalarFunction {
+                        exprs.push(match date_part {
+                            Some(date_part) => DfExpr::ScalarFunction(ScalarFunction {
                                 func: datafusion_functions::datetime::date_part(),
                                 args: vec![date_part.lit(), timestamp_expr],
-                            }));
-                        }
+                            }),
+                            None => Self::days_in_month_expr(timestamp_expr),
+                        });
                     }
                 } else {
                     // Without an argument, they read the evaluation instant, which the
                     // time index of the input table carries.
-                    if func.name == "days_in_month" {
-                        let timestamp_expr = self.create_time_index_column_expr()?;
-                        exprs.push(Self::days_in_month_expr(timestamp_expr));
-                    } else {
-                        exprs.push(self.date_part_on_time_index(date_part)?);
-                    }
+                    exprs.push(match date_part {
+                        Some(date_part) => self.date_part_on_time_index(date_part)?,
+                        None => Self::days_in_month_expr(self.create_time_index_column_expr()?),
+                    });
                 }
                 ScalarFunc::GeneratedExpr
             }
