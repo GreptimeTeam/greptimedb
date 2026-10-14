@@ -168,7 +168,15 @@ mod tests {
             ("ttl".into(), "2d".into()),
         ])
         .unwrap();
-        assert_eq!(hints.len(), 2);
+        // Assert the complete ordered list so a reversal (which would make the
+        // downstream last-write-wins loop keep `1d`) cannot slip through.
+        assert_eq!(
+            hints,
+            vec![
+                ("ttl".to_string(), "1d".to_string()),
+                ("ttl".to_string(), "2d".to_string()),
+            ]
+        );
     }
 
     #[test]

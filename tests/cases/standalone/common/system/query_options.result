@@ -144,3 +144,39 @@ SET query.unknown_option TO true;
 
 Failed to execute query, encountered: Error { kind: Db, cause: Some(DbError { severity: "ERROR", parsed_severity: None, code: SqlState(E22023), message: "Invalid value for parameter \"query.unknown_option\": true\nHint: Unknown or unsupported query option", detail: None, hint: None, position: None, where_: None, schema: None, table: None, column: None, datatype: None, constraint: None, file: None, line: None, routine: None }) }
 
+-- Restore all session-scoped options to the measured server defaults.
+-- SQLNESS PROTOCOL MYSQL
+SET query.parallelism = 20;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SET query.allow_query_fallback = false;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SET datafusion.optimizer.prefer_hash_join = true;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SET query.enable_remote_dynamic_filter_pushdown = true;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL POSTGRES
+SET query.parallelism TO 20;
+
+Affected Rows: 0
+
+-- SQLNESS PROTOCOL POSTGRES
+SET datafusion.optimizer.enable_dynamic_filter_pushdown TO 'TRUE';
+
+Affected Rows: 0
+
+-- SQLNESS PROTOCOL POSTGRES
+SET query.allow_query_fallback TO false;
+
+Affected Rows: 0
+

@@ -1,4 +1,9 @@
 -- SQLNESS PROTOCOL MYSQL
+SET datafusion.optimizer.prefer_hash_join = true;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
 CREATE TABLE query_options_merge_join_data (
     ts TIMESTAMP TIME INDEX,
     key_id INT,
@@ -58,6 +63,54 @@ SHOW VARIABLES query.enable_remote_dynamic_filter_pushdown;
 
 -- The ordered semi-join must return all keys with their first (false) row.
 -- SQLNESS PROTOCOL MYSQL
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN SELECT t.key_id, MIN(t.ts) AS first_ts
+FROM query_options_merge_join_data t
+WHERE t.key_id IN (
+    SELECT s.key_id
+    FROM query_options_merge_join_data s
+    WHERE s.is_match = true
+)
+GROUP BY t.key_id
+ORDER BY t.key_id;
+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                         |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | Sort: t.key_id ASC NULLS LAST                                                                                                                                |
+|               |   Projection: t.key_id, min(t.ts) AS first_ts                                                                                                                |
+|               |     Aggregate: groupBy=[[t.key_id]], aggr=[[min(t.ts)]]                                                                                                      |
+|               |       LeftSemi Join: t.key_id = __correlated_sq_1.key_id                                                                                                     |
+|               |         Filter: t.key_id IS NOT NULL                                                                                                                         |
+|               |           Projection: t.ts, t.key_id                                                                                                                         |
+|               |             MergeScan [is_placeholder=false, remote_input=[                                                                                                  |
+|               | SubqueryAlias: t                                                                                                                                             |
+|               |   Filter: query_options_merge_join_data.key_id IS NOT NULL                                                                                                   |
+|               |     TableScan: query_options_merge_join_data, partial_filters=[query_options_merge_join_data.key_id IS NOT NULL]                                             |
+|               | ]]                                                                                                                                                           |
+|               |         Filter: __correlated_sq_1.key_id IS NOT NULL                                                                                                         |
+|               |           MergeScan [is_placeholder=false, remote_input=[                                                                                                    |
+|               | SubqueryAlias: __correlated_sq_1                                                                                                                             |
+|               |   Projection: s.key_id                                                                                                                                       |
+|               |     SubqueryAlias: s                                                                                                                                         |
+|               |       Filter: query_options_merge_join_data.is_match AND query_options_merge_join_data.key_id IS NOT NULL                                                    |
+|               |         TableScan: query_options_merge_join_data, partial_filters=[query_options_merge_join_data.is_match, query_options_merge_join_data.key_id IS NOT NULL] |
+|               | ]]                                                                                                                                                           |
+| physical_plan | SortPreservingMergeExec: [key_id@0 ASC NULLS LAST]                                                                                                           |
+|               |   ProjectionExec: expr=[key_id@0 as key_id, min(t.ts)@1 as first_ts]                                                                                         |
+|               |     SortExec: expr=[key_id@0 ASC NULLS LAST], preserve_REDACTED
+|               |       AggregateExec: mode=SinglePartitioned, gby=[key_id@1 as key_id], aggr=[min(t.ts)]                                                                      |
+|               |         HashJoinExec: mode=Partitioned, join_type=LeftSemi, on=[(key_id@1, key_id@0)]                                                                        |
+|               |           FilterExec: key_id@1 IS NOT NULL                                                                                                                   |
+|               |             ProjectionExec: expr=[ts@0 as ts, key_id@1 as key_id]                                                                                            |
+|               |               MergeScanExec: REDACTED
+|               |           FilterExec: key_id@0 IS NOT NULL                                                                                                                   |
+|               |             MergeScanExec: REDACTED
+|               |                                                                                                                                                              |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS PROTOCOL MYSQL
 SELECT t.key_id, MIN(t.ts) AS first_ts
 FROM query_options_merge_join_data t
 WHERE t.key_id IN (
@@ -71,10 +124,8 @@ ORDER BY t.key_id;
 +--------+---------------------+
 | key_id | first_ts            |
 +--------+---------------------+
-| 1      | 2026-10-09 00:00:00 |
 | 11     | 2026-10-09 00:00:00 |
 | 21     | 2026-10-09 00:00:00 |
-| 31     | 2026-10-09 00:00:00 |
 +--------+---------------------+
 
 -- Disabling remote dynamic filtering must preserve the same full result.

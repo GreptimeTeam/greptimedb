@@ -1,4 +1,7 @@
 -- SQLNESS PROTOCOL MYSQL
+SET datafusion.optimizer.prefer_hash_join = true;
+
+-- SQLNESS PROTOCOL MYSQL
 CREATE TABLE query_options_merge_join_data (
     ts TIMESTAMP TIME INDEX,
     key_id INT,
@@ -37,6 +40,19 @@ SHOW VARIABLES query.parallelism;
 SHOW VARIABLES query.enable_remote_dynamic_filter_pushdown;
 
 -- The ordered semi-join must return all keys with their first (false) row.
+-- SQLNESS PROTOCOL MYSQL
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN SELECT t.key_id, MIN(t.ts) AS first_ts
+FROM query_options_merge_join_data t
+WHERE t.key_id IN (
+    SELECT s.key_id
+    FROM query_options_merge_join_data s
+    WHERE s.is_match = true
+)
+GROUP BY t.key_id
+ORDER BY t.key_id;
+
 -- SQLNESS PROTOCOL MYSQL
 SELECT t.key_id, MIN(t.ts) AS first_ts
 FROM query_options_merge_join_data t

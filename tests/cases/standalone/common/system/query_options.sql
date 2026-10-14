@@ -68,3 +68,25 @@ SHOW query.allow_query_fallback;
 -- PostgreSQL query-option typos are errors.
 -- SQLNESS PROTOCOL POSTGRES
 SET query.unknown_option TO true;
+
+-- Restore all session-scoped options to the measured server defaults.
+-- SQLNESS PROTOCOL MYSQL
+SET query.parallelism = 20;
+
+-- SQLNESS PROTOCOL MYSQL
+SET query.allow_query_fallback = false;
+
+-- SQLNESS PROTOCOL MYSQL
+SET datafusion.optimizer.prefer_hash_join = true;
+
+-- SQLNESS PROTOCOL MYSQL
+SET query.enable_remote_dynamic_filter_pushdown = true;
+
+-- SQLNESS PROTOCOL POSTGRES
+SET query.parallelism TO 20;
+
+-- SQLNESS PROTOCOL POSTGRES
+SET datafusion.optimizer.enable_dynamic_filter_pushdown TO 'TRUE';
+
+-- SQLNESS PROTOCOL POSTGRES
+SET query.allow_query_fallback TO false;
