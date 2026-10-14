@@ -23,7 +23,7 @@ use store_api::storage::{ColumnId, FileId};
 
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::sst::index::fulltext_index::applier::builder::{
-    FulltextQuery, FulltextRequest, FulltextTerm,
+    FulltextLike, FulltextQuery, FulltextRequest, FulltextTerm,
 };
 use crate::sst::parquet::row_selection::RowGroupSelection;
 
@@ -177,9 +177,9 @@ impl FulltextIndexKey {
                     .map(|term| term.term.len() + size_of::<FulltextTerm>())
                     .sum::<usize>();
                 let like_size = request
-                    .like_patterns
+                    .likes
                     .iter()
-                    .map(|pattern| pattern.len() + size_of::<String>())
+                    .map(|like| like.pattern.len() + size_of::<FulltextLike>())
                     .sum::<usize>();
                 query_size + term_size + like_size
             })
@@ -348,7 +348,7 @@ mod tests {
                 FulltextQuery("another long query string".to_string()),
             ],
             terms: vec![],
-            like_patterns: vec![],
+            likes: vec![],
         };
         predicates1.insert(1, request1);
         let key1 = PredicateKey::new_fulltext(Arc::new(predicates1));
@@ -363,7 +363,7 @@ mod tests {
                 FulltextQuery("another long query string".to_string()),
             ],
             terms: vec![],
-            like_patterns: vec![],
+            likes: vec![],
         };
         predicates2.insert(1, request2);
         let key2 = PredicateKey::new_fulltext(Arc::new(predicates2));
@@ -434,7 +434,7 @@ mod tests {
                 col_lowered: false,
                 term: "test term".to_string(),
             }],
-            like_patterns: vec![],
+            likes: vec![],
         };
         predicates1.insert(1, request1);
         let key1 = PredicateKey::new_fulltext(Arc::new(predicates1));

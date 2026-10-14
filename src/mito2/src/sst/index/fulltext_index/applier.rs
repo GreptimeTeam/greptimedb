@@ -363,7 +363,7 @@ impl FulltextIndexApplier {
         let mut applied = false;
 
         for (column_id, request) in self.requests.iter() {
-            if request.terms.is_empty() && request.like_patterns.is_empty() {
+            if request.terms.is_empty() && request.likes.is_empty() {
                 continue;
             }
 
@@ -513,32 +513,30 @@ impl FulltextIndexApplier {
     /// Converts terms and `LIKE` patterns to predicates, one per token that a matching
     /// row must contain. Multiple predicates are combined with AND semantics.
     fn request_to_predicates(request: &FulltextRequest, config: &Config) -> Vec<InListPredicate> {
-        // `matches_term(lower(col), ..)` matches against the lowercased text, whose word
-        // boundaries may differ from the indexed text's, e.g. U+212A KELVIN SIGN
-        // lowercases to an ASCII 'k'. So lowercased columns get no probes.
+        // Probes of a lowercased column come from lowercased text and are indexed as is;
+        // a case-sensitive index has no tokens of the lowercased text.
+        let probes = |col_lowered: bool, probes: Vec<String>| -> Vec<Vec<u8>> {
+            match (col_lowered, config.case_sensitive) {
+                (true, true) => vec![],
+                (false, false) => probes
+                    .iter()
+                    .map(|p| p.to_lowercase().into_bytes())
+                    .collect(),
+                _ => probes.into_iter().map(String::into_bytes).collect(),
+            }
+        };
         let term_probes = request
             .terms
             .iter()
-            .filter(|term| !term.col_lowered)
-            .flat_map(|term| extract_term_probes(&term.term));
+            .flat_map(|term| probes(term.col_lowered, extract_term_probes(&term.term)));
         let like_probes = request
-            .like_patterns
+            .likes
             .iter()
-            .flat_map(|pattern| extract_like_probes(pattern));
+            .flat_map(|like| probes(like.col_lowered, extract_like_probes(&like.pattern)));
 
-        let probes = term_probes
+        term_probes
             .chain(like_probes)
-            .map(|probe| {
-                if config.case_sensitive {
-                    probe
-                } else {
-                    probe.to_lowercase()
-                }
-                .into_bytes()
-            })
-            .collect::<HashSet<_>>();
-
-        probes
+            .collect::<HashSet<_>>()
             .into_iter()
             .map(|p| InListPredicate {
                 list: iter::once(p).collect(),
@@ -770,35 +768,52 @@ mod tests {
     use rand::{Rng, SeedableRng};
 
     use super::*;
-    use crate::sst::index::fulltext_index::applier::builder::FulltextTerm;
+    use crate::sst::index::fulltext_index::applier::builder::{FulltextLike, FulltextTerm};
 
+    /// A `matches_term` or `LIKE` predicate on `col`, or on `lower(col)` when `lowered`.
     enum Predicate<'a> {
         Term(&'a str),
         Like(&'a str),
+        LowerTerm(&'a str),
+        LowerLike(&'a str),
     }
 
     impl Predicate<'_> {
         fn eval(&self, text: &str) -> bool {
-            match self {
-                Predicate::Term(term) => MatchesTermFinder::new(term).find(text),
-                Predicate::Like(pattern) => like(
+            let like_matches = |text: &str, pattern: &str| {
+                like(
                     &StringArray::from(vec![text]),
-                    &Scalar::new(StringArray::from(vec![*pattern])),
+                    &Scalar::new(StringArray::from(vec![pattern])),
                 )
                 .unwrap()
-                .value(0),
+                .value(0)
+            };
+            match self {
+                Predicate::Term(term) => MatchesTermFinder::new(term).find(text),
+                Predicate::Like(pattern) => like_matches(text, pattern),
+                Predicate::LowerTerm(term) => {
+                    MatchesTermFinder::new(term).find(&text.to_lowercase())
+                }
+                Predicate::LowerLike(pattern) => like_matches(&text.to_lowercase(), pattern),
             }
         }
 
         fn request(&self) -> FulltextRequest {
             let mut request = FulltextRequest::default();
-            match self {
-                Predicate::Term(term) => request.terms.push(FulltextTerm {
-                    col_lowered: false,
-                    term: term.to_string(),
-                }),
-                Predicate::Like(pattern) => request.like_patterns.push(pattern.to_string()),
-            }
+            let (term, like, col_lowered) = match *self {
+                Predicate::Term(term) => (Some(term), None, false),
+                Predicate::Like(pattern) => (None, Some(pattern), false),
+                Predicate::LowerTerm(term) => (Some(term), None, true),
+                Predicate::LowerLike(pattern) => (None, Some(pattern), true),
+            };
+            request.terms.extend(term.map(|term| FulltextTerm {
+                col_lowered,
+                term: term.to_string(),
+            }));
+            request.likes.extend(like.map(|pattern| FulltextLike {
+                col_lowered,
+                pattern: pattern.to_string(),
+            }));
             request
         }
 
@@ -904,7 +919,24 @@ mod tests {
             ("错误error日志", Predicate::Like("%错误error日%"), true),
             ("错误error日志", Predicate::Like("%r日志"), true),
         ];
-        for (text, predicate, has_probes) in cases {
+        let lowered_cases = [
+            (
+                "Connection TIMEOUT after 5s",
+                Predicate::LowerTerm("timeout"),
+                true,
+            ),
+            (
+                "Connection TIMEOUT after 5s",
+                Predicate::LowerLike("% timeout %"),
+                true,
+            ),
+            // Lowercasing changes the class of U+212A KELVIN SIGN, splits U+0130 into
+            // two characters, and lowercases `Σ` depending on what follows it.
+            ("a\u{212A}b", Predicate::LowerTerm("akb"), true),
+            ("\u{130}stanbul", Predicate::LowerTerm("stanbul"), true),
+            ("ΟΔΟΣ.x", Predicate::LowerTerm("οδοσ"), true),
+        ];
+        for (text, predicate, has_probes) in cases.into_iter().chain(lowered_cases) {
             assert!(predicate.eval(text), "case doesn't match: {text:?}");
             assert_eq!(
                 predicate.assert_probes_indexed(text) > 0,
@@ -934,9 +966,11 @@ mod tests {
             let end = rng.random_range(start..=chars.len());
 
             let term = chars[start..end].iter().collect::<String>();
-            let predicate = Predicate::Term(&term);
-            if predicate.eval(&text) {
-                predicate.assert_probes_indexed(&text);
+            let lowered = term.to_lowercase();
+            for predicate in [Predicate::Term(&term), Predicate::LowerTerm(&lowered)] {
+                if predicate.eval(&text) {
+                    predicate.assert_probes_indexed(&text);
+                }
             }
 
             let mut pattern = String::new();
@@ -957,9 +991,11 @@ mod tests {
             if end < chars.len() && rng.random_bool(0.5) {
                 pattern.push('%');
             }
-            let predicate = Predicate::Like(&pattern);
-            if predicate.eval(&text) {
-                predicate.assert_probes_indexed(&text);
+            let lowered = pattern.to_lowercase();
+            for predicate in [Predicate::Like(&pattern), Predicate::LowerLike(&lowered)] {
+                if predicate.eval(&text) {
+                    predicate.assert_probes_indexed(&text);
+                }
             }
         }
     }

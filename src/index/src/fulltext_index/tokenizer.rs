@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_base::term_token;
+use common_base::term_token::{self, has_irregular_lowercase};
 
 use crate::Bytes;
 use crate::bloom_filter::element_hash;
@@ -36,6 +36,8 @@ impl Tokenizer for ScriptTokenizer {
 /// `Analyzer` analyzes a text into a list of tokens.
 ///
 /// It uses a `Tokenizer` to tokenize the text and optionally lowercases the tokens.
+/// When case-insensitive, it also emits the tokens of the whole lowercased text if
+/// they can differ, so that predicates on `lower(col)` can probe the index.
 pub struct Analyzer {
     tokenizer: Box<dyn Tokenizer>,
     case_sensitive: bool,
@@ -61,22 +63,36 @@ impl Analyzer {
         buf: &'a mut Vec<u8>,
     ) -> impl Iterator<Item = u64> + use<'a> {
         let case_sensitive = self.case_sensitive;
-        self.tokenizer.tokenize(text).into_iter().map(move |token| {
-            if case_sensitive {
-                element_hash(token.as_bytes())
-            } else if token.is_ascii() {
-                buf.clear();
-                buf.extend(token.bytes().map(|b| b.to_ascii_lowercase()));
-                element_hash(buf)
-            } else {
-                element_hash(token.to_lowercase().as_bytes())
-            }
-        })
+        let lowercased_text_hashes = self
+            .irregular_lowercased_text(text)
+            .map(|lowered| {
+                self.tokenizer
+                    .tokenize(&lowered)
+                    .into_iter()
+                    .map(|token| element_hash(token.as_bytes()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        self.tokenizer
+            .tokenize(text)
+            .into_iter()
+            .map(move |token| {
+                if case_sensitive {
+                    element_hash(token.as_bytes())
+                } else if token.is_ascii() {
+                    buf.clear();
+                    buf.extend(token.bytes().map(|b| b.to_ascii_lowercase()));
+                    element_hash(buf)
+                } else {
+                    element_hash(token.to_lowercase().as_bytes())
+                }
+            })
+            .chain(lowercased_text_hashes)
     }
 
     /// Analyzes the given text into a list of tokens.
     pub fn analyze_text(&self, text: &str) -> Result<Vec<Bytes>> {
-        let res = self
+        let mut res = self
             .tokenizer
             .tokenize(text)
             .iter()
@@ -87,8 +103,21 @@ impl Analyzer {
                     s.to_lowercase().as_bytes().to_vec()
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
+        if let Some(lowered) = self.irregular_lowercased_text(text) {
+            res.extend(
+                self.tokenizer
+                    .tokenize(&lowered)
+                    .into_iter()
+                    .map(|token| token.as_bytes().to_vec()),
+            );
+        }
         Ok(res)
+    }
+
+    /// Returns the lowercased text whose tokens must be indexed too, if any.
+    fn irregular_lowercased_text(&self, text: &str) -> Option<String> {
+        (!self.case_sensitive && has_irregular_lowercase(text)).then(|| text.to_lowercase())
     }
 }
 

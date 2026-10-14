@@ -26,6 +26,7 @@ use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error, warn};
 use common_time::Timestamp;
+use datatypes::schema::FulltextBackend;
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -37,6 +38,7 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::sst::file_purger::FilePurgerRef;
+use crate::sst::index::fulltext_index::FULLTEXT_BLOOM_VERSION;
 use crate::sst::location;
 use crate::sst::parquet::SstInfo;
 use crate::sst::primary_key::PrimaryKeyRangeMapper;
@@ -397,6 +399,14 @@ pub struct ColumnIndexMetadata {
     pub column_id: ColumnId,
     /// List of index types that have been successfully created for this column.
     pub created_indexes: IndexTypes,
+    /// Version of the column's fulltext bloom index, `0` if the column has none or the
+    /// SST was written before the version was recorded.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub fulltext_bloom_version: u8,
+}
+
+fn is_zero(version: &u8) -> bool {
+    *version == 0
 }
 
 impl FileMeta {
@@ -450,13 +460,14 @@ impl FileMeta {
         let id_to_indexes = self
             .indexes
             .iter()
-            .map(|index| (index.column_id, index.created_indexes.clone()))
+            .map(|index| (index.column_id, index))
             .collect::<std::collections::HashMap<_, _>>();
         for column in metadata {
             if !column.column_schema.is_indexed() {
                 continue;
             }
-            if let Some(indexes) = id_to_indexes.get(&column.column_id) {
+            if let Some(index) = id_to_indexes.get(&column.column_id) {
+                let indexes = &index.created_indexes;
                 if column.column_schema.is_inverted_indexed()
                     && !indexes.contains(&IndexType::InvertedIndex)
                 {
@@ -464,6 +475,18 @@ impl FileMeta {
                 }
                 if column.column_schema.is_fulltext_indexed()
                     && !indexes.contains(&IndexType::FulltextIndex)
+                {
+                    return false;
+                }
+                if column
+                    .column_schema
+                    .fulltext_options()
+                    .ok()
+                    .flatten()
+                    .is_some_and(|options| {
+                        options.enable && options.backend == FulltextBackend::Bloom
+                    })
+                    && index.fulltext_bloom_version < FULLTEXT_BLOOM_VERSION
                 {
                     return false;
                 }
@@ -1038,6 +1061,7 @@ mod tests {
             indexes: vec![ColumnIndexMetadata {
                 column_id: 0,
                 created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+                ..Default::default()
             }],
             index_file_size: 0,
             index_version: 0,
@@ -1116,6 +1140,7 @@ mod tests {
             indexes: vec![ColumnIndexMetadata {
                 column_id: 0,
                 created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+                ..Default::default()
             }],
             index_file_size: 0,
             index_version: 0,
@@ -1340,6 +1365,7 @@ mod tests {
             indexes: vec![ColumnIndexMetadata {
                 column_id: 1,
                 created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+                ..Default::default()
             }],
             ..Default::default()
         };
@@ -1353,6 +1379,7 @@ mod tests {
                 IndexType::InvertedIndex,
                 IndexType::BloomFilterIndex,
             ]),
+            ..Default::default()
         }];
         let region_meta = vec![new_column_meta(1, "tag1", true, false, false)];
         assert!(file_meta.is_index_consistent_with_region(&region_meta));
@@ -1361,6 +1388,7 @@ mod tests {
         file_meta.indexes = vec![ColumnIndexMetadata {
             column_id: 1,
             created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            ..Default::default()
         }];
         let region_meta = vec![new_column_meta(1, "tag1", true, true, false)]; // Requires fulltext too
         assert!(!file_meta.is_index_consistent_with_region(&region_meta));
@@ -1369,6 +1397,7 @@ mod tests {
         file_meta.indexes = vec![ColumnIndexMetadata {
             column_id: 2, // File only has index for column 2
             created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            ..Default::default()
         }];
         let region_meta = vec![new_column_meta(1, "tag1", true, false, false)]; // Requires index on column 1
         assert!(!file_meta.is_index_consistent_with_region(&region_meta));
@@ -1377,6 +1406,7 @@ mod tests {
         file_meta.indexes = vec![ColumnIndexMetadata {
             column_id: 1,
             created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            ..Default::default()
         }];
         let region_meta = vec![new_column_meta(1, "tag1", false, false, false)]; // No index required
         assert!(file_meta.is_index_consistent_with_region(&region_meta));
@@ -1391,10 +1421,12 @@ mod tests {
             ColumnIndexMetadata {
                 column_id: 1,
                 created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+                ..Default::default()
             },
             ColumnIndexMetadata {
                 column_id: 2, // Column 2 is missing the required BloomFilterIndex
                 created_indexes: SmallVec::from_iter([IndexType::FulltextIndex]),
+                ..Default::default()
             },
         ];
         let region_meta = vec![
@@ -1402,5 +1434,42 @@ mod tests {
             new_column_meta(2, "tag2", false, true, true), // Requires Fulltext and BloomFilter
         ];
         assert!(!file_meta.is_index_consistent_with_region(&region_meta));
+    }
+
+    #[test]
+    fn test_index_consistency_requires_current_fulltext_bloom_version() {
+        let fulltext_column = |backend| {
+            let column_schema = ColumnSchema::new("msg", ConcreteDataType::string_datatype(), true)
+                .with_fulltext_options(FulltextOptions::new_unchecked(
+                    true,
+                    FulltextAnalyzer::English,
+                    false,
+                    backend,
+                    1000,
+                    0.01,
+                ))
+                .unwrap();
+            vec![ColumnMetadata {
+                column_schema,
+                semantic_type: api::v1::SemanticType::Field,
+                column_id: 1,
+            }]
+        };
+        let file_meta = |fulltext_bloom_version| FileMeta {
+            indexes: vec![ColumnIndexMetadata {
+                column_id: 1,
+                created_indexes: SmallVec::from_iter([IndexType::FulltextIndex]),
+                fulltext_bloom_version,
+            }],
+            ..Default::default()
+        };
+
+        let bloom = fulltext_column(FulltextBackend::Bloom);
+        // Written before the version was recorded, i.e. with the old bloom blob.
+        assert!(!file_meta(0).is_index_consistent_with_region(&bloom));
+        assert!(file_meta(FULLTEXT_BLOOM_VERSION).is_index_consistent_with_region(&bloom));
+        // Tantivy indexes carry no bloom version.
+        let tantivy = fulltext_column(FulltextBackend::Tantivy);
+        assert!(file_meta(0).is_index_consistent_with_region(&tantivy));
     }
 }

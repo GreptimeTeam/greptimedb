@@ -229,6 +229,14 @@ impl FulltextIndexer {
     pub fn column_ids(&self) -> impl Iterator<Item = ColumnId> + '_ {
         self.creators.keys().copied()
     }
+
+    /// Returns IDs of columns indexed with the bloom backend.
+    pub fn bloom_column_ids(&self) -> impl Iterator<Item = ColumnId> + '_ {
+        self.creators
+            .values()
+            .filter(|c| matches!(c.inner, AltFulltextCreator::Bloom(_)))
+            .map(|c| c.column_id)
+    }
 }
 
 impl FulltextIndexer {
@@ -999,14 +1007,13 @@ mod tests {
         .await;
         assert_eq!(row_ids, Some(rows([2])));
 
-        // `lower(col)` may split words differently from `col`, so it gets no probes.
         let row_ids = applier_factory(
             vec![],
             vec![(2, vec![(true, "hello")])],
             Some(BitVec::from_slice(&[0b1111])),
         )
         .await;
-        assert_eq!(row_ids, None);
+        assert_eq!(row_ids, Some(rows([0, 3])));
     }
 
     #[tokio::test]
@@ -1160,7 +1167,7 @@ mod tests {
             Some(BitVec::from_slice(&[0b1111])),
         )
         .await;
-        assert_eq!(row_ids, Some(rows([2, 3])));
+        assert_eq!(row_ids, Some(rows([3])));
 
         let row_ids = applier_factory(
             vec![],
@@ -1168,7 +1175,7 @@ mod tests {
             Some(BitVec::from_slice(&[0b1111])),
         )
         .await;
-        assert_eq!(row_ids, Some(rows([0, 3])));
+        assert_eq!(row_ids, Some(rows([3])));
 
         let row_ids = applier_factory(
             vec![],
@@ -1176,7 +1183,7 @@ mod tests {
             Some(BitVec::from_slice(&[0b1111])),
         )
         .await;
-        assert_eq!(row_ids, None);
+        assert_eq!(row_ids, Some(rows([3])));
     }
 
     #[tokio::test]

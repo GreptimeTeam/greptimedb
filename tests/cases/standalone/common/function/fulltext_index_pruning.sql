@@ -15,7 +15,8 @@ INSERT INTO ft_en_bloom VALUES
     (4, '登录手机号18888888888的动态key'),
     (5, '中国农业银行'),
     (6, '连接timeout.5次'),
-    (7, '用户user-123登录');
+    (7, '用户user-123登录'),
+    (8, 'Disk QUOTA Exceeded on VOL_7');
 
 ADMIN flush_table('ft_en_bloom');
 
@@ -63,6 +64,16 @@ SELECT ts, msg FROM ft_en_bloom WHERE msg LIKE '连接timeout.%' ORDER BY ts;
 
 SELECT ts, msg FROM ft_en_bloom WHERE msg LIKE '%user-123%' ORDER BY ts;
 
+SELECT ts, matches_term(lower(msg), 'quota') AS "matches_term(lower(msg), 'quota')", matches_term(lower(msg), 'vol') AS "matches_term(lower(msg), 'vol')", lower(msg) LIKE '%disk quota exceeded%' AS "lower(msg) LIKE '%disk quota exceeded%'", lower(msg) LIKE 'disk quota%' AS "lower(msg) LIKE 'disk quota%'" FROM ft_en_bloom ORDER BY ts;
+
+SELECT ts, msg FROM ft_en_bloom WHERE matches_term(lower(msg), 'quota') ORDER BY ts;
+
+SELECT ts, msg FROM ft_en_bloom WHERE matches_term(lower(msg), 'vol') ORDER BY ts;
+
+SELECT ts, msg FROM ft_en_bloom WHERE lower(msg) LIKE '%disk quota exceeded%' ORDER BY ts;
+
+SELECT ts, msg FROM ft_en_bloom WHERE lower(msg) LIKE 'disk quota%' ORDER BY ts;
+
 DROP TABLE ft_en_bloom;
 
 CREATE TABLE ft_zh_bloom (
@@ -77,7 +88,8 @@ INSERT INTO ft_zh_bloom VALUES
     (4, '登录手机号18888888888的动态key'),
     (5, '中国农业银行'),
     (6, '连接timeout.5次'),
-    (7, '用户user-123登录');
+    (7, '用户user-123登录'),
+    (8, 'Disk QUOTA Exceeded on VOL_7');
 
 ADMIN flush_table('ft_zh_bloom');
 
@@ -125,6 +137,16 @@ SELECT ts, msg FROM ft_zh_bloom WHERE msg LIKE '连接timeout.%' ORDER BY ts;
 
 SELECT ts, msg FROM ft_zh_bloom WHERE msg LIKE '%user-123%' ORDER BY ts;
 
+SELECT ts, matches_term(lower(msg), 'quota') AS "matches_term(lower(msg), 'quota')", matches_term(lower(msg), 'vol') AS "matches_term(lower(msg), 'vol')", lower(msg) LIKE '%disk quota exceeded%' AS "lower(msg) LIKE '%disk quota exceeded%'", lower(msg) LIKE 'disk quota%' AS "lower(msg) LIKE 'disk quota%'" FROM ft_zh_bloom ORDER BY ts;
+
+SELECT ts, msg FROM ft_zh_bloom WHERE matches_term(lower(msg), 'quota') ORDER BY ts;
+
+SELECT ts, msg FROM ft_zh_bloom WHERE matches_term(lower(msg), 'vol') ORDER BY ts;
+
+SELECT ts, msg FROM ft_zh_bloom WHERE lower(msg) LIKE '%disk quota exceeded%' ORDER BY ts;
+
+SELECT ts, msg FROM ft_zh_bloom WHERE lower(msg) LIKE 'disk quota%' ORDER BY ts;
+
 DROP TABLE ft_zh_bloom;
 
 CREATE TABLE ft_en_tantivy (
@@ -139,7 +161,8 @@ INSERT INTO ft_en_tantivy VALUES
     (4, '登录手机号18888888888的动态key'),
     (5, '中国农业银行'),
     (6, '连接timeout.5次'),
-    (7, '用户user-123登录');
+    (7, '用户user-123登录'),
+    (8, 'Disk QUOTA Exceeded on VOL_7');
 
 ADMIN flush_table('ft_en_tantivy');
 
@@ -187,6 +210,16 @@ SELECT ts, msg FROM ft_en_tantivy WHERE msg LIKE '连接timeout.%' ORDER BY ts;
 
 SELECT ts, msg FROM ft_en_tantivy WHERE msg LIKE '%user-123%' ORDER BY ts;
 
+SELECT ts, matches_term(lower(msg), 'quota') AS "matches_term(lower(msg), 'quota')", matches_term(lower(msg), 'vol') AS "matches_term(lower(msg), 'vol')", lower(msg) LIKE '%disk quota exceeded%' AS "lower(msg) LIKE '%disk quota exceeded%'", lower(msg) LIKE 'disk quota%' AS "lower(msg) LIKE 'disk quota%'" FROM ft_en_tantivy ORDER BY ts;
+
+SELECT ts, msg FROM ft_en_tantivy WHERE matches_term(lower(msg), 'quota') ORDER BY ts;
+
+SELECT ts, msg FROM ft_en_tantivy WHERE matches_term(lower(msg), 'vol') ORDER BY ts;
+
+SELECT ts, msg FROM ft_en_tantivy WHERE lower(msg) LIKE '%disk quota exceeded%' ORDER BY ts;
+
+SELECT ts, msg FROM ft_en_tantivy WHERE lower(msg) LIKE 'disk quota%' ORDER BY ts;
+
 DROP TABLE ft_en_tantivy;
 
 CREATE TABLE ft_zh_tantivy (
@@ -201,7 +234,8 @@ INSERT INTO ft_zh_tantivy VALUES
     (4, '登录手机号18888888888的动态key'),
     (5, '中国农业银行'),
     (6, '连接timeout.5次'),
-    (7, '用户user-123登录');
+    (7, '用户user-123登录'),
+    (8, 'Disk QUOTA Exceeded on VOL_7');
 
 ADMIN flush_table('ft_zh_tantivy');
 
@@ -248,5 +282,15 @@ SELECT ts, msg FROM ft_zh_tantivy WHERE msg LIKE '%农业%' ORDER BY ts;
 SELECT ts, msg FROM ft_zh_tantivy WHERE msg LIKE '连接timeout.%' ORDER BY ts;
 
 SELECT ts, msg FROM ft_zh_tantivy WHERE msg LIKE '%user-123%' ORDER BY ts;
+
+SELECT ts, matches_term(lower(msg), 'quota') AS "matches_term(lower(msg), 'quota')", matches_term(lower(msg), 'vol') AS "matches_term(lower(msg), 'vol')", lower(msg) LIKE '%disk quota exceeded%' AS "lower(msg) LIKE '%disk quota exceeded%'", lower(msg) LIKE 'disk quota%' AS "lower(msg) LIKE 'disk quota%'" FROM ft_zh_tantivy ORDER BY ts;
+
+SELECT ts, msg FROM ft_zh_tantivy WHERE matches_term(lower(msg), 'quota') ORDER BY ts;
+
+SELECT ts, msg FROM ft_zh_tantivy WHERE matches_term(lower(msg), 'vol') ORDER BY ts;
+
+SELECT ts, msg FROM ft_zh_tantivy WHERE lower(msg) LIKE '%disk quota exceeded%' ORDER BY ts;
+
+SELECT ts, msg FROM ft_zh_tantivy WHERE lower(msg) LIKE 'disk quota%' ORDER BY ts;
 
 DROP TABLE ft_zh_tantivy;

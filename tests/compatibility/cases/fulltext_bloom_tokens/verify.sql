@@ -13,7 +13,14 @@ INSERT INTO t_fulltext_bloom_tokens VALUES
 
 ADMIN FLUSH_TABLE('t_fulltext_bloom_tokens');
 
--- Old and new SSTs.
+-- Old and new SSTs: one bloom blob of each version.
+SELECT meta_json LIKE '%"bloom_version":2%' AS is_v2, count(*) AS ssts
+FROM information_schema.ssts_index_meta
+WHERE table_id = (SELECT table_id FROM information_schema.tables WHERE table_name = 't_fulltext_bloom_tokens')
+  AND index_type = 'fulltext_bloom'
+GROUP BY is_v2
+ORDER BY is_v2;
+
 SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg @@ 'world' ORDER BY ts;
 
 SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg @@ 'error' ORDER BY ts;
@@ -22,10 +29,27 @@ SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg @@ '农业' ORDER BY ts;
 
 SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg LIKE 'hello\_%' ORDER BY ts;
 
+-- Rebuilds the old SST's index with the current bloom version.
+ADMIN BUILD_INDEX('t_fulltext_bloom_tokens');
+
+-- SQLNESS SLEEP 2s
+SELECT meta_json LIKE '%"bloom_version":2%' AS is_v2, count(*) AS ssts
+FROM information_schema.ssts_index_meta
+WHERE table_id = (SELECT table_id FROM information_schema.tables WHERE table_name = 't_fulltext_bloom_tokens')
+  AND index_type = 'fulltext_bloom'
+GROUP BY is_v2
+ORDER BY is_v2;
+
+SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg @@ 'world' ORDER BY ts;
+
 ADMIN COMPACT_TABLE('t_fulltext_bloom_tokens');
 
--- After compaction.
-SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg @@ 'world' ORDER BY ts;
+SELECT meta_json LIKE '%"bloom_version":2%' AS is_v2, count(*) AS ssts
+FROM information_schema.ssts_index_meta
+WHERE table_id = (SELECT table_id FROM information_schema.tables WHERE table_name = 't_fulltext_bloom_tokens')
+  AND index_type = 'fulltext_bloom'
+GROUP BY is_v2
+ORDER BY is_v2;
 
 SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg @@ '农业' ORDER BY ts;
 

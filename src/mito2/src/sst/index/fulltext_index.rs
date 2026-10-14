@@ -20,6 +20,9 @@ pub(crate) const INDEX_BLOB_TYPE_TANTIVY: &str = "greptime-fulltext-index-v1";
 /// older versions, which would probe these tokens with their own rules and drop rows,
 /// don't find the blob and scan without pruning.
 pub(crate) const INDEX_BLOB_TYPE_BLOOM: &str = "greptime-fulltext-index-bloom-v2";
+/// Version of the bloom blobs stored under [`INDEX_BLOB_TYPE_BLOOM`], recorded in the
+/// manifest so that `ADMIN BUILD_INDEX` can find SSTs with older blobs.
+pub(crate) const FULLTEXT_BLOOM_VERSION: u8 = 2;
 /// Bloom blobs from older versions. Their tokens don't follow `matches_term` boundaries,
 /// so queries never probe them; they are kept only for index metadata listing.
 pub(crate) const INDEX_BLOB_TYPE_BLOOM_V1: &str = "greptime-fulltext-index-bloom";

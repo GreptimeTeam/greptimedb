@@ -277,6 +277,7 @@ mod tests {
             indexes: vec![ColumnIndexMetadata {
                 column_id: 0,
                 created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+                ..Default::default()
             }],
             index_file_size: 4096,
             index_version: 0,

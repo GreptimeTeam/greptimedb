@@ -38,8 +38,7 @@ use crate::sst::index::puffin_manager::PuffinManagerFactory;
 pub struct FulltextRequest {
     pub queries: Vec<FulltextQuery>,
     pub terms: Vec<FulltextTerm>,
-    /// Patterns of case-sensitive `LIKE` predicates, e.g. "%foo%" in `text LIKE '%foo%'`.
-    pub like_patterns: Vec<String>,
+    pub likes: Vec<FulltextLike>,
 }
 
 /// A query to be matched in fulltext index.
@@ -56,6 +55,16 @@ pub struct FulltextQuery(pub String);
 pub struct FulltextTerm {
     pub col_lowered: bool,
     pub term: String,
+}
+
+/// A case-sensitive `LIKE` pattern to be matched in fulltext index.
+///
+/// `pattern` is e.g. "%foo bar%" in `SELECT * FROM t WHERE text LIKE '%foo bar%'`.
+/// `col_lowered` indicates whether the column is lowercased, e.g. `lower(text) LIKE '%foo bar%'`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct FulltextLike {
+    pub col_lowered: bool,
+    pub pattern: String,
 }
 
 /// `FulltextIndexApplierBuilder` is a builder for `FulltextIndexApplier`.
@@ -124,9 +133,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
 
         // Check if any requests have queries or terms
         let has_requests = requests.iter().any(|(_, request)| {
-            !request.queries.is_empty()
-                || !request.terms.is_empty()
-                || !request.like_patterns.is_empty()
+            !request.queries.is_empty() || !request.terms.is_empty() || !request.likes.is_empty()
         });
 
         Ok(has_requests.then(|| {
@@ -158,12 +165,8 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
                 Self::extract_requests(right, metadata, requests);
             }
             Expr::Like(like) => {
-                if let Some((column_id, pattern)) = Self::expr_to_like_pattern(metadata, like) {
-                    requests
-                        .entry(column_id)
-                        .or_default()
-                        .like_patterns
-                        .push(pattern);
+                if let Some((column_id, like)) = Self::expr_to_like(metadata, like) {
+                    requests.entry(column_id).or_default().likes.push(like);
                 }
             }
             Expr::ScalarFunction(func) => {
@@ -251,7 +254,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
         ))
     }
 
-    fn expr_to_like_pattern(metadata: &RegionMetadata, like: &Like) -> Option<(ColumnId, String)> {
+    fn expr_to_like(metadata: &RegionMetadata, like: &Like) -> Option<(ColumnId, FulltextLike)> {
         // `ILIKE` uses Unicode case folding, which disagrees with the index's
         // `to_lowercase` on characters like 'ſ', so its probes could miss rows.
         if like.negated || like.case_insensitive {
@@ -262,8 +265,13 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             return None;
         }
 
-        let Expr::Column(c) = like.expr.as_ref() else {
-            return None;
+        let (c, col_lowered) = match like.expr.as_ref() {
+            Expr::Column(c) => (c, false),
+            Expr::ScalarFunction(f) => match Self::extract_lower_arg(f)? {
+                Expr::Column(c) => (c, true),
+                _ => return None,
+            },
+            _ => return None,
         };
         let column = metadata.column_by_name(&c.name)?;
         if column.column_schema.data_type != ConcreteDataType::string_datatype() {
@@ -289,7 +297,13 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
             return None;
         }
 
-        Some((column.column_id, pattern.clone()))
+        Some((
+            column.column_id,
+            FulltextLike {
+                col_lowered,
+                pattern: pattern.clone(),
+            },
+        ))
     }
 
     fn extract_lower_arg(lower_func: &ScalarFunction) -> Option<&Expr> {
@@ -574,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn test_expr_to_like_pattern() {
+    fn test_expr_to_like() {
         let like = |negated, case_insensitive, escape_char, pattern: &str| Like {
             negated,
             expr: Box::new(Expr::Column(Column::from_name("text"))),
@@ -586,13 +600,36 @@ mod tests {
 
         for escape_char in [None, Some('\\')] {
             assert_eq!(
-                FulltextIndexApplierBuilder::expr_to_like_pattern(
+                FulltextIndexApplierBuilder::expr_to_like(
                     &bloom,
                     &like(false, false, escape_char, "%foo bar baz%")
                 ),
-                Some((1, "%foo bar baz%".to_string()))
+                Some((
+                    1,
+                    FulltextLike {
+                        col_lowered: false,
+                        pattern: "%foo bar baz%".to_string(),
+                    }
+                ))
             );
         }
+        let lowered = Like {
+            expr: Box::new(Expr::ScalarFunction(ScalarFunction {
+                args: vec![Expr::Column(Column::from_name("text"))],
+                func: lower(),
+            })),
+            ..like(false, false, None, "%foo bar baz%")
+        };
+        assert_eq!(
+            FulltextIndexApplierBuilder::expr_to_like(&bloom, &lowered),
+            Some((
+                1,
+                FulltextLike {
+                    col_lowered: true,
+                    pattern: "%foo bar baz%".to_string(),
+                }
+            ))
+        );
         // NOT LIKE, ILIKE and other escape characters can't use the probes, and
         // '%foo%' has none.
         for like in [
@@ -602,7 +639,7 @@ mod tests {
             like(false, false, None, "%foo%"),
         ] {
             assert_eq!(
-                FulltextIndexApplierBuilder::expr_to_like_pattern(&bloom, &like),
+                FulltextIndexApplierBuilder::expr_to_like(&bloom, &like),
                 None
             );
         }
@@ -612,7 +649,7 @@ mod tests {
             mock_metadata_with_fulltext(FulltextBackend::Tantivy),
         ] {
             assert_eq!(
-                FulltextIndexApplierBuilder::expr_to_like_pattern(
+                FulltextIndexApplierBuilder::expr_to_like(
                     &metadata,
                     &like(false, false, None, "%foo bar baz%")
                 ),

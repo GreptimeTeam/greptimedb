@@ -45,7 +45,21 @@ ADMIN FLUSH_TABLE('t_fulltext_bloom_tokens');
 | 0                                            |
 +----------------------------------------------+
 
--- Old and new SSTs.
+-- Old and new SSTs: one bloom blob of each version.
+SELECT meta_json LIKE '%"bloom_version":2%' AS is_v2, count(*) AS ssts
+FROM information_schema.ssts_index_meta
+WHERE table_id = (SELECT table_id FROM information_schema.tables WHERE table_name = 't_fulltext_bloom_tokens')
+  AND index_type = 'fulltext_bloom'
+GROUP BY is_v2
+ORDER BY is_v2;
+
++-------+------+
+| is_v2 | ssts |
++-------+------+
+| false | 1    |
+| true  | 1    |
++-------+------+
+
 SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg @@ 'world' ORDER BY ts;
 
 +-------------------------+-------------------+
@@ -82,15 +96,29 @@ SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg LIKE 'hello\_%' ORDER BY t
 | 1970-01-01T00:00:00.004 | hello_world again |
 +-------------------------+-------------------+
 
-ADMIN COMPACT_TABLE('t_fulltext_bloom_tokens');
+-- Rebuilds the old SST's index with the current bloom version.
+ADMIN BUILD_INDEX('t_fulltext_bloom_tokens');
 
-+------------------------------------------------+
-| ADMIN COMPACT_TABLE('t_fulltext_bloom_tokens') |
-+------------------------------------------------+
-| 0                                              |
-+------------------------------------------------+
++----------------------------------------------+
+| ADMIN BUILD_INDEX('t_fulltext_bloom_tokens') |
++----------------------------------------------+
+| 0                                            |
++----------------------------------------------+
 
--- After compaction.
+-- SQLNESS SLEEP 2s
+SELECT meta_json LIKE '%"bloom_version":2%' AS is_v2, count(*) AS ssts
+FROM information_schema.ssts_index_meta
+WHERE table_id = (SELECT table_id FROM information_schema.tables WHERE table_name = 't_fulltext_bloom_tokens')
+  AND index_type = 'fulltext_bloom'
+GROUP BY is_v2
+ORDER BY is_v2;
+
++-------+------+
+| is_v2 | ssts |
++-------+------+
+| true  | 2    |
++-------+------+
+
 SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg @@ 'world' ORDER BY ts;
 
 +-------------------------+-------------------+
@@ -99,6 +127,27 @@ SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg @@ 'world' ORDER BY ts;
 | 1970-01-01T00:00:00.001 | hello_world       |
 | 1970-01-01T00:00:00.004 | hello_world again |
 +-------------------------+-------------------+
+
+ADMIN COMPACT_TABLE('t_fulltext_bloom_tokens');
+
++------------------------------------------------+
+| ADMIN COMPACT_TABLE('t_fulltext_bloom_tokens') |
++------------------------------------------------+
+| 0                                              |
++------------------------------------------------+
+
+SELECT meta_json LIKE '%"bloom_version":2%' AS is_v2, count(*) AS ssts
+FROM information_schema.ssts_index_meta
+WHERE table_id = (SELECT table_id FROM information_schema.tables WHERE table_name = 't_fulltext_bloom_tokens')
+  AND index_type = 'fulltext_bloom'
+GROUP BY is_v2
+ORDER BY is_v2;
+
++-------+------+
+| is_v2 | ssts |
++-------+------+
+| true  | 2    |
++-------+------+
 
 SELECT ts, msg FROM t_fulltext_bloom_tokens WHERE msg @@ '农业' ORDER BY ts;
 

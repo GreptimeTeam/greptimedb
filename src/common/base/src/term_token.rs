@@ -57,6 +57,15 @@ fn is_han(c: char) -> bool {
     HAN_SCRIPT_DATA.get(c) == Script::Han
 }
 
+/// Returns whether lowercasing `text` as a whole can produce tokens that lowercasing
+/// each token of `text` doesn't, which `matches_term(lower(col), ..)` and
+/// `lower(col) LIKE ..` rely on. Every other character lowercases to one character
+/// of the same class, but U+0130 and U+212A change length or class, and `Σ`
+/// lowercases depending on the characters after it.
+pub fn has_irregular_lowercase(text: &str) -> bool {
+    !text.is_ascii() && text.contains(['\u{130}', '\u{212A}', 'Σ'])
+}
+
 /// Returns the tokens the fulltext bloom index stores for `text`.
 ///
 /// A token is a maximal run of ASCII alphanumerics or of non-Han alphanumerics;
@@ -217,6 +226,16 @@ mod tests {
         ];
         for (text, expected) in cases {
             assert_eq!(tokenize(text), expected, "text: {text}");
+        }
+    }
+
+    #[test]
+    fn test_irregular_lowercase_chars() {
+        for c in (0..=0x10FFFF).filter_map(char::from_u32) {
+            let lower = c.to_lowercase().collect::<Vec<_>>();
+            let regular = lower.len() == 1 && classify_char(lower[0]) == classify_char(c);
+            let expect_regular = !matches!(c, '\u{130}' | '\u{212A}');
+            assert_eq!(regular, expect_regular, "U+{:04X}", c as u32);
         }
     }
 
