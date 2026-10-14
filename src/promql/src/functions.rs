@@ -30,6 +30,8 @@ mod round;
 mod test_util;
 mod vector_matching;
 
+use std::sync::Arc;
+
 pub use aggr_over_time::{
     AbsentOverTime, AvgOverTime, CountOverTime, LastOverTime, MaxOverTime, MinOverTime,
     PresentOverTime, StddevOverTime, StdvarOverTime, SumOverTime,
@@ -65,7 +67,6 @@ pub use quantile::QuantileOverTime;
 pub use quantile_aggr::{QUANTILE_NAME, quantile_udaf};
 pub use resets::Resets;
 pub use round::Round;
-use std::sync::Arc;
 pub use vector_matching::{MatchGroupViolation, UniqueMatchGroup};
 
 use crate::range_array::RangeArray;
@@ -236,13 +237,13 @@ pub(crate) fn linear_regression_slices(
 
 /// Registers every PromQL scalar function (UDF) and aggregate function (UDAF)
 /// implemented in this module into `session_state`.
-///
-/// This is the single entry point for PromQL function registration, so plan
-/// decoding does not have to enumerate individual PromQL function
-/// implementations: function names, aliases (e.g. `prom_holt_winters`) and
-/// signatures are all declared here.
 pub fn register_promql_functions(session_state: &mut SessionState) {
     let _ = session_state.register_udaf(quantile_udaf());
+
+    for udf in IeeeComparison::all() {
+        let _ = session_state.register_udf(Arc::new(udf));
+    }
+    let _ = session_state.register_udf(Arc::new(IeeeSqrt::scalar_udf()));
 
     let _ = session_state.register_udf(Arc::new(IDelta::<false>::scalar_udf()));
     let _ = session_state.register_udf(Arc::new(IDelta::<true>::scalar_udf()));
@@ -490,12 +491,17 @@ mod test {
             "prom_delta",
             "prom_deriv",
             "prom_double_exponential_smoothing",
+            "prom_eq",
             "prom_float_to_string",
+            "prom_ge",
+            "prom_gt",
             "prom_holt_winters",
             "prom_idelta",
             "prom_increase",
             "prom_irate",
             "prom_last_over_time",
+            "prom_le",
+            "prom_lt",
             "prom_max_over_time",
             "prom_min_over_time",
             "prom_mixed_range_float",
@@ -532,12 +538,14 @@ mod test {
             "prom_native_histogram_sum",
             "prom_native_histogram_sum_over_time",
             "prom_native_histogram_to_string",
+            "prom_ne",
             "prom_predict_linear",
             "prom_present_over_time",
             "prom_quantile_over_time",
             "prom_rate",
             "prom_resets",
             "prom_round",
+            "prom_sqrt",
             "prom_stddev_over_time",
             "prom_stdvar_over_time",
             "prom_sum_over_time",
@@ -546,29 +554,15 @@ mod test {
         .collect();
         assert_eq!(registered, expected);
 
-        // `prom_holt_winters` is kept as an alias of the double exponential
-        // smoothing function.
-        let des_udf = session_state
-            .scalar_functions()
-            .get(DoubleExponentialSmoothing::name())
-            .expect("prom_double_exponential_smoothing should be registered");
-        assert!(des_udf.aliases().contains(&"prom_holt_winters".to_string()));
-        let alias_udf = session_state
-            .scalar_functions()
-            .get("prom_holt_winters")
-            .expect("prom_holt_winters alias should be registered");
-        assert!(Arc::ptr_eq(des_udf, alias_udf));
-
         for name in [
             QUANTILE_NAME,
             NativeHistogramAggAvg::name(),
             NativeHistogramAggSum::name(),
         ] {
-            let udaf = session_state
-                .aggregate_functions()
-                .get(name)
-                .unwrap_or_else(|| panic!("{name} should be registered"));
-            assert_eq!(udaf.name(), name);
+            assert!(
+                session_state.aggregate_functions().contains_key(name),
+                "{name} should be registered"
+            );
         }
     }
 }

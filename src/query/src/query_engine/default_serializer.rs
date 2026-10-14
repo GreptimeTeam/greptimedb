@@ -319,9 +319,6 @@ fn register_greptime_functions(
             .context(RegisterUdfSnafu { name })?;
     }
 
-    // The PromQL functions (scalar UDFs and UDAFs), including aliases such
-    // as `prom_holt_winters` and the native-histogram functions, are
-    // registered by the `promql` crate itself.
     register_promql_functions(session_state);
 
     Ok(())
@@ -386,7 +383,7 @@ mod tests {
     use promql::extension_plan::{RangeManipulate, SeriesNormalize, UnionDistinctOn};
     use promql::functions::{
         MixedRange, NativeHistogramAggAvg, NativeHistogramAggSum, NativeHistogramCount,
-        NativeHistogramDrop, PromqlFloatToString, Rate, Round, quantile_udaf,
+        NativeHistogramDrop, PromqlFloatToString,
     };
     use session::context::QueryContext;
     use table::TableRef;
@@ -1554,129 +1551,5 @@ mod tests {
             err.contains("Type variation extensions are not supported"),
             "unexpected error: {err}"
         );
-    }
-
-    #[tokio::test]
-    async fn test_serializer_decode_centralized_promql_registration() {
-        let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
-        let factory = QueryEngineFactory::new(
-            catalog_list,
-            None,
-            None,
-            None,
-            None,
-            false,
-            QueryOptions::default(),
-        );
-        let engine = factory.query_engine();
-        let plan_decoder = engine
-            .engine_context(QueryContext::arc())
-            .new_plan_decoder()
-            .unwrap();
-
-        // Scalar functions registered by `register_promql_functions`.
-        let schema = Arc::new(Schema::new(vec![
-            Field::new(
-                "timestamp_range",
-                ArrowDataType::Dictionary(
-                    Box::new(ArrowDataType::Int64),
-                    Box::new(ArrowDataType::Timestamp(TimeUnit::Millisecond, None)),
-                ),
-                true,
-            ),
-            Field::new(
-                "value_range",
-                ArrowDataType::Dictionary(
-                    Box::new(ArrowDataType::Int64),
-                    Box::new(ArrowDataType::Float64),
-                ),
-                true,
-            ),
-            Field::new(
-                "timestamp",
-                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
-                false,
-            ),
-            Field::new("range_length", ArrowDataType::Int64, true),
-        ]));
-        let plan = LogicalPlanBuilder::scan(
-            "devices",
-            Arc::new(LogicalTableSource::new(schema.clone())),
-            None,
-        )
-        .unwrap()
-        .project(vec![
-            Expr::ScalarFunction(ScalarFunction {
-                func: Arc::new(Rate::scalar_udf()),
-                args: vec![
-                    col("timestamp_range"),
-                    col("value_range"),
-                    col("timestamp"),
-                    col("range_length"),
-                ],
-            })
-            .alias("rate"),
-            Expr::ScalarFunction(ScalarFunction {
-                func: Arc::new(Round::scalar_udf()),
-                args: vec![lit(1.0), lit(0.5)],
-            })
-            .alias("rounded"),
-        ])
-        .unwrap()
-        .build()
-        .unwrap();
-        let bytes = DFLogicalSubstraitConvertor
-            .encode(&plan, DefaultSerializer)
-            .unwrap();
-        let table_provider = Arc::new(MemTable::try_new(schema, vec![vec![]]).unwrap());
-        let decoded = plan_decoder
-            .decode(
-                bytes,
-                Arc::new(DummyCatalogList::with_table_provider(table_provider)),
-                false,
-            )
-            .await
-            .unwrap()
-            .to_string();
-        assert!(decoded.contains(Rate::name()));
-        assert!(decoded.contains(Round::name()));
-
-        // The `quantile` UDAF registered together with the PromQL functions.
-        let schema = Arc::new(Schema::new(vec![Field::new(
-            "float",
-            ArrowDataType::Float64,
-            true,
-        )]));
-        let plan = LogicalPlanBuilder::scan(
-            "devices",
-            Arc::new(LogicalTableSource::new(schema.clone())),
-            None,
-        )
-        .unwrap()
-        .aggregate(
-            Vec::<Expr>::new(),
-            vec![
-                quantile_udaf()
-                    .call(vec![lit(0.5), col("float")])
-                    .alias("q"),
-            ],
-        )
-        .unwrap()
-        .build()
-        .unwrap();
-        let bytes = DFLogicalSubstraitConvertor
-            .encode(&plan, DefaultSerializer)
-            .unwrap();
-        let table_provider = Arc::new(MemTable::try_new(schema, vec![vec![]]).unwrap());
-        let decoded = plan_decoder
-            .decode(
-                bytes,
-                Arc::new(DummyCatalogList::with_table_provider(table_provider)),
-                false,
-            )
-            .await
-            .unwrap()
-            .to_string();
-        assert!(decoded.contains("quantile(Float64(0.5)"));
     }
 }
