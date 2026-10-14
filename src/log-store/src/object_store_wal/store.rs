@@ -1534,8 +1534,14 @@ impl Actor {
     /// of failed batches as the object `next_object_seq`, even when the open
     /// batch holds no entry, and starts its create when a slot is free.
     /// Returns whether a batch was sealed.
+    ///
+    /// A failing store keeps the records of failed batches coalesced instead
+    /// of sealing them alone behind its backlog on every tick.
     fn seal(&mut self, releases: Vec<Release>) -> bool {
-        if self.open_batch.is_empty() && releases.is_empty() && self.failed_releases.is_empty() {
+        if self.open_batch.is_empty()
+            && releases.is_empty()
+            && (self.failed_releases.is_empty() || self.failing.is_some())
+        {
             return false;
         }
         if let Some(error) = terminal(&self.terminal_error) {
@@ -2157,8 +2163,8 @@ impl Actor {
             entry_id,
         };
         // A failing store admits nothing behind its backlog: the release
-        // fails at once, and its record waits for the next sealed batch like
-        // that of a batch that failed.
+        // fails at once, and its record is kept like that of a batch that
+        // failed, sealed once a create succeeds.
         if let Some(failing) = &mut self.failing {
             let _ = response.send(Err(failing.reject()));
             self.keep_release(release);
@@ -9703,11 +9709,17 @@ mod tests {
         }
 
         /// A release that arrives while the store is failing fails at once
-        /// with the retryable error and seals nothing behind the backlog; its
-        /// record lands in the next object sealed once the backlog is created.
+        /// with the retryable error. Its record is kept coalesced: the ticks
+        /// that pass while the store is failing seal nothing, however often
+        /// the release is repeated, and the first tick after the backlog is
+        /// created seals the record, which recovery reads back.
         async fn release_while_the_backlog_is_refused() {
-            let (store, io, mut parked) =
-                open_parking_creates(memory_store(), &enqueued(eager())).await;
+            let object_store = memory_store();
+            let (store, io, mut parked) = open_parking_creates(
+                object_store.clone(),
+                &enqueued(config(MIN_FLUSH_INTERVAL, 1)),
+            )
+            .await;
             let before = Counters::sample();
             let region_id = region(1);
             append(&store, region_id, "a1").await.unwrap();
@@ -9717,13 +9729,18 @@ mod tests {
             create.send(false).unwrap();
             wait_until(|| failing_stores() == 1).await;
 
-            let error = store
-                .release_region(&provider(region_id), region_id)
-                .await
-                .unwrap_err();
-            assert_rejected(&error, ErrorKind::PermissionDenied);
+            for _ in 0..3 {
+                let error = store
+                    .release_region(&provider(region_id), region_id)
+                    .await
+                    .unwrap_err();
+                assert_rejected(&error, ErrorKind::PermissionDenied);
+            }
             assert_eq!(Some(id(1, 1)), watermark(&store, region_id));
             assert!(terminal(&store.terminal_error).is_none());
+            // The next attempt of the backlog comes after several ticks.
+            let (object_seq, create) = next_parked_operation(&mut parked).await;
+            assert_eq!(1, object_seq);
             assert!(parked.try_recv().is_err());
             assert_eq!(
                 Counters {
@@ -9731,34 +9748,44 @@ mod tests {
                     sealed_objects: 1,
                     object_bytes: one_entry_object(),
                     object_entries: 1,
-                    rejected_appends: 1,
+                    rejected_appends: 3,
                     ..Counters::default()
                 },
                 Counters::since(before)
             );
 
-            let (object_seq, create) = next_parked_operation(&mut parked).await;
-            assert_eq!(1, object_seq);
             create.send(true).unwrap();
-            timeout(WAIT, store.wait_durable(&provider(region_id), id(1, 1)))
-                .await
-                .unwrap()
-                .unwrap();
+            let (object_seq, create) = next_parked_operation(&mut parked).await;
+            assert_eq!(2, object_seq);
             assert_eq!(0, failing_stores());
-            let other = region(2);
-            append(&store, other, "b1").await.unwrap();
-            next_parked_operation(&mut parked)
-                .await
-                .1
-                .send(true)
-                .unwrap();
-            timeout(WAIT, store.wait_durable(&provider(other), id(2, 1)))
-                .await
-                .unwrap()
-                .unwrap();
-            let decoded = decode_object(&io.get(2).await.unwrap()).unwrap();
-            assert_eq!(1, decoded.records.len());
-            assert_eq!(vec![release(region_id, id(1, 1))], decoded.releases);
+            create.send(true).unwrap();
+            wait_until(|| store.catalog.read().unwrap().contains_object(2)).await;
+            // Object 2 carries the boundary the release allows past objects 0
+            // and 1.
+            assert_eq!(vec![2], collected_object_seqs(&store).await);
+            assert_eq!(
+                vec![release(region_id, id(1, 1))],
+                releases_of(io.as_ref(), 2).await
+            );
+            assert_eq!(
+                Counters {
+                    created_objects: 2,
+                    seal_to_durable: 2,
+                    create_failures: 1,
+                    sealed_objects: 2,
+                    object_bytes: one_entry_object() + release_object(),
+                    object_entries: 1,
+                    deleted_objects: 2,
+                    release_records: 1,
+                    rejected_appends: 3,
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+            store.stop().await.unwrap();
+
+            let store = open(object_store, &eager()).await;
+            assert_eq!(Some(id(1, 1)), watermark(&store, region_id));
             store.stop().await.unwrap();
         }
 
