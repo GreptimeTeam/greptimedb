@@ -326,7 +326,7 @@ impl CompactionScheduler {
                 };
                 let waiters = status.take_waiters();
                 match self
-                    .submit_prepared_compaction(prepared, files, waiters, plan_id)
+                    .prepare_or_submit_compaction(prepared, files, waiters, plan_id)
                     .await
                 {
                     Ok(Some(phase)) => {
@@ -422,7 +422,9 @@ impl CompactionScheduler {
         CompactionTransition::NoAction
     }
 
-    async fn submit_prepared_compaction(
+    /// Submits a remote job, or prepares local unit tasks without submitting them.
+    /// The caller dispatches local units after installing the returned phase.
+    async fn prepare_or_submit_compaction(
         &mut self,
         prepared: PreparedCompaction,
         files: CompactingFiles,
