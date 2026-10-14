@@ -312,9 +312,21 @@ def run_direct_case(
     runner: Path,
 ) -> int:
     ports = allocate_ports(16)
+    # Disable the event recorder so it does not create the internal `events`
+    # table asynchronously — a race between the base and candidate targets
+    # would shift the table ids of the case tables and fail the metadata
+    # comparison in `prepare-direct`.
+    for config_name in ("base", "candidate"):
+        config_dir = work_dir / config_name
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "frontend.toml").write_text(
+            '[event_recorder]\nevent_types = []\n', encoding="utf-8"
+        )
     targets = [
-        make_target("base", base_bin, work_dir, ports[:8]),
-        make_target("candidate", candidate_bin, work_dir, ports[8:]),
+        make_target("base", base_bin, work_dir, ports[:8],
+                    frontend_config=work_dir / "base" / "frontend.toml"),
+        make_target("candidate", candidate_bin, work_dir, ports[8:],
+                    frontend_config=work_dir / "candidate" / "frontend.toml"),
     ]
     for target in targets:
         if target.work_dir.exists() and any(target.work_dir.iterdir()):

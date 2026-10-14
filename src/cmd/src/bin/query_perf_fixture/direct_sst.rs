@@ -370,19 +370,6 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
     if scenario.layout.time_range_layout != "non_overlapping_per_sst" {
         panic!("MVP supports time_range_layout=non_overlapping_per_sst");
     }
-    if scenario.layout.series_layout == "timestamp_major"
-        && !scenario
-            .layout
-            .rows_per_sst
-            .is_multiple_of(scenario.layout.series_count.get())
-    {
-        panic!(
-            "series_layout=timestamp_major requires rows_per_sst to be divisible by series_count"
-        );
-    }
-    if scenario.layout.sst_count > 1000 && !args.allow_large {
-        panic!("sst_count exceeds 1000; pass --allow-large");
-    }
     let seed = scenario.seed.unwrap_or(0);
     let table_index = match args.table.as_deref() {
         Some(name) => scenario
@@ -400,6 +387,19 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
     let table = &scenario.tables[table_index];
     if table.engine != "mito" {
         panic!("MVP supports engine=mito");
+    }
+    let layout = scenario.layout.for_table(table);
+    if layout.series_layout == "timestamp_major"
+        && !layout
+            .rows_per_sst
+            .is_multiple_of(layout.series_count.get())
+    {
+        panic!(
+            "series_layout=timestamp_major requires rows_per_sst to be divisible by series_count"
+        );
+    }
+    if layout.sst_count > 1000 && !args.allow_large {
+        panic!("sst_count exceeds 1000; pass --allow-large");
     }
     let region_id = RegionId::from(args.region_id);
     let table_dir = args
@@ -426,8 +426,8 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
         case.scenario.kind(),
         table.database,
         table.name,
-        scenario.layout.sst_count,
-        scenario.layout.rows_per_sst
+        layout.sst_count,
+        layout.rows_per_sst
     );
     println!(
         "out_dir={} table_dir={} region_dir={}",
@@ -446,11 +446,11 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
     let ostorage = ObjectStore::new(FsBuilder::default().root(&obj_store_dir.to_string_lossy()))
         .expect("failed to create filesystem object store for fixture output");
     let metadata: RegionMetadataRef = Arc::new(build_region_metadata(table, region_id));
-    let mut files = HashMap::with_capacity(scenario.layout.sst_count);
+    let mut files = HashMap::with_capacity(layout.sst_count);
     let mut next_file_index = 1;
-    for i in 0..scenario.layout.sst_count {
+    for i in 0..layout.sst_count {
         let sequence = 1000 + i as u64;
-        let batch = generate_record_batch(table, &metadata, &scenario.layout, i, sequence);
+        let batch = generate_record_batch(table, &metadata, &layout, i, sequence);
         let source =
             FlatSource::new_iter(batch.schema(), Box::new(vec![batch].into_iter().map(Ok)));
         let mut metrics = Metrics::new(WriteType::Flush);
@@ -467,7 +467,7 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
         .await;
         let opts = WriteOptions {
             write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
-            row_group_size: scenario.layout.row_group_size,
+            row_group_size: layout.row_group_size,
             max_file_size: None,
             float_field_encoding: Default::default(),
         };
@@ -533,7 +533,7 @@ pub(super) async fn run_direct_sst(args: DirectArgs) {
         writeln!(jsonl, "{}", serde_json::to_string(&serde_json::json!({ "file_id": file_id.to_string(), "region_id": meta.region_id.as_u64(), "object_path": mito2::sst::location::sst_file_path(&table_dir, RegionFileId::new(meta.region_id, *file_id), PathType::Bare), "time_range_start": meta.time_range.0.value(), "time_range_end": meta.time_range.1.value(), "num_rows": meta.num_rows, "num_row_groups": meta.num_row_groups, "file_size": meta.file_size, "num_series": meta.num_series, "sequence": meta.sequence.map(|s| s.get()) })).expect("failed to serialize fixture SST metadata JSONL entry")).expect("failed to write fixture SST metadata JSONL entry");
     }
     jsonl.flush().expect("failed to flush fixture files.jsonl");
-    fs::write(out_dir.join("summary.json"), serde_json::to_vec_pretty(&serde_json::json!({ "case": case_name, "seed": seed, "table_index": table_index, "table": table.name, "database": table.database, "region_id": region_id.as_u64(), "table_dir": table_dir, "region_dir": region_dir, "sst_format": format!("{format:?}"), "sst_count": scenario.layout.sst_count, "rows_per_sst": scenario.layout.rows_per_sst, "row_group_size": scenario.layout.row_group_size, "total_rows": scenario.layout.sst_count * scenario.layout.rows_per_sst, "checkpoint_path": checkpoint_path, "files_jsonl_path": files_jsonl_path, "readback_validated": false, "metadata_source": "synthetic" })).expect("failed to serialize fixture summary")).expect("failed to write fixture summary.json");
+    fs::write(out_dir.join("summary.json"), serde_json::to_vec_pretty(&serde_json::json!({ "case": case_name, "seed": seed, "table_index": table_index, "table": table.name, "database": table.database, "region_id": region_id.as_u64(), "table_dir": table_dir, "region_dir": region_dir, "sst_format": format!("{format:?}"), "sst_count": layout.sst_count, "rows_per_sst": layout.rows_per_sst, "row_group_size": layout.row_group_size, "total_rows": layout.sst_count * layout.rows_per_sst, "checkpoint_path": checkpoint_path, "files_jsonl_path": files_jsonl_path, "readback_validated": false, "metadata_source": "synthetic" })).expect("failed to serialize fixture summary")).expect("failed to write fixture summary.json");
     println!("Done. wrote {} SST file entries", manifest.files.len());
 }
 

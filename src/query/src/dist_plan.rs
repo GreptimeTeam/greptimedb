@@ -14,8 +14,10 @@
 
 mod analyzer;
 mod commutativity;
+mod dist_join_planner;
 mod dyn_filter_bridge;
 mod filter_id;
+mod materialized_broadcast;
 mod merge_scan;
 mod merge_sort;
 mod planner;
@@ -25,7 +27,15 @@ mod remote_dyn_filter_receiver;
 mod remote_dyn_filter_registry;
 
 pub use analyzer::{DistPlannerAnalyzer, DistPlannerOptions};
+pub use dist_join_planner::DistJoinPlanner;
+#[cfg(test)]
+pub(crate) use dist_join_planner::DistJoinTableStats;
+pub(crate) use dist_join_planner::{
+    DIST_JOIN_PLANNER_RULE_NAME, DistJoinStats, aggregate_region_stats, candidate_joins,
+    expected_region_ids, restore_join_schema, side_base_table_id,
+};
 pub use filter_id::{FilterFingerprint, FilterId, ParseFilterIdError, RemoteDynFilterProducerId};
+pub(crate) use materialized_broadcast::MaterializedBroadcastNode;
 pub use merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 pub(crate) use merge_sort::MergeSortExec;
 pub use planner::{DistExtensionPlanner, MergeSortExtensionPlanner};

@@ -100,6 +100,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 |_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
 |_|_TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)] |
 |_| ]]_|
+| logical_plan after DistJoinPlanner_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonSchemaConcretizeRule_| SAME TEXT AS ABOVE_|
 | logical_plan after FixStateUdafOrderingAnalyzer_| SAME TEXT AS ABOVE_|
 | analyzed_logical_plan_| SAME TEXT AS ABOVE_|
@@ -254,6 +255,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 |_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
 |_|_TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)] |
 |_| ]]_|
+| logical_plan after DistJoinPlanner_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonSchemaConcretizeRule_| SAME TEXT AS ABOVE_|
 | logical_plan after FixStateUdafOrderingAnalyzer_| SAME TEXT AS ABOVE_|
 | analyzed_logical_plan_| SAME TEXT AS ABOVE_|
@@ -440,6 +442,7 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 |_|_Filter: test_nano.j > TimestampNanosecond(-300000000000, None) AND test_nano.j <= TimestampNanosecond(10000000000, None)_|
 |_|_TableScan: test_nano, partial_filters=[test_nano.j > TimestampNanosecond(-300000000000, None), test_nano.j <= TimestampNanosecond(10000000000, None)] |
 |_| ]]_|
+| logical_plan after DistJoinPlanner_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonSchemaConcretizeRule_| SAME TEXT AS ABOVE_|
 | logical_plan after FixStateUdafOrderingAnalyzer_| SAME TEXT AS ABOVE_|
 | analyzed_logical_plan_| SAME TEXT AS ABOVE_|

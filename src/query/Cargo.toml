@@ -60,6 +60,7 @@ meter-macros.workspace = true
 object-store.workspace = true
 once_cell.workspace = true
 partition.workspace = true
+parking_lot.workspace = true
 prometheus.workspace = true
 promql.workspace = true
 promql-parser.workspace = true
@@ -84,6 +85,7 @@ arrow.workspace = true
 catalog = { workspace = true, features = ["testing"] }
 common-function.workspace = true
 common-macro.workspace = true
+common-procedure.workspace = true
 common-query = { workspace = true, features = ["testing"] }
 fastrand = "2.0"
 moka = { workspace = true, features = ["future"] }

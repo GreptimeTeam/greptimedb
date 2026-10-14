@@ -130,6 +130,31 @@ pub(super) async fn http_post_sql(client: &Client, port: u16, sql: &str, db: &st
     sample
 }
 
+/// Posts `sql` to `/v1/sql` without an explicit response format.
+///
+/// A request that carries several statements is answered with the default `greptimedb_v1`
+/// format, whose response holds one output per statement; the `json` format used for single
+/// statements rejects multi-statement results. The response of a failing statement is an error
+/// response, so a failed prefix statement still fails the sample.
+pub(super) async fn http_post_multi_statement_sql(
+    client: &Client,
+    port: u16,
+    sql: &str,
+    db: &str,
+) -> Value {
+    let mut sample = post_form(
+        client,
+        format!("http://127.0.0.1:{port}/v1/sql"),
+        &[("sql", sql), ("db", db)],
+    )
+    .await;
+    sample
+        .as_object_mut()
+        .expect("HTTP samples are objects")
+        .insert("sql".to_string(), Value::String(sql.to_string()));
+    sample
+}
+
 /// Posts a Prometheus HTTP API range query (`/v1/prometheus/api/v1/query_range`)
 /// and measures the full request-to-body latency. This exercises the Prometheus
 /// JSON response building path (`PrometheusJsonResponse::record_batches_to_data`)
