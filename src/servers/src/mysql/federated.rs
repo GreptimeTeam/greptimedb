@@ -288,7 +288,7 @@ fn check_show_variables(query: &str) -> Option<Output> {
         if remainder.is_empty() {
             Some(show_variables("", ""))
         } else {
-            let remainder = remainder.trim();
+            let remainder = remainder.trim_start();
             // Filter keywords need an identifier boundary; named variables do not.
             let looks_like_filter = ["WHERE", "LIKE"].iter().any(|keyword| {
                 remainder
@@ -299,15 +299,7 @@ fn check_show_variables(query: &str) -> Option<Output> {
                         .next()
                         .is_none_or(|c| !(c == '_' || c == '$' || c.is_alphanumeric()))
             });
-            let is_dotted_identifier = remainder.split('.').all(|part| {
-                let bytes = part.as_bytes();
-                !bytes.is_empty()
-                    && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_' || bytes[0] == b'$')
-                    && bytes[1..]
-                        .iter()
-                        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_' || *byte == b'$')
-            });
-            if looks_like_filter || !is_dotted_identifier {
+            if looks_like_filter {
                 Some(show_variables("", ""))
             } else {
                 None
@@ -587,6 +579,9 @@ mod test {
 
     #[test]
     fn test_show_variables_where_filter_is_absorbed() {
+        // Old Connector/J `loadServerVariables` issues `SHOW VARIABLES WHERE
+        // Variable_name = '...'`; the federated path answers with an empty table
+        // instead of falling through to our parser, which would reject it.
         let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
         let output = check(
             "show variables where Variable_name = 'sql_mode'",
@@ -598,14 +593,18 @@ mod test {
     }
 
     #[test]
-    fn test_show_variables_named_identifier_falls_back() {
+    fn test_show_variables_named_variable_falls_back() {
+        // A named variable (e.g. `SHOW VARIABLES MAX_EXECUTION_TIME`,
+        // `SHOW VARIABLES query.parallelism`) reaches the real handler.
         let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
-        assert!(check("show variables some_name", QueryContext::arc(), session).is_none());
-    }
-
-    #[test]
-    fn test_show_variables_dotted_identifier_falls_back() {
-        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
+        assert!(
+            check(
+                "show variables max_execution_time",
+                QueryContext::arc(),
+                session.clone()
+            )
+            .is_none()
+        );
         assert!(
             check(
                 "show variables query.parallelism",
