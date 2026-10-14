@@ -850,7 +850,7 @@ pub fn show_query_option(
     query_ctx: QueryContextRef,
     engine: &dyn crate::QueryEngine,
 ) -> Result<Option<Output>> {
-    let name = stmt.variable.to_string();
+    let name = sql::ast::object_name_to_string_unquoted(&stmt.variable);
     let Some(canonical) = session::query_options::canonical_query_option_name(&name) else {
         if name.to_ascii_lowercase().starts_with("query.")
             || name.to_ascii_lowercase().starts_with("datafusion.")
