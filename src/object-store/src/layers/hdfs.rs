@@ -15,6 +15,7 @@
 use std::fmt::{self, Debug};
 use std::sync::Arc;
 
+use common_telemetry::warn;
 use hdfs_native::{Client, ClientBuilder};
 use opendal::raw::oio::{Delete as _, Read as _, ReadStream as _, Write as _};
 use opendal::raw::{
@@ -162,6 +163,9 @@ enum HdfsWriterInner {
         writer: Option<oio::Writer>,
         temporary_path: String,
         target_path: String,
+        /// Message of the write that failed and removed the writer, so later
+        /// `write`/`close` calls can explain why the writer is gone.
+        failure: Option<String>,
     },
 }
 
@@ -174,11 +178,12 @@ impl oio::Write for HdfsWriter {
                 context,
                 writer,
                 temporary_path,
+                failure,
                 ..
             } => {
                 let result = writer
                     .as_mut()
-                    .ok_or_else(writer_unavailable)?
+                    .ok_or_else(|| writer_unavailable(failure.as_deref()))?
                     .write(buffer)
                     .await;
                 if let Err(error) = result {
@@ -187,6 +192,7 @@ impl oio::Write for HdfsWriter {
                     if let Some(writer) = writer.take() {
                         abort_and_delete(inner, context, writer, temporary_path).await;
                     }
+                    *failure = Some(error.to_string());
                     return Err(error);
                 }
                 Ok(())
@@ -204,8 +210,11 @@ impl oio::Write for HdfsWriter {
                 writer,
                 temporary_path,
                 target_path,
+                failure,
             } => {
-                let mut writer = writer.take().ok_or_else(writer_unavailable)?;
+                let mut writer = writer
+                    .take()
+                    .ok_or_else(|| writer_unavailable(failure.as_deref()))?;
                 let metadata = match writer.close().await {
                     Ok(metadata) => metadata,
                     Err(error) => {
@@ -257,11 +266,17 @@ impl oio::Write for HdfsWriter {
     }
 }
 
-fn writer_unavailable() -> opendal::Error {
-    opendal::Error::new(
-        ErrorKind::Unexpected,
-        "HDFS writer is unavailable after close or abort",
-    )
+fn writer_unavailable(failure: Option<&str>) -> opendal::Error {
+    match failure {
+        Some(failure) => opendal::Error::new(
+            ErrorKind::Unexpected,
+            format!("HDFS writer is unavailable: a previous write failed: {failure}"),
+        ),
+        None => opendal::Error::new(
+            ErrorKind::Unexpected,
+            "HDFS writer is unavailable after close or abort",
+        ),
+    }
 }
 
 impl Service for HdfsCompatibilityService {
@@ -316,6 +331,7 @@ impl Service for HdfsCompatibilityService {
             writer: Some(writer),
             temporary_path,
             target_path: path.to_string(),
+            failure: None,
         }))
     }
 
@@ -431,9 +447,13 @@ async fn abort_and_delete(
     mut writer: oio::Writer,
     path: &str,
 ) {
-    let _ = writer.abort().await;
+    if let Err(error) = writer.abort().await {
+        warn!(error; "Failed to abort HDFS writer for temporary file {path}");
+    }
     drop(writer);
-    let _ = delete_path(inner, context, path).await;
+    if let Err(error) = delete_path(inner, context, path).await {
+        warn!(error; "Failed to delete temporary file {path} after a failed HDFS write");
+    }
 }
 
 async fn delete_path(inner: &Servicer, context: &OperationContext, path: &str) -> Result<()> {
@@ -635,7 +655,7 @@ mod tests {
         // closed or aborted by the caller.
         assert!(
             store
-                .list("")
+                .list("data/")
                 .await
                 .unwrap()
                 .iter()
