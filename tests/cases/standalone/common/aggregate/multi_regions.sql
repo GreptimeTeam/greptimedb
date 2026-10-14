@@ -19,7 +19,7 @@ partition on columns (host) (
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
 select sum(val) from t group by host;
 
@@ -31,7 +31,7 @@ select sum(val) from t group by host;
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
 select sum(val) from t;
 
@@ -44,7 +44,7 @@ select sum(val) from t;
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
 select sum(val) from t group by idc;
 

@@ -132,7 +132,7 @@ SELECT i, t AS alias_ts FROM test_pk ORDER BY alias_ts DESC LIMIT 5;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT i, t AS alias_ts FROM test_pk ORDER BY t DESC LIMIT 5;
 
 +-+-+-+
@@ -144,7 +144,7 @@ EXPLAIN ANALYZE SELECT i, t AS alias_ts FROM test_pk ORDER BY t DESC LIMIT 5;
 | 1_| 0_|_SortPreservingMergeExec: [alias_ts@1 DESC], fetch=5 REDACTED
 |_|_|_ProjectionExec: expr=[i@0 as i, t@1 as alias_ts] REDACTED
 |_|_|_SortExec: TopK(fetch=5), expr=[t@1 DESC], preserve_partitioning=[true], filter=[t@1 IS NULL OR t@1 > 2] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["i", "t"], "dyn_filters": ["DynamicFilter [ t@1 IS NULL OR t@1 > 2 ]"], "time_range":REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["i", "t"], "dyn_filters":REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
 +-+-+-+
@@ -155,7 +155,7 @@ EXPLAIN ANALYZE SELECT i, t AS alias_ts FROM test_pk ORDER BY t DESC LIMIT 5;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT i, t AS alias_ts FROM test_pk ORDER BY alias_ts DESC LIMIT 5;
 
 +-+-+-+
@@ -167,7 +167,7 @@ EXPLAIN ANALYZE SELECT i, t AS alias_ts FROM test_pk ORDER BY alias_ts DESC LIMI
 | 1_| 0_|_SortPreservingMergeExec: [alias_ts@1 DESC], fetch=5 REDACTED
 |_|_|_ProjectionExec: expr=[i@0 as i, t@1 as alias_ts] REDACTED
 |_|_|_SortExec: TopK(fetch=5), expr=[t@1 DESC], preserve_partitioning=[true], filter=[t@1 IS NULL OR t@1 > 2] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["i", "t"], "dyn_filters": ["DynamicFilter [ t@1 IS NULL OR t@1 > 2 ]"], "time_range":REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["i", "t"], "dyn_filters":REDACTED
 |_|_|_|
 |_|_| Total rows: 5_|
 +-+-+-+

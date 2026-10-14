@@ -56,7 +56,7 @@ explain select
 -- SQLNESS REPLACE (partitioning.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE __table_id\s*=\s*UInt32\(\d+\) __table_id=UInt32(REDACTED)
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
     select
         first_value(host order by ts),
@@ -82,7 +82,7 @@ explain select first_value(ts order by ts) from t;
 -- SQLNESS REPLACE (partitioning.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE __table_id\s*=\s*UInt32\(\d+\) __table_id=UInt32(REDACTED)
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
     select first_value(ts order by ts) from t;
 
@@ -143,7 +143,7 @@ order by ordered_host;
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE __table_id\s*=\s*UInt32\(\d+\) __table_id=UInt32(REDACTED)
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
 select
     first_value(host order by ts) as ordered_host,
@@ -172,7 +172,7 @@ explain select first_value(ts order by ts) from t;
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE __table_id\s*=\s*UInt32\(\d+\) __table_id=UInt32(REDACTED)
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
     select first_value(ts order by ts) from t;
 
@@ -211,7 +211,7 @@ order by time_window, ordered_host;
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE __table_id\s*=\s*UInt32\(\d+\) __table_id=UInt32(REDACTED)
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
 select
     first_value(host order by ts) as ordered_host,
@@ -267,7 +267,7 @@ explain
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE __table_id\s*=\s*UInt32\(\d+\) __table_id=UInt32(REDACTED)
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
     select first_value(ts order by ts) from t1;
 
@@ -302,7 +302,7 @@ order by ordered_host;
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE __table_id\s*=\s*UInt32\(\d+\) __table_id=UInt32(REDACTED)
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze 
 select
     first_value(host order by ts) as ordered_host,
@@ -345,7 +345,7 @@ order by time_window, ordered_host;
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE __table_id\s*=\s*UInt32\(\d+\) __table_id=UInt32(REDACTED)
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
 select
     first_value(host order by ts) as ordered_host,

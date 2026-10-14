@@ -40,7 +40,7 @@ SELECT MAX(v), MAX(ts) FROM t;
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE ,\s"dyn_filters":\s\["DynamicFilter\s\[[^"]*\]"\] , "dyn_filters": ["DynamicFilter [ REDACTED ]"]
 -- SQLNESS REPLACE metrics=REDACTED\s*\| metrics=REDACTED_|
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT MAX(ABS(v)), MAX(ts) FROM t;
 
 -- A column-only multiple-MAX query remains a dynamic-filter positive control.
@@ -61,7 +61,7 @@ EXPLAIN ANALYZE VERBOSE SELECT MAX(ABS(v)), MAX(ts) FROM t;
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE ,\s"dyn_filters":\s\["DynamicFilter\s\[[^"]*\]"\] , "dyn_filters": ["DynamicFilter [ REDACTED ]"]
 -- SQLNESS REPLACE metrics=REDACTED\s*\| metrics=REDACTED_|
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT MAX(v), MAX(ts) FROM t;
 
 DROP TABLE t;

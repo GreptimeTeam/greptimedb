@@ -25,7 +25,7 @@ INSERT INTO promql_column_pruning VALUES
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE (0, 10, '5s') sum(promql_column_pruning);
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
@@ -35,7 +35,7 @@ TQL ANALYZE (0, 10, '5s') sum(promql_column_pruning);
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE (0, 10, '5s') sum(rate(promql_column_pruning[5s]));
 
 DROP TABLE promql_column_pruning;

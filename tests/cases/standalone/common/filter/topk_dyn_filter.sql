@@ -54,7 +54,7 @@ LIMIT 3;
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE DynamicFilter\s\[[^\]]*\] DynamicFilter [ REDACTED ]
 -- SQLNESS REPLACE "files":\s\[[^\]]*\] "files": REDACTED
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT "id", customer_id, amount
 FROM orders
 ORDER BY amount DESC

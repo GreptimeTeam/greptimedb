@@ -50,7 +50,7 @@ values  ('a', '2024-09-06T06:00:01Z', 1),
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (\{count\[count\]:)\d+(\}) {count[count]:REDACTED}
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
 select count(1) from count_where_bug;
 
@@ -70,7 +70,7 @@ select count(1) from count_where_bug;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
 select count(1) from count_where_bug where `tag` = 'b';
 
@@ -92,7 +92,7 @@ select count(1) from count_where_bug where `tag` = 'b';
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (\{count\[count\]:)\d+(\}) {count[count]:REDACTED}
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
 select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
 
@@ -112,7 +112,7 @@ select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
 select count(1) from count_where_bug where num != 3;
 
@@ -149,7 +149,7 @@ values  ('a', '2024-09-06T06:00:01Z', 1),
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (\{count\[count\]:)\d+(\}) {count[count]:REDACTED}
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
 select count(1) from count_where_bug;
 
@@ -162,7 +162,7 @@ select count(1) from count_where_bug;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
 select count(1) from count_where_bug where `tag` = 'b';
 
@@ -173,7 +173,7 @@ select count(1) from count_where_bug where `tag` = 'b';
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
 select count(1) from count_where_bug where `tag` = 'b';
 
@@ -188,7 +188,7 @@ select count(1) from count_where_bug where `tag` = 'b';
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (\{count\[count]:)\d+(\}) {count[count]:REDACTED}
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
 select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
 
@@ -201,7 +201,7 @@ select count(1) from count_where_bug where ts > '2024-09-06T06:00:04Z';
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
 select count(1) from count_where_bug where num != 3;
 

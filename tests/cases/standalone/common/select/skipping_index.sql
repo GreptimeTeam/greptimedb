@@ -25,7 +25,7 @@ ADMIN FLUSH_TABLE('skipping_table');
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT * FROM skipping_table WHERE id = 'id2' ORDER BY `name`;
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
@@ -34,7 +34,7 @@ EXPLAIN ANALYZE SELECT * FROM skipping_table WHERE id = 'id2' ORDER BY `name`;
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT * FROM skipping_table WHERE id = 'id5' ORDER BY `name`;
 
 DROP TABLE IF EXISTS skipping_table;

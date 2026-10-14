@@ -32,7 +32,7 @@ INSERT INTO tsid_metric VALUES
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE __table_id\s*=\s*UInt32\(\d+\) __table_id=UInt32(REDACTED)
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE (0, 10, '5s') sum(tsid_metric);
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
@@ -43,7 +43,7 @@ TQL ANALYZE (0, 10, '5s') sum(tsid_metric);
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE __table_id\s*=\s*UInt32\(\d+\) __table_id=UInt32(REDACTED)
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE (0, 10, '5s') sum by (job, instance) (tsid_metric);
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
@@ -54,7 +54,7 @@ TQL ANALYZE (0, 10, '5s') sum by (job, instance) (tsid_metric);
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE __table_id\s*=\s*UInt32\(\d+\) __table_id=UInt32(REDACTED)
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE (0, 10, '5s')  sum(irate(tsid_metric[1h])) / scalar(count(count(tsid_metric) by (job)));
 
 -- SQLNESS REPLACE (metrics.*) REDACTED
@@ -65,7 +65,7 @@ TQL ANALYZE (0, 10, '5s')  sum(irate(tsid_metric[1h])) / scalar(count(count(tsid
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE __table_id\s*=\s*UInt32\(\d+\) __table_id=UInt32(REDACTED)
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE (0, 10, '5s')  sum(irate(tsid_metric[1h])) / scalar(count(sum(tsid_metric) by (job)));
 
 DROP TABLE tsid_metric;

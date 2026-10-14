@@ -71,7 +71,7 @@ TQL EVAL (0, 10, '5s') avg_over_time(tsid_no_aggr_metric[5s]);
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE __table_id\s*=\s*UInt32\(\d+\) __table_id=UInt32(REDACTED)
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE (0, 10, '5s') histogram_quantile(0.5, tsid_no_aggr_histogram_bucket);
 
 -- SQLNESS SORT_RESULT 3 1

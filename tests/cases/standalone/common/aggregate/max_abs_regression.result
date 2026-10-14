@@ -67,7 +67,7 @@ SELECT MAX(v), MAX(ts) FROM t;
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE ,\s"dyn_filters":\s\["DynamicFilter\s\[[^"]*\]"\] , "dyn_filters": ["DynamicFilter [ REDACTED ]"]
 -- SQLNESS REPLACE metrics=REDACTED\s*\| metrics=REDACTED_|
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT MAX(ABS(v)), MAX(ts) FROM t;
 
 +-+-+-+
@@ -102,7 +102,7 @@ EXPLAIN ANALYZE VERBOSE SELECT MAX(ABS(v)), MAX(ts) FROM t;
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE ,\s"dyn_filters":\s\["DynamicFilter\s\[[^"]*\]"\] , "dyn_filters": ["DynamicFilter [ REDACTED ]"]
 -- SQLNESS REPLACE metrics=REDACTED\s*\| metrics=REDACTED_|
--- SQLNESS REPLACE \\?"(time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT MAX(v), MAX(ts) FROM t;
 
 +-+-+-+
@@ -114,7 +114,7 @@ EXPLAIN ANALYZE VERBOSE SELECT MAX(v), MAX(ts) FROM t;
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[max(t.v), max(t.ts)] metrics=REDACTED_|
 |_|_|_CoalescePartitionsExec metrics=REDACTED_|
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[max(t.v), max(t.ts)] metrics=REDACTED_|
-|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["ts", "v"], "dyn_filters": ["DynamicFilter [ REDACTED ]"], "time_range":REDACTED
+|_|_|_SeqScan: region=REDACTED, {"partition_count":REDACTED, "projection": ["ts", "v"], "dyn_filters":REDACTED
 |_|_|_|
 |_|_| Total rows: REDACTED_|
 +-+-+-+
