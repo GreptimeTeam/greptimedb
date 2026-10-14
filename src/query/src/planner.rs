@@ -55,6 +55,7 @@ use crate::error::{
     UnimplementedSnafu,
 };
 use crate::log_query::planner::LogQueryPlanner;
+use crate::optimizer::expr_depth;
 use crate::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryLanguageParser, QueryStatement};
 use crate::promql::planner::PromPlanner;
 use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
@@ -262,6 +263,7 @@ impl DfLogicalPlanner {
                 .context(PlanSqlSnafu)?
         };
 
+        expr_depth::validate_plan(&result)?;
         common_telemetry::debug!("Logical planner, statement to plan result: {result}");
         let plan = RangePlanRewriter::new(table_provider, query_ctx.clone())
             .rewrite(result)

@@ -60,7 +60,6 @@ use crate::dist_plan::{
     RemoteDynFilterRegistryLease,
 };
 use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_BYTES};
-use crate::optimizer::ExtensionAnalyzerRule;
 use crate::optimizer::const_normalization::ConstNormalizationRule;
 use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
 use crate::optimizer::count_nest_aggr::CountNestAggrRule;
@@ -76,6 +75,7 @@ use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::transcribe_atat::TranscribeAtatRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
 use crate::optimizer::windowed_sort::WindowedSortPhysicalRule;
+use crate::optimizer::{ExtensionAnalyzerRule, expr_depth};
 use crate::options::{QueryMemoryPoolPolicy, QueryOptions as QueryOptionsNew};
 use crate::query_engine::DefaultSerializer;
 use crate::query_engine::options::QueryOptions;
@@ -212,6 +212,7 @@ impl QueryEngineState {
             analyzer.rules.push(Arc::new(JsonSchemaConcretizeRule));
         }
         analyzer.rules.push(Arc::new(FixStateUdafOrderingAnalyzer));
+        analyzer.rules.push(Arc::new(expr_depth::ExprDepthRule));
 
         let mut optimizer = Optimizer::new();
         optimizer.rules.push(Arc::new(ScanHintRule));
@@ -305,15 +306,20 @@ impl QueryEngineState {
         plan: DfLogicalPlan,
         context: &QueryEngineContext,
     ) -> DfResult<DfLogicalPlan> {
+        expr_depth::validate_plan(&plan)?;
         self.extension_rules
             .iter()
             .try_fold(plan, |acc_plan, rule| {
-                rule.analyze(acc_plan, context, self.session_state().config_options())
+                let plan =
+                    rule.analyze(acc_plan, context, self.session_state().config_options())?;
+                expr_depth::validate_plan(&plan)?;
+                Ok(plan)
             })
     }
 
     /// Run the full logical plan optimize phase for the given plan.
     pub fn optimize_logical_plan(&self, plan: DfLogicalPlan) -> DfResult<DfLogicalPlan> {
+        expr_depth::validate_plan(&plan)?;
         self.session_state().optimize(&plan)
     }
 
