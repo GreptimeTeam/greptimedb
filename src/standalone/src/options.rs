@@ -25,7 +25,7 @@ use flow::FlowConfig;
 use frontend::frontend::FrontendOptions;
 use frontend::service_config::{
     InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, OtlpOptions, PostgresOptions,
-    PromStoreOptions,
+    PromStoreOptions, WriteRetryOptions,
 };
 use mito2::config::MitoConfig;
 use pipeline::PipelineOptions;
@@ -162,6 +162,11 @@ impl StandaloneOptions {
             otlp: cloned_opts.otlp,
             prom_store: cloned_opts.prom_store,
             meta_client: None,
+            // Local region calls consume requests directly and do not use remote write retries.
+            write_retry: WriteRetryOptions {
+                max_retries: 0,
+                ..Default::default()
+            },
             logging: cloned_opts.logging,
             user_provider: cloned_opts.user_provider,
             query: cloned_opts.query,
@@ -209,6 +214,18 @@ mod tests {
     use common_event_recorder::EventTypeFilter;
 
     use super::*;
+
+    #[test]
+    fn test_frontend_write_retries_disabled() {
+        assert!(FrontendOptions::default().write_retry.max_retries > 0);
+        assert_eq!(
+            StandaloneOptions::default()
+                .frontend_options()
+                .write_retry
+                .max_retries,
+            0
+        );
+    }
 
     #[test]
     fn test_event_recorder_event_types_preserve_filter_semantics() {

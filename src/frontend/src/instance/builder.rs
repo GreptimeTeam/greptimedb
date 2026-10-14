@@ -24,8 +24,8 @@ use catalog::system_schema::semantic_graph::EntityGraphProviderRef;
 use common_base::Plugins;
 use common_datasource::object_store::LocalFileAccess;
 use common_event_recorder::{EventRecorderImpl, EventRecorderRef};
-use common_meta::cache::{LayeredCacheRegistryRef, TableRouteCacheRef};
-use common_meta::cache_invalidator::{CacheInvalidatorRef, DummyCacheInvalidator};
+use common_meta::cache::{LayeredCacheRegistryRef, TableInfoCacheRef, TableRouteCacheRef};
+use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::key::TableMetadataManager;
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
@@ -44,6 +44,7 @@ use operator::statement::{
     StatementExecutor, StatementExecutorConfiguratorRef, StatementExecutorRef,
 };
 use operator::table::TableMutationOperator;
+use operator::write_dispatcher::WriteDispatcher;
 use partition::cache::PartitionInfoCacheRef;
 use partition::manager::PartitionRuleManager;
 use pipeline::pipeline_operator::PipelineOperator;
@@ -64,7 +65,7 @@ pub struct FrontendBuilder {
     options: FrontendOptions,
     kv_backend: KvBackendRef,
     layered_cache_registry: LayeredCacheRegistryRef,
-    local_cache_invalidator: Option<CacheInvalidatorRef>,
+    local_cache_invalidator: CacheInvalidatorRef,
     catalog_manager: CatalogManagerRef,
     node_manager: NodeManagerRef,
     plugins: Option<Plugins>,
@@ -74,6 +75,9 @@ pub struct FrontendBuilder {
 }
 
 impl FrontendBuilder {
+    /// Creates a frontend builder from its configuration and shared services.
+    ///
+    /// Uses the layered cache registry for local invalidation unless overridden.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         options: FrontendOptions,
@@ -87,8 +91,8 @@ impl FrontendBuilder {
         Self {
             options,
             kv_backend,
+            local_cache_invalidator: layered_cache_registry.clone(),
             layered_cache_registry,
-            local_cache_invalidator: None,
             catalog_manager,
             node_manager,
             plugins: None,
@@ -134,9 +138,10 @@ impl FrontendBuilder {
         )
     }
 
+    /// Overrides the default local cache invalidator.
     pub fn with_local_cache_invalidator(self, cache_invalidator: CacheInvalidatorRef) -> Self {
         Self {
-            local_cache_invalidator: Some(cache_invalidator),
+            local_cache_invalidator: cache_invalidator,
             ..self
         }
     }
@@ -181,7 +186,11 @@ impl FrontendBuilder {
         }
     }
 
+    /// Validates configuration and assembles the frontend [`Instance`].
     pub async fn try_build(self) -> Result<Instance> {
+        if let Err(reason) = self.options.write_retry.validate() {
+            return error::InvalidWriteRetryConfigSnafu { reason }.fail();
+        }
         let kv_backend = self.kv_backend;
         let node_manager = self.node_manager;
         let plugins = self.plugins.unwrap_or_default();
@@ -204,9 +213,24 @@ impl FrontendBuilder {
             partition_info_cache.clone(),
         ));
 
-        let local_cache_invalidator = self
-            .local_cache_invalidator
-            .unwrap_or_else(|| Arc::new(DummyCacheInvalidator));
+        let local_cache_invalidator = self.local_cache_invalidator;
+
+        let mut write_dispatcher =
+            WriteDispatcher::new(node_manager.clone(), partition_manager.clone());
+        if self.options.write_retry.max_retries > 0 {
+            let table_info_cache: TableInfoCacheRef =
+                self.layered_cache_registry
+                    .get()
+                    .context(error::CacheRequiredSnafu {
+                        name: cache::TABLE_INFO_CACHE_NAME,
+                    })?;
+            write_dispatcher = write_dispatcher.with_retry(
+                self.options.write_retry.clone(),
+                table_info_cache,
+                local_cache_invalidator.clone(),
+            );
+        }
+        let write_dispatcher = Arc::new(write_dispatcher);
 
         let region_query_handler =
             if let Some(factory) = plugins.get::<RegionQueryHandlerFactoryRef>() {
@@ -222,18 +246,24 @@ impl FrontendBuilder {
                     name: TABLE_FLOWNODE_SET_CACHE_NAME,
                 })?;
 
-        let inserter = Arc::new(Inserter::new(
-            self.catalog_manager.clone(),
-            partition_manager.clone(),
-            node_manager.clone(),
-            table_flownode_cache,
-            self.options.auto_create_table,
-        ));
-        let deleter = Arc::new(Deleter::new(
-            self.catalog_manager.clone(),
-            partition_manager.clone(),
-            node_manager.clone(),
-        ));
+        let inserter = Arc::new(
+            Inserter::new(
+                self.catalog_manager.clone(),
+                partition_manager.clone(),
+                node_manager.clone(),
+                table_flownode_cache,
+                self.options.auto_create_table,
+            )
+            .with_write_dispatcher(write_dispatcher.clone()),
+        );
+        let deleter = Arc::new(
+            Deleter::new(
+                self.catalog_manager.clone(),
+                partition_manager.clone(),
+                node_manager.clone(),
+            )
+            .with_write_dispatcher(write_dispatcher),
+        );
         let requester = Arc::new(Requester::new(
             self.catalog_manager.clone(),
             partition_manager.clone(),
@@ -371,5 +401,78 @@ impl FrontendBuilder {
             otlp_resource_info: self.options.otlp.experimental_enable_resource_info,
             suspend: Arc::new(AtomicBool::new(false)),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use api::v1::meta::Role;
+    use common_meta::cache_invalidator::{Context, DummyCacheInvalidator};
+    use common_meta::instruction::CacheIdent;
+    use common_meta::key::table_route::{TableRouteKey, TableRouteValue};
+    use common_meta::key::{MetadataKey, MetadataValue};
+    use common_meta::rpc::router::{Region, RegionRoute};
+    use common_meta::rpc::store::PutRequest;
+    use meta_client::client::MetaClientBuilder;
+    use store_api::storage::RegionId;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_local_cache_invalidator() {
+        for custom_invalidator in [false, true] {
+            let mut builder = FrontendBuilder::new_test(
+                &FrontendOptions::default(),
+                Arc::new(MetaClientBuilder::new(0, Role::Frontend).build()),
+            );
+            if custom_invalidator {
+                builder = builder.with_local_cache_invalidator(Arc::new(DummyCacheInvalidator));
+            }
+            let backend = builder.kv_backend.clone();
+            let routes: TableRouteCacheRef = builder.layered_cache_registry.get().unwrap();
+            let partitions: PartitionInfoCacheRef = builder.layered_cache_registry.get().unwrap();
+            let instance = builder.try_build().await.unwrap();
+            let table_id = 1024;
+            for region_number in [1, 2] {
+                let route = TableRouteValue::physical(vec![RegionRoute {
+                    region: Region {
+                        id: RegionId::new(table_id, region_number),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }]);
+                backend
+                    .put(
+                        PutRequest::new()
+                            .with_key(TableRouteKey::new(table_id).to_bytes())
+                            .with_value(route.try_as_raw_value().unwrap()),
+                    )
+                    .await
+                    .unwrap();
+                if region_number == 1 {
+                    routes.get(table_id).await.unwrap().unwrap();
+                    partitions.get(table_id).await.unwrap().unwrap();
+                }
+            }
+            assert!(routes.contains_key(&table_id));
+            assert!(partitions.contains_key(&table_id));
+
+            instance
+                .cache_invalidator()
+                .invalidate(&Context::default(), &[CacheIdent::TableId(table_id)])
+                .await
+                .unwrap();
+
+            assert_eq!(custom_invalidator, routes.contains_key(&table_id));
+            assert_eq!(custom_invalidator, partitions.contains_key(&table_id));
+            let route = routes.get(table_id).await.unwrap().unwrap();
+            let region = route.as_physical_table_route_ref().unwrap().region_routes[0]
+                .region
+                .id;
+            assert_eq!(
+                if custom_invalidator { 1 } else { 2 },
+                region.region_number()
+            );
+        }
     }
 }

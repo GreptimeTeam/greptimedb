@@ -674,6 +674,7 @@ async fn setup_test_prom_app_with_frontend_inner(
         PendingRowsBatcher::try_new(
             frontend_ref.partition_manager().clone(),
             frontend_ref.node_manager().clone(),
+            frontend_ref.inserter().write_dispatcher().clone(),
             frontend_ref.catalog_manager().clone(),
             frontend_ref.table_flownode_set_cache().clone(),
             true,

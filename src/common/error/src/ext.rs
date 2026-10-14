@@ -32,6 +32,10 @@ use crate::status_code::StatusCode;
 pub enum RetryHint {
     /// The operation may succeed if retried later.
     Retryable,
+    /// The operation may succeed after refreshing routing and partition information.
+    /// The request may need rebuilding when its partition assignment changes.
+    /// This hint does not imply that a failed operation had no side effects.
+    RetryAfterRouteRefresh,
     /// Retrying the same operation is not expected to help.
     ///
     /// This is the default for errors that do not explicitly opt in to retry.
@@ -39,16 +43,23 @@ pub enum RetryHint {
 }
 
 const RETRY_HINT_RETRYABLE: &str = "retryable";
+const RETRY_HINT_AFTER_ROUTE_REFRESH: &str = "retry_after_route_refresh";
 const RETRY_HINT_NON_RETRYABLE: &str = "non_retryable";
 
 impl RetryHint {
+    /// Returns whether another attempt may succeed, possibly after refreshing routes.
     pub fn is_retryable(self) -> bool {
-        matches!(self, RetryHint::Retryable)
+        matches!(
+            self,
+            RetryHint::Retryable | RetryHint::RetryAfterRouteRefresh
+        )
     }
 
+    /// Returns the retry hint encoded in gRPC error metadata.
     pub fn as_str(self) -> &'static str {
         match self {
             RetryHint::Retryable => RETRY_HINT_RETRYABLE,
+            RetryHint::RetryAfterRouteRefresh => RETRY_HINT_AFTER_ROUTE_REFRESH,
             RetryHint::NonRetryable => RETRY_HINT_NON_RETRYABLE,
         }
     }
@@ -76,6 +87,7 @@ impl FromStr for RetryHint {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             RETRY_HINT_RETRYABLE => Ok(RetryHint::Retryable),
+            RETRY_HINT_AFTER_ROUTE_REFRESH => Ok(RetryHint::RetryAfterRouteRefresh),
             RETRY_HINT_NON_RETRYABLE => Ok(RetryHint::NonRetryable),
             _ => Err(()),
         }
@@ -119,7 +131,9 @@ pub trait ErrorExt: StackError {
     ///
     /// Implementations should return [`RetryHint::Retryable`] only when retrying the
     /// same operation may succeed without changing the request. The default is
-    /// [`RetryHint::NonRetryable`] to avoid accidental retry loops.
+    /// [`RetryHint::NonRetryable`] to avoid accidental retry loops. Use
+    /// [`RetryHint::RetryAfterRouteRefresh`] when routing or partition information
+    /// must be refreshed before another attempt.
     fn retry_hint(&self) -> RetryHint {
         RetryHint::NonRetryable
     }

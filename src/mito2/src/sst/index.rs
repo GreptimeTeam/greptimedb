@@ -54,8 +54,8 @@ use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::config::VectorIndexConfig;
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
 use crate::error::{
-    BuildIndexAsyncSnafu, DecodeSnafu, Error, InvalidRecordBatchSnafu, JoinSnafu, RegionClosedSnafu,
-    RegionDroppedSnafu, RegionTruncatedSnafu, Result,
+    BuildIndexAsyncSnafu, DecodeSnafu, Error, InvalidRecordBatchSnafu, JoinSnafu,
+    RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
 use crate::metrics::{
     INDEX_ARTIFACT_CLEANUP_FAILURE_TOTAL, INDEX_CREATE_MEMORY_USAGE, INDEX_PUBLICATION_STALE_TOTAL,

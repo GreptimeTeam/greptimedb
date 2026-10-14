@@ -25,6 +25,7 @@ arrow.workspace = true
 arrow-ipc.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
+backon.workspace = true
 bytes.workspace = true
 catalog.workspace = true
 chrono.workspace = true
@@ -55,12 +56,14 @@ file-engine.workspace = true
 futures.workspace = true
 futures-util.workspace = true
 humantime.workspace = true
+humantime-serde.workspace = true
 itertools.workspace = true
 jsonb.workspace = true
 lazy_static.workspace = true
 meta-client.workspace = true
 meter-core.workspace = true
 meter-macros.workspace = true
+mito-codec.workspace = true
 moka = { workspace = true, features = ["future"] }
 object-store.workspace = true
 partition.workspace = true
@@ -85,7 +88,9 @@ tonic.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+cache.workspace = true
 catalog = { workspace = true, features = ["testing"] }
 common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 path-slash = "0.2"
+tokio-stream = { workspace = true, features = ["net"] }

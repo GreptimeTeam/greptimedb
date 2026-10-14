@@ -35,3 +35,6 @@ cargo nextest run -p servers
 ```
 
 Keep protocol translation here and permissions/database behavior in frontend.
+Logical-table physical flushes retain partition columns in Arrow RPC payloads and
+pass all region writes to the operator write dispatcher together; the dispatcher
+owns peer resolution and retries. See `pending_rows_batcher.rs`.
