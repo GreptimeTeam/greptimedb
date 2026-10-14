@@ -84,7 +84,8 @@ use table::table_reference::TableReference;
 use crate::batcher::PendingRowsBatcher;
 use crate::error::{
     CatalogSnafu, ColumnOptionsSnafu, CreatePartitionRulesSnafu, InvalidInsertRequestSnafu,
-    JoinTaskSnafu, RequestInsertsSnafu, Result, TableNotFoundSnafu, WriteRejectedSnafu,
+    JoinTaskSnafu, RequestInsertsSnafu, Result, RetentionTtlOnLogicalTableSnafu,
+    TableNotFoundSnafu, WriteRejectedSnafu,
 };
 use crate::expr_helper;
 use crate::region_req_factory::RegionRequestFactory;
@@ -1388,9 +1389,7 @@ impl Inserter {
             // stripping it from the logical table.
             if retention_ttl_hint(ctx).is_some() {
                 return InvalidInsertRequestSnafu {
-                    reason: format!(
-                        "Retention TTL hint cannot be applied because physical table `{physical_table}` already exists; set `{TTL_KEY}` when that physical table is created"
-                    ),
+                    reason: retention_ttl_hint_on_existing_physical_table_reason(physical_table),
                 }
                 .fail();
             }
@@ -1866,10 +1865,38 @@ pub fn is_instant_ttl(ttl: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Returns true when `ttl` is a retention duration (anything other than `instant`).
+pub fn is_retention_ttl(ttl: &str) -> bool {
+    !is_instant_ttl(ttl)
+}
+
+pub fn logical_table_options_have_retention_ttl(
+    table_options: &std::collections::HashMap<String, String>,
+) -> bool {
+    table_options
+        .get(TTL_KEY)
+        .is_some_and(|ttl| is_retention_ttl(ttl))
+}
+
+pub fn ensure_no_retention_ttl_on_logical_table(
+    table_options: &std::collections::HashMap<String, String>,
+) -> Result<()> {
+    if logical_table_options_have_retention_ttl(table_options) {
+        return RetentionTtlOnLogicalTableSnafu.fail();
+    }
+    Ok(())
+}
+
+pub fn retention_ttl_hint_on_existing_physical_table_reason(physical_table: &str) -> String {
+    format!(
+        "Retention TTL hint cannot be applied because physical table `{physical_table}` already exists; set `{TTL_KEY}` when that physical table is created"
+    )
+}
+
 /// Retention TTL from an ingest hint. `ttl=instant` is excluded: it stays on
 /// the logical table and must not be copied onto the shared physical table.
 pub fn retention_ttl_hint(ctx: &QueryContextRef) -> Option<&str> {
-    ctx.extension(TTL_KEY).filter(|ttl| !is_instant_ttl(ttl))
+    ctx.extension(TTL_KEY).filter(|ttl| is_retention_ttl(ttl))
 }
 
 /// Copies a retention TTL hint onto a physical metric table being created.
@@ -1907,10 +1934,7 @@ pub fn fill_table_options_for_create(
             // it from the logical table to forward rows to flows without
             // persisting them. Only retention TTLs are reserved for the
             // physical table.
-            if table_options
-                .get(TTL_KEY)
-                .is_some_and(|ttl| !is_instant_ttl(ttl))
-            {
+            if logical_table_options_have_retention_ttl(table_options) {
                 table_options.remove(TTL_KEY);
             }
             table_options.insert(
@@ -3214,6 +3238,16 @@ mod tests {
         assert!(!is_instant_ttl("forever"));
         assert!(!is_instant_ttl(""));
         assert!(!is_instant_ttl("not-a-duration"));
+    }
+
+    #[test]
+    fn test_ensure_no_retention_ttl_on_logical_table() {
+        let mut options = std::collections::HashMap::new();
+        options.insert(TTL_KEY.to_string(), "instant".to_string());
+        ensure_no_retention_ttl_on_logical_table(&options).unwrap();
+
+        options.insert(TTL_KEY.to_string(), "7d".to_string());
+        assert!(ensure_no_retention_ttl_on_logical_table(&options).is_err());
     }
 
     #[test]

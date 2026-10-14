@@ -39,6 +39,7 @@ use operator::insert::{
     AutoCreateTableType, InserterRef, PerTableSemanticIndex, apply_per_table_semantic_options,
     apply_retention_ttl_hint, build_create_table_expr, fill_table_options_for_create,
     parse_per_table_semantic_index, retention_ttl_hint,
+    retention_ttl_hint_on_existing_physical_table_reason,
 };
 use operator::statement::StatementExecutor;
 use prost::Message;
@@ -673,9 +674,7 @@ impl Instance {
         if table.is_some() {
             if retention_ttl_hint(&ctx).is_some() {
                 return error::InvalidPromRemoteRequestSnafu {
-                    msg: format!(
-                        "Retention TTL hint cannot be applied because physical table `{physical_table}` already exists; set `ttl` when that physical table is created"
-                    ),
+                    msg: retention_ttl_hint_on_existing_physical_table_reason(physical_table),
                 }
                 .fail();
             }

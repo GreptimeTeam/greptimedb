@@ -120,7 +120,7 @@ use crate::error::{
     TableReadOnlySnafu, UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper::{self, RepartitionRequest, RepartitionSource};
-use crate::insert::is_instant_ttl;
+use crate::insert::{ensure_no_retention_ttl_on_logical_table, is_retention_ttl};
 use crate::statement::StatementExecutor;
 use crate::statement::show::create_partitions_stmt;
 use crate::utils::{to_executor_context, to_executor_context_with_origin_frontend};
@@ -449,13 +449,7 @@ impl StatementExecutor {
         ensure_table_definition_writable(&expr.schema_name, &expr.table_name)?;
         // `ttl='instant'` stays on logical tables so the Inserter can forward
         // rows to flows. Retention TTL is enforced by the physical table.
-        if expr
-            .table_options
-            .get(TTL_KEY)
-            .is_some_and(|ttl| !is_instant_ttl(ttl))
-        {
-            return RetentionTtlOnLogicalTableSnafu.fail();
-        }
+        ensure_no_retention_ttl_on_logical_table(&expr.table_options)?;
         if let Some(partitions) = partitions
             && !partitions.exprs.is_empty()
         {
@@ -2130,7 +2124,7 @@ impl StatementExecutor {
                 Kind::SetTableOptions(options) => options
                     .table_options
                     .iter()
-                    .any(|option| option.key == TTL_KEY && !is_instant_ttl(&option.value)),
+                    .any(|option| option.key == TTL_KEY && is_retention_ttl(&option.value)),
                 Kind::UnsetTableOptions(options) => options.keys.iter().any(|key| key == TTL_KEY),
                 _ => false,
             });
