@@ -162,7 +162,7 @@ pub(crate) async fn tracked_query(
                 .query_with_terminal_metrics(phase_request)
                 .await
                 .map(|output| output.output)
-                .map_err(|e| e.to_string())
+                .map_err(|e| (e.status_code(), e.to_string()))
         } else {
             let mut ctx_extensions: HashMap<String, String> =
                 operation_extensions.into_iter().collect();
@@ -186,7 +186,7 @@ pub(crate) async fn tracked_query(
             handler
                 .do_query(Request::Query(phase_request), Arc::new(ctx))
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| (e.status_code(), e.to_string()))
         };
         let reply = match response {
             Ok(output) => match decode_output(output).await {
@@ -202,8 +202,33 @@ pub(crate) async fn tracked_query(
                     None
                 }
             },
-            Err(e) => {
-                warn!("Tracked Flow {:?} transport failure: {}", command, e);
+            Err((code, msg)) => {
+                // Classify application-level rejections that will never succeed on
+                // retry against this frontend. This fail-fast is applied ONLY to
+                // `Open`, which is always pre-admission (no write has been
+                // dispatched yet), so a definitive rejection (an older frontend
+                // treats Open as empty SQL -> InvalidArguments; a non-internal
+                // channel rejects the extension -> PermissionDenied/Unsupported)
+                // can never have committed anything — safe to surface a terminal
+                // pre-write error instead of looping forever on a pinned frontend.
+                //
+                // `Write`/`Close` rejections are NOT classified this way: once a
+                // write may have been admitted, a rejection (e.g. WriterLost, or an
+                // UnknownCapability after a VIP moved Open->A/Write->B) leaves the
+                // outcome ambiguous. Treating it as "provably not dispatched" would
+                // let the caller replay and duplicate rows, so those fall through
+                // to the same-capability retry below like any ambiguous transport
+                // failure.
+                if matches!(&command, Command::Open { .. }) && is_definitive_rejection(code) {
+                    return Err(prewrite_reason(
+                        format!("Frontend rejected tracked Flow open: {msg}"),
+                        code,
+                    ));
+                }
+                warn!(
+                    "Tracked Flow {:?} transport failure (code={:?}): {}",
+                    command, code, msg
+                );
                 None
             }
         };
@@ -269,6 +294,18 @@ pub(crate) async fn tracked_query(
 fn prewrite_error(error: Error) -> Error {
     let status = error.status_code();
     prewrite_reason(error.to_string(), status)
+}
+
+/// Returns true when a tracked Flow command error is a definitive, non-retryable
+/// rejection from the frontend rather than an ambiguous transport failure. These
+/// codes indicate the frontend itself refused the command (unsupported protocol,
+/// malformed/empty command, or wrong channel), so retrying the same pinned
+/// frontend can never succeed; the caller must fail fast instead of looping.
+fn is_definitive_rejection(code: StatusCode) -> bool {
+    matches!(
+        code,
+        StatusCode::Unsupported | StatusCode::InvalidArguments | StatusCode::PermissionDenied
+    )
 }
 
 fn prewrite_reason(message: String, status: StatusCode) -> Error {
@@ -452,5 +489,57 @@ mod tests {
             .unwrap();
         assert!(matches!(second.output.data, OutputData::AffectedRows(1)));
         assert_eq!(handler.executions.load(Ordering::SeqCst), 2);
+    }
+
+    /// A legacy frontend that does not understand the tracked-write extension
+    /// processes `Open` as an ordinary empty-SQL query and rejects it with
+    /// `InvalidArguments`. That is a definitive application rejection, not an
+    /// ambiguous transport failure: the client must fail fast instead of
+    /// retrying the same pinned frontend forever.
+    #[derive(Debug, Default)]
+    struct LegacyRejectHandler {
+        opens: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl super::super::GrpcQueryHandlerWithBoxedError for LegacyRejectHandler {
+        async fn do_query(
+            &self,
+            _request: Request,
+            _ctx: QueryContextRef,
+        ) -> Result<Output, BoxedError> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            Err(BoxedError::new(PlainError::new(
+                "empty statements".to_string(),
+                StatusCode::InvalidArguments,
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn fails_fast_on_definitive_open_rejection() {
+        let handler = Arc::new(LegacyRejectHandler::default());
+        let trait_handler: Arc<dyn super::super::GrpcQueryHandlerWithBoxedError> = handler.clone();
+        let weak = Arc::downgrade(&trait_handler);
+        let frontend =
+            FrontendClient::from_grpc_handler(weak, query::options::QueryOptions::default())
+                .with_tracked_writes();
+        let result = frontend
+            .tracked_sql_write("greptime", "public", "INSERT INTO t VALUES (7)")
+            .await;
+        let err = result.expect_err("definitive Open rejection must not be retried forever");
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+        // The durable-execution layer keys repair off a TerminalError inside
+        // Error::External; pin that exact shape so a refactor cannot silently
+        // downgrade the rejection to an unresolved (permanently stalled) error.
+        assert!(
+            matches!(&err, Error::External { source, .. } if source.as_any().is::<common_grpc::flow_write::TerminalError>()),
+            "expected Error::External carrying TerminalError, got {err:?}"
+        );
+        assert_eq!(
+            handler.opens.load(Ordering::SeqCst),
+            1,
+            "Open must not be retried after a definitive rejection"
+        );
     }
 }
