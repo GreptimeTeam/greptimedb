@@ -14,7 +14,7 @@ Status: Proposed
 **日期：2026-10-14**  
 **目标：实现完整的 PromQL 兼容性，逐步替换并最终移除现有 DataFusion-centric PromQL 执行路径。**  
 **基础原型：[#9556](https://github.com/GreptimeTeam/greptimedb/pull/9556)，审阅基准 `e0df7f17`**  
-**参考研究：**同目录 [`mqe-source-study.md`](mqe-source-study.md)，Mimir `streamingpromql@51704a4f`。  
+**参考研究：**[Mimir `streamingpromql` 源码调研报告（独立参考文档）](https://github.com/GreptimeTeam/greptimedb/blob/d02dac694e88ab15b77ac00ac9bcc56d9cfa959c/docs/rfcs/2026-10-14-native-promql-engine/mqe-source-study.md)，Mimir `streamingpromql@51704a4f`。  
 **与并行开发对齐：**[Footer POC 分支 `discord9/greptimedb@3c264d84`](https://github.com/discord9/greptimedb/tree/3c264d84ab5cc1804c43d6357095f3e4697cb387) 已包含写入和读取侧、Postcard、`all_put`、范围校验和 fallback，但提交说明仍有测试失败与谓词限制。本文明确其当前接口，**并将 Footer 的懒读取、通用类型、持续写入、元数据可扩展性纳入正式演进目标**。
 
 ## 0. 决策摘要（先读此节）
