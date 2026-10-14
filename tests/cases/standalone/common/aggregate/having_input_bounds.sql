@@ -84,3 +84,29 @@ HAVING SUM(CASE WHEN service_name = 'cart' AND CAST(ts AS BIGINT) < 20 THEN 1 EL
 ORDER BY trace_start, trace_id;
 
 DROP TABLE having_input_bounds;
+
+-- A derived column must not move fallible arithmetic/casts ahead of its WHERE guard.
+CREATE TABLE having_guarded(k STRING, v BIGINT, d BIGINT, text_value STRING, ts TIMESTAMP TIME INDEX);
+INSERT INTO having_guarded VALUES ('a', 12, 0, 'bad', 1), ('a', 5, 1, '5', 2), ('b', 25, 1, '25', 3);
+
+SELECT k, MIN(r) FROM (
+    SELECT k, v / d AS r FROM having_guarded WHERE abs(d) > 0
+) s GROUP BY k
+HAVING SUM(CASE WHEN r < 20 THEN 1 ELSE 0 END) > 0
+ORDER BY k;
+
+SELECT k, MIN(r) FROM (
+    SELECT k, CAST(text_value AS BIGINT) AS r FROM having_guarded WHERE abs(d) > 0
+) s GROUP BY k
+HAVING SUM(CASE WHEN r < 20 THEN 1 ELSE 0 END) > 0
+ORDER BY k;
+
+CREATE VIEW having_guarded_view AS
+SELECT k, v / d AS r FROM having_guarded WHERE abs(d) > 0;
+
+SELECT k, MIN(r) FROM having_guarded_view GROUP BY k
+HAVING SUM(CASE WHEN r < 20 THEN 1 ELSE 0 END) > 0
+ORDER BY k;
+
+DROP VIEW having_guarded_view;
+DROP TABLE having_guarded;

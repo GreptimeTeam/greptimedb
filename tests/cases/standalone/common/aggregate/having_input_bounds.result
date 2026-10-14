@@ -133,3 +133,59 @@ DROP TABLE having_input_bounds;
 
 Affected Rows: 0
 
+-- A derived column must not move fallible arithmetic/casts ahead of its WHERE guard.
+CREATE TABLE having_guarded(k STRING, v BIGINT, d BIGINT, text_value STRING, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO having_guarded VALUES ('a', 12, 0, 'bad', 1), ('a', 5, 1, '5', 2), ('b', 25, 1, '25', 3);
+
+Affected Rows: 3
+
+SELECT k, MIN(r) FROM (
+    SELECT k, v / d AS r FROM having_guarded WHERE abs(d) > 0
+) s GROUP BY k
+HAVING SUM(CASE WHEN r < 20 THEN 1 ELSE 0 END) > 0
+ORDER BY k;
+
++---+----------+
+| k | min(s.r) |
++---+----------+
+| a | 5        |
++---+----------+
+
+SELECT k, MIN(r) FROM (
+    SELECT k, CAST(text_value AS BIGINT) AS r FROM having_guarded WHERE abs(d) > 0
+) s GROUP BY k
+HAVING SUM(CASE WHEN r < 20 THEN 1 ELSE 0 END) > 0
+ORDER BY k;
+
++---+----------+
+| k | min(s.r) |
++---+----------+
+| a | 5        |
++---+----------+
+
+CREATE VIEW having_guarded_view AS
+SELECT k, v / d AS r FROM having_guarded WHERE abs(d) > 0;
+
+Affected Rows: 0
+
+SELECT k, MIN(r) FROM having_guarded_view GROUP BY k
+HAVING SUM(CASE WHEN r < 20 THEN 1 ELSE 0 END) > 0
+ORDER BY k;
+
++---+----------------------------+
+| k | min(having_guarded_view.r) |
++---+----------------------------+
+| a | 5                          |
++---+----------------------------+
+
+DROP VIEW having_guarded_view;
+
+Affected Rows: 0
+
+DROP TABLE having_guarded;
+
+Affected Rows: 0
+

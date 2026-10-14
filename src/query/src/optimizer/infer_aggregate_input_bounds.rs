@@ -18,7 +18,7 @@ use arrow_schema::DataType;
 use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
 use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion_common::tree_node::{Transformed, TreeNode};
-use datafusion_common::{DFSchema, Result, ScalarValue};
+use datafusion_common::{Column, DFSchema, Result, ScalarValue};
 use datafusion_expr::expr::AggregateFunction;
 use datafusion_expr::utils::split_conjunction;
 use datafusion_expr::{Aggregate, Expr, ExprSchemable, Filter, LogicalPlan, Operator};
@@ -108,7 +108,7 @@ fn infer_bound(aggregate: &Aggregate, having: &Expr) -> Result<Option<Expr>> {
         let Some(extremum) = plain_aggregate(&aggregate.aggr_expr[1 - sum_index]) else {
             continue;
         };
-        if let Some(bound) = bound_from_aggregates(sum, extremum, aggregate.input.schema())? {
+        if let Some(bound) = bound_from_aggregates(sum, extremum, &aggregate.input)? {
             return Ok(Some(bound));
         }
     }
@@ -156,8 +156,9 @@ fn plain_aggregate(expr: &Expr) -> Option<&AggregateFunction> {
 fn bound_from_aggregates(
     sum: &AggregateFunction,
     extremum: &AggregateFunction,
-    schema: &DFSchema,
+    input: &LogicalPlan,
 ) -> Result<Option<Expr>> {
+    let schema = input.schema();
     // Compare function identities, not names: a user-defined "sum" need not
     // have the built-in aggregate's zero-contribution semantics.
     if sum.func != sum_udaf() || (extremum.func != min_udaf() && extremum.func != max_udaf()) {
@@ -173,7 +174,10 @@ fn bound_from_aggregates(
     let Some(condition) = indicator_condition(&sum.params.args[0]) else {
         return Ok(None);
     };
-    if !safe_predicate(condition, schema)? {
+    if !safe_predicate(condition, schema)?
+        || !columns_are_from_scan(argument, input)?
+        || !columns_are_from_scan(condition, input)?
+    {
         return Ok(None);
     }
     Ok(split_conjunction(condition)
@@ -232,7 +236,8 @@ fn integer_literal(expr: &Expr) -> Option<i64> {
     }
 }
 
-/// Avoids moving evaluation of volatile, fallible or subquery expressions.
+/// Rejects explicitly volatile, fallible or subquery expressions. Column
+/// references additionally require input-plan provenance checks.
 fn safe_predicate(expr: &Expr, schema: &DFSchema) -> Result<bool> {
     match expr {
         Expr::BinaryExpr(binary) => Ok(matches!(
@@ -262,6 +267,59 @@ fn safe_operand(expr: &Expr, schema: &DFSchema) -> Result<bool> {
             && matches!(cast.expr.get_type(schema)?, DataType::Timestamp(..))),
         _ => Ok(false),
     }
+}
+
+/// A projected column can hide division, a fallible cast or a volatile UDF.
+/// PushDownFilter may inline it below the WHERE that made evaluation safe.
+fn columns_are_from_scan(expr: &Expr, input: &LogicalPlan) -> Result<bool> {
+    for column in expr.column_refs() {
+        if !column_is_from_scan(column, input)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn column_is_from_scan(column: &Column, input: &LogicalPlan) -> Result<bool> {
+    let index = input.schema().index_of_column(column)?;
+    match input {
+        LogicalPlan::TableScan(_) => Ok(true),
+        LogicalPlan::Filter(filter) => column_is_from_scan(column, &filter.input),
+        LogicalPlan::SubqueryAlias(alias) => column_at_is_from_scan(index, &alias.input),
+        LogicalPlan::Projection(projection) => {
+            let expr = match &projection.expr[index] {
+                Expr::Alias(alias) => alias.expr.as_ref(),
+                expr => expr,
+            };
+            Ok(safe_operand(expr, projection.input.schema())?
+                && columns_are_from_scan(expr, &projection.input)?)
+        }
+        LogicalPlan::Join(join) => {
+            match (
+                join.left.schema().has_column(column),
+                join.right.schema().has_column(column),
+            ) {
+                (true, false) => column_is_from_scan(column, &join.left),
+                (false, true) => column_is_from_scan(column, &join.right),
+                _ => Ok(false),
+            }
+        }
+        LogicalPlan::Union(union) => {
+            for input in &union.inputs {
+                if !column_at_is_from_scan(index, input)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        // Unknown plan nodes may synthesize columns or hide their origin.
+        _ => Ok(false),
+    }
+}
+
+fn column_at_is_from_scan(index: usize, input: &LogicalPlan) -> Result<bool> {
+    let (qualifier, field) = input.schema().qualified_field(index);
+    column_is_from_scan(&Column::new(qualifier.cloned(), field.name()), input)
 }
 
 fn already_filtered(input: &LogicalPlan, bound: &Expr) -> bool {
@@ -468,6 +526,74 @@ mod tests {
                 optimize(optimized.clone()),
                 "rule must be idempotent: {sql}"
             );
+            assert_eq!(
+                rows(&ctx, original).await,
+                rows(&ctx, optimized).await,
+                "{sql}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn guarded_derived_operands_are_not_pruned() {
+        let ctx = SessionContext::new();
+        let batch = RecordBatch::try_from_iter(vec![
+            ("k", Arc::new(StringArray::from(vec!["a", "a", "b"])) as _),
+            ("v", Arc::new(Int64Array::from(vec![12, 5, 25])) as _),
+            ("d", Arc::new(Int64Array::from(vec![0, 1, 1])) as _),
+            (
+                "raw",
+                Arc::new(StringArray::from(vec!["bad", "5", "25"])) as _,
+            ),
+        ])
+        .unwrap();
+        ctx.register_batch("guarded", batch).unwrap();
+        ctx.sql("CREATE VIEW guarded_view AS SELECT k, v / d AS r FROM guarded WHERE abs(d) > 0")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        for source in [
+            "SELECT k, v / d AS r FROM guarded WHERE abs(d) > 0",
+            "SELECT k, quotient AS r FROM (SELECT k, v / d AS quotient FROM guarded WHERE abs(d) > 0) q",
+            "SELECT k, CAST(raw AS BIGINT) AS r FROM guarded WHERE abs(d) > 0",
+            "SELECT k, r FROM guarded_view",
+            "SELECT k, v AS r FROM guarded UNION ALL SELECT k, v / d AS r FROM guarded WHERE abs(d) > 0",
+            "SELECT l.k, l.r FROM guarded_view l JOIN guarded q ON l.k = q.k",
+        ] {
+            let sql = format!(
+                "SELECT k, MIN(r) FROM ({source}) s GROUP BY k
+                HAVING SUM(CASE WHEN r < 20 THEN 1 ELSE 0 END) > 0 ORDER BY k"
+            );
+            let original = analyzed(&ctx, &sql).await;
+            let optimized = optimize(original.clone());
+            assert_eq!(
+                rows(&ctx, original.clone()).await,
+                rows(&ctx, optimized.clone()).await,
+                "{sql}"
+            );
+            assert_eq!(original, optimized, "{sql}");
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_column_aliases_still_allow_bounds() {
+        let ctx = context();
+        for source in [
+            "SELECT k, v AS r FROM t",
+            "SELECT k, renamed AS r FROM (SELECT k, v AS renamed FROM t) q",
+            "SELECT k, CAST(ts AS BIGINT) AS r FROM t",
+            "SELECT k, v AS r FROM t UNION ALL SELECT k, v AS r FROM t",
+            "SELECT l.k, l.v AS r FROM t l JOIN t r ON l.k = r.k",
+        ] {
+            let sql = format!(
+                "SELECT k, MIN(r) FROM ({source}) s GROUP BY k
+                HAVING SUM(CASE WHEN r < 20 THEN 1 ELSE 0 END) > 0 ORDER BY k NULLS FIRST"
+            );
+            let original = analyzed(&ctx, &sql).await;
+            let optimized = optimize(original.clone());
+            assert!(aggregate_input_bound(&optimized).is_some(), "{sql}");
             assert_eq!(
                 rows(&ctx, original).await,
                 rows(&ctx, optimized).await,
