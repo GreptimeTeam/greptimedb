@@ -4679,6 +4679,26 @@ async fn unsupported_native_histogram_functions_use_drop_udf() {
 }
 
 #[tokio::test]
+async fn date_functions_skip_native_histogram_columns_with_float_alternative() {
+    // A table storing float and native histogram samples in alternative columns gives
+    // every date function a float column to read. The native histogram column must be
+    // skipped: converting it to a timestamp would read histogram bytes as a value.
+    let (mut planner, input) = mixed_direct_or(false).await;
+    let PromExpr::Call(call) = parser::parse("minute(lhs)").unwrap() else {
+        unreachable!()
+    };
+    let state = build_query_engine_state();
+    let (exprs, _) = planner
+        .create_function_expr(&call.func, vec![], input.schema(), &state, None, true)
+        .unwrap();
+
+    assert_eq!(exprs.len(), 1, "{exprs:?}");
+    let expr = exprs[0].to_string();
+    assert!(expr.contains("minute("), "{expr}");
+    assert!(expr.contains(OR_FLOAT_FIELD_PREFIX), "{expr}");
+}
+
+#[tokio::test]
 async fn native_histogram_absent_over_time_uses_native_udf() {
     let plan = native_histogram_plan("absent_over_time(some_metric[5m])").await;
 
@@ -4760,6 +4780,28 @@ async fn native_histogram_all_function_arms_route_correctly() {
         ("rad(some_metric)", "prom_native_histogram_drop_float"),
         ("deg(some_metric)", "prom_native_histogram_drop_float"),
         ("sgn(some_metric)", "prom_native_histogram_drop_float"),
+        // Date functions dropped with the float-null UDF: Prometheus skips native
+        // histogram samples when reading the sample value as a timestamp.
+        ("minute(some_metric)", "prom_native_histogram_drop_float"),
+        ("hour(some_metric)", "prom_native_histogram_drop_float"),
+        ("month(some_metric)", "prom_native_histogram_drop_float"),
+        ("year(some_metric)", "prom_native_histogram_drop_float"),
+        (
+            "day_of_month(some_metric)",
+            "prom_native_histogram_drop_float",
+        ),
+        (
+            "day_of_week(some_metric)",
+            "prom_native_histogram_drop_float",
+        ),
+        (
+            "day_of_year(some_metric)",
+            "prom_native_histogram_drop_float",
+        ),
+        (
+            "days_in_month(some_metric)",
+            "prom_native_histogram_drop_float",
+        ),
         // Instant helper functions routed to native histogram UDFs.
         (
             "histogram_count(some_metric)",

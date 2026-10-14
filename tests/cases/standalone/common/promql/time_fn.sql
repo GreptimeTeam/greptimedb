@@ -127,26 +127,30 @@ drop table metrics;
 -- A date function with an argument in Prometheus reads the sample value as a Unix
 -- timestamp in seconds (truncated towards zero, UTC), not the sample's time index.
 -- The values below are chosen so that their calendar components differ from the
--- evaluation instants (1970-01-01T00:00:00Z .. 1970-01-01T00:00:20Z).
+-- evaluation instants (1970-01-01T00:00:00Z .. 1970-01-01T00:00:45Z). NaN, +Inf,
+-- -Inf and values beyond the int64 range have no portable Prometheus result: the
+-- sample is read as the Unix epoch. A year-3000 value checks that the calendar
+-- logic does not go through a nanosecond timestamp.
 
 create table date_fns (ts timestamp time index, val double);
 
-insert into date_fns values (0, 120), (5000, 180), (10000, 1234567890), (15000, 59.9), (20000, -1.5);
+insert into date_fns values (0, 120), (5000, 180), (10000, 1234567890), (15000, 59.9), (20000, -1.5),
+    (25000, 'NaN'::double), (30000, 'inf'::double), (35000, '-inf'::double), (40000, 1e19), (45000, 32503680000);
 
-tql eval (0, 20, '5s') minute(date_fns);
+tql eval (0, 45, '5s') minute(date_fns);
 
-tql eval (0, 20, '5s') hour(date_fns);
+tql eval (0, 45, '5s') hour(date_fns);
 
-tql eval (0, 20, '5s') month(date_fns);
+tql eval (0, 45, '5s') month(date_fns);
 
-tql eval (0, 20, '5s') year(date_fns);
+tql eval (0, 45, '5s') year(date_fns);
 
-tql eval (0, 20, '5s') day_of_month(date_fns);
+tql eval (0, 45, '5s') day_of_month(date_fns);
 
-tql eval (0, 20, '5s') day_of_week(date_fns);
+tql eval (0, 45, '5s') day_of_week(date_fns);
 
-tql eval (0, 20, '5s') day_of_year(date_fns);
+tql eval (0, 45, '5s') day_of_year(date_fns);
 
-tql eval (0, 20, '5s') days_in_month(date_fns);
+tql eval (0, 45, '5s') days_in_month(date_fns);
 
 drop table date_fns;
