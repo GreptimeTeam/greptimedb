@@ -5,7 +5,7 @@ CREATE TABLE json2_inverted_index (
         max_auto_expanded_paths = 0,
         "service.name" STRING INVERTED INDEX,
         service.name STRING INVERTED INDEX,
-        http.status_code INT INVERTED INDEX,
+        http.status_code BIGINT INVERTED INDEX,
         request.bytes BIGINT UNSIGNED INVERTED INDEX,
         duration DOUBLE INVERTED INDEX,
         success BOOLEAN INVERTED INDEX,
