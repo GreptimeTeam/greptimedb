@@ -15,6 +15,7 @@
 use std::fmt::{self, Debug};
 use std::sync::Arc;
 
+use common_telemetry::warn;
 use hdfs_native::{Client, ClientBuilder};
 use opendal::raw::oio::{Delete as _, Read as _, ReadStream as _, Write as _};
 use opendal::raw::{
@@ -162,6 +163,9 @@ enum HdfsWriterInner {
         writer: Option<oio::Writer>,
         temporary_path: String,
         target_path: String,
+        /// Message of the write that failed and removed the writer, so later
+        /// `write`/`close` calls can explain why the writer is gone.
+        failure: Option<String>,
     },
 }
 
@@ -169,12 +173,29 @@ impl oio::Write for HdfsWriter {
     async fn write(&mut self, buffer: Buffer) -> Result<()> {
         match &mut self.0 {
             HdfsWriterInner::Direct(writer) => writer.write(buffer).await,
-            HdfsWriterInner::Atomic { writer, .. } => {
-                writer
+            HdfsWriterInner::Atomic {
+                inner,
+                context,
+                writer,
+                temporary_path,
+                failure,
+                ..
+            } => {
+                let result = writer
                     .as_mut()
-                    .ok_or_else(writer_unavailable)?
+                    .ok_or_else(|| writer_unavailable(failure.as_deref()))?
                     .write(buffer)
-                    .await
+                    .await;
+                if let Err(error) = result {
+                    // A failed write leaves the temporary file behind, so abort
+                    // it before returning the original error to the caller.
+                    if let Some(writer) = writer.take() {
+                        abort_and_delete(inner, context, writer, temporary_path).await;
+                    }
+                    *failure = Some(error.to_string());
+                    return Err(error);
+                }
+                Ok(())
             }
         }
     }
@@ -189,8 +210,11 @@ impl oio::Write for HdfsWriter {
                 writer,
                 temporary_path,
                 target_path,
+                failure,
             } => {
-                let mut writer = writer.take().ok_or_else(writer_unavailable)?;
+                let mut writer = writer
+                    .take()
+                    .ok_or_else(|| writer_unavailable(failure.as_deref()))?;
                 let metadata = match writer.close().await {
                     Ok(metadata) => metadata,
                     Err(error) => {
@@ -242,11 +266,17 @@ impl oio::Write for HdfsWriter {
     }
 }
 
-fn writer_unavailable() -> opendal::Error {
-    opendal::Error::new(
-        ErrorKind::Unexpected,
-        "HDFS writer is unavailable after close or abort",
-    )
+fn writer_unavailable(failure: Option<&str>) -> opendal::Error {
+    match failure {
+        Some(failure) => opendal::Error::new(
+            ErrorKind::Unexpected,
+            format!("HDFS writer is unavailable: a previous write failed: {failure}"),
+        ),
+        None => opendal::Error::new(
+            ErrorKind::Unexpected,
+            "HDFS writer is unavailable after close or abort",
+        ),
+    }
 }
 
 impl Service for HdfsCompatibilityService {
@@ -301,6 +331,7 @@ impl Service for HdfsCompatibilityService {
             writer: Some(writer),
             temporary_path,
             target_path: path.to_string(),
+            failure: None,
         }))
     }
 
@@ -416,9 +447,13 @@ async fn abort_and_delete(
     mut writer: oio::Writer,
     path: &str,
 ) {
-    let _ = writer.abort().await;
+    if let Err(error) = writer.abort().await {
+        warn!(error; "Failed to abort HDFS writer for temporary file {path}");
+    }
     drop(writer);
-    let _ = delete_path(inner, context, path).await;
+    if let Err(error) = delete_path(inner, context, path).await {
+        warn!(error; "Failed to delete temporary file {path} after a failed HDFS write");
+    }
 }
 
 async fn delete_path(inner: &Servicer, context: &OperationContext, path: &str) -> Result<()> {
@@ -443,6 +478,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::layers::mock::{MockLayerBuilder, MockWriterFactory};
 
     fn test_store() -> (TempDir, Operator) {
         let directory = tempfile::tempdir().unwrap();
@@ -546,6 +582,84 @@ mod tests {
                 .unwrap()
                 .to_bytes()
                 .as_ref()
+        );
+    }
+
+    /// A writer that starts failing once more than `fail_after` bytes have been
+    /// accepted, to simulate a failure in the middle of an atomic write.
+    struct FailingWriter {
+        inner: oio::Writer,
+        written: usize,
+        fail_after: usize,
+    }
+
+    impl oio::Write for FailingWriter {
+        async fn write(&mut self, buffer: Buffer) -> Result<()> {
+            if self.written + buffer.len() > self.fail_after {
+                return Err(opendal::Error::new(
+                    ErrorKind::Unexpected,
+                    "injected write failure",
+                ));
+            }
+            self.written += buffer.len();
+            self.inner.write(buffer).await
+        }
+
+        async fn close(&mut self) -> Result<Metadata> {
+            self.inner.close().await
+        }
+
+        async fn abort(&mut self) -> Result<()> {
+            self.inner.abort().await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_atomic_write_cleans_up_temporary_file_after_write_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let factory: MockWriterFactory = Arc::new(|path, _args, inner| {
+            if path.contains(".greptime-") {
+                Box::new(FailingWriter {
+                    inner,
+                    written: 0,
+                    fail_after: 4,
+                })
+            } else {
+                inner
+            }
+        });
+        let mock_layer = MockLayerBuilder::default()
+            .writer_factory(factory)
+            .build()
+            .unwrap();
+        let store = Operator::new(Fs::default().root(directory.path().to_str().unwrap()))
+            .unwrap()
+            .layer(mock_layer)
+            .layer(HdfsCompatibilityLayer::new_for_test());
+
+        store.write("data/target", "old").await.unwrap();
+
+        let mut writer: Writer = store.writer("data/target").await.unwrap();
+        writer.write("part").await.unwrap();
+
+        let error = writer.write("ial").await.unwrap_err();
+        assert_eq!(ErrorKind::Unexpected, error.kind());
+        assert!(error.to_string().contains("injected write failure"));
+
+        // The destination keeps its previous contents...
+        assert_eq!(
+            b"old",
+            store.read("data/target").await.unwrap().to_bytes().as_ref()
+        );
+        // ...and the temporary file is removed even though the writer was not
+        // closed or aborted by the caller.
+        assert!(
+            store
+                .list("data/")
+                .await
+                .unwrap()
+                .iter()
+                .all(|entry| !entry.path().contains(".greptime-"))
         );
     }
 }
