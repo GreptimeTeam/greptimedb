@@ -89,47 +89,33 @@ def entries(s3, operation, bucket, prefix, fields):
 
 def inventory(s3, bucket, prefix):
     objects = list(entries(s3, "list_objects_v2", bucket, prefix, ("Contents",)))
-    uploads = list(entries(s3, "list_multipart_uploads", bucket, prefix, ("Uploads",)))
-    versions = list(entries(s3, "list_object_versions", bucket, prefix, ("Versions", "DeleteMarkers")))
     return {"prefix": prefix, "objects": len(objects), "bytes": sum(item["Size"] for item in objects),
-            "versions_and_delete_markers": len(versions), "incomplete_multipart_uploads": len(uploads),
             "measurement": "S3 listing inventory; not request counts or transferred bytes."}
 
 
 def probe(s3, bucket, prefix):
-    if s3.get_bucket_location(Bucket=bucket).get("LocationConstraint") != REGION:
-        raise ValueError("actual S3 bucket location is not ap-southeast-1")
-    before = inventory(s3, bucket, prefix)
-    if any(before[key] for key in ("objects", "versions_and_delete_markers", "incomplete_multipart_uploads")):
+    if inventory(s3, bucket, prefix)["objects"]:
         raise ValueError("run prefix is already occupied; use a fresh workflow attempt")
     key = prefix + "_probe"
-    written = s3.put_object(Bucket=bucket, Key=key, Body=b"metric snapshot benchmark")
-    identity = {"Bucket": bucket, "Key": key}
-    if "VersionId" in written:
-        identity["VersionId"] = written["VersionId"]
+    s3.put_object(Bucket=bucket, Key=key, Body=b"metric snapshot benchmark")
     try:
-        body = s3.get_object(**identity)["Body"]
+        body = s3.get_object(Bucket=bucket, Key=key)["Body"]
         try:
             if body.read() != b"metric snapshot benchmark":
                 raise ValueError("S3 probe returned unexpected content")
         finally:
             body.close()
     finally:
-        s3.delete_object(**identity)
+        s3.delete_object(Bucket=bucket, Key=key)
     return inventory(s3, bucket, prefix)
 
 
 def cleanup(s3, bucket, prefix):
     owned_prefix(prefix)
-    for item in entries(s3, "list_multipart_uploads", bucket, prefix, ("Uploads",)):
-        s3.abort_multipart_upload(Bucket=bucket, Key=item["Key"], UploadId=item["UploadId"])
-    # Version-specific deletion removes old data and markers without creating new markers.
-    for item in entries(s3, "list_object_versions", bucket, prefix, ("Versions", "DeleteMarkers")):
-        s3.delete_object(Bucket=bucket, Key=item["Key"], VersionId=item["VersionId"])
     for item in entries(s3, "list_objects_v2", bucket, prefix, ("Contents",)):
         s3.delete_object(Bucket=bucket, Key=item["Key"])
     after = inventory(s3, bucket, prefix)
-    if any(after[key] for key in ("objects", "versions_and_delete_markers", "incomplete_multipart_uploads")):
+    if after["objects"]:
         raise RuntimeError("owned S3 prefix is not empty after cleanup")
     return after
 

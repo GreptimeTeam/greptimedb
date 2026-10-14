@@ -63,6 +63,12 @@ jobs:
       run: |
         echo "run_id=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
         echo "run_prefix=$RUN_PREFIX" >> "$GITHUB_OUTPUT"
+    - uses: astral-sh/setup-uv@v6
+    - name: Check S3 access before allocating EC2
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+      run: uv run greptimedb/.github/scripts/metric-snapshot-s3-ops.py probe
     - name: Resolve the fixed benchmark runner
       id: runner
       run: python3 greptimedb/.github/scripts/ci-runner-config.py --provider AWS --instance-type c6id.4xlarge
@@ -176,7 +182,7 @@ jobs:
     - validate
     - provision
     # Start alongside the benchmark so an offline runner cannot hold cleanup in its queue.
-    if: ${{ always() && needs.validate.outputs.run_id != '' && needs.provision.result != 'skipped' }}
+    if: ${{ always() && needs.validate.outputs.run_id != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 330
     permissions:
@@ -197,13 +203,13 @@ jobs:
         STARTED_AT: ${{ needs.provision.outputs.started_at }}
       run: python3 greptimedb/.github/scripts/metric-snapshot-s3-ops.py wait-for-benchmark --started-at "$STARTED_AT"
     - uses: aws-actions/configure-aws-credentials@v4
-      if: always()
+      if: ${{ always() && needs.provision.result != 'skipped' }}
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.RUNNER_REGION }}
     - name: Delete EC2, its temporary disks and runner registration
-      if: always()
+      if: ${{ always() && needs.provision.result != 'skipped' }}
       env:
         GH_PERSONAL_ACCESS_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
         AWS_REGION: ${{ env.RUNNER_REGION }}

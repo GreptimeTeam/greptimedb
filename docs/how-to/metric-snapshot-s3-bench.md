@@ -67,9 +67,11 @@ A separate GitHub-hosted teardown job starts when provisioning finishes and poll
 the benchmark job. Its deadline includes queue time: allocation start plus 45
 minutes, the benchmark timeout and 10 minutes. Completion, cancellation, an API
 error or the deadline leads to cleanup. Failed provisioning skips the wait.
-It terminates the EC2 instance and its disks, unregisters the runner, aborts
-unfinished multipart uploads, deletes all object versions under the run's unique
-prefix and verifies that prefix is empty. Check teardown completion before another
+It terminates the EC2 instance and its disks, unregisters the runner, deletes every
+object listed under the run's unique prefix and verifies the listing is empty. Like
+the object store WAL benchmark, it needs only list, put, get and delete on the CI
+bucket. It does not abort incomplete multipart uploads or remove noncurrent object
+versions; those depend on the bucket's lifecycle configuration. Check teardown completion before another
 attempt. A deadline may leave the GitHub benchmark job queued after its resources
 are removed; cancel that workflow manually. If cleanup fails, rerun the teardown
 job only; it keeps the original attempt's resource identity and deadline. A new benchmark needs a new dispatch because teardown

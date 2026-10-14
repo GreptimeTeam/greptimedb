@@ -31,32 +31,30 @@ PREFIX = "metric-snapshot-bench/123-1/"
 
 class FakeS3:
     def __init__(self):
-        self.uploads = [{"Key": PREFIX + "unfinished", "UploadId": "u"}]
-        self.versions = [{"Key": PREFIX + "data", "VersionId": "v"}]
-        self.markers = [{"Key": PREFIX + "deleted", "VersionId": "m"}]
-        self.objects = [{"Key": PREFIX + "current", "Size": 11}]
+        self.objects = [{"Key": PREFIX + "current", "Size": 11}, {"Key": PREFIX + "data", "Size": 7}]
         self.deleted = []
 
     def get_paginator(self, operation):
+        assert operation == "list_objects_v2"
         parent = self
 
         class Paginator:
             def paginate(self, **kwargs):
                 assert kwargs == {"Bucket": "bucket", "Prefix": PREFIX}
-                return iter([{"Uploads": parent.uploads.copy()}] if operation == "list_multipart_uploads" else
-                            [{"Versions": parent.versions.copy(), "DeleteMarkers": parent.markers.copy()}]
-                            if operation == "list_object_versions" else [{"Contents": parent.objects.copy()}])
+                return iter([{"Contents": parent.objects.copy()}])
 
         return Paginator()
 
-    def abort_multipart_upload(self, **kwargs):
-        self.deleted.append(kwargs)
-        self.uploads = []
+    def put_object(self, **kwargs):
+        self.objects.append({"Key": kwargs["Key"], "Size": len(kwargs["Body"])})
+        return {}
+
+    def get_object(self, **kwargs):
+        return {"Body": io.BytesIO(b"metric snapshot benchmark")}
 
     def delete_object(self, **kwargs):
         self.deleted.append(kwargs)
-        for name in ("versions", "markers", "objects"):
-            setattr(self, name, [item for item in getattr(self, name) if item["Key"] != kwargs["Key"]])
+        self.objects = [item for item in self.objects if item["Key"] != kwargs["Key"]]
 
 
 class OperationsTest(unittest.TestCase):
@@ -126,17 +124,35 @@ class OperationsTest(unittest.TestCase):
             ops.wait_for_benchmark(self.watcher_env(), 1000)
         sleep.assert_not_called()
 
-    def test_cleanup_aborts_multipart_and_deletes_all_versions_and_markers(self):
+    def test_cleanup_deletes_every_listed_object(self):
         s3 = FakeS3()
         result = ops.cleanup(s3, "bucket", PREFIX)
         self.assertEqual(result["objects"], 0)
-        self.assertEqual(result["versions_and_delete_markers"], 0)
-        self.assertEqual(result["incomplete_multipart_uploads"], 0)
-        self.assertEqual(s3.deleted, [
-            {"Bucket": "bucket", "Key": PREFIX + "unfinished", "UploadId": "u"},
-            {"Bucket": "bucket", "Key": PREFIX + "data", "VersionId": "v"},
-            {"Bucket": "bucket", "Key": PREFIX + "deleted", "VersionId": "m"},
-            {"Bucket": "bucket", "Key": PREFIX + "current"}])
+        self.assertEqual(s3.deleted, [{"Bucket": "bucket", "Key": PREFIX + "current"},
+                                      {"Bucket": "bucket", "Key": PREFIX + "data"}])
+
+    def test_probe_refuses_occupied_prefix_and_removes_its_object(self):
+        with self.assertRaisesRegex(ValueError, "already occupied"):
+            ops.probe(FakeS3(), "bucket", PREFIX)
+        s3 = FakeS3()
+        s3.objects = []
+        self.assertEqual(ops.probe(s3, "bucket", PREFIX)["objects"], 0)
+        self.assertEqual(s3.deleted, [{"Bucket": "bucket", "Key": PREFIX + "_probe"}])
+
+    def test_failed_probe_delete_still_has_hosted_cleanup_path(self):
+        s3 = FakeS3()
+        s3.objects = []
+        with mock.patch.object(s3, "delete_object", side_effect=OSError("temporary delete failure")), \
+                self.assertRaises(OSError):
+            ops.probe(s3, "bucket", PREFIX)
+        self.assertEqual([item["Key"] for item in s3.objects], [PREFIX + "_probe"])
+        workflow = (Path(__file__).parents[2] / "workflows/metric-snapshot-s3-bench.yml").read_text()
+        teardown = workflow.split("  teardown:\n", 1)[1]
+        job_if = next(line.strip() for line in teardown.splitlines() if line.startswith("    if:"))
+        self.assertEqual(job_if, "if: ${{ always() && needs.validate.outputs.run_id != '' }}")
+        ec2 = teardown.split("    - name: Delete EC2, its temporary disks and runner registration\n", 1)[1]
+        self.assertEqual(ec2.splitlines()[0].strip(), "if: ${{ always() && needs.provision.result != 'skipped' }}")
+        self.assertEqual(ops.cleanup(s3, "bucket", PREFIX)["objects"], 0)
 
     def test_bad_prefix_and_out_of_scope_response_cannot_delete(self):
         for prefix in ("", "metric-snapshot-bench/", "metric-snapshot-bench/123-1", PREFIX + "../", "oswal-bench/123-1/"):
@@ -145,7 +161,7 @@ class OperationsTest(unittest.TestCase):
                 ops.cleanup(s3, "bucket", prefix)
             self.assertEqual(s3.deleted, [])
         s3 = FakeS3()
-        s3.uploads[0]["Key"] = "other-run/unfinished"
+        s3.objects[0]["Key"] = "other-run/current"
         with self.assertRaises(ValueError):
             ops.cleanup(s3, "bucket", PREFIX)
         self.assertEqual(s3.deleted, [])
