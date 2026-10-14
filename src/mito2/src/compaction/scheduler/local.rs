@@ -43,6 +43,8 @@ struct UnitExecution {
 #[derive(Debug)]
 pub(crate) struct LocalCompaction {
     /// All pending and submitted units, retained until task exit. Tasks own their input leases.
+    /// Keyed by each unit's execution plan ID, allocated from the scheduler's `next_plan_id`;
+    /// it equals `CompactionExecution::plan_id()` and the `plan_id` in unit notifications.
     units: HashMap<u64, UnitExecution>,
     pending: VecDeque<CompactionTask>,
     parallelism: usize,
