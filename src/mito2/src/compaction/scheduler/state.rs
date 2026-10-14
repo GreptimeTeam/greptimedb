@@ -262,7 +262,9 @@ impl CompactingFiles {
         Some(Self { files })
     }
 
-    /// Transfers a dependency group's leases without briefly releasing any input.
+    /// Clones the shared leases of a dependency group's inputs without briefly releasing any input.
+    /// `self` retains its leases, so an input is released only after every owner, including
+    /// the original collection, drops its lease.
     /// A delayed remote notifier may retain the same leases across local fallback.
     /// Indexing keeps splitting proportional to the group's input count.
     pub(crate) fn for_inputs(&self, inputs: &[FileHandle]) -> Self {
