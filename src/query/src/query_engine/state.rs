@@ -66,6 +66,7 @@ use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
 use crate::optimizer::count_nest_aggr::CountNestAggrRule;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::enforce_sorting::EnforceSorting;
+use crate::optimizer::expr_depth;
 use crate::optimizer::global_limit::EnsureGlobalLimitForFetch;
 use crate::optimizer::json_schema_concretize::JsonSchemaConcretizeRule;
 use crate::optimizer::json_type_concretize::JsonTypeConcretizeRule;
@@ -212,6 +213,7 @@ impl QueryEngineState {
             analyzer.rules.push(Arc::new(JsonSchemaConcretizeRule));
         }
         analyzer.rules.push(Arc::new(FixStateUdafOrderingAnalyzer));
+        analyzer.rules.push(Arc::new(expr_depth::ExprDepthRule));
 
         // Note: Postgres oid-alias string coercion (`'x'::regclass`,
         // `'public'::regnamespace`, ...) is handled by the
@@ -311,15 +313,20 @@ impl QueryEngineState {
         plan: DfLogicalPlan,
         context: &QueryEngineContext,
     ) -> DfResult<DfLogicalPlan> {
+        expr_depth::validate_plan(&plan)?;
         self.extension_rules
             .iter()
             .try_fold(plan, |acc_plan, rule| {
-                rule.analyze(acc_plan, context, self.session_state().config_options())
+                let plan =
+                    rule.analyze(acc_plan, context, self.session_state().config_options())?;
+                expr_depth::validate_plan(&plan)?;
+                Ok(plan)
             })
     }
 
     /// Run the full logical plan optimize phase for the given plan.
     pub fn optimize_logical_plan(&self, plan: DfLogicalPlan) -> DfResult<DfLogicalPlan> {
+        expr_depth::validate_plan(&plan)?;
         self.session_state().optimize(&plan)
     }
 
