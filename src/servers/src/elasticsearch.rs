@@ -25,6 +25,7 @@ use common_error::ext::ErrorExt;
 use common_telemetry::{debug, error};
 use headers::ContentType;
 use once_cell::sync::Lazy;
+use pipeline::util::to_pipeline_version;
 use pipeline::{
     GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME, GreptimePipelineParams, PipelineDefinition,
 };
@@ -44,7 +45,10 @@ use crate::http::event::{
     LogIngesterQueryParams, LogState, PipelineIngestRequest,
     extract_pipeline_params_map_from_headers, ingest_logs_inner,
 };
-use crate::http::header::constants::GREPTIME_PIPELINE_NAME_HEADER_NAME;
+use crate::http::header::constants::{
+    GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME, GREPTIME_PIPELINE_NAME_HEADER_NAME,
+    GREPTIME_PIPELINE_VERSION_HEADER_NAME,
+};
 use crate::metrics::{
     METRIC_ELASTICSEARCH_LOGS_DOCS_COUNT, METRIC_ELASTICSEARCH_LOGS_INGESTION_ELAPSED,
 };
@@ -173,7 +177,28 @@ async fn do_handle_bulk_api(
     };
     let log_num = requests.len();
 
-    let pipeline = match PipelineDefinition::from_name(pipeline_name, None, None) {
+    // Query `version` wins over `x-greptime-pipeline-version` /
+    // `x-greptime-log-pipeline-version`. Missing means the latest version.
+    let version = match to_pipeline_version(resolve_pipeline_version_str(
+        params.version.as_deref(),
+        &headers,
+    )) {
+        Ok(version) => version,
+        Err(e) => {
+            return (
+                status_code_to_http_status(&e.status_code()),
+                elasticsearch_headers(),
+                axum::Json(write_bulk_response(
+                    start.elapsed().as_millis() as i64,
+                    0,
+                    e.status_code() as u32,
+                    e.to_string().as_str(),
+                )),
+            );
+        }
+    };
+
+    let pipeline = match PipelineDefinition::from_name(pipeline_name, version, None) {
         Ok(pipeline) => pipeline,
         Err(e) => {
             // should be unreachable
@@ -289,6 +314,23 @@ pub fn elasticsearch_headers() -> HeaderMap {
 // { "field1" : "value1" }
 // { "index" : { "_index" : "test", "_id" : "2" } }
 // { "field2" : "value2" }
+/// Resolve the pipeline version string for Elasticsearch `_bulk`.
+///
+/// Prefer the `version` query parameter; otherwise fall back to the
+/// `x-greptime-pipeline-version` / `x-greptime-log-pipeline-version` headers.
+/// `None` means "use the latest pipeline version".
+fn resolve_pipeline_version_str<'a>(
+    params_version: Option<&'a str>,
+    headers: &'a HeaderMap,
+) -> Option<&'a str> {
+    params_version.or_else(|| {
+        headers
+            .get(GREPTIME_PIPELINE_VERSION_HEADER_NAME)
+            .or_else(|| headers.get(GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME))
+            .and_then(|v| v.to_str().ok())
+    })
+}
+
 fn parse_bulk_request(
     input: &str,
     index_from_url: &Option<String>,
@@ -584,5 +626,59 @@ mod tests {
                 assert!(requests.is_err());
             }
         }
+    }
+
+    #[test]
+    fn test_resolve_pipeline_version_str() {
+        // Query param wins over headers.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            GREPTIME_PIPELINE_VERSION_HEADER_NAME,
+            HeaderValue::from_static("2024-01-01 00:00:00.000000000"),
+        );
+        assert_eq!(
+            resolve_pipeline_version_str(Some("2024-02-01 00:00:00.000000000"), &headers),
+            Some("2024-02-01 00:00:00.000000000")
+        );
+
+        // Fall back to x-greptime-pipeline-version.
+        assert_eq!(
+            resolve_pipeline_version_str(None, &headers),
+            Some("2024-01-01 00:00:00.000000000")
+        );
+
+        // Fall back to deprecated x-greptime-log-pipeline-version.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            GREPTIME_LOG_PIPELINE_VERSION_HEADER_NAME,
+            HeaderValue::from_static("2024-03-01 00:00:00.000000000"),
+        );
+        assert_eq!(
+            resolve_pipeline_version_str(None, &headers),
+            Some("2024-03-01 00:00:00.000000000")
+        );
+
+        // Prefer the non-deprecated header when both are present.
+        headers.insert(
+            GREPTIME_PIPELINE_VERSION_HEADER_NAME,
+            HeaderValue::from_static("2024-04-01 00:00:00.000000000"),
+        );
+        assert_eq!(
+            resolve_pipeline_version_str(None, &headers),
+            Some("2024-04-01 00:00:00.000000000")
+        );
+
+        assert_eq!(resolve_pipeline_version_str(None, &HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn test_to_pipeline_version_from_resolved_str() {
+        assert!(to_pipeline_version(None).unwrap().is_none());
+        assert!(
+            to_pipeline_version(Some("2024-01-01 00:00:00Z"))
+                .unwrap()
+                .is_some()
+        );
+        assert!(to_pipeline_version(Some("not-a-version")).is_err());
     }
 }
