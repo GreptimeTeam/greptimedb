@@ -736,6 +736,7 @@ pub struct ConfigurationVariables {
     pg_datestyle_format: ArcSwap<(PGDateTimeStyle, PGDateOrder)>,
     pg_intervalstyle_format: ArcSwap<PGIntervalStyle>,
     allow_query_fallback: ArcSwap<bool>,
+    experimental_enable_factorized_join_agg: ArcSwap<Option<bool>>,
 }
 
 impl Clone for ConfigurationVariables {
@@ -745,6 +746,9 @@ impl Clone for ConfigurationVariables {
             pg_datestyle_format: ArcSwap::new(self.pg_datestyle_format.load().clone()),
             pg_intervalstyle_format: ArcSwap::new(self.pg_intervalstyle_format.load().clone()),
             allow_query_fallback: ArcSwap::new(self.allow_query_fallback.load().clone()),
+            experimental_enable_factorized_join_agg: ArcSwap::new(
+                self.experimental_enable_factorized_join_agg.load().clone(),
+            ),
         }
     }
 }
@@ -785,6 +789,23 @@ impl ConfigurationVariables {
     pub fn set_allow_query_fallback(&self, allow: bool) {
         self.allow_query_fallback.swap(Arc::new(allow));
     }
+
+    pub fn experimental_enable_factorized_join_agg(&self) -> bool {
+        self.experimental_enable_factorized_join_agg
+            .load()
+            .unwrap_or(false)
+    }
+
+    pub fn set_experimental_enable_factorized_join_agg(&self, enabled: bool) {
+        self.experimental_enable_factorized_join_agg
+            .store(Arc::new(Some(enabled)));
+    }
+
+    pub fn experimental_enable_factorized_join_agg_is_set(&self) -> bool {
+        self.experimental_enable_factorized_join_agg
+            .load()
+            .is_some()
+    }
 }
 
 #[cfg(test)]
@@ -795,6 +816,30 @@ mod test {
 
     use crate::Session;
     use crate::context::{Channel, *};
+
+    #[test]
+    fn factorized_join_agg_configuration_clone_preserves_unset_and_values() {
+        let variables = ConfigurationVariables::new();
+        assert!(!variables.experimental_enable_factorized_join_agg_is_set());
+        let unset_clone = variables.clone();
+        assert!(!unset_clone.experimental_enable_factorized_join_agg_is_set());
+
+        for value in [false, true] {
+            variables.set_experimental_enable_factorized_join_agg(value);
+            let cloned = variables.clone();
+            assert!(cloned.experimental_enable_factorized_join_agg_is_set());
+            assert_eq!(cloned.experimental_enable_factorized_join_agg(), value);
+        }
+    }
+
+    #[test]
+    fn factorized_join_agg_configuration_set_is_visible_to_clone() {
+        let variables = ConfigurationVariables::new();
+        variables.set_experimental_enable_factorized_join_agg(false);
+        let cloned = variables.clone();
+        assert!(cloned.experimental_enable_factorized_join_agg_is_set());
+        assert!(!cloned.experimental_enable_factorized_join_agg());
+    }
 
     #[test]
     fn test_session() {

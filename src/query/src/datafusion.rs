@@ -68,7 +68,7 @@ use crate::metrics::{
     OnDone, QUERY_STAGE_ELAPSED, maybe_attach_region_watermark_metrics,
     should_collect_region_watermark_from_query_ctx,
 };
-use crate::options::ScheduledTimeExtension;
+use crate::options::{FactorizedJoinAggOptions, ScheduledTimeExtension};
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
 use crate::query_engine::{DescribeResult, QueryEngineContext, QueryEngineState};
@@ -147,6 +147,16 @@ pub struct DatafusionQueryEngine {
 impl DatafusionQueryEngine {
     pub fn new(state: Arc<QueryEngineState>, plugins: Plugins) -> Self {
         Self { state, plugins }
+    }
+
+    /// Crate-visible view of the per-query engine context, for tests that
+    /// assert configuration propagation through the real query path.
+    #[cfg(test)]
+    pub(crate) fn engine_context_for_tests(
+        &self,
+        query_ctx: QueryContextRef,
+    ) -> QueryEngineContext {
+        self.engine_context(query_ctx)
     }
 
     #[tracing::instrument(skip_all)]
@@ -565,6 +575,19 @@ impl QueryEngine for DatafusionQueryEngine {
                     parallelism
                 );
             }
+        }
+
+        let factorized_join_agg = query_ctx.configuration_parameter();
+        if factorized_join_agg.experimental_enable_factorized_join_agg_is_set() {
+            // Preserve the server-level default when the session variable is unset,
+            // but let either explicit SET value override that default.
+            state
+                .config_mut()
+                .options_mut()
+                .extensions
+                .insert(FactorizedJoinAggOptions {
+                    enabled: factorized_join_agg.experimental_enable_factorized_join_agg(),
+                });
         }
 
         // configure execution options
