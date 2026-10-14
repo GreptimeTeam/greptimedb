@@ -288,7 +288,7 @@ lazy_static! {
     /// until a create succeeds.
     pub static ref METRIC_OBJECT_STORE_WAL_FAILING: IntGauge = register_int_gauge!(
         "greptime_logstore_object_store_wal_failing",
-        "object store logstores rejecting appends because the object store refuses their backlog with a non-retriable error",
+        "object store logstores rejecting appends because the object store refuses their backlog with an error that requires intervention",
     )
     .unwrap();
 

@@ -78,7 +78,8 @@ const MAX_IN_FLIGHT_DELETES: usize = 4;
 /// `enqueued` acknowledgement mode, where no caller is left to retry it.
 const CREATE_RETRY_DELAY: Duration = Duration::from_millis(100);
 /// Longest delay from a failed attempt of a backlog that the object store
-/// refuses with a non-retriable error, see [`Failing`], to the next attempt.
+/// refuses with an error that requires intervention, see [`Failing`], to the
+/// next attempt.
 /// The delay doubles from [`CREATE_RETRY_DELAY`] after every attempt. At the
 /// cap a dead bucket costs four requests a minute, a conditional create and
 /// the read that reconciles it every 30 seconds; a longer cap would keep
@@ -134,8 +135,8 @@ const RECOVERY_TAIL_WINDOW: usize = 64 * 1024;
 /// `enqueued` mode it returns on admission and the object is created in the
 /// background. While [`MAX_SEALED_BATCHES`] batches
 /// wait to become durable no append is admitted, and in the `enqueued` mode
-/// appends are rejected while the object store refuses the backlog with a
-/// non-retriable error. A segment that a read cannot
+/// appends are rejected while the object store refuses the backlog with an
+/// error that requires intervention. A segment that a read cannot
 /// decode is handled as `on_corrupted_segment` says. Objects below the reclaim
 /// boundary of the last indexed object are deleted in the background.
 pub struct ObjectStoreLogStore {
@@ -1103,7 +1104,8 @@ impl SealedBatch {
 type CreateOutcome = (u64, Result<PutResult>);
 
 /// The state of an `enqueued` store whose backlog the object store refuses
-/// with a non-retriable error, see [`is_non_retriable`], such as denied
+/// with an error that requires intervention, see [`requires_intervention`],
+/// such as denied
 /// access or a missing bucket.
 ///
 /// Poisoning would drop the acknowledged backlog and need a restart, while
@@ -1159,7 +1161,7 @@ impl Failing {
 /// | created, or identical retry | advances | acknowledged in order | healthy |
 /// | transient error, `durable` mode | never reused: a create that reported an error may have written its object | every batch that is not indexed fails, created ones included; retries are assigned new ids | healthy: the next batch links to the last indexed object, so no chain reaches a failed batch |
 /// | transient error, `enqueued` mode | unchanged | already acknowledged | healthy: the create is repeated with the same bytes after [`CREATE_RETRY_DELAY`], which an identical retry accepts |
-/// | non-retriable error, `enqueued` mode | unchanged | already acknowledged; later appends are rejected with a retryable error | failing, see [`Failing`]: the lowest pending create is repeated alone with backoff, and the first create that succeeds ends it |
+/// | error that requires intervention, `enqueued` mode | unchanged | already acknowledged; later appends are rejected with a retryable error | failing, see [`Failing`]: the lowest pending create is repeated alone with backoff, and the first create that succeeds ends it |
 /// | object store error, `enqueued` mode after `stop` began | never reused | already acknowledged | the backlog is dropped and `stop` reports the error |
 /// | an object of an earlier epoch holds the sequence, `durable` mode | never reused | as for a transient error | healthy: that object can never be on the chain |
 /// | an object of the same or a later epoch holds the sequence, any conflicting object in the `enqueued` mode, encoding or catalog error | unchanged | every batch that is not indexed fails | poisoned |
@@ -1215,7 +1217,7 @@ struct Actor {
     /// it was held back. Later appends wait in their channel.
     stalled: Option<(QueuedAppend, Instant)>,
     /// Set while the object store refuses the `enqueued` backlog with a
-    /// non-retriable error.
+    /// error that requires intervention.
     failing: Option<Failing>,
     durable_waiters: Vec<DurableWaiter>,
     /// Callers of `stop`, answered once nothing is in flight.
@@ -1712,11 +1714,11 @@ impl Actor {
     }
 
     /// Records the failure of a create the `enqueued` mode repeats. A
-    /// non-retriable error makes the store failing; while it is, every error
+    /// error that requires intervention makes the store failing; while it is, every error
     /// becomes the one rejected appends carry.
     fn on_create_failed(&mut self, error: Error) {
         let Some(failing) = &mut self.failing else {
-            if is_non_retriable(&error) {
+            if requires_intervention(&error) {
                 self.enter_failing(error);
             }
             return;
@@ -2332,14 +2334,15 @@ fn publish_indexed(catalog: &ObjectCatalog) {
 /// bucket or container. A read that finds nothing is not one: it is what the
 /// read that reconciles a create meets when the object is gone, and a repeat
 /// creates it. Every other error, an HTTP 400 or 5xx, a timeout or a refused
-/// connection, may pass by itself.
+/// connection, may pass by itself. The store still repeats a create that
+/// failed with such an error, only slowly, see [`Failing`].
 ///
 /// Only the kind of the error decides. Its status cannot: on object storage
 /// the store sits behind OpenDAL's retry layer, which marks every error it
 /// returns as persistent, including those it never retried because they were
 /// not temporary, so a 403 arrives with the status of a 503 that outlasted
 /// the retries.
-fn is_non_retriable(error: &Error) -> bool {
+fn requires_intervention(error: &Error) -> bool {
     match error {
         Error::WalObjectStore {
             operation, error, ..
@@ -6884,7 +6887,7 @@ mod tests {
         // access, a missing S3 bucket, or a write to a missing bucket of
         // another service cannot; an HTTP 400 or a 5xx that outlasted the
         // retries may pass.
-        for (kind, non_retriable) in [
+        for (kind, requires) in [
             (ErrorKind::PermissionDenied, true),
             (ErrorKind::ConfigInvalid, true),
             (ErrorKind::NotFound, true),
@@ -6897,7 +6900,7 @@ mod tests {
                     if error.kind() == kind && error.is_persistent()),
                 "unexpected error for {kind:?}: {error:?}"
             );
-            assert_eq!(non_retriable, is_non_retriable(&error), "{kind:?}");
+            assert_eq!(requires, requires_intervention(&error), "{kind:?}");
         }
 
         // The object exists, so the create is refused by its condition and
@@ -6905,7 +6908,7 @@ mod tests {
         // object that is gone is created by the repeat.
         refusing.refuse_writes(None);
         io.put_if_absent(1, content.clone()).await.unwrap();
-        for (kind, non_retriable) in [
+        for (kind, requires) in [
             (ErrorKind::PermissionDenied, true),
             (ErrorKind::NotFound, false),
         ] {
@@ -6919,9 +6922,9 @@ mod tests {
                     if error.kind() == kind && error.is_persistent()),
                 "unexpected error for {kind:?}: {error:?}"
             );
-            assert_eq!(non_retriable, is_non_retriable(&error), "{kind:?}");
+            assert_eq!(requires, requires_intervention(&error), "{kind:?}");
         }
-        assert!(!is_non_retriable(
+        assert!(!requires_intervention(
             &WalObjectConflictSnafu {
                 path: io.object_path(1)
             }
@@ -6975,7 +6978,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_store_enqueued_non_retriable_failure_keeps_the_backlog() {
+    async fn test_store_enqueued_failure_requiring_intervention_keeps_the_backlog() {
         let _serialized = SERIALIZED.lock().await;
         let region_id = region(1);
         // Denied access and a missing bucket, as S3 reports them.
@@ -7033,7 +7036,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_store_enqueued_failing_store_attempts_its_backlog_a_few_times() {
+    async fn test_store_enqueued_create_retries_back_off() {
         let _serialized = SERIALIZED.lock().await;
         let (store, refusing) = open_failing(ErrorKind::PermissionDenied).await;
         let refused = || refusing.refused_writes.lock().unwrap().clone();
@@ -7064,7 +7067,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_store_enqueued_failing_store_attempts_the_lowest_batch_alone_with_backoff() {
+    async fn test_store_enqueued_failing_store_attempts_the_lowest_batch_alone() {
         let _serialized = SERIALIZED.lock().await;
         let (store, io, mut parked) =
             open_parking_creates(memory_store(), &enqueued(eager())).await;
@@ -7074,22 +7077,18 @@ mod tests {
         }
         let mut releases = parked_operations(&mut parked, 3).await;
         io.creates_refused.store(true, Ordering::SeqCst);
-        let mut failed_at = Instant::now();
         for object_seq in [2, 1, 3] {
             releases.remove(&object_seq).unwrap().send(false).unwrap();
         }
 
-        // Each attempt is the create of object 1 alone, due a delay after the
-        // previous one failed that doubles from 100 ms.
-        for delay in [100, 200, 400, 800] {
+        // Each attempt is the create of object 1 alone.
+        for _ in 0..2 {
             let (object_seq, release) = next_parked_operation(&mut parked).await;
-            assert!(failed_at.elapsed() >= Duration::from_millis(delay));
             assert_eq!(1, object_seq);
             assert_eq!(1, io.in_flight.load(Ordering::SeqCst));
-            failed_at = Instant::now();
             release.send(false).unwrap();
+            assert!(parked.try_recv().is_err());
         }
-        assert!(parked.try_recv().is_err());
 
         // The attempt that succeeds ends the failing state: the other
         // batches are created together and everything is acknowledged in
@@ -8351,8 +8350,8 @@ mod tests {
             EarlierEpochDurable,
             /// transient I/O error, `enqueued` mode
             TransientEnqueued,
-            /// non-retriable I/O error, `enqueued` mode
-            NonRetriableEnqueued,
+            /// I/O error that requires intervention, `enqueued` mode
+            InterventionEnqueued,
             /// any I/O error, `enqueued` mode after `stop` began
             ErrorEnqueuedAfterStop,
             /// an object of the same or a later epoch holds the sequence, or
@@ -8375,7 +8374,7 @@ mod tests {
             Row::TransientDurable,
             Row::EarlierEpochDurable,
             Row::TransientEnqueued,
-            Row::NonRetriableEnqueued,
+            Row::InterventionEnqueued,
             Row::ErrorEnqueuedAfterStop,
             Row::Conflict,
             Row::CatalogError,
@@ -8637,8 +8636,8 @@ mod tests {
                     run: || Box::pin(create_fails_transiently_enqueued()),
                 },
                 Case {
-                    fault: "creates the object store refuses with a non-retriable error, `enqueued` mode",
-                    row: Some(Row::NonRetriableEnqueued),
+                    fault: "creates the object store refuses with an error that requires intervention, `enqueued` mode",
+                    row: Some(Row::InterventionEnqueued),
                     run: || Box::pin(creates_refused_enqueued()),
                 },
                 Case {
