@@ -24,7 +24,7 @@ use catalog::system_schema::semantic_graph::EntityGraphProviderRef;
 use common_base::Plugins;
 use common_datasource::object_store::LocalFileAccess;
 use common_event_recorder::{EventRecorderImpl, EventRecorderRef};
-use common_meta::cache::{LayeredCacheRegistryRef, TableInfoCacheRef, TableRouteCacheRef};
+use common_meta::cache::{LayeredCacheRegistryRef, TableRouteCacheRef};
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::key::TableMetadataManager;
 use common_meta::key::flow::FlowMetadataManager;
@@ -218,15 +218,9 @@ impl FrontendBuilder {
         let mut write_dispatcher =
             WriteDispatcher::new(node_manager.clone(), partition_manager.clone());
         if self.options.write_retry.max_retries > 0 {
-            let table_info_cache: TableInfoCacheRef =
-                self.layered_cache_registry
-                    .get()
-                    .context(error::CacheRequiredSnafu {
-                        name: cache::TABLE_INFO_CACHE_NAME,
-                    })?;
             write_dispatcher = write_dispatcher.with_retry(
                 self.options.write_retry.clone(),
-                table_info_cache,
+                self.catalog_manager.clone(),
                 local_cache_invalidator.clone(),
             );
         }
