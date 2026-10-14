@@ -2026,6 +2026,8 @@ impl Actor {
     fn poison(&mut self, error: Error) -> Arc<Error> {
         let error = set_terminal(&self.terminal_error, error);
         let stopped = self.is_stopped();
+        let releases_lost = !self.failed_releases.is_empty()
+            || self.sealed.iter().any(|batch| !batch.releases.is_empty());
         let failure = || {
             if stopped {
                 ObjectStoreWalStoppedSnafu.build()
@@ -2038,7 +2040,9 @@ impl Actor {
         }
         self.reset_open_batch();
         self.fail_unacknowledged(failure);
-        if self.ack_mode == AckMode::Enqueued {
+        // As in `roll_back`, release records lost once stop began are
+        // reported by `stop` in both modes.
+        if self.ack_mode == AckMode::Enqueued || (!self.stop.is_empty() && releases_lost) {
             self.stop_error.get_or_insert(error.clone());
         }
         self.leave_failing("the store is poisoned");
@@ -2726,8 +2730,9 @@ struct FetchedObject {
 
 /// Rebuilds the catalog from object headers and footers,
 /// so recovery costs a few small reads per object however large the objects
-/// are. Segments are not read; a segment checksum is verified by the read that
-/// decodes it. Footers are fetched for up to [`RECOVERY_CONCURRENCY`] objects
+/// are. Segments are not read, except those of release records, see
+/// [`read_releases`]; a segment checksum is verified by the read that decodes
+/// it. Footers are fetched for up to [`RECOVERY_CONCURRENCY`] objects
 /// at a time and indexed in sequence order, so the catalog checks the entry
 /// ranges of every object against its predecessors like a sequential replay.
 /// Only the objects on the chain [`select_chain`] picks are indexed.
@@ -2740,7 +2745,9 @@ async fn recover(io: &dyn WalObjectIo) -> Result<Recovered> {
 
 /// Reads the release records of the indexed objects, which seed the
 /// watermarks of their regions: one range read of the segment of
-/// [`RELEASE_REGION_ID`] per object that holds one.
+/// [`RELEASE_REGION_ID`] per object that holds one. A segment that cannot be
+/// fetched or does not decode fails recovery, whatever `on_corrupted_segment`
+/// says: skipping it would lose the watermarks it seeds.
 ///
 /// A release record needs no bookkeeping of its own. It is sealed once every
 /// entry it covers was admitted, so it lies in the object holding the last
@@ -8348,23 +8355,23 @@ mod tests {
 
         // The release fails with its create, and a tick seals the record
         // again although nothing is appended.
-        let store = open(memory_store(), &config(MIN_FLUSH_INTERVAL, u64::MAX)).await;
-        store.fail_creates();
+        let (io, _) = RecordingIo::over(memory_store());
+        let store = open_over(io.clone(), &config(MIN_FLUSH_INTERVAL, u64::MAX)).await;
+        io.fail_next_put_persistently();
         store
             .release_region(&provider(region_id), region_id)
             .await
             .unwrap_err();
-        store.allow_creates();
         wait_until(|| store.catalog.read().unwrap().contains_object(2)).await;
         assert_eq!(
             vec![release(region_id, 0)],
-            releases_of(store.io.as_ref(), 2).await
+            releases_of(io.as_ref(), 2).await
         );
         store.stop().await.unwrap();
 
         // A `durable` stop creates the record once more, and reports it lost
-        // when that create fails too.
-        for creates_allowed in [true, false] {
+        // when that create fails or conflicts too.
+        for last_create in ["succeeds", "fails", "conflicts"] {
             let object_store = memory_store();
             let store = open(object_store.clone(), &eager()).await;
             append(&store, region_id, "a1").await.unwrap();
@@ -8373,19 +8380,23 @@ mod tests {
                 .release_region(&provider(region_id), region_id)
                 .await
                 .unwrap_err();
-            if creates_allowed {
-                store.allow_creates();
+            match last_create {
+                "succeeds" => store.allow_creates(),
+                "conflicts" => {
+                    store.allow_creates();
+                    put_foreign(&object_store, 3, 2).await;
+                }
+                _ => {}
             }
             let stopped = store.stop().await;
             let store = open(object_store, &eager()).await;
-            if creates_allowed {
+            if last_create == "succeeds" {
                 stopped.unwrap();
                 assert_eq!(Some(id(1, 1)), watermark(&store, region_id));
             } else {
-                assert!(matches!(
-                    unwrap_shared(&stopped.unwrap_err()),
-                    Error::WalObjectStore { .. }
-                ));
+                let error = stopped.unwrap_err();
+                let conflict = matches!(unwrap_shared(&error), Error::WalObjectConflict { .. });
+                assert_eq!(last_create == "conflicts", conflict, "{error:?}");
                 assert_eq!(None, watermark(&store, region_id));
             }
             store.stop().await.unwrap();

@@ -61,7 +61,9 @@
 //!
 //! Recovery lists the objects, reads and verifies only the header, trailer and
 //! footer of each, and indexes the footers of the chain in sequence order to
-//! rebuild the object catalog, which rejects a sequence it already holds.
+//! rebuild the object catalog, which rejects a sequence it already holds. Of
+//! the segments it reads only those of release records, and one that does not
+//! decode fails recovery.
 //! Segments are read and checksummed only when a read decodes them; a segment
 //! that does not decode is fetched once more and then skipped as a hole of its
 //! region or fails the read, as `on_corrupted_segment` says.
