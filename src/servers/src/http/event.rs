@@ -59,7 +59,8 @@ use crate::http::header::constants::{
     GREPTIME_PIPELINE_PARAMS_HEADER,
 };
 use crate::http::header::{
-    CONTENT_TYPE_NDJSON_STR, CONTENT_TYPE_NDJSON_SUBTYPE_STR, CONTENT_TYPE_PROTOBUF_STR,
+    CONTENT_TYPE_JSON_STREAM_STR, CONTENT_TYPE_JSON_STREAM_SUBTYPE_STR, CONTENT_TYPE_NDJSON_STR,
+    CONTENT_TYPE_NDJSON_SUBTYPE_STR, CONTENT_TYPE_PROTOBUF_STR,
 };
 use crate::http::result::greptime_manage_resp::{GreptimedbManageResponse, SqlOutput};
 use crate::http::result::greptime_result_v1::GreptimedbV1Response;
@@ -87,6 +88,8 @@ lazy_static! {
         ContentType::from_str(CONTENT_TYPE_PROTOBUF_STR).unwrap();
     pub static ref NDJSON_CONTENT_TYPE: ContentType =
         ContentType::from_str(CONTENT_TYPE_NDJSON_STR).unwrap();
+    pub static ref JSON_STREAM_CONTENT_TYPE: ContentType =
+        ContentType::from_str(CONTENT_TYPE_JSON_STREAM_STR).unwrap();
 }
 
 /// LogIngesterQueryParams is used for query params of log ingester API.
@@ -797,6 +800,10 @@ pub async fn log_ingester(
 #[derive(Debug, EnumIter)]
 enum EventPayloadResolverInner {
     Json,
+    /// `application/x-json-stream`: concatenated JSON values without any
+    /// separator between them, e.g. `{"a":1}{"b":2}` (the `json_stream`
+    /// format of fluentbit).
+    JsonStream,
     Ndjson,
     Text,
 }
@@ -805,6 +812,7 @@ impl Display for EventPayloadResolverInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EventPayloadResolverInner::Json => write!(f, "{}", *JSON_CONTENT_TYPE),
+            EventPayloadResolverInner::JsonStream => write!(f, "{}", *JSON_STREAM_CONTENT_TYPE),
             EventPayloadResolverInner::Ndjson => write!(f, "{}", *NDJSON_CONTENT_TYPE),
             EventPayloadResolverInner::Text => write!(f, "{}", *TEXT_CONTENT_TYPE),
         }
@@ -818,6 +826,9 @@ impl TryFrom<&ContentType> for EventPayloadResolverInner {
         let mime: mime_guess::Mime = content_type.clone().into();
         match (mime.type_(), mime.subtype()) {
             (mime::APPLICATION, mime::JSON) => Ok(EventPayloadResolverInner::Json),
+            (mime::APPLICATION, subtype) if subtype == CONTENT_TYPE_JSON_STREAM_SUBTYPE_STR => {
+                Ok(EventPayloadResolverInner::JsonStream)
+            }
             (mime::APPLICATION, subtype) if subtype == CONTENT_TYPE_NDJSON_SUBTYPE_STR => {
                 Ok(EventPayloadResolverInner::Ndjson)
             }
@@ -866,10 +877,17 @@ impl<'a> TryFrom<&'a ContentType> for EventPayloadResolver<'a> {
 impl EventPayloadResolver<'_> {
     fn parse_payload(&self, payload: Bytes, ignore_errors: bool) -> Result<Vec<VrlValue>> {
         match self.inner {
-            EventPayloadResolverInner::Json => transform_ndjson_array_factory(
-                Deserializer::from_slice(&payload).into_iter(),
-                ignore_errors,
-            ),
+            // `application/json` accepts a single JSON value or a top-level
+            // array; `application/x-json-stream` additionally accepts values
+            // placed back-to-back without a separator. The streaming
+            // deserializer yields every top-level value in order, and
+            // `transform_ndjson_array_factory` flattens top-level arrays.
+            EventPayloadResolverInner::Json | EventPayloadResolverInner::JsonStream => {
+                transform_ndjson_array_factory(
+                    Deserializer::from_slice(&payload).into_iter(),
+                    ignore_errors,
+                )
+            }
             EventPayloadResolverInner::Ndjson => {
                 let mut result = Vec::with_capacity(1000);
                 let mut buffer = Buffers::new(1000);
@@ -1075,6 +1093,49 @@ mod tests {
         )
         .unwrap();
         assert_eq!(a, "[{\"a\":1},{\"b\":2}]");
+    }
+
+    #[test]
+    fn test_extract_by_json_stream_content_type() {
+        // `application/x-json-stream` accepts concatenated JSON values, with
+        // or without line breaks between them.
+        let json_stream = ContentType::from_str("application/x-json-stream").unwrap();
+        let payload = r#"{"a": 1}{"b": 2}
+{"c": 1}"#
+            .as_bytes();
+        let payload = Bytes::from_static(payload);
+
+        let values =
+            extract_pipeline_value_by_content_type(json_stream.clone(), payload, false).unwrap();
+        assert_eq!(
+            values,
+            vec![
+                json!({"a": 1}).into(),
+                json!({"b": 2}).into(),
+                json!({"c": 1}).into()
+            ]
+        );
+
+        assert!(
+            EventPayloadResolver::support_content_type_list().contains(&json_stream.to_string())
+        );
+    }
+
+    #[test]
+    fn test_json_stream_matches_json_for_concatenated_values() {
+        // a concatenated payload is parsed exactly like `application/json`
+        let payload = Bytes::from_static(r#"{"a": 1}{"b": 2}"#.as_bytes());
+        let via_json =
+            extract_pipeline_value_by_content_type(ContentType::json(), payload.clone(), false)
+                .unwrap();
+        let via_stream = extract_pipeline_value_by_content_type(
+            ContentType::from_str("application/x-json-stream").unwrap(),
+            payload,
+            false,
+        )
+        .unwrap();
+        assert_eq!(via_json, via_stream);
+        assert_eq!(via_stream.len(), 2);
     }
 
     #[test]

@@ -189,6 +189,7 @@ macro_rules! http_tests {
 
                 test_pipeline_api,
                 test_pipeline_name_in_header,
+                test_json_stream_ingestion,
                 test_plain_text_ingestion,
                 test_pipeline_auto_transform,
                 test_pipeline_auto_transform_with_select,
@@ -7951,7 +7952,7 @@ transform:
         assert_eq!(
             body["error"],
             json!(
-                "Invalid request parameter: invalid content type: application/yaml, expected: one of application/json, application/x-ndjson, text/plain"
+                "Invalid request parameter: invalid content type: application/yaml, expected: one of application/json, application/x-json-stream, application/x-ndjson, text/plain"
             )
         );
 
@@ -8104,6 +8105,59 @@ transform:
         v,
         r#"[["hello",1716668197217000000],["hello world",1716668197218000000]]"#,
     );
+
+    guard.remove_all().await;
+}
+
+pub async fn test_json_stream_ingestion(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_json_stream_ingestion").await;
+
+    // handshake
+    let client = TestClient::new(app).await;
+
+    let pipeline_body = r#"
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+transform:
+  - field: message
+    type: string
+  - field: time
+    type: time
+    index: timestamp
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/pipelines/test")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 2. write data as concatenated JSON (the `json_stream` format of fluentbit)
+    let data_body = r#"{"time": "2024-05-25 20:16:37.217", "message": "hello"}{"time": "2024-05-25 20:16:37.218", "message": "hello world"}"#;
+    let res = client
+        .post("/v1/ingest?db=public&table=logs1&pipeline_name=test")
+        .header("Content-Type", "application/x-json-stream")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 3. check data
+    validate_data(
+        "json_stream_ingestion",
+        &client,
+        "select message, time from logs1",
+        r#"[["hello",1716668197217000000],["hello world",1716668197218000000]]"#,
+    )
+    .await;
 
     guard.remove_all().await;
 }
