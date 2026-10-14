@@ -244,7 +244,7 @@ lazy_static! {
     /// `durable` mode and are repeated in the `enqueued` mode.
     pub static ref METRIC_OBJECT_STORE_WAL_CREATE_FAILURES_TOTAL: IntCounter = register_int_counter!(
         "greptime_logstore_object_store_wal_create_failures_total",
-        "object store logstore transient conditional create failures total",
+        "object store logstore conditional creates the object store did not confirm total",
     )
     .unwrap();
 
@@ -256,12 +256,14 @@ lazy_static! {
     )
     .unwrap();
 
-    /// Counter of appends the object store logstore held back because the
-    /// unpersisted backlog reached a threshold in the `enqueued` mode, which
-    /// says the write rate is above what the uploads sustain.
+    /// Counter of appends the object store logstore held back until an upload
+    /// completed: in either mode because the sealed batches waiting to become
+    /// durable left no room for another, and in the `enqueued` mode also
+    /// because the unpersisted backlog reached a threshold. Either says the
+    /// write rate is above what the uploads sustain.
     pub static ref METRIC_OBJECT_STORE_WAL_STALLED_APPENDS_TOTAL: IntCounter = register_int_counter!(
         "greptime_logstore_object_store_wal_stalled_appends_total",
-        "object store logstore appends stalled by the backlog thresholds total",
+        "object store logstore appends stalled by full sealed batches or the backlog thresholds total",
     )
     .unwrap();
 
@@ -276,6 +278,26 @@ lazy_static! {
         "greptime_logstore_object_store_wal_stalled_append_seconds",
         "object store logstore seconds a stalled append is held back before it is admitted or refused",
         exponential_buckets(0.005, 3.0, 9).unwrap(),
+    )
+    .unwrap();
+
+    /// Number of object store logstores in the `enqueued` mode whose backlog
+    /// the object store refuses with an error that repeating the create
+    /// cannot settle, such as denied access or a missing bucket. Such a store
+    /// keeps its backlog, attempts it again with backoff and rejects appends
+    /// until a create succeeds.
+    pub static ref METRIC_OBJECT_STORE_WAL_FAILING: IntGauge = register_int_gauge!(
+        "greptime_logstore_object_store_wal_failing",
+        "object store logstores rejecting appends because the object store refuses their backlog with an error that requires intervention",
+    )
+    .unwrap();
+
+    /// Counter of appends the object store logstore rejected while its
+    /// backlog is refused, see the gauge above. They take no entry id and
+    /// fail with a retryable error.
+    pub static ref METRIC_OBJECT_STORE_WAL_REJECTED_APPENDS_TOTAL: IntCounter = register_int_counter!(
+        "greptime_logstore_object_store_wal_rejected_appends_total",
+        "object store logstore appends rejected while the object store refuses the backlog total",
     )
     .unwrap();
 }

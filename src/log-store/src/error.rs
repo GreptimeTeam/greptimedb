@@ -436,6 +436,15 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Object store WAL rejects appends until the object store accepts its acknowledged backlog"
+    ))]
+    ObjectStoreWalFailing {
+        source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -495,6 +504,7 @@ impl ErrorExt for Error {
 
             InvalidWalObject { source, .. } => source.status_code(),
             ObjectStoreWal { source, .. } => source.status_code(),
+            ObjectStoreWalFailing { .. } => StatusCode::StorageUnavailable,
 
             // Object store related errors
             WalObjectStore { .. }
@@ -534,7 +544,8 @@ impl ErrorExt for Error {
             | AddEntryLogBatch { .. }
             | WalObjectSequenceUnsettled { .. }
             | StaleWalObject { .. }
-            | UnconfirmedWalEpochStart { .. } => RetryHint::Retryable,
+            | UnconfirmedWalEpochStart { .. }
+            | ObjectStoreWalFailing { .. } => RetryHint::Retryable,
             ProduceRecord { error, .. } => match error {
                 rskafka::client::producer::Error::Client(error) => {
                     rskafka_client_error_to_retry_hint(error)
