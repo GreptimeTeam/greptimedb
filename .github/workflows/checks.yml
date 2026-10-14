@@ -88,6 +88,8 @@ jobs:
         run: .github/scripts/run-fuzz-targets-test.sh
       - name: Run CI comment-command tests
         run: python3 .github/scripts/tests/test_ci_slash.py
+      - name: Run metric snapshot benchmark tests
+        run: python3 -m unittest discover -s .github/scripts/tests -p 'test_metric_snapshot*.py'
       - name: Run query-regression Python tooling tests
         run: |
           python3 tests/perf/test_query_regression_runner_compaction_toctou.py

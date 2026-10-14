@@ -1,0 +1,224 @@
+name: Metric Snapshot S3 Benchmark
+on:
+  workflow_dispatch:
+    inputs:
+      greptimedb_image:
+        description: 'Immutable greptime/greptimedb or greptimedb-nightly image (repository@sha256:digest)'
+        required: true
+        type: string
+      expected_commit:
+        description: 'Full source commit SHA reported by the image'
+        required: true
+        type: string
+      logical_tables_per_group:
+        description: 'Logical tables per physical table, 50..10000; 10 physical tables, 32 rows per logical table'
+        type: number
+        default: 10000
+      benchmark_timeout_minutes:
+        description: 'Setup, 500-table smoke and full run timeout, 30..240 minutes'
+        type: number
+        default: 240
+      prior_spend_usd:
+        description: 'Cumulative estimated cloud spend for all earlier attempts in this $20 campaign'
+        required: true
+        type: string
+        default: '0'
+permissions:
+  contents: read
+concurrency:
+  group: metric-snapshot-s3-bench
+  cancel-in-progress: false
+env:
+  GREPTIMEDB_IMAGE: ${{ inputs.greptimedb_image }}
+  EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+  LOGICAL_TABLES_PER_GROUP: ${{ inputs.logical_tables_per_group }}
+  BENCHMARK_TIMEOUT_MINUTES: ${{ inputs.benchmark_timeout_minutes }}
+  PRIOR_SPEND_USD: ${{ inputs.prior_spend_usd }}
+  RUN_PREFIX: metric-snapshot-bench/${{ github.run_id }}-${{ github.run_attempt }}/
+  S3_BUCKET: ${{ vars.AWS_CI_TEST_BUCKET }}
+  S3_REGION: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+  RUNNER_REGION: ${{ vars.EC2_RUNNER_REGION }}
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      instance_type: ${{ steps.runner.outputs.instance_type }}
+      run_id: ${{ steps.identity.outputs.run_id }}
+      run_prefix: ${{ steps.identity.outputs.run_prefix }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        path: greptimedb
+        persist-credentials: false
+    - name: Test benchmark boundaries
+      run: |
+        python3 greptimedb/.github/scripts/tests/test_metric_snapshot_s3_ops.py
+        python3 greptimedb/.github/scripts/tests/test_metric_snapshot_fixture.py
+        python3 greptimedb/.github/scripts/tests/test_metric_snapshot_s3_bench.py
+    - name: Validate pinned version, scale, region and cumulative budget
+      run: python3 greptimedb/.github/scripts/metric-snapshot-s3-ops.py plan
+    - name: Bind resource ownership to this validated attempt
+      id: identity
+      run: |
+        echo "run_id=$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+        echo "run_prefix=$RUN_PREFIX" >> "$GITHUB_OUTPUT"
+    - name: Resolve the fixed benchmark runner
+      id: runner
+      run: python3 greptimedb/.github/scripts/ci-runner-config.py --provider AWS --instance-type c6id.4xlarge
+  provision:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      label: ${{ steps.aws.outputs.label }}
+      instance_id: ${{ steps.aws.outputs.instance_id }}
+      runner_name: ${{ steps.aws.outputs.runner_name }}
+      started_at: ${{ steps.start.outputs.started_at }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        path: greptimedb
+        persist-credentials: false
+    - uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.RUNNER_REGION }}
+    - uses: astral-sh/setup-uv@v6
+    - name: Record allocation start
+      id: start
+      run: echo "started_at=$(date +%s)" >> "$GITHUB_OUTPUT"
+    - name: Create ephemeral EC2 runner
+      id: aws
+      env:
+        GH_PERSONAL_ACCESS_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+        AWS_REGION: ${{ env.RUNNER_REGION }}
+        AWS_EC2_IMAGE_ID: ${{ vars.BENCHMARK_EC2_IMAGE_ID || 'auto' }}
+        AWS_EC2_INSTANCE_TYPE: ${{ needs.validate.outputs.instance_type }}
+        AWS_EC2_SUBNET_ID: ${{ vars.EC2_RUNNER_SUBNET_ID }}
+        AWS_EC2_SECURITY_GROUP_ID: ${{ vars.EC2_RUNNER_SECURITY_GROUP_ID }}
+        AWS_EC2_SYSTEM_DISK_GIB: '60'
+        AWS_EC2_TTL_HOURS: '6'
+        AWS_EC2_RUN_ID: ${{ needs.validate.outputs.run_id }}
+      run: uv run greptimedb/.github/scripts/aws-ec2-runner-provision.py
+  benchmark:
+    needs:
+    - validate
+    - provision
+    runs-on: ${{ needs.provision.outputs.label }}
+    timeout-minutes: ${{ fromJSON(format('{0}', inputs.benchmark_timeout_minutes)) }}
+    env:
+      RUN_PREFIX: ${{ needs.validate.outputs.run_prefix }}
+      RESULTS: ${{ github.workspace }}/metric-snapshot-results
+      DISK_ROOT: /mnt/metric-snapshot-disk
+      DATA_ROOT: /mnt/metric-snapshot-disk/data
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        path: greptimedb
+        persist-credentials: false
+    - name: Set up benchmark dependencies
+      uses: ./greptimedb/.github/actions/setup-benchmark
+    - uses: astral-sh/setup-uv@v6
+    - name: Mount the temporary local File data disk
+      run: |
+        device=$(lsblk -dnpo NAME,MODEL | awk '/Instance Storage/ {print $1; exit}')
+        test -n "$device"
+        if [[ "$(lsblk -nro TYPE "$device" | wc -l)" -ne 1 ]] || findmnt --source "$device" >/dev/null; then
+          echo 'Refusing partitioned or mounted instance storage' >&2
+          exit 1
+        fi
+        probe_status=0
+        sudo -n blkid -p "$device" || probe_status=$?
+        if ((probe_status != 2)); then
+          echo 'Refusing a disk with an existing signature or an unsuccessful signature probe' >&2
+          exit 1
+        fi
+        sudo -n mkfs.ext4 -q "$device"
+        sudo -n mkdir -p "$DISK_ROOT"
+        sudo -n mount -o noatime "$device" "$DISK_ROOT"
+        sudo -n chown "$(id -u):$(id -g)" "$DISK_ROOT"
+        findmnt -no SOURCE,FSTYPE -T "$DISK_ROOT"
+    - name: Probe the real same-region S3 bucket
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+      run: uv run greptimedb/.github/scripts/metric-snapshot-s3-ops.py probe
+    - name: Run the 500-table smoke, then one full packed export and restore
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+      run: python3 greptimedb/.github/scripts/metric-snapshot-s3-bench.py run
+    - name: Check results for credentials
+      id: scrub
+      if: always()
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+      run: python3 greptimedb/.github/scripts/metric-snapshot-s3-ops.py scrub
+    - name: Publish the readable result
+      if: ${{ always() && steps.scrub.outcome == 'success' }}
+      run: |
+        if test -f "$RESULTS/summary.md"; then
+          cat "$RESULTS/summary.md" >> "$GITHUB_STEP_SUMMARY"
+        fi
+    - name: Upload bounded-retention evidence
+      if: ${{ always() && steps.scrub.outcome == 'success' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: metric-snapshot-s3-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ env.RESULTS }}
+        if-no-files-found: warn
+        retention-days: 14
+  teardown:
+    needs:
+    - validate
+    - provision
+    # Start alongside the benchmark so an offline runner cannot hold cleanup in its queue.
+    if: ${{ always() && needs.validate.outputs.run_id != '' && needs.provision.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    permissions:
+      contents: read
+      actions: read
+    env:
+      RUN_PREFIX: ${{ needs.validate.outputs.run_prefix }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        path: greptimedb
+        persist-credentials: false
+    - uses: astral-sh/setup-uv@v6
+    - name: Wait for completion within the allocation deadline
+      if: ${{ !cancelled() && needs.provision.result == 'success' && needs.provision.outputs.started_at != '' }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+        STARTED_AT: ${{ needs.provision.outputs.started_at }}
+      run: python3 greptimedb/.github/scripts/metric-snapshot-s3-ops.py wait-for-benchmark --started-at "$STARTED_AT"
+    - uses: aws-actions/configure-aws-credentials@v4
+      if: always()
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.RUNNER_REGION }}
+    - name: Delete EC2, its temporary disks and runner registration
+      if: always()
+      env:
+        GH_PERSONAL_ACCESS_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+        AWS_REGION: ${{ env.RUNNER_REGION }}
+        AWS_EC2_INSTANCE_ID: ${{ needs.provision.outputs.instance_id }}
+        AWS_EC2_RUNNER_NAME: ${{ needs.provision.outputs.runner_name }}
+        AWS_EC2_RUN_ID: ${{ needs.validate.outputs.run_id }}
+      run: uv run greptimedb/.github/scripts/aws-ec2-runner-teardown.py
+    - name: Remove and verify only this run's S3 prefix
+      if: always()
+      env:
+        AWS_ACCESS_KEY_ID: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+      run: uv run greptimedb/.github/scripts/metric-snapshot-s3-ops.py cleanup
+    - name: Estimate the cumulative cloud cost
+      if: ${{ always() && needs.provision.outputs.started_at != '' }}
+      env:
+        STARTED_AT: ${{ needs.provision.outputs.started_at }}
+      run: python3 greptimedb/.github/scripts/metric-snapshot-s3-ops.py cost --started-at "$STARTED_AT" >> "$GITHUB_STEP_SUMMARY"
