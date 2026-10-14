@@ -1120,8 +1120,10 @@ struct SealedBatch {
     /// Number of creates that were attempted for the batch.
     attempts: u32,
     waiters: Vec<PendingAppend>,
-    /// Callers that sealed the batch, a release or the testing hook, answered
-    /// once the object is durable and indexed.
+    /// Callers of a release whose record the batch carries, answered once the
+    /// object is durable and indexed.
+    release_waiters: Vec<oneshot::Sender<Result<()>>>,
+    #[cfg(any(test, feature = "testing"))]
     seal_waiters: Vec<oneshot::Sender<Result<()>>>,
     state: CreateState,
 }
@@ -1135,6 +1137,10 @@ impl SealedBatch {
         for waiter in self.waiters {
             let _ = waiter.response.send(Err(error()));
         }
+        for waiter in self.release_waiters {
+            let _ = waiter.send(Err(error()));
+        }
+        #[cfg(any(test, feature = "testing"))]
         for waiter in self.seal_waiters {
             let _ = waiter.send(Err(error()));
         }
@@ -1154,7 +1160,8 @@ type CreateOutcome = (u64, Result<PutResult>);
 /// flight, after a delay that doubles from [`CREATE_RETRY_DELAY`] up to
 /// [`MAX_FAILING_RETRY_DELAY`]. Appends are rejected at once with a retryable
 /// error that carries the last error: they take no entry id and never wait
-/// behind the backlog. The first create that succeeds ends the state.
+/// behind the backlog. Releases fail with it too, and their records wait for
+/// a create. The first create that succeeds ends the state.
 struct Failing {
     /// The last error a create met, which rejected appends carry.
     error: Arc<Error>,
@@ -1201,7 +1208,7 @@ impl Failing {
 /// | created, or identical retry | advances | acknowledged in order | healthy |
 /// | transient error, `durable` mode | never reused: a create that reported an error may have written its object | every batch that is not indexed fails, created ones included; retries are assigned new ids | healthy: the next batch links to the last indexed object, so no chain reaches a failed batch |
 /// | transient error, `enqueued` mode | unchanged | already acknowledged, except a release, which waits for the repeat | healthy: the create is repeated with the same bytes after [`CREATE_RETRY_DELAY`], which an identical retry accepts |
-/// | error that requires intervention, `enqueued` mode | unchanged | already acknowledged; later appends are rejected with a retryable error | failing, see [`Failing`]: the lowest pending create is repeated alone with backoff, and the first create that succeeds ends it |
+/// | error that requires intervention, `enqueued` mode | unchanged | already acknowledged, except a release, which fails while its record stays in the backlog; later appends and releases are rejected with a retryable error | failing, see [`Failing`]: the lowest pending create is repeated alone with backoff, and the first create that succeeds ends it |
 /// | object store error, `enqueued` mode after `stop` began | never reused | already acknowledged, except a release, which fails with the stopped error | the backlog is dropped and `stop` reports the error |
 /// | an object of an earlier epoch holds the sequence, `durable` mode | never reused | as for a transient error | healthy: that object can never be on the chain |
 /// | an object of the same or a later epoch holds the sequence, any conflicting object in the `enqueued` mode, encoding or catalog error | unchanged | every batch that is not indexed fails | poisoned |
@@ -1605,6 +1612,8 @@ impl Actor {
             sealed_at: Instant::now(),
             attempts: 0,
             waiters: std::mem::take(&mut self.pending),
+            release_waiters: Vec::new(),
+            #[cfg(any(test, feature = "testing"))]
             seal_waiters: Vec::new(),
             state: CreateState::Pending,
         });
@@ -1828,6 +1837,13 @@ impl Actor {
         if let Some((_, response)) = stalled {
             let _ = response.send(Err(failing.reject()));
         }
+        // So would a release. Its record stays in the backlog and becomes
+        // durable with it.
+        for batch in &mut self.sealed {
+            for waiter in batch.release_waiters.drain(..) {
+                let _ = waiter.send(Err(failing.reject()));
+            }
+        }
     }
 
     /// Ends the failing state, if the store is in it, because of `reason`.
@@ -1893,6 +1909,10 @@ impl Actor {
                 last_entry_ids: waiter.last_entry_ids,
             }));
         }
+        for waiter in batch.release_waiters {
+            let _ = waiter.send(Ok(()));
+        }
+        #[cfg(any(test, feature = "testing"))]
         for waiter in batch.seal_waiters {
             let _ = waiter.send(Ok(()));
         }
@@ -1973,12 +1993,16 @@ impl Actor {
     /// batch.
     fn keep_releases(&mut self, batch: &mut SealedBatch) {
         for release in batch.releases.drain(..) {
-            let entry_id = self
-                .failed_releases
-                .entry(release.region_id)
-                .or_insert(release.entry_id);
-            *entry_id = (*entry_id).max(release.entry_id);
+            self.keep_release(release);
         }
+    }
+
+    fn keep_release(&mut self, release: Release) {
+        let entry_id = self
+            .failed_releases
+            .entry(release.region_id)
+            .or_insert(release.entry_id);
+        *entry_id = (*entry_id).max(release.entry_id);
     }
 
     /// Records `error` as terminal and fails every waiter that is not
@@ -2128,12 +2152,22 @@ impl Actor {
         record_obsolete(&self.obsolete_entry_ids, region_id, entry_id);
         self.update_reclaim_boundary();
         self.collect();
-        if self.seal(vec![Release {
+        let release = Release {
             region_id,
             entry_id,
-        }]) && let Some(batch) = self.sealed.back_mut()
+        };
+        // A failing store admits nothing behind its backlog: the release
+        // fails at once, and its record waits for the next sealed batch like
+        // that of a batch that failed.
+        if let Some(failing) = &mut self.failing {
+            let _ = response.send(Err(failing.reject()));
+            self.keep_release(release);
+            return;
+        }
+        if self.seal(vec![release])
+            && let Some(batch) = self.sealed.back_mut()
         {
-            batch.seal_waiters.push(response);
+            batch.release_waiters.push(response);
             return;
         }
         // Sealing failed and poisoned the store.
@@ -9264,6 +9298,16 @@ mod tests {
                     run: || Box::pin(release_create_fails_transiently_enqueued()),
                 },
                 Case {
+                    fault: "a release whose create the object store refuses with an error that requires intervention, `enqueued` mode",
+                    row: Some(Row::InterventionEnqueued),
+                    run: || Box::pin(release_create_refused_enqueued()),
+                },
+                Case {
+                    fault: "a release while the object store refuses the backlog, `enqueued` mode",
+                    row: None,
+                    run: || Box::pin(release_while_the_backlog_is_refused()),
+                },
+                Case {
                     fault: "a release whose create finds an object of the same or a later epoch",
                     row: Some(Row::Conflict),
                     run: || Box::pin(release_create_finds_another_writer()),
@@ -9568,6 +9612,7 @@ mod tests {
             let (object_seq, repeat) = next_parked_operation(&mut parked).await;
             assert_eq!(1, object_seq);
             assert!(!released.is_finished());
+            assert_eq!(0, failing_stores());
             assert_eq!(vec![0], object_seqs(io.as_ref()).await);
             assert_indexed(io.as_ref(), &[0]).await;
             assert_eq!(
@@ -9597,6 +9642,123 @@ mod tests {
                 },
                 Counters::since(before)
             );
+            store.stop().await.unwrap();
+        }
+
+        /// The object store denies access to the object of a release: the
+        /// store becomes failing and the release fails at once with the
+        /// retryable error; its record stays in the backlog and becomes
+        /// durable with the next create that succeeds.
+        async fn release_create_refused_enqueued() {
+            let (store, io, mut parked) =
+                open_parking_creates(memory_store(), &enqueued(eager())).await;
+            let before = Counters::sample();
+            let region_id = region(1);
+            let released = spawn_release(&store, region_id);
+            let (object_seq, create) = next_parked_operation(&mut parked).await;
+            assert_eq!(1, object_seq);
+            io.creates_refused.store(true, Ordering::SeqCst);
+            create.send(false).unwrap();
+            let error = timeout(WAIT, released).await.unwrap().unwrap().unwrap_err();
+            assert_rejected(&error, ErrorKind::PermissionDenied);
+            assert_eq!(1, failing_stores());
+            assert!(terminal(&store.terminal_error).is_none());
+            assert_indexed(io.as_ref(), &[0]).await;
+            assert_eq!(
+                Counters {
+                    create_failures: 1,
+                    sealed_objects: 1,
+                    object_bytes: release_object(),
+                    rejected_appends: 1,
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+
+            let (object_seq, create) = next_parked_operation(&mut parked).await;
+            assert_eq!(1, object_seq);
+            create.send(true).unwrap();
+            wait_until(|| failing_stores() == 0).await;
+            assert_eq!(vec![1], collected_object_seqs(&store).await);
+            assert_eq!(
+                vec![release(region_id, 0)],
+                releases_of(io.as_ref(), 1).await
+            );
+            assert_indexed(io.as_ref(), &[1]).await;
+            assert_eq!(
+                Counters {
+                    created_objects: 1,
+                    seal_to_durable: 1,
+                    create_failures: 1,
+                    sealed_objects: 1,
+                    object_bytes: release_object(),
+                    deleted_objects: 1,
+                    release_records: 1,
+                    rejected_appends: 1,
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+            store.stop().await.unwrap();
+        }
+
+        /// A release that arrives while the store is failing fails at once
+        /// with the retryable error and seals nothing behind the backlog; its
+        /// record lands in the next object sealed once the backlog is created.
+        async fn release_while_the_backlog_is_refused() {
+            let (store, io, mut parked) =
+                open_parking_creates(memory_store(), &enqueued(eager())).await;
+            let before = Counters::sample();
+            let region_id = region(1);
+            append(&store, region_id, "a1").await.unwrap();
+            let (object_seq, create) = next_parked_operation(&mut parked).await;
+            assert_eq!(1, object_seq);
+            io.creates_refused.store(true, Ordering::SeqCst);
+            create.send(false).unwrap();
+            wait_until(|| failing_stores() == 1).await;
+
+            let error = store
+                .release_region(&provider(region_id), region_id)
+                .await
+                .unwrap_err();
+            assert_rejected(&error, ErrorKind::PermissionDenied);
+            assert_eq!(Some(id(1, 1)), watermark(&store, region_id));
+            assert!(terminal(&store.terminal_error).is_none());
+            assert!(parked.try_recv().is_err());
+            assert_eq!(
+                Counters {
+                    create_failures: 1,
+                    sealed_objects: 1,
+                    object_bytes: one_entry_object(),
+                    object_entries: 1,
+                    rejected_appends: 1,
+                    ..Counters::default()
+                },
+                Counters::since(before)
+            );
+
+            let (object_seq, create) = next_parked_operation(&mut parked).await;
+            assert_eq!(1, object_seq);
+            create.send(true).unwrap();
+            timeout(WAIT, store.wait_durable(&provider(region_id), id(1, 1)))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(0, failing_stores());
+            let other = region(2);
+            append(&store, other, "b1").await.unwrap();
+            next_parked_operation(&mut parked)
+                .await
+                .1
+                .send(true)
+                .unwrap();
+            timeout(WAIT, store.wait_durable(&provider(other), id(2, 1)))
+                .await
+                .unwrap()
+                .unwrap();
+            let decoded = decode_object(&io.get(2).await.unwrap()).unwrap();
+            assert_eq!(1, decoded.records.len());
+            assert_eq!(vec![release(region_id, id(1, 1))], decoded.releases);
             store.stop().await.unwrap();
         }
 
