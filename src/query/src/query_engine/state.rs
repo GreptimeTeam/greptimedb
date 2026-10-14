@@ -92,6 +92,7 @@ use crate::region_query::RegionQueryHandlerRef;
 pub struct QueryEngineState {
     df_context: SessionContext,
     pub(crate) series_plan_cache: crate::research_series_grid::plan_cache::PlanCache,
+    series_source_planner: Option<Arc<DistExtensionPlanner>>,
     catalog_manager: CatalogManagerRef,
     dyn_filter_registry_manager: Arc<DynFilterRegistryManager>,
     function_state: Arc<FunctionState>,
@@ -278,7 +279,7 @@ impl QueryEngineState {
             .with_serializer_registry(Arc::new(DefaultSerializer))
             .with_query_planner(Arc::new(DfQueryPlanner::new(
                 catalog_list.clone(),
-                partition_rule_manager,
+                partition_rule_manager.clone(),
                 region_query_handler.clone(),
                 options.enable_per_region_metrics,
             )))
@@ -289,9 +290,20 @@ impl QueryEngineState {
         register_function_aliases(&df_context);
         register_pg_catalog_compat(&df_context);
 
+        let series_source_planner = partition_rule_manager.zip(region_query_handler).map(
+            |(partition_rule_manager, region_query_handler)| {
+                Arc::new(DistExtensionPlanner::new(
+                    catalog_list.clone(),
+                    partition_rule_manager,
+                    region_query_handler,
+                    options.enable_per_region_metrics,
+                ))
+            },
+        );
         Ok(Self {
             df_context,
             series_plan_cache: Default::default(),
+            series_source_planner,
             catalog_manager: catalog_list,
             dyn_filter_registry_manager: Arc::new(DynFilterRegistryManager::default()),
             function_state: Arc::new(FunctionState {
@@ -445,6 +457,10 @@ impl QueryEngineState {
     /// which is used by `DfContextProviderAdapter::get_window_meta`.
     pub fn register_window_function(&self, func: WindowUDF) {
         self.df_context.register_udwf(func);
+    }
+
+    pub(crate) fn series_source_planner(&self) -> Option<&Arc<DistExtensionPlanner>> {
+        self.series_source_planner.as_ref()
     }
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {

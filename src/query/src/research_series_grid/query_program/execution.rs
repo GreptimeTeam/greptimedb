@@ -218,17 +218,12 @@ impl ExecutionPlan for ProgramExec {
                 .clone()
                 .ok_or_else(|| invalid("Query program requires fragments"))?;
             let workers = program.query.workers.clamp(1, 32);
+            let points = program.query.grid.instants.len();
             // A global top-one can stay in the existing single source task.
             // Larger or multi-source reads retain the parallel program path.
             if let Some(top) = &program.top_one
                 && sources.len() == 1
-                && sources[0]
-                    .source
-                    .num_series()
-                    .div_ceil(128)
-                    .max(1)
-                    .min(workers)
-                    == 1
+                && read_tasks(sources[0].source.num_series(), points, workers) == 1
             {
                 common_telemetry::debug!(tasks = 1, "Research complete query program executing");
                 let source = sources[0].clone();
@@ -286,7 +281,7 @@ impl ExecutionPlan for ProgramExec {
             let mut tasks = Vec::new();
             for (source, index) in sources.into_iter().zip(indices) {
                 let count = source.source.num_series();
-                let task_count = count.div_ceil(128).max(1).min(workers);
+                let task_count = read_tasks(count, points, workers);
                 let size = count.div_ceil(task_count).max(1);
                 for task in 0..task_count {
                     let start = (task * size).min(count);
@@ -471,6 +466,16 @@ impl ExecutionPlan for ProgramExec {
     }
 }
 
+/// Read tasks for `series` over a grid of `points`. Work grows with the grid, so the
+/// split is sized by series x points, calibrated to 128 series per task at 73 points.
+fn read_tasks(series: usize, points: usize, workers: usize) -> usize {
+    series
+        .saturating_mul(points.max(1))
+        .div_ceil(128 * 73)
+        .clamp(1, workers)
+        .min(series.max(1))
+}
+
 fn invalid(message: &str) -> DataFusionError {
     DataFusionError::Execution(message.into())
 }
@@ -493,6 +498,18 @@ mod tests {
 
     use super::*;
     use crate::dist_plan::MergeScanLogicalPlan;
+
+    #[test]
+    fn read_tasks_scale_with_grid_length() {
+        // Six-hour grid keeps the 128-series granularity.
+        assert_eq!(read_tasks(32, 73, 8), 1);
+        assert_eq!(read_tasks(1000, 73, 8), 8);
+        // Q06 on a 7-day grid: 32 series no longer collapse into one task.
+        assert_eq!(read_tasks(32, 2017, 8), 7);
+        // Never more tasks than series or workers.
+        assert_eq!(read_tasks(2, 20_000, 8), 2);
+        assert_eq!(read_tasks(0, 2017, 8), 1);
+    }
     use crate::optimizer::test_util::mock_table_provider_with_tsid;
     use crate::research_series_grid::SeriesInstantMax;
     use crate::research_series_grid::evaluate::SelectorKey;

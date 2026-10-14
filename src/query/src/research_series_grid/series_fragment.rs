@@ -119,9 +119,6 @@ struct WireFragment {
     sum: bool,
 }
 
-/// Grid length above which unaggregated fragments are not shipped as dense lists.
-const PER_SERIES_GRID_LIMIT: usize = 1024;
-
 fn invalid(message: &str) -> DataFusionError {
     DataFusionError::Plan(message.into())
 }
@@ -249,10 +246,10 @@ impl SeriesFragment {
             // the distinction between a present null and an absent series.
             return Ok(None);
         }
-        if !sum && spec.grid.instants.len() > PER_SERIES_GRID_LIMIT {
+        if !sum && !super::dense_budget::admits(spec.grid.instants.len()) {
             // Without a partial sum the fragment ships one full grid per source series;
-            // over long ranges with churned short-lived series those are mostly empty
-            // and exceed the query pool. Leave such inputs to row streaming.
+            // over long ranges with many (e.g. churned short-lived) series those exceed
+            // the query pool. Leave such inputs to row streaming.
             return Ok(None);
         }
         let Some(value_index) = spec

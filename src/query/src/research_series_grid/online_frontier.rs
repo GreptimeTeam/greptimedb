@@ -748,10 +748,6 @@ impl Splitter {
     }
 }
 
-/// Grid length above which a vector join over unaggregated series is left to row
-/// streaming: series execution keeps a dense grid per input series until matched.
-const JOIN_GRID_LIMIT: usize = 1024;
-
 /// Whether `expr` joins two instant vectors where one side is not an aggregation,
 /// so each of its input series is retained by the join.
 pub(crate) fn has_series_level_join(expr: &Expr) -> bool {
@@ -788,9 +784,10 @@ pub(crate) fn has_series_level_join(expr: &Expr) -> bool {
     }
 }
 
-/// Long ranges with a series-level join run on the row-streaming plan.
+/// A series-level join keeps a dense grid per input series until matched; over long
+/// ranges it runs on the row-streaming plan unless the planner admits the selection.
 pub(crate) fn exceeds_join_grid(expr: &Expr, points: usize) -> bool {
-    points > JOIN_GRID_LIMIT && has_series_level_join(expr)
+    points > super::dense_budget::DENSE_GRID_POINTS && has_series_level_join(expr)
 }
 
 pub(crate) fn needs_series_execution(expr: &Expr, root_selectors: bool) -> bool {

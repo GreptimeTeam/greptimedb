@@ -14,6 +14,7 @@
 
 mod block_eval;
 mod decoded_block;
+pub(crate) mod dense_budget;
 mod direct_binding;
 mod evaluate;
 mod execution;
