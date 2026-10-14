@@ -17,13 +17,15 @@ use std::sync::Arc;
 use arrow_schema::DataType;
 use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
 use datafusion::functions_aggregate::sum::sum_udaf;
-use datafusion_common::tree_node::Transformed;
+use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{DFSchema, Result, ScalarValue};
 use datafusion_expr::expr::AggregateFunction;
 use datafusion_expr::utils::split_conjunction;
 use datafusion_expr::{Aggregate, Expr, ExprSchemable, Filter, LogicalPlan, Operator};
 use datafusion_optimizer::optimizer::ApplyOrder;
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
+
+use crate::dist_plan::MergeScanLogicalPlan;
 
 /// Derives an input bound from an existential HAVING condition and MIN/MAX.
 ///
@@ -59,6 +61,14 @@ impl OptimizerRule for InferAggregateInputBoundsRule {
         let LogicalPlan::Aggregate(aggregate) = having.input.as_ref() else {
             return Ok(Transformed::no(LogicalPlan::Filter(having)));
         };
+        // The pre-MergeScan pass already handled remote inputs. Their filters
+        // are hidden from this pass, so re-inference can add useless local work.
+        if aggregate.input.exists(|plan| {
+            Ok(matches!(plan, LogicalPlan::Extension(extension)
+                if extension.node.as_any().is::<MergeScanLogicalPlan>()))
+        })? {
+            return Ok(Transformed::no(LogicalPlan::Filter(having)));
+        }
         let Some(bound) = infer_bound(aggregate, &having.predicate)? else {
             return Ok(Transformed::no(LogicalPlan::Filter(having)));
         };
