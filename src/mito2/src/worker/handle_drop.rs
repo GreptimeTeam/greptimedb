@@ -122,11 +122,12 @@ where
         self.cleanup_dropped_region_runtime_state(region_id).await;
 
         // Deletes region data in WAL, and releases it so that this outlives a restart, which
-        // never opens the region again. A failure of either does not fail the drop: the region
-        // has left the map, a drop request for it is not sent again, and a caller that drops
-        // several regions, such as the metric engine, would leave the others undone. A log
-        // store that persists releases keeps a failed release and writes it with its next
-        // object.
+        // never opens the region again. A failure of the object store WAL does not fail the
+        // drop: the region has left the map, a drop request for it is not sent again, and a
+        // caller that drops several regions on one store, such as the metric engine, would
+        // leave the others undone, for instance once the release of one poisoned the store.
+        // The store keeps a failed release and writes it with its next object unless it is
+        // stopped or poisoned.
         if let Err(e) = self
             .wal
             .obsolete(
@@ -136,6 +137,9 @@ where
             )
             .await
         {
+            if region.provider.as_object_store_provider().is_none() {
+                return Err(e);
+            }
             error!(e; "Failed to obsolete the WAL of dropped region {}", region_id);
         }
         if let Err(e) = self.wal.release_region(region_id, &region.provider).await {
