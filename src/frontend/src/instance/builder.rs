@@ -235,6 +235,7 @@ impl FrontendBuilder {
             write_dispatcher = write_dispatcher.with_retry(
                 self.options.write_retry.clone(),
                 table_info_cache,
+                table_route_cache.clone(),
                 local_cache_invalidator.clone(),
             );
         }

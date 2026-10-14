@@ -184,10 +184,12 @@ impl RegionTestServer {
         update_table_leader(&backend, &self.peer).await;
         let registry = cache::build_fundamental_cache_registry(backend);
         let table_info_cache = registry.get::<TableInfoCacheRef>().unwrap();
+        let table_route_cache = registry.get::<TableRouteCacheRef>().unwrap();
         let clients = Arc::new(NodeClients::new(ChannelConfig::default()));
         WriteDispatcher::new(clients, partition_manager).with_retry(
             build_retry_options(max_retries),
             table_info_cache,
+            table_route_cache,
             self.invalidator.clone(),
         )
     }
@@ -624,6 +626,7 @@ async fn test_finish_retries_initial_failures_in_one_round() {
         .find_table_partition_rule(&table_info)
         .await
         .unwrap();
+    let table_route_cache = registry.get::<TableRouteCacheRef>().unwrap();
     let invalidator = Arc::new(RecordingCacheInvalidator {
         inner: Some(registry),
         ..Default::default()
@@ -632,6 +635,7 @@ async fn test_finish_retries_initial_failures_in_one_round() {
     let dispatcher = WriteDispatcher::new(clients, partition_manager).with_retry(
         build_retry_options(2),
         table_info_cache,
+        table_route_cache,
         invalidator.clone(),
     );
     let mut attempts = Vec::new();
@@ -704,6 +708,7 @@ async fn test_write_retry_refreshes_stale_route_and_sends_only_failed_region_to_
         old_server.peer
     );
 
+    let table_route_cache = registry.get::<TableRouteCacheRef>().unwrap();
     let invalidator = Arc::new(RecordingCacheInvalidator {
         calls: Mutex::default(),
         inner: Some(registry),
@@ -713,6 +718,7 @@ async fn test_write_retry_refreshes_stale_route_and_sends_only_failed_region_to_
     let dispatcher = WriteDispatcher::new(clients, partition_manager).with_retry(
         build_retry_options(2),
         table_info_cache,
+        table_route_cache,
         invalidator.clone(),
     );
     let mut request = build_insert_request(&[1, 2]);
@@ -922,6 +928,7 @@ async fn test_write_retry_rebuilds_only_failed_rows_after_route_refresh() {
             .unwrap();
             routes.push(route);
         }
+        let table_route_cache = registry.get::<TableRouteCacheRef>().unwrap();
         let invalidator = Arc::new(RecordingCacheInvalidator {
             calls: Mutex::default(),
             inner: Some(registry),
@@ -931,6 +938,7 @@ async fn test_write_retry_rebuilds_only_failed_rows_after_route_refresh() {
         let dispatcher = WriteDispatcher::new(clients, partition_manager.clone()).with_retry(
             build_retry_options(2),
             table_info_cache,
+            table_route_cache,
             invalidator.clone(),
         );
         let response = dispatcher
@@ -1103,6 +1111,7 @@ async fn test_write_retry_restores_changed_partition_tags_for_failed_regions() {
         route.region.partition_expr = expr.as_json_str().unwrap();
         route.leader_peer = Some(new_server.peer.clone());
     }
+    let table_route_cache = registry.get::<TableRouteCacheRef>().unwrap();
     let invalidator = Arc::new(RecordingCacheInvalidator {
         calls: Mutex::default(),
         inner: Some(registry),
@@ -1112,6 +1121,7 @@ async fn test_write_retry_restores_changed_partition_tags_for_failed_regions() {
     let dispatcher = WriteDispatcher::new(clients, partition_manager.clone()).with_retry(
         build_retry_options(1),
         table_info_cache.clone(),
+        table_route_cache,
         invalidator.clone(),
     );
     // The successful row would move under the new rule, but must not be replayed.
@@ -1491,102 +1501,154 @@ async fn test_resolve_peers_cache_lookup_ablation() {
 }
 
 #[tokio::test]
-async fn test_write_retry_rebuilds_logical_rows_in_mixed_table_envelope() {
-    for kind in [WriteKind::Insert, WriteKind::Delete] {
-        let server = RegionTestServer::start().await;
-        let backend = test_util::prepare_mocked_backend().await;
-        test_util::create_partition_rule_manager(backend.clone()).await;
-        TableMetadataManager::new(backend.clone())
-            .create_table_metadata(
-                test_util::new_test_table_info(42, "retry_logical", [1, 2, 3].into_iter()),
-                TableRouteValue::logical(1),
-                Default::default(),
-            )
-            .await
-            .unwrap();
-        update_table_leader(&backend, &server.peer).await;
-        let (partition_manager, table_info_cache, registry) = create_routing_caches(backend);
-        let table_info = table_info_cache.get(1).await.unwrap().unwrap();
-        let (_, versions) = partition_manager
-            .find_table_partition_rule(&table_info)
-            .await
-            .unwrap();
-        let invalidator = Arc::new(RecordingCacheInvalidator {
-            inner: Some(registry),
-            ..Default::default()
-        });
-        let clients = Arc::new(NodeClients::new(ChannelConfig::default()));
-        let dispatcher = WriteDispatcher::new(clients, partition_manager).with_retry(
-            build_retry_options(2),
-            table_info_cache,
-            invalidator.clone(),
-        );
-        let physical_id = RegionId::new(1, 1).as_u64();
-        let stale_logical_id = RegionId::new(42, 2).as_u64();
-        let rebuilt_logical_id = RegionId::new(42, 3).as_u64();
-        let mut status = Status::unavailable("partition changed");
-        status.metadata_mut().insert(
-            common_error::GREPTIME_DB_HEADER_ERROR_RETRY_HINT,
-            RetryHint::RetryAfterRouteRefresh.as_str().parse().unwrap(),
-        );
-        server
-            .service
-            .rejections
-            .lock()
-            .unwrap()
-            .insert(stale_logical_id, VecDeque::from([status]));
+async fn test_insert_retry_rebuilds_logical_rows_in_mixed_table_envelope() {
+    check_write_retry_rebuilds_logical_rows_in_mixed_table_envelope(WriteKind::Insert).await;
+}
 
-        let header = Some(RegionRequestHeader {
-            dbname: "greptime.public".to_string(),
-            ..Default::default()
-        });
-        let mut physical = build_partitioned_request(kind, 1, versions[&1], &[70]);
-        physical.header = header.clone();
-        // The stale logical request must move to region 3 while keeping table 42.
-        let mut logical = build_partitioned_request(kind, 2, Some(0), &[1]);
-        let mut rebuilt = build_partitioned_request(kind, 3, versions[&3], &[1]);
-        for request in [&mut logical, &mut rebuilt] {
-            request.header = header.clone();
-            let region_id = match request.body.as_mut().unwrap() {
-                Body::Inserts(inserts) => &mut inserts.requests[0].region_id,
-                Body::Deletes(deletes) => &mut deletes.requests[0].region_id,
-                _ => unreachable!(),
-            };
-            *region_id = RegionId::new(42, RegionId::from_u64(*region_id).region_number()).as_u64();
-        }
-        let mut envelope = physical.clone();
-        match (
-            envelope.body.as_mut().unwrap(),
-            logical.body.clone().unwrap(),
-        ) {
-            (Body::Inserts(physical), Body::Inserts(logical)) => {
-                physical.requests.extend(logical.requests);
-            }
-            (Body::Deletes(physical), Body::Deletes(logical)) => {
-                physical.requests.extend(logical.requests);
-            }
+#[tokio::test]
+async fn test_delete_retry_rebuilds_logical_rows_in_mixed_table_envelope() {
+    check_write_retry_rebuilds_logical_rows_in_mixed_table_envelope(WriteKind::Delete).await;
+}
+
+async fn check_write_retry_rebuilds_logical_rows_in_mixed_table_envelope(kind: WriteKind) {
+    let server = RegionTestServer::start().await;
+    let backend = test_util::prepare_mocked_backend().await;
+    test_util::create_partition_rule_manager(backend.clone()).await;
+    let metadata = TableMetadataManager::new(backend.clone());
+    let current = metadata.table_info_manager().get(1).await.unwrap().unwrap();
+    let mut physical_info = current.table_info.clone();
+    physical_info.meta.engine = metric_engine_consts::METRIC_ENGINE_NAME.to_string();
+    physical_info.meta.options.extra_options.insert(
+        metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY.to_string(),
+        String::new(),
+    );
+    metadata
+        .update_table_info(&current, None, physical_info)
+        .await
+        .unwrap();
+    let mut logical_info =
+        test_util::new_test_table_info(42, "retry_logical", [1, 2, 3].into_iter());
+    logical_info.meta.engine = metric_engine_consts::METRIC_ENGINE_NAME.to_string();
+    logical_info.meta.options.extra_options.insert(
+        metric_engine_consts::LOGICAL_TABLE_METADATA_KEY.to_string(),
+        "table_1".to_string(),
+    );
+    // Persisted logical metadata inherits partition columns from the physical table.
+    logical_info.meta.partition_key_indices.clear();
+    // Physical column `a` is at index 0, but logical column `a` is at index 2.
+    let mut columns = logical_info.meta.schema.column_schemas().to_vec();
+    columns.swap(0, 2);
+    logical_info.meta.schema = Arc::new(schema::Schema::new(columns));
+    logical_info.meta.primary_key_indices = vec![2];
+    metadata
+        .create_table_metadata(
+            logical_info,
+            TableRouteValue::logical(1),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    update_table_leader(&backend, &server.peer).await;
+    let (partition_manager, table_info_cache, registry) = create_routing_caches(backend);
+    let table_info = table_info_cache.get(1).await.unwrap().unwrap();
+    assert_eq!(table_info.meta.partition_key_indices, vec![0]);
+    assert!(
+        table_info_cache
+            .get(42)
+            .await
+            .unwrap()
+            .unwrap()
+            .meta
+            .partition_key_indices
+            .is_empty()
+    );
+    let (_, versions) = partition_manager
+        .find_table_partition_rule(&table_info)
+        .await
+        .unwrap();
+    let table_route_cache = registry.get::<TableRouteCacheRef>().unwrap();
+    let invalidator = Arc::new(RecordingCacheInvalidator {
+        inner: Some(registry),
+        ..Default::default()
+    });
+    let clients = Arc::new(NodeClients::new(ChannelConfig::default()));
+    let dispatcher = WriteDispatcher::new(clients, partition_manager).with_retry(
+        build_retry_options(2),
+        table_info_cache,
+        table_route_cache,
+        invalidator.clone(),
+    );
+    let physical_id = RegionId::new(1, 1).as_u64();
+    let stale_logical_id = RegionId::new(42, 2).as_u64();
+    let rebuilt_logical_ids = [1, 3].map(|region| RegionId::new(42, region).as_u64());
+    let mut status = Status::unavailable("partition changed");
+    status.metadata_mut().insert(
+        common_error::GREPTIME_DB_HEADER_ERROR_RETRY_HINT,
+        RetryHint::RetryAfterRouteRefresh.as_str().parse().unwrap(),
+    );
+    server
+        .service
+        .rejections
+        .lock()
+        .unwrap()
+        .insert(stale_logical_id, VecDeque::from([status]));
+
+    let header = Some(RegionRequestHeader {
+        dbname: "greptime.public".to_string(),
+        ..Default::default()
+    });
+    let mut physical = build_partitioned_request(kind, 1, versions[&1], &[70]);
+    physical.header = header.clone();
+    // Only the failed logical rows are split again, preserving their logical table ID.
+    let mut logical = build_partitioned_request(kind, 2, Some(0), &[1, 70]);
+    let mut rebuilt_lower = build_partitioned_request(kind, 3, versions[&3], &[1]);
+    let mut rebuilt_upper = build_partitioned_request(kind, 1, versions[&1], &[70]);
+    for request in [&mut logical, &mut rebuilt_lower, &mut rebuilt_upper] {
+        request.header = header.clone();
+        let region_id = match request.body.as_mut().unwrap() {
+            Body::Inserts(inserts) => &mut inserts.requests[0].region_id,
+            Body::Deletes(deletes) => &mut deletes.requests[0].region_id,
             _ => unreachable!(),
-        }
-        let response = dispatcher.dispatch(vec![envelope]).await.unwrap();
-        assert_eq!(response.affected_rows, 2, "{kind:?}");
-        assert_eq!(
-            server.attempt_counts(),
-            HashMap::from([
-                (physical_id, 1),
-                (stale_logical_id, 1),
-                (rebuilt_logical_id, 1)
-            ]),
-            "{kind:?}"
-        );
-        let mut requests = server.service.requests.lock().unwrap().clone();
-        requests.sort_by_key(|request| write_region_id(request).unwrap().as_u64());
-        assert_eq!(requests, vec![physical, logical, rebuilt], "{kind:?}");
-        let calls = invalidator.calls.lock().unwrap();
-        assert_eq!(calls.len(), 1, "{kind:?}");
-        assert_eq!(calls[0].len(), 2, "{kind:?}");
-        assert!(calls[0].contains(&CacheIdent::TableId(1)));
-        assert!(calls[0].contains(&CacheIdent::TableId(42)));
+        };
+        *region_id = RegionId::new(42, RegionId::from_u64(*region_id).region_number()).as_u64();
     }
+    let mut envelope = physical.clone();
+    match (
+        envelope.body.as_mut().unwrap(),
+        logical.body.clone().unwrap(),
+    ) {
+        (Body::Inserts(physical), Body::Inserts(logical)) => {
+            physical.requests.extend(logical.requests);
+        }
+        (Body::Deletes(physical), Body::Deletes(logical)) => {
+            physical.requests.extend(logical.requests);
+        }
+        _ => unreachable!(),
+    }
+    let response = dispatcher.dispatch(vec![envelope]).await.unwrap();
+    assert_eq!(response.affected_rows, 3, "{kind:?}");
+    assert_eq!(
+        server.attempt_counts(),
+        HashMap::from([
+            (physical_id, 1),
+            (stale_logical_id, 1),
+            (rebuilt_logical_ids[0], 1),
+            (rebuilt_logical_ids[1], 1),
+        ]),
+        "{kind:?}"
+    );
+    let mut requests = server.service.requests.lock().unwrap().clone();
+    requests.sort_by_key(|request| write_region_id(request).unwrap().as_u64());
+    assert_eq!(
+        requests,
+        vec![physical, rebuilt_upper, logical, rebuilt_lower],
+        "{kind:?}"
+    );
+    let calls = invalidator.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1, "{kind:?}");
+    assert_eq!(calls[0].len(), 2, "{kind:?}");
+    assert!(calls[0].contains(&CacheIdent::TableId(1)));
+    assert!(calls[0].contains(&CacheIdent::TableId(42)));
 }
 
 #[tokio::test]
@@ -1595,9 +1657,14 @@ async fn test_with_retry_can_disable_previously_enabled_retries() {
     let dispatcher = server.create_dispatcher(1).await;
     let retry = dispatcher.retry.as_ref().unwrap();
     let table_info_cache = retry.table_info_cache.clone();
+    let table_route_cache = retry.table_route_cache.clone();
     let cache_invalidator = retry.cache_invalidator.clone();
-    let dispatcher =
-        dispatcher.with_retry(build_retry_options(0), table_info_cache, cache_invalidator);
+    let dispatcher = dispatcher.with_retry(
+        build_retry_options(0),
+        table_info_cache,
+        table_route_cache,
+        cache_invalidator,
+    );
     assert!(dispatcher.retry.is_none());
     server.fail_region(1, [RetryHint::Retryable]);
     assert!(

@@ -23,8 +23,8 @@ use common_catalog::consts::{
 };
 use common_error::ext::BoxedError;
 use common_meta::cache::{
-    LayeredCacheRegistryRef, TableInfoCacheRef, TableNameCacheRef, TableRoute, TableRouteCacheRef,
-    ViewInfoCacheRef,
+    LayeredCacheRegistryRef, TableInfoCacheRef, TableNameCacheRef, TableRouteCacheRef,
+    ViewInfoCacheRef, resolve_logical_table_info,
 };
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::catalog_name::CatalogNameKey;
@@ -40,7 +40,6 @@ use moka::sync::Cache;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::{Channel, QueryContext};
 use snafu::prelude::*;
-use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
 use table::TableRef;
 use table::dist_table::DistTable;
 use table::metadata::{TableId, TableInfoRef};
@@ -141,65 +140,19 @@ impl KvBackendCatalogManager {
         table_info_cache: &TableInfoCacheRef,
         table: TableRef,
     ) -> Result<TableRef> {
-        // If the table is not a metric table, return the table directly.
-        if table.table_info().meta.engine != METRIC_ENGINE_NAME {
-            return Ok(table);
-        }
-
-        if let Some(table_route_value) = table_route_cache
-            .get(table.table_info().table_id())
-            .await
-            .context(TableMetadataManagerSnafu)?
-            && let TableRoute::Logical(logical_route) = &*table_route_value
-            && let Some(physical_table_info) = table_info_cache
-                .get(logical_route.physical_table_id())
+        if let Some(resolved) =
+            resolve_logical_table_info(&table.table_info(), table_route_cache, table_info_cache)
                 .await
                 .context(TableMetadataManagerSnafu)?
         {
-            let mut new_table_info = (*table.table_info()).clone();
-
-            let mut phy_part_cols_not_in_logical_table = vec![];
-
-            // Remap partition key indices from physical table to logical table
-            new_table_info.meta.partition_key_indices = physical_table_info
-                .meta
-                .partition_key_indices
-                .iter()
-                .filter_map(|&physical_index| {
-                    // Get the column name from the physical table using the physical index
-                    physical_table_info
-                        .meta
-                        .schema
-                        .column_schemas()
-                        .get(physical_index)
-                        .and_then(|physical_column| {
-                            // Find the corresponding index in the logical table schema
-                            let idx = new_table_info
-                                .meta
-                                .schema
-                                .column_index_by_name(physical_column.name.as_str());
-                            if idx.is_none() {
-                                // not all part columns in physical table that are also in logical table
-                                phy_part_cols_not_in_logical_table
-                                    .push(physical_column.name.clone());
-                            }
-
-                            idx
-                        })
-                })
-                .collect();
-
-            let partition_rules = if !phy_part_cols_not_in_logical_table.is_empty() {
-                Some(PartitionRules {
-                    extra_phy_cols_not_in_logical_table: phy_part_cols_not_in_logical_table,
-                })
-            } else {
-                None
-            };
-
-            let new_table = DistTable::table_partitioned(Arc::new(new_table_info), partition_rules);
-
-            return Ok(new_table);
+            let partition_rules =
+                (!resolved.missing_partition_columns.is_empty()).then_some(PartitionRules {
+                    extra_phy_cols_not_in_logical_table: resolved.missing_partition_columns,
+                });
+            return Ok(DistTable::table_partitioned(
+                resolved.table_info,
+                partition_rules,
+            ));
         }
 
         Ok(table)
@@ -707,9 +660,10 @@ impl SystemCatalog {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use common_meta::cache::{CacheContainer, Initializer};
+    use common_meta::cache::{CacheContainer, Initializer, TableRoute};
     use common_meta::key::table_route::LogicalTableRouteValue;
     use moka::future::Cache as FutureCache;
+    use store_api::metric_engine_consts::METRIC_ENGINE_NAME;
     use table::metadata::TableInfo;
 
     use super::*;

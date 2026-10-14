@@ -23,7 +23,7 @@ use api::region::RegionResponse;
 use api::v1::region::{DeleteRequests, InsertRequests, RegionRequest, region_request::Body};
 use backon::{BackoffBuilder, ExponentialBuilder};
 use common_error::ext::{BoxedError, ErrorExt, RetryHint};
-use common_meta::cache::TableInfoCacheRef;
+use common_meta::cache::{TableInfoCacheRef, TableRouteCacheRef, resolve_logical_table_info};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, Context};
 use common_meta::error::{Error, ExternalSnafu, Result, TableInfoNotFoundSnafu, UnexpectedSnafu};
 use common_meta::instruction::CacheIdent;
@@ -77,6 +77,7 @@ impl WriteDispatcher {
         mut self,
         options: WriteRetryOptions,
         table_info_cache: TableInfoCacheRef,
+        table_route_cache: TableRouteCacheRef,
         cache_invalidator: CacheInvalidatorRef,
     ) -> Self {
         if options.max_retries > 0 {
@@ -85,6 +86,7 @@ impl WriteDispatcher {
                 partition_manager: self.partition_manager.clone(),
                 options,
                 table_info_cache,
+                table_route_cache,
                 cache_invalidator,
             });
         } else {
@@ -283,6 +285,7 @@ struct WriteRetry {
     partition_manager: PartitionRuleManagerRef,
     options: WriteRetryOptions,
     table_info_cache: TableInfoCacheRef,
+    table_route_cache: TableRouteCacheRef,
     cache_invalidator: CacheInvalidatorRef,
 }
 
@@ -403,6 +406,13 @@ impl WriteRetry {
                 .with_context(|| TableInfoNotFoundSnafu {
                     table: table_id.to_string(),
                 })?;
+            let table_info = resolve_logical_table_info(
+                &table_info,
+                &self.table_route_cache,
+                &self.table_info_cache,
+            )
+            .await?
+            .map_or(table_info, |resolved| resolved.table_info);
             let partitioner = TablePartitioner::try_new(&self.partition_manager, &table_info)
                 .await
                 .map_err(BoxedError::new)

@@ -20,7 +20,10 @@ mod table_schema;
 mod view_info;
 
 pub use schema::{SchemaCache, SchemaCacheRef, new_schema_cache};
-pub use table_info::{TableInfoCache, TableInfoCacheRef, new_table_info_cache};
+pub use table_info::{
+    ResolvedLogicalTableInfo, TableInfoCache, TableInfoCacheRef, new_table_info_cache,
+    resolve_logical_table_info,
+};
 pub use table_name::{TableNameCache, TableNameCacheRef, new_table_name_cache};
 pub use table_route::{TableRoute, TableRouteCache, TableRouteCacheRef, new_table_route_cache};
 pub use table_schema::{TableSchemaCache, TableSchemaCacheRef, new_table_schema_cache};
