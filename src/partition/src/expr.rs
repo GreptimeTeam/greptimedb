@@ -885,6 +885,7 @@ mod tests {
         let start_ms =
             serde_json::from_str::<Value>(r#"{"Timestamp":{"value":0,"unit":"Millisecond"}}"#)
                 .unwrap();
+        let ts_ms = ConcreteDataType::timestamp_millisecond_datatype();
         let ts_ns = ConcreteDataType::timestamp_nanosecond_datatype();
 
         let routes = |expr: &PartitionExpr| {
@@ -897,8 +898,8 @@ mod tests {
                 ..Default::default()
             }]
         };
-        let changed = |column: &str, data_type: ConcreteDataType| {
-            HashMap::from([(column.to_string(), data_type)])
+        let changed = |column: &str, old_type: ConcreteDataType, new_type: ConcreteDataType| {
+            HashMap::from([(column.to_string(), (old_type, new_type))])
         };
 
         // Compile-time tripwire: exhaustively matching the operand and operator
@@ -939,9 +940,11 @@ mod tests {
         );
         for expr in [&simple, &nested_and, &nested_or] {
             walk(expr);
-            let err =
-                validate_region_partition_bounds(&changed("ts", ts_ns.clone()), &routes(expr))
-                    .unwrap_err();
+            let err = validate_region_partition_bounds(
+                &changed("ts", ts_ms.clone(), ts_ns.clone()),
+                &routes(expr),
+            )
+            .unwrap_err();
             assert!(
                 matches!(
                     err,
@@ -953,15 +956,28 @@ mod tests {
 
         // A representable bound passes.
         let compatible = col("ts").lt(start_ms);
-        validate_region_partition_bounds(&changed("ts", ts_ns), &routes(&compatible)).unwrap();
+        validate_region_partition_bounds(&changed("ts", ts_ms, ts_ns), &routes(&compatible))
+            .unwrap();
 
-        // Narrowing a field column must not be over-rejected: the scan casts the
-        // column up to the common Int64 type instead of the bound down to Int32.
+        // Narrowing a field column must be rejected as well: the region's write
+        // path compares the persisted Int64 bound against Int32 rows directly
+        // and panics, even though the scan would coerce both sides.
         let narrowing = col("v").lt(Value::Int64(3_000_000_000));
-        validate_region_partition_bounds(
-            &changed("v", ConcreteDataType::int32_datatype()),
+        let err = validate_region_partition_bounds(
+            &changed(
+                "v",
+                ConcreteDataType::int64_datatype(),
+                ConcreteDataType::int32_datatype(),
+            ),
             &routes(&narrowing),
         )
-        .unwrap();
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::PartitionExprIncompatible { ref column, .. } if column == "v"
+            ),
+            "unexpected error: {err}"
+        );
     }
 }

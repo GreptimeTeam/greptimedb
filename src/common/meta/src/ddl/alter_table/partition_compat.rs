@@ -14,15 +14,25 @@
 
 //! Preflight validation of persisted partition expressions against an ALTER TABLE schema change.
 //!
-//! Persisted partition bounds keep the types they were written with. When a column
-//! referenced by a partition expression changes its type, the region coerces the bound
-//! literal and the new column type to a common comparison type while building the
-//! partition predicate on scan. If no common type exists, or the bound cannot be cast
-//! to it (a classic example is a millisecond timestamp bound that overflows when the
-//! time index column is widened to nanoseconds), every scan of that region fails at
-//! that point. Such an ALTER must be rejected before it is submitted to any region,
-//! otherwise already-altered regions keep failing while the rest of the table is
-//! untouched.
+//! Persisted partition bounds keep the types they were written with. A column whose
+//! type changes while a partition expression references it breaks the region on both
+//! paths that consume the bounds:
+//!
+//! * On scan, the region coerces the bound literal and the new column type to a
+//!   common comparison type while building the partition predicate. If no common type
+//!   exists, or the bound cannot be cast to it (a classic example is a millisecond
+//!   timestamp bound that overflows when the time index column is widened to
+//!   nanoseconds), every scan of that region fails at that point.
+//! * On write, the region routes rows through `MultiDimPartitionRule::find_region`,
+//!   which compares the persisted bound against row values directly (`Value::cmp`): a
+//!   bound whose variant no longer matches the column's panics on ordered comparisons
+//!   and misroutes silently on equality. Only a timestamp unit widening keeps the two
+//!   comparable — `Timestamp` comparisons convert units before comparing — so every
+//!   other type change of a referenced column is rejected outright, and the widening
+//!   keeps the scan check below.
+//!
+//! Such an ALTER must be rejected before it is submitted to any region, otherwise
+//! already-altered regions keep failing while the rest of the table is untouched.
 //!
 //! The `partition` crate depends on `common-meta`, so this crate cannot depend on
 //! `partition` back and cannot reuse [`partition::expr::PartitionExpr`]. The `Persisted*`
@@ -93,20 +103,23 @@ enum PersistedOp {
 }
 
 /// Returns the columns whose data type differs between `old_schema` and `new_schema`,
-/// mapped to the new type. Columns only present in one of the schemas (added or dropped)
-/// are not included; dropping a column referenced by a partition expression is already
-/// rejected by the table metadata validation.
+/// mapped to (old type, new type). Columns only present in one of the schemas (added or
+/// dropped) are not included; dropping a column referenced by a partition expression is
+/// already rejected by the table metadata validation.
 pub(crate) fn changed_column_types(
     old_schema: &Schema,
     new_schema: &Schema,
-) -> HashMap<String, ConcreteDataType> {
+) -> HashMap<String, (ConcreteDataType, ConcreteDataType)> {
     let mut changed = HashMap::new();
     for new_column in new_schema.column_schemas() {
         let Some(old_column) = old_schema.column_schema_by_name(&new_column.name) else {
             continue;
         };
         if old_column.data_type != new_column.data_type {
-            changed.insert(new_column.name.clone(), new_column.data_type.clone());
+            changed.insert(
+                new_column.name.clone(),
+                (old_column.data_type.clone(), new_column.data_type.clone()),
+            );
         }
     }
 
@@ -120,7 +133,7 @@ pub(crate) fn changed_column_types(
 /// Public so that round-trip tests in the `partition` crate can run real serialized
 /// partition expressions through the same mirror used here.
 pub fn validate_region_partition_bounds(
-    changed_columns: &HashMap<String, ConcreteDataType>,
+    changed_columns: &HashMap<String, (ConcreteDataType, ConcreteDataType)>,
     region_routes: &[RegionRoute],
 ) -> Result<()> {
     if changed_columns.is_empty() {
@@ -160,7 +173,7 @@ pub fn validate_region_partition_bounds(
 
 fn validate_expr(
     expr: &PersistedPartitionExpr,
-    changed_columns: &HashMap<String, ConcreteDataType>,
+    changed_columns: &HashMap<String, (ConcreteDataType, ConcreteDataType)>,
     region_id: RegionId,
 ) -> Result<()> {
     match expr.op {
@@ -185,7 +198,7 @@ fn validate_expr(
 
 fn validate_operand(
     operand: &PersistedOperand,
-    changed_columns: &HashMap<String, ConcreteDataType>,
+    changed_columns: &HashMap<String, (ConcreteDataType, ConcreteDataType)>,
     region_id: RegionId,
 ) -> Result<()> {
     match operand {
@@ -197,14 +210,14 @@ fn validate_operand(
 fn validate_comparison(
     operand: &PersistedOperand,
     other: &PersistedOperand,
-    changed_columns: &HashMap<String, ConcreteDataType>,
+    changed_columns: &HashMap<String, (ConcreteDataType, ConcreteDataType)>,
     region_id: RegionId,
 ) -> Result<()> {
     let (PersistedOperand::Column(column), PersistedOperand::Value(value)) = (operand, other)
     else {
         return Ok(());
     };
-    let Some(target_type) = changed_columns.get(column) else {
+    let Some((old_type, target_type)) = changed_columns.get(column) else {
         return Ok(());
     };
     // Values not representable as a partition bound (lists, structs, json) are
@@ -213,12 +226,31 @@ fn validate_comparison(
         return Ok(());
     };
 
-    // Mirror `ExprSimplifier::coerce` in `PredicateGroup::new`: the region casts
-    // both the column and the persisted bound to the common comparison type. The
-    // bound is not cast to the column type itself, so narrowing a column (e.g.
-    // BIGINT to INT with an out-of-range bound) is fine as long as the bound
-    // survives the common type, while a bound that cannot be cast to it — or a
-    // pair of types without a common comparison type — fails every scan.
+    // The write path (`MultiDimPartitionRule::find_region`) compares the persisted
+    // bound against row values directly: `Value::cmp` panics on mismatched variants
+    // and equality misroutes silently. Only a timestamp unit widening keeps the
+    // bound and the rows comparable (`Timestamp` comparisons convert units first),
+    // so every other type change of a referenced column is rejected here.
+    if !old_type.is_timestamp_unit_widening_to(target_type) {
+        warn!(
+            "Persisted partition bound would be compared against values of a different \
+             type after the ALTER, region_id: {}, column: '{}', target_type: {}",
+            region_id, column, target_type
+        );
+        return PartitionExprIncompatibleSnafu {
+            region_id,
+            column: column.clone(),
+            target_type: target_type.to_string(),
+        }
+        .fail();
+    }
+
+    // For the widening, mirror `ExprSimplifier::coerce` in `PredicateGroup::new`:
+    // the region casts both the column and the persisted bound to the common
+    // comparison type. The bound is not cast to the column type itself, so the
+    // widening is accepted as long as the bound survives the common type; a bound
+    // that cannot be cast to it — or a pair of types without a common comparison
+    // type — fails every scan.
     let target_arrow_type = target_type.as_arrow_type();
     let Some(common_type) = comparison_coercion(&target_arrow_type, &scalar.data_type()) else {
         warn!(
@@ -325,8 +357,12 @@ mod tests {
             .collect()
     }
 
-    fn changed(column: &str, data_type: ConcreteDataType) -> HashMap<String, ConcreteDataType> {
-        HashMap::from([(column.to_string(), data_type)])
+    fn changed(
+        column: &str,
+        old_type: ConcreteDataType,
+        new_type: ConcreteDataType,
+    ) -> HashMap<String, (ConcreteDataType, ConcreteDataType)> {
+        HashMap::from([(column.to_string(), (old_type, new_type))])
     }
 
     #[test]
@@ -337,7 +373,10 @@ mod tests {
         assert_eq!(changed.len(), 1);
         assert_eq!(
             changed["ts"],
-            ConcreteDataType::timestamp_nanosecond_datatype()
+            (
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                ConcreteDataType::timestamp_nanosecond_datatype()
+            )
         );
 
         // Added and dropped columns are not type changes.
@@ -356,7 +395,11 @@ mod tests {
         // Year 3000 fits milliseconds but overflows nanoseconds.
         let routes = routes(&[&ts_bound(32_503_680_000_000)]);
         let err = validate_region_partition_bounds(
-            &changed("ts", ConcreteDataType::timestamp_nanosecond_datatype()),
+            &changed(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+            ),
             &routes,
         )
         .unwrap_err();
@@ -372,12 +415,20 @@ mod tests {
         // 2024-01-01T00:00:00Z fits both microseconds and nanoseconds.
         let routes = routes(&[&ts_bound(1_704_067_200_000)]);
         validate_region_partition_bounds(
-            &changed("ts", ConcreteDataType::timestamp_nanosecond_datatype()),
+            &changed(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+            ),
             &routes,
         )
         .unwrap();
         validate_region_partition_bounds(
-            &changed("ts", ConcreteDataType::timestamp_microsecond_datatype()),
+            &changed(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                ConcreteDataType::timestamp_microsecond_datatype(),
+            ),
             &routes,
         )
         .unwrap();
@@ -387,7 +438,11 @@ mod tests {
     fn test_later_region_rejection_names_the_region() {
         let routes = routes(&[&ts_bound(1_704_067_200_000), &ts_bound(32_503_680_000_000)]);
         let err = validate_region_partition_bounds(
-            &changed("ts", ConcreteDataType::timestamp_nanosecond_datatype()),
+            &changed(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+            ),
             &routes,
         )
         .unwrap_err();
@@ -398,18 +453,26 @@ mod tests {
     }
 
     #[test]
-    fn test_unrelated_and_unchanged_columns_are_skipped() {
-        let other_column =
+    fn test_unrelated_columns_are_skipped() {
+        let host_bound =
             r#"{"Expr":{"lhs":{"Column":"host"},"op":"Eq","rhs":{"Value":{"String":"a"}}}}"#;
-        // `host` changed, but this bound is a string that any host type accepts.
+        // The changed column is not referenced by this bound.
         validate_region_partition_bounds(
-            &changed("host", ConcreteDataType::string_datatype()),
-            &routes(&[other_column]),
+            &changed(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+            ),
+            &routes(&[host_bound]),
         )
         .unwrap();
-        // `ts` bound with an unrelated column changed.
+        // The referenced column did not change.
         validate_region_partition_bounds(
-            &changed("host", ConcreteDataType::string_datatype()),
+            &changed(
+                "host",
+                ConcreteDataType::int32_datatype(),
+                ConcreteDataType::string_datatype(),
+            ),
             &routes(&[&ts_bound(32_503_680_000_000)]),
         )
         .unwrap();
@@ -419,7 +482,11 @@ mod tests {
     fn test_nested_expression_is_validated() {
         let expr = r#"{"Expr":{"lhs":{"Expr":{"lhs":{"Column":"ts"},"op":"GtEq","rhs":{"Value":{"Timestamp":{"value":0,"unit":"Millisecond"}}}}},"op":"And","rhs":{"Expr":{"lhs":{"Column":"ts"},"op":"Lt","rhs":{"Value":{"Timestamp":{"value":32503680000000,"unit":"Millisecond"}}}}}}}"#.to_string();
         let err = validate_region_partition_bounds(
-            &changed("ts", ConcreteDataType::timestamp_nanosecond_datatype()),
+            &changed(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+            ),
             &routes(&[&expr]),
         )
         .unwrap_err();
@@ -429,36 +496,70 @@ mod tests {
     #[test]
     fn test_deprecated_and_empty_bounds_are_skipped() {
         validate_region_partition_bounds(
-            &changed("ts", ConcreteDataType::timestamp_nanosecond_datatype()),
+            &changed(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+            ),
             &routes(&["", r#""MaxValue""#, r#"{"Value":{"UInt32":1}}"#, "not-json"]),
         )
         .unwrap();
     }
 
     #[test]
-    fn test_field_narrowing_keeps_bounds_the_scan_coerces() {
+    fn test_field_narrowing_is_rejected_for_persisted_bounds() {
         // BIGINT bound outside the INT range with the column narrowed to INT: the
-        // region casts the column up to the common Int64 comparison type, so the
-        // bound still scans and the ALTER must not be rejected.
+        // scan would coerce both sides to Int64, but the region's write path
+        // compares the persisted Int64 bound against Int32 rows directly and
+        // panics, so the ALTER must be rejected.
         let bound =
             r#"{"Expr":{"lhs":{"Column":"v"},"op":"Lt","rhs":{"Value":{"Int64":3000000000}}}}"#;
-        validate_region_partition_bounds(
-            &changed("v", ConcreteDataType::int32_datatype()),
-            &routes(&[bound]),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn test_bound_without_common_comparison_type_is_rejected() {
-        // No comparison coercion exists between a boolean bound and an int column,
-        // so the region's predicate build fails and the ALTER must be rejected.
-        let bound = r#"{"Expr":{"lhs":{"Column":"v"},"op":"Lt","rhs":{"Value":{"Boolean":true}}}}"#;
         let err = validate_region_partition_bounds(
-            &changed("v", ConcreteDataType::int32_datatype()),
+            &changed(
+                "v",
+                ConcreteDataType::int64_datatype(),
+                ConcreteDataType::int32_datatype(),
+            ),
             &routes(&[bound]),
         )
         .unwrap_err();
         assert!(err.to_string().contains("'v'"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_non_timestamp_widening_is_rejected_for_persisted_bounds() {
+        // Widening INT to BIGINT still changes the variant rows carry: the
+        // region's write path compares the persisted Int32 bound against Int64
+        // rows directly and panics, so the ALTER must be rejected as well.
+        let bound = r#"{"Expr":{"lhs":{"Column":"v"},"op":"Lt","rhs":{"Value":{"Int32":10}}}}"#;
+        let err = validate_region_partition_bounds(
+            &changed(
+                "v",
+                ConcreteDataType::int32_datatype(),
+                ConcreteDataType::int64_datatype(),
+            ),
+            &routes(&[bound]),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("'v'"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_bound_without_common_comparison_type_is_rejected() {
+        // A boolean bound has no comparison coercion with a timestamp column, so
+        // even a widening whose bounds are normally representable fails every
+        // predicate build; the ALTER must be rejected.
+        let bound =
+            r#"{"Expr":{"lhs":{"Column":"ts"},"op":"Lt","rhs":{"Value":{"Boolean":true}}}}"#;
+        let err = validate_region_partition_bounds(
+            &changed(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                ConcreteDataType::timestamp_nanosecond_datatype(),
+            ),
+            &routes(&[bound]),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("'ts'"), "unexpected error: {err}");
     }
 }
