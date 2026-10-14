@@ -42,14 +42,101 @@ Status: Proposed
 
 #9556 已证明可通过 `PreparedSeriesSource`、`VisibleSeriesBlock`、`RangeProcessor`、原生 `Evaluator` 避免大量中间 Arrow 处理。不过当前普通 `ProgramExec` 在各 worker 后仍构造 `Vec<SeriesVector>` → `outputs` → `BTreeMap<Labels, Vec<Option<f64>>>` → `evaluate_collected()`，内存峰值和上层 evaluator 的组合性不理想。
 
-### 1.2 目标
+### 1.2 核心架构决策：为什么是 PromQL-native Operator，而不是继续扩展 DataFusion
+
+这一节是本 RFC 的**主要论证**。这里要替换的是 **PromQL 使用的关系算子数据流模型**，而不是 DataFusion 这个组件本身。DataFusion 已支持异步、流式 `RecordBatch`、自定义 `ExecutionPlan`、聚合/Join/排序、分区规划、内存限制和多种优化规则；不能用“DataFusion 不流式”或“通用执行器必然慢”作为理由。[DataFusion 官方介绍](https://datafusion.apache.org/blog/2026/03/31/writing-table-providers/)；[DataFusion 55 的物理优化进展](https://datafusion.apache.org/blog/2026/08/25/datafusion-55.0.0/)。
+
+**更精确的判断是：PromQL 的主要计算单位与关系代数不同；为了借用通用关系算子，我们持续支付表示转换与语义映射的复杂性，而 series-aware 优化也很难自然跨越这些边界。** 这是一项要通过代码结构和同条件 benchmark 验证的工程判断，不是把运行速度直接归因于 DataFusion。
+
+#### 1.2.1 三种实际可行的方案
+
+| 方案 | 具体实现 | 优点 | 主要问题 |
+| --- | --- | --- | --- |
+| **A. 继续强化关系算子** | 沿用 PromQL AST → DataFusion `Sort/SeriesDivide/RangeManipulate/Projection/Aggregate/Join`，加融合规则、UDF/UDAF、专用 `ExecutionPlan` | 复用既有代码、planner、算子优化、资源治理；改动相对局部 | PromQL 的 labels、时间网格、histogram 与 vector matching 需要持续映射到 schema/row/join；跨多个关系算子做 series 优化和语义修复会越来越复杂 |
+| **B. #9556 式 monolithic `ProgramExec`** | 一个 DataFusion `ExecutionPlan` 内直接读取 series、调用 native kernel，随后以 `Evaluator::evaluate_inner` 解释整个 PromQL AST | 数据路径短，已经证明了可用性；很适合 benchmark 和过渡 | `outputs → BTreeMap → evaluate_collected` 仍汇集大量 series；继续加完整 PromQL 语义，会把集中式 evaluator 与每个特殊融合通路都扩大 |
+| **C. 可组合的 native PromQL Operators（推荐）** | 保留一个 DataFusion 外层 `PromqlExec: ExecutionPlan` 适配器，内部使用 `Selector → Range/Function → Aggregation/Matching → Result` 的 typed series graph | 语义与数据单位匹配；可以预先分析标签依赖、逐 series 归约、重用窗口状态；能分别优化/测试各类 PromQL 运算 | 需自行维护 PromQL operator 生命周期、语义与特有优化；DataFusion 通用关系算子的一部分便利不能直接复用 |
+
+**C 不是从零写一个通用查询引擎。** 第一阶段依然可以用 DataFusion 的 `TaskContext`、`MemoryPool/MemoryReservation`、metrics、取消/运行时、物理执行接口以及必要的分布式边界；SQL 仍继续走 DataFusion。#9556 的 `ProgramExec` 已作为 `ExecutionPlan` 嵌入 DataFusion，这个集成形态已被源码证明可行。真正新增的只有 **PromQL-specific operator graph 与语义实现**。
+
+#### 1.2.2 为何这种模型更适合 PromQL：四个可以指向具体代码的问题
+
+**（一）表示转换不再是执行的中心工作。**
+
+以 `sum by (region) (rate(requests_total[5m]))` 为例，现有关系路径会生成 per-series 排序/分组、`RangeManipulate`、标量计算和关系聚合。在 [`promql/planner.rs`](https://github.com/GreptimeTeam/greptimedb/blob/main/src/query/src/promql/planner.rs) 中，range planner 的注释明确表示：`RangeManipulate` 假定每个输入 batch 恰好一条 series，因而先按 series key 和 timestamp 排序，再通过 `SeriesDivide` 拆成 per-series batches，并在需要时进行 `SeriesNormalize`。这些步骤本身并非全无价值，但其中一部分存在的**原因是让 series 计算适配 RecordBatch 的边界条件**。
+
+若数据源本来就能提供经过可见性处理、按时间有序的 series blocks，原生算子可以直接消费它们，并仅在 SQL/API 输出边界转换为 Arrow。它避免的是 **不必要的中间列/批次重构和跨层约束**；并不主张 Arrow 或向量化计算本身低效。对于数据源不能提供这些性质的情况仍需排序/可见性处理，不能假装成本消失。
+
+**（二）PromQL 的 label-set 不是普通的 SQL 列投影或等值 Join。**
+
+`on/ignoring`、`group_left/right`、集合操作、逐 evaluation instant 的 cardinality/error、动态输出标签与 `__name__` 的移除/保留，都应是显式的语义规则。现有 [`promql/planner.rs`](https://github.com/GreptimeTeam/greptimedb/blob/main/src/query/src/promql/planner.rs) 为 `count_values` 处理样本值转标签时，需要同步修改 `ctx.tag_columns`、分组表达式、列 qualifier、字符串格式化 UDF 和输出投影；vector matching 也在关系 Join 的两侧构造 schema/column mapping。新功能一旦改变输出标签，多个关系层的状态必须协同维护。
+
+新算子应由**同一个语义组件**负责「输出 LabelSet 计算、匹配 key、样本值运算、重名与冲突检查、annotations」，在 operator 边界直接传递 `SeriesMetadata { labels, sample_kind, ... }`。必须区分 Mito 物理 PK/Metric-name 列与 PromQL 逻辑 `__name__`；新方案不意味着数据库内的 name 特殊列可以当普通 label 随意修改。
+
+**（三）有天然的 series-level 优化，而不是只有 row-level 优化。**
+
+Metadata-first 使聚合能在读取 sample 之前知道每条输入 series 属于哪个 group、哪一条是该 group 的最后贡献者；join 能先建立 label matching 关系，优先缓存低基数一侧，跳过不会匹配的 series；subquery 和 range function 可以持有明确的 evaluation-grid / sliding-window 状态。可以将 Footer 快路径、一般 Mito visible scan 与这些上层语义**独立组合**。
+
+这些优化**并非绝对无法通过 DataFusion 的自定义物理算子实现**。恰恰相反：如果在 DataFusion 里引入一组以 SeriesMetadata、SampleCursor、标签匹配和 RangeWindow 为输入输出的专用 `ExecutionPlan`，它在内部已接近本 RFC 提议的 native operator graph。真正要评估的是是否继续把每一步包成关系 `RecordBatch`/`LogicalPlan`，还是直接在一个 `PromqlExec` 中组合 PromQL 原生算子。前者的集成优势与后者的语义清晰度要用实际复杂度和执行成本比较。
+
+**（四）完整兼容性的实现与测试单位更小。**
+
+PromQL 的时间规则包括 lookback/staleness、`offset`、`@`、子查询嵌套网格、重叠 range windows、histogram/float 混合样本和 annotations。这些不是 SQL `Aggregate` 或 `HashJoin` 的默认语义。专用算子使每个语义规则可独立实现并对照 Prometheus 测试，而无需为新语义同步添加多处 planner/schema/optimizer 补丁。
+
+例如 #9556 当前 [`RangeProcessor::new_inner`](https://github.com/killme2008/greptimedb/blob/e0df7f17e4b904bde017e935125ed779f4ebd7a6/src/query/src/research_series_grid/scan_range.rs#L174-L199) 的快速路径只接受互不重叠的窗口，`rate(m[5m])` + 1 分钟 step 不能通过这个限制。新的 `RangeOperator` 可直接为**完整正确性**实现滑动窗口，再按能力选择非重叠快速 kernel；不需要将“某个存储/算子加速的限制”扩展为 PromQL 语法限制。上述重叠窗口算法也可以在自定义 DataFusion 算子中写出来，因此这说明的是**算子语义边界的收益**，不是 DataFusion 缺乏表达能力。
+
+#### 1.2.3 性能收益的明确机制与上界
+
+设 `S` 为匹配的原始 series 数，`T` 为 evaluation points，`G` 为聚合输出组数（常见 `G ≪ S`），`B` 为可同时驻留的输入 series 缓冲数。
+
+- #9556 普通 `ProgramExec` 的 `outputs` 和随后汇总的 `Vec<SeriesVector> / BTreeMap<Labels, Vec<Option<f64>>>` 可以使中间值占用达到 **`O(S × T)`**，还未包含 reader 预读和 metadata。
+- 对 `sum by (region)(rate(m[5m]))` 这种可逐 series 归约的表达式，目标可以是 **`O(G × T + B × T + metadata(S))`**：完成某条输入 series 即累计到 group，然后归还输入值 buffer；Footer 的 lazy payload 对这一上界至关重要。
+- group labels 的枚举本身通常仍可能是 `O(S)` 内存；匹配、`count_values`、`topk`、子查询、histogram 和某些最终输出可能必须保留更多状态。**不得把全引擎宣传成 O(1) 内存或总能提前返回首批结果。**
+- DataFusion 的成熟 `AggregateExec` 同样可能有效归约中间行。因此 `O(G × T)` **不是 native operator 独占的算法上界**。真正的预期增益是：输入保持 compact per-series 表示，减少重复转换/物化，让上层可组合地受益，而无需为每个查询形态设计一条跨越关系算子的特殊融合规则。
+
+**重要归因约束：#9556 Sidecar/Reader 曾报告的加速，不能证明 native Operator 比 DataFusion 更快。** 必须在**相同数据、快照、Footer/Mito reader、过滤条件、并行度、内存额度**下比较执行器，否则测到的可能只是物理读取优势。
+
+#### 1.2.4 我们承认的代价，以及为什么仍值得尝试
+
+采用 C 会失去直接调用部分成熟关系 `Join/Aggregate/Sort` 的便利，增加一套 PromQL-specific operator 生命周期、buffer ownership、metadata scheduling 和 optimizer 维护工作。尤其当表达式非常简单、输入很少、查询受 IO 主导时，专用算子**未必明显快于**已有 DataFusion 路径。MQE 的 metadata-first 也并非零开销，复杂向量匹配可能需要缓存整侧输入。
+
+因此“更简单”的准确表述是：**在实现并扩展完整 PromQL 语义时，整体语义状态更集中、特例更少，预期更容易 review 和验证；绝不是说新增一套 Operator 框架的首个 PR 会更少行。** 一旦原生方案需要另一套通用 scheduler、通用内存框架、SQL optimizer 或完整分布式执行协议，便偏离了本 RFC 的可控范围。
+
+#### 1.2.5 可证伪的对照实验与采纳标准
+
+需将以下路线放在**相同的 SeriesSource** 上做 A/B/C 测试，不能把 Footer/Sidecar 的加速混为新算子收益：
+
+1. **A：现有 DataFusion PromQL**。保持当前 plan；尽可能用等价底层读取（若该 plan 无法消费同种 `SeriesSource`，单独报告这一限制及 IO 差异）。
+2. **B：#9556 `ProgramExec`**。使用已有 direct reader/Range kernel、保留 `outputs → evaluate_collected` 的集中物化模型。
+3. **C：新的 Operator graph**。与 B 使用同一 `PreparedSeriesSource`、相同窗口计算 kernel 和并行度，只替换上层 materialization、聚合/matching 生命周期。
+4. **A′：DataFusion 内增加最小融合 `ExecutionPlan`**。在成本可控时做一个 `rate → sum` 的专用 `Exec`，验证「仅融合几个热点」是否已取得 C 的绝大多数收益；这是支持方应正面回应的最强反例。
+
+测试至少覆盖：
+
+| 查询形态 | 核心变量 | 关键判别指标 |
+| --- | --- | --- |
+| 裸 selector / `rate` | 小/大 S，重叠与非重叠窗口 | native 分发是否引入额外开销、窗口正确性 |
+| `sum by(region)(rate(...))` | `S` 上升、`G` 固定和增加 | 峰值内存随 S 的增长斜率、转换/聚合 CPU、TTFB |
+| `a * on(host) group_left(zone) b` | 双侧基数、匹配比例、输入顺序 | 有界 buffering、重复匹配错误、join CPU |
+| `topk` / `count_values` | churn、动态输出 labels、T | 必要物化范围与动态 labels 正确性 |
+| nested subquery / native histogram | 窗口重叠、sample kinds、annotations | Prometheus 等价性、scratch/缓存内存 |
+
+指标：`p50/p95` latency（冷热缓存分开）、CPU/allocations、source IO bytes、Footer hit rate、`RecordBatch` 中间数量/字节、已计费与实际峰值内存、planning time、取消/资源耗尽行为、Prometheus 差分通过率。所有新旧路径输出必须先正确，然后再比较性能。
+
+**采纳和退出标准**：
+
+- **功能优先**：C 必须让 PromQL 的 unsupported 特性能够以相对局部、可独立测试的算子实现；避免为一个功能同步修改多处 DataFusion schema/column-role 映射。用真实变更样例和 diff/test 证明维护收益，而不是主观打分。
+- **性能有证据**：C 在高基数/高 fan-in 或复杂 matching 场景必须表现出可解释的**峰值内存或 CPU 优势**，且无无法接受的其他工作负载回退；不提前承诺所有查询加速几倍。
+- **同条件归因**：存储提速要归给 Footer；window kernel 提速要归给 kernel；只有同 Reader、同 kernel、同预算的 B/C 对比才归给 operator graph。
+- **可推翻决策**：如果 A′/B 已能用明显更少的维护复杂度达到相同语义覆盖和资源曲线，**应该继续选择现有 DataFusion 集成而不强推新 Operator graph**。本 RFC 提议 C，是一个有明确竞争替代方案与评估门槛的架构判断。
+
+### 1.3 目标
 
 - **功能**：可逐步达到 Prometheus PromQL 完整的语法、类型、函数、运算、histogram、subquery、标签、staleness、annotations 语义；支持 standalone 与 distributed，以及正常持续写入的数据。
 - **性能**：保留 Footer/series-major 加速和 #9556 range kernel 的优点；在高 series cardinality 和长 evaluation range 下避免不必要的全部输入网格物化。
 - **维护**：一条清楚的存储正确性边界，一套原生 operator semantics，减少 DataFusion 特殊扩展节点和隐藏条件。
 - **迁移**：功能覆盖与生产验证充分后淘汰旧 PromQL 执行器，不能让 fallback 成为最终架构。
 
-### 1.3 非目标
+### 1.4 非目标
 
 - 本 RFC **不要求立即重做现有 Footer/Postcard 格式或 writer**；其 POC 修复仍由并行任务负责。但本文规定 Footer 的未来接口及性能/兼容性目标，不把现有 float-only、全量物化、无谓词等 POC 限制固化为长期设计。
 - 初始阶段**不重新设计 Mito 的 MVCC、LSM、WAL、memtable、series index**；只是消费其已有可见性能力。
