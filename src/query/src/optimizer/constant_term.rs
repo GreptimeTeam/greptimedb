@@ -18,7 +18,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use arrow::array::BooleanArray;
-use common_base::term_token::term_probes;
+use common_base::term_token::extract_term_probes;
 use common_function::scalars::matches_term::MatchesTermFinder;
 use datafusion::config::ConfigOptions;
 use datafusion::error::Result as DfResult;
@@ -181,7 +181,7 @@ impl PhysicalOptimizerRule for MatchesConstantTermOptimizer {
                                 let finder = MatchesTermFinder::new(term);
 
                                 // Shown in plans to explain fulltext bloom pruning.
-                                let probes = term_probes(term);
+                                let probes = extract_term_probes(term);
 
                                 let expr = PreCompiledMatchesTermExpr {
                                     text: args[0].clone(),

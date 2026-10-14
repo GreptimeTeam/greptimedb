@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 
-use common_base::term_token::like_probes;
+use common_base::term_token::extract_like_probes;
 use datafusion_common::ScalarValue;
 use datafusion_expr::expr::{Like, ScalarFunction};
 use datafusion_expr::{BinaryExpr, Expr, Operator};
@@ -285,7 +285,7 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
         else {
             return None;
         };
-        if like_probes(pattern).is_empty() {
+        if extract_like_probes(pattern).is_empty() {
             return None;
         }
 

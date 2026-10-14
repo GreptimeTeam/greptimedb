@@ -16,21 +16,28 @@
 //!
 //! Bloom pruning is only sound if the index splits text exactly where
 //! `matches_term` sees word boundaries, so both use [`classify_char`], and the
-//! query side derives its probes with [`term_probes`] and [`like_probes`].
+//! query side derives its probes with [`extract_term_probes`] and [`extract_like_probes`].
 
 use std::ops::Range;
 
 use icu_properties::props::Script;
 use icu_properties::{CodePointMapData, CodePointMapDataBorrowed};
 
+/// Classes of characters that decide where `matches_term` sees a word boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CharClass {
+    /// `[0-9A-Za-z]`.
     AsciiWord,
+    /// Characters of the Han script, alphanumeric or not.
     Han,
+    /// Non-ASCII alphanumerics outside the Han script, such as `é` or `д`.
     UnicodeWord,
+    /// Everything else, including `_`.
     Other,
 }
 
+/// Returns the [`CharClass`] of `c`. [`tokenize`] splits text wherever the class
+/// changes and at every [`CharClass::Other`] character.
 pub fn classify_char(c: char) -> CharClass {
     if c.is_ascii_alphanumeric() {
         CharClass::AsciiWord
@@ -46,7 +53,7 @@ pub fn classify_char(c: char) -> CharClass {
 static HAN_SCRIPT_DATA: CodePointMapDataBorrowed<'static, Script> =
     CodePointMapData::<Script>::new();
 
-pub fn is_han(c: char) -> bool {
+fn is_han(c: char) -> bool {
     HAN_SCRIPT_DATA.get(c) == Script::Han
 }
 
@@ -126,7 +133,7 @@ fn push_han_tokens<'a>(run: &'a str, tokens: &mut Vec<&'a str>) {
 
 /// Returns tokens that every text satisfying `matches_term(text, term)` contains,
 /// as produced by [`tokenize`].
-pub fn term_probes(term: &str) -> Vec<String> {
+pub fn extract_term_probes(term: &str) -> Vec<String> {
     // Non-Han terms only match between word boundaries that `tokenize` also
     // splits at, so their edge runs are whole tokens. Han-containing terms match
     // as plain substrings and give no such guarantee at their edges.
@@ -139,7 +146,7 @@ pub fn term_probes(term: &str) -> Vec<String> {
 /// Returns tokens that every text satisfying `text LIKE pattern` contains, as
 /// produced by [`tokenize`]. `\` escapes the next character, following
 /// arrow's `like` kernel; a trailing `\` is a literal backslash.
-pub fn like_probes(pattern: &str) -> Vec<String> {
+pub fn extract_like_probes(pattern: &str) -> Vec<String> {
     let mut probes = Vec::new();
     let mut literal = String::new();
     // The pattern start and end are anchors; a wildcard can stand for word
@@ -228,7 +235,7 @@ mod tests {
             ("x错误y日z", &["错误", "y", "日"]),
         ];
         for (term, expected) in cases {
-            assert_eq!(term_probes(term), expected, "term: {term}");
+            assert_eq!(extract_term_probes(term), expected, "term: {term}");
         }
     }
 
@@ -248,7 +255,7 @@ mod tests {
             ("%错误 x%", &["错误"]),
         ];
         for (pattern, expected) in cases {
-            assert_eq!(like_probes(pattern), expected, "pattern: {pattern}");
+            assert_eq!(extract_like_probes(pattern), expected, "pattern: {pattern}");
         }
     }
 }

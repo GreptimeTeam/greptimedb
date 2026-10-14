@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use common_base::range_read::RangeReader;
-use common_base::term_token::{like_probes, term_probes};
+use common_base::term_token::{extract_like_probes, extract_term_probes};
 use common_telemetry::{tracing, warn};
 use index::bloom_filter::applier::{BloomFilterApplier, InListPredicate};
 use index::bloom_filter::reader::{BloomFilterReadMetrics, BloomFilterReaderImpl};
@@ -520,11 +520,11 @@ impl FulltextIndexApplier {
             .terms
             .iter()
             .filter(|term| !term.col_lowered)
-            .flat_map(|term| term_probes(&term.term));
+            .flat_map(|term| extract_term_probes(&term.term));
         let like_probes = request
             .like_patterns
             .iter()
-            .flat_map(|pattern| like_probes(pattern));
+            .flat_map(|pattern| extract_like_probes(pattern));
 
         let probes = term_probes
             .chain(like_probes)
