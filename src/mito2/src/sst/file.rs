@@ -399,8 +399,9 @@ pub struct ColumnIndexMetadata {
     pub column_id: ColumnId,
     /// List of index types that have been successfully created for this column.
     pub created_indexes: IndexTypes,
-    /// Version of the column's fulltext bloom index, `0` if the column has none or the
-    /// SST was written before the version was recorded.
+    /// Version of the column's fulltext bloom index. `0` means not recorded: the column
+    /// has no bloom index, or its index is the legacy format, which `ssts_index_meta`
+    /// reports as version 1.
     #[serde(skip_serializing_if = "is_zero")]
     pub fulltext_bloom_version: u8,
 }
