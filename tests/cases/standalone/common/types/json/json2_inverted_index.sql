@@ -44,7 +44,7 @@ CREATE TABLE json2_inverted_invalid (
     attrs JSON2 (nested."!__remainder__!".value STRING INVERTED INDEX)
 );
 
--- Invalid index declarations and unsupported paths/types are rejected.
+-- Duplicate and incomplete index declarations are rejected.
 CREATE TABLE json2_inverted_invalid (
     ts TIMESTAMP TIME INDEX,
     attrs JSON2 (message STRING INVERTED INDEX INVERTED INDEX)
@@ -55,6 +55,7 @@ CREATE TABLE json2_inverted_invalid (
     attrs JSON2 (message STRING INVERTED)
 );
 
+-- Array paths and unsupported hint types are rejected.
 CREATE TABLE json2_inverted_invalid (
     ts TIMESTAMP TIME INDEX,
     attrs JSON2 (items[0].name STRING INVERTED INDEX)
@@ -65,6 +66,7 @@ CREATE TABLE json2_inverted_invalid (
     attrs JSON2 (event_time TIMESTAMP INVERTED INDEX)
 );
 
+-- JSON hints support only inverted indexes.
 CREATE TABLE json2_inverted_invalid (
     ts TIMESTAMP TIME INDEX,
     attrs JSON2 (message STRING SKIPPING INDEX)

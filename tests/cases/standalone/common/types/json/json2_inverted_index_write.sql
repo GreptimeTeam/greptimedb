@@ -1,3 +1,4 @@
+-- Flush builds typed JSON indexes, including missing and null values.
 CREATE TABLE json2_index_write (
     ts TIMESTAMP TIME INDEX,
     attrs JSON2 (
@@ -28,6 +29,7 @@ FROM information_schema.ssts_index_meta
 WHERE table_id = (SELECT table_id FROM information_schema.tables WHERE table_name = 'json2_index_write')
 ORDER BY target_type, target_json;
 
+-- Each flushed SST gets its own set of indexes.
 INSERT INTO json2_index_write VALUES
     (5, '{"service.name":"worker","service":{"name":"batch"},"status":500}', 'e');
 
@@ -38,6 +40,7 @@ FROM information_schema.ssts_index_meta
 WHERE table_id = (SELECT table_id FROM information_schema.tables WHERE table_name = 'json2_index_write')
 GROUP BY target_type ORDER BY target_type;
 
+-- Compaction recreates the same targets and preserves all rows.
 ADMIN COMPACT_TABLE('json2_index_write', 'swcs', '86400');
 
 SELECT index_type, target_type, target_json, blob_size > 0 AS has_index_data

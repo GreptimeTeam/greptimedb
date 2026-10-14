@@ -1,3 +1,4 @@
+-- Query indexed JSON paths alongside ordinary columns in flat SSTs.
 CREATE TABLE json2_index_query (
     ts TIMESTAMP TIME INDEX,
     attrs JSON2 (
@@ -20,10 +21,12 @@ INSERT INTO json2_index_query VALUES
 
 ADMIN FLUSH_TABLE('json2_index_query');
 
+-- Nested and literal dotted paths resolve to different targets.
 SELECT ts FROM json2_index_query WHERE attrs.service.name = 'api' ORDER BY ts;
 
 SELECT ts FROM json2_index_query WHERE json_get(attrs, '$."service.name"') = 'api' ORDER BY ts;
 
+-- Integer predicates support equality, reversed ranges, BETWEEN, and IN.
 SELECT ts FROM json2_index_query WHERE attrs.status::BIGINT = 200 ORDER BY ts;
 
 SELECT ts FROM json2_index_query WHERE 400 < attrs.status::BIGINT ORDER BY ts;
@@ -32,10 +35,12 @@ SELECT ts FROM json2_index_query WHERE attrs.status::BIGINT BETWEEN 100 AND 300 
 
 SELECT ts FROM json2_index_query WHERE attrs.status::BIGINT IN (200, 500) ORDER BY ts;
 
+-- OR predicates work within one path and across different paths.
 SELECT ts FROM json2_index_query WHERE attrs.service.name = 'api' OR attrs.service.name = 'worker' ORDER BY ts;
 
 SELECT ts FROM json2_index_query WHERE attrs.service.name = 'api' OR json_get(attrs, '$."service.name"') = 'api' ORDER BY ts;
 
+-- Regex, boolean, floating-point, and unsigned predicates return matching rows.
 SELECT ts FROM json2_index_query WHERE attrs.service.name ~ '^a.*[ip]$' ORDER BY ts;
 
 SELECT ts FROM json2_index_query WHERE attrs.success::BOOLEAN = true ORDER BY ts;
@@ -44,10 +49,13 @@ SELECT ts FROM json2_index_query WHERE attrs.duration::DOUBLE > 2.0 ORDER BY ts;
 
 SELECT ts FROM json2_index_query WHERE attrs.bytes::BIGINT UNSIGNED = 18446744073709551615::BIGINT UNSIGNED ORDER BY ts;
 
+-- Ordinary and JSON index predicates can be combined.
 SELECT ts FROM json2_index_query WHERE ordinary = 'b' AND attrs.status::BIGINT > 400 ORDER BY ts;
 
+-- Missing paths and null roots remain visible to IS NULL.
 SELECT ts FROM json2_index_query WHERE attrs.service.name IS NULL ORDER BY ts;
 
+-- Unindexed hints remain queryable.
 SELECT ts FROM json2_index_query WHERE attrs.unindexed = 'x' ORDER BY ts;
 
 -- Implicit comparison and explicit conversion preserve query results.
@@ -55,7 +63,7 @@ SELECT ts FROM json2_index_query WHERE attrs.status = '200' ORDER BY ts;
 
 SELECT ts FROM json2_index_query WHERE attrs.duration::BIGINT = 1 ORDER BY ts;
 
--- Preserve index pruning counters while normalizing timing and execution details.
+-- String equality prunes all four rows; keep the pruning counter in the plan.
 -- SQLNESS REPLACE "metrics_per_partition":.*("rows_inverted_filtered":\d+).*metrics= "metrics_per_partition":{$1} metrics=
 -- SQLNESS REPLACE "metrics_per_partition":\s*\[.*metrics= "metrics_per_partition":REDACTED metrics=
 -- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
@@ -74,6 +82,7 @@ SELECT ts FROM json2_index_query WHERE attrs.duration::BIGINT = 1 ORDER BY ts;
 -- SQLNESS REPLACE "index_size":\d+ "index_size":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_index_query WHERE attrs.service.name = 'absent';
 
+-- A numeric range prunes all four rows.
 -- SQLNESS REPLACE "metrics_per_partition":.*("rows_inverted_filtered":\d+).*metrics= "metrics_per_partition":{$1} metrics=
 -- SQLNESS REPLACE "metrics_per_partition":\s*\[.*metrics= "metrics_per_partition":REDACTED metrics=
 -- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
@@ -92,6 +101,7 @@ EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_index_query WHERE attrs.service.nam
 -- SQLNESS REPLACE "index_size":\d+ "index_size":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_index_query WHERE attrs.status::BIGINT > 600;
 
+-- A regex predicate prunes all four rows.
 -- SQLNESS REPLACE "metrics_per_partition":.*("rows_inverted_filtered":\d+).*metrics= "metrics_per_partition":{$1} metrics=
 -- SQLNESS REPLACE "metrics_per_partition":\s*\[.*metrics= "metrics_per_partition":REDACTED metrics=
 -- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
@@ -152,6 +162,7 @@ SELECT ts FROM json2_index_query WHERE json_get(attrs, '$.duration', NULL::BIGIN
 -- SQLNESS REPLACE "index_size":\d+ "index_size":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_index_query WHERE json_get(attrs, '$.duration', NULL::BIGINT) > 600;
 
+-- Queries retain correct results after compaction.
 INSERT INTO json2_index_query VALUES (5, '{"service":{"name":"api"},"status":201}', 'a');
 
 ADMIN FLUSH_TABLE('json2_index_query');

@@ -46,6 +46,15 @@ SHOW CREATE TABLE json2_index_evolution;
 |                       | )                                                    |
 +-----------------------+------------------------------------------------------+
 
+-- Two-argument access uses the enabled BIGINT hint for old SSTs.
+SELECT ts, json_get(attrs, '$.value') AS value FROM json2_index_evolution WHERE json_get(attrs, '$.value') = 42 ORDER BY ts;
+
++-------------------------+-------+
+| ts                      | value |
++-------------------------+-------+
+| 1970-01-01T00:00:00.001 | 42    |
++-------------------------+-------+
+
 SELECT ts FROM json2_index_evolution WHERE json_get(attrs, '$.value', NULL::BIGINT) = 42 ORDER BY ts;
 
 +-------------------------+
@@ -66,6 +75,16 @@ ADMIN FLUSH_TABLE('json2_index_evolution');
 | 0                                          |
 +--------------------------------------------+
 
+-- Two-argument access returns matching rows from both old and new SSTs.
+SELECT ts, json_get(attrs, '$.value') AS value FROM json2_index_evolution WHERE json_get(attrs, '$.value') = 42 ORDER BY ts;
+
++-------------------------+-------+
+| ts                      | value |
++-------------------------+-------+
+| 1970-01-01T00:00:00.001 | 42    |
+| 1970-01-01T00:00:00.002 | 42    |
++-------------------------+-------+
+
 SELECT ts FROM json2_index_evolution WHERE json_get(attrs, '$.value', NULL::BIGINT) = 42 ORDER BY ts;
 
 +-------------------------+
@@ -74,6 +93,39 @@ SELECT ts FROM json2_index_evolution WHERE json_get(attrs, '$.value', NULL::BIGI
 | 1970-01-01T00:00:00.001 |
 | 1970-01-01T00:00:00.002 |
 +-------------------------+
+
+-- Only the new SST has a usable BIGINT index; it filters one row.
+-- SQLNESS REPLACE "metrics_per_partition":.*("rows_inverted_filtered":\d+).*metrics= "metrics_per_partition":{$1} metrics=
+-- SQLNESS REPLACE "metrics_per_partition":\s*\[.*metrics= "metrics_per_partition":REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE ,\s"dyn_filters":\s\[.* REDACTED
+-- SQLNESS REPLACE "index_size":\d+ "index_size":REDACTED
+-- SQLNESS REPLACE "files":\s*\[.*\],\s*"flat_format" "files":REDACTED,"flat_format"
+EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_index_evolution WHERE json_get(attrs, '$.value') > 600;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_FilterExec: json_get(attrs@1, $.value, NULL) > 600, projection=[ts@0] metrics=REDACTED_|
+|_|_|_CooperativeExec metrics=REDACTED_|
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":2, "mem_ranges":0, "files":2, "file_ranges":2}, "projection": ["ts", "attrs"], "filters": ["json_get(attrs, Utf8(\"$.value\"), Int64(NULL)) > Int64(600)"], "files":REDACTED,"flat_format":REDACTED, "metrics_per_partition":{"rows_inverted_filtered":1} metrics=REDACTED |
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
 
 -- Changing the hint type must not use old indexes with a different value encoding.
 ALTER TABLE json2_index_evolution MODIFY COLUMN attrs JSON2 (max_auto_expanded_paths = 0, value DOUBLE INVERTED INDEX);
@@ -128,15 +180,200 @@ GROUP BY target_type, target_json ORDER BY target_type, target_json;
 | json_path   | {"json_path":{"column":1,"data_type":{"Int64":{}},"path":["value"]}}   | 1           |
 +-------------+------------------------------------------------------------------------+-------------+
 
-SELECT ts FROM json2_index_evolution WHERE json_get(attrs, '$.value', NULL::DOUBLE) >= 42.0 ORDER BY ts;
+-- The DOUBLE hint matches old integer values and new fractional values.
+SELECT ts, json_get(attrs, '$.value') AS value FROM json2_index_evolution WHERE json_get(attrs, '$.value') = 42.0 ORDER BY ts;
 
-+-------------------------+
-| ts                      |
-+-------------------------+
-| 1970-01-01T00:00:00.001 |
-| 1970-01-01T00:00:00.002 |
-| 1970-01-01T00:00:00.003 |
-+-------------------------+
++-------------------------+-------+
+| ts                      | value |
++-------------------------+-------+
+| 1970-01-01T00:00:00.001 | 42.0  |
+| 1970-01-01T00:00:00.002 | 42.0  |
++-------------------------+-------+
+
+SELECT ts, json_get(attrs, '$.value') AS value FROM json2_index_evolution WHERE json_get(attrs, '$.value') = 42.5 ORDER BY ts;
+
++-------------------------+-------+
+| ts                      | value |
++-------------------------+-------+
+| 1970-01-01T00:00:00.003 | 42.5  |
++-------------------------+-------+
+
+-- Only the new DOUBLE index filters a row; older SSTs fall back to scanning.
+-- SQLNESS REPLACE "metrics_per_partition":.*("rows_inverted_filtered":\d+).*metrics= "metrics_per_partition":{$1} metrics=
+-- SQLNESS REPLACE "metrics_per_partition":\s*\[.*metrics= "metrics_per_partition":REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE ,\s"dyn_filters":\s\[.* REDACTED
+-- SQLNESS REPLACE "index_size":\d+ "index_size":REDACTED
+-- SQLNESS REPLACE "files":\s*\[.*\],\s*"flat_format" "files":REDACTED,"flat_format"
+EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_index_evolution WHERE json_get(attrs, '$.value') = 42.0;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_FilterExec: json_get(attrs@1, $.value, NULL) = 42, projection=[ts@0] metrics=REDACTED_|
+|_|_|_CooperativeExec metrics=REDACTED_|
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":3, "mem_ranges":0, "files":3, "file_ranges":3}, "projection": ["ts", "attrs"], "filters": ["json_get(attrs, Utf8(\"$.value\"), Float64(NULL)) = Float64(42)"], "files":REDACTED,"flat_format":REDACTED, "metrics_per_partition":{"rows_inverted_filtered":1} metrics=REDACTED |
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+-- Restart preserves the altered hint, query results, and index pruning.
+-- SQLNESS ARG restart=true
+SHOW CREATE TABLE json2_index_evolution;
+
++-----------------------+------------------------------------------------------+
+| Table                 | Create Table                                         |
++-----------------------+------------------------------------------------------+
+| json2_index_evolution | CREATE TABLE IF NOT EXISTS "json2_index_evolution" ( |
+|                       |   "ts" TIMESTAMP(3) NOT NULL,                        |
+|                       |   "attrs" JSON2(                                     |
+|                       |     max_auto_expanded_paths = 0,                     |
+|                       |     "value" DOUBLE INVERTED INDEX                    |
+|                       |   ) NULL,                                            |
+|                       |   "ordinary" STRING NULL INVERTED INDEX,             |
+|                       |   TIME INDEX ("ts")                                  |
+|                       | )                                                    |
+|                       |                                                      |
+|                       | ENGINE=mito                                          |
+|                       | WITH(                                                |
+|                       |   append_mode = 'true',                              |
+|                       |   'index.inverted_index.segment_row_count' = '1',    |
+|                       |   sst_format = 'flat'                                |
+|                       | )                                                    |
++-----------------------+------------------------------------------------------+
+
+SELECT ts, json_get(attrs, '$.value') AS value FROM json2_index_evolution WHERE json_get(attrs, '$.value') = 42.0 ORDER BY ts;
+
++-------------------------+-------+
+| ts                      | value |
++-------------------------+-------+
+| 1970-01-01T00:00:00.001 | 42.0  |
+| 1970-01-01T00:00:00.002 | 42.0  |
++-------------------------+-------+
+
+SELECT ts, json_get(attrs, '$.value') AS value FROM json2_index_evolution WHERE json_get(attrs, '$.value') = 42.5 ORDER BY ts;
+
++-------------------------+-------+
+| ts                      | value |
++-------------------------+-------+
+| 1970-01-01T00:00:00.003 | 42.5  |
++-------------------------+-------+
+
+-- SQLNESS REPLACE "metrics_per_partition":.*("rows_inverted_filtered":\d+).*metrics= "metrics_per_partition":{$1} metrics=
+-- SQLNESS REPLACE "metrics_per_partition":\s*\[.*metrics= "metrics_per_partition":REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE ,\s"dyn_filters":\s\[.* REDACTED
+-- SQLNESS REPLACE "index_size":\d+ "index_size":REDACTED
+-- SQLNESS REPLACE "files":\s*\[.*\],\s*"flat_format" "files":REDACTED,"flat_format"
+EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_index_evolution WHERE json_get(attrs, '$.value') = 42.0;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_FilterExec: json_get(attrs@1, $.value, NULL) = 42, projection=[ts@0] metrics=REDACTED_|
+|_|_|_CooperativeExec metrics=REDACTED_|
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":3, "mem_ranges":0, "files":3, "file_ranges":3}, "projection": ["ts", "attrs"], "filters": ["json_get(attrs, Utf8(\"$.value\"), Float64(NULL)) = Float64(42)"], "files":REDACTED,"flat_format":REDACTED, "metrics_per_partition":{"rows_inverted_filtered":1} metrics=REDACTED |
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+-- Compaction replaces old indexes with DOUBLE indexes for all three rows.
+ADMIN COMPACT_TABLE('json2_index_evolution', 'swcs', '86400');
+
++---------------------------------------------------------------+
+| ADMIN COMPACT_TABLE('json2_index_evolution', 'swcs', '86400') |
++---------------------------------------------------------------+
+| 0                                                             |
++---------------------------------------------------------------+
+
+SELECT ts, json_get(attrs, '$.value') AS value FROM json2_index_evolution WHERE json_get(attrs, '$.value') = 42.0 ORDER BY ts;
+
++-------------------------+-------+
+| ts                      | value |
++-------------------------+-------+
+| 1970-01-01T00:00:00.001 | 42.0  |
+| 1970-01-01T00:00:00.002 | 42.0  |
++-------------------------+-------+
+
+SELECT ts, json_get(attrs, '$.value') AS value FROM json2_index_evolution WHERE json_get(attrs, '$.value') = 42.5 ORDER BY ts;
+
++-------------------------+-------+
+| ts                      | value |
++-------------------------+-------+
+| 1970-01-01T00:00:00.003 | 42.5  |
++-------------------------+-------+
+
+SELECT target_type, target_json, COUNT(*) AS index_count
+FROM information_schema.ssts_index_meta
+WHERE table_id = (SELECT table_id FROM information_schema.tables WHERE table_name = 'json2_index_evolution')
+GROUP BY target_type, target_json ORDER BY target_type, target_json;
+
++-------------+------------------------------------------------------------------------+-------------+
+| target_type | target_json                                                            | index_count |
++-------------+------------------------------------------------------------------------+-------------+
+| column      | {"column":2}                                                           | 1           |
+| json_path   | {"json_path":{"column":1,"data_type":{"Float64":{}},"path":["value"]}} | 1           |
++-------------+------------------------------------------------------------------------+-------------+
+
+-- SQLNESS REPLACE "metrics_per_partition":.*("rows_inverted_filtered":\d+).*metrics= "metrics_per_partition":{$1} metrics=
+-- SQLNESS REPLACE "metrics_per_partition":\s*\[.*metrics= "metrics_per_partition":REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE ,\s"dyn_filters":\s\[.* REDACTED
+-- SQLNESS REPLACE "index_size":\d+ "index_size":REDACTED
+-- SQLNESS REPLACE "files":\s*\[.*\],\s*"flat_format" "files":REDACTED,"flat_format"
+EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_index_evolution WHERE json_get(attrs, '$.value') > 600.0;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_FilterExec: json_get(attrs@1, $.value, NULL) > 600, projection=[ts@0] metrics=REDACTED_|
+|_|_|_CooperativeExec metrics=REDACTED_|
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["json_get(attrs, Utf8(\"$.value\"), Float64(NULL)) > Float64(600)"], "files":REDACTED,"flat_format":REDACTED, "metrics_per_partition":{"rows_inverted_filtered":3} metrics=REDACTED |
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
 
 DROP TABLE json2_index_evolution;
 
@@ -221,6 +458,16 @@ ADMIN FLUSH_TABLE('json2_index_schema');
 | 0                                       |
 +-----------------------------------------+
 
+-- Without a hint, two-argument access uses the default string result type.
+SELECT ts, json_get(attrs, '$.value') AS value FROM json2_index_schema WHERE json_get(attrs, '$.value') = '42' ORDER BY ts;
+
++-------------------------+-------+
+| ts                      | value |
++-------------------------+-------+
+| 1970-01-01T00:00:00.001 | 42    |
+| 1970-01-01T00:00:00.003 | 42    |
++-------------------------+-------+
+
 SELECT ts FROM json2_index_schema WHERE json_get(attrs, '$.value', NULL::BIGINT) = 42 ORDER BY ts;
 
 +-------------------------+
@@ -229,6 +476,88 @@ SELECT ts FROM json2_index_schema WHERE json_get(attrs, '$.value', NULL::BIGINT)
 | 1970-01-01T00:00:00.001 |
 | 1970-01-01T00:00:00.003 |
 +-------------------------+
+
+-- Removing the hint disables pruning by the old JSON index.
+-- SQLNESS REPLACE "metrics_per_partition":.*("rows_inverted_filtered":\d+).*metrics= "metrics_per_partition":{$1} metrics=
+-- SQLNESS REPLACE "metrics_per_partition":\s*\[.*metrics= "metrics_per_partition":REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE ,\s"dyn_filters":\s\[.* REDACTED
+-- SQLNESS REPLACE "index_size":\d+ "index_size":REDACTED
+-- SQLNESS REPLACE "files":\s*\[.*\],\s*"flat_format" "files":REDACTED,"flat_format"
+EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_index_schema WHERE json_get(attrs, '$.value') = 'missing';
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_FilterExec: json_get(attrs@1, $.value) = missing, projection=[ts@0] metrics=REDACTED_|
+|_|_|_CooperativeExec metrics=REDACTED_|
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":2, "mem_ranges":0, "files":2, "file_ranges":2}, "projection": ["ts", "attrs"], "filters": ["json_get(attrs, Utf8(\"$.value\")) = Utf8View(\"missing\")"], "files":REDACTED,"flat_format":REDACTED, "metrics_per_partition":REDACTED metrics=REDACTED |
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+-- Compaction after hint removal preserves values and drops the JSON index.
+SELECT ts, json_get(attrs, '$.value') AS value FROM json2_index_schema ORDER BY ts;
+
++-------------------------+-------+
+| ts                      | value |
++-------------------------+-------+
+| 1970-01-01T00:00:00.001 | 42    |
+| 1970-01-01T00:00:00.002 | 7     |
+| 1970-01-01T00:00:00.003 | 42    |
++-------------------------+-------+
+
+ADMIN COMPACT_TABLE('json2_index_schema', 'swcs', '86400');
+
++------------------------------------------------------------+
+| ADMIN COMPACT_TABLE('json2_index_schema', 'swcs', '86400') |
++------------------------------------------------------------+
+| 0                                                          |
++------------------------------------------------------------+
+
+SELECT ts, json_get(attrs, '$.value') AS value FROM json2_index_schema ORDER BY ts;
+
++-------------------------+-------+
+| ts                      | value |
++-------------------------+-------+
+| 1970-01-01T00:00:00.001 | 42    |
+| 1970-01-01T00:00:00.002 | 7     |
+| 1970-01-01T00:00:00.003 | 42    |
++-------------------------+-------+
+
+SELECT ts FROM json2_index_schema WHERE json_get(attrs, '$.value', NULL::BIGINT) = 42 ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.003 |
++-------------------------+
+
+SELECT target_type, target_json, COUNT(*) AS index_count
+FROM information_schema.ssts_index_meta
+WHERE table_id = (SELECT table_id FROM information_schema.tables WHERE table_name = 'json2_index_schema')
+GROUP BY target_type, target_json ORDER BY target_type, target_json;
+
++-------------+--------------+-------------+
+| target_type | target_json  | index_count |
++-------------+--------------+-------------+
+| column      | {"column":2} | 1           |
++-------------+--------------+-------------+
 
 -- SQLNESS REPLACE "metrics_per_partition":.*("rows_inverted_filtered":\d+).*metrics= "metrics_per_partition":{$1} metrics=
 -- SQLNESS REPLACE "metrics_per_partition":\s*\[.*metrics= "metrics_per_partition":REDACTED metrics=
@@ -247,7 +576,127 @@ SELECT ts FROM json2_index_schema WHERE json_get(attrs, '$.value', NULL::BIGINT)
 -- SQLNESS REPLACE ,\s"dyn_filters":\s\[.* REDACTED
 -- SQLNESS REPLACE "index_size":\d+ "index_size":REDACTED
 -- SQLNESS REPLACE "files":\s*\[.*\],\s*"flat_format" "files":REDACTED,"flat_format"
-EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_index_schema WHERE json_get(attrs, '$.value', NULL::BIGINT) > 600;
+EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_index_schema WHERE json_get(attrs, '$.value') = 'missing';
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_FilterExec: json_get(attrs@1, $.value) = missing, projection=[ts@0] metrics=REDACTED_|
+|_|_|_CooperativeExec metrics=REDACTED_|
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["json_get(attrs, Utf8(\"$.value\")) = Utf8View(\"missing\")"], "files":REDACTED,"flat_format":REDACTED, "metrics_per_partition":REDACTED metrics=REDACTED |
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+DROP TABLE json2_index_schema;
+
+Affected Rows: 0
+
+-- Disable only indexing, retaining the BIGINT hint and old physical index.
+CREATE TABLE json2_index_disabled (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2 (max_auto_expanded_paths = 0, value BIGINT INVERTED INDEX),
+    ordinary STRING INVERTED INDEX
+) WITH ('append_mode' = 'true', 'sst_format' = 'flat', 'index.inverted_index.segment_row_count' = '1');
+
+Affected Rows: 0
+
+INSERT INTO json2_index_disabled VALUES (1, '{"value":42}', 'a'), (2, '{"value":7}', 'b');
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('json2_index_disabled');
+
++-------------------------------------------+
+| ADMIN FLUSH_TABLE('json2_index_disabled') |
++-------------------------------------------+
+| 0                                         |
++-------------------------------------------+
+
+ALTER TABLE json2_index_disabled MODIFY COLUMN attrs JSON2 (max_auto_expanded_paths = 0, value BIGINT);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE json2_index_disabled;
+
++----------------------+-----------------------------------------------------+
+| Table                | Create Table                                        |
++----------------------+-----------------------------------------------------+
+| json2_index_disabled | CREATE TABLE IF NOT EXISTS "json2_index_disabled" ( |
+|                      |   "ts" TIMESTAMP(3) NOT NULL,                       |
+|                      |   "attrs" JSON2(                                    |
+|                      |     max_auto_expanded_paths = 0,                    |
+|                      |     "value" BIGINT                                  |
+|                      |   ) NULL,                                           |
+|                      |   "ordinary" STRING NULL INVERTED INDEX,            |
+|                      |   TIME INDEX ("ts")                                 |
+|                      | )                                                   |
+|                      |                                                     |
+|                      | ENGINE=mito                                         |
+|                      | WITH(                                               |
+|                      |   append_mode = 'true',                             |
+|                      |   'index.inverted_index.segment_row_count' = '1',   |
+|                      |   sst_format = 'flat'                               |
+|                      | )                                                   |
++----------------------+-----------------------------------------------------+
+
+INSERT INTO json2_index_disabled VALUES (3, '{"value":42}', 'c');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_index_disabled');
+
++-------------------------------------------+
+| ADMIN FLUSH_TABLE('json2_index_disabled') |
++-------------------------------------------+
+| 0                                         |
++-------------------------------------------+
+
+-- The retained hint still gives two-argument access a numeric result.
+SELECT ts, json_get(attrs, '$.value') + 1 AS value FROM json2_index_disabled WHERE json_get(attrs, '$.value') = 42 ORDER BY ts;
+
++-------------------------+-------+
+| ts                      | value |
++-------------------------+-------+
+| 1970-01-01T00:00:00.001 | 43    |
+| 1970-01-01T00:00:00.003 | 43    |
++-------------------------+-------+
+
+-- Only the old SST retains a physical JSON index.
+SELECT target_type, target_json, COUNT(*) AS index_count
+FROM information_schema.ssts_index_meta
+WHERE table_id = (SELECT table_id FROM information_schema.tables WHERE table_name = 'json2_index_disabled')
+GROUP BY target_type, target_json ORDER BY target_type, target_json;
+
++-------------+----------------------------------------------------------------------+-------------+
+| target_type | target_json                                                          | index_count |
++-------------+----------------------------------------------------------------------+-------------+
+| column      | {"column":2}                                                         | 2           |
+| json_path   | {"json_path":{"column":1,"data_type":{"Int64":{}},"path":["value"]}} | 1           |
++-------------+----------------------------------------------------------------------+-------------+
+
+-- Neither SST uses the disabled JSON index.
+-- SQLNESS REPLACE "metrics_per_partition":.*("rows_inverted_filtered":\d+).*metrics= "metrics_per_partition":{$1} metrics=
+-- SQLNESS REPLACE "metrics_per_partition":\s*\[.*metrics= "metrics_per_partition":REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE ,\s"dyn_filters":\s\[.* REDACTED
+-- SQLNESS REPLACE "index_size":\d+ "index_size":REDACTED
+-- SQLNESS REPLACE "files":\s*\[.*\],\s*"flat_format" "files":REDACTED,"flat_format"
+EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_index_disabled WHERE json_get(attrs, '$.value') > 600;
 
 +-+-+-+
 | stage | node | plan_|
@@ -262,7 +711,7 @@ EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_index_schema WHERE json_get(attrs, 
 |_|_| Total rows: REDACTED_|
 +-+-+-+
 
-DROP TABLE json2_index_schema;
+DROP TABLE json2_index_disabled;
 
 Affected Rows: 0
 

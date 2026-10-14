@@ -1,3 +1,4 @@
+-- Query indexed JSON paths alongside ordinary columns in flat SSTs.
 CREATE TABLE json2_index_query (
     ts TIMESTAMP TIME INDEX,
     attrs JSON2 (
@@ -30,6 +31,7 @@ ADMIN FLUSH_TABLE('json2_index_query');
 | 0                                      |
 +----------------------------------------+
 
+-- Nested and literal dotted paths resolve to different targets.
 SELECT ts FROM json2_index_query WHERE attrs.service.name = 'api' ORDER BY ts;
 
 +-------------------------+
@@ -46,6 +48,7 @@ SELECT ts FROM json2_index_query WHERE json_get(attrs, '$."service.name"') = 'ap
 | 1970-01-01T00:00:00.002 |
 +-------------------------+
 
+-- Integer predicates support equality, reversed ranges, BETWEEN, and IN.
 SELECT ts FROM json2_index_query WHERE attrs.status::BIGINT = 200 ORDER BY ts;
 
 +-------------------------+
@@ -79,6 +82,7 @@ SELECT ts FROM json2_index_query WHERE attrs.status::BIGINT IN (200, 500) ORDER 
 | 1970-01-01T00:00:00.002 |
 +-------------------------+
 
+-- OR predicates work within one path and across different paths.
 SELECT ts FROM json2_index_query WHERE attrs.service.name = 'api' OR attrs.service.name = 'worker' ORDER BY ts;
 
 +-------------------------+
@@ -97,6 +101,7 @@ SELECT ts FROM json2_index_query WHERE attrs.service.name = 'api' OR json_get(at
 | 1970-01-01T00:00:00.002 |
 +-------------------------+
 
+-- Regex, boolean, floating-point, and unsigned predicates return matching rows.
 SELECT ts FROM json2_index_query WHERE attrs.service.name ~ '^a.*[ip]$' ORDER BY ts;
 
 +-------------------------+
@@ -129,6 +134,7 @@ SELECT ts FROM json2_index_query WHERE attrs.bytes::BIGINT UNSIGNED = 1844674407
 | 1970-01-01T00:00:00.001 |
 +-------------------------+
 
+-- Ordinary and JSON index predicates can be combined.
 SELECT ts FROM json2_index_query WHERE ordinary = 'b' AND attrs.status::BIGINT > 400 ORDER BY ts;
 
 +-------------------------+
@@ -137,6 +143,7 @@ SELECT ts FROM json2_index_query WHERE ordinary = 'b' AND attrs.status::BIGINT >
 | 1970-01-01T00:00:00.002 |
 +-------------------------+
 
+-- Missing paths and null roots remain visible to IS NULL.
 SELECT ts FROM json2_index_query WHERE attrs.service.name IS NULL ORDER BY ts;
 
 +-------------------------+
@@ -146,6 +153,7 @@ SELECT ts FROM json2_index_query WHERE attrs.service.name IS NULL ORDER BY ts;
 | 1970-01-01T00:00:00.004 |
 +-------------------------+
 
+-- Unindexed hints remain queryable.
 SELECT ts FROM json2_index_query WHERE attrs.unindexed = 'x' ORDER BY ts;
 
 +-------------------------+
@@ -171,7 +179,7 @@ SELECT ts FROM json2_index_query WHERE attrs.duration::BIGINT = 1 ORDER BY ts;
 | 1970-01-01T00:00:00.001 |
 +-------------------------+
 
--- Preserve index pruning counters while normalizing timing and execution details.
+-- String equality prunes all four rows; keep the pruning counter in the plan.
 -- SQLNESS REPLACE "metrics_per_partition":.*("rows_inverted_filtered":\d+).*metrics= "metrics_per_partition":{$1} metrics=
 -- SQLNESS REPLACE "metrics_per_partition":\s*\[.*metrics= "metrics_per_partition":REDACTED metrics=
 -- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
@@ -203,6 +211,7 @@ EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_index_query WHERE attrs.service.nam
 |_|_| Total rows: REDACTED_|
 +-+-+-+
 
+-- A numeric range prunes all four rows.
 -- SQLNESS REPLACE "metrics_per_partition":.*("rows_inverted_filtered":\d+).*metrics= "metrics_per_partition":{$1} metrics=
 -- SQLNESS REPLACE "metrics_per_partition":\s*\[.*metrics= "metrics_per_partition":REDACTED metrics=
 -- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
@@ -234,6 +243,7 @@ EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_index_query WHERE attrs.status::BIG
 |_|_| Total rows: REDACTED_|
 +-+-+-+
 
+-- A regex predicate prunes all four rows.
 -- SQLNESS REPLACE "metrics_per_partition":.*("rows_inverted_filtered":\d+).*metrics= "metrics_per_partition":{$1} metrics=
 -- SQLNESS REPLACE "metrics_per_partition":\s*\[.*metrics= "metrics_per_partition":REDACTED metrics=
 -- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
@@ -345,6 +355,7 @@ EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_index_query WHERE json_get(attrs, '
 |_|_| Total rows: REDACTED_|
 +-+-+-+
 
+-- Queries retain correct results after compaction.
 INSERT INTO json2_index_query VALUES (5, '{"service":{"name":"api"},"status":201}', 'a');
 
 Affected Rows: 1

@@ -106,7 +106,7 @@ CREATE TABLE json2_inverted_invalid (
 
 Error: 2000(InvalidSyntax), Invalid SQL, error: JSON2 indexed type hint path cannot contain reserved field '!__remainder__!'
 
--- Invalid index declarations and unsupported paths/types are rejected.
+-- Duplicate and incomplete index declarations are rejected.
 CREATE TABLE json2_inverted_invalid (
     ts TIMESTAMP TIME INDEX,
     attrs JSON2 (message STRING INVERTED INDEX INVERTED INDEX)
@@ -121,6 +121,7 @@ CREATE TABLE json2_inverted_invalid (
 
 Error: 2000(InvalidSyntax), Invalid SQL, error: expect INDEX after INVERTED keyword for JSON2 type hint 'message'
 
+-- Array paths and unsupported hint types are rejected.
 CREATE TABLE json2_inverted_invalid (
     ts TIMESTAMP TIME INDEX,
     attrs JSON2 (items[0].name STRING INVERTED INDEX)
@@ -135,6 +136,7 @@ CREATE TABLE json2_inverted_invalid (
 
 Error: 2000(InvalidSyntax), Invalid SQL, error: unsupported JSON2 type hint data type: TIMESTAMP; supported types: STRING, BIGINT, BIGINT UNSIGNED, DOUBLE, BOOLEAN; supported aliases: INT64, UINT64, FLOAT64
 
+-- JSON hints support only inverted indexes.
 CREATE TABLE json2_inverted_invalid (
     ts TIMESTAMP TIME INDEX,
     attrs JSON2 (message STRING SKIPPING INDEX)
