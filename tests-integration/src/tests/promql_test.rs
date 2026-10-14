@@ -1185,15 +1185,15 @@ async fn promql_stale_marker_excludes_series_across_flushes(instance: Arc<dyn Mo
 // ---------------------------------------------------------------------------
 //
 // `scalar()` inside a TQL CTE is planned as `ScalarCalculate`
-// (`src/promql/src/extension_plan/scalar_calculate.rs`). Its execution plan
-// claims `maintains_input_order() == true` even though the node projects its
+// (`src/promql/src/extension_plan/scalar_calculate.rs`). Before this fix, its execution plan
+// claimed `maintains_input_order() == true` even though the node projects its
 // input down to `(time_index, scalar(field))`, so its output column `ts@0` is
-// not the input column `0`. DataFusion's sort push-down maps the sort key by
-// column index, so the SQL-level sort over `scalar()` reads the wrong column:
+// not the input column `0`. DataFusion's sort push-down mapped the sort key by
+// column index, so the SQL-level sort over `scalar()` read the wrong column:
 //
-// * `ORDER BY ts DESC` really sorts by `host` (ordinary Mito table) or by `val`
-//   (metric logical table) and silently returns the wrong row order.
-// * `ORDER BY "scalar(val)" ASC` does not order by the scalar value at all.
+// * `ORDER BY ts DESC` really sorted by `host` (ordinary Mito table) or by `val`
+//   (metric logical table) and silently returned the wrong row order.
+// * `ORDER BY "scalar(val)" ASC` did not order by the scalar value at all.
 // * `LAG(...) OVER (ORDER BY ts DESC)` could not be planned before this fix:
 //   the window needed `ts@0 DESC` while the pushed-down sort provided
 //   `host@0 DESC` / `val@0 DESC`, so planning failed with code 3000.
