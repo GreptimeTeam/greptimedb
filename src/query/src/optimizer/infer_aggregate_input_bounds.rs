@@ -632,6 +632,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nonpositive_thresholds_preserve_zero_match_groups() {
+        let ctx = context();
+        let expected = [
+            "+---+----------+",
+            "| k | endpoint |",
+            "+---+----------+",
+            "|   | 2        |",
+            "| a | 5        |",
+            "| b | 25       |",
+            "| c | 4        |",
+            "+---+----------+",
+        ]
+        .join("\n");
+        for threshold in [">= 0", "> -1"] {
+            let sql = format!(
+                "SELECT k, MIN(v) AS endpoint FROM t GROUP BY k
+                HAVING SUM(CASE WHEN flag AND v < 20 THEN 1 ELSE 0 END) {threshold}
+                ORDER BY k NULLS FIRST"
+            );
+            let original = analyzed(&ctx, &sql).await;
+            let optimized = optimize(original.clone());
+            assert_eq!(original, optimized, "{sql}");
+            assert_eq!(expected, rows(&ctx, optimized).await, "{sql}");
+        }
+    }
+
+    #[tokio::test]
     async fn bound_survives_filter_pushdown_without_being_added_again() {
         let ctx = context();
         let original = analyzed(
