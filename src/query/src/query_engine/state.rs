@@ -67,6 +67,7 @@ use crate::optimizer::count_nest_aggr::CountNestAggrRule;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::enforce_sorting::EnforceSorting;
 use crate::optimizer::global_limit::EnsureGlobalLimitForFetch;
+use crate::optimizer::infer_aggregate_input_bounds::InferAggregateInputBoundsRule;
 use crate::optimizer::json_schema_concretize::JsonSchemaConcretizeRule;
 use crate::optimizer::json_type_concretize::JsonTypeConcretizeRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
@@ -222,6 +223,19 @@ impl QueryEngineState {
         // handled by the parser's blacklist.
 
         let mut optimizer = Optimizer::new();
+        // Constants must be simplified, but CASE arguments must not yet be
+        // hidden by common-subexpression extraction.
+        let filter_pushdown_index = optimizer
+            .rules
+            .iter()
+            .position(|rule| rule.name() == "push_down_filter")
+            .ok_or_else(|| {
+                datafusion_common::internal_datafusion_err!("Missing PushDownFilter rule")
+            })?;
+        optimizer.rules.insert(
+            filter_pushdown_index,
+            Arc::new(InferAggregateInputBoundsRule),
+        );
         optimizer.rules.push(Arc::new(ScanHintRule));
         optimizer.rules.push(Arc::new(JsonTypeConcretizeRule));
 

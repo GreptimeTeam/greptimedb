@@ -1633,6 +1633,43 @@ fn sibling_merge_scans_have_unique_remote_dyn_filter_producer_ids() {
     );
 }
 
+#[tokio::test]
+async fn having_bound_reaches_remote_scan_before_aggregate_splitting() {
+    for pushdown in [FilterPushDownType::Inexact, FilterPushDownType::Exact] {
+        let table = TestTable::table_with_filter_pushdown(0, "t".to_string(), pushdown);
+        let ctx = SessionContext::new();
+        ctx.register_table("t", Arc::new(DfTableProviderAdapter::new(table)))
+            .unwrap();
+        // Both region-local groups and groups requiring coordinator aggregation
+        // must receive the bound before MIN/SUM become state aggregates.
+        for group_by in ["pk1, pk2", "pk3"] {
+            let sql = format!(
+                "SELECT {group_by}, MIN(CAST(ts AS BIGINT)) FROM t GROUP BY {group_by}
+                 HAVING SUM(CASE WHEN number > 0 AND CAST(ts AS BIGINT) >= 10
+                     AND CAST(ts AS BIGINT) < 20 THEN 1 ELSE 0 END) > 0"
+            );
+            let state = ctx.state();
+            let plan = state.create_logical_plan(&sql).await.unwrap();
+            let plan = state
+                .analyzer()
+                .execute_and_check(plan, state.config_options(), |_, _| {})
+                .unwrap();
+            let planned = DistPlannerAnalyzer
+                .analyze(plan, state.config_options())
+                .unwrap();
+            let remote = find_merge_scan_for_table(&planned, "t").unwrap().input();
+            let scan = find_table_scan(remote, "t").unwrap();
+            let bound = datafusion_expr::cast(col("t.ts"), DataType::Int64).lt(lit(20_i64));
+            assert!(scan.filters.contains(&bound), "{planned}");
+            assert!(
+                planned.to_string().contains("> Int64(0)"),
+                "HAVING must remain: {planned}"
+            );
+            assert_remote_table_scan_filters_are_safe(&planned);
+        }
+    }
+}
+
 #[test]
 fn pre_merge_scan_optimizer_eliminates_projected_false_filter() {
     init_default_ut_logging();

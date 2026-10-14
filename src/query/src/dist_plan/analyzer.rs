@@ -53,6 +53,7 @@ use crate::dist_plan::commutativity::{
 use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
 use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
 use crate::metrics::PUSH_DOWN_FALLBACK_ERRORS_TOTAL;
+use crate::optimizer::infer_aggregate_input_bounds::InferAggregateInputBoundsRule;
 use crate::options::ScheduledTimeExtension;
 use crate::plan::ExtractExpr;
 use crate::query_engine::DefaultSerializer;
@@ -222,6 +223,7 @@ fn pre_merge_scan_optimizer() -> Optimizer {
         Arc::new(EliminateFilter::new()),
         Arc::new(PropagateEmptyRelation::new()),
         Arc::new(FilterNullJoinKeys::default()),
+        Arc::new(InferAggregateInputBoundsRule),
         Arc::new(PushDownFilter::new()),
         Arc::new(SimplifyExpressions::new()),
     ])
