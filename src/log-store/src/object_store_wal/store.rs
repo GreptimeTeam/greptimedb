@@ -1216,7 +1216,7 @@ struct Actor {
     /// `enqueued` mode, the unpersisted backlog is at a threshold, and when
     /// it was held back. Later appends wait in their channel.
     stalled: Option<(QueuedAppend, Instant)>,
-    /// Set while the object store refuses the `enqueued` backlog with a
+    /// Set while the object store refuses the `enqueued` backlog with an
     /// error that requires intervention.
     failing: Option<Failing>,
     durable_waiters: Vec<DurableWaiter>,
@@ -1713,9 +1713,9 @@ impl Actor {
         self.settle();
     }
 
-    /// Records the failure of a create the `enqueued` mode repeats. A
-    /// error that requires intervention makes the store failing; while it is, every error
-    /// becomes the one rejected appends carry.
+    /// Records the failure of a create the `enqueued` mode repeats. An error
+    /// that requires intervention makes the store failing; while it is, every
+    /// error becomes the one rejected appends carry.
     fn on_create_failed(&mut self, error: Error) {
         let Some(failing) = &mut self.failing else {
             if requires_intervention(&error) {
@@ -2334,8 +2334,9 @@ fn publish_indexed(catalog: &ObjectCatalog) {
 /// bucket or container. A read that finds nothing is not one: it is what the
 /// read that reconciles a create meets when the object is gone, and a repeat
 /// creates it. Every other error, an HTTP 400 or 5xx, a timeout or a refused
-/// connection, may pass by itself. The store still repeats a create that
-/// failed with such an error, only slowly, see [`Failing`].
+/// connection, may pass by itself. A create that fails with an error
+/// requiring intervention is still repeated, with the backoff [`Failing`]
+/// describes.
 ///
 /// Only the kind of the error decides. Its status cannot: on object storage
 /// the store sits behind OpenDAL's retry layer, which marks every error it
@@ -7081,7 +7082,6 @@ mod tests {
             releases.remove(&object_seq).unwrap().send(false).unwrap();
         }
 
-        // Each attempt is the create of object 1 alone.
         for _ in 0..2 {
             let (object_seq, release) = next_parked_operation(&mut parked).await;
             assert_eq!(1, object_seq);
