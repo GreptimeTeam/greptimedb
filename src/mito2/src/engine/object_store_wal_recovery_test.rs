@@ -1214,9 +1214,9 @@ async fn test_restart_after_a_drop_collects_the_objects_of_the_dropped_region(
         .await
         .unwrap()
         .unwrap();
-    // A drop whose release fails completes and reports the failure, and the
-    // stop creates the record in object 4.
-    assert_eq!(release_fails, dropped.is_err());
+    // A drop whose release fails succeeds all the same, and the stop creates
+    // the record in object 4.
+    dropped.unwrap();
     assert!(!engine.is_region_exists(REGION_A));
     store.allow_creates();
     wait_for_collection(&store).await;

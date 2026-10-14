@@ -521,7 +521,7 @@ impl TestEnv {
     /// Creates a new engine with specific config on an [ObjectStoreLogStore] that
     /// keeps its objects in memory, opened as datanode 0 in the standalone
     /// generation. Returns the store so that a test can drive its testing hooks.
-    pub(crate) async fn create_engine_with_object_store_wal(
+    pub async fn create_engine_with_object_store_wal(
         &mut self,
         config: MitoConfig,
         wal_config: &ObjectStoreWalConfig,

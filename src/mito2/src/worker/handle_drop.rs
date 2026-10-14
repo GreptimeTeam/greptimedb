@@ -129,18 +129,14 @@ where
                 &region.provider,
             )
             .await?;
-        // Makes the release outlive a restart, which never opens the region again. A drop
-        // request for the region is not sent again once it is removed, so a failed release
-        // does not stop the drop: the rest of it completes and the drop reports the failure.
-        // A log store that persists releases keeps the record and writes it with its next
-        // object.
-        let released = self
-            .wal
-            .release_region(region_id, &region.provider)
-            .await
-            .inspect_err(
-                |e| error!(e; "Failed to release the WAL of dropped region {}", region_id),
-            );
+        // Makes the release outlive a restart, which never opens the region again. A failed
+        // release does not fail the drop: a drop request for a removed region is not sent
+        // again, and a caller that drops several regions, such as the metric engine, would
+        // leave the others undone. A log store that persists releases keeps the record and
+        // writes it with its next object.
+        if let Err(e) = self.wal.release_region(region_id, &region.provider).await {
+            error!(e; "Failed to release the WAL of dropped region {}", region_id);
+        }
 
         if let Some(store) = &self.series_index_store {
             crate::series_index::delete_catalogs(store, region_id).await;
@@ -213,7 +209,7 @@ where
             listener.on_later_drop_end(region_id, removed);
         });
 
-        released.map(|()| 0)
+        Ok(0)
     }
 
     /// Cleans runtime state for a region that is no longer available to serve requests.

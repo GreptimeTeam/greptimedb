@@ -171,3 +171,73 @@ impl MetricEngineInner {
         Ok(0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common_wal::config::object_store::ObjectStoreWalConfig;
+    use common_wal::options::{ObjectStoreWalOptions, WAL_OPTIONS_KEY, WalOptions};
+    use log_store::ObjectStoreLogStore;
+    use mito2::config::MitoConfig;
+    use mito2::test_util::TestEnv as MitoTestEnv;
+    use store_api::region_engine::RegionEngine;
+    use store_api::region_request::{RegionDropRequest, RegionRequest};
+    use store_api::storage::RegionId;
+
+    use crate::test_util::TestEnv;
+    use crate::utils::{to_data_region_id, to_metadata_region_id};
+
+    #[tokio::test]
+    async fn test_drop_physical_region_whose_wal_release_fails() {
+        let mut mito_env = MitoTestEnv::with_prefix("metric-drop-failed-release").await;
+        let (mito, wal): (_, Arc<ObjectStoreLogStore>) = mito_env
+            .create_engine_with_object_store_wal(
+                MitoConfig::default(),
+                &ObjectStoreWalConfig::default(),
+            )
+            .await;
+        let env = TestEnv::with_mito_engine(mito_env, mito);
+        let region_id = RegionId::new(1, 1);
+        let wal_options = WalOptions::ObjectStore(ObjectStoreWalOptions::new(
+            "wal/datanodes/0/epochs/0".to_string(),
+        ));
+        env.create_physical_region(
+            region_id,
+            "test_metric_table",
+            vec![(
+                WAL_OPTIONS_KEY.to_string(),
+                serde_json::to_string(&wal_options).unwrap(),
+            )],
+        )
+        .await;
+
+        // The WAL releases of both mito regions fail; the drop still removes
+        // the metadata region and the physical region state.
+        wal.fail_creates();
+        env.metric()
+            .handle_request(
+                region_id,
+                RegionRequest::Drop(RegionDropRequest {
+                    fast_path: false,
+                    force: false,
+                    partial_drop: false,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(!env.mito().is_region_exists(to_data_region_id(region_id)));
+        assert!(
+            !env.mito()
+                .is_region_exists(to_metadata_region_id(region_id))
+        );
+        assert!(
+            !env.metric()
+                .inner
+                .state
+                .read()
+                .unwrap()
+                .exist_physical_region(to_data_region_id(region_id))
+        );
+    }
+}
