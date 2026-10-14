@@ -31,7 +31,7 @@ use index::bloom_filter::reader::BloomFilterReaderImpl;
 use index::external_provider::{ExternalTempFileProvider, Reader, Writer};
 use index::fulltext_index::Config;
 use index::fulltext_index::create::{BloomFilterFulltextIndexCreator, FulltextIndexCreator};
-use index::fulltext_index::tokenizer::{Analyzer, EnglishTokenizer};
+use index::fulltext_index::tokenizer::{Analyzer, ScriptTokenizer};
 use index::inverted_index::create::InvertedIndexCreator;
 use index::inverted_index::create::sort::external_sort::ExternalSorter;
 use index::inverted_index::create::sort_create::SortIndexCreator;
@@ -365,7 +365,7 @@ fn bench_bloom_search(c: &mut Criterion) {
     let mut group = c.benchmark_group("bloom_search");
 
     let lines = service_logs(ROWS * 10);
-    let analyzer = Analyzer::new(Box::new(EnglishTokenizer), false);
+    let analyzer = Analyzer::new(Box::new(ScriptTokenizer), false);
     let blob = rt.block_on(async {
         let mut creator = bloom_creator();
         for line in &lines {

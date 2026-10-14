@@ -160,6 +160,7 @@ impl Indexer {
         };
 
         let column_ids = indexer.column_ids().collect();
+        index_output.fulltext_bloom_columns = indexer.bloom_column_ids().collect();
         let err = match indexer.finish(puffin_writer).await {
             Ok((row_count, byte_count)) => {
                 self.fill_fulltext_index_output(
