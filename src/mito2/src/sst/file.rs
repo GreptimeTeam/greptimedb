@@ -488,6 +488,14 @@ impl FileMeta {
                     })
                     && index.fulltext_bloom_version < FULLTEXT_BLOOM_VERSION
                 {
+                    debug!(
+                        "Fulltext bloom index is outdated, region_id: {}, file_id: {}, column_id: {}, version: {}, current: {}",
+                        self.region_id,
+                        self.file_id,
+                        column.column_id,
+                        index.fulltext_bloom_version,
+                        FULLTEXT_BLOOM_VERSION
+                    );
                     return false;
                 }
                 if column.column_schema.is_skipping_indexed()
