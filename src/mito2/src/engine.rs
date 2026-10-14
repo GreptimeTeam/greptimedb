@@ -241,18 +241,17 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(self.log_store));
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
-        let scan_memory_tracker =
-            QueryMemoryTracker::builder(scan_memory_limit, config.scan_memory_on_exhausted)
-                .on_update(|usage| {
-                    SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
-                })
-                .on_exhausted(|| {
-                    SCAN_MEMORY_EXHAUSTED_TOTAL.inc();
-                })
-                .on_reject(|| {
-                    SCAN_REQUESTS_REJECTED_TOTAL.inc();
-                })
-                .build();
+        let scan_memory_tracker = QueryMemoryTracker::builder(scan_memory_limit)
+            .on_update(|usage| {
+                SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
+            })
+            .on_exhausted(|| {
+                SCAN_MEMORY_EXHAUSTED_TOTAL.inc();
+            })
+            .on_reject(|| {
+                SCAN_REQUESTS_REJECTED_TOTAL.inc();
+            })
+            .build();
 
         let inner = EngineInner {
             workers,
@@ -1616,18 +1615,17 @@ impl MitoEngine {
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(log_store.clone()));
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
-        let scan_memory_tracker =
-            QueryMemoryTracker::builder(scan_memory_limit, config.scan_memory_on_exhausted)
-                .on_update(|usage| {
-                    SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
-                })
-                .on_exhausted(|| {
-                    SCAN_MEMORY_EXHAUSTED_TOTAL.inc();
-                })
-                .on_reject(|| {
-                    SCAN_REQUESTS_REJECTED_TOTAL.inc();
-                })
-                .build();
+        let scan_memory_tracker = QueryMemoryTracker::builder(scan_memory_limit)
+            .on_update(|usage| {
+                SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
+            })
+            .on_exhausted(|| {
+                SCAN_MEMORY_EXHAUSTED_TOTAL.inc();
+            })
+            .on_reject(|| {
+                SCAN_REQUESTS_REJECTED_TOTAL.inc();
+            })
+            .build();
         Ok(MitoEngine {
             inner: Arc::new(EngineInner {
                 workers: WorkerGroup::start_for_test(

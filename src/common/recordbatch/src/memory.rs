@@ -14,7 +14,7 @@
 
 //! Scan memory reservations held for reader lifetimes.
 
-use common_memory_manager::{MemoryGuard, OnExhaustedPolicy};
+use common_memory_manager::MemoryGuard;
 
 use crate::CallbackMemoryMetrics;
 
@@ -27,15 +27,5 @@ pub struct QueryMemoryReservation {
 impl QueryMemoryReservation {
     pub(crate) fn try_acquire_additional(&mut self, bytes: u64) -> bool {
         self.inner.try_acquire_additional(bytes)
-    }
-
-    pub(crate) async fn acquire_additional_with_policy(
-        &mut self,
-        bytes: u64,
-        policy: OnExhaustedPolicy,
-    ) -> common_memory_manager::Result<()> {
-        self.inner
-            .acquire_additional_with_policy(bytes, policy)
-            .await
     }
 }

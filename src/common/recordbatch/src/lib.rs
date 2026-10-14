@@ -22,15 +22,13 @@ pub mod recordbatch;
 pub mod util;
 
 use std::fmt::{self, Write};
-use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use adapter::RecordBatchMetrics;
 use arc_swap::ArcSwapOption;
 use common_base::readable_size::ReadableSize;
-use common_error::ext::BoxedError;
-use common_memory_manager::{MemoryManager, MemoryMetrics, OnExhaustedPolicy, PermitGranularity};
+use common_memory_manager::{MemoryManager, MemoryMetrics, PermitGranularity};
 use common_telemetry::tracing::Span;
 pub use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
 use datatypes::arrow::array::{Array, ArrayRef, AsArray, StringBuilder};
@@ -52,7 +50,7 @@ use error::Result;
 use futures::task::{Context, Poll};
 use futures::{Stream, TryStreamExt};
 pub use recordbatch::RecordBatch;
-use snafu::{IntoError, ResultExt, ensure};
+use snafu::{ResultExt, ensure};
 
 use crate::error::{ArrowComputeSnafu, NewDfRecordBatchSnafu};
 pub use crate::memory::QueryMemoryReservation;
@@ -597,12 +595,12 @@ impl<S: Stream<Item = Result<RecordBatch>> + Unpin> Stream for RecordBatchStream
 
 /// Memory tracker for RecordBatch streams and reader reservations. Clone to share
 /// the same limit across queries. Limited accounting rounds up to KB; unlimited
-/// accounting is byte-exact. DataFusion operators use the separate query runtime pool.
+/// accounting is byte-exact. Exhaustion fails immediately. DataFusion operators use
+/// the separate query runtime pool.
 #[derive(Clone)]
 pub struct QueryMemoryTracker {
     manager: MemoryManager<CallbackMemoryMetrics>,
     metrics: CallbackMemoryMetrics,
-    on_exhausted_policy: OnExhaustedPolicy,
 }
 
 impl fmt::Debug for QueryMemoryTracker {
@@ -610,7 +608,6 @@ impl fmt::Debug for QueryMemoryTracker {
         f.debug_struct("QueryMemoryTracker")
             .field("current", &self.current())
             .field("limit", &self.limit())
-            .field("on_exhausted_policy", &self.on_exhausted_policy)
             .field("on_update", &self.metrics.has_on_update())
             .field("on_exhausted", &self.metrics.has_on_exhausted())
             .field("on_rejected", &self.metrics.has_on_rejected())
@@ -620,13 +617,9 @@ impl fmt::Debug for QueryMemoryTracker {
 
 impl QueryMemoryTracker {
     /// Create a builder for a query memory tracker.
-    pub fn builder(
-        limit: usize,
-        on_exhausted_policy: OnExhaustedPolicy,
-    ) -> QueryMemoryTrackerBuilder {
+    pub fn builder(limit: usize) -> QueryMemoryTrackerBuilder {
         QueryMemoryTrackerBuilder {
             limit,
-            on_exhausted_policy,
             on_update: None,
             on_exhausted: None,
             on_reject: None,
@@ -653,24 +646,13 @@ impl QueryMemoryTracker {
         self.manager.limit_bytes() as usize
     }
 
-    /// Reserves bytes until the returned guard is dropped.
-    pub async fn reserve(&self, bytes: usize) -> Result<QueryMemoryReservation> {
+    /// Reserves bytes until the returned guard is dropped, failing immediately if
+    /// the shared budget cannot accommodate the reservation.
+    pub fn reserve(&self, bytes: usize) -> Result<QueryMemoryReservation> {
         let mut tracker = self.new_stream_tracker();
-        match tracker.try_track(bytes) {
-            Ok(()) => return Ok(tracker.guard),
-            Err(error) if matches!(self.on_exhausted_policy, OnExhaustedPolicy::Fail) => {
-                tracker.inc_rejected();
-                return Err(error);
-            }
-            Err(_) => {}
-        }
-        let result = tracker
-            .guard
-            .acquire_additional_with_policy(bytes as u64, self.on_exhausted_policy)
-            .await;
-        if let Err(error) = result {
+        if let Err(error) = tracker.try_track(bytes) {
             tracker.inc_rejected();
-            return Err(tracker.wait_error(bytes, error));
+            return Err(error);
         }
         Ok(tracker.guard)
     }
@@ -701,7 +683,6 @@ impl QueryMemoryTracker {
 /// Builder for constructing a [`QueryMemoryTracker`] with optional callbacks.
 pub struct QueryMemoryTrackerBuilder {
     limit: usize,
-    on_exhausted_policy: OnExhaustedPolicy,
     on_update: Option<UpdateCallback>,
     on_exhausted: Option<UnitCallback>,
     on_reject: Option<RejectCallback>,
@@ -726,7 +707,6 @@ impl QueryMemoryTrackerBuilder {
     ///
     /// # Note
     /// This is called when the non-blocking allocation fast path fails.
-    /// Requests using `OnExhaustedPolicy::Wait` may still succeed after waiting.
     /// It is never called when `limit == 0` (unlimited mode).
     pub fn on_exhausted<F>(mut self, on_exhausted: F) -> Self
     where
@@ -754,11 +734,7 @@ impl QueryMemoryTrackerBuilder {
             metrics.clone(),
         );
 
-        QueryMemoryTracker {
-            manager,
-            metrics,
-            on_exhausted_policy: self.on_exhausted_policy,
-        }
+        QueryMemoryTracker { manager, metrics }
     }
 }
 
@@ -767,8 +743,6 @@ struct StreamMemoryTracker {
     guard: QueryMemoryReservation,
     tracked_bytes: usize,
 }
-
-type MemoryAcquireResult = std::result::Result<(), common_memory_manager::Error>;
 
 impl StreamMemoryTracker {
     fn inc_rejected(&self) {
@@ -784,50 +758,12 @@ impl StreamMemoryTracker {
         }
     }
 
-    async fn track_with_policy(mut self, additional: usize) -> (Self, MemoryAcquireResult) {
-        let result = self
-            .guard
-            .acquire_additional_with_policy(additional as u64, self.tracker.on_exhausted_policy)
-            .await;
-        if result.is_ok() {
-            self.tracked_bytes = self.tracked_bytes.saturating_add(additional);
-        }
-        (self, result)
-    }
-
     fn reject_error(&self, additional: usize) -> error::Error {
         let current = self.tracker.current();
         self.tracker
             .reject_error(current, additional, self.tracked_bytes)
     }
-
-    fn wait_error(&self, additional: usize, source: common_memory_manager::Error) -> error::Error {
-        match source {
-            common_memory_manager::Error::MemoryLimitExceeded { .. } => {
-                self.reject_error(additional)
-            }
-            common_memory_manager::Error::MemoryAcquireTimeout { waited, .. } => {
-                let current = self.tracker.current();
-                let limit = self.tracker.limit();
-                let msg = format!(
-                    "timed out waiting {:?} for {}, {} used globally ({}%), {} used by this stream, hard limit: {}",
-                    waited,
-                    ReadableSize(additional as u64),
-                    ReadableSize(current as u64),
-                    current.saturating_mul(100).checked_div(limit).unwrap_or(0),
-                    ReadableSize(self.tracked_bytes as u64),
-                    ReadableSize(limit as u64)
-                );
-                error::ExceedMemoryLimitSnafu { msg }.build()
-            }
-            error => error::ExternalSnafu.into_error(BoxedError::new(error)),
-        }
-    }
 }
-
-type PendingTrackFuture = Pin<
-    Box<dyn Future<Output = (StreamMemoryTracker, RecordBatch, usize, MemoryAcquireResult)> + Send>,
->;
 
 #[derive(Clone)]
 struct CallbackMemoryMetrics {
@@ -897,99 +833,24 @@ impl MemoryMetrics for CallbackMemoryMetrics {
 /// A wrapper stream that tracks memory usage of RecordBatches.
 pub struct MemoryTrackedStream {
     inner: SendableRecordBatchStream,
-    tracker: Option<StreamMemoryTracker>,
-    // Waiting stores a batch that has already been pulled from the inner stream but has not yet
-    // acquired additional quota. This keeps `poll_next()` non-blocking and allows bounded waits,
-    // at the cost of temporarily holding one untracked batch per blocked stream in memory.
-    waiting: Option<PendingTrackFuture>,
+    tracker: StreamMemoryTracker,
 }
 
 impl MemoryTrackedStream {
     pub fn new(inner: SendableRecordBatchStream, tracker: QueryMemoryTracker) -> Self {
         Self {
             inner,
-            tracker: Some(tracker.new_stream_tracker()),
-            waiting: None,
+            tracker: tracker.new_stream_tracker(),
         }
     }
 
-    fn ready_tracker_mut(&mut self) -> &mut StreamMemoryTracker {
-        debug_assert!(
-            self.waiting.is_none(),
-            "a ready tracker must not coexist with a waiting future"
-        );
-        self.tracker.as_mut().unwrap()
-    }
-
-    fn enter_waiting(&mut self, batch: RecordBatch, additional: usize) {
-        debug_assert!(
-            self.waiting.is_none(),
-            "enter_waiting should only be called from the ready state"
-        );
-        debug_assert!(
-            self.tracker.is_some(),
-            "enter_waiting requires a tracker in the ready state"
-        );
-        let tracker = self.tracker.take().unwrap();
-        self.waiting = Some(Self::start_waiting(tracker, batch, additional));
-    }
-
-    fn start_waiting(
-        tracker: StreamMemoryTracker,
-        batch: RecordBatch,
-        additional: usize,
-    ) -> PendingTrackFuture {
-        Box::pin(async move {
-            let (tracker, result) = tracker.track_with_policy(additional).await;
-            (tracker, batch, additional, result)
-        })
-    }
-
-    fn poll_waiting(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<RecordBatch>>> {
-        let future = self.waiting.as_mut().unwrap();
-        match future.as_mut().poll(cx) {
-            Poll::Ready((tracker, batch, additional, result)) => {
-                let output = match result {
-                    Ok(()) => Ok(batch),
-                    Err(error) => {
-                        tracker.inc_rejected();
-                        Err(tracker.wait_error(additional, error))
-                    }
-                };
-                self.waiting = None;
-                self.tracker = Some(tracker);
-                Poll::Ready(Some(output))
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    }
-
-    fn poll_batch(
-        &mut self,
-        batch: RecordBatch,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<RecordBatch>>> {
+    fn track_batch(&mut self, batch: RecordBatch) -> Result<RecordBatch> {
         let additional = batch.logical_slice_memory_size();
-        let tracker = self.ready_tracker_mut();
-
-        if let Err(error) = tracker.try_track(additional) {
-            match tracker.tracker.on_exhausted_policy {
-                OnExhaustedPolicy::Fail => {
-                    tracker.inc_rejected();
-                    return Poll::Ready(Some(Err(error)));
-                }
-                // `Wait` is a deliberate tradeoff: the batch has already been materialized, so we
-                // keep it in memory while waiting for quota instead of failing immediately. Under
-                // contention, real memory usage can therefore exceed `scan_memory_limit` by up to
-                // one buffered batch per blocked stream.
-                OnExhaustedPolicy::Wait { .. } => {
-                    self.enter_waiting(batch, additional);
-                    return self.poll_waiting(cx);
-                }
-            }
+        if let Err(error) = self.tracker.try_track(additional) {
+            self.tracker.inc_rejected();
+            return Err(error);
         }
-
-        Poll::Ready(Some(Ok(batch)))
+        Ok(batch)
     }
 }
 
@@ -997,12 +858,8 @@ impl Stream for MemoryTrackedStream {
     type Item = Result<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.waiting.is_some() {
-            return self.poll_waiting(cx);
-        }
-
         match Pin::new(&mut self.inner).poll_next(cx) {
-            Poll::Ready(Some(Ok(batch))) => self.poll_batch(batch, cx),
+            Poll::Ready(Some(Ok(batch))) => Poll::Ready(Some(self.track_batch(batch))),
             Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
@@ -1032,9 +889,8 @@ impl RecordBatchStream for MemoryTrackedStream {
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
 
-    use common_memory_manager::{OnExhaustedPolicy, PermitGranularity};
+    use common_memory_manager::PermitGranularity;
     use datatypes::arrow::array::{
         DictionaryArray, Int32Array, ListArray, StringArray, UInt32Array,
     };
@@ -1046,7 +902,6 @@ mod tests {
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{BooleanVector, Int32Vector, StringVector};
     use futures::StreamExt;
-    use tokio::time::{sleep, timeout};
 
     use super::*;
 
@@ -1067,46 +922,30 @@ mod tests {
             as usize
     }
 
-    #[tokio::test]
-    async fn test_reader_reservation_wait_release_timeout_and_cancellation() {
-        let tracker = QueryMemoryTracker::builder(
-            2048,
-            OnExhaustedPolicy::Wait {
-                timeout: Duration::from_millis(20),
-            },
-        )
-        .build();
-        let first = tracker.reserve(1025).await.unwrap();
+    #[test]
+    fn test_reader_reservation_rejects_and_releases_capacity() {
+        let tracker = QueryMemoryTracker::builder(2048).build();
+        let first = tracker.reserve(1025).unwrap();
         assert_eq!(2048, tracker.current());
-        let mut waiting = Box::pin(tracker.reserve(1));
-        assert!(futures::poll!(&mut waiting).is_pending());
+        assert!(tracker.reserve(1).is_err());
+        assert_eq!(2048, tracker.current());
         drop(first);
-        let guard = waiting.await.unwrap();
-        assert_eq!(1024, tracker.current());
-        assert!(
-            tracker
-                .reserve(1025)
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains("timed out")
-        );
-        assert!(futures::poll!(Box::pin(tracker.reserve(2049))).is_ready());
-        let mut cancelled = Box::pin(tracker.reserve(1025));
-        assert!(futures::poll!(&mut cancelled).is_pending());
-        drop(cancelled);
+        assert_eq!(0, tracker.current());
+
+        assert!(tracker.reserve(2049).is_err());
+        assert_eq!(0, tracker.current());
+        let guard = tracker.reserve(2048).unwrap();
+        assert_eq!(2048, tracker.current());
         drop(guard);
         assert_eq!(0, tracker.current());
-        assert!(tracker.reserve(2048).await.is_ok());
     }
 
     #[tokio::test]
     async fn test_reader_and_batch_reservations_share_scan_budget() {
         let batch = large_string_batch(512);
         let batch_bytes = aligned_tracked_bytes(batch.logical_slice_memory_size());
-        let tracker =
-            QueryMemoryTracker::builder(batch_bytes + 1024, OnExhaustedPolicy::Fail).build();
-        let reader = tracker.reserve(1).await.unwrap();
+        let tracker = QueryMemoryTracker::builder(batch_bytes + 1024).build();
+        let reader = tracker.reserve(1).unwrap();
         let mut stream = MemoryTrackedStream::new(
             RecordBatches::try_new(batch.schema.clone(), vec![batch.clone(), batch])
                 .unwrap()
@@ -1115,14 +954,14 @@ mod tests {
         );
         stream.next().await.unwrap().unwrap();
         assert_eq!(tracker.limit(), tracker.current());
-        assert!(tracker.reserve(1).await.is_err());
+        assert!(tracker.reserve(1).is_err());
         assert!(stream.next().await.unwrap().is_err());
         drop(reader);
         assert_eq!(batch_bytes, tracker.current());
         drop(stream);
         assert_eq!(0, tracker.current());
-        let unlimited = QueryMemoryTracker::builder(0, OnExhaustedPolicy::Fail).build();
-        let guard = unlimited.reserve(17).await.unwrap();
+        let unlimited = QueryMemoryTracker::builder(0).build();
+        let guard = unlimited.reserve(17).unwrap();
         assert_eq!(17, unlimited.current());
         drop(guard);
         assert_eq!(0, unlimited.current());
@@ -1144,7 +983,7 @@ mod tests {
             .unwrap();
         let expected_bytes = aligned_tracked_bytes(batch.logical_slice_memory_size());
         assert!(expected_bytes < aligned_tracked_bytes(batch.buffer_memory_size()));
-        let tracker = QueryMemoryTracker::builder(MB, OnExhaustedPolicy::Fail).build();
+        let tracker = QueryMemoryTracker::builder(MB).build();
         let mut stream = MemoryTrackedStream::new(
             RecordBatches::try_new(batch.schema.clone(), vec![batch])
                 .unwrap()
@@ -1369,8 +1208,7 @@ mod tests {
 
     #[test]
     fn test_query_memory_tracker_basic() {
-        let tracker =
-            Arc::new(QueryMemoryTracker::builder(10 * MB, OnExhaustedPolicy::Fail).build());
+        let tracker = Arc::new(QueryMemoryTracker::builder(10 * MB).build());
 
         let mut stream1 = tracker.new_stream_tracker();
         assert!(stream1.try_track(5 * MB).is_ok());
@@ -1387,8 +1225,7 @@ mod tests {
 
     #[test]
     fn test_query_memory_tracker_shared_global_limit() {
-        let tracker =
-            Arc::new(QueryMemoryTracker::builder(10 * MB, OnExhaustedPolicy::Fail).build());
+        let tracker = Arc::new(QueryMemoryTracker::builder(10 * MB).build());
         let mut stream1 = tracker.new_stream_tracker();
         let mut stream2 = tracker.new_stream_tracker();
 
@@ -1412,8 +1249,7 @@ mod tests {
 
     #[test]
     fn test_query_memory_tracker_hard_limit() {
-        let tracker =
-            Arc::new(QueryMemoryTracker::builder(10 * MB, OnExhaustedPolicy::Fail).build());
+        let tracker = Arc::new(QueryMemoryTracker::builder(10 * MB).build());
         let mut stream = tracker.new_stream_tracker();
 
         assert!(stream.try_track(9 * MB).is_ok());
@@ -1434,7 +1270,7 @@ mod tests {
 
     #[test]
     fn test_query_memory_tracker_unlimited() {
-        let tracker = Arc::new(QueryMemoryTracker::builder(0, OnExhaustedPolicy::Fail).build());
+        let tracker = Arc::new(QueryMemoryTracker::builder(0).build());
         let mut stream = tracker.new_stream_tracker();
 
         assert!(stream.try_track(10 * MB).is_ok());
@@ -1445,8 +1281,7 @@ mod tests {
 
     #[test]
     fn test_query_memory_tracker_rounds_to_kilobytes() {
-        let tracker =
-            Arc::new(QueryMemoryTracker::builder(10 * MB, OnExhaustedPolicy::Fail).build());
+        let tracker = Arc::new(QueryMemoryTracker::builder(10 * MB).build());
         let mut stream = tracker.new_stream_tracker();
 
         assert!(stream.try_track(1_537).is_ok());
@@ -1457,110 +1292,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_memory_tracked_stream_waits_for_capacity() {
+    async fn test_memory_tracked_stream_rejects_immediately() {
         let exhausted = Arc::new(AtomicUsize::new(0));
         let rejected = Arc::new(AtomicUsize::new(0));
         let exhausted_counter = exhausted.clone();
         let rejected_counter = rejected.clone();
-        let tracker = QueryMemoryTracker::builder(
-            MB,
-            OnExhaustedPolicy::Wait {
-                timeout: Duration::from_millis(200),
-            },
-        )
-        .on_exhausted(move || {
-            exhausted_counter.fetch_add(1, Ordering::Relaxed);
-        })
-        .on_reject(move || {
-            rejected_counter.fetch_add(1, Ordering::Relaxed);
-        })
-        .build();
-        let batch = large_string_batch(700 * 1024);
-        let expected_bytes = aligned_tracked_bytes(batch.logical_slice_memory_size());
-
-        let mut stream1 = MemoryTrackedStream::new(
-            RecordBatches::try_new(batch.schema.clone(), vec![batch.clone()])
-                .unwrap()
-                .as_stream(),
-            tracker.clone(),
-        );
-        let first = stream1.next().await.unwrap().unwrap();
-        assert_eq!(first.num_rows(), 1);
-        assert_eq!(tracker.current(), expected_bytes);
-
-        let stream2 = MemoryTrackedStream::new(
-            RecordBatches::try_new(batch.schema.clone(), vec![batch])
-                .unwrap()
-                .as_stream(),
-            tracker.clone(),
-        );
-        let waiter = tokio::spawn(async move {
-            let mut stream2 = stream2;
-            stream2.next().await.unwrap()
-        });
-
-        sleep(Duration::from_millis(50)).await;
-        assert!(!waiter.is_finished());
-
-        drop(stream1);
-        let second = waiter.await.unwrap().unwrap();
-        assert_eq!(second.num_rows(), 1);
-        assert_eq!(exhausted.load(Ordering::Relaxed), 1);
-        assert_eq!(rejected.load(Ordering::Relaxed), 0);
-    }
-
-    #[tokio::test]
-    async fn test_memory_tracked_stream_wait_times_out() {
-        let exhausted = Arc::new(AtomicUsize::new(0));
-        let rejected = Arc::new(AtomicUsize::new(0));
-        let exhausted_counter = exhausted.clone();
-        let rejected_counter = rejected.clone();
-        let tracker = QueryMemoryTracker::builder(
-            MB,
-            OnExhaustedPolicy::Wait {
-                timeout: Duration::from_millis(50),
-            },
-        )
-        .on_exhausted(move || {
-            exhausted_counter.fetch_add(1, Ordering::Relaxed);
-        })
-        .on_reject(move || {
-            rejected_counter.fetch_add(1, Ordering::Relaxed);
-        })
-        .build();
-        let batch = large_string_batch(700 * 1024);
-
-        let mut stream1 = MemoryTrackedStream::new(
-            RecordBatches::try_new(batch.schema.clone(), vec![batch.clone()])
-                .unwrap()
-                .as_stream(),
-            tracker.clone(),
-        );
-        let first = stream1.next().await.unwrap().unwrap();
-        assert_eq!(first.num_rows(), 1);
-
-        let mut stream2 = MemoryTrackedStream::new(
-            RecordBatches::try_new(batch.schema.clone(), vec![batch])
-                .unwrap()
-                .as_stream(),
-            tracker,
-        );
-        let result = timeout(Duration::from_secs(1), stream2.next())
-            .await
-            .unwrap();
-        let error = result.unwrap().unwrap_err();
-        assert!(error.to_string().contains("timed out waiting"));
-        assert_eq!(exhausted.load(Ordering::Relaxed), 1);
-        assert_eq!(rejected.load(Ordering::Relaxed), 1);
-    }
-
-    #[tokio::test]
-    async fn test_memory_tracked_stream_fail_policy_rejects_immediately() {
-        let exhausted = Arc::new(AtomicUsize::new(0));
-        let rejected = Arc::new(AtomicUsize::new(0));
-        let exhausted_counter = exhausted.clone();
-        let rejected_counter = rejected.clone();
-        let tracker = QueryMemoryTracker::builder(MB, OnExhaustedPolicy::Fail)
+        let tracker = QueryMemoryTracker::builder(MB)
             .on_exhausted(move || {
                 exhausted_counter.fetch_add(1, Ordering::Relaxed);
             })
@@ -1585,8 +1322,10 @@ mod tests {
                 .as_stream(),
             tracker,
         );
-        let result = stream2.next().await.unwrap();
-        assert!(result.is_err());
+        assert!(matches!(
+            futures::poll!(stream2.next()),
+            Poll::Ready(Some(Err(_)))
+        ));
         assert_eq!(exhausted.load(Ordering::Relaxed), 1);
         assert_eq!(rejected.load(Ordering::Relaxed), 1);
     }

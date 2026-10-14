@@ -1837,7 +1837,7 @@ async fn check_two_phase_series_scan(
     })
     .await
     .unwrap();
-    let scan_guard = scan_tracker.reserve(scan_tracker.limit()).await.unwrap();
+    let scan_guard = scan_tracker.reserve(scan_tracker.limit()).unwrap();
     let fresh_context = store_api::region_engine::QueryScanContext::default();
     let fresh_pool = Arc::downgrade(&fresh_context.memory_pool);
     let failed = tokio::time::timeout(

@@ -364,7 +364,7 @@ pub fn build_sst_parquet_record_batch_stream(
 
     Ok(async_stream::try_stream! {
         let _reservation = if let Some(tracker) = &fetcher.memory_tracker {
-            Some(tracker.reserve(uncompressed_bytes).await
+            Some(tracker.reserve(uncompressed_bytes)
                 .context(crate::error::RecordBatchSnafu)?)
         } else {
             None
@@ -392,7 +392,6 @@ mod tests {
     async fn test_decoder_memory_projection_lifetime_and_error() {
         use std::sync::Arc;
 
-        use common_memory_manager::OnExhaustedPolicy;
         use datatypes::arrow::array::{Int64Array, StringArray};
         use datatypes::arrow::datatypes::{DataType, Field, Schema};
         use object_store::services::Memory;
@@ -442,7 +441,7 @@ mod tests {
         let projection = ProjectionMask::leaves(metadata.file_metadata().schema_descr(), [0]);
         let metadata =
             ArrowReaderMetadata::try_new(Arc::new(metadata), ArrowReaderOptions::new()).unwrap();
-        let tracker = QueryMemoryTracker::builder(limit, OnExhaustedPolicy::Fail).build();
+        let tracker = QueryMemoryTracker::builder(limit).build();
         let cache = CacheStrategy::EnableAll(Arc::new(
             crate::cache::CacheManager::builder()
                 .page_cache_size(1024 * 1024)
