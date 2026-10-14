@@ -688,12 +688,10 @@ scan_memory_limit = "25%"
 ## with other query operators on the executing node. Neither budget measures total process memory.
 scan_memory_mode = "basic"
 
-## Controls what happens when a scan cannot get memory immediately.
-## "fail" (default) fails fast and is the recommended option for most users.
-## "wait" / "wait(<duration>)" waits for memory to become available. This is mainly
-## for advanced tuning in bursty workloads where temporary contention is common and
-## higher latency is acceptable.
-## "wait" means "wait(10s)", not unlimited waiting.
+## Scan memory exhaustion always fails immediately.
+## Legacy "wait" / "wait(<duration>)" settings are deprecated. They are accepted
+## for upgrade compatibility, but startup logs a warning and treats them as "fail".
+## Change existing wait settings to "fail"; scans no longer wait for quota to free up.
 ## This policy applies only to scan reservations. Series merges use the query pool
 ## and fail immediately when that pool is exhausted.
 scan_memory_on_exhausted = "fail"

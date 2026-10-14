@@ -1669,7 +1669,7 @@ impl ScanInput {
                     let maybe_batch = {
                         tokio::select! {
                             // Cancellation or early completion can drop the receiver while
-                            // we wait for a permit, scan memory, or I/O. Exit and drop the
+                            // we wait for a permit or I/O. Exit and drop the
                             // input to release its reservations without waiting for a batch.
                             _ = sender.closed() => break,
                             batch = async {

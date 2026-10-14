@@ -1515,6 +1515,9 @@ async fn check_two_phase_series_scan(
     let engine = env
         .create_engine(MitoConfig {
             scan_memory_mode,
+            scan_memory_on_exhausted: common_memory_manager::OnExhaustedPolicy::Wait {
+                timeout: std::time::Duration::from_secs(30),
+            },
             experimental_series_scan_v2: true,
             experimental_enable_series_index: true,
             experimental_enable_range_index: enable_range_index,
@@ -1836,15 +1839,32 @@ async fn check_two_phase_series_scan(
     .unwrap();
     let scan_guard = scan_tracker.reserve(scan_tracker.limit()).await.unwrap();
     let fresh_context = store_api::region_engine::QueryScanContext::default();
-    let failed = try_join_all((0..3).map(|partition| {
-        let stream = scanner
-            .scan_partition(&fresh_context, &metrics_set, partition)
-            .unwrap();
-        async move { stream.try_collect::<Vec<_>>().await }
-    }))
-    .await;
+    let fresh_pool = Arc::downgrade(&fresh_context.memory_pool);
+    let failed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        try_join_all((0..3).map(|partition| {
+            let stream = scanner
+                .scan_partition(&fresh_context, &metrics_set, partition)
+                .unwrap();
+            async move { stream.try_collect::<Vec<_>>().await }
+        })),
+    )
+    .await
+    .expect("legacy wait policy must fail immediately on scan memory exhaustion");
     assert!(failed.is_err());
+    drop(fresh_context);
+    // Keep the external quota occupied while failure tears down the distributor
+    // and readers. Cleanup must not depend on quota becoming available.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while fresh_pool.upgrade().is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(scan_tracker.limit(), scan_tracker.current());
     drop(scan_guard);
+    assert_eq!(0, scan_tracker.current());
 
     // Keep the previous execution's pool exhausted while replay uses a fresh pool.
     other.try_grow(1024 * 1024).unwrap();

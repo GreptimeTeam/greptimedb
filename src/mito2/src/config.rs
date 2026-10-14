@@ -66,7 +66,7 @@ pub enum ScanMemoryMode {
 pub(crate) const FETCH_OPTION_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Configuration for [MitoEngine](crate::engine::MitoEngine).
-/// Before using the config, make sure to call `MitoConfig::validate()` to check if the config is valid.
+/// Before using the config, call [`MitoConfig::sanitize()`] to validate and normalize it.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(default)]
 pub struct MitoConfig {
@@ -194,10 +194,9 @@ pub struct MitoConfig {
     /// extended also counts cumulative streamed batches. Limited reservations round up to KB.
     /// Internal series merges use the query runtime pool in both modes.
     pub scan_memory_mode: ScanMemoryMode,
-    /// Behavior when scan memory tracking cannot acquire memory from the budget.
-    /// `wait` means `wait(10s)`, not unlimited waiting.
-    /// Defaults to [`OnExhaustedPolicy::Fail`], which intentionally differs from
-    /// [`OnExhaustedPolicy::default()`].
+    /// Scan memory exhaustion always fails immediately (default: `fail`).
+    /// Legacy `wait` and `wait(<duration>)` values are accepted but deprecated:
+    /// sanitization warns and replaces them with [`OnExhaustedPolicy::Fail`].
     pub scan_memory_on_exhausted: OnExhaustedPolicy,
 
     /// Index configs.
@@ -298,6 +297,18 @@ impl MitoConfig {
     ///
     /// Returns an error if there is a configuration that unable to sanitize.
     pub fn sanitize(&mut self, data_home: &str) -> Result<()> {
+        if matches!(
+            self.scan_memory_on_exhausted,
+            OnExhaustedPolicy::Wait { .. }
+        ) {
+            warn!(
+                "scan_memory_on_exhausted = {:?} is deprecated and is treated as fail; \
+                 scan memory exhaustion now fails immediately. Set scan_memory_on_exhausted = \"fail\"",
+                self.scan_memory_on_exhausted
+            );
+            self.scan_memory_on_exhausted = OnExhaustedPolicy::Fail;
+        }
+
         if self.experimental_enable_series_index {
             snafu::ensure!(
                 self.experimental_series_index_max_size.as_bytes() >= 1024,
@@ -435,6 +446,39 @@ impl MitoConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_scan_memory_policy_upgrade() {
+        for policy in [
+            None,
+            Some("fail"),
+            Some("skip"),
+            Some("wait"),
+            Some("wait(30s)"),
+        ] {
+            let input = policy
+                .map(|policy| format!("scan_memory_on_exhausted = {policy:?}"))
+                .unwrap_or_default();
+            let mut config: MitoConfig = toml::from_str(&input).unwrap();
+            let compaction_policy = config.experimental_compaction_on_exhausted;
+            config.sanitize("/data").unwrap();
+            assert_eq!(OnExhaustedPolicy::Fail, config.scan_memory_on_exhausted);
+            assert_eq!(
+                compaction_policy,
+                config.experimental_compaction_on_exhausted
+            );
+            let serialized = toml::to_string(&config).unwrap();
+            assert!(serialized.contains("scan_memory_on_exhausted = \"fail\""));
+            config.sanitize("/data").unwrap();
+            assert_eq!(serialized, toml::to_string(&config).unwrap());
+        }
+        for policy in ["unknown", "wait(invalid)", "wait()"] {
+            assert!(
+                toml::from_str::<MitoConfig>(&format!("scan_memory_on_exhausted = {policy:?}"))
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn test_default_auto_flush_interval() {
