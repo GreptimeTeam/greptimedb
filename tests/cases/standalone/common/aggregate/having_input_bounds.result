@@ -49,6 +49,44 @@ LIMIT 20;
 | a        | 5           |
 +----------+-------------+
 
+-- Pin the optimization itself: the remote scan has only the inferred time upper
+-- bound, while HAVING stays above aggregation. Result equality alone cannot prove this.
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
+-- SQLNESS REPLACE (MergeScanExec:.*) MergeScanExec: REDACTED
+EXPLAIN SELECT trace_id, MIN(CAST(ts AS BIGINT)) AS trace_start
+FROM having_input_bounds
+GROUP BY trace_id
+HAVING SUM(CASE WHEN service_name = 'cart' AND span_name = 'GetCart'
+    AND CAST(ts AS BIGINT) >= 10 AND CAST(ts AS BIGINT) < 20 THEN 1 ELSE 0 END) > 0
+ORDER BY trace_start, trace_id
+LIMIT 20;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Sort: trace_start ASC NULLS LAST, having_input_bounds.trace_id ASC NULLS LAST, fetch=20_|
+|_|_Projection: having_input_bounds.trace_id, min(having_input_bounds.ts) AS trace_start_|
+|_|_Filter: sum(CASE WHEN having_input_bounds.service_name = Utf8("cart") AND having_input_bounds.span_name = Utf8("GetCart") AND having_input_bounds.ts >= Int64(10) AND having_input_bounds.ts < Int64(20) THEN Int64(1) ELSE Int64(0) END) > Int64(0)_|
+|_|_Aggregate: groupBy=[[having_input_bounds.trace_id]], aggr=[[__min_merge(__min_state(having_input_bounds.ts)) AS min(having_input_bounds.ts), __sum_merge(__sum_state(CASE WHEN having_input_bounds.service_name = Utf8("cart") AND having_input_bounds.span_name = Utf8("GetCart") AND having_input_bounds.ts >= Int64(10) AND having_input_bounds.ts < Int64(20) THEN Int64(1) ELSE Int64(0) END)) AS sum(CASE WHEN having_input_bounds.service_name = Utf8("cart") AND having_input_bounds.span_name = Utf8("GetCart") AND having_input_bounds.ts >= Int64(10) AND having_input_bounds.ts < Int64(20) THEN Int64(1) ELSE Int64(0) END)]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[having_input_bounds.trace_id]], aggr=[[__min_state(CAST(having_input_bounds.ts AS Int64)), __sum_state(CASE WHEN having_input_bounds.service_name = CAST(Utf8("cart") AS Dictionary(UInt32, Utf8)) AND having_input_bounds.span_name = Utf8("GetCart") AND CAST(having_input_bounds.ts AS Int64) >= Int64(10) AND CAST(having_input_bounds.ts AS Int64) < Int64(20) THEN Int64(1) ELSE Int64(0) END)]]_|
+|_|_Filter: CAST(having_input_bounds.ts AS Int64) < Int64(20)_|
+|_|_TableScan: having_input_bounds, partial_filters=[CAST(having_input_bounds.ts AS Int64) < Int64(20)]_|
+|_| ]]_|
+| physical_plan | SortPreservingMergeExec: [trace_start@1 ASC NULLS LAST, trace_id@0 ASC NULLS LAST], fetch=20_|
+|_|_SortExec: TopK(fetch=20), expr=[trace_start@1 ASC NULLS LAST, trace_id@0 ASC NULLS LAST], preserve_partitioning=[true]_|
+|_|_ProjectionExec: expr=[trace_id@0 as trace_id, min(having_input_bounds.ts)@1 as trace_start]_|
+|_|_FilterExec: sum(CASE WHEN having_input_bounds.service_name = Utf8("cart") AND having_input_bounds.span_name = Utf8("GetCart") AND having_input_bounds.ts >= Int64(10) AND having_input_bounds.ts < Int64(20) THEN Int64(1) ELSE Int64(0) END)@2 > 0, projection=[trace_id@0, min(having_input_bounds.ts)@1]_|
+|_|_AggregateExec: mode=FinalPartitioned, gby=[trace_id@0 as trace_id], aggr=[__min_merge(__min_state(having_input_bounds.ts)) as min(having_input_bounds.ts), __sum_merge(__sum_state(CASE WHEN having_input_bounds.service_name = Utf8("cart") AND having_input_bounds.span_name = Utf8("GetCart") AND having_input_bounds.ts >= Int64(10) AND having_input_bounds.ts < Int64(20) THEN Int64(1) ELSE Int64(0) END)) as sum(CASE WHEN having_input_bounds.service_name = Utf8("cart") AND having_input_bounds.span_name = Utf8("GetCart") AND having_input_bounds.ts >= Int64(10) AND having_input_bounds.ts < Int64(20) THEN Int64(1) ELSE Int64(0) END)] |
+|_|_RepartitionExec: REDACTED
+|_|_AggregateExec: mode=Partial, gby=[trace_id@0 as trace_id], aggr=[__min_merge(__min_state(having_input_bounds.ts)) as min(having_input_bounds.ts), __sum_merge(__sum_state(CASE WHEN having_input_bounds.service_name = Utf8("cart") AND having_input_bounds.span_name = Utf8("GetCart") AND having_input_bounds.ts >= Int64(10) AND having_input_bounds.ts < Int64(20) THEN Int64(1) ELSE Int64(0) END)) as sum(CASE WHEN having_input_bounds.service_name = Utf8("cart") AND having_input_bounds.span_name = Utf8("GetCart") AND having_input_bounds.ts >= Int64(10) AND having_input_bounds.ts < Int64(20) THEN Int64(1) ELSE Int64(0) END)]_|
+|_|_RepartitionExec: REDACTED
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
 -- T03 shape: a span attribute is part of the existence condition, not an input filter.
 SELECT trace_id, MIN(CAST(ts AS BIGINT)) AS trace_start
 FROM having_input_bounds

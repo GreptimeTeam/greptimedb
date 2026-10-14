@@ -38,6 +38,20 @@ HAVING SUM(CASE WHEN service_name = 'cart' AND span_name = 'GetCart'
 ORDER BY trace_start, trace_id
 LIMIT 20;
 
+-- Pin the optimization itself: the remote scan has only the inferred time upper
+-- bound, while HAVING stays above aggregation. Result equality alone cannot prove this.
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
+-- SQLNESS REPLACE (MergeScanExec:.*) MergeScanExec: REDACTED
+EXPLAIN SELECT trace_id, MIN(CAST(ts AS BIGINT)) AS trace_start
+FROM having_input_bounds
+GROUP BY trace_id
+HAVING SUM(CASE WHEN service_name = 'cart' AND span_name = 'GetCart'
+    AND CAST(ts AS BIGINT) >= 10 AND CAST(ts AS BIGINT) < 20 THEN 1 ELSE 0 END) > 0
+ORDER BY trace_start, trace_id
+LIMIT 20;
+
 -- T03 shape: a span attribute is part of the existence condition, not an input filter.
 SELECT trace_id, MIN(CAST(ts AS BIGINT)) AS trace_start
 FROM having_input_bounds
