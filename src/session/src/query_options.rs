@@ -60,7 +60,7 @@ pub fn parse_query_option(
                 return InvalidConfigValueSnafu {
                     name: key,
                     value,
-                    hint: "query.parallelism must be between 1 and 1024",
+                    hint: format!("query.parallelism must be between 1 and {max_parallelism}"),
                 }
                 .fail();
             }

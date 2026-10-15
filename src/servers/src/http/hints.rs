@@ -20,6 +20,7 @@ use common_telemetry::debug;
 use session::context::QueryContext;
 use session::hints::is_reserved_extension_key;
 
+use crate::error::{InvalidParameterSnafu, Result};
 use crate::hint_headers;
 
 pub async fn extract_hints(mut request: Request<Body>, next: Next) -> Response {
@@ -31,8 +32,10 @@ pub async fn extract_hints(mut request: Request<Body>, next: Next) -> Response {
         Ok(hints) => hints,
         Err(error) => return error.into_response(),
     };
-    if let Some(query_ctx) = request.extensions_mut().get_mut::<QueryContext>() {
-        apply_hints(query_ctx, hints, dedicated_read_preference);
+    if let Some(query_ctx) = request.extensions_mut().get_mut::<QueryContext>()
+        && let Err(error) = apply_hints(query_ctx, hints, dedicated_read_preference)
+    {
+        return error.into_response();
     }
     next.run(request).await
 }
@@ -41,7 +44,7 @@ fn apply_hints(
     query_ctx: &mut QueryContext,
     hints: Vec<(String, String)>,
     dedicated_read_preference: bool,
-) {
+) -> Result<()> {
     for (key, value) in hints {
         if is_reserved_extension_key(&key) {
             debug!(
@@ -51,15 +54,20 @@ fn apply_hints(
             continue;
         }
         if key.eq_ignore_ascii_case(session::hints::READ_PREFERENCE_HINT) {
-            if !dedicated_read_preference
-                && let Ok(preference) = value.parse::<session::ReadPreference>()
-            {
+            if !dedicated_read_preference {
+                let preference = value.parse::<session::ReadPreference>().map_err(|_| {
+                    InvalidParameterSnafu {
+                        reason: format!("Invalid read_preference hint: {value}"),
+                    }
+                    .build()
+                })?;
                 query_ctx.set_read_preference(preference);
             }
         } else {
             query_ctx.set_extension(key, value);
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -153,7 +161,8 @@ mod tests {
                 ("ttl".to_string(), "7d".to_string()),
             ],
             false,
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             query_ctx.remote_query_id(),
