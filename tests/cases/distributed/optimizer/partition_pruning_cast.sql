@@ -43,5 +43,31 @@ FROM partition_pruning_cast_control
 WHERE CAST(k AS BIGINT) = 1
 ORDER BY k;
 
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE SELECT k, v
+FROM partition_pruning_cast_partitioned
+WHERE k >= 1.25::FLOAT AND k < 2.5::FLOAT;
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+EXPLAIN ANALYZE SELECT k, v
+FROM partition_pruning_cast_partitioned
+WHERE k >= 1.25::FLOAT AND k < 2.5::FLOAT AND CAST(v AS INT) IS NOT NULL;
+SELECT k, v FROM partition_pruning_cast_partitioned
+WHERE k >= 1.25::FLOAT AND k < 2.5::FLOAT AND CAST(v AS INT) IS NOT NULL;
+
+SELECT k FROM partition_pruning_cast_partitioned
+WHERE k = 1.0 OR CAST(k AS BIGINT) = 1 ORDER BY k;
+
 DROP TABLE partition_pruning_cast_partitioned;
 DROP TABLE partition_pruning_cast_control;
