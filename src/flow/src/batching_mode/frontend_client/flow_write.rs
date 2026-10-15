@@ -548,9 +548,9 @@ mod tests {
             request: Request,
             ctx: QueryContextRef,
         ) -> Result<Output, BoxedError> {
-            let encoded = ctx.extensions().get(COMMAND_KEY).unwrap();
+            let encoded = ctx.extensions().get(COMMAND_KEY).cloned().unwrap();
             assert_empty_sql(&request);
-            match Command::decode(encoded).unwrap() {
+            match Command::decode(&encoded).unwrap() {
                 Command::Open { .. } => {
                     self.opens.fetch_add(1, Ordering::SeqCst);
                     if self.reject_open {
@@ -647,8 +647,8 @@ mod tests {
             request: Request,
             ctx: QueryContextRef,
         ) -> Result<Output, BoxedError> {
-            let encoded = ctx.extensions().get(COMMAND_KEY).unwrap();
-            match Command::decode(encoded).unwrap() {
+            let encoded = ctx.extensions().get(COMMAND_KEY).cloned().unwrap();
+            match Command::decode(&encoded).unwrap() {
                 Command::Open { nonce } => {
                     assert_empty_sql(&request);
                     self.opens.fetch_add(1, Ordering::SeqCst);
