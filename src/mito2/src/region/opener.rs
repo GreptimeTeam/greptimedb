@@ -388,6 +388,11 @@ impl RegionOpener {
         };
         ensure_json2_not_use_time_series_memtable(&metadata, &options)?;
         options.validate_column_compression(&metadata)?;
+        // The region's WAL history starts in this log store, so reopening
+        // the region on it passes the history check without any entry. It is
+        // recorded before the manifest exists: a log store that gave up its
+        // history meanwhile fails the create before it leaves a manifest.
+        wal.start_region_history(region_id, &provider)?;
         // Create a manifest manager for this region and writes regions to the manifest file.
         let mut region_manifest_options =
             RegionManifestOptions::new(config, &region_dir, &object_store);
@@ -410,9 +415,6 @@ impl RegionOpener {
             &self.stats,
         )
         .await?;
-        // The region's WAL history starts in this log store, so reopening
-        // the region on it passes the history check without any entry.
-        wal.start_region_history(region_id, &provider)?;
 
         let memtable_builder = self.memtable_builder_provider.builder_for_options(&options);
         let part_duration = options.compaction.time_window();

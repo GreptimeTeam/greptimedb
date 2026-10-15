@@ -814,6 +814,53 @@ async fn test_open_on_an_empty_prefix_requires_accepting_the_missing_history() {
 }
 
 #[tokio::test]
+async fn test_create_after_a_withdrawal_leaves_no_manifest() {
+    let mut env = TestEnv::with_prefix("object-store-wal-create-after-withdrawal").await;
+    let store = open_store(&memory_store(), AckMode::Durable).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (table_dir_a, _) = create_region(&engine, REGION_A, &[]).await;
+    engine.stop().await.unwrap();
+    drop(engine);
+    drop(store);
+
+    // On a new location the refused open of region A gives up the start
+    // object, and a create of region B after it fails before it writes a
+    // manifest.
+    let new_location = memory_store();
+    let store = open_store(&new_location, AckMode::Durable).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    open_region(&engine, REGION_A, &table_dir_a, &[])
+        .await
+        .unwrap_err();
+    let request = CreateRequestBuilder::new()
+        .insert_option(WAL_OPTIONS_KEY, &wal_options()[WAL_OPTIONS_KEY])
+        .build();
+    let err = engine
+        .handle_request(REGION_B, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("gave up its start object"),
+        "unexpected error: {err:?}"
+    );
+    assert!(!engine.is_region_exists(REGION_B));
+    engine.stop().await.unwrap();
+    drop(engine);
+    drop(store);
+
+    // The next start creates region B, which a manifest left behind would
+    // have turned into an existing region without its history.
+    let store = open_store(&new_location, AckMode::Durable).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    engine
+        .handle_request(REGION_B, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    assert!(engine.is_region_exists(REGION_B));
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn test_reopen_a_region_created_on_an_empty_prefix_without_writes() {
     let mut env = TestEnv::with_prefix("object-store-wal-created-region").await;
     let store = open_store(&memory_store(), AckMode::Durable).await;
