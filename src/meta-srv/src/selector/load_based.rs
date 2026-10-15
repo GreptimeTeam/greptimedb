@@ -14,13 +14,14 @@
 
 use std::collections::HashMap;
 
+use common_meta::affinity::AffinityFallback;
 use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue};
 use common_meta::peer::Peer;
 use common_telemetry::debug;
 use snafu::ResultExt;
 
 use crate::cluster::MetaPeerClientRef;
-use crate::error::{ListActiveDatanodesSnafu, Result};
+use crate::error::{self, ListActiveDatanodesSnafu, Result};
 use crate::metasrv::SelectorContext;
 use crate::selector::common::{choose_items, filter_out_excluded_peers};
 use crate::selector::weight_compute::WeightCompute;
@@ -41,15 +42,15 @@ impl<C> LoadBasedSelector<C> {
     }
 }
 
-#[async_trait::async_trait]
-impl<C> Selector for LoadBasedSelector<C>
+impl<C> LoadBasedSelector<C>
 where
     C: WeightCompute<Source = HashMap<DatanodeStatKey, DatanodeStatValue>>,
 {
-    type Context = SelectorContext;
-    type Output = Vec<Peer>;
-
-    async fn select(&self, ctx: &Self::Context, opts: SelectorOptions) -> Result<Self::Output> {
+    async fn select_once(
+        &self,
+        ctx: &SelectorContext,
+        opts: &SelectorOptions,
+    ) -> Result<Vec<Peer>> {
         // 1. get alive datanodes.
         let alive_datanodes = ctx
             .peer_discovery
@@ -57,6 +58,11 @@ where
             .await
             .context(ListActiveDatanodesSnafu)?
             .into_iter()
+            .filter(|node| {
+                opts.affinity
+                    .as_ref()
+                    .is_none_or(|requirements| ctx.affinity.matches(requirements, node))
+            })
             .map(|node| node.peer)
             .collect::<Vec<_>>();
 
@@ -77,7 +83,7 @@ where
         filter_out_excluded_peers(&mut weight_array, &opts.exclude_peer_ids);
         // 5. choose peers by weight_array.
         let mut weighted_choose = RandomWeightedChoose::new(weight_array);
-        let selected = choose_items(&opts, &mut weighted_choose)?;
+        let selected = choose_items(opts, &mut weighted_choose)?;
 
         debug!(
             "LoadBasedSelector select peers: {:?}, opts: {:?}.",
@@ -85,6 +91,32 @@ where
         );
 
         Ok(selected)
+    }
+}
+
+#[async_trait::async_trait]
+impl<C> Selector for LoadBasedSelector<C>
+where
+    C: WeightCompute<Source = HashMap<DatanodeStatKey, DatanodeStatValue>>,
+{
+    type Context = SelectorContext;
+    type Output = Vec<Peer>;
+
+    async fn select(&self, ctx: &Self::Context, mut opts: SelectorOptions) -> Result<Self::Output> {
+        match self.select_once(ctx, &opts).await {
+            Err(error::Error::NoEnoughAvailableNode {
+                required,
+                available,
+                ..
+            }) if opts.affinity.is_some()
+                && ctx.affinity_fallback == AffinityFallback::Unconstrained
+                && available < required =>
+            {
+                opts.affinity = None;
+                self.select_once(ctx, &opts).await
+            }
+            result => result,
+        }
     }
 }
 

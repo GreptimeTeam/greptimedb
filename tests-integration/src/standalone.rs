@@ -293,6 +293,8 @@ impl GreptimeDbStandaloneBuilder {
         let repartition_procedure_factory = Arc::new(StandaloneRepartitionProcedureFactory);
         let ddl_manager = Arc::new(DdlManager::new(
             DdlContext {
+                affinity_resolver: None,
+                peer_alloc_context_provider: None,
                 node_manager: node_manager.clone(),
                 cache_invalidator: cache_registry.clone(),
                 memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),

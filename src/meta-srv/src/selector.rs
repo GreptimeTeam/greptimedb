@@ -20,9 +20,10 @@ pub mod round_robin;
 pub(crate) mod test_utils;
 pub mod weight_compute;
 pub mod weighted_choose;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
+use common_meta::affinity::AffinityRequirements;
 use serde::{Deserialize, Serialize};
 use store_api::storage::RegionId;
 use strum::AsRefStr;
@@ -56,8 +57,10 @@ pub trait RegionStatAwareSelector: Send + Sync {
     ) -> Result<Self::Output>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SelectorOptions {
+    /// Resolved requirements used to filter candidate nodes.
+    pub affinity: Option<AffinityRequirements>,
     /// Minimum number of selected results.
     pub min_required_items: usize,
     /// Whether duplicates are allowed in the selected result, default false.
@@ -66,18 +69,16 @@ pub struct SelectorOptions {
     pub exclude_peer_ids: HashSet<u64>,
     /// The filter to select the peers based on their workloads.
     pub workload_filter: Option<fn(&NodeWorkloads) -> bool>,
-    /// Additional placement context, such as the frontend identity that originated the request.
-    pub extensions: HashMap<String, String>,
 }
 
 impl Default for SelectorOptions {
     fn default() -> Self {
         Self {
+            affinity: None,
             min_required_items: 1,
             allow_duplication: false,
             exclude_peer_ids: HashSet::new(),
             workload_filter: None,
-            extensions: HashMap::new(),
         }
     }
 }

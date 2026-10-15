@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use common_meta::affinity::NoopAffinity;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
 use rand::prelude::SliceRandom;
@@ -34,6 +35,8 @@ pub fn new_test_selector_context() -> SelectorContext {
         .unwrap();
 
     SelectorContext {
+        affinity_fallback: Default::default(),
+        affinity: Arc::new(NoopAffinity),
         peer_discovery: meta_peer_client,
     }
 }

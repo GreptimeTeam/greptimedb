@@ -41,6 +41,13 @@ pub use retry_hint::{retry_hint_from_postgres_error, retry_hint_from_postgres_po
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Affinity requirements unavailable for reference: {reference}"))]
+    AffinityRequirementsUnavailable {
+        reference: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Empty key is not allowed"))]
     EmptyKey {
         #[snafu(implicit)]
@@ -1252,7 +1259,8 @@ impl ErrorExt for Error {
 
             SchemaAlreadyExists { .. } => StatusCode::DatabaseAlreadyExists,
 
-            ProcedureNotFound { .. }
+            AffinityRequirementsUnavailable { .. }
+            | ProcedureNotFound { .. }
             | InvalidViewInfo { .. }
             | InvalidFlowOption { .. }
             | PrimaryKeyNotFound { .. }

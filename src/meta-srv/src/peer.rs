@@ -21,8 +21,8 @@ use common_meta::peer::{Peer, PeerAllocContext, PeerAllocator};
 use snafu::{ResultExt, ensure};
 
 use crate::discovery::utils::accept_ingest_workload;
-use crate::error::{Result, TooManyPartitionsSnafu};
-use crate::metasrv::{SelectorContext, SelectorRef};
+use crate::error::{self, Result, TooManyPartitionsSnafu};
+use crate::metasrv::{SelectTarget, SelectorContext, SelectorRef};
 use crate::selector::SelectorOptions;
 
 pub struct MetasrvPeerAllocator {
@@ -67,18 +67,23 @@ impl MetasrvPeerAllocator {
             );
         }
 
-        self.selector
-            .select(
-                &self.ctx,
-                SelectorOptions {
-                    min_required_items,
-                    allow_duplication: true,
-                    exclude_peer_ids: HashSet::new(),
-                    workload_filter: Some(accept_ingest_workload),
-                    extensions: alloc_context.extensions.clone(),
-                },
-            )
-            .await
+        let options = SelectorOptions {
+            affinity: alloc_context.affinity.clone(),
+            min_required_items,
+            allow_duplication: true,
+            exclude_peer_ids: HashSet::new(),
+            workload_filter: Some(accept_ingest_workload),
+        };
+        let peers = self.selector.select(&self.ctx, options).await?;
+        ensure!(
+            peers.len() >= min_required_items,
+            error::NoEnoughAvailableNodeSnafu {
+                required: min_required_items,
+                available: peers.len(),
+                select_target: SelectTarget::Datanode,
+            }
+        );
+        Ok(peers)
     }
 }
 
@@ -89,5 +94,179 @@ impl PeerAllocator for MetasrvPeerAllocator {
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use common_meta::affinity::{
+        Affinity, AffinityFallback, AffinityRef, AffinityRequirements, NoopAffinity,
+    };
+    use common_meta::cluster::NodeInfo;
+
+    use super::*;
+    use crate::selector::Selector;
+    use crate::selector::round_robin::RoundRobinSelector;
+    use crate::test_util::{create_meta_peer_client, put_datanodes};
+
+    struct OnlySecondNode;
+
+    impl Affinity for OnlySecondNode {
+        fn matches(&self, _: &AffinityRequirements, node: &NodeInfo) -> bool {
+            node.peer.id == 2
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum Outcome {
+        Base,
+        BackendError,
+        Short,
+    }
+
+    struct CountingSelector {
+        base: RoundRobinSelector,
+        calls: AtomicUsize,
+        outcome: Outcome,
+    }
+
+    #[async_trait]
+    impl Selector for CountingSelector {
+        type Context = SelectorContext;
+        type Output = Vec<Peer>;
+
+        async fn select(
+            &self,
+            ctx: &SelectorContext,
+            opts: SelectorOptions,
+        ) -> Result<Self::Output> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            assert!(opts.allow_duplication);
+            assert!(opts.exclude_peer_ids.is_empty());
+            assert!(opts.workload_filter.is_some());
+            assert_eq!(opts.min_required_items, 2);
+            match self.outcome {
+                Outcome::Base => self.base.select(ctx, opts).await,
+                Outcome::BackendError => error::UnexpectedSnafu {
+                    violated: "selection backend failed",
+                }
+                .fail(),
+                Outcome::Short => Ok(vec![Peer::empty(1)]),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_allocator_delegates_fallback_and_validates_results() {
+        let discovery = create_meta_peer_client();
+        put_datanodes(&discovery, vec![Peer::empty(1)]).await;
+        for (has_requirements, fallback, noop, outcome, expected_calls, succeeds) in [
+            (
+                true,
+                AffinityFallback::Error,
+                false,
+                Outcome::Base,
+                1,
+                false,
+            ),
+            (
+                true,
+                AffinityFallback::Unconstrained,
+                false,
+                Outcome::Base,
+                1,
+                true,
+            ),
+            (true, AffinityFallback::Error, true, Outcome::Base, 1, true),
+            (
+                false,
+                AffinityFallback::Unconstrained,
+                false,
+                Outcome::Base,
+                1,
+                true,
+            ),
+            (
+                true,
+                AffinityFallback::Unconstrained,
+                false,
+                Outcome::BackendError,
+                1,
+                false,
+            ),
+            (
+                true,
+                AffinityFallback::Error,
+                false,
+                Outcome::Short,
+                1,
+                false,
+            ),
+            (
+                true,
+                AffinityFallback::Unconstrained,
+                false,
+                Outcome::Short,
+                1,
+                false,
+            ),
+            (
+                false,
+                AffinityFallback::Unconstrained,
+                false,
+                Outcome::Short,
+                1,
+                false,
+            ),
+        ] {
+            let selector = Arc::new(CountingSelector {
+                base: RoundRobinSelector::default(),
+                calls: AtomicUsize::new(0),
+                outcome,
+            });
+            let affinity: AffinityRef = if noop {
+                Arc::new(NoopAffinity)
+            } else {
+                Arc::new(OnlySecondNode)
+            };
+            let allocator = MetasrvPeerAllocator::new(
+                SelectorContext {
+                    affinity_fallback: fallback,
+                    peer_discovery: discovery.clone(),
+                    affinity,
+                },
+                selector.clone(),
+            );
+            let result = allocator
+                .alloc(
+                    2,
+                    &PeerAllocContext {
+                        affinity: has_requirements.then(|| {
+                            AffinityRequirements::new(HashMap::from([("pool".into(), "a".into())]))
+                                .unwrap()
+                        }),
+                    },
+                )
+                .await;
+            assert_eq!(selector.calls.load(Ordering::Relaxed), expected_calls);
+            if succeeds {
+                assert_eq!(result.unwrap(), vec![Peer::empty(1); 2]);
+            } else {
+                match outcome {
+                    Outcome::BackendError => assert!(matches!(
+                        result.unwrap_err(),
+                        error::Error::Unexpected { .. }
+                    )),
+                    _ => assert!(matches!(
+                        result.unwrap_err(),
+                        error::Error::NoEnoughAvailableNode { .. }
+                    )),
+                }
+            }
+        }
     }
 }

@@ -14,11 +14,12 @@
 
 use std::sync::atomic::AtomicUsize;
 
+use common_meta::affinity::AffinityFallback;
 use common_meta::peer::Peer;
 use snafu::{ResultExt, ensure};
 
 use crate::error::{
-    ListActiveDatanodesSnafu, ListActiveFlownodesSnafu, NoEnoughAvailableNodeSnafu, Result,
+    self, ListActiveDatanodesSnafu, ListActiveFlownodesSnafu, NoEnoughAvailableNodeSnafu, Result,
 };
 use crate::metasrv::{SelectTarget, SelectorContext};
 use crate::selector::{Selector, SelectorOptions};
@@ -54,33 +55,38 @@ impl RoundRobinSelector {
 
     async fn get_peers(&self, opts: &SelectorOptions, ctx: &SelectorContext) -> Result<Vec<Peer>> {
         let mut peers = match self.select_target {
-            SelectTarget::Datanode => {
-                // 1. get alive datanodes.
-                let alive_datanodes = ctx
-                    .peer_discovery
-                    .active_datanodes(opts.workload_filter)
-                    .await
-                    .context(ListActiveDatanodesSnafu)?;
-
-                // 2. filter out excluded datanodes.
-                alive_datanodes
-                    .into_iter()
-                    .map(|node| node.peer)
-                    .filter(|p| !opts.exclude_peer_ids.contains(&p.id))
-                    .collect::<Vec<_>>()
-            }
+            SelectTarget::Datanode => ctx
+                .peer_discovery
+                .active_datanodes(opts.workload_filter)
+                .await
+                .context(ListActiveDatanodesSnafu)?
+                .into_iter()
+                .filter(|node| {
+                    opts.affinity
+                        .as_ref()
+                        .is_none_or(|requirements| ctx.affinity.matches(requirements, node))
+                })
+                .map(|node| node.peer)
+                .filter(|peer| !opts.exclude_peer_ids.contains(&peer.id))
+                .collect::<Vec<_>>(),
             SelectTarget::Flownode => ctx
                 .peer_discovery
                 .active_flownodes(opts.workload_filter)
                 .await
                 .context(ListActiveFlownodesSnafu)?
                 .into_iter()
+                .filter(|node| {
+                    opts.affinity
+                        .as_ref()
+                        .is_none_or(|requirements| ctx.affinity.matches(requirements, node))
+                })
                 .map(|node| node.peer)
+                .filter(|peer| !opts.exclude_peer_ids.contains(&peer.id))
                 .collect::<Vec<_>>(),
         };
 
         ensure!(
-            !peers.is_empty(),
+            !peers.is_empty() && (opts.allow_duplication || peers.len() >= opts.min_required_items),
             NoEnoughAvailableNodeSnafu {
                 required: opts.min_required_items,
                 available: peers.len(),
@@ -93,15 +99,13 @@ impl RoundRobinSelector {
 
         Ok(peers)
     }
-}
 
-#[async_trait::async_trait]
-impl Selector for RoundRobinSelector {
-    type Context = SelectorContext;
-    type Output = Vec<Peer>;
-
-    async fn select(&self, ctx: &Self::Context, opts: SelectorOptions) -> Result<Vec<Peer>> {
-        let peers = self.get_peers(&opts, ctx).await?;
+    async fn select_once(
+        &self,
+        ctx: &SelectorContext,
+        opts: &SelectorOptions,
+    ) -> Result<Vec<Peer>> {
+        let peers = self.get_peers(opts, ctx).await?;
         // choose peers
         let mut selected = Vec::with_capacity(opts.min_required_items);
         for _ in 0..opts.min_required_items {
@@ -116,9 +120,35 @@ impl Selector for RoundRobinSelector {
     }
 }
 
+#[async_trait::async_trait]
+impl Selector for RoundRobinSelector {
+    type Context = SelectorContext;
+    type Output = Vec<Peer>;
+
+    async fn select(&self, ctx: &Self::Context, mut opts: SelectorOptions) -> Result<Self::Output> {
+        match self.select_once(ctx, &opts).await {
+            Err(error::Error::NoEnoughAvailableNode {
+                required,
+                available,
+                ..
+            }) if opts.affinity.is_some()
+                && ctx.affinity_fallback == AffinityFallback::Unconstrained
+                && available < required =>
+            {
+                opts.affinity = None;
+                self.select_once(ctx, &opts).await
+            }
+            result => result,
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use std::collections::HashSet;
+    use std::sync::Arc;
+
+    use common_meta::affinity::NoopAffinity;
 
     use super::*;
     use crate::test_util::{create_meta_peer_client, put_datanodes};
@@ -128,6 +158,8 @@ mod test {
         let selector = RoundRobinSelector::default();
         let meta_peer_client = create_meta_peer_client();
         let ctx = SelectorContext {
+            affinity_fallback: Default::default(),
+            affinity: Arc::new(NoopAffinity),
             peer_discovery: meta_peer_client.clone(),
         };
         // add three nodes
@@ -150,11 +182,11 @@ mod test {
             .select(
                 &ctx,
                 SelectorOptions {
+                    affinity: None,
                     min_required_items: 4,
                     allow_duplication: true,
                     exclude_peer_ids: HashSet::new(),
                     workload_filter: None,
-                    extensions: Default::default(),
                 },
             )
             .await
@@ -169,11 +201,11 @@ mod test {
             .select(
                 &ctx,
                 SelectorOptions {
+                    affinity: None,
                     min_required_items: 2,
                     allow_duplication: true,
                     exclude_peer_ids: HashSet::new(),
                     workload_filter: None,
-                    extensions: Default::default(),
                 },
             )
             .await
@@ -187,6 +219,8 @@ mod test {
         let selector = RoundRobinSelector::new(SelectTarget::Datanode);
         let meta_peer_client = create_meta_peer_client();
         let ctx = SelectorContext {
+            affinity_fallback: Default::default(),
+            affinity: Arc::new(NoopAffinity),
             peer_discovery: meta_peer_client.clone(),
         };
         // add three nodes
@@ -212,11 +246,11 @@ mod test {
             .select(
                 &ctx,
                 SelectorOptions {
+                    affinity: None,
                     min_required_items: 1,
                     allow_duplication: true,
                     exclude_peer_ids: HashSet::from([2, 5]),
                     workload_filter: None,
-                    extensions: Default::default(),
                 },
             )
             .await

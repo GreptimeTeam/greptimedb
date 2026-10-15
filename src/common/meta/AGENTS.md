@@ -11,6 +11,7 @@ and durable DDL procedures. Metasrv process and service wiring live in
 
 | Area | Path | Entry point |
 | --- | --- | --- |
+| Affinity | `src/common/meta/src/affinity.rs` | Requirements, reference resolution, node matching, and allocation-context provider |
 | Metadata model | `src/common/meta/src/key.rs`, `src/common/meta/src/key/` | Typed keys, values, and `TableMetadataManager` |
 | KV storage | `src/common/meta/src/kv_backend.rs`, `src/common/meta/src/kv_backend/` | `KvBackend`, transactions, memory/etcd/RDS backends |
 | DDL procedures | `src/common/meta/src/ddl.rs`, `src/common/meta/src/ddl/`, `src/common/meta/src/ddl_manager.rs` | Durable DDL state machines and task dispatch |
@@ -31,6 +32,10 @@ and durable DDL procedures. Metasrv process and service wiring live in
   `src/table/src/requests.rs` — classification, validation, logical-table
   eligibility, and the metadata-only alter flow come with it. Do not add
   per-option special cases to the alter conversion or DDL routing.
+- Create-table preparation obtains allocation inputs from the optional query
+  provider in `DdlContext`. Install providers before registering procedure
+  loaders so restored procedures use the same runtime dependencies. Affinity
+  requirements and fallback policy are runtime inputs, not persisted fields.
 - `KvBackend` behavior changes should extend the shared tests in
   `src/common/meta/src/kv_backend/test.rs`.
 
