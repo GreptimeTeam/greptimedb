@@ -364,11 +364,12 @@ class WriterDeadlineTest(unittest.TestCase):
     def test_writers_stop_at_the_deadline_with_every_batch_acknowledged(self):
         import http.server
         import threading
+        status = [200]
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
                 self.rfile.read(int(self.headers["Content-Length"]))
-                self.send_response(200)
+                self.send_response(status[0])
                 self.end_headers()
 
             def log_message(self, *args):
@@ -379,13 +380,18 @@ class WriterDeadlineTest(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as directory:
                 run = Path(directory)
-                crash.write(SimpleNamespace(dir=str(run / "cycle-1"), url=f"http://127.0.0.1:{server.server_port}/",
-                                            table="dropped", writers=2, first_seq=0, rows=2, seconds=0.3))
+                args = SimpleNamespace(dir=str(run / "cycle-1"), url=f"http://127.0.0.1:{server.server_port}/",
+                                       table="dropped", writers=2, first_seq=0, rows=2, seconds=0.3)
+                self.assertEqual(crash.write(args), 0)
                 result = crash.verify(run, {}, 2, True, 1)
                 self.assertGreater(result["cycle_acked_batches"], 0)
                 self.assertEqual(result["verify_errors"], [])
                 for index in range(2):
                     self.assertTrue((run / "cycle-1" / f"exit-{index}.log").exists())
+                # A rejected batch ends a timed writer early, which fails the command.
+                status[0] = 503
+                args.dir, args.seconds = str(run / "cycle-2"), 30
+                self.assertEqual(crash.write(args), 1)
         finally:
             server.shutdown()
             server.server_close()
@@ -560,7 +566,14 @@ class SummaryTest(unittest.TestCase):
             self.assertEqual((result["rows"], result["objects"], result["read_seconds"], result["reads"]),
                              (12_625_005, 3158 + 1, 95.15, 3))
             self.assertAlmostEqual(result["seconds"], 95.150155247)
-            self.assertEqual([r["region"] for r in result["regions"]], [4402341478400, 4402341478401])
+            self.assertEqual([(r["region"], r["rows"], r["objects"]) for r in result["regions"]],
+                             [(4398046511104, 0, 0), (4402341478400, 12_625_000, 3158), (4402341478401, 5, 1)])
+            self.assertEqual((result["regions"][1]["first_entry_id"], result["regions"][1]["last_entry_id"]),
+                             (4853858306, 8164212737))
+            self.assertAlmostEqual(result["regions"][0]["seconds"], 60.581e-6)
+            self.assertEqual(summary.replayed(result["regions"]),
+                             "4402341478400: 12,625,000 rows, objects 4,629–7,786, 95.15 s; "
+                             "4402341478401: 5 rows, objects 7,786–7,786, 0.01 s")
             self.assertIsNone(summary.replay(path / "absent.log", metrics))
             raft = log.replace("ObjectStore(", "RaftEngine(")
             (path / "server-restart.log").write_text(raft)
@@ -579,15 +592,14 @@ class SummaryTest(unittest.TestCase):
             (path / "metrics-written.prom").write_text("greptime_logstore_object_store_wal_indexed_objects 300\n")
             (path / "metrics-restart.prom").write_text(
                 "greptime_logstore_object_store_wal_recovered_objects_total 280\n"
-                "greptime_logstore_object_store_wal_release_records_total 1\n"
                 "greptime_logstore_object_store_wal_deleted_objects_total 279\n")
             (path / "collected.tsv").write_text("100 281\n101 120\n104 2\n")
             cell = summary.load_cell(path)
             self.assertEqual(cell["drop"], {"acked_batches": 5, "indexed_before_drop": 300, "restart_seconds": 2.5,
-                                            "recovered_objects": 280, "release_records": 1, "indexed_at_end": 2,
+                                            "recovered_objects": 280, "indexed_at_end": 2,
                                             "deleted_after_restart": 279, "seconds_to_collect": 4})
             output = summary.render({}, [cell], [])
-            self.assertIn("| drop-1-8-D | 5 | 300 | 2.50 | 280 | 1 | 2 | 279 | 4 | collected |", output)
+            self.assertIn("| drop-1-8-D | 5 | 300 | 2.50 | 280 | 2 | 279 | 4 | collected |", output)
 
     def test_untouched_counters_are_zero_only_for_an_active_object_store_wal(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -635,7 +647,7 @@ FAKE_DOCKER = r"""#!/usr/bin/env bash
 printf '%s\n' "docker $*" >> "$FAKE_LOG"
 case "$1" in
     run)
-        for arg in "$@"; do [[ "$arg" != -d ]] || { rm -f "${FAKE_KILL_FLAG:-/nonexistent}"; echo "keys=${GREPTIMEDB_STANDALONE__STORAGE__ACCESS_KEY_ID:+set}${GREPTIMEDB_STANDALONE__STORAGE__SECRET_ACCESS_KEY:+set}" >> "$FAKE_LOG"; echo fakecid; exit 0; }; done
+        for arg in "$@"; do [[ "$arg" != -d ]] || { echo $(($(cat "$FAKE_LOG.runs" 2>/dev/null || echo 0) + 1)) > "$FAKE_LOG.runs"; rm -f "${FAKE_KILL_FLAG:-/nonexistent}"; echo "keys=${GREPTIMEDB_STANDALONE__STORAGE__ACCESS_KEY_ID:+set}${GREPTIMEDB_STANDALONE__STORAGE__SECRET_ACCESS_KEY:+set}" >> "$FAKE_LOG"; echo fakecid; exit 0; }; done
         for arg in "$@"; do
             case "$arg" in type=bind,src=*,dst=/results) results=${arg#type=bind,src=}; results=${results%,dst=/results} ;; esac
         done
@@ -646,7 +658,9 @@ case "$1" in
     kill) touch "${FAKE_KILL_FLAG:-/dev/null}" ;;
     inspect) echo true ;;
     exec) [[ "$*" == *cpu.stat* ]] && echo 'usage_usec 5000000' || echo 'version: 1.4.0-test' ;;
-    logs) echo 'server log' ;;
+    logs) echo 'server log'
+        # The rows a server replayed are its start number, so each log can be told apart.
+        [[ -z "${FAKE_REPLAY:-}" ]] || echo "INFO Replay WAL for region: 4398046511104(1024, 0), provider: ObjectStore(x), rows recovered: $(cat "$FAKE_LOG.runs"), replay from entry id: 1048577, last entry id: 2097153, total timeseries replayed: 1, elapsed: 1.5s" ;;
 esac
 """
 FAKE_CURL = r"""#!/usr/bin/env bash
@@ -804,7 +818,8 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
             self.assertEqual(log.count("/metrics"), 2)
             self.assertIn(f"type=bind,src={root}/corpus/corpus-6000,dst=/work/corpus,readonly", log)
 
-    def run_crash(self, root, metrics_rc=0, pin=False, sample_rc=0, full_metrics="5", groups=None, env=None):
+    def run_crash(self, root, metrics_rc=0, pin=False, sample_rc=0, full_metrics="5", groups=None, env=None,
+                  status=200):
         """A crash cell, or another group that writes through the crash writer, against fake docker
         and a stub SQL endpoint that the fake kill takes down."""
         import http.server
@@ -823,7 +838,7 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
                 seq = re.search(r"VALUES [(](\d+),", body).group(1)
                 with lock, open(found, "a") as out:
                     out.write(seq + "\n")
-                self.send_response(200)
+                self.send_response(status)
                 self.end_headers()
 
             def log_message(self, *args):
@@ -852,9 +867,12 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
     def test_a_crash_cell_kills_restarts_and_checks_every_cycle(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            cells, _, log, _ = self.run_crash(root)
+            cells, _, log, _ = self.run_crash(root, env={"FAKE_REPLAY": "1"})
             self.assertEqual(cells.returncode, 0, cells.stdout + cells.stderr)
             cell = root / "results" / "cells" / "crash-1-8-D"
+            # Server 1 is loaded and killed; servers 2 and 3 are the restarts of cycles 1 and 2.
+            replays = [c["replay"]["rows"] for c in summary.load_cell(cell)["cycles"]]
+            self.assertEqual(replays, [2, 3])
             cycles = [json.loads(line) for line in (cell / "cycles.jsonl").read_text().splitlines()]
             self.assertEqual([c["cycle"] for c in cycles], [1, 2])
             for c in cycles:
@@ -864,7 +882,8 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
             self.assertEqual(log.count("docker kill --signal KILL fakecid"), 2)
             self.assertEqual(log.count("docker wait fakecid"), 2)
             self.assertIn("GREPTIMEDB_STANDALONE__STORAGE__DATA_HOME=/oswal_home", (cell / "config.env").read_text())
-            for name in ("metrics-start-1.prom", "metrics-cycle-2.prom", "metrics-restart-2.prom", "server-cycle-1.log"):
+            for name in ("metrics-start-1.prom", "metrics-cycle-2.prom", "metrics-restart-2.prom", "server.log",
+                         "server-restart-1.log", "server-restart-2.log"):
                 self.assertTrue((cell / name).exists(), name)
 
     def test_failed_pinned_samples_are_missing_not_zero(self):
@@ -948,9 +967,19 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
                 self.assertEqual(log.count("docker kill --signal KILL fakecid"), 1)
                 self.assertTrue(list((cell / "dropped").glob("acked-*.log")))
                 self.assertTrue(list((cell / "kept").glob("acked-*.log")))
-                for name in ("metrics-written.prom", "metrics-restart.prom", "server-written.log",
+                for name in ("metrics-written.prom", "metrics-restart.prom", "server.log",
                              "server-restart.log", "collected.tsv"):
                     self.assertTrue((cell / name).exists(), name)
+
+    def test_a_drop_cell_whose_writers_fail_stops_before_the_drop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            groups = json.dumps([{"name": "drop", "mode": "drop", "configs": "D", "write_seconds": 1}])
+            cells, _, log, _ = self.run_crash(root, full_metrics="2", groups=groups, status=503)
+            recorded = json.loads((root / "results" / "cells" / "drop-1-8-D" / "cell.json").read_text())
+            self.assertEqual(recorded["exit_code"], 10, cells.stdout + cells.stderr)
+            self.assertNotIn("DROP TABLE", urllib.parse.unquote_plus(log))
+            self.assertNotIn("docker kill", log)
 
     def test_a_crash_cycle_without_its_scrapes_fails_the_cell(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -20,7 +20,8 @@ batch sequence numbers, inserts `rows` rows per batch and stops at the first
 statement that is not acknowledged, so a stripe has at most one attempted but
 unacknowledged batch: the one in flight at the kill. Every request is logged
 with its status and the time it ended, on the same clock as the kill stamps.
-With `--seconds` the writers also stop once that long has passed.
+With `--seconds` the writers also stop once that long has passed, and the
+command fails unless every writer wrote until then without a failure.
 """
 
 from __future__ import annotations
@@ -51,7 +52,7 @@ def insert(url: str, table: str, seq: int, rows: int) -> str:
         return "000"
 
 
-def writer(args, index: int, deadline: float) -> None:
+def writer(args, index: int, deadline: float, failures: list) -> None:
     directory, seq = Path(args.dir), args.first_seq + index
     with open(directory / f"attempted-{index}.log", "a") as attempted, \
             open(directory / f"requests-{index}.log", "a") as requests, \
@@ -63,6 +64,7 @@ def writer(args, index: int, deadline: float) -> None:
             requests.write(f"{seq} {code} {time.time_ns()}\n")
             requests.flush()
             if code != "200":
+                failures.append(f"writer {index}: batch {seq} ended with {code}")
                 break
             acked.write(f"{seq}\n")
             acked.flush()
@@ -73,11 +75,24 @@ def writer(args, index: int, deadline: float) -> None:
 def write(args) -> int:
     os.makedirs(args.dir, exist_ok=True)
     deadline = time.monotonic() + args.seconds if args.seconds else float("inf")
-    threads = [threading.Thread(target=writer, args=(args, i, deadline)) for i in range(args.writers)]
+    failures = []
+
+    def run(index):
+        try:
+            writer(args, index, deadline, failures)
+        except Exception as error:
+            failures.append(f"writer {index}: {error!r}")
+            raise
+
+    threads = [threading.Thread(target=run, args=(i,)) for i in range(args.writers)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
+    # Crash cells end their writers with a kill; timed writers must have run to the deadline.
+    if args.seconds and (failures or not any(lines(Path(args.dir) / f"acked-{i}.log") for i in range(args.writers))):
+        print("; ".join(failures) or "no batch was acknowledged", file=sys.stderr)
+        return 1
     return 0
 
 

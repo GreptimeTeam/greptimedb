@@ -93,7 +93,9 @@ elapsed() { awk -v a="$1" -v b="$(now)" 'BEGIN {printf "%.3f", b - a}'; }
 server_cpu() { docker exec "$cid" cat /sys/fs/cgroup/cpu.stat 2>/dev/null | awk '/^usage_usec / {printf "%.3f", $2 / 1e6}' || true; }
 host_cpu() { awk '/^cpu / {print $2 + $3 + $4 + $7 + $8 + $9, $2 + $3 + $4 + $5 + $6 + $7 + $8 + $9}' /proc/stat 2>/dev/null || true; }
 
+# A server's log is named after the phase it started in, whatever phase stops it.
 start_server() {
+    server_phase=$phase
     cid=$(docker run -d --init --name "$name$phase" --label "o11ybench.owner=$OWNER" \
         --add-host host.docker.internal:host-gateway \
         -p 127.0.0.1:4000:4000 -p 127.0.0.1:4001:4001 "${docker_env[@]}" ${mounts[@]+"${mounts[@]}"} \
@@ -114,7 +116,7 @@ stop_server() {
         killed) docker wait "$cid" >/dev/null ;;
         *) docker stop -t 120 "$cid" >/dev/null ;;
     esac
-    docker logs "$cid" > "$dir/server$phase.log" 2>&1
+    docker logs "$cid" > "$dir/server$server_phase.log" 2>&1
     docker rm -fv "$cid" >/dev/null
     cid=
 }
@@ -234,7 +236,8 @@ drop_restart() {
     sql "CREATE TABLE dropped (seq BIGINT, ts TIMESTAMP TIME INDEX) WITH (append_mode = 'true')" >/dev/null
     sql "CREATE TABLE kept (seq BIGINT, ts TIMESTAMP TIME INDEX) WITH (append_mode = 'true')" >/dev/null
     python3 "$here/oswal-s3-bench-crash.py" write --dir "$dir/dropped" --url "$sql_url" --table dropped \
-        --writers "$writers" --first-seq 0 --rows "$rows" --seconds "$seconds"
+        --writers "$writers" --first-seq 0 --rows "$rows" --seconds "$seconds" \
+        || { echo "$id: the writers of dropped stopped before $seconds s" >&2; exit 10; }
     phase=-written; scrape_retry indexed_objects || { echo "$id: metrics scrape failed" >&2; exit 4; }
     sql "DROP TABLE dropped" >/dev/null
     stop_server kill
@@ -244,13 +247,14 @@ drop_restart() {
     scrape_retry recovery_seconds_count || { echo "$id: metrics scrape failed" >&2; exit 4; }
     recovered=$(awk '/^greptime_logstore_object_store_wal_recovered_objects_total / {print $2}' "$dir/metrics-restart.prom")
     python3 "$here/oswal-s3-bench-crash.py" write --dir "$dir/kept" --url "$sql_url" --table kept \
-        --writers 1 --first-seq 0 --rows "$rows" --seconds 2
+        --writers 1 --first-seq 0 --rows "$rows" --seconds 2 \
+        || { echo "$id: the writer of kept stopped before 2 s" >&2; exit 10; }
     sql "ADMIN FLUSH_TABLE('kept')" >/dev/null
     # The flushed watermark becomes durable with the next object, so every sample writes one row.
     deadline=$((SECONDS + ${OSWAL_COLLECT_SECONDS:-120}))
     while :; do
         sql "INSERT INTO kept VALUES (-1, $SECONDS)" >/dev/null
-        # The samples have their own file; the final scrape and the log keep the restart's name.
+        # The samples have their own file; the final scrape keeps the restart's name.
         phase=-collected
         scrape_retry indexed_objects || { phase=-restart; echo "$id: metrics scrape failed" >&2; exit 4; }
         phase=-restart
@@ -296,7 +300,7 @@ finish() {
 cell() {
     : "${PLAN:?}" "${RESULTS:?}" "${CORPUS_DIR:?}" "${OWNER:?}" "${RUNTIME_IMAGE:?}" "${GREPTIMEDB_IMAGE:?}"
     : "${RUN_PREFIX:?}" "${WAL_ROOT:?}" "${S3_BUCKET:?}" "${S3_REGION:?}" "${AWS_ACCESS_KEY_ID:?}" "${AWS_SECRET_ACCESS_KEY:?}"
-    spec=$1 cid= wal_dir= home_dir= version= load_seconds= metrics_scraped=false id= phase=
+    spec=$1 cid= wal_dir= home_dir= version= load_seconds= metrics_scraped=false id= phase= server_phase=
     restart_scraped=false restart_seconds= restart_query_seconds= restart_count= server_cpu_seconds= host_cpu_busy=
     indexed_before_kill=
     local concurrency setting started cpu_before host_before host_after corpus partitions load script

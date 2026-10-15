@@ -96,16 +96,23 @@ def replay(log: Path, metrics: dict) -> dict | None:
     regions = []
     for match in REPLAY.finditer(log.read_text(errors="replace")):
         region, provider, rows, first, last, elapsed, unit = match.groups()
-        if int(rows):
-            objects = (int(last) >> POSITION_BITS) - (int(first) >> POSITION_BITS) + 1 \
-                if provider == "ObjectStore" else None
-            regions.append({"region": int(region), "rows": int(rows), "seconds": float(elapsed) * UNITS[unit],
-                            "objects": objects})
+        # The range runs from the first entry to replay to the last one; it is empty when first > last.
+        objects = None if provider != "ObjectStore" else 0 if int(first) > int(last) else \
+            (int(last) >> POSITION_BITS) - (int(first) >> POSITION_BITS) + 1
+        regions.append({"region": int(region), "rows": int(rows), "first_entry_id": int(first),
+                        "last_entry_id": int(last), "seconds": float(elapsed) * UNITS[unit], "objects": objects})
     samples = metrics["samples"]
     return {"regions": regions, "rows": sum(r["rows"] for r in regions),
             "seconds": max((r["seconds"] for r in regions), default=None),
-            "objects": sum(r["objects"] or 0 for r in regions) if regions and regions[0]["objects"] else None,
+            "objects": sum(r["objects"] for r in regions) if regions and regions[0]["objects"] is not None else None,
             "read_seconds": samples.get("read_seconds_sum"), "reads": samples.get("read_seconds_count")}
+
+
+def replayed(regions: list) -> str:
+    """Each region that replayed rows: its rows, the objects of its range and its time."""
+    return "; ".join(f"{r['region']}: {r['rows']:,} rows" + (
+        f", objects {r['first_entry_id'] >> POSITION_BITS:,}–{r['last_entry_id'] >> POSITION_BITS:,}"
+        if r["objects"] else "") + f", {r['seconds']:.2f} s" for r in regions if r["rows"]) or "—"
 
 
 def client_latency(path: Path) -> tuple:
@@ -124,7 +131,7 @@ def region_rows(path: Path) -> list | None:
     """Rows per region of a partitioned load cell, as the server reported them after the load."""
     if not path.exists():
         return None
-    return [int(row[2]) for row in json.loads(path.read_text())["output"][0]["records"]["rows"]]
+    return [int(row[2] or 0) for row in json.loads(path.read_text())["output"][0]["records"]["rows"]]
 
 
 def interval_seconds(wal: dict) -> float:
@@ -239,7 +246,6 @@ def load_cell(path: Path, spec: dict | None = None) -> dict:
             "indexed_before_drop": written.get("indexed_objects"),
             "restart_seconds": cell.get("restart_seconds"),
             "recovered_objects": restarted_samples.get("recovered_objects_total"),
-            "release_records": restarted_samples.get("release_records_total"),
             "indexed_at_end": int(float(samples[-1][1])) if samples else None,
             "deleted_after_restart": restarted_samples.get("deleted_objects_total"),
             "seconds_to_collect": int(samples[-1][0]) - int(samples[0][0]) if samples else None,
@@ -383,21 +389,22 @@ def render(run: dict, rows: list, pairs: list) -> str:
     replays += [(r["id"], fmt(c["cycle"]), c | {"wall_seconds": c.get("restart_seconds")})
                 for r in crashes for c in r["cycles"] if c.get("replay")]
     if replays:
-        lines += ["", "| Cell | Cycle | Restart to /health s | Recovery s | Recovered objects | Regions replayed "
-                  "| Rows replayed | Objects replayed | Slowest region replay s | Read seconds (reads) |",
-                  "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |"]
+        lines += ["", "| Cell | Cycle | Restart to /health s | Recovery s | Recovered objects | Regions opened "
+                  "| Rows replayed | Objects replayed | Slowest region replay s | Read seconds (reads) "
+                  "| Regions with rows |",
+                  "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |"]
         for cell, cycle, x in replays:
             y = x["replay"]
             lines.append(" | ".join([
                 f"| {cell}", cycle, fmt(x.get("wall_seconds"), 2), fmt(x.get("recovery_seconds"), 3),
                 fmt(x.get("recovered_objects")), fmt(len(y["regions"])), fmt(y["rows"]), fmt(y["objects"]),
-                fmt(y["seconds"], 2), f"{fmt(y['read_seconds'], 2)} ({fmt(y['reads'])})"]) + " |")
+                fmt(y["seconds"], 2), f"{fmt(y['read_seconds'], 2)} ({fmt(y['reads'])})",
+                replayed(y["regions"])]) + " |")
     drops = [r for r in rows if r.get("drop")]
     if drops:
         lines += ["", "| Cell | Acked batches before the drop | Indexed before the drop | Restart to /health s "
-                  "| Recovered objects | Release records | Indexed at the end | Deleted after the restart "
-                  "| Seconds to collect | Verdict |",
-                  "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |"]
+                  "| Recovered objects | Indexed at the end | Deleted after the restart | Seconds to collect | Verdict |",
+                  "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |"]
         for r in drops:
             x = r["drop"]
             # Objects the release already collected before the kill leave nothing to show.
@@ -406,7 +413,7 @@ def render(run: dict, rows: list, pairs: list) -> str:
                 "collected" if r["exit_code"] == 0 else "still indexed"
             lines.append(" | ".join([
                 f"| {label(r)}", fmt(x["acked_batches"]), fmt(x["indexed_before_drop"]), fmt(x["restart_seconds"], 2),
-                fmt(x["recovered_objects"]), fmt(x["release_records"]), fmt(x["indexed_at_end"]),
+                fmt(x["recovered_objects"]), fmt(x["indexed_at_end"]),
                 fmt(x["deleted_after_restart"]), fmt(x["seconds_to_collect"]), verdict]) + " |")
     restarts = [r for r in rows if "restart" in r]
     if restarts:
