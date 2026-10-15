@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use api::v1::region::build_index_request;
 use common_telemetry::{debug, error, warn};
+use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::RegionBuildIndexRequest;
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc;
@@ -27,7 +28,7 @@ use crate::cache::CacheStrategy;
 use crate::error::{InvalidRequestSnafu, Result, WorkerStoppedSnafu};
 use crate::manifest::action::RegionEdit;
 use crate::metrics::INDEX_PUBLICATION_STALE_TOTAL;
-use crate::region::version::VersionRef;
+use crate::region::options::IndexOptions;
 use crate::region::{IndexBuildSource, MitoRegionRef};
 use crate::request::{
     BuildIndexRequest, IndexBuildFailed, IndexBuildFinished, IndexBuildStopped, OptionOutputTx,
@@ -39,11 +40,20 @@ use crate::sst::index::{
 };
 use crate::worker::RegionWorkerLoop;
 
+/// Parts of a region version that index build tasks need.
+///
+/// Holding this instead of the whole version avoids pinning memtables and the
+/// SST version while the worker awaits.
+pub(crate) struct IndexBuildSnapshot {
+    metadata: RegionMetadataRef,
+    index_options: IndexOptions,
+}
+
 impl<S> RegionWorkerLoop<S> {
     pub(crate) fn new_index_build_task(
         &self,
         region: &MitoRegionRef,
-        version: &VersionRef,
+        snapshot: &IndexBuildSnapshot,
         file: FileHandle,
         file_meta: FileMeta,
         build_type: IndexBuildType,
@@ -65,11 +75,11 @@ impl<S> RegionWorkerLoop<S> {
 
         let indexer_builder_ref = Arc::new(IndexerBuilderImpl {
             build_type: build_type.clone(),
-            metadata: version.metadata.clone(),
+            metadata: snapshot.metadata.clone(),
             inverted_index_config: self.config.inverted_index.clone(),
             fulltext_index_config: self.config.fulltext_index.clone(),
             bloom_filter_index_config: self.config.bloom_filter_index.clone(),
-            index_options: version.options.index_options.clone(),
+            index_options: snapshot.index_options.clone(),
             intermediate_manager,
             puffin_manager,
             write_cache_enabled: self.cache_manager.write_cache().is_some(),
@@ -78,8 +88,8 @@ impl<S> RegionWorkerLoop<S> {
         IndexBuildTask {
             region_id: region.region_id,
             file: file.clone(),
-            target_region_metadata: version.metadata.clone(),
-            source: IndexBuildSource::new(file_meta, version.metadata.schema_version),
+            target_region_metadata: snapshot.metadata.clone(),
+            source: IndexBuildSource::new(file_meta, snapshot.metadata.schema_version),
             reason: build_type,
             access_layer: access_layer.clone(),
             listener: self.listener.clone(),
@@ -159,11 +169,27 @@ impl<S> RegionWorkerLoop<S> {
             return;
         };
 
-        let version_control = region.version_control.clone();
-        let version = version_control.current().version;
+        // Only keep the parts of the version that index builds need, so the
+        // memtables and SST version are not pinned across the awaits below.
+        let (snapshot, all_files) = {
+            let version = region.version_control.current().version;
+            let all_files: HashMap<FileId, FileHandle> = version
+                .ssts
+                .levels()
+                .iter()
+                .flat_map(|level| level.files.iter())
+                .filter(|(_, handle)| !handle.is_deleted() && !handle.compacting())
+                .map(|(id, handle)| (*id, handle.clone()))
+                .collect();
+            let snapshot = IndexBuildSnapshot {
+                metadata: version.metadata.clone(),
+                index_options: version.options.index_options.clone(),
+            };
+            (snapshot, all_files)
+        };
         // A committed index publication may not have reached version control
         // yet. Use the manifest's FileMeta as the conditional publication
-        // source while keeping the builder's schema generation from `version`.
+        // source while keeping the builder's schema generation from the version.
         let manifest = region.manifest_ctx.manifest().await;
         let current_file_meta = |file_id| {
             let file_meta = manifest.files.get(&file_id);
@@ -176,23 +202,15 @@ impl<S> RegionWorkerLoop<S> {
             file_meta.cloned()
         };
 
-        let all_files: HashMap<FileId, FileHandle> = version
-            .ssts
-            .levels()
-            .iter()
-            .flat_map(|level| level.files.iter())
-            .filter(|(_, handle)| !handle.is_deleted() && !handle.compacting())
-            .map(|(id, handle)| (*id, handle.clone()))
-            .collect();
-
         let build_tasks = if request.file_metas.is_empty() {
             // If no specific files are provided, find files whose index is inconsistent with the region metadata.
             all_files
                 .values()
                 .filter_map(|file| {
                     let file_meta = current_file_meta(file.meta_ref().file_id)?;
-                    (!file_meta.is_index_consistent_with_region(&version.metadata.column_metadatas))
-                        .then(|| (file.clone(), file_meta))
+                    (!file_meta
+                        .is_index_consistent_with_region(&snapshot.metadata.column_metadatas))
+                    .then(|| (file.clone(), file_meta))
                 })
                 .collect::<Vec<_>>()
         } else {
@@ -238,7 +256,7 @@ impl<S> RegionWorkerLoop<S> {
 
             let task = self.new_index_build_task(
                 &region,
-                &version,
+                &snapshot,
                 file_handle.clone(),
                 file_meta,
                 request.build_type.clone(),
