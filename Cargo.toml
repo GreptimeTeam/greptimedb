@@ -237,7 +237,7 @@ rskafka = { git = "https://github.com/influxdata/rskafka.git", rev = "80f42eb15e
 rstest = "0.25"
 rstest_reuse = "0.7"
 rust_decimal = "1.33"
-rustls = { version = "0.23.25", default-features = false }
+rustls = { version = "0.23.46", default-features = false }
 ryu = "1.0"
 sea-query = "0.32"
 serde = { version = "1.0", features = ["derive"] }
