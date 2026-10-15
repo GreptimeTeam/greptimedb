@@ -21,7 +21,9 @@ use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_query::request::RawSeriesRequest;
 use common_query::series_frame::pack_raw_series;
-use common_recordbatch::adapter::{RecordBatchStreamAdapter, RegionQueryStatCounters};
+use common_recordbatch::adapter::{
+    RecordBatchStreamAdapter, RegionQueryStatCounters, SERIES_SCAN_EXEC_NAME,
+};
 use common_recordbatch::{
     DfRecordBatch, DfSendableRecordBatchStream, MemoryTrackedStream, QueryMemoryTracker,
     RecordBatch, SendableRecordBatchStream,
@@ -526,6 +528,14 @@ impl SeriesScanExec {
     pub fn series_schema(&self) -> &Arc<SeriesSchema> {
         &self.series_schema
     }
+
+    pub fn query_load_region_id(&self) -> Option<u64> {
+        self.scan.query_load_region_id()
+    }
+
+    pub fn query_stat_counters(&self) -> Option<RegionQueryStatCounters> {
+        self.scan.query_stat_counters()
+    }
 }
 
 fn raw_label_mode(source: &RawLabelSource) -> RawLabelMode {
@@ -603,7 +613,7 @@ impl ExecutionPlan for SeriesScanExec {
         Ok(self)
     }
     fn name(&self) -> &str {
-        "SeriesScanExec"
+        SERIES_SCAN_EXEC_NAME
     }
     fn metrics(&self) -> Option<MetricsSet> {
         Some(self.scan.metric.clone_inner())

@@ -893,6 +893,27 @@ async fn memory_quota_failure_does_not_replay_raw_scan() {
 }
 
 #[test]
+fn native_series_scan_forwards_query_load_region_id() {
+    let schema = series_schema();
+    let (scan, _) = fixture(Some(schema), vec![]);
+    let region_id = RegionId::new(1, 99);
+    scan.scanner
+        .lock()
+        .unwrap()
+        .set_query_load_region_id(region_id);
+    let plan = scan
+        .try_to_series_scan(RawLabelSource::Explicit)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(plan.query_load_region_id(), Some(region_id.as_u64()));
+    assert_eq!(
+        plan.name(),
+        common_recordbatch::adapter::SERIES_SCAN_EXEC_NAME
+    );
+}
+
+#[test]
 fn bound_series_scan_uses_open_scanner_metadata_without_execution() {
     let schema = Arc::new(SeriesSchema {
         fields: vec![FieldSpec {

@@ -29,6 +29,7 @@ use common_function::handlers::{
     FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
 };
 use common_query::Output;
+use common_query::request::RawSeriesRequest;
 use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
 use datafusion_expr::{AggregateUDF, LogicalPlan, WindowUDF};
@@ -76,6 +77,19 @@ pub trait QueryEngine: Send + Sync {
 
     /// Execute the given [`LogicalPlan`].
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output>;
+
+    /// Execute a native single-region raw-series scan.
+    async fn execute_raw_series(
+        &self,
+        _plan: LogicalPlan,
+        _query_ctx: QueryContextRef,
+        _binding: RawSeriesRequest,
+    ) -> Result<Output> {
+        crate::error::UnimplementedSnafu {
+            operation: "native raw-series query",
+        }
+        .fail()
+    }
 
     /// Register an aggregate function.
     ///

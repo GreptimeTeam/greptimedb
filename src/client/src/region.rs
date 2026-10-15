@@ -28,21 +28,26 @@ use arc_swap::ArcSwapOption;
 use arrow_flight::Ticket;
 use async_stream::stream;
 use async_trait::async_trait;
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, PlainError};
 use common_error::status_code::StatusCode;
 use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::node_manager::Datanode;
-use common_query::request::QueryRequest;
+use common_query::error::Error as CommonQueryError;
+use common_query::request::{QueryRequest, RAW_SERIES_REQUEST_EXTENSION_KEY, RawSeriesRequest};
+use common_query::series_frame::unpack_raw_series;
+use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::error;
 use common_telemetry::tracing::Span;
 use common_telemetry::tracing_context::TracingContext;
+use datatypes::series::raw::RawSeriesOrdering;
 use futures_util::Stream;
 use prost::Message;
 use query::query_engine::DefaultSerializer;
 use snafu::{OptionExt, ResultExt, location};
+use store_api::region_engine::SendableRawSeriesStream;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use tokio_stream::StreamExt;
 use tonic::codec::CompressionEncoding;
@@ -100,6 +105,80 @@ impl RegionRequester {
             send_compression,
             accept_compression,
         }
+    }
+
+    /// Sends an explicit trusted internal raw-series request and decodes its Flight frames.
+    ///
+    /// The binding is an expectation supplied by the already-authorized internal planner; it is
+    /// not evidence of provenance or an independent authorization grant.
+    pub async fn handle_raw_series_query(
+        &self,
+        mut request: QueryRequest,
+        binding: RawSeriesRequest,
+    ) -> MetaResult<SendableRawSeriesStream> {
+        if request.region_id != binding.physical_metadata.region_id {
+            return Err(BoxedError::new(PlainError::new(
+                "raw-series request region does not match binding".to_string(),
+                StatusCode::InvalidArguments,
+            )))
+            .context(meta_error::ExternalSnafu);
+        }
+        let (expected_schema, label_source) = binding
+            .bind(Arc::new(binding.physical_metadata.clone()))
+            .map_err(|error| {
+                BoxedError::new(CommonQueryError::GeneralDataFusion {
+                    error,
+                    location: location!(),
+                })
+            })
+            .context(meta_error::ExternalSnafu)?;
+        if request
+            .header
+            .as_ref()
+            .and_then(|header| header.query_context.as_ref())
+            .is_some_and(|context| {
+                context
+                    .extensions
+                    .contains_key(RAW_SERIES_REQUEST_EXTENSION_KEY)
+            })
+        {
+            return Err(BoxedError::new(PlainError::new(
+                "raw-series request marker already exists".to_string(),
+                StatusCode::InvalidArguments,
+            )))
+            .context(meta_error::ExternalSnafu);
+        }
+        let extension = binding
+            .to_extension_value()
+            .map_err(|error| {
+                BoxedError::new(CommonQueryError::GeneralDataFusion {
+                    error,
+                    location: location!(),
+                })
+            })
+            .context(meta_error::ExternalSnafu)?;
+        request
+            .header
+            .get_or_insert_default()
+            .query_context
+            .get_or_insert_default()
+            .extensions
+            .insert(RAW_SERIES_REQUEST_EXTENSION_KEY.to_string(), extension);
+        let stream = Datanode::handle_query(self, request).await?;
+        let stream = Box::pin(DfRecordBatchStreamAdapter::new(stream));
+        unpack_raw_series(
+            stream,
+            expected_schema,
+            label_source,
+            RawSeriesOrdering::Contiguous,
+        )
+        .map_err(|error| {
+            BoxedError::new(CommonQueryError::GeneralDataFusion {
+                error,
+                location: location!(),
+            })
+        })
+        .context(meta_error::ExternalSnafu)
     }
 
     pub async fn do_get_inner(&self, ticket: Ticket) -> Result<SendableRecordBatchStream> {
@@ -422,7 +501,8 @@ mod tests {
     };
     use api::v1::value::ValueData;
     use api::v1::{
-        ColumnDataType, ColumnSchema as PbColumnSchema, Row, Rows, Status as PbStatus, Value,
+        ColumnDataType, ColumnSchema as PbColumnSchema, QueryContext as ApiQueryContext, Row, Rows,
+        Status as PbStatus, Value,
     };
     use common_error::ext::RetryHint;
     use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
@@ -440,6 +520,37 @@ mod tests {
 
     use super::*;
     use crate::Error;
+
+    fn raw_series_fixture() -> RawSeriesRequest {
+        RawSeriesRequest::from_extension_value(include_str!(
+            "../../../tests/compatibility/wire/raw_series_request/v1_request.json"
+        ))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn raw_query_rejects_existing_marker_before_transport() {
+        let requester = RegionRequester::new(Client::new(), false, false);
+        let mut context = ApiQueryContext::default();
+        context.extensions.insert(
+            RAW_SERIES_REQUEST_EXTENSION_KEY.to_string(),
+            "already-set".to_string(),
+        );
+        let request = QueryRequest {
+            header: Some(RegionRequestHeader {
+                query_context: Some(context),
+                ..Default::default()
+            }),
+            region_id: raw_series_fixture().physical_metadata.region_id,
+            plan: Default::default(),
+        };
+        let error = requester
+            .handle_raw_series_query(request, raw_series_fixture())
+            .await
+            .err()
+            .expect("conflicting marker should be rejected before transport");
+        assert_eq!(error.status_code(), StatusCode::InvalidArguments);
+    }
 
     #[derive(Clone, Default)]
     struct RecordingRegionService {

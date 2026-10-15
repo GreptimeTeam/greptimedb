@@ -29,18 +29,26 @@ use common_catalog::consts::is_readonly_table;
 use common_error::ext::BoxedError;
 use common_function::function::FunctionContext;
 use common_function::function_factory::ScalarFunctionFactory;
+use common_query::request::{
+    INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, RawSeriesRequest,
+};
 use common_query::{Output, OutputData, OutputMeta};
-use common_recordbatch::adapter::{RecordBatchStreamAdapter, RegionQueryStatCounters};
+use common_recordbatch::adapter::{
+    RecordBatchStreamAdapter, RegionQueryStatCounters, SERIES_SCAN_EXEC_NAME,
+};
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing;
 use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
+use datafusion::datasource::DefaultTableSource;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion_common::ResolvedTableReference;
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::{
-    AggregateUDF, DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlan, WindowUDF, WriteOp,
+    AggregateUDF, DmlStatement, Expr, LogicalPlan as DfLogicalPlan, LogicalPlan, Volatility,
+    WindowUDF, WriteOp,
 };
 use datatypes::prelude::VectorRef;
 use datatypes::schema::Schema;
@@ -50,7 +58,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use sqlparser::ast::AnalyzeFormat;
 use table::TableRef;
 use table::requests::{DeleteRequest, InsertRequest};
-use table::table::scan::{REGION_SCAN_EXEC_NAME, RegionScanExec};
+use table::table::scan::{REGION_SCAN_EXEC_NAME, RegionScanExec, SeriesScanExec};
 use tracing::Span;
 
 use crate::analyze::DistAnalyzeExec;
@@ -82,15 +90,57 @@ pub const QUERY_PARALLELISM_HINT: &str = "query_parallelism";
 /// Whether to fallback to the original plan when failed to push down.
 pub const QUERY_FALLBACK_HINT: &str = "query_fallback";
 
+fn raw_expr_supported(expr: &Expr) -> bool {
+    let mut supported = true;
+    let _ = expr.apply(|node| {
+        match node {
+            Expr::Column(_) | Expr::Literal(_, _) => {}
+            Expr::ScalarFunction(function)
+                if function.func.signature().volatility == Volatility::Immutable => {}
+            Expr::BinaryExpr(_)
+            | Expr::Like(_)
+            | Expr::SimilarTo(_)
+            | Expr::Not(_)
+            | Expr::IsNotNull(_)
+            | Expr::IsNull(_)
+            | Expr::IsTrue(_)
+            | Expr::IsFalse(_)
+            | Expr::IsUnknown(_)
+            | Expr::IsNotTrue(_)
+            | Expr::IsNotFalse(_)
+            | Expr::IsNotUnknown(_)
+            | Expr::Negative(_)
+            | Expr::Between(_)
+            | Expr::Case(_)
+            | Expr::Cast(_)
+            | Expr::TryCast(_)
+            | Expr::InList(_) => {}
+            _ => supported = false,
+        }
+        Ok(if supported {
+            TreeNodeRecursion::Continue
+        } else {
+            TreeNodeRecursion::Stop
+        })
+    });
+    supported
+}
+
 fn query_load_region_id(plan: &Arc<dyn ExecutionPlan>) -> Option<u64> {
     let mut region_id = None;
     let mut stack = vec![plan.clone()];
 
     while let Some(plan) = stack.pop() {
-        if plan.name() == REGION_SCAN_EXEC_NAME
-            && let Some(scan) = plan.downcast_ref::<RegionScanExec>()
-            && let Some(scan_region_id) = scan.query_load_region_id()
-        {
+        let scan_region_id = if plan.name() == REGION_SCAN_EXEC_NAME {
+            plan.downcast_ref::<RegionScanExec>()
+                .and_then(RegionScanExec::query_load_region_id)
+        } else if plan.name() == SERIES_SCAN_EXEC_NAME {
+            plan.downcast_ref::<SeriesScanExec>()
+                .and_then(SeriesScanExec::query_load_region_id)
+        } else {
+            None
+        };
+        if let Some(scan_region_id) = scan_region_id {
             match region_id {
                 Some(region_id) if region_id != scan_region_id => return None,
                 Some(_) => {}
@@ -116,10 +166,16 @@ fn query_stat_counters(plan: &Arc<dyn ExecutionPlan>) -> Option<RegionQueryStatC
     let mut stack = vec![plan.clone()];
 
     while let Some(plan) = stack.pop() {
-        if plan.name() == REGION_SCAN_EXEC_NAME
-            && let Some(scan) = plan.downcast_ref::<RegionScanExec>()
-            && let Some(scan_counters) = scan.query_stat_counters()
-        {
+        let scan_counters = if plan.name() == REGION_SCAN_EXEC_NAME {
+            plan.downcast_ref::<RegionScanExec>()
+                .and_then(RegionScanExec::query_stat_counters)
+        } else if plan.name() == SERIES_SCAN_EXEC_NAME {
+            plan.downcast_ref::<SeriesScanExec>()
+                .and_then(SeriesScanExec::query_stat_counters)
+        } else {
+            None
+        };
+        if let Some(scan_counters) = scan_counters {
             match &counters {
                 Some(counters)
                     if !Arc::ptr_eq(&counters.query_cpu_time, &scan_counters.query_cpu_time)
@@ -523,6 +579,98 @@ impl QueryEngine for DatafusionQueryEngine {
         }
     }
 
+    async fn execute_raw_series(
+        &self,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+        binding: RawSeriesRequest,
+    ) -> Result<Output> {
+        use crate::dummy_catalog::DummyTableProvider;
+        use crate::error::{QueryExecutionSnafu, UnimplementedSnafu};
+
+        let unsupported = || {
+            UnimplementedSnafu {
+                operation: "unsupported native raw-series plan".to_string(),
+            }
+            .build()
+        };
+        if let Some(hint) = query_ctx.extension(QUERY_PARALLELISM_HINT)
+            && hint.parse::<usize>().ok() != Some(1)
+        {
+            return Err(unsupported());
+        }
+        if query_ctx
+            .extension(INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY)
+            .is_some()
+        {
+            return Err(unsupported());
+        }
+        let LogicalPlan::TableScan(scan) = &plan else {
+            return Err(unsupported());
+        };
+        if scan.fetch.is_some()
+            || scan.projection.is_none()
+            || !scan.statistics_requests.is_empty()
+            || scan.filters.iter().any(|e| !raw_expr_supported(e))
+        {
+            return Err(unsupported());
+        }
+        let Some(source) = scan.source.downcast_ref::<DefaultTableSource>() else {
+            return Err(unsupported());
+        };
+        let Some(provider) = source.table_provider.downcast_ref::<DummyTableProvider>() else {
+            return Err(unsupported());
+        };
+        let Some(provider) = provider.clone_for_raw_series() else {
+            return Err(unsupported());
+        };
+        let replacement = Arc::new(provider);
+        let new_source = Arc::new(DefaultTableSource::new(replacement));
+        let mut scan = scan.clone();
+        scan.source = new_source;
+        let plan = LogicalPlan::TableScan(scan);
+
+        let normal_ctx = self.engine_context(query_ctx.clone());
+        let mut state = normal_ctx.state().clone();
+        let config = state.config().clone().with_target_partitions(1);
+        *state.config_mut() = config;
+        let mut ctx = QueryEngineContext::new(state, query_ctx.clone());
+        let physical = self.create_physical_plan(&mut ctx, &plan).await?;
+        let physical = self.optimize_physical_plan(&mut ctx, physical)?;
+        if physical.name() != REGION_SCAN_EXEC_NAME {
+            return Err(unsupported());
+        }
+        let Some(scan) = physical.downcast_ref::<RegionScanExec>() else {
+            return Err(unsupported());
+        };
+        let ranges = scan.get_partition_ranges();
+        let prepared = Arc::new(
+            scan.with_new_partitions(vec![ranges], 1)
+                .map_err(BoxedError::new)
+                .context(QueryExecutionSnafu)?,
+        );
+        let Some(native) = prepared.clone().try_to_bound_series_scan(&binding)? else {
+            return Err(unsupported());
+        };
+        let native_plan: Arc<dyn ExecutionPlan> = native;
+        let wrapped = if let Some(wrapper) = self.plugins.get::<PhysicalPlanWrapperRef>() {
+            wrapper.wrap(native_plan.clone(), query_ctx)
+        } else {
+            native_plan.clone()
+        };
+        if !Arc::ptr_eq(&native_plan, &wrapped)
+            || native_plan.schema() != wrapped.schema()
+            || wrapped.properties().output_partitioning().partition_count() != 1
+        {
+            return Err(unsupported());
+        }
+        let stream = self.execute_stream(&ctx, &wrapped)?;
+        Ok(Output::new(
+            OutputData::Stream(stream),
+            OutputMeta::new_with_plan(wrapped),
+        ))
+    }
+
     /// Note in SQL queries, aggregate names are looked up using
     /// lowercase unless the query uses quotes. For example,
     ///
@@ -764,6 +912,7 @@ mod tests {
     use datafusion::prelude::{col, lit};
     use datafusion_common::{JoinType, NullEquality, ScalarValue};
     use datafusion_physical_expr::expressions::Column;
+    use datatypes::arrow::datatypes::{DataType, Field};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, SchemaRef};
     use datatypes::vectors::{Helper, UInt32Vector, VectorRef};
@@ -1040,6 +1189,67 @@ mod tests {
             QueryOptions::default(),
         )
         .query_engine()
+    }
+
+    #[tokio::test]
+    async fn raw_series_entrypoint_rejects_parent_plans_and_invalid_parallel_hints() {
+        let engine = create_test_engine().await;
+        let provider = crate::optimizer::test_util::mock_table_provider(RegionId::new(1, 1));
+        let metadata = provider.region_metadata();
+        let source = Arc::new(DefaultTableSource::new(Arc::new(provider)));
+        let scan = datafusion_expr::LogicalPlanBuilder::scan("raw", source, Some(vec![2]))
+            .unwrap()
+            .build()
+            .unwrap();
+        let binding = RawSeriesRequest {
+            version: 1,
+            physical_metadata: metadata.as_ref().clone(),
+            metric_name: "m".to_string(),
+            logical_tags: vec![],
+            field_ids: vec![3],
+        };
+        for hint in ["invalid", "0", "2"] {
+            let ctx = Arc::new(
+                QueryContextBuilder::default()
+                    .set_extension(QUERY_PARALLELISM_HINT.to_string(), hint.to_string())
+                    .build(),
+            );
+            let error = match engine
+                .execute_raw_series(scan.clone(), ctx, binding.clone())
+                .await
+            {
+                Err(error) => error,
+                Ok(_) => panic!("invalid parallelism hint was accepted"),
+            };
+            assert!(matches!(
+                error,
+                crate::error::Error::Unimplemented { operation, .. }
+                    if operation == "unsupported native raw-series plan"
+            ));
+        }
+        assert!(raw_expr_supported(&lit(1_i64).eq(lit(2_i64))));
+        assert!(!raw_expr_supported(&Expr::ScalarVariable(
+            Arc::new(Field::new("v", DataType::Int64, true)),
+            vec!["v".into()],
+        )));
+
+        let parent = datafusion_expr::LogicalPlanBuilder::from(scan.clone())
+            .filter(col("v0").gt(lit(0.0)))
+            .unwrap()
+            .build()
+            .unwrap();
+        let error = match engine
+            .execute_raw_series(parent, QueryContext::arc(), binding)
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("a parent logical plan was accepted"),
+        };
+        assert!(matches!(
+            error,
+            crate::error::Error::Unimplemented { operation, .. }
+                if operation == "unsupported native raw-series plan"
+        ));
     }
 
     #[tokio::test]

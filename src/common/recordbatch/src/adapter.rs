@@ -55,6 +55,7 @@ use crate::{
 };
 
 const REGION_SCAN_EXEC_NAME: &str = "RegionScanExec";
+pub const SERIES_SCAN_EXEC_NAME: &str = "SeriesScanExec";
 
 type FutureStream =
     Pin<Box<dyn std::future::Future<Output = Result<SendableRecordBatchStream>> + Send>>;
@@ -377,12 +378,16 @@ impl RecordBatchStreamAdapter {
     }
 }
 
+fn is_region_scan_name(name: &str) -> bool {
+    name == REGION_SCAN_EXEC_NAME || name == SERIES_SCAN_EXEC_NAME
+}
+
 /// Extracts total `output_bytes` from region scan plan nodes.
 pub fn region_scan_output_bytes(metrics: &RecordBatchMetrics) -> usize {
     metrics
         .plan_metrics
         .iter()
-        .filter(|pm| pm.plan_name == REGION_SCAN_EXEC_NAME)
+        .filter(|pm| is_region_scan_name(&pm.plan_name))
         .flat_map(|pm| &pm.metrics)
         .filter_map(|(name, value)| (name == "output_bytes").then_some(*value))
         .sum()
@@ -434,7 +439,7 @@ fn collect_lightweight_query_load_metrics_inner(
     level: usize,
     record_batch_metrics: &mut RecordBatchMetrics,
 ) {
-    let is_region_scan = df_plan.name() == REGION_SCAN_EXEC_NAME;
+    let is_region_scan = is_region_scan_name(df_plan.name());
     let mut region_scan_output_bytes = None;
 
     if let Some(metrics) = df_plan.metrics() {
@@ -967,6 +972,7 @@ mod test {
         properties: Arc<PlanProperties>,
         metrics: ExecutionPlanMetricsSet,
         format_plan: bool,
+        plan_name: &'static str,
     }
 
     impl TestMetricsExec {
@@ -975,17 +981,23 @@ mod test {
         }
 
         fn new_without_plan_formatting(schema: DfSchemaRef) -> Self {
-            Self::with_output_bytes_and_formatting(schema, &[24], false)
+            Self::with_output_bytes_and_formatting(schema, &[24], false, REGION_SCAN_EXEC_NAME)
         }
 
         fn with_output_bytes(schema: DfSchemaRef, output_bytes_by_partition: &[usize]) -> Self {
-            Self::with_output_bytes_and_formatting(schema, output_bytes_by_partition, true)
+            Self::with_output_bytes_and_formatting(
+                schema,
+                output_bytes_by_partition,
+                true,
+                REGION_SCAN_EXEC_NAME,
+            )
         }
 
         fn with_output_bytes_and_formatting(
             schema: DfSchemaRef,
             output_bytes_by_partition: &[usize],
             format_plan: bool,
+            plan_name: &'static str,
         ) -> Self {
             let metrics = ExecutionPlanMetricsSet::new();
             let elapsed_compute = MetricBuilder::new(&metrics).elapsed_compute(0);
@@ -1004,6 +1016,7 @@ mod test {
                 )),
                 metrics,
                 format_plan,
+                plan_name,
             }
         }
     }
@@ -1014,7 +1027,7 @@ mod test {
                 self.format_plan,
                 "non-verbose lightweight partial metrics must not format the plan"
             );
-            write!(f, "RegionScanExec")?;
+            write!(f, "{}", self.plan_name)?;
             if matches!(t, DisplayFormatType::Verbose) {
                 write!(f, ": files=[file-1.parquet]")?;
             }
@@ -1024,7 +1037,7 @@ mod test {
 
     impl ExecutionPlan for TestMetricsExec {
         fn name(&self) -> &str {
-            REGION_SCAN_EXEC_NAME
+            self.plan_name
         }
 
         fn properties(&self) -> &Arc<PlanProperties> {
@@ -1062,6 +1075,29 @@ mod test {
         fn metrics(&self) -> Option<MetricsSet> {
             Some(self.metrics.clone_inner())
         }
+    }
+
+    #[test]
+    fn test_lightweight_query_load_metrics_sums_series_scan_output_bytes() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let plan = TestMetricsExec::with_output_bytes_and_formatting(
+            schema.arrow_schema().clone(),
+            &[24, 18],
+            true,
+            SERIES_SCAN_EXEC_NAME,
+        );
+
+        let metrics = collect_lightweight_query_load_metrics(&plan, Some(42));
+
+        assert_eq!(region_scan_output_bytes(&metrics), 42);
+        assert_eq!(metrics.plan_metrics[0].plan_name, SERIES_SCAN_EXEC_NAME);
+
+        let full_metrics = collect_full_metrics(&plan, false, Some(42));
+        assert_eq!(region_scan_output_bytes(&full_metrics), 42);
     }
 
     #[test]
