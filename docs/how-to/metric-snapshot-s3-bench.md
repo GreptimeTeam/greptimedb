@@ -2,8 +2,9 @@
 
 The manual `Metric Snapshot S3 Benchmark` workflow tests packed Metric export and
 restore against real S3 in `ap-southeast-1`. It must first exist on the repository's
-default branch for GitHub to register `workflow_dispatch`. AWS measurements have
-not yet been collected for this harness.
+default branch for GitHub to register `workflow_dispatch`. It was validated on AWS
+by run [38544464731](https://github.com/GreptimeTeam/greptimedb/actions/runs/38544464731);
+[#9573](https://github.com/GreptimeTeam/greptimedb/pull/9573) records its conditions and results.
 
 ## Run
 
