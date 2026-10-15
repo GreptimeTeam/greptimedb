@@ -102,11 +102,13 @@ ORDER BY t.key_id;
 |               |     SortExec: expr=[key_id@0 ASC NULLS LAST], preserve_REDACTED
 |               |       AggregateExec: mode=SinglePartitioned, gby=[key_id@1 as key_id], aggr=[min(t.ts)]                                                                      |
 |               |         HashJoinExec: mode=Partitioned, join_type=LeftSemi, on=[(key_id@1, key_id@0)]                                                                        |
-|               |           FilterExec: key_id@1 IS NOT NULL                                                                                                                   |
-|               |             ProjectionExec: expr=[ts@0 as ts, key_id@1 as key_id]                                                                                            |
+|               |           RepartitionExec: REDACTED
+|               |             FilterExec: key_id@1 IS NOT NULL                                                                                                                 |
+|               |               ProjectionExec: expr=[ts@0 as ts, key_id@1 as key_id]                                                                                          |
+|               |                 MergeScanExec: REDACTED
+|               |           RepartitionExec: REDACTED
+|               |             FilterExec: key_id@0 IS NOT NULL                                                                                                                 |
 |               |               MergeScanExec: REDACTED
-|               |           FilterExec: key_id@0 IS NOT NULL                                                                                                                   |
-|               |             MergeScanExec: REDACTED
 |               |                                                                                                                                                              |
 +---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
@@ -124,8 +126,10 @@ ORDER BY t.key_id;
 +--------+---------------------+
 | key_id | first_ts            |
 +--------+---------------------+
+| 1      | 2026-10-09 00:00:00 |
 | 11     | 2026-10-09 00:00:00 |
 | 21     | 2026-10-09 00:00:00 |
+| 31     | 2026-10-09 00:00:00 |
 +--------+---------------------+
 
 -- Disabling remote dynamic filtering must preserve the same full result.
