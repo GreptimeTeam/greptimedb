@@ -242,6 +242,9 @@ impl WorkerGroup {
         let compaction_memory_manager =
             Arc::new(new_compaction_memory_manager(compaction_limit_bytes));
         let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
+        // A sweep waits for a permit while a GC job takes one without waiting, so
+        // sharing the GC limiter would fail GC jobs and report sweeps as GC jobs.
+        let sweep_limiter = Arc::new(Semaphore::new(config.gc.max_concurrent_gc_job));
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -270,7 +273,7 @@ impl WorkerGroup {
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                     flush_semaphore: flush_semaphore.clone(),
-                    gc_limiter: gc_limiter.clone(),
+                    sweep_limiter: sweep_limiter.clone(),
                 }
                 .start()
             })
@@ -493,6 +496,9 @@ impl WorkerGroup {
         let compaction_memory_manager =
             Arc::new(new_compaction_memory_manager(compaction_limit_bytes));
         let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
+        // A sweep waits for a permit while a GC job takes one without waiting, so
+        // sharing the GC limiter would fail GC jobs and report sweeps as GC jobs.
+        let sweep_limiter = Arc::new(Semaphore::new(config.gc.max_concurrent_gc_job));
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
@@ -520,7 +526,7 @@ impl WorkerGroup {
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                     flush_semaphore: flush_semaphore.clone(),
-                    gc_limiter: gc_limiter.clone(),
+                    sweep_limiter: sweep_limiter.clone(),
                 }
                 .start()
             })
@@ -631,8 +637,8 @@ struct WorkerStarter<S> {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     flush_semaphore: Arc<Semaphore>,
-    /// Limiter shared with the GC jobs.
-    gc_limiter: GcLimiterRef,
+    /// Limiter for the temporary file sweeps.
+    sweep_limiter: Arc<Semaphore>,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -733,7 +739,7 @@ impl<S: LogStore> WorkerStarter<S> {
             partition_expr_fetcher: self.partition_expr_fetcher,
             flush_semaphore: self.flush_semaphore,
             plugins: self.plugins,
-            gc_limiter: self.gc_limiter,
+            sweep_limiter: self.sweep_limiter,
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -1061,8 +1067,8 @@ struct RegionWorkerLoop<S> {
     flush_semaphore: Arc<Semaphore>,
     /// Plugins for flush hooks.
     plugins: Plugins,
-    /// Limiter shared with the GC jobs.
-    gc_limiter: GcLimiterRef,
+    /// Limiter for the temporary file sweeps.
+    sweep_limiter: Arc<Semaphore>,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -1487,7 +1493,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 region.set_role(RegionRole::DowngradingLeader);
             }
             let sweep_older_than = self.config.gc.unknown_file_lingering_time;
-            let gc_limiter = self.gc_limiter.clone();
+            let sweep_limiter = self.sweep_limiter.clone();
             // We need to do this in background as we need the manifest lock.
             common_runtime::spawn_global(async move {
                 match region.set_role_state_gracefully(region_role_state).await {
@@ -1503,7 +1509,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                                 region.access_layer(),
                                 region_id,
                                 sweep_older_than,
-                                gc_limiter,
+                                sweep_limiter,
                             );
                         }
                     }

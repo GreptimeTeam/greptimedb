@@ -14,14 +14,15 @@
 
 //! Reclaims the temporary files that a crashed writer left in a region.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use common_telemetry::info;
 use object_store::temp_file::{sweep_temporary_files, writes_temporary_files};
 use store_api::storage::RegionId;
+use tokio::sync::Semaphore;
 
 use crate::access_layer::{AccessLayer, AccessLayerRef};
-use crate::gc::GcLimiterRef;
 use crate::manifest::storage::manifest_dir;
 use crate::manifest::storage::staging::{staging_blob_path, staging_manifest_path};
 use crate::sst::location::index_dir;
@@ -47,11 +48,15 @@ pub(crate) fn region_write_dirs(access_layer: &AccessLayer, region_id: RegionId)
 /// The caller is on the path that makes the region its writable leader, so
 /// reclaiming leftovers must not slow it down or fail it: everything happens in
 /// a spawned task that only logs.
+///
+/// `older_than` is the margin the caller takes from GC's
+/// `unknown_file_lingering_time`, which guards the same thing: a file this old
+/// is not one a writer is still filling.
 pub(crate) fn spawn_region_sweep(
     access_layer: AccessLayerRef,
     region_id: RegionId,
     older_than: Duration,
-    limiter: GcLimiterRef,
+    sweep_limiter: Arc<Semaphore>,
 ) {
     // No write to this store leaves a temporary file behind, so don't spend a
     // task on it: a sweep would still list every directory of the region to
@@ -61,11 +66,10 @@ pub(crate) fn spawn_region_sweep(
     }
 
     common_runtime::spawn_global(async move {
-        // Share the GC limiter: a sweep is the same kind of background cleanup,
-        // and a burst of regions becoming writable must not run more of them at
-        // once than a datanode allows GC jobs. Wait for a permit instead of
-        // giving up, the sweep has no deadline.
-        let Ok(_permit) = limiter.gc_job_limit.clone().acquire_owned().await else {
+        // A burst of regions becoming writable must not run more sweeps at once
+        // than the datanode allows GC jobs. Wait for a permit instead of giving
+        // up, the sweep has no deadline.
+        let Ok(_permit) = sweep_limiter.acquire_owned().await else {
             return;
         };
 

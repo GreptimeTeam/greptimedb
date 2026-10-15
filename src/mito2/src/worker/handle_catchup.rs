@@ -71,7 +71,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let wal = self.wal.clone();
         let allow_stale_entries = self.config.allow_stale_entries;
         let sweep_older_than = self.config.gc.unknown_file_lingering_time;
-        let gc_limiter = self.gc_limiter.clone();
+        let sweep_limiter = self.sweep_limiter.clone();
         common_runtime::spawn_global(async move {
             let mut task = RegionCatchupTask::new(region.clone(), wal, allow_stale_entries)
                 .with_entry_receiver(entry_receiver)
@@ -91,7 +91,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                                 region.access_layer(),
                                 region_id,
                                 sweep_older_than,
-                                gc_limiter,
+                                sweep_limiter,
                             ),
                             Err(err) => {
                                 error!(err; "Failed to set region {region_id} to leader");
