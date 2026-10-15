@@ -1056,31 +1056,23 @@ mod tests {
     fn test_cast_expressions() {
         let cases = vec![
             FilterTestCase::new(
-                "safe_cast",
+                "column_cast_requires_type_proof",
                 Expr::Cast(datafusion_expr::Cast::new(
                     Box::new(col("user_id")),
                     DataType::Int64,
                 ))
                 .eq(lit(100i64)),
-                vec![PartitionExpr::new(
-                    Operand::Column("user_id".to_string()),
-                    RestrictedOp::Eq,
-                    Operand::Value(Value::Int64(100)),
-                )],
+                vec![],
                 vec!["user_id"],
             ),
             FilterTestCase::new(
-                "cast_with_alias",
+                "cast_with_alias_requires_type_proof",
                 Expr::Cast(datafusion_expr::Cast::new(
                     Box::new(col("user_id").alias("uid")),
                     DataType::Int64,
                 ))
                 .eq(lit(100i64)),
-                vec![PartitionExpr::new(
-                    Operand::Column("user_id".to_string()),
-                    RestrictedOp::Eq,
-                    Operand::Value(Value::Int64(100)),
-                )],
+                vec![],
                 vec!["user_id"],
             ),
             FilterTestCase::new(
@@ -1168,11 +1160,7 @@ mod tests {
                     let in_expr = col("user_id")
                         .alias("uid")
                         .in_list(vec![lit(100i64), lit(200i64)], false);
-                    let cast_expr = Expr::Cast(datafusion_expr::Cast::new(
-                        Box::new(col("user_id")),
-                        DataType::Int64,
-                    ));
-                    let between_expr = cast_expr.between(lit(300i64), lit(400i64));
+                    let between_expr = col("user_id").between(lit(300i64), lit(400i64));
                     in_expr.or(between_expr)
                 },
                 vec![PartitionExpr::new(
