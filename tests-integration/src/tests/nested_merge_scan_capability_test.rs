@@ -1406,3 +1406,207 @@ async fn assert_raw_entrypoint_wrapper_contract(
     );
     assert_eq!(2, calls.load(Ordering::SeqCst));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_native_histogram_rows_ingest_into_mito() {
+    use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
+    use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram};
+    use api::v1::value::ValueData;
+    use api::v1::{
+        ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
+    };
+    use common_query::OutputData;
+    use common_query::native_histogram::{
+        encode_native_histogram, native_histogram_column_schema, native_histogram_value_type,
+    };
+    use datafusion::arrow::array::Int64Array;
+    use datatypes::prelude::ConcreteDataType;
+    use store_api::codec::PrimaryKeyEncoding;
+
+    const TABLE: &str = "native_histogram_raw_flight_flush";
+    common_telemetry::init_default_ut_logging();
+    let cluster = build_cluster("test_native_histogram_rows_ingest_into_mito").await;
+    let frontend = cluster.fe_instance().clone();
+    execute_sql(
+        &frontend,
+        &format!(
+            "CREATE TABLE {TABLE} (host STRING, ts TIMESTAMP TIME INDEX, float_value DOUBLE, PRIMARY KEY(host)) ENGINE=mito"
+        ),
+    )
+    .await;
+
+    let histogram_column = native_histogram_column_schema().unwrap();
+    let histograms = [
+        Histogram {
+            count: Some(Count::CountInt(8)),
+            sum: 10.0,
+            schema: 1,
+            zero_threshold: 0.001,
+            zero_count: Some(ZeroCount::ZeroCountInt(1)),
+            negative_spans: vec![BucketSpan {
+                offset: -2,
+                length: 1,
+            }],
+            negative_deltas: vec![1],
+            positive_spans: vec![BucketSpan {
+                offset: 0,
+                length: 3,
+            }],
+            positive_deltas: vec![1, 2, -1],
+            reset_hint: 2,
+            timestamp: 1_000,
+            start_timestamp: 500,
+            ..Default::default()
+        },
+        Histogram {
+            count: Some(Count::CountFloat(6.5)),
+            sum: 20.0,
+            schema: 2,
+            zero_threshold: 0.002,
+            zero_count: Some(ZeroCount::ZeroCountFloat(0.5)),
+            positive_spans: vec![BucketSpan {
+                offset: 3,
+                length: 2,
+            }],
+            positive_counts: vec![2.0, 3.5],
+            negative_spans: vec![BucketSpan {
+                offset: -1,
+                length: 1,
+            }],
+            negative_counts: vec![0.5],
+            reset_hint: 3,
+            timestamp: 2_000,
+            start_timestamp: 750,
+            ..Default::default()
+        },
+        Histogram {
+            count: Some(Count::CountFloat(3.5)),
+            sum: -0.0,
+            schema: -53,
+            zero_count: Some(ZeroCount::ZeroCountFloat(0.0)),
+            custom_values: vec![1.5, 2.5],
+            positive_spans: vec![BucketSpan {
+                offset: 0,
+                length: 3,
+            }],
+            positive_counts: vec![0.5, 1.25, 1.75],
+            reset_hint: 77,
+            timestamp: 3_000,
+            ..Default::default()
+        },
+    ];
+    let histograms = histograms
+        .iter()
+        .map(|histogram| encode_native_histogram(histogram).unwrap().into())
+        .collect::<Vec<_>>();
+    let mut schema = vec![
+        ColumnSchema {
+            column_name: "host".to_string(),
+            datatype: ColumnDataType::String as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "ts".to_string(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "float_value".to_string(),
+            datatype: ColumnDataType::Float64 as i32,
+            semantic_type: SemanticType::Field as i32,
+            ..Default::default()
+        },
+    ];
+    schema.push(histogram_column);
+    let rows = [1_000, 2_000, 3_000, 4_000]
+        .into_iter()
+        .zip(histograms.into_iter().map(Some).chain([None]))
+        .zip([None, Some(-0.0), Some(4.75), Some(7.25)])
+        .map(|((timestamp, histogram), value)| Row {
+            values: vec![
+                ValueData::StringValue("alpha".to_string()).into(),
+                ValueData::TimestampMillisecondValue(timestamp).into(),
+                value
+                    .map(ValueData::F64Value)
+                    .map(Into::into)
+                    .unwrap_or_default(),
+                histogram.unwrap_or_default(),
+            ],
+        })
+        .collect();
+    let output = frontend
+        .handle_row_inserts(
+            RowInsertRequests {
+                inserts: vec![RowInsertRequest {
+                    table_name: TABLE.to_string(),
+                    rows: Some(Rows { schema, rows }),
+                }],
+            },
+            QueryContext::arc(),
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(output.data, OutputData::AffectedRows(4)));
+
+    let leaders = region_leaders(&frontend, TABLE).await;
+    assert_eq!(1, leaders.len(), "fixture is required to have one region");
+    let (datanode, _) = leaders.values().next().unwrap();
+    let region_id = *leaders.keys().next().unwrap();
+    let region = region_server(&cluster, *datanode)
+        .mito_engine()
+        .unwrap()
+        .find_region(RegionId::from_u64(region_id))
+        .unwrap();
+    let metadata = region.metadata();
+    let histogram_column = metadata
+        .column_metadatas
+        .iter()
+        .find(|column| column.column_schema.name == "greptime_native_histogram")
+        .expect("region metadata must contain the native histogram field");
+    assert_eq!(SemanticType::Field, histogram_column.semantic_type);
+    assert_eq!(
+        native_histogram_value_type(),
+        &histogram_column.column_schema.data_type
+    );
+    assert_eq!(PrimaryKeyEncoding::Dense, metadata.primary_key_encoding);
+    assert_eq!(
+        vec!["host"],
+        metadata
+            .primary_key_columns()
+            .map(|column| column.column_schema.name.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        ConcreteDataType::float64_datatype(),
+        metadata
+            .column_by_name("float_value")
+            .unwrap()
+            .column_schema
+            .data_type
+    );
+    assert!(region.find_committed_sequence() > 0);
+    assert!(region.manifest_sst_entries().await.is_empty());
+
+    let count = output_batches(
+        run_sql(
+            &frontend,
+            &format!("SELECT COUNT(*) FROM {TABLE}"),
+            query_ctx(),
+        )
+        .await,
+    )
+    .await;
+    let count = count
+        .iter()
+        .next()
+        .expect("COUNT query must return a batch")
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("COUNT(*) must return Int64");
+    assert_eq!(4, count.value(0));
+}
