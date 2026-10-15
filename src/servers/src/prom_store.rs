@@ -21,7 +21,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use api::prom_store::remote::label_matcher::Type as MatcherType;
-use api::prom_store::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
+use api::prom_store::remote::{Label, LabelMatcher, Query, Sample, TimeSeries, WriteRequest};
 use api::v1::RowInsertRequests;
 use arrow::array::{
     Array, ArrayRef, AsArray, DictionaryArray, LargeStringArray, StringArray, StringViewArray,
@@ -136,6 +136,27 @@ pub fn extract_schema_from_query(query: &Query) -> Option<String> {
             is_database_selection_label(&matcher.name) && matcher.r#type == MatcherType::Eq as i32
         })
         .map(|matcher| matcher.value.clone())
+}
+
+/// Validate matcher syntax independently of whether the metric exists.
+pub fn validate_matchers(matchers: &[LabelMatcher]) -> Result<()> {
+    for matcher in matchers {
+        let matcher_type = MatcherType::try_from(matcher.r#type).map_err(|e| {
+            error::InvalidPromRemoteRequestSnafu {
+                msg: format!("invalid LabelMatcher type, decode error: {e}"),
+            }
+            .build()
+        })?;
+        if matches!(matcher_type, MatcherType::Re | MatcherType::Nre) {
+            regex::Regex::new(&matcher.value).map_err(|e| {
+                error::InvalidPromRemoteRequestSnafu {
+                    msg: format!("invalid regex for label '{}': {e}", matcher.name),
+                }
+                .build()
+            })?;
+        }
+    }
+    Ok(())
 }
 
 /// Create a DataFrame from a remote Query

@@ -34,6 +34,8 @@ mod tests {
     use frontend::instance::Instance;
     use prost::Message;
     use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
+    use servers::http::test_helpers::TestClient;
+    use servers::http::{HttpOptions, HttpServerBuilder};
     use servers::prom_store;
     use servers::prom_store::to_grpc_row_insert_requests;
     use servers::query_handler::PromStoreProtocolHandler;
@@ -662,6 +664,131 @@ mod tests {
                 }
             ]
         );
+
+        instance
+            .do_query(
+                "CREATE TABLE invalid_metric (ts TIMESTAMP TIME INDEX, a DOUBLE, b DOUBLE)",
+                ctx.clone(),
+            )
+            .await[0]
+            .as_ref()
+            .unwrap();
+        let server = HttpServerBuilder::new(HttpOptions::default())
+            .with_prom_handler(instance.clone(), None, true, Default::default(), None)
+            .build();
+        let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+        // Matcher syntax must be checked even when the metric does not exist.
+        let mut matcher_statuses = Vec::new();
+        for metric in ["metric1", "missing_metric"] {
+            for (matcher_type, value, expected_status) in [
+                (99, "spark", 400),
+                (MatcherType::Re as i32, "[", 400),
+                (MatcherType::Nre as i32, "[", 400),
+                (MatcherType::Eq as i32, "[", 200),
+                (MatcherType::Neq as i32, "[", 200),
+                (MatcherType::Re as i32, "spark", 200),
+                (MatcherType::Nre as i32, "api.*", 200),
+            ] {
+                let request = ReadRequest {
+                    queries: vec![Query {
+                        start_timestamp_ms: 1000,
+                        end_timestamp_ms: 2000,
+                        matchers: vec![
+                            LabelMatcher {
+                                name: prom_store::METRIC_NAME_LABEL.to_string(),
+                                value: metric.to_string(),
+                                r#type: MatcherType::Eq as i32,
+                            },
+                            LabelMatcher {
+                                name: "job".to_string(),
+                                value: value.to_string(),
+                                r#type: matcher_type,
+                            },
+                        ],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                };
+                let response = client
+                    .post("/v1/prometheus/read?db=prometheus")
+                    .body(prom_store::snappy_compress(&request.encode_to_vec()).unwrap())
+                    .send()
+                    .await;
+                matcher_statuses.push((
+                    metric,
+                    matcher_type,
+                    response.status().as_u16(),
+                    expected_status,
+                ));
+            }
+        }
+        assert!(
+            matcher_statuses
+                .iter()
+                .all(|(_, _, status, expected)| status == expected),
+            "{matcher_statuses:?}"
+        );
+
+        // Missing metrics must retain their result slots in multi-query responses.
+        for metrics in [
+            vec!["missing_metric"],
+            vec!["missing_metric", "another_missing_metric"],
+            vec![
+                "missing_metric",
+                "metric1",
+                "missing_metric",
+                "metric3",
+                "missing_metric",
+            ],
+            vec!["missing_metric", "invalid_metric"],
+        ] {
+            let request = ReadRequest {
+                queries: metrics
+                    .iter()
+                    .map(|metric| Query {
+                        start_timestamp_ms: 1000,
+                        end_timestamp_ms: 2000,
+                        matchers: vec![LabelMatcher {
+                            name: prom_store::METRIC_NAME_LABEL.to_string(),
+                            value: (*metric).to_string(),
+                            r#type: MatcherType::Eq as i32,
+                        }],
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            let response = client
+                .post("/v1/prometheus/read?db=prometheus")
+                .body(prom_store::snappy_compress(&request.encode_to_vec()).unwrap())
+                .send()
+                .await;
+            if metrics.contains(&"invalid_metric") {
+                assert!(!response.status().is_success());
+                assert!(response.text().await.contains("Ambiguous value column"));
+                continue;
+            }
+            assert_eq!(response.status(), 200, "{}", response.text().await);
+            assert_eq!(response.headers()["content-type"], "application/x-protobuf");
+            assert_eq!(response.headers()["content-encoding"], "snappy");
+            let body = prom_store::snappy_decompress(&response.bytes().await).unwrap();
+            let response = ReadResponse::decode(&body[..]).unwrap();
+            assert_eq!(response.results.len(), metrics.len());
+            for (result, metric) in response.results.iter().zip(metrics) {
+                if metric.ends_with("missing_metric") {
+                    assert!(result.timeseries.is_empty());
+                    continue;
+                }
+                assert!(!result.timeseries.is_empty());
+                for series in &result.timeseries {
+                    assert!(series.labels.iter().any(|label| {
+                        label.name == prom_store::METRIC_NAME_LABEL && label.value == metric
+                    }));
+                    assert_eq!(series.samples.len(), 2);
+                }
+            }
+        }
 
         // check physical table if provided
         if let Some(physical_table) = physical_table {

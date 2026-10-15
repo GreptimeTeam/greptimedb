@@ -61,7 +61,7 @@ use tracing::instrument;
 
 use crate::error::{
     AmbiguousValueColumnSnafu, CatalogSnafu, ColumnNotFoundSnafu, ExecLogicalPlanSnafu,
-    PromStoreRemoteQueryPlanSnafu, ReadTableSnafu, Result, TableNotFoundSnafu,
+    PromStoreRemoteQueryPlanSnafu, ReadTableSnafu, Result,
 };
 use crate::instance::Instance;
 
@@ -207,15 +207,15 @@ impl Instance {
         schema_name: &str,
         table_name: &str,
         query: &Query,
-    ) -> Result<RemoteQueryOutput> {
-        let table = self
+    ) -> Result<Option<RemoteQueryOutput>> {
+        let Some(table) = self
             .catalog_manager
             .table(catalog_name, schema_name, table_name, Some(ctx))
             .await
             .context(CatalogSnafu)?
-            .with_context(|| TableNotFoundSnafu {
-                table_name: format_full_table_name(catalog_name, schema_name, table_name),
-            })?;
+        else {
+            return Ok(None);
+        };
 
         let timestamp_column_name = table
             .schema()
@@ -250,12 +250,12 @@ impl Instance {
             .await
             .context(ExecLogicalPlanSnafu)?;
 
-        Ok(RemoteQueryOutput {
+        Ok(Some(RemoteQueryOutput {
             table_name: table_name.to_string(),
             timestamp_column_name,
             value_column_name,
             output,
-        })
+        }))
     }
 
     #[tracing::instrument(skip_all)]
@@ -264,7 +264,7 @@ impl Instance {
         ctx: QueryContextRef,
         queries: &[Query],
         query_targets: &[PermissionTableTarget],
-    ) -> ServerResult<Vec<RemoteQueryOutput>> {
+    ) -> ServerResult<Vec<Option<RemoteQueryOutput>>> {
         let mut results = Vec::with_capacity(queries.len());
 
         for (query, target) in queries.iter().zip(query_targets) {
@@ -599,6 +599,10 @@ impl PromStoreProtocolHandler for Instance {
 
         let response_type = negotiate_response_type(&request.accepted_response_types)?;
 
+        for query in &request.queries {
+            prom_store::validate_matchers(&query.matchers)?;
+        }
+
         // TODO(dennis): use read_hints to speedup query if possible
         let results = self
             .handle_remote_queries(ctx, &request.queries, &query_targets)
@@ -609,6 +613,10 @@ impl PromStoreProtocolHandler for Instance {
                 let mut query_results = Vec::with_capacity(results.len());
                 let mut map = HashMap::new();
                 for result in results {
+                    let Some(result) = result else {
+                        query_results.push(QueryResult { timeseries: vec![] });
+                        continue;
+                    };
                     let RemoteQueryOutput {
                         table_name,
                         timestamp_column_name,
