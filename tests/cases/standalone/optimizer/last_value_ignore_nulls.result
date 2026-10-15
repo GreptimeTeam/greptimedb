@@ -1,0 +1,169 @@
+create table last_value_ignore_nulls (
+    ts timestamp time index,
+    host string primary key,
+    v1 double,
+    v2 double,
+);
+
+Affected Rows: 0
+
+insert into last_value_ignore_nulls values
+    (1000, 'a', 42.0, null),
+    (2000, 'a', null, 20.0),
+    (1000, 'b', null, null),
+    (2000, 'b', null, null);
+
+Affected Rows: 4
+
+select
+    host,
+    last_value(v1 order by ts) ignore nulls as v1_ignore,
+    last_value(v2 order by ts) ignore nulls as v2_ignore,
+    last_value(v1 order by ts) as v1_default,
+    last_value(v1 order by ts) respect nulls as v1_respect
+from last_value_ignore_nulls
+group by host
+order by host;
+
++------+-----------+-----------+------------+------------+
+| host | v1_ignore | v2_ignore | v1_default | v1_respect |
++------+-----------+-----------+------------+------------+
+| a    | 42.0      | 20.0      |            |            |
+| b    |           |           |            |            |
++------+-----------+-----------+------------+------------+
+
+-- Default and RESPECT NULLS should retain the LastRow selector.
+select
+    host,
+    last_value(v1 order by ts) as v1_default,
+    last_value(v1 order by ts) respect nulls as v1_respect
+from last_value_ignore_nulls
+group by host
+order by host;
+
++------+------------+------------+
+| host | v1_default | v1_respect |
++------+------------+------------+
+| a    |            |            |
+| b    |            |            |
++------+------------+------------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+explain analyze select
+    last_value(v1 order by ts),
+    last_value(v1 order by ts) respect nulls
+from last_value_ignore_nulls
+group by host;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_ProjectionExec: expr=[last_value(last_value_ignore_nulls.v1) ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST]@1 as last_value(last_value_ignore_nulls.v1) ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST], last_value(last_value_ignore_nulls.v1) RESPECT NULLS ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST]@2 as last_value(last_value_ignore_nulls.v1) RESPECT NULLS ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST]] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[host@0 as host], aggr=[last_value(last_value_ignore_nulls.v1) ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST], last_value(last_value_ignore_nulls.v1) RESPECT NULLS ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST]] REDACTED
+|_|_|_RepartitionExec: REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[host@1 as host], aggr=[last_value(last_value_ignore_nulls.v1) ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST], last_value(last_value_ignore_nulls.v1) RESPECT NULLS ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST]] REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "selector":"LastRow { after_merge: false }" REDACTED
+|_|_|_|
+|_|_| Total rows: 2_|
++-+-+-+
+
+-- The IGNORE NULLS member rejects the shared selector, including when it is second.
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+explain analyze select
+    last_value(v1 order by ts),
+    last_value(v2 order by ts) ignore nulls
+from last_value_ignore_nulls
+group by host;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_ProjectionExec: expr=[last_value(last_value_ignore_nulls.v1) ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST]@1 as last_value(last_value_ignore_nulls.v1) ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST], last_value(last_value_ignore_nulls.v2) IGNORE NULLS ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST]@2 as last_value(last_value_ignore_nulls.v2) IGNORE NULLS ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST]] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[host@0 as host], aggr=[last_value(last_value_ignore_nulls.v1) ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST], last_value(last_value_ignore_nulls.v2) IGNORE NULLS ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST]] REDACTED
+|_|_|_RepartitionExec: REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[host@1 as host], aggr=[last_value(last_value_ignore_nulls.v1) ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST], last_value(last_value_ignore_nulls.v2) IGNORE NULLS ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST]] REDACTED
+|_|_|_RepartitionExec: REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_|
+|_|_| Total rows: 2_|
++-+-+-+
+
+admin flush_table('last_value_ignore_nulls');
+
++----------------------------------------------+
+| ADMIN flush_table('last_value_ignore_nulls') |
++----------------------------------------------+
+| 0                                            |
++----------------------------------------------+
+
+select
+    host,
+    last_value(v1 order by ts) ignore nulls as v1_ignore,
+    last_value(v2 order by ts) ignore nulls as v2_ignore,
+    last_value(v1 order by ts) as v1_default,
+    last_value(v1 order by ts) respect nulls as v1_respect
+from last_value_ignore_nulls
+group by host
+order by host;
+
++------+-----------+-----------+------------+------------+
+| host | v1_ignore | v2_ignore | v1_default | v1_respect |
++------+-----------+-----------+------------+------------+
+| a    | 42.0      | 20.0      |            |            |
+| b    |           |           |            |            |
++------+-----------+-----------+------------+------------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+explain analyze select
+    last_value(v1 order by ts),
+    last_value(v2 order by ts) ignore nulls
+from last_value_ignore_nulls
+group by host;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_ProjectionExec: expr=[last_value(last_value_ignore_nulls.v1) ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST]@1 as last_value(last_value_ignore_nulls.v1) ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST], last_value(last_value_ignore_nulls.v2) IGNORE NULLS ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST]@2 as last_value(last_value_ignore_nulls.v2) IGNORE NULLS ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST]] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[host@0 as host], aggr=[last_value(last_value_ignore_nulls.v1) ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST], last_value(last_value_ignore_nulls.v2) IGNORE NULLS ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST]] REDACTED
+|_|_|_RepartitionExec: REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[host@1 as host], aggr=[last_value(last_value_ignore_nulls.v1) ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST], last_value(last_value_ignore_nulls.v2) IGNORE NULLS ORDER BY [last_value_ignore_nulls.ts ASC NULLS LAST]] REDACTED
+|_|_|_RepartitionExec: REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1} REDACTED
+|_|_|_|
+|_|_| Total rows: 2_|
++-+-+-+
+
+drop table last_value_ignore_nulls;
+
+Affected Rows: 0
+
