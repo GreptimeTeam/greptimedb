@@ -10898,6 +10898,8 @@ dependencies = [
  "snafu 0.8.6",
  "sql",
  "table",
+ "temp-env",
+ "tempfile",
  "tokio",
  "urlencoding",
  "vrl",

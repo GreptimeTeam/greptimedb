@@ -1095,6 +1095,10 @@ ttl = "90d"
 [pipeline]
 ## Time to live of the local pipeline cache. Default is `10s`.
 cache_ttl = "10s"
+## Allow VRL to access the server environment, filesystem, hostname, local timezone,
+## network, and logs. Default is false. Enable only for trusted pipeline authors.
+## Applies to pipeline creation, execution, and dry-runs. Requires a restart.
+allow_vrl_host_access = false
 
 ## Configuration options for the event recorder.
 [event_recorder]

@@ -230,6 +230,18 @@ mod tests {
         Pin<Box<dyn Stream<Item = std::result::Result<T, Status>> + Send + Sync + 'static>>;
 
     #[test]
+    fn test_pipeline_host_access_config() {
+        let defaults: FrontendOptions = toml::from_str("").unwrap();
+        assert!(!defaults.pipeline.allow_vrl_host_access);
+        let options: FrontendOptions =
+            toml::from_str("[pipeline]\nallow_vrl_host_access = true").unwrap();
+        assert!(options.pipeline.allow_vrl_host_access);
+        let serialized = toml::to_string(&options).unwrap();
+        let restored: FrontendOptions = toml::from_str(&serialized).unwrap();
+        assert_eq!(options.pipeline, restored.pipeline);
+    }
+
+    #[test]
     fn test_write_retry_config() {
         let defaults: FrontendOptions = toml::from_str("").unwrap();
         assert_eq!(defaults.write_retry, WriteRetryOptions::default());

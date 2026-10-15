@@ -268,6 +268,7 @@
 | `tracing.tokio_console_addr` | String | Unset | The tokio console address. |
 | `pipeline` | -- | -- | The pipeline options. |
 | `pipeline.cache_ttl` | String | `10s` | Time to live of the local pipeline cache. Default is `10s`. |
+| `pipeline.allow_vrl_host_access` | Bool | `false` | Allow VRL to access the server environment, filesystem, hostname, local timezone,<br/>network, and logs. Default is false. Enable only for trusted pipeline authors.<br/>Applies to pipeline creation, execution, and dry-runs. Requires a restart. |
 | `event_recorder` | -- | -- | Configuration options for the event recorder. |
 | `event_recorder.ttl` | String | `90d` | TTL for the events table that will be used to store the events. Default is `90d`. |
 | `event_recorder.event_types` | Array | All | Event types to record. Current available event types: `create_database`,<br/>`alter_database`, `drop_database`, `create_flow`, `drop_flow`,<br/>`create_table`, `create_logical_tables`, `alter_table`, `alter_logical_tables`,<br/>`drop_table`, `undrop_table`, `purge_dropped_table`, `truncate_table`,<br/>`create_view`, `drop_view`, `admin_function`, `reconcile_catalog`,<br/>`reconcile_database`, `reconcile_table`, `reconcile_logical_tables`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
@@ -429,6 +430,7 @@
 | `memory.enable_heap_profiling` | Bool | `true` | Whether to enable heap profiling activation during startup.<br/>When enabled, heap profiling will be activated if the `MALLOC_CONF` environment variable<br/>is set to "prof:true,prof_active:false". The official image adds this env variable.<br/>Default is true. |
 | `pipeline` | -- | -- | The pipeline options. |
 | `pipeline.cache_ttl` | String | `10s` | Time to live of the frontend-local pipeline cache. A pipeline created or deleted on<br/>another frontend takes effect on this one after at most this duration. |
+| `pipeline.allow_vrl_host_access` | Bool | `false` | Allow VRL to access the server environment, filesystem, hostname, local timezone,<br/>network, and logs. Default is false. Enable only for trusted pipeline authors.<br/>Applies to pipeline creation, execution, and dry-runs. Requires a restart. |
 | `event_recorder` | -- | -- | Configuration options for the event recorder. |
 | `event_recorder.ttl` | String | `90d` | TTL for the events table that will be used to store the events. Default is `90d`. |
 | `event_recorder.event_types` | Array | All | Event types to record. Current available event type: `admin_function`.<br/>When omitted, all current and future event types are recorded.<br/>Set to an empty array to disable event recording. |
