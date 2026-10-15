@@ -1423,14 +1423,19 @@ mod test {
             Some(("query.parallelism".into(), "1".into()))
         );
         for value in ["", "-1", "0", "1025", "65536", "18446744073709551615"] {
-            assert!(parse_query_option("query.parallelism", value, MAX_PUBLIC_PARALLELISM).is_err());
+            assert!(
+                parse_query_option("query.parallelism", value, MAX_PUBLIC_PARALLELISM).is_err()
+            );
         }
         assert!(parse_query_option("query.unknown", "true", MAX_PUBLIC_PARALLELISM).is_err());
         assert_eq!(
             parse_query_option("query_fallback", "TRUE", MAX_PUBLIC_PARALLELISM).unwrap(),
             Some(("query.allow_query_fallback".into(), "true".into()))
         );
-        assert!(parse_query_option("query.allow_query_fallback", "yes", MAX_PUBLIC_PARALLELISM).is_err());
+        assert!(
+            parse_query_option("query.allow_query_fallback", "yes", MAX_PUBLIC_PARALLELISM)
+                .is_err()
+        );
         assert_eq!(
             canonical_query_option_name("datafusion.optimizer.prefer_hash_join"),
             Some("datafusion.optimizer.prefer_hash_join".to_string())
@@ -1462,7 +1467,10 @@ mod test {
                 Some((key.to_string(), "false".to_string())),
                 "{key} should accept uppercase false"
             );
-            assert!(parse_query_option(key, "yes", MAX_PUBLIC_PARALLELISM).is_err(), "{key}");
+            assert!(
+                parse_query_option(key, "yes", MAX_PUBLIC_PARALLELISM).is_err(),
+                "{key}"
+            );
         }
         for (key, input, expected) in [
             ("datafusion.optimizer.max_passes", "05", "5"),
@@ -1488,9 +1496,19 @@ mod test {
             ("datafusion.optimizer.unknown", "true"),
             ("datafusion.optimizer.max_passes.extra", "5"),
         ] {
-            assert!(parse_query_option(key, value, MAX_PUBLIC_PARALLELISM).is_err(), "{key}={value}");
+            assert!(
+                parse_query_option(key, value, MAX_PUBLIC_PARALLELISM).is_err(),
+                "{key}={value}"
+            );
         }
-        assert!(parse_query_option("datafusion.execution.batch_size", "12", MAX_PUBLIC_PARALLELISM).is_err());
+        assert!(
+            parse_query_option(
+                "datafusion.execution.batch_size",
+                "12",
+                MAX_PUBLIC_PARALLELISM
+            )
+            .is_err()
+        );
         assert_eq!(
             parse_query_option("custom.extension", "value", MAX_PUBLIC_PARALLELISM).unwrap(),
             None
