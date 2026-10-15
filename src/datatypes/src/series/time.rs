@@ -181,32 +181,54 @@ pub enum TimeAxis {
 impl TimeAxis {
     /// Validates an explicit, strictly increasing timestamp sequence.
     pub fn try_new(timestamps: ScalarBuffer<i64>) -> Result<Self> {
-        if timestamps.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return invalid("timestamps must be strictly increasing");
-        }
-        Ok(Self::Explicit(timestamps))
+        let axis = Self::Explicit(timestamps);
+        axis.try_len()?;
+        Ok(axis)
     }
 
     /// Validates and stores timestamp chunks without concatenating their buffers.
     pub fn try_from_chunks(chunks: Vec<ScalarBuffer<i64>>) -> Result<Self> {
-        let mut previous = None;
-        let mut nonempty = Vec::new();
-        for chunk in chunks {
-            if chunk.windows(2).any(|pair| pair[0] >= pair[1])
-                || chunk
-                    .first()
-                    .is_some_and(|first| previous.is_some_and(|last| last >= *first))
-            {
-                return invalid("timestamps must be strictly increasing across chunks");
+        let axis = Self::ExplicitChunks(
+            chunks
+                .into_iter()
+                .filter(|chunk| !chunk.is_empty())
+                .collect(),
+        );
+        axis.try_len()?;
+        Ok(axis)
+    }
+
+    /// Returns the validated timestamp count.
+    pub(crate) fn try_len(&self) -> Result<usize> {
+        match self {
+            Self::Grid(range) => Ok(range.len()),
+            Self::Explicit(values) => {
+                if values.windows(2).any(|pair| pair[0] >= pair[1]) {
+                    return invalid("timestamps must be strictly increasing");
+                }
+                Ok(values.len())
             }
-            if let Some(last) = chunk.last() {
-                previous = Some(*last);
-            }
-            if !chunk.is_empty() {
-                nonempty.push(chunk);
+            Self::ExplicitChunks(chunks) => {
+                let mut total = 0usize;
+                let mut previous = None;
+                for chunk in chunks.iter() {
+                    total = total
+                        .checked_add(chunk.len())
+                        .ok_or_else(|| invalid_series("timestamp length overflow"))?;
+                    if chunk.windows(2).any(|pair| pair[0] >= pair[1])
+                        || chunk
+                            .first()
+                            .is_some_and(|first| previous.is_some_and(|last| last >= *first))
+                    {
+                        return invalid("timestamps must be strictly increasing across chunks");
+                    }
+                    if let Some(last) = chunk.last() {
+                        previous = Some(*last);
+                    }
+                }
+                Ok(total)
             }
         }
-        Ok(Self::ExplicitChunks(nonempty.into()))
     }
 
     /// Returns the timestamp count.
