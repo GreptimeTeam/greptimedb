@@ -1427,6 +1427,20 @@ mod test {
                 parse_query_option("query.parallelism", value, MAX_PUBLIC_PARALLELISM).is_err()
             );
         }
+        for (max, invalid) in [(1024, "1025"), (u16::MAX, "65536")] {
+            let message = parse_query_option("query.parallelism", invalid, max)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                message.contains(&format!("1 and {max}")),
+                "unexpected diagnostic for max={max}: {message}"
+            );
+            assert!(parse_query_option("query.parallelism", "0", max).is_err());
+        }
+        assert_eq!(
+            parse_query_option("query.parallelism", "65535", u16::MAX).unwrap(),
+            Some(("query.parallelism".into(), "65535".into()))
+        );
         assert!(parse_query_option("query.unknown", "true", MAX_PUBLIC_PARALLELISM).is_err());
         assert_eq!(
             parse_query_option("query_fallback", "TRUE", MAX_PUBLIC_PARALLELISM).unwrap(),
