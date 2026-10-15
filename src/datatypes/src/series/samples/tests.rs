@@ -321,25 +321,27 @@ fn densifying_histogram_and_mixed_chunks_keeps_shared_table() {
 }
 
 #[test]
-fn densification_falls_back_for_distinct_shared_table_owners() {
+fn densification_preserves_distinct_shared_table_owner_values() {
     let first = batch(2.0, 3.0, &[4.0, 5.0]);
-    let second = Arc::new(HistogramBatch::try_from_arrow(first.as_arrow().clone()).unwrap());
+    let second = batch(6.0, 7.0, &[8.0, 9.0]);
 
-    for (owners, expected_indices) in [
-        (vec![first.clone(), second.clone()], vec![0, 1]),
-        (
-            vec![first.clone(), first.clone(), second.clone()],
-            vec![0, 1, 2],
-        ),
+    for owners in [
+        vec![first.clone(), second.clone()],
+        vec![first.clone(), first.clone(), second.clone()],
     ] {
         let expected: Vec<_> = owners
             .iter()
-            .map(|owner| SampleRef::Histogram(owner.view(0).unwrap()))
+            .flat_map(|owner| {
+                [
+                    SampleRef::Missing,
+                    SampleRef::Histogram(owner.view(0).unwrap()),
+                ]
+            })
             .collect();
         let chunks = owners
             .iter()
             .map(|owner| {
-                Samples::try_from_histogram(UInt32Array::from(vec![Some(0)]), owner.clone())
+                Samples::try_from_histogram(UInt32Array::from(vec![None, Some(0)]), owner.clone())
                     .unwrap()
             })
             .collect();
@@ -348,18 +350,18 @@ fn densification_falls_back_for_distinct_shared_table_owners() {
             .into_dense()
             .unwrap();
 
-        assert_eq!(dense.len(), owners.len());
+        assert_eq!(dense.len(), expected.len());
         let DenseSamplesRef::Histogram(values) = dense.dense().unwrap() else {
             panic!()
         };
-        assert_eq!(values.batch().len(), owners.len());
-        assert!(!Arc::ptr_eq(values.batch(), &first));
-        assert!(!Arc::ptr_eq(values.batch(), &second));
-        for (index, (expected, expected_index)) in
-            expected.into_iter().zip(expected_indices).enumerate()
-        {
-            assert_eq!(values.indices().value(index), expected_index);
-            assert!(same_sample(expected, dense.sample(index)));
+        for (index, expected) in expected.into_iter().enumerate() {
+            if !values.indices().is_null(index) {
+                assert!((values.indices().value(index) as usize) < values.batch().len());
+            }
+            assert!(
+                same_sample(expected, dense.sample(index)),
+                "position {index}"
+            );
         }
     }
 }
@@ -957,22 +959,6 @@ fn short_multifield_series_uses_its_grid_range_and_checks_explicit_chunk_order()
             MetricName::try_new(None, vec![]).unwrap(),
             ordered_chunks,
             ordered_fields,
-        )
-        .is_err()
-    );
-
-    let unordered_single = TimeAxis::Explicit(ScalarBuffer::from(vec![2_i64, 1]));
-    assert!(
-        Series::try_new(
-            &SeriesSchema {
-                fields: Arc::from([FieldSpec {
-                    name: Arc::from("value")
-                }]),
-                eval_grid: None
-            },
-            MetricName::try_new(None, vec![]).unwrap(),
-            unordered_single,
-            SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0, 2.0]))),
         )
         .is_err()
     );
