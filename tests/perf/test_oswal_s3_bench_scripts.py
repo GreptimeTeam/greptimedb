@@ -857,7 +857,8 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
                            "OSWAL_SAMPLE_SECONDS": "0.2", "FAKE_SAMPLE_RC": str(sample_rc),
                            "FAKE_FULL_METRICS": full_metrics} | (env or {}))
         try:
-            return self.run_cells(root, load_rc=0, metrics_rc=metrics_rc, groups=groups)
+            return self.run_cells(root, load_rc=0, metrics_rc=metrics_rc, groups=groups,
+                                  count=(env or {}).get("FAKE_COUNT", 6000))
         finally:
             os.environ.clear()
             os.environ.update(old)
@@ -889,13 +890,24 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
     def test_failed_pinned_samples_are_missing_not_zero(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            cells, _, log, _ = self.run_crash(root, pin=True, sample_rc=28)
+            cells, _, log, _ = self.run_crash(root, pin=True, sample_rc=28, env={"FAKE_COUNT": "1"})
             self.assertEqual(cells.returncode, 0, cells.stdout + cells.stderr)
             cell = root / "results" / "cells" / "crash-1-8-D"
             samples = (cell / "objects.tsv").read_text().splitlines()
             self.assertTrue(samples and all(line.split()[1:] == ["missing"] for line in samples), samples)
             self.assertIn("sql=INSERT INTO pin VALUES (1, 0)", log)
             self.assertEqual(len((cell / "cycles.jsonl").read_text().splitlines()), 2)
+
+    def test_a_durable_pinned_cycle_fails_unless_its_pin_row_is_there_once(self):
+        for count in ("0", "2"):
+            with self.subTest(count=count), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.run_crash(root, pin=True, env={"FAKE_COUNT": count})
+                cell = root / "results" / "cells" / "crash-1-8-D"
+                cycle = json.loads((cell / "cycles.jsonl").read_text().splitlines()[0])
+                self.assertEqual((cycle["passed"], cycle["pin_rows"]), (False, int(count)))
+                self.assertIn(f"the pin table holds {count} rows, not 1", cycle["verify_errors"])
+                self.assertEqual(json.loads((cell / "cell.json").read_text())["exit_code"], 6)
 
     def test_a_scrape_without_the_wal_samples_is_incomplete(self):
         with tempfile.TemporaryDirectory() as directory:

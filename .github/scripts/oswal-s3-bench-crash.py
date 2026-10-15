@@ -195,6 +195,7 @@ def main() -> int:
     c.add_argument("--mode", choices=("durable", "enqueued"), required=True)
     for name in ("writers", "rows", "before-ns", "after-ns", "window-max-ms"):
         c.add_argument(f"--{name}", type=int, required=True)
+    c.add_argument("--pin-rows", type=int, help="rows of the pin table, whose one row was acknowledged first")
     args = parser.parse_args()
     if args.command == "write":
         return write(args)
@@ -204,6 +205,8 @@ def main() -> int:
                          args.window_max_ms)
     result |= verify(args.run_dir, {int(seq): int(count) for seq, count in rows}, args.rows,
                      args.mode == "enqueued", args.cycle)
+    if args.pin_rows is not None and (args.pin_rows > 1 or args.mode == "durable" and args.pin_rows != 1):
+        result["verify_errors"].append(f"the pin table holds {args.pin_rows} rows, not 1")
     result["passed"] = not result["kill_errors"] and not result["verify_errors"]
     print(json.dumps(result))
     return 0 if result["passed"] else 1

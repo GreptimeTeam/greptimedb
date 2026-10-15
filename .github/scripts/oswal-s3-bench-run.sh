@@ -171,7 +171,7 @@ sample_objects() {
 # server; it restarts on the same prefix and data home and the table is checked
 # against what was acknowledged. Nothing is cleaned between cycles.
 crash_cycles() {
-    local writers rows cycles kill_min kill_max cycle cdir wpid spid= delay before after started restart_s query_s next=0 pin_count
+    local writers rows cycles kill_min kill_max cycle cdir wpid spid= delay before after started restart_s query_s next=0 pin_count pin_args
     local load_start complete sql_url=${OSWAL_SQL_URL:-http://127.0.0.1:4000/v1/sql?db=public}
     writers=$(jq -r .concurrency <<< "$spec") rows=$(jq -r .batch_rows "$PLAN") cycles=$(jq -r .cycles <<< "$spec")
     kill_min=$(jq -r '.kill_after[0]' <<< "$spec") kill_max=$(jq -r '.kill_after[1]' <<< "$spec")
@@ -205,14 +205,15 @@ crash_cycles() {
         done
         query_s=$(elapsed "$started")
         scrape_retry recovery_seconds_count || complete=false
-        pin_count=null
+        pin_count=null pin_args=()
         if jq -e .pin <<< "$spec" >/dev/null; then
-            pin_count=$(sql "SELECT count(*) FROM pin" | jq -er '.output[0].records.rows[0][0]')
+            pin_count=$(sql "SELECT count(*) FROM pin" | jq -er '.output[0].records.rows[0][0]') pin_args=(--pin-rows "$pin_count")
         fi
         local verdict=0
         python3 "$here/oswal-s3-bench-crash.py" check --run-dir "$dir" --cycle "$cycle" --found "$cdir/found.json" \
             --mode "$(jq -r .wal.ACK_MODE <<< "$spec")" --writers "$writers" --rows "$rows" \
-            --before-ns "$before" --after-ns "$after" --window-max-ms 2000 > "$cdir/check.json" || verdict=$?
+            --before-ns "$before" --after-ns "$after" --window-max-ms 2000 ${pin_args[@]+"${pin_args[@]}"} \
+            > "$cdir/check.json" || verdict=$?
         jq -c --arg delay "$delay" --arg restart "$restart_s" --arg query "$query_s" --argjson pin "$pin_count" \
             --argjson load "$(awk -v a="$load_start" -v b="$before" 'BEGIN {printf "%.3f", (b - a) / 1e9}')" \
             --argjson complete "$complete" \
