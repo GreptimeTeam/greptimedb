@@ -12,11 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use api::v1::Rows;
 use common_wal::options::{WAL_OPTIONS_KEY, WalOptions};
+use rstest::rstest;
 use store_api::logstore::provider::Provider;
 use store_api::mito_engine_options::SKIP_WAL_KEY;
 use store_api::region_engine::{RegionEngine, RegionRole};
@@ -29,7 +31,7 @@ use store_api::storage::{RegionId, ScanRequest};
 use crate::config::MitoConfig;
 use crate::engine::listener::AlterFlushListener;
 use crate::test_util::{
-    CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, rows_schema,
+    CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, reopen_region, rows_schema,
 };
 
 #[tokio::test]
@@ -754,4 +756,193 @@ async fn test_close_region_after_truncate_skip_wal() {
         .unwrap();
     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
     assert_eq!(3, total_rows);
+}
+
+#[rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test]
+async fn test_close_request_skip_wal(
+    #[case] skip_wal: bool,
+    #[values(false, true)] flat_format: bool,
+) {
+    let mut env = TestEnv::with_prefix("close-request-skip-wal").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                skip_wal,
+                rows: Rows {
+                    schema: rows_schema(&request),
+                    rows: build_rows(0, 3),
+                },
+                hint: None,
+                partition_expr_version: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    assert!(!region.skip_wal());
+    assert_eq!(region.version().memtables.has_skip_wal_writes(), skip_wal);
+    let expected = common_recordbatch::RecordBatches::try_collect(
+        engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+    .pretty_print()
+    .unwrap();
+
+    reopen_region(&engine, region_id, request.table_dir, false, HashMap::new()).await;
+    // Logged writes are recovered without a close-time flush.
+    assert_eq!(
+        region.version().flushed_sequence,
+        if skip_wal { 3 } else { 0 }
+    );
+    let reopened = engine.get_region(region_id).unwrap();
+    assert!(!reopened.version().memtables.has_skip_wal_writes());
+    let actual = common_recordbatch::RecordBatches::try_collect(
+        engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+    .pretty_print()
+    .unwrap();
+    assert_eq!(actual, expected);
+}
+
+#[rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test]
+async fn test_close_request_skip_wal_during_flush(#[case] new_skip_wal: bool) {
+    let mut env = TestEnv::with_prefix("close-request-skip-wal-during-flush").await;
+    let listener = Arc::new(AlterFlushListener::default());
+    let engine = env
+        .create_engine_with(MitoConfig::default(), None, Some(listener.clone()), None)
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                skip_wal: true,
+                rows: Rows {
+                    schema: rows_schema(&request),
+                    rows: build_rows(0, 3),
+                },
+                hint: None,
+                partition_expr_version: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let engine_cloned = engine.clone();
+    let flush_job = tokio::spawn(async move {
+        flush_region(&engine_cloned, region_id, None).await;
+    });
+    tokio::time::timeout(Duration::from_secs(5), listener.wait_flush_begin())
+        .await
+        .unwrap();
+
+    // These rows belong to the next mutable, while the skipped rows are frozen.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                skip_wal: new_skip_wal,
+                rows: Rows {
+                    schema: rows_schema(&request),
+                    rows: build_rows(3, 6),
+                },
+                hint: None,
+                partition_expr_version: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let expected = common_recordbatch::RecordBatches::try_collect(
+        engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+    .pretty_print()
+    .unwrap();
+    let request_count = listener.request_count();
+    let engine_cloned = engine.clone();
+    let close_job = tokio::spawn(async move {
+        engine_cloned
+            .handle_request(
+                region_id,
+                RegionRequest::Close(RegionCloseRequest::default()),
+            )
+            .await
+            .unwrap();
+    });
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        listener.wait_request_count(request_count + 1),
+    )
+    .await
+    .unwrap();
+    listener.wake_flush();
+    tokio::time::timeout(Duration::from_secs(5), flush_job)
+        .await
+        .unwrap()
+        .unwrap();
+    if new_skip_wal {
+        tokio::time::timeout(Duration::from_secs(5), listener.wait_flush_begin())
+            .await
+            .unwrap();
+        listener.wake_flush();
+    }
+    tokio::time::timeout(Duration::from_secs(5), close_job)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        region.version().flushed_sequence,
+        if new_skip_wal { 6 } else { 3 }
+    );
+    assert!(!region.version().memtables.has_skip_wal_writes());
+
+    reopen_region(&engine, region_id, request.table_dir, false, HashMap::new()).await;
+    let actual = common_recordbatch::RecordBatches::try_collect(
+        engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+    .pretty_print()
+    .unwrap();
+    assert_eq!(actual, expected);
 }
