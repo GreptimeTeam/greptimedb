@@ -550,17 +550,22 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
 
     /// Scans a partition as raw series when this source supports that path.
     ///
-    /// `None` means raw capability is absent before execution and permits a legacy scan instead.
-    /// `Some` selects this entrypoint, including for an empty successful stream. Errors propagate;
-    /// callers must not replay a failed raw scan through the legacy path. Use only one entrypoint
-    /// for a given scanner partition per execution.
+    /// Implementations may return `None` when raw capability is absent before execution, permitting
+    /// a legacy scan instead. `Some` selects this entrypoint, including for an empty successful
+    /// stream. Errors propagate; callers must not replay a failed raw scan through the legacy path.
+    /// Use only one entrypoint for a given scanner partition per execution.
+    ///
+    /// # Panics
+    ///
+    /// The default implementation panics. Implementations must override this method to support
+    /// raw series scanning.
     fn scan_series_partition(
         &self,
         _ctx: &QueryScanContext,
         _metrics_set: &ExecutionPlanMetricsSet,
         _partition: usize,
     ) -> Result<Option<SendableRawSeriesStream>, BoxedError> {
-        Ok(None)
+        todo!()
     }
 
     /// Check if there is any predicate exclude region partition exprs that may be executed in this scanner.
@@ -813,8 +818,16 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn single_partition_scanner_preserves_legacy_fallback_after_raw_capability_miss() {
-        let schema = Arc::new(datatypes::schema::Schema::new(vec![
+    async fn single_partition_scanner_raw_scan_panics_and_preserves_legacy_read() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        use api::v1::SemanticType;
+        use datatypes::arrow::array::Int32Array;
+        use datatypes::schema::Schema as ArrowSchema;
+
+        use crate::metadata::{ColumnMetadata, RegionMetadataBuilder};
+
+        let schema = Arc::new(ArrowSchema::new(vec![
             ColumnSchema::new("value", ConcreteDataType::int32_datatype(), false),
             ColumnSchema::new(
                 "ts",
@@ -828,20 +841,19 @@ mod tests {
         ];
         let batch = RecordBatch::new(schema.clone(), columns).unwrap();
         let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
-        let mut metadata_builder =
-            crate::metadata::RegionMetadataBuilder::new(RegionId::new(1234, 1));
-        metadata_builder.push_column_metadata(crate::metadata::ColumnMetadata {
+        let mut metadata_builder = RegionMetadataBuilder::new(RegionId::new(1234, 1));
+        metadata_builder.push_column_metadata(ColumnMetadata {
             column_schema: ColumnSchema::new("value", ConcreteDataType::int32_datatype(), false),
-            semantic_type: api::v1::SemanticType::Field,
+            semantic_type: SemanticType::Field,
             column_id: 1,
         });
-        metadata_builder.push_column_metadata(crate::metadata::ColumnMetadata {
+        metadata_builder.push_column_metadata(ColumnMetadata {
             column_schema: ColumnSchema::new(
                 "ts",
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 false,
             ),
-            semantic_type: api::v1::SemanticType::Timestamp,
+            semantic_type: SemanticType::Timestamp,
             column_id: 2,
         });
         let metadata = Arc::new(metadata_builder.build().unwrap());
@@ -849,12 +861,11 @@ mod tests {
         let ctx = QueryScanContext::default();
         let metrics = ExecutionPlanMetricsSet::new();
 
-        assert!(
-            scanner
-                .scan_series_partition(&ctx, &metrics, 0)
-                .unwrap()
-                .is_none()
-        );
+        // SinglePartitionScanner uses the default raw-scan implementation, which panics.
+        let raw_scan = catch_unwind(AssertUnwindSafe(|| {
+            scanner.scan_series_partition(&ctx, &metrics, 0)
+        }));
+        assert!(raw_scan.is_err());
         let legacy = scanner.scan_partition(&ctx, &metrics, 0).unwrap();
         let legacy_batches = legacy.try_collect::<Vec<_>>().await.unwrap();
         assert_eq!(legacy_batches.len(), 1);
@@ -864,19 +875,11 @@ mod tests {
                 .column(0)
                 .as_ref()
                 .as_any()
-                .downcast_ref::<datatypes::arrow::array::Int32Array>()
+                .downcast_ref::<Int32Array>()
                 .unwrap()
                 .value(0),
             42
         );
-
-        let second = scanner
-            .scan_partition(&ctx, &metrics, 0)
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap();
-        assert!(second.is_empty());
     }
 
     #[test]

@@ -180,9 +180,7 @@ async fn streaming_round_trip_preserves_sliced_multifield_payload_and_owners() {
         true,
     )
     .unwrap();
-    let input_times_ptr = match &chunk.time {
-        RawTimeAxis::Explicit(values) => values.as_ptr(),
-    };
+    let input_times_ptr = chunk.time.as_explicit().unwrap().as_ptr();
     let input_float_ptr = float_a.values().as_ptr();
     let input_hist_indices_ptr = indices.values().as_ptr();
     let input_mixed_float_ptr = mixed_float_owner.values().as_ptr();
@@ -255,7 +253,7 @@ async fn streaming_round_trip_preserves_sliced_multifield_payload_and_owners() {
             .to_data()
             .ptr_eq(&sliced_table.as_arrow().to_data())
     );
-    let RawTimeAxis::Explicit(first_times) = &output[0].time;
+    let first_times = output[0].time.as_explicit().unwrap();
     assert_eq!(first_times.as_ptr(), input_times_ptr);
 
     drop(decoded);
