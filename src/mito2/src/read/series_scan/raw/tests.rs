@@ -49,6 +49,8 @@ use crate::error::{Error, InvalidRecordBatchSnafu, Result};
 use crate::read::scan_util::PartitionMetrics;
 use crate::read::series_scan::{FlatSeriesBatch, SeriesBatch};
 use crate::read::stream::{ScanBatch, ScanBatchStream};
+use crate::sst::parquet::flat_format::wrap_pk_binary_to_dict;
+use crate::sst::parquet::format::PrimaryKeyArray;
 
 fn metrics() -> PartitionMetrics {
     PartitionMetrics::new(
@@ -71,7 +73,7 @@ fn schema() -> Arc<SeriesSchema> {
     })
 }
 
-fn batch(keys: &[&[u8]], times: &[i64], values: &[Option<i64>]) -> RecordBatch {
+fn binary_batch(keys: &[&[u8]], times: &[i64], values: &[Option<i64>]) -> RecordBatch {
     assert_eq!(keys.len(), times.len());
     assert_eq!(keys.len(), values.len());
     let columns: Vec<ArrayRef> = vec![
@@ -93,6 +95,33 @@ fn batch(keys: &[&[u8]], times: &[i64], values: &[Option<i64>]) -> RecordBatch {
         Field::new("__op_type", DataType::UInt8, false),
     ]));
     RecordBatch::try_new(schema, columns).unwrap()
+}
+
+fn dictionary_batch(keys: &[&[u8]], times: &[i64], values: &[Option<i64>]) -> RecordBatch {
+    let binary = binary_batch(keys, times, values);
+    let schema = Arc::new(Schema::new(
+        binary
+            .schema()
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                if index == binary.num_columns() - 3 {
+                    Field::new(
+                        field.name(),
+                        DataType::Dictionary(
+                            Box::new(DataType::UInt32),
+                            Box::new(DataType::Binary),
+                        ),
+                        field.is_nullable(),
+                    )
+                } else {
+                    field.as_ref().clone()
+                }
+            })
+            .collect::<Vec<_>>(),
+    ));
+    wrap_pk_binary_to_dict(binary, &schema).unwrap()
 }
 
 fn histogram_input() -> (RecordBatch, Vec<NativeHistogram>) {
@@ -145,7 +174,29 @@ fn histogram_input() -> (RecordBatch, Vec<NativeHistogram>) {
         Field::new("__op_type", DataType::UInt8, false),
     ];
     (
-        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap(),
+        wrap_pk_binary_to_dict(
+            RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap(),
+            &Arc::new(Schema::new(vec![
+                Field::new(
+                    "histogram",
+                    native_histogram_value_type().as_arrow_type(),
+                    true,
+                ),
+                Field::new(
+                    "ts",
+                    DataType::Timestamp(TimeUnit::Millisecond, None),
+                    false,
+                ),
+                Field::new(
+                    "__primary_key",
+                    DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Binary)),
+                    false,
+                ),
+                Field::new("__sequence", DataType::UInt64, false),
+                Field::new("__op_type", DataType::UInt8, false),
+            ])),
+        )
+        .unwrap(),
         expected,
     )
 }
@@ -251,12 +302,12 @@ fn values(chunk: &RawSeriesChunk) -> Vec<Option<f64>> {
 #[tokio::test]
 async fn chunks_preserve_keys_values_times_and_final_flags_for_both_input_shapes() {
     let schema = schema();
-    let first = batch(
+    let first = dictionary_batch(
         &[b"prefix-full-key-a", b"prefix-full-key-a"],
         &[1, 2],
         &[Some(1), None],
     );
-    let second = batch(
+    let second = dictionary_batch(
         &[
             b"prefix-full-key-a",
             b"prefix-full-key-a",
@@ -328,7 +379,7 @@ async fn typed_predicate_filters_before_numeric_samples_are_cast() {
         physical_lit(ScalarValue::Int64(Some(threshold))),
     ));
     let mut output = make_stream(
-        input(vec![Ok(ScanBatch::RecordBatch(batch(
+        input(vec![Ok(ScanBatch::RecordBatch(dictionary_batch(
             &[b"a", b"a", b"a", b"b", b"c"],
             &[1, 2, 3, 1, 1],
             &[
@@ -363,7 +414,7 @@ async fn typed_predicate_filters_before_numeric_samples_are_cast() {
 async fn predicate_error_is_terminal() {
     let predicate: Arc<dyn PhysicalExpr> = Arc::new(Column::new("value", 0));
     let mut output = make_stream(
-        input(vec![Ok(ScanBatch::RecordBatch(batch(
+        input(vec![Ok(ScanBatch::RecordBatch(dictionary_batch(
             &[b"a"],
             &[1],
             &[Some(1)],
@@ -386,9 +437,21 @@ async fn upstream_error_is_terminal_after_yielded_prefix_without_flushing_pendin
     .build();
     let mut output = convert(
         input(vec![
-            Ok(ScanBatch::RecordBatch(batch(&[b"a"], &[1], &[Some(1)]))),
-            Ok(ScanBatch::RecordBatch(batch(&[b"a"], &[2], &[Some(2)]))),
-            Ok(ScanBatch::RecordBatch(batch(&[b"a"], &[3], &[Some(3)]))),
+            Ok(ScanBatch::RecordBatch(dictionary_batch(
+                &[b"a"],
+                &[1],
+                &[Some(1)],
+            ))),
+            Ok(ScanBatch::RecordBatch(dictionary_batch(
+                &[b"a"],
+                &[2],
+                &[Some(2)],
+            ))),
+            Ok(ScanBatch::RecordBatch(dictionary_batch(
+                &[b"a"],
+                &[3],
+                &[Some(3)],
+            ))),
             Err(upstream_error),
         ]),
         schema(),
@@ -418,9 +481,21 @@ async fn upstream_error_is_terminal_after_yielded_prefix_without_flushing_pendin
 async fn dropping_raw_stream_drops_unfinished_input() {
     let drops = Arc::new(AtomicUsize::new(0));
     let upstream = input(vec![
-        Ok(ScanBatch::RecordBatch(batch(&[b"a"], &[1], &[Some(1)]))),
-        Ok(ScanBatch::RecordBatch(batch(&[b"b"], &[1], &[Some(2)]))),
-        Ok(ScanBatch::RecordBatch(batch(&[b"c"], &[1], &[Some(3)]))),
+        Ok(ScanBatch::RecordBatch(dictionary_batch(
+            &[b"a"],
+            &[1],
+            &[Some(1)],
+        ))),
+        Ok(ScanBatch::RecordBatch(dictionary_batch(
+            &[b"b"],
+            &[1],
+            &[Some(2)],
+        ))),
+        Ok(ScanBatch::RecordBatch(dictionary_batch(
+            &[b"c"],
+            &[1],
+            &[Some(3)],
+        ))),
     ]);
     let spy = DropSpy {
         inner: upstream,
@@ -433,47 +508,107 @@ async fn dropping_raw_stream_drops_unfinished_input() {
 }
 
 #[tokio::test]
-async fn raw_stream_owns_schema_and_bound_source_metadata() {
-    let schema = schema();
-    let schema_weak = Arc::downgrade(&schema);
-    let metadata = metadata();
-    let metadata_weak = Arc::downgrade(&metadata);
-    let mut raw = convert_with_source(
-        input(vec![]),
-        schema.clone(),
-        primary_key_source(metadata.clone()),
-        ConcreteDataType::int64_datatype(),
+async fn legacy_series_requires_increasing_keys_but_record_batches_do_not() {
+    let mut batches = smallvec::SmallVec::new();
+    batches.push(dictionary_batch(&[b"b"], &[1], &[Some(1)]));
+    batches.push(dictionary_batch(&[b"a"], &[2], &[Some(2)]));
+    let mut output = convert(
+        input(vec![Ok(ScanBatch::Series(SeriesBatch::Flat(
+            FlatSeriesBatch { batches },
+        )))]),
+        schema(),
     );
-    drop(schema);
-    drop(metadata);
-    assert!(schema_weak.upgrade().is_some());
-    assert!(metadata_weak.upgrade().is_some());
-    assert_eq!(raw.schema().fields[0].name.as_ref(), "value");
-    match raw.label_source() {
-        RawLabelSource::PrimaryKey {
-            metric_name,
-            physical_metadata,
-            logical_tags,
-        } => {
-            assert_eq!(metric_name.as_ref(), "metric");
-            assert_eq!(physical_metadata.region_id, RegionId::new(1, 0));
-            assert_eq!(
-                physical_metadata.column_metadatas[0].column_schema.name,
-                "tag"
-            );
-            assert_eq!(logical_tags[0].column_id, 0);
-            assert_eq!(logical_tags[0].name.as_ref(), "tag");
-            assert!(Arc::ptr_eq(
-                physical_metadata,
-                &metadata_weak.upgrade().unwrap()
-            ));
-        }
-        RawLabelSource::Explicit => panic!("expected bound primary-key labels"),
-    }
-    assert!(raw.next().await.is_none());
-    drop(raw);
-    assert!(schema_weak.upgrade().is_none());
-    assert!(metadata_weak.upgrade().is_none());
+    assert!(output.next().await.unwrap().is_err());
+    assert!(output.next().await.is_none());
+
+    let mut batches = smallvec::SmallVec::new();
+    batches.push(dictionary_batch(&[b"a"], &[1], &[Some(1)]));
+    batches.push(dictionary_batch(&[b"b"], &[1], &[Some(2)]));
+    batches.push(dictionary_batch(&[b"a"], &[2], &[Some(3)]));
+    let mut output = convert(
+        input(vec![Ok(ScanBatch::Series(SeriesBatch::Flat(
+            FlatSeriesBatch { batches },
+        )))]),
+        schema(),
+    );
+    let prefix = output.next().await.unwrap().unwrap();
+    assert_eq!(prefix.read_key.as_slice(), b"a");
+    assert_eq!(values(&prefix), vec![Some(1.0)]);
+    assert_eq!(prefix.time.timestamp(0), Some(1));
+    assert!(prefix.is_last);
+    assert!(output.next().await.unwrap().is_err());
+    assert!(output.next().await.is_none());
+
+    let mut batches = smallvec::SmallVec::new();
+    batches.push(dictionary_batch(&[b"a"], &[1], &[Some(1)]));
+    batches.push(dictionary_batch(&[b"b"], &[1], &[Some(2)]));
+    let mut output = convert(
+        input(vec![Ok(ScanBatch::Series(SeriesBatch::Flat(
+            FlatSeriesBatch { batches },
+        )))]),
+        schema(),
+    );
+    let first = output.next().await.unwrap().unwrap();
+    assert_eq!(first.read_key.as_slice(), b"a");
+    assert_eq!(values(&first), vec![Some(1.0)]);
+    assert_eq!(first.time.timestamp(0), Some(1));
+    assert!(first.is_last);
+    let second = output.next().await.unwrap().unwrap();
+    assert_eq!(second.read_key.as_slice(), b"b");
+    assert_eq!(values(&second), vec![Some(2.0)]);
+    assert_eq!(second.time.timestamp(0), Some(1));
+    assert!(second.is_last);
+    assert!(output.next().await.is_none());
+
+    let mut output = convert(
+        input(vec![
+            Ok(ScanBatch::RecordBatch(dictionary_batch(
+                &[b"b"],
+                &[1],
+                &[Some(1)],
+            ))),
+            Ok(ScanBatch::RecordBatch(dictionary_batch(
+                &[b"a"],
+                &[1],
+                &[Some(2)],
+            ))),
+        ]),
+        schema(),
+    );
+    let first = output.next().await.unwrap().unwrap();
+    assert_eq!(first.read_key.as_slice(), b"b");
+    assert_eq!(values(&first), vec![Some(1.0)]);
+    assert_eq!(first.time.timestamp(0), Some(1));
+    assert!(first.is_last);
+    let second = output.next().await.unwrap().unwrap();
+    assert_eq!(second.read_key.as_slice(), b"a");
+    assert_eq!(values(&second), vec![Some(2.0)]);
+    assert_eq!(second.time.timestamp(0), Some(1));
+    assert!(second.is_last);
+    assert!(output.next().await.is_none());
+}
+
+#[tokio::test]
+async fn raw_key_shares_dictionary_values_and_survives_batch_drop() {
+    let record = dictionary_batch(
+        &[b"unused", b"prefix-key", b"other"],
+        &[0, 1, 1],
+        &[Some(0), Some(1), Some(2)],
+    )
+    .slice(1, 2);
+    let pk = record
+        .column(record.num_columns() - 3)
+        .as_any()
+        .downcast_ref::<PrimaryKeyArray>()
+        .unwrap();
+    let values = pk.values().as_any().downcast_ref::<BinaryArray>().unwrap();
+    let expected_ptr = values.value(1).as_ptr();
+    let mut output = convert(input(vec![Ok(ScanBatch::RecordBatch(record))]), schema());
+    let chunk = output.next().await.unwrap().unwrap();
+    assert_eq!(chunk.read_key.as_slice(), b"prefix-key");
+    assert_eq!(chunk.read_key.as_ptr(), expected_ptr);
+    drop(output);
+    assert_eq!(chunk.read_key.as_slice(), b"prefix-key");
 }
 
 #[tokio::test]
@@ -532,12 +667,16 @@ async fn duplicate_or_descending_cross_batch_time_is_terminal() {
     for next in [2, 1] {
         let mut output = convert(
             input(vec![
-                Ok(ScanBatch::RecordBatch(batch(
+                Ok(ScanBatch::RecordBatch(dictionary_batch(
                     &[b"k", b"k"],
                     &[1, 2],
                     &[Some(1), Some(2)],
                 ))),
-                Ok(ScanBatch::RecordBatch(batch(&[b"k"], &[next], &[Some(3)]))),
+                Ok(ScanBatch::RecordBatch(dictionary_batch(
+                    &[b"k"],
+                    &[next],
+                    &[Some(3)],
+                ))),
             ]),
             schema(),
         );

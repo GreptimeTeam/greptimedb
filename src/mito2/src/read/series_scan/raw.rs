@@ -28,11 +28,12 @@ use common_query::native_histogram::{
 use common_recordbatch::filter;
 use datafusion::physical_plan::PhysicalExpr;
 use datatypes::arrow::array::{
-    Array, BinaryArray, DictionaryArray, Float64Array, StructArray, TimestampMillisecondArray,
+    Array, BinaryArray, Float64Array, StructArray, TimestampMillisecondArray,
 };
 use datatypes::arrow::buffer::Buffer;
 use datatypes::arrow::compute::cast;
-use datatypes::arrow::datatypes::{DataType, UInt32Type};
+use datatypes::arrow::datatypes::ArrowNativeType;
+use datatypes::arrow::datatypes::DataType;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::series::raw::{RawSeriesChunk, RawSeriesOrdering, RawTimeAxis};
@@ -50,6 +51,7 @@ use crate::read::scan_util::PartitionMetrics;
 use crate::read::series_scan::SeriesBatch;
 use crate::read::stream::{ScanBatch, ScanBatchStream};
 use crate::sst::parquet::flat_format::{primary_key_column_index, time_index_column_index};
+use crate::sst::parquet::format::PrimaryKeyArray;
 
 fn boxed(error: Error) -> BoxedError {
     BoxedError::new(error)
@@ -64,41 +66,14 @@ fn invalid(reason: impl Into<String>) -> BoxedError {
     )
 }
 
-fn read_key(batch: &RecordBatch, row: usize) -> Result<&[u8], BoxedError> {
-    let column = batch.column(primary_key_column_index(batch.num_columns()));
-    if let Some(binary) = column.as_any().downcast_ref::<BinaryArray>() {
-        return binary
-            .is_valid(row)
-            .then(|| binary.value(row))
-            .ok_or_else(|| invalid("null primary key"));
-    }
-    let dictionary = column
-        .as_any()
-        .downcast_ref::<DictionaryArray<UInt32Type>>()
-        .ok_or_else(|| invalid("invalid primary-key array"))?;
-    let values = dictionary
-        .values()
-        .as_any()
-        .downcast_ref::<BinaryArray>()
-        .ok_or_else(|| invalid("invalid primary-key dictionary"))?;
-    if !dictionary.keys().is_valid(row) {
-        return Err(invalid("null primary key"));
-    }
-    let index = dictionary.keys().value(row) as usize;
-    if index >= values.len() || !values.is_valid(index) {
-        return Err(invalid("invalid primary-key dictionary value"));
-    }
-    Ok(values.value(index))
-}
-
 fn chunk(
     batch: &RecordBatch,
     start: usize,
     end: usize,
+    key: Buffer,
     schema: &SeriesSchema,
     fields: &[(usize, ConcreteDataType)],
 ) -> Result<RawSeriesChunk, BoxedError> {
-    let key = read_key(batch, start)?;
     let timestamp = batch
         .column(time_index_column_index(batch.num_columns()))
         .as_any()
@@ -144,16 +119,9 @@ fn chunk(
     let fields = SeriesFields::try_from_vec(samples)
         .context(DataTypeMismatchSnafu)
         .map_err(BoxedError::new)?;
-    RawSeriesChunk::try_new(
-        schema,
-        Buffer::from(key.to_vec()),
-        None,
-        time,
-        fields,
-        false,
-    )
-    .context(DataTypeMismatchSnafu)
-    .map_err(BoxedError::new)
+    RawSeriesChunk::try_new(schema, key, None, time, fields, false)
+        .context(DataTypeMismatchSnafu)
+        .map_err(BoxedError::new)
 }
 
 struct RawStream {
@@ -194,9 +162,9 @@ pub(crate) fn make_stream(
         let mut input = inner;
         let mut pending: Option<RawSeriesChunk> = None;
         while let Some(item) = input.next().await {
-            let records = match item {
-                Ok(ScanBatch::Series(SeriesBatch::Flat(flat))) => flat.batches.into_vec(),
-                Ok(ScanBatch::RecordBatch(batch)) => vec![batch],
+            let (records, is_legacy) = match item {
+                Ok(ScanBatch::Series(SeriesBatch::Flat(flat))) => (flat.batches.into_vec(), true),
+                Ok(ScanBatch::RecordBatch(batch)) => (vec![batch], false),
                 Err(error) => { yield Err(BoxedError::new(error)); return; }
             };
             for record in records {
@@ -222,22 +190,59 @@ pub(crate) fn make_stream(
                 if record.num_rows() == 0 {
                     continue;
                 }
+                let pk_column = record.column(primary_key_column_index(record.num_columns()));
+                let primary_key = match pk_column.as_any().downcast_ref::<PrimaryKeyArray>() {
+                    Some(primary_key) => primary_key,
+                    None => { yield Err(invalid("invalid primary-key array")); return; }
+                };
+                let values = match primary_key.values().as_any().downcast_ref::<BinaryArray>() {
+                    Some(values) => values,
+                    None => { yield Err(invalid("invalid primary-key dictionary")); return; }
+                };
                 let mut start = 0;
                 while start < record.num_rows() {
-                    let key = match read_key(&record, start) { Ok(key) => key, Err(error) => { yield Err(error); return; } };
+                    let index = if primary_key.keys().is_valid(start) {
+                        primary_key.keys().value(start).as_usize()
+                    } else {
+                        yield Err(invalid("null primary key")); return;
+                    };
+                    if index >= values.len() || !values.is_valid(index) {
+                        yield Err(invalid("invalid primary-key dictionary value")); return;
+                    }
                     let mut end = start + 1;
                     while end < record.num_rows() {
-                        match read_key(&record, end) {
-                            Ok(next) if next == key => end += 1,
-                            Ok(_) => break,
-                            Err(error) => { yield Err(error); return; }
+                        let next_index = if primary_key.keys().is_valid(end) {
+                            primary_key.keys().value(end).as_usize()
+                        } else {
+                            yield Err(invalid("null primary key")); return;
+                        };
+                        if next_index >= values.len() || !values.is_valid(next_index) {
+                            yield Err(invalid("invalid primary-key dictionary value")); return;
+                        }
+                        if super::primary_key_at(primary_key, values, end)
+                            == super::primary_key_at(primary_key, values, start)
+                        {
+                            end += 1;
+                        } else {
+                            break;
                         }
                     }
+                    let offsets = values.value_offsets();
+                    let value_start = offsets[index].as_usize();
+                    let value_len = offsets[index + 1].as_usize() - value_start;
+                    let key = values.values().slice_with_length(value_start, value_len);
                     let begun = Instant::now();
-                    let current = match chunk(&record, start, end, &output_schema, &fields) {
+                    let current = match chunk(&record, start, end, key, &output_schema, &fields) {
                         Ok(chunk) => chunk, Err(error) => { yield Err(error); return; }
                     };
                     metrics.inc_convert_batch_cost(begun.elapsed());
+                    if let Some(old) = pending.as_ref()
+                        && is_legacy
+                        && old.read_key.as_slice() != current.read_key.as_slice()
+                        && current.read_key.as_slice() <= old.read_key.as_slice()
+                    {
+                        yield Err(invalid("legacy series primary keys are not strictly increasing")); return;
+                    }
                     if let Some(old) = pending.as_ref()
                         && old.read_key.as_slice() == current.read_key.as_slice()
                         && current.time.timestamp(0).zip(old.time.timestamp(old.time.len() - 1))
