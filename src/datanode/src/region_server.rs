@@ -84,7 +84,7 @@ use session::context::{
 };
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{
-    FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
+    FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, RELATIONAL_ENGINE_NAME,
 };
 use store_api::region_engine::{
     RegionEngineRef, RegionManifestInfo, RegionRole, RegionStatistic, RemapManifestsRequest,
@@ -1936,6 +1936,9 @@ impl RegionServerInner {
                     RegionAttribute::File => {
                         // do nothing
                     }
+                    RegionAttribute::Relational => {
+                        // do nothing
+                    }
                 }
             }
             RegionChange::Deregisters => {
@@ -2176,6 +2179,7 @@ fn parse_region_attribute(
             Ok(RegionAttribute::Metric { physical })
         }
         FILE_ENGINE_NAME => Ok(RegionAttribute::File),
+        RELATIONAL_ENGINE_NAME => Ok(RegionAttribute::Relational),
         _ => error::UnexpectedSnafu {
             violated: format!("Unknown engine: {}", engine),
         }
@@ -2188,6 +2192,7 @@ enum RegionAttribute {
     Mito,
     Metric { physical: bool },
     File,
+    Relational,
 }
 
 impl RegionAttribute {
@@ -2196,6 +2201,7 @@ impl RegionAttribute {
             RegionAttribute::Mito => MITO_ENGINE_NAME,
             RegionAttribute::Metric { .. } => METRIC_ENGINE_NAME,
             RegionAttribute::File => FILE_ENGINE_NAME,
+            RegionAttribute::Relational => RELATIONAL_ENGINE_NAME,
         }
     }
 }

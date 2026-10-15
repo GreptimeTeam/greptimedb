@@ -58,6 +58,11 @@ pub const FILE_TABLE_LOCATION_KEY: &str = "location";
 pub const FILE_TABLE_PATTERN_KEY: &str = "pattern";
 pub const FILE_TABLE_FORMAT_KEY: &str = "format";
 
+// Relational (external table) engine keys. `connection` holds the remote DSN
+// (`mysql://…` / `postgresql://…`), `remote_table` the remote table name.
+pub const RELATIONAL_CONNECTION_KEY: &str = "connection";
+pub const RELATIONAL_REMOTE_TABLE_KEY: &str = "remote_table";
+
 pub const TABLE_DATA_MODEL: &str = "table_data_model";
 pub const TABLE_DATA_MODEL_TRACE_V1: &str = "greptime_trace_v1";
 /// Table data model used by the JSON2-based OTLP trace pipeline.
