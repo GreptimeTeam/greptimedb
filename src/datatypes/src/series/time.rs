@@ -165,7 +165,10 @@ impl PartialEq for GridRange {
 impl Eq for GridRange {}
 
 /// A timestamp axis represented as a grid or explicit shared Arrow buffers.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Checked constructors validate timestamp ordering. Public payloads are validated again by the
+/// downstream series boundary.
+#[derive(Clone, Debug)]
 pub enum TimeAxis {
     /// A slice of a shared regular evaluation grid.
     Grid(GridRange),
@@ -186,13 +189,9 @@ impl TimeAxis {
 
     /// Validates and stores timestamp chunks without concatenating their buffers.
     pub fn try_from_chunks(chunks: Vec<ScalarBuffer<i64>>) -> Result<Self> {
-        let mut total = 0usize;
         let mut previous = None;
         let mut nonempty = Vec::new();
         for chunk in chunks {
-            total = total.checked_add(chunk.len()).context(InvalidSeriesSnafu {
-                reason: "timestamp length overflow".to_string(),
-            })?;
             if chunk.windows(2).any(|pair| pair[0] >= pair[1])
                 || chunk
                     .first()
@@ -207,7 +206,6 @@ impl TimeAxis {
                 nonempty.push(chunk);
             }
         }
-        let _ = total;
         Ok(Self::ExplicitChunks(nonempty.into()))
     }
 
