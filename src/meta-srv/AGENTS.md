@@ -66,10 +66,12 @@ API under `src/meta-srv/src/service/admin/`.
   `cache_invalidator.rs` and the heartbeat publish handler.
 - **Affinity**: `common-meta/affinity.rs` defines requirements, matching, batch
   resolution, and the query allocation-context provider. The selector factory
-  optionally supplies a resolver for allocation inputs. DDL configurators can
-  install a query provider before procedure loaders are registered. Each selector
-  allows one unconstrained retry on candidate shortage only when explicitly
-  configured. Procedure state is unchanged.
+  optionally supplies a resolver shared by DDL allocation and the region
+  supervisor; without one, allocation skips source lookup. DDL configurators can
+  install a query provider before procedure loaders are registered. Repartition
+  and failover resolve source requirements before selection. Each selector allows
+  one unconstrained retry on candidate shortage only when explicitly configured;
+  metadata errors propagate. Procedure state is unchanged.
 - **Selector stats fields**: keep `selector/` implementations in sync with the
   stats they consume.
 
