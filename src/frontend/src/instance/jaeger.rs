@@ -340,7 +340,7 @@ async fn query_trace_table(
     distincts: Vec<Expr>,
 ) -> ServerResult<Output> {
     let dataframe =
-        filtered_trace_dataframe(&ctx, instance, selects, filters, tags, &distincts).await?;
+        build_trace_dataframe(&ctx, instance, selects, filters, tags, &distincts).await?;
 
     // Apply the distinct if needed.
     let dataframe = if !distincts.is_empty() {
@@ -381,7 +381,7 @@ async fn find_latest_trace_ids(
     tags: Option<HashMap<String, JsonValue>>,
 ) -> ServerResult<Output> {
     let dataframe =
-        filtered_trace_dataframe(&ctx, instance, vec![wildcard()], filters, tags, &[]).await?;
+        build_trace_dataframe(&ctx, instance, vec![wildcard()], filters, tags, &[]).await?;
     let dataframe = dataframe
         .aggregate(
             vec![col(TRACE_ID_COLUMN)],
@@ -404,7 +404,7 @@ async fn find_latest_trace_ids(
 /// Reads the trace table, or the services or operations lookup table that
 /// answers `selects` and `distincts`, then projects `selects` and applies
 /// `filters` and the Jaeger tag filters.
-async fn filtered_trace_dataframe(
+async fn build_trace_dataframe(
     ctx: &QueryContextRef,
     instance: &Instance,
     selects: Vec<SelectExpr>,
@@ -480,6 +480,8 @@ async fn filtered_trace_dataframe(
     Ok(dataframe)
 }
 
+/// Executes `dataframe` and wraps its stream into an [`Output`] with dictionary
+/// columns decoded to values.
 async fn execute_trace_dataframe(dataframe: DataFrame) -> ServerResult<Output> {
     let stream = dataframe.execute_stream().await.context(DataFusionSnafu)?;
 
