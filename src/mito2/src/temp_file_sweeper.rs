@@ -53,11 +53,14 @@ pub(crate) fn region_write_dirs(access_layer: &AccessLayer, region_id: RegionId)
 /// `older_than` is the margin the caller takes from GC's
 /// `unknown_file_lingering_time`, which guards the same thing: a file this old
 /// is not one a writer is still filling.
+///
+/// A sweep waits for a permit of `sweep_limiter`, so a `None` means the
+/// datanode allows no concurrent GC job and there is no sweep.
 pub(crate) fn spawn_region_sweep(
     access_layer: AccessLayerRef,
     region_id: RegionId,
     older_than: Duration,
-    sweep_limiter: Arc<Semaphore>,
+    sweep_limiter: Option<Arc<Semaphore>>,
 ) {
     // No write to this store leaves a temporary file behind, so don't spend a
     // task on it: a sweep would still list every directory of the region to
@@ -65,6 +68,10 @@ pub(crate) fn spawn_region_sweep(
     if !writes_temporary_files(access_layer.object_store()) {
         return;
     }
+
+    let Some(sweep_limiter) = sweep_limiter else {
+        return;
+    };
 
     common_runtime::spawn_global(async move {
         // A burst of regions becoming writable must not run more sweeps at once

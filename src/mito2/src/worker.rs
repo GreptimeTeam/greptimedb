@@ -244,7 +244,10 @@ impl WorkerGroup {
         let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
         // A sweep waits for a permit while a GC job takes one without waiting, so
         // sharing the GC limiter would fail GC jobs and report sweeps as GC jobs.
-        let sweep_limiter = Arc::new(Semaphore::new(config.gc.max_concurrent_gc_job));
+        // A datanode that allows no concurrent GC job runs no sweep either: a
+        // limiter of zero would never hand out the permit the task waits for.
+        let sweep_limiter = (config.gc.max_concurrent_gc_job > 0)
+            .then(|| Arc::new(Semaphore::new(config.gc.max_concurrent_gc_job)));
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -498,7 +501,10 @@ impl WorkerGroup {
         let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
         // A sweep waits for a permit while a GC job takes one without waiting, so
         // sharing the GC limiter would fail GC jobs and report sweeps as GC jobs.
-        let sweep_limiter = Arc::new(Semaphore::new(config.gc.max_concurrent_gc_job));
+        // A datanode that allows no concurrent GC job runs no sweep either: a
+        // limiter of zero would never hand out the permit the task waits for.
+        let sweep_limiter = (config.gc.max_concurrent_gc_job > 0)
+            .then(|| Arc::new(Semaphore::new(config.gc.max_concurrent_gc_job)));
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
@@ -637,8 +643,9 @@ struct WorkerStarter<S> {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     flush_semaphore: Arc<Semaphore>,
-    /// Limiter for the temporary file sweeps.
-    sweep_limiter: Arc<Semaphore>,
+    /// Limiter for the temporary file sweeps, or `None` if the datanode allows
+    /// no concurrent GC job.
+    sweep_limiter: Option<Arc<Semaphore>>,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -1067,8 +1074,9 @@ struct RegionWorkerLoop<S> {
     flush_semaphore: Arc<Semaphore>,
     /// Plugins for flush hooks.
     plugins: Plugins,
-    /// Limiter for the temporary file sweeps.
-    sweep_limiter: Arc<Semaphore>,
+    /// Limiter for the temporary file sweeps, or `None` if the datanode allows
+    /// no concurrent GC job.
+    sweep_limiter: Option<Arc<Semaphore>>,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
