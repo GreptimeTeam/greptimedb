@@ -66,6 +66,7 @@ use crate::metrics::{
     OnDone, QUERY_STAGE_ELAPSED, maybe_attach_region_watermark_metrics,
     should_collect_region_watermark_from_query_ctx,
 };
+use crate::optimizer::expr_depth;
 use crate::options::ScheduledTimeExtension;
 use crate::physical_wrapper::PhysicalPlanWrapperRef;
 use crate::planner::{DfLogicalPlanner, LogicalPlanner};
@@ -380,6 +381,8 @@ impl DatafusionQueryEngine {
             }
         }
 
+        expr_depth::validate_plan(logical_plan)?;
+
         let mut logger = PanicLogger {
             input_logical_plan: logical_plan,
             after_analyze: None,
@@ -407,6 +410,7 @@ impl DatafusionQueryEngine {
             |_, _| {},
         )?;
 
+        expr_depth::validate_plan(&analyzed_plan)?;
         logger.after_analyze = Some(analyzed_plan.clone());
 
         common_telemetry::debug!("Create physical plan, analyzed plan: {analyzed_plan}");
@@ -422,6 +426,7 @@ impl DatafusionQueryEngine {
                 .optimize(analyzed_plan, state, |_, _| {})?
         };
 
+        expr_depth::validate_plan(&optimized_plan)?;
         common_telemetry::debug!("Create physical plan, optimized plan: {optimized_plan}");
         logger.after_optimize = Some(optimized_plan.clone());
 

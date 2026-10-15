@@ -29,3 +29,4 @@ pub mod table;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;
 pub mod utils;
+pub mod write_dispatcher;

@@ -24,10 +24,8 @@ use snafu::{Location, Snafu};
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
-    #[snafu(display(
-        "Experimental Metric export requires Parquet and a frontend that explicitly reports experimental_metric_export=true. Use an upgraded, consistently configured frontend entry point."
-    ))]
-    MetricExportUnavailable {
+    #[snafu(display("Packed Metric export requires Parquet"))]
+    MetricExportRequiresParquet {
         #[snafu(implicit)]
         location: Location,
     },
@@ -219,7 +217,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
-            Error::MetricExportUnavailable { .. }
+            Error::MetricExportRequiresParquet { .. }
             | Error::InvalidUri { .. }
             | Error::UnsupportedScheme { .. }
             | Error::SchemaOnlyModeMismatch { .. }

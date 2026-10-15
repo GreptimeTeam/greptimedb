@@ -31,6 +31,74 @@ use crate::test_util::{
 };
 
 #[tokio::test]
+async fn test_engine_column_compression_validation() {
+    use datatypes::schema::COMPRESSION_KEY;
+    use store_api::region_request::{AlterKind, RegionAlterRequest, SetRegionOption};
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    for (column_index, compression, options, accepted) in [
+        (1, r#"{"level":23}"#, vec![], false),
+        (
+            0,
+            r#"{"level":3}"#,
+            vec![
+                ("sst_format", "primary_key"),
+                ("memtable.type", "time_series"),
+            ],
+            false,
+        ),
+        (
+            0,
+            r#"{"level":3}"#,
+            vec![("primary_key_encoding", "sparse")],
+            false,
+        ),
+        (0, r#"{"level":3}"#, vec![], true),
+    ] {
+        let mut request = CreateRequestBuilder::new().build();
+        request.options.extend(
+            options
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string())),
+        );
+        let column = &mut request.column_metadatas[column_index].column_schema;
+        *column = column
+            .clone()
+            .with_metadata(std::collections::HashMap::from([(
+                COMPRESSION_KEY.to_string(),
+                compression.to_string(),
+            )]));
+        let result = engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await;
+        if accepted {
+            result.unwrap();
+        } else {
+            assert_eq!(
+                StatusCode::InvalidArguments,
+                result.unwrap_err().status_code()
+            );
+            assert!(engine.get_region(region_id).is_none());
+        }
+    }
+
+    let err = engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::SetRegionOptions {
+                    options: vec![SetRegionOption::Format("primary_key".to_string())],
+                },
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(StatusCode::InvalidArguments, err.status_code());
+}
+
+#[tokio::test]
 async fn test_engine_create_new_region() {
     test_engine_create_new_region_with_format(false).await;
     test_engine_create_new_region_with_format(true).await;

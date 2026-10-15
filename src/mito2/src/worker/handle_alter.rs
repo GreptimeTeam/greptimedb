@@ -197,6 +197,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
         // Persist the metadata to region's manifest.
         let options = new_options.as_ref().unwrap_or(&version.options);
+        if let Err(e) = options.validate_column_compression(&new_meta) {
+            sender.send(Err(e));
+            return;
+        }
         let change = RegionChange {
             metadata: new_meta,
             sst_format: options.sst_format.unwrap_or_default(),
@@ -356,6 +360,15 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             }
             .build()
         })?;
+        candidate
+            .validate_column_compression(&version.metadata)
+            .map_err(|e| {
+                store_api::metadata::InvalidRegionRequestSnafu {
+                    region_id: region.region_id,
+                    err: e.to_string(),
+                }
+                .build()
+            })?;
         if all_options_altered {
             region.version_control.alter_options(candidate);
             Ok(None)

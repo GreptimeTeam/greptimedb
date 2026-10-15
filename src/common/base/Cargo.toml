@@ -14,6 +14,7 @@ async-trait.workspace = true
 bitvec = "1.0"
 bytes.workspace = true
 futures.workspace = true
+icu_properties.workspace = true
 lazy_static.workspace = true
 pin-project.workspace = true
 regex.workspace = true

@@ -54,6 +54,7 @@ use crate::dist_plan::commutativity::{
 use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
 use crate::dist_plan::merge_sort::MergeSortLogicalPlan;
 use crate::metrics::PUSH_DOWN_FALLBACK_ERRORS_TOTAL;
+use crate::optimizer::expr_depth;
 use crate::options::ScheduledTimeExtension;
 use crate::plan::ExtractExpr;
 use crate::query_engine::DefaultSerializer;
@@ -119,6 +120,7 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         plan: LogicalPlan,
         config: &ConfigOptions,
     ) -> datafusion_common::Result<LogicalPlan> {
+        expr_depth::validate_plan(&plan)?;
         let mut config = config.clone();
         // Preserve the historical pre-MergeScan default unless explicitly set.
         let explicit = config
@@ -154,6 +156,7 @@ impl AnalyzerRule for DistPlannerAnalyzer {
         let plan = plan
             .rewrite_with_subqueries(&mut PlanTreeExpressionSimplifier::new(optimizer_context))?
             .data;
+        expr_depth::validate_plan(&plan)?;
         let fallback_plan = plan.clone();
 
         // Run a filter-focused optimizer subset before MergeScan wraps remote
@@ -780,14 +783,7 @@ impl PlanRewriter {
         );
 
         // add merge scan as the new root
-        let mut node = MergeScanLogicalPlan::new(
-            on_node.clone(),
-            false,
-            // at this stage, the partition cols should be set
-            // treat it as non-partitioned if None
-            self.partition_cols.clone().unwrap_or_default(),
-        )
-        .into_logical_plan();
+        let mut node = MergeScanLogicalPlan::new(on_node.clone(), false).into_logical_plan();
 
         // expand stages
         for new_stage in self.stage.drain(..) {

@@ -30,7 +30,6 @@ pub(super) struct CopyOptions {
     pub(super) format: DataFormat,
     pub(super) time_range: TimeRange,
     pub(super) parallelism: usize,
-    pub(crate) experimental_metric_export: bool,
     pub(super) packed: bool,
 }
 
@@ -218,10 +217,8 @@ pub(crate) async fn execute_copy_database_from(
 
 fn build_with_options(options: &CopyOptions) -> String {
     let mut parts = vec![format!("FORMAT='{}'", options.format)];
-    if options.experimental_metric_export {
-        parts.push("experimental_metric_export='true'".to_string());
-    }
     if options.packed {
+        parts.push("experimental_metric_export='true'".to_string());
         parts.push("metric_data_layout='packed'".to_string());
     }
     if let Some(start) = options.time_range.start {
@@ -429,6 +426,25 @@ mod tests {
 
     use super::*;
     use crate::common::{PrefixedAzblobConnection, PrefixedGcsConnection, PrefixedOssConnection};
+
+    #[test]
+    fn test_packed_copy_options() {
+        let mut options = CopyOptions {
+            format: DataFormat::Parquet,
+            time_range: TimeRange::unbounded(),
+            parallelism: 2,
+            packed: false,
+        };
+        assert_eq!(
+            build_with_options(&options),
+            "FORMAT='parquet', PARALLELISM=2"
+        );
+        options.packed = true;
+        assert_eq!(
+            build_with_options(&options),
+            "FORMAT='parquet', experimental_metric_export='true', metric_data_layout='packed', PARALLELISM=2"
+        );
+    }
 
     #[test]
     fn test_build_oss_connection_includes_endpoint() {

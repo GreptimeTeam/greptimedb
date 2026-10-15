@@ -39,7 +39,6 @@ struct ExportContext<'a> {
     schemas: Vec<String>,
     format: DataFormat,
     parallelism: usize,
-    experimental_metric_export: bool,
     packed: bool,
     resume: bool,
 }
@@ -49,7 +48,6 @@ pub struct ExportDataOptions<'a> {
     pub storage_config: &'a ObjectStoreConfig,
     pub parallelism: usize,
     pub chunk_parallelism: usize,
-    pub experimental_metric_export: bool,
     pub resume: bool,
 }
 
@@ -74,7 +72,6 @@ pub async fn export_data(
         format: manifest.format,
         packed: manifest.is_packed(),
         parallelism: options.parallelism,
-        experimental_metric_export: options.experimental_metric_export,
         resume: options.resume,
     };
 
@@ -278,7 +275,7 @@ async fn export_chunk(
     chunk_id: u32,
     time_range: TimeRange,
 ) -> Result<Vec<String>> {
-    if context.experimental_metric_export {
+    if context.packed {
         context
             .storage
             .prepare_export_chunk(&context.schemas, chunk_id, context.resume, context.packed)
@@ -290,7 +287,6 @@ async fn export_chunk(
         format: context.format,
         time_range,
         parallelism: context.parallelism,
-        experimental_metric_export: context.experimental_metric_export,
         packed: context.packed,
     };
 

@@ -200,12 +200,12 @@ mod tests {
         headers.insert(
             "x-greptime-hints",
             HeaderValue::from_static(" auto_create_table=true, ttl =3600d, append_mode=true , merge_mode=false , physical_table= table1,\
-            read_preference=leader"),
+            read_preference=leader, compaction.twcs.time_window=1h"),
         );
 
         let hints = extract_hints(&headers);
 
-        assert_eq!(hints.len(), 6);
+        assert_eq!(hints.len(), 7);
         assert_eq!(
             hints[0],
             ("auto_create_table".to_string(), "true".to_string())
@@ -220,6 +220,10 @@ mod tests {
         assert_eq!(
             hints[5],
             ("read_preference".to_string(), "leader".to_string())
+        );
+        assert_eq!(
+            hints[6],
+            ("compaction.twcs.time_window".to_string(), "1h".to_string())
         );
     }
 

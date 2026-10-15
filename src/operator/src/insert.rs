@@ -42,7 +42,7 @@ use common_frontend::slow_query_event::SLOW_QUERY_TABLE_NAME;
 use common_grpc_expr::util::ColumnExpr;
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::datanode::REGION_STATS_HISTORY_TABLE_NAME;
-use common_meta::node_manager::{AffectedRows, NodeManagerRef};
+use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::Peer;
 use common_meta::rpc::ddl::TriggerReason;
 use common_query::Output;
@@ -67,8 +67,8 @@ use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
 use store_api::mito_engine_options::{
-    APPEND_MODE_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, TTL_KEY,
-    TWCS_TIME_WINDOW,
+    APPEND_MODE_KEY, COMPACTION_OPTION_KEYS, COMPACTION_TWCS_PREFIX, COMPACTION_TYPE,
+    COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, TTL_KEY,
 };
 use store_api::storage::{RegionId, TableId};
 use table::TableRef;
@@ -80,12 +80,12 @@ use table::requests::{
     validate_semantic_option,
 };
 use table::table_reference::TableReference;
+use tokio_util::sync::CancellationToken;
 
 use crate::batcher::PendingRowsBatcher;
 use crate::error::{
-    CatalogSnafu, ColumnOptionsSnafu, CreatePartitionRulesSnafu, FindRegionLeaderSnafu,
-    InvalidInsertRequestSnafu, JoinTaskSnafu, RequestInsertsSnafu, Result, TableNotFoundSnafu,
-    WriteRejectedSnafu,
+    CatalogSnafu, ColumnOptionsSnafu, CreatePartitionRulesSnafu, InvalidInsertRequestSnafu,
+    JoinTaskSnafu, RequestInsertsSnafu, Result, TableNotFoundSnafu, WriteRejectedSnafu,
 };
 use crate::expr_helper;
 use crate::region_req_factory::RegionRequestFactory;
@@ -95,11 +95,13 @@ use crate::req_convert::insert::{
     fill_reqs_with_impure_default, rows_to_record_batch,
 };
 use crate::statement::StatementExecutor;
+use crate::write_dispatcher::{WriteDispatcher, WriteDispatcherRef};
 
 pub struct Inserter {
     catalog_manager: CatalogManagerRef,
     pub(crate) partition_manager: PartitionRuleManagerRef,
     pub(crate) node_manager: NodeManagerRef,
+    pub(crate) write_dispatcher: WriteDispatcherRef,
     pub(crate) table_flownode_set_cache: TableFlownodeSetCacheRef,
     /// Server-side upper bound for auto table creation on write.
     /// When `false`, missing tables are never auto-created regardless of the
@@ -292,6 +294,7 @@ impl Inserter {
         cost
     }
 
+    /// Creates a row inserter with the default write dispatcher.
     pub fn new(
         catalog_manager: CatalogManagerRef,
         partition_manager: PartitionRuleManagerRef,
@@ -300,6 +303,10 @@ impl Inserter {
         auto_create_table: bool,
     ) -> Self {
         Self {
+            write_dispatcher: Arc::new(WriteDispatcher::new(
+                node_manager.clone(),
+                partition_manager.clone(),
+            )),
             catalog_manager,
             partition_manager,
             node_manager,
@@ -308,6 +315,12 @@ impl Inserter {
             pending_rows_batcher: None,
             mirror_pending_rows: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Installs the shared dispatcher used by direct writes and batch flushes.
+    pub fn with_write_dispatcher(mut self, dispatcher: WriteDispatcherRef) -> Self {
+        self.write_dispatcher = dispatcher;
+        self
     }
 
     /// Installs the shared batcher; callers explicitly select its ingestion entry point.
@@ -826,30 +839,19 @@ impl Inserter {
             has_instant_rows,
         )?;
 
-        // Write requests to datanode and wait for response
-        let write_tasks = self
-            .group_requests_by_peer(normal_requests)
-            .await?
-            .into_iter()
-            .map(|(peer, inserts)| {
-                let node_manager = self.node_manager.clone();
-                let request = request_factory.build_insert(inserts);
-                common_runtime::spawn_global(async move {
-                    node_manager
-                        .datanode(&peer)
-                        .await
-                        .handle(request)
-                        .await
-                        .context(RequestInsertsSnafu)
-                })
-            });
-        let results = future::try_join_all(write_tasks)
-            .await
-            .context(JoinTaskSnafu)?;
-        let affected_rows = results
-            .into_iter()
-            .map(|resp| resp.map(|r| r.affected_rows))
-            .sum::<Result<AffectedRows>>()?;
+        let dispatcher = self.write_dispatcher.clone();
+        let request = request_factory.build_insert(normal_requests);
+        let writes = dispatcher.prepare(vec![request]).await?;
+        // Dropping the caller stops retries without abandoning in-flight writes.
+        let cancellation = CancellationToken::new();
+        let _guard = cancellation.clone().drop_guard();
+        let affected_rows = common_runtime::spawn_global(async move {
+            dispatcher.execute(writes, None, Some(&cancellation)).await
+        })
+        .await
+        .context(JoinTaskSnafu)?
+        .context(RequestInsertsSnafu)?
+        .affected_rows;
         crate::metrics::DIST_INGEST_ROW_COUNT
             .with_label_values(&[ctx.get_db_string().as_str()])
             .inc_by(affected_rows as u64);
@@ -857,40 +859,6 @@ impl Inserter {
             OutputData::AffectedRows(affected_rows),
             OutputMeta::new_with_cost(write_cost as _),
         ))
-    }
-
-    async fn group_requests_by_peer(
-        &self,
-        requests: RegionInsertRequests,
-    ) -> Result<HashMap<Peer, RegionInsertRequests>> {
-        // group by region ids first to reduce repeatedly call `find_region_leader`
-        // TODO(discord9): determine if a addition clone is worth it
-        let mut requests_per_region: HashMap<RegionId, RegionInsertRequests> = HashMap::new();
-        for req in requests.requests {
-            let region_id = RegionId::from_u64(req.region_id);
-            requests_per_region
-                .entry(region_id)
-                .or_default()
-                .requests
-                .push(req);
-        }
-
-        let mut inserts: HashMap<Peer, RegionInsertRequests> = HashMap::new();
-
-        for (region_id, reqs) in requests_per_region {
-            let peer = self
-                .partition_manager
-                .find_region_leader(region_id)
-                .await
-                .context(FindRegionLeaderSnafu)?;
-            inserts
-                .entry(peer)
-                .or_default()
-                .requests
-                .extend(reqs.requests);
-        }
-
-        Ok(inserts)
     }
 
     /// Returns `Some(reason)` if the config or request hint disables automatic
@@ -1717,6 +1685,11 @@ impl Inserter {
         }
     }
 
+    /// Returns the dispatcher shared with batching execution paths.
+    pub fn write_dispatcher(&self) -> &WriteDispatcherRef {
+        &self.write_dispatcher
+    }
+
     pub fn node_manager(&self) -> &NodeManagerRef {
         &self.node_manager
     }
@@ -1888,6 +1861,21 @@ pub fn fill_table_options_for_create(
         }
     }
 
+    if !matches!(create_type, AutoCreateTableType::Logical(_)) {
+        let mut has_twcs_option = false;
+        for key in COMPACTION_OPTION_KEYS {
+            if let Some(value) = ctx.extension(key) {
+                has_twcs_option |= key.starts_with(COMPACTION_TWCS_PREFIX);
+                table_options.insert(key.to_string(), value.to_string());
+            }
+        }
+        if has_twcs_option {
+            table_options
+                .entry(COMPACTION_TYPE.to_string())
+                .or_insert_with(|| COMPACTION_TYPE_TWCS.to_string());
+        }
+    }
+
     // Semantic keys use their own vocabulary instead of the fixed option list.
     for (key, value) in ctx.extensions() {
         if is_semantic_option_key(&key) && validate_semantic_option(&key, &value) {
@@ -1908,14 +1896,6 @@ pub fn fill_table_options_for_create(
             }
             if let Some(merge_mode) = ctx.extension(MERGE_MODE_KEY) {
                 table_options.insert(MERGE_MODE_KEY.to_string(), merge_mode.to_string());
-            }
-            if let Some(time_window) = ctx.extension(TWCS_TIME_WINDOW) {
-                table_options.insert(TWCS_TIME_WINDOW.to_string(), time_window.to_string());
-                // We need to set the compaction type explicitly.
-                table_options.insert(
-                    COMPACTION_TYPE.to_string(),
-                    COMPACTION_TYPE_TWCS.to_string(),
-                );
             }
         }
         // Set append_mode to true for log table.
@@ -3084,6 +3064,49 @@ mod tests {
     }
 
     #[test]
+    fn test_trace_create_options_copy_compaction_hints() {
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        ctx.set_extension("compaction.twcs.time_window", "1h");
+        ctx.set_extension("compaction.twcs.max_output_file_size", "256MB");
+        ctx.set_extension("compaction.twcs.remote_compaction", "true");
+        ctx.set_extension("compaction.unknown", "ignored");
+        let ctx = Arc::new(ctx);
+        let mut table_options = Default::default();
+
+        fill_table_options_for_create(
+            &mut table_options,
+            &AutoCreateTableType::Trace {
+                alter_existing: true,
+            },
+            &ctx,
+        );
+
+        assert_eq!(
+            Some("twcs"),
+            table_options.get(COMPACTION_TYPE).map(String::as_str)
+        );
+        assert_eq!(
+            Some("1h"),
+            table_options
+                .get("compaction.twcs.time_window")
+                .map(String::as_str)
+        );
+        assert_eq!(
+            Some("256MB"),
+            table_options
+                .get("compaction.twcs.max_output_file_size")
+                .map(String::as_str)
+        );
+        assert_eq!(
+            Some("true"),
+            table_options
+                .get("compaction.twcs.remote_compaction")
+                .map(String::as_str)
+        );
+        assert!(!table_options.contains_key("compaction.unknown"));
+    }
+
+    #[test]
     fn test_skip_wal_does_not_change_table_options() {
         check_skip_wal_does_not_change_table_options(false);
         check_skip_wal_does_not_change_table_options(true);
@@ -3581,9 +3604,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl common_meta::node_manager::Datanode for RecordingNode {
-        async fn handle(
+        async fn handle_request(
             &self,
-            _request: api::v1::region::RegionRequest,
+            _request: Arc<api::v1::region::RegionRequest>,
         ) -> common_meta::error::Result<api::region::RegionResponse> {
             let rows = match _request.body.as_ref() {
                 Some(api::v1::region::region_request::Body::Inserts(requests)) => requests

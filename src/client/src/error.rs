@@ -18,7 +18,7 @@ use common_error::define_from_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use snafu::{Location, Snafu};
+use snafu::{Location, Snafu, location};
 use tonic::Code;
 use tonic::metadata::errors::InvalidMetadataValue;
 
@@ -191,9 +191,22 @@ impl ErrorExt for Error {
             Error::Tonic { retry_hint, .. } => *retry_hint,
             Error::FlightGet { source, .. }
             | Error::FlightStream { source, .. }
-            | Error::RegionServer { source, .. }
             | Error::FlowServer { source, .. }
             | Error::External { source, .. } => source.retry_hint(),
+            Error::RegionServer { code, source, .. } => {
+                let hint = source.retry_hint();
+                // Preserve the transport retry policy previously applied by should_retry().
+                if !hint.is_retryable()
+                    && matches!(
+                        code,
+                        Code::Unavailable | Code::Cancelled | Code::DeadlineExceeded
+                    )
+                {
+                    RetryHint::Retryable
+                } else {
+                    hint
+                }
+            }
             Error::ConvertFlightData { source, .. }
             | Error::CreateChannel { source, .. }
             | Error::CreateTlsChannel { source, .. } => source.retry_hint(),
@@ -204,6 +217,15 @@ impl ErrorExt for Error {
 }
 
 define_from_tonic_status!(Error, Tonic);
+
+impl From<Error> for common_meta::error::Error {
+    fn from(error: Error) -> Self {
+        Self::External {
+            source: BoxedError::new(error),
+            location: location!(),
+        }
+    }
+}
 
 impl Error {
     /// Returns the gRPC status code if this error is caused by a gRPC request failure.

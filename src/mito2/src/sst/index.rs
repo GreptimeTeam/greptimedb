@@ -74,6 +74,7 @@ use crate::sst::file::{
     ColumnIndexMetadata, FileHandle, IndexType, IndexTypes, RegionFileId, RegionIndexId,
 };
 use crate::sst::file_purger::FilePurgerRef;
+use crate::sst::index::fulltext_index::FULLTEXT_BLOOM_VERSION;
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::inverted_index::creator::InvertedIndexer;
@@ -160,6 +161,8 @@ pub struct IndexOutput {
     pub inverted_index: InvertedIndexOutput,
     /// Fulltext index output.
     pub fulltext_index: FulltextIndexOutput,
+    /// Columns of `fulltext_index` that use the bloom backend.
+    pub fulltext_bloom_columns: Vec<ColumnId>,
     /// Bloom filter output.
     pub bloom_filter: BloomFilterOutput,
 }
@@ -203,6 +206,13 @@ impl IndexOutput {
         map.into_iter()
             .map(|(column_id, created_indexes)| ColumnIndexMetadata {
                 column_id,
+                fulltext_bloom_version: if self.fulltext_index.is_available()
+                    && self.fulltext_bloom_columns.contains(&column_id)
+                {
+                    FULLTEXT_BLOOM_VERSION
+                } else {
+                    0
+                },
                 created_indexes,
             })
             .collect::<Vec<_>>()

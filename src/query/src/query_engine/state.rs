@@ -67,11 +67,11 @@ use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
 use crate::optimizer::count_nest_aggr::CountNestAggrRule;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::enforce_sorting::EnforceSorting;
+use crate::optimizer::expr_depth;
 use crate::optimizer::global_limit::EnsureGlobalLimitForFetch;
 use crate::optimizer::json_schema_concretize::JsonSchemaConcretizeRule;
 use crate::optimizer::json_type_concretize::JsonTypeConcretizeRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
-use crate::optimizer::pass_distribution::PassDistribution;
 use crate::optimizer::promql_tsid_narrow_join::PromqlTsidNarrowJoin;
 use crate::optimizer::remove_duplicate::RemoveDuplicate;
 use crate::optimizer::scan_hint::ScanHintRule;
@@ -214,6 +214,7 @@ impl QueryEngineState {
             analyzer.rules.push(Arc::new(JsonSchemaConcretizeRule));
         }
         analyzer.rules.push(Arc::new(FixStateUdafOrderingAnalyzer));
+        analyzer.rules.push(Arc::new(expr_depth::ExprDepthRule));
 
         // Note: Postgres oid-alias string coercion (`'x'::regclass`,
         // `'public'::regnamespace`, ...) is handled by the
@@ -233,17 +234,13 @@ impl QueryEngineState {
         physical_optimizer
             .rules
             .insert(5, Arc::new(ParallelizeScan));
-        // Pass distribution requirement to MergeScanExec to avoid unnecessary shuffling
-        physical_optimizer
-            .rules
-            .insert(6, Arc::new(PassDistribution));
         // Prefer collecting narrow PromQL build sides over repartitioning wide label streams.
         physical_optimizer
             .rules
-            .insert(7, Arc::new(PromqlTsidNarrowJoin));
+            .insert(6, Arc::new(PromqlTsidNarrowJoin));
         // Re-enforce sorting after custom rules update scan partitioning and distribution.
         // Keep it immediately before DataFusion's default EnsureRequirements.
-        physical_optimizer.rules.insert(8, Arc::new(EnforceSorting));
+        physical_optimizer.rules.insert(7, Arc::new(EnforceSorting));
         // Add rule for windowed sort
         physical_optimizer
             .rules
@@ -371,15 +368,19 @@ impl QueryEngineState {
         plan: DfLogicalPlan,
         context: &QueryEngineContext,
     ) -> DfResult<DfLogicalPlan> {
+        expr_depth::validate_plan(&plan)?;
         self.extension_rules
             .iter()
             .try_fold(plan, |acc_plan, rule| {
-                rule.analyze(acc_plan, context, context.state().config_options())
+                let plan = rule.analyze(acc_plan, context, context.state().config_options())?;
+                expr_depth::validate_plan(&plan)?;
+                Ok(plan)
             })
     }
 
     /// Run the full logical plan optimize phase for the given plan.
     pub fn optimize_logical_plan(&self, plan: DfLogicalPlan) -> DfResult<DfLogicalPlan> {
+        expr_depth::validate_plan(&plan)?;
         self.session_state().optimize(&plan)
     }
 
