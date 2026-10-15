@@ -18,8 +18,13 @@ use std::time::Duration;
 
 use common_telemetry::warn;
 use opendal::raw::Timestamp;
+#[cfg(feature = "hdfs-object-store")]
+use uuid::Uuid;
 
 use crate::{ErrorKind, ObjectStore};
+
+/// Prefix of a temporary file name.
+const TEMPORARY_PREFIX: &str = ".";
 
 /// Marker that follows the name of the target in a temporary file name.
 const TEMPORARY_MARKER: &str = ".greptime-";
@@ -145,9 +150,24 @@ async fn sweep_dir(store: &ObjectStore, dir: &str, older_than: Duration) -> Swee
     report
 }
 
+/// Returns the path a non-append write to `path` goes to before it is renamed.
+///
+/// A writer that dies in between leaves the file behind, which is what
+/// [`sweep_temporary_files`] reclaims.
+#[cfg(feature = "hdfs-object-store")]
+pub(crate) fn temporary_path(path: &str) -> String {
+    let suffix = format!("{TEMPORARY_MARKER}{}{TEMPORARY_SUFFIX}", Uuid::new_v4());
+    match path.rsplit_once('/') {
+        Some((parent, name)) => format!("{parent}/{TEMPORARY_PREFIX}{name}{suffix}"),
+        None => format!("{TEMPORARY_PREFIX}{path}{suffix}"),
+    }
+}
+
 fn is_temporary_file(name: &str) -> bool {
     // `name` is the last segment of a path, so a directory name ends with `/`.
-    name.starts_with('.') && name.contains(TEMPORARY_MARKER) && name.ends_with(TEMPORARY_SUFFIX)
+    name.starts_with(TEMPORARY_PREFIX)
+        && name.contains(TEMPORARY_MARKER)
+        && name.ends_with(TEMPORARY_SUFFIX)
 }
 
 #[cfg(test)]
