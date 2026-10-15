@@ -16,6 +16,7 @@ pub mod context;
 pub mod hints;
 pub mod protocol_ctx;
 pub mod query_id;
+pub mod query_options;
 pub mod session_config;
 pub mod table_name;
 
