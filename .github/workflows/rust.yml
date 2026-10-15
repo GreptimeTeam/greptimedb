@@ -294,6 +294,7 @@ jobs:
         env:
           CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
           RUST_BACKTRACE: 1
+          RUST_MIN_STACK: 8388608 # 8MB, aligned with the test job
           CARGO_INCREMENTAL: 0
           # Runs the object-store matrix against the local MinIO from
           # tests-integration/fixtures. Real AWS S3 is covered by the nightly
