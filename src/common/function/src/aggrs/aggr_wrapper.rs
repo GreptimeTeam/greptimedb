@@ -22,6 +22,7 @@
 //! `foo_merge`'s input arg is the same as `foo_state`'s output, and its output is the same as `foo`'s input.
 //!
 
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -185,6 +186,11 @@ impl StateMergeHelper {
         };
         // (unaliased state expression, output column name)
         let mut lower_states: Vec<(Expr, String)> = vec![];
+        let mut lower_output_names: HashSet<String> = aggr
+            .group_expr
+            .iter()
+            .map(|e| e.qualified_name().1)
+            .collect();
         let mut upper_aggr_exprs = vec![];
 
         // group exprs for upper plan should refer to the output group expr as column from lower plan
@@ -225,20 +231,19 @@ impl StateMergeHelper {
             // rewrite such as `count(*)` -> `count(ts) AS count(*)` can make two aggregates
             // share one state expression, and schema names hide casts, so
             // `count(CAST(ts AS Int64))` is named `count(t.ts)` too. Identical states are
-            // computed once; a different state with a taken name is renamed after the
-            // original output name.
+            // computed once; a different state with a taken name gets a numeric suffix.
             let lower_state_output_col_name =
                 if let Some((_, name)) = lower_states.iter().find(|(e, _)| *e == expr) {
                     name.clone()
                 } else {
-                    let mut name = expr.schema_name().to_string();
-                    if lower_states.iter().any(|(_, n)| *n == name) {
-                        name = format!(
-                            "{}({})",
-                            aggr_state_func_name(aggr_func.func.name()),
-                            aggr_expr.schema_name()
-                        );
+                    let base = expr.schema_name().to_string();
+                    let mut name = base.clone();
+                    let mut suffix = 0;
+                    while lower_output_names.contains(&name) {
+                        suffix += 1;
+                        name = format!("{base}_{suffix}");
                     }
+                    lower_output_names.insert(name.clone());
                     lower_states.push((expr, name.clone()));
                     name
                 };

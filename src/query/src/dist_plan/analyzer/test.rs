@@ -1933,8 +1933,9 @@ fn expand_step_aggr_count_wildcard_and_time_index() {
     assert_eq!(expected, result.to_string());
 }
 
-/// After the `count(*)` rewrite, `count(ts)` and `count(CAST(ts AS Int64))` are different
-/// states with the same schema name, as schema names hide casts.
+/// After the `count(*)` rewrite, `count(ts)` and the casts of `ts` are different states with
+/// the same schema name, as schema names hide casts. The output alias `t.ts` and the second
+/// cast make sure a renamed state never takes a name that is already allocated.
 #[test]
 fn expand_step_aggr_count_wildcard_and_cast_time_index() {
     init_default_ut_logging();
@@ -1951,7 +1952,13 @@ fn expand_step_aggr_count_wildcard_and_cast_time_index() {
                 datafusion::functions_aggregate::expr_fn::count(datafusion_expr::cast(
                     col("ts"),
                     DataType::Int64,
-                )),
+                ))
+                .alias("t.ts"),
+                datafusion::functions_aggregate::expr_fn::count(datafusion_expr::cast(
+                    col("ts"),
+                    DataType::Utf8,
+                ))
+                .alias("c"),
             ],
         )
         .unwrap()
@@ -1962,10 +1969,10 @@ fn expand_step_aggr_count_wildcard_and_cast_time_index() {
     let plan = CountWildcardToTimeIndexRule.analyze(plan, &config).unwrap();
     let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
     let expected = [
-        "Projection: count(*), count(t.ts)",
-        "  Aggregate: groupBy=[[]], aggr=[[__count_merge(__count_state(t.ts)) AS count(*), __count_merge(__count_state(count(t.ts))) AS count(t.ts)]]",
+        "Projection: count(*), t.ts, c",
+        "  Aggregate: groupBy=[[]], aggr=[[__count_merge(__count_state(t.ts)) AS count(*), __count_merge(__count_state(t.ts)_1) AS t.ts, __count_merge(__count_state(t.ts)_2) AS c]]",
         "    MergeScan [is_placeholder=false, remote_input=[",
-        "Aggregate: groupBy=[[]], aggr=[[__count_state(t.ts), __count_state(CAST(t.ts AS Int64)) AS __count_state(count(t.ts))]]",
+        "Aggregate: groupBy=[[]], aggr=[[__count_state(t.ts), __count_state(CAST(t.ts AS Int64)) AS __count_state(t.ts)_1, __count_state(CAST(t.ts AS Utf8)) AS __count_state(t.ts)_2]]",
         "  TableScan: t",
         "]]",
     ]
