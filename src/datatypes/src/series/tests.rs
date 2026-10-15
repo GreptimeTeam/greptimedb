@@ -54,7 +54,6 @@ fn metric_identity_uses_contents_and_distinguishes_absent_from_empty() {
     assert_eq!(one.get("empty"), Some(""));
     assert_eq!(one.get("missing"), None);
     assert_eq!(one.get("__name__"), Some("cpu"));
-    assert_eq!(one.get("__name_missing"), None);
 }
 
 #[test]

@@ -345,14 +345,15 @@ impl Default for HistogramBatchBuilder {
 impl HistogramBatchBuilder {
     /// Creates an empty builder.
     pub fn new() -> Self {
+        // Avoid reserving Arrow's large default capacity for small histogram batches.
         Self {
-            schema: Int32Builder::new(),
-            threshold: Float64Builder::new(),
-            sum: Float64Builder::new(),
-            count: Float64Builder::new(),
-            zero: Float64Builder::new(),
-            hint: Int32Builder::new(),
-            start: Int64Builder::new(),
+            schema: Int32Builder::with_capacity(0),
+            threshold: Float64Builder::with_capacity(0),
+            sum: Float64Builder::with_capacity(0),
+            count: Float64Builder::with_capacity(0),
+            zero: Float64Builder::with_capacity(0),
+            hint: Int32Builder::with_capacity(0),
+            start: Int64Builder::with_capacity(0),
             custom: lb64(),
             po: lb32(),
             pl: lb32(),
@@ -462,14 +463,14 @@ fn preflight(r: HistogramView<'_>, rows: usize, existing: [usize; 7]) -> Result<
     )
 }
 fn lb64() -> ListBuilder<Float64Builder> {
-    ListBuilder::new(Float64Builder::new()).with_field(Arc::new(Field::new(
+    ListBuilder::new(Float64Builder::with_capacity(0)).with_field(Arc::new(Field::new(
         "item",
         DataType::Float64,
         false,
     )))
 }
 fn lb32() -> ListBuilder<Int32Builder> {
-    ListBuilder::new(Int32Builder::new()).with_field(Arc::new(Field::new(
+    ListBuilder::new(Int32Builder::with_capacity(0)).with_field(Arc::new(Field::new(
         "item",
         DataType::Int32,
         false,
@@ -489,5 +490,4 @@ fn append32(b: &mut ListBuilder<Int32Builder>, v: &[i32]) {
 }
 
 #[cfg(test)]
-#[path = "histogram/tests.rs"]
 mod tests;
