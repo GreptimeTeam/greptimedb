@@ -13,6 +13,10 @@
 // limitations under the License.
 
 mod catalog;
+#[cfg(feature = "enterprise")]
+mod flow_write;
+#[cfg(feature = "enterprise")]
+use flow_write::TrackedPayload;
 mod registrations;
 mod remote_dyn_filter;
 
@@ -29,7 +33,8 @@ use api::region::RegionResponse;
 use api::v1::meta::TopicStat;
 use api::v1::region::sync_request::ManifestInfo;
 use api::v1::region::{
-    ListMetadataRequest, RegionResponse as RegionResponseV1, SyncRequest, region_request,
+    ListMetadataRequest, RegionRequest as RegionRequestV1, RegionResponse as RegionResponseV1,
+    SyncRequest, region_request,
 };
 use api::v1::{ResponseHeader, Status};
 use arrow_flight::{FlightData, Ticket};
@@ -37,6 +42,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+#[cfg(feature = "enterprise")]
+use common_grpc::flow_write::{COMMAND_KEY, FlowWriteRegistry, Reply};
 use common_meta::datanode::TopicStatsReporter;
 use common_query::OutputData;
 use common_query::request::QueryRequest;
@@ -115,6 +122,8 @@ pub struct RegionServer {
     inner: Arc<RegionServerInner>,
     flight_compression: FlightCompression,
     suspend: Arc<AtomicBool>,
+    #[cfg(feature = "enterprise")]
+    flow_write_registry: Arc<FlowWriteRegistry<TrackedPayload, Reply>>,
 }
 
 pub struct RegionStat {
@@ -163,6 +172,8 @@ impl RegionServer {
             )),
             flight_compression,
             suspend: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "enterprise")]
+            flow_write_registry: Arc::new(FlowWriteRegistry::default()),
         }
     }
 
@@ -925,6 +936,25 @@ impl Stream for RegionWatermarkStream {
 
 #[async_trait]
 impl RegionServerHandler for RegionServer {
+    async fn handle_region_request(
+        &self,
+        request: RegionRequestV1,
+    ) -> ServerResult<RegionResponseV1> {
+        #[cfg(feature = "enterprise")]
+        if request
+            .header
+            .as_ref()
+            .and_then(|header| header.query_context.as_ref())
+            .is_some_and(|context| context.extensions.contains_key(COMMAND_KEY))
+        {
+            return self.handle_flow_write_request(request).await;
+        }
+        let body = request.body.context(servers_error::InvalidQuerySnafu {
+            reason: "Expecting non-empty region request body.",
+        })?;
+        self.handle(body).await
+    }
+
     async fn handle(&self, request: region_request::Body) -> ServerResult<RegionResponseV1> {
         let failed_requests_cnt = crate::metrics::REGION_SERVER_REQUEST_FAILURE_COUNT
             .with_label_values(&[request.as_ref()]);
