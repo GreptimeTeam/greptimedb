@@ -844,7 +844,7 @@ mod test {
                 }));
             }
         }
-        samples.sort_by(|left, right| left.0.cmp(&right.0));
+        samples.sort_by_key(|left| left.0);
         assert_eq!(samples, vec![(10, 10.0), (11, 11.0)]);
         assert_eq!(keys.len(), 2);
         assert_eq!(

@@ -4874,7 +4874,7 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
     let tags = metadata
         .column_metadatas
         .iter()
-        .filter(|c| c.semantic_type == SemanticType::Tag.into())
+        .filter(|c| c.semantic_type == SemanticType::Tag)
         .map(|c| BoundTag {
             column_id: c.column_id,
             name: Arc::from(c.column_schema.name.as_str()),

@@ -208,12 +208,12 @@ pub(crate) fn make_stream(
                         Ok(chunk) => chunk, Err(error) => { yield Err(error); return; }
                     };
                     metrics.inc_convert_batch_cost(begun.elapsed());
-                    if let Some(old) = pending.as_ref() {
-                        if old.read_key.as_slice() == current.read_key.as_slice()
-                            && current.time.timestamp(0).zip(old.time.timestamp(old.time.len() - 1))
-                                .is_some_and(|(next, previous)| next <= previous) {
-                            yield Err(invalid("raw timestamps are not strictly increasing")); return;
-                        }
+                    if let Some(old) = pending.as_ref()
+                        && old.read_key.as_slice() == current.read_key.as_slice()
+                        && current.time.timestamp(0).zip(old.time.timestamp(old.time.len() - 1))
+                            .is_some_and(|(next, previous)| next <= previous)
+                    {
+                        yield Err(invalid("raw timestamps are not strictly increasing")); return;
                     }
                     if let Some(mut old) = pending.take() {
                         if old.read_key.as_slice() != current.read_key.as_slice() { old.is_last = true; }
