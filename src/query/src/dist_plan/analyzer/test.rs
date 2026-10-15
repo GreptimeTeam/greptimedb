@@ -32,7 +32,7 @@ use datafusion::functions_nested::expr_fn::make_array;
 use datafusion::prelude::SessionContext;
 use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_common::{ExprSchema, JoinType, ScalarValue, TableReference};
-use datafusion_expr::expr::{Exists, ScalarFunction};
+use datafusion_expr::expr::{Exists, NullTreatment, ScalarFunction};
 use datafusion_expr::utils::split_conjunction;
 use datafusion_expr::{
     AggregateUDF, Expr, ExprSchemable as _, Extension, LogicalPlanBuilder, Operator, Subquery,
@@ -2213,6 +2213,75 @@ fn date_bin_ts_group_by() {
     ]
     .join("\n");
     assert_eq!(expected, result.to_string());
+}
+
+#[test]
+fn ignore_nulls_aggregate_stays_on_frontend() {
+    use datafusion::functions_aggregate::first_last::last_value;
+
+    let table = TestTable::table_with_name(0, "t".to_string());
+    let source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(table),
+    )));
+    let input = LogicalPlanBuilder::scan_with_filters("t", source, None, vec![])
+        .unwrap()
+        .build()
+        .unwrap();
+    for (group_by, null_treatment) in [
+        (
+            vec![col("pk1"), col("pk2")],
+            Some(NullTreatment::IgnoreNulls),
+        ),
+        (vec![col("number")], Some(NullTreatment::IgnoreNulls)),
+        (vec![col("pk1"), col("pk2")], None),
+        (
+            vec![col("pk1"), col("pk2")],
+            Some(NullTreatment::RespectNulls),
+        ),
+    ] {
+        let mut ignored = last_value(col("number"), vec![]);
+        let Expr::AggregateFunction(func) = &mut ignored else {
+            panic!("expected aggregate expression");
+        };
+        func.params.null_treatment = null_treatment;
+        let aggregate_exprs = if null_treatment == Some(NullTreatment::IgnoreNulls) {
+            let mut ordinary = last_value(col("number"), vec![]);
+            let Expr::AggregateFunction(func) = &mut ordinary else {
+                panic!("expected aggregate expression");
+            };
+            func.params.null_treatment = None;
+            vec![ordinary.alias("ordinary"), ignored.alias("ignored")]
+        } else {
+            vec![ignored]
+        };
+        let plan = LogicalPlanBuilder::from(input.clone())
+            .aggregate(group_by, aggregate_exprs)
+            .unwrap()
+            .build()
+            .unwrap();
+        let analyzed = DistPlannerAnalyzer {}
+            .analyze(plan.clone(), &ConfigOptions::default())
+            .unwrap();
+        if null_treatment == Some(NullTreatment::IgnoreNulls) {
+            let LogicalPlan::Aggregate(aggregate) = &analyzed else {
+                panic!("IGNORE NULLS aggregate must remain on the frontend: {analyzed}");
+            };
+            let remote_input = find_merge_scan(&analyzed).unwrap().input();
+            assert!(
+                !matches!(remote_input, LogicalPlan::Aggregate(_)),
+                "remote input contains aggregate: {remote_input}"
+            );
+            let Some(func) =
+                common_function::aggrs::aggr_wrapper::get_aggr_func(&aggregate.aggr_expr[1])
+            else {
+                unreachable!();
+            };
+            assert_eq!(Some(NullTreatment::IgnoreNulls), func.params.null_treatment);
+        } else {
+            let remote_input = find_merge_scan(&analyzed).unwrap().input();
+            assert!(matches!(remote_input, LogicalPlan::Aggregate(_)));
+        }
+    }
 }
 
 #[test]
