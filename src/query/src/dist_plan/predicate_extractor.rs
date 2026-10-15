@@ -20,7 +20,7 @@ use std::collections::HashSet;
 
 use common_telemetry::debug;
 use datafusion_common::Result as DfResult;
-use datafusion_expr::{Expr, LogicalPlan, Operator};
+use datafusion_expr::{Expr, LogicalPlan, Operator, utils::split_conjunction};
 use datatypes::value::Value;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
 
@@ -47,33 +47,46 @@ impl PredicateExtractor {
         let partition_set: HashSet<String> = partition_columns.iter().cloned().collect();
 
         for filter_expr in filter_exprs {
-            match DataFusionExprConverter::convert(&filter_expr) {
-                Ok(partition_expr) => {
-                    // Check expression for safe partition pruning
-                    match ExpressionChecker::check_expression_for_pruning(
-                        &partition_expr,
-                        &partition_set,
-                    ) {
-                        ExpressionCheckResult::UseAsIs(expr) => {
-                            partition_exprs.push(expr);
-                        }
-                        ExpressionCheckResult::UsePartial(exprs) => {
-                            partition_exprs.extend(exprs);
-                        }
-                        ExpressionCheckResult::Drop => {
-                            debug!(
-                                "Dropping mixed expression for correctness: {}",
-                                partition_expr
-                            );
-                        }
-                    }
-                }
+            let partition_expr = match DataFusionExprConverter::convert(&filter_expr) {
+                Ok(expr) => Some(expr),
                 Err(err) => {
                     debug!(
-                        "Failed to convert filter expression to PartitionExpr: {}, skipping",
+                        "Failed to convert filter expression to PartitionExpr: {}, trying conjuncts",
                         err
                     );
-                    continue;
+                    split_conjunction(&filter_expr)
+                        .into_iter()
+                        .filter_map(|conjunct| match DataFusionExprConverter::convert(conjunct) {
+                            Ok(expr) => Some(expr),
+                            Err(err) => {
+                                debug!(
+                                    "Failed to convert filter conjunct to PartitionExpr: {}, skipping",
+                                    err
+                                );
+                                None
+                            }
+                        })
+                        // Keep salvaged conjuncts in one AND expression, not as alternatives.
+                        .reduce(PartitionExpr::and)
+                }
+            };
+            let Some(partition_expr) = partition_expr else {
+                continue;
+            };
+
+            // Check expression for safe partition pruning
+            match ExpressionChecker::check_expression_for_pruning(&partition_expr, &partition_set) {
+                ExpressionCheckResult::UseAsIs(expr) => {
+                    partition_exprs.push(expr);
+                }
+                ExpressionCheckResult::UsePartial(exprs) => {
+                    partition_exprs.extend(exprs);
+                }
+                ExpressionCheckResult::Drop => {
+                    debug!(
+                        "Dropping mixed expression for correctness: {}",
+                        partition_expr
+                    );
                 }
             }
         }
@@ -682,12 +695,114 @@ mod tests {
             Box::new(col("user_id")),
             DataType::Float32,
         ));
+        let lower = PartitionExpr::new(
+            Operand::Column("user_id".to_string()),
+            RestrictedOp::GtEq,
+            Operand::Value(Value::Int64(1)),
+        );
+        let upper = PartitionExpr::new(
+            Operand::Column("user_id".to_string()),
+            RestrictedOp::Lt,
+            Operand::Value(Value::Int64(10)),
+        );
+        let bounds = PartitionExpr::new(
+            Operand::Expr(lower.clone()),
+            RestrictedOp::And,
+            Operand::Expr(upper.clone()),
+        );
         check_partition_expressions(vec![
             FilterTestCase::new(
-                "cast_in_and_is_skipped",
+                "cast_in_and_preserves_partition_bound",
                 col("user_id")
                     .eq(lit(1i64))
                     .and(cast.clone().eq(lit(1.0f32))),
+                vec![PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::Eq,
+                    Operand::Value(Value::Int64(1)),
+                )],
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "cast_between_two_bounds_preserves_both",
+                col("user_id")
+                    .gt_eq(lit(1i64))
+                    .and(col("user_id").lt(lit(10i64)))
+                    .and(cast.clone().eq(lit(1.0f32))),
+                vec![bounds.clone()],
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "cast_left_of_bounds_preserves_both",
+                cast.clone()
+                    .eq(lit(1.0f32))
+                    .and(col("user_id").gt_eq(lit(1i64)))
+                    .and(col("user_id").lt(lit(10i64))),
+                vec![bounds.clone()],
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "cast_between_bounds_preserves_both",
+                col("user_id")
+                    .gt_eq(lit(1i64))
+                    .and(cast.clone().eq(lit(1.0f32)))
+                    .and(col("user_id").lt(lit(10i64))),
+                vec![bounds],
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "is_not_null_cast_preserves_partition_bound",
+                col("user_id").eq(lit(1i64)).and(
+                    Expr::Cast(datafusion_expr::Cast::new(
+                        Box::new(col("value")),
+                        DataType::Int32,
+                    ))
+                    .is_not_null(),
+                ),
+                vec![PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::Eq,
+                    Operand::Value(Value::Int64(1)),
+                )],
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "all_unsupported_conjunction_is_dropped",
+                Expr::Cast(datafusion_expr::Cast::new(
+                    Box::new(col("value")),
+                    DataType::Int32,
+                ))
+                .eq(lit(1i32))
+                .and(
+                    Expr::Cast(datafusion_expr::Cast::new(
+                        Box::new(col("timestamp")),
+                        DataType::Float32,
+                    ))
+                    .eq(lit(1.0f32)),
+                ),
+                vec![],
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "nested_and_with_or_side_preserves_bound",
+                col("user_id").eq(lit(1i64)).and(
+                    col("user_id")
+                        .eq(lit(2i64))
+                        .or(cast.clone().eq(lit(1.0f32))),
+                ),
+                vec![PartitionExpr::new(
+                    Operand::Column("user_id".to_string()),
+                    RestrictedOp::Eq,
+                    Operand::Value(Value::Int64(1)),
+                )],
+                vec!["user_id"],
+            ),
+            FilterTestCase::new(
+                "or_with_nested_and_cast_drops_whole_expression",
+                col("user_id")
+                    .eq(lit(1i64))
+                    .and(cast.clone().eq(lit(1.0f32)))
+                    .or(col("user_id").eq(lit(2i64))),
                 vec![],
                 vec!["user_id"],
             ),
@@ -709,32 +824,42 @@ mod tests {
             panic!("expected test table scan");
         };
         let plan = LogicalPlan::TableScan(datafusion_expr::logical_plan::TableScan {
-            filters: vec![filter_a, filter_b],
+            filters: vec![filter_a.clone(), filter_b.clone()],
+            ..scan.clone()
+        });
+        let partition_columns = ["user_id".to_string(), "value".to_string()];
+        let expected = vec![PartitionExpr::new(
+            Operand::Expr(PartitionExpr::new(
+                Operand::Column("user_id".to_string()),
+                RestrictedOp::Eq,
+                Operand::Value(Value::Int64(10)),
+            )),
+            RestrictedOp::And,
+            Operand::Expr(PartitionExpr::new(
+                Operand::Column("value".to_string()),
+                RestrictedOp::Eq,
+                Operand::Value(Value::Int64(20)),
+            )),
+        )];
+
+        let partition_exprs =
+            PredicateExtractor::extract_partition_expressions(&plan, &partition_columns).unwrap();
+        assert_eq!(partition_exprs, expected);
+
+        let unsupported = Expr::Cast(datafusion_expr::Cast::new(
+            Box::new(col("timestamp")),
+            DataType::Float32,
+        ))
+        .eq(lit(1.0f32));
+        let plan = LogicalPlan::TableScan(datafusion_expr::logical_plan::TableScan {
+            filters: vec![filter_a, unsupported, filter_b],
             ..scan
         });
 
-        let partition_exprs = PredicateExtractor::extract_partition_expressions(
-            &plan,
-            &["user_id".to_string(), "value".to_string()],
-        )
-        .unwrap();
+        let partition_exprs =
+            PredicateExtractor::extract_partition_expressions(&plan, &partition_columns).unwrap();
 
-        assert_eq!(
-            partition_exprs,
-            vec![PartitionExpr::new(
-                Operand::Expr(PartitionExpr::new(
-                    Operand::Column("user_id".to_string()),
-                    RestrictedOp::Eq,
-                    Operand::Value(Value::Int64(10)),
-                )),
-                RestrictedOp::And,
-                Operand::Expr(PartitionExpr::new(
-                    Operand::Column("value".to_string()),
-                    RestrictedOp::Eq,
-                    Operand::Value(Value::Int64(20)),
-                )),
-            )]
-        );
+        assert_eq!(partition_exprs, expected);
     }
 
     #[test]
