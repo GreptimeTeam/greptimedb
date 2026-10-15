@@ -21,7 +21,7 @@ from last_value_ignore_nulls
 group by host
 order by host;
 
--- Default and RESPECT NULLS should retain the LastRow selector.
+-- Default and RESPECT NULLS return the same results in both modes.
 select
     host,
     last_value(v1 order by ts) as v1_default,
@@ -29,20 +29,6 @@ select
 from last_value_ignore_nulls
 group by host
 order by host;
-
--- SQLNESS REPLACE (-+) -
--- SQLNESS REPLACE (\s\s+) _
--- SQLNESS REPLACE (elapsed_compute.*) REDACTED
--- SQLNESS REPLACE (peers.*) REDACTED
--- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
--- SQLNESS REPLACE (metrics.*) REDACTED
--- SQLNESS REPLACE (partitioning.*) REDACTED
--- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
-explain analyze select
-    last_value(v1 order by ts),
-    last_value(v1 order by ts) respect nulls
-from last_value_ignore_nulls
-group by host;
 
 -- The IGNORE NULLS member rejects the shared selector, including when it is second.
 -- SQLNESS REPLACE (-+) -

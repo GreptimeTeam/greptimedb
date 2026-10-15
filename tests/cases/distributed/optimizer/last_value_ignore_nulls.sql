@@ -1,1 +1,0 @@
-../../standalone/optimizer/last_value_ignore_nulls.sql

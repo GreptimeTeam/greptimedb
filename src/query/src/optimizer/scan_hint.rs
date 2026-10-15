@@ -22,7 +22,7 @@ use common_recordbatch::filter::SimpleFilterEvaluator;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::tree_node::{Transformed, TreeNodeRewriter};
 use datafusion_common::{Column, Result};
-use datafusion_expr::expr::Sort;
+use datafusion_expr::expr::{NullTreatment, Sort};
 use datafusion_expr::{Expr, LogicalPlan, utils};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 use datatypes::arrow::datatypes::{DataType, TimeUnit as ArrowTimeUnit};
@@ -401,8 +401,6 @@ impl ScanHintRewriter {
     fn extract_last_value_selector(
         aggregate: &datafusion_expr::logical_plan::Aggregate,
     ) -> Option<(HashSet<Column>, Column)> {
-        use datafusion_expr::expr::NullTreatment;
-
         let mut order_by_expr = None;
         if aggregate.aggr_expr.is_empty() {
             return None;
