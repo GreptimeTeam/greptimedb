@@ -472,6 +472,7 @@ fn make_region_truncate(truncate: TruncateRequest) -> Result<Vec<(RegionId, Regi
 /// Convert [BulkInsertRequest] to [RegionRequest] and group by [RegionId].
 fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId, RegionRequest)>> {
     let region_id = request.region_id.into();
+    let skip_wal = request.skip_wal;
     let partition_expr_version = request.partition_expr_version.map(|v| v.value);
     let aligned_schema_version = request.aligned_schema_version.map(|v| v.schema_version);
     let Some(Body::ArrowIpc(request)) = request.body else {
@@ -493,6 +494,7 @@ fn make_region_bulk_inserts(request: BulkInsertRequest) -> Result<Vec<(RegionId,
             region_id,
             payload,
             raw_data: request,
+            skip_wal,
             partition_expr_version,
             aligned_schema_version,
         }),
@@ -1755,6 +1757,8 @@ pub struct RegionCatchupRequest {
 
 #[derive(Debug, Clone)]
 pub struct RegionBulkInsertsRequest {
+    /// Whether this request should skip WAL.
+    pub skip_wal: bool,
     pub region_id: RegionId,
     pub payload: DfRecordBatch,
     pub raw_data: ArrowIpc,

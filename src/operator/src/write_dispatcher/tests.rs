@@ -857,6 +857,7 @@ fn build_partitioned_request(
             .unwrap();
             let (schema, data_header, payload) = flight::record_batch_to_ipc(batch).unwrap();
             Body::BulkInsert(BulkInsertRequest {
+                skip_wal: false,
                 region_id,
                 partition_expr_version,
                 aligned_schema_version: Some(AlignedSchemaVersion {
@@ -1383,6 +1384,7 @@ async fn test_dispatch_preserves_write_payloads_and_envelopes() {
             ..Default::default()
         }),
         body: Some(Body::BulkInsert(BulkInsertRequest {
+            skip_wal: false,
             region_id: region.as_u64(),
             partition_expr_version: version,
             aligned_schema_version: None,
