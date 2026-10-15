@@ -17,6 +17,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole as PbRegionRole};
@@ -29,6 +30,9 @@ use common_time::Timestamp;
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType, PhysicalExpr};
 use datatypes::schema::SchemaRef;
+use datatypes::series::raw::{RawSeriesChunk, RawSeriesOrdering};
+use datatypes::series::samples::SeriesSchema;
+use futures::Stream;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
@@ -38,7 +42,7 @@ use crate::metadata::RegionMetadataRef;
 use crate::region_request::{
     BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
 };
-use crate::storage::{FileId, RegionId, ScanRequest, SequenceNumber};
+use crate::storage::{ColumnId, FileId, RegionId, ScanRequest, SequenceNumber};
 
 /// The settable region role state.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -467,6 +471,49 @@ pub struct QueryScanContext {
     pub explain_verbose: bool,
 }
 
+/// A tag bound to a physical column in the scan's metadata snapshot.
+#[derive(Clone, Debug)]
+pub struct BoundTag {
+    /// Physical region column identifier for this logical tag.
+    pub column_id: ColumnId,
+    /// Logical tag name visible to the query.
+    pub name: Arc<str>,
+}
+
+/// Bound source for materializing labels from raw series chunks.
+#[derive(Clone, Debug)]
+pub enum RawLabelSource {
+    /// Labels are encoded in the complete primary key and use this scan-bound metadata.
+    PrimaryKey {
+        /// Metric name associated with the bound logical source.
+        metric_name: Arc<str>,
+        /// Physical metadata snapshot used to decode primary-key values.
+        physical_metadata: RegionMetadataRef,
+        /// Logical tag names mapped to physical column identifiers.
+        logical_tags: Arc<[BoundTag]>,
+    },
+    /// The stream supplies a complete metric name and label set in each chunk.
+    Explicit,
+}
+
+/// A stream of raw series chunks with stable schema, label binding, and ordering.
+///
+/// Chunks for a read key are contiguous, with strictly increasing timestamps within and across
+/// chunks. `is_last` marks the last chunk of that key in this stream, not across streams.
+pub trait RawSeriesStream: Stream<Item = Result<RawSeriesChunk, BoxedError>> + Send {
+    /// Returns the schema shared by all chunks; raw schemas have no evaluation grid.
+    fn schema(&self) -> &Arc<SeriesSchema>;
+    /// Returns scan-bound label metadata. `PrimaryKey` chunks leave `metric` as `None`, meaning
+    /// labels are undecoded, not that the metric name is missing; `Explicit` chunks supply
+    /// `Some` with a complete metric name and labels.
+    fn label_source(&self) -> &RawLabelSource;
+    /// Returns this stream's ordering guarantee.
+    fn ordering(&self) -> RawSeriesOrdering;
+}
+
+/// A pinned raw-series stream that can be sent between threads.
+pub type SendableRawSeriesStream = Pin<Box<dyn RawSeriesStream>>;
+
 /// A scanner that provides a way to scan the region concurrently.
 ///
 /// The scanner splits the region into partitions so that each partition can be scanned concurrently.
@@ -498,6 +545,21 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError>;
+
+    /// Scans a partition as raw series when this source supports that path.
+    ///
+    /// `None` means raw capability is absent before execution and permits a legacy scan instead.
+    /// `Some` selects this entrypoint, including for an empty successful stream. Errors propagate;
+    /// callers must not replay a failed raw scan through the legacy path. Use only one entrypoint
+    /// for a given scanner partition per execution.
+    fn scan_series_partition(
+        &self,
+        _ctx: &QueryScanContext,
+        _metrics_set: &ExecutionPlanMetricsSet,
+        _partition: usize,
+    ) -> Result<Option<SendableRawSeriesStream>, BoxedError> {
+        Ok(None)
+    }
 
     /// Check if there is any predicate exclude region partition exprs that may be executed in this scanner.
     fn has_predicate_without_region(&self) -> bool;
@@ -739,9 +801,81 @@ impl RegionStatistic {
 
 #[cfg(test)]
 mod tests {
+    use common_recordbatch::{RecordBatch, RecordBatches};
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use datatypes::vectors::{Int32Vector, TimestampMillisecondVector, VectorRef};
+    use futures::TryStreamExt;
     use serde_json::json;
 
     use super::*;
+
+    #[tokio::test]
+    async fn single_partition_scanner_preserves_legacy_fallback_after_raw_capability_miss() {
+        let schema = Arc::new(datatypes::schema::Schema::new(vec![
+            ColumnSchema::new("value", ConcreteDataType::int32_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+        ]));
+        let columns: Vec<VectorRef> = vec![
+            Arc::new(Int32Vector::from_slice([42])),
+            Arc::new(TimestampMillisecondVector::from_slice([7])),
+        ];
+        let batch = RecordBatch::new(schema.clone(), columns).unwrap();
+        let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
+        let mut metadata_builder =
+            crate::metadata::RegionMetadataBuilder::new(RegionId::new(1234, 1));
+        metadata_builder.push_column_metadata(crate::metadata::ColumnMetadata {
+            column_schema: ColumnSchema::new("value", ConcreteDataType::int32_datatype(), false),
+            semantic_type: api::v1::SemanticType::Field,
+            column_id: 1,
+        });
+        metadata_builder.push_column_metadata(crate::metadata::ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: api::v1::SemanticType::Timestamp,
+            column_id: 2,
+        });
+        let metadata = Arc::new(metadata_builder.build().unwrap());
+        let scanner = SinglePartitionScanner::new(batches.as_stream(), false, metadata, None);
+        let ctx = QueryScanContext::default();
+        let metrics = ExecutionPlanMetricsSet::new();
+
+        assert!(
+            scanner
+                .scan_series_partition(&ctx, &metrics, 0)
+                .unwrap()
+                .is_none()
+        );
+        let legacy = scanner.scan_partition(&ctx, &metrics, 0).unwrap();
+        let legacy_batches = legacy.try_collect::<Vec<_>>().await.unwrap();
+        assert_eq!(legacy_batches.len(), 1);
+        assert_eq!(legacy_batches[0].num_rows(), 1);
+        assert_eq!(
+            legacy_batches[0]
+                .column(0)
+                .as_ref()
+                .as_any()
+                .downcast_ref::<datatypes::arrow::array::Int32Array>()
+                .unwrap()
+                .value(0),
+            42
+        );
+
+        let second = scanner
+            .scan_partition(&ctx, &metrics, 0)
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert!(second.is_empty());
+    }
 
     #[test]
     fn region_statistic_deserializes_without_query_stats() {

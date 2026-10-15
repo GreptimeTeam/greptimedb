@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod histogram;
+pub mod raw;
 pub mod samples;
 pub mod time;
 
