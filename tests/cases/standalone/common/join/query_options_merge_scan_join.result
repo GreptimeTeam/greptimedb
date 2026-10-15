@@ -4,6 +4,11 @@ SET datafusion.optimizer.prefer_hash_join = true;
 affected_rows: 0
 
 -- SQLNESS PROTOCOL MYSQL
+SET datafusion.optimizer.filter_null_join_keys = true;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
 CREATE TABLE query_options_merge_join_data (
     ts TIMESTAMP TIME INDEX,
     key_id INT,
