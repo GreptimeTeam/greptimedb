@@ -15,6 +15,7 @@
 mod lifecycle;
 
 use std::collections::VecDeque;
+use std::io::Cursor;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -27,12 +28,13 @@ use datafusion::physical_plan::RecordBatchStream;
 use datatypes::arrow::array::{Array, Float64Array};
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
 use datatypes::arrow::compute::concat_batches;
-use datatypes::arrow::datatypes::SchemaRef;
+use datatypes::arrow::datatypes::{DataType, SchemaRef};
+use datatypes::arrow::ipc::{reader::StreamReader, writer::StreamWriter};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::series::Label;
 use datatypes::series::MetricName;
 use datatypes::series::raw::{RawSeriesChunk, RawSeriesOrdering, RawTimeAxis};
-use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
+use datatypes::series::samples::{DenseSamplesRef, FieldSpec, Samples, SeriesFields, SeriesSchema};
 use futures_util::{Stream, StreamExt};
 use store_api::region_engine::{
     BoundTag, RawLabelSource, RawSeriesStream, SendableRawSeriesStream,
@@ -1414,6 +1416,121 @@ async fn unpack_preflights_empty_and_grid_schemas_without_polling() {
                 Arc::new(expected),
                 RawLabelSource::Explicit,
                 RawSeriesOrdering::Contiguous,
+            )
+            .is_err()
+        );
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+}
+
+fn named_fields_schema(names: [&str; 2]) -> Arc<SeriesSchema> {
+    Arc::new(SeriesSchema {
+        fields: names
+            .into_iter()
+            .map(|name| FieldSpec {
+                name: Arc::from(name),
+            })
+            .collect(),
+        eval_grid: None,
+    })
+}
+
+fn named_fields_chunk(schema: &SeriesSchema) -> RawSeriesChunk {
+    RawSeriesChunk::try_new(
+        schema,
+        Buffer::from(b"series-key".to_vec()),
+        Some(metric()),
+        RawTimeAxis::try_new(ScalarBuffer::from(vec![7_i64, 8])).unwrap(),
+        SeriesFields::try_from_vec(vec![
+            Samples::from_float(Float64Array::from(vec![Some(1.0), Some(2.0)])),
+            Samples::from_float(Float64Array::from(vec![Some(10.0), Some(20.0)])),
+        ])
+        .unwrap(),
+        true,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn named_frame_fields_roundtrip_and_reject_wrong_bindings_before_polling() {
+    let expected = named_fields_schema(["cpu_usage", "cpu_idle"]);
+    let input_chunk = named_fields_chunk(&expected);
+    let input: SendableRawSeriesStream = Box::pin(RawMock {
+        schema: expected.clone(),
+        items: VecDeque::from([Ok(input_chunk)]),
+        binding: RawLabelSource::Explicit,
+        ordering: RawSeriesOrdering::ReadKeyThenTime,
+        polls: Arc::new(AtomicUsize::new(0)),
+        drops: Arc::new(AtomicUsize::new(0)),
+        pending: false,
+        emitted: false,
+    });
+    let batches = pack_all(input).await;
+    let mut ipc = Vec::new();
+    {
+        let mut writer = StreamWriter::try_new(&mut ipc, &batches[0].schema()).unwrap();
+        for batch in &batches {
+            writer.write(batch).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+    let reader = StreamReader::try_new(Cursor::new(ipc), None).unwrap();
+    let frame_schema = reader.schema();
+    let ipc_batches = reader.map(Result::unwrap).collect::<Vec<_>>();
+    let payload_fields = frame_schema.field_with_name("fields").unwrap().data_type();
+    let DataType::Struct(payload_fields) = payload_fields else {
+        panic!("expected struct payload field");
+    };
+    assert_eq!(
+        payload_fields
+            .iter()
+            .map(|field| field.name())
+            .collect::<Vec<_>>(),
+        ["cpu_usage", "cpu_idle"]
+    );
+
+    let (source, _, _) = df_source(ipc_batches.clone(), frame_schema.clone(), false);
+    let mut decoded = unpack_raw_series(
+        source,
+        expected.clone(),
+        RawLabelSource::Explicit,
+        RawSeriesOrdering::ReadKeyThenTime,
+    )
+    .unwrap();
+    let actual = decoded.next().await.unwrap().unwrap();
+    assert_chunk(
+        &actual,
+        b"series-key",
+        &[7, 8],
+        &[Some(1.0), Some(2.0)],
+        true,
+    );
+    assert_eq!(actual.fields.len(), 2);
+    let second = match actual.fields.as_slice()[1].dense().unwrap() {
+        DenseSamplesRef::Float(values) => values,
+        _ => panic!("expected float field"),
+    };
+    assert_eq!(second.null_count(), 0);
+    assert_eq!(second.values(), &[10.0, 20.0]);
+    assert_metric(&actual, None);
+    assert!(decoded.next().await.is_none());
+
+    for (wrong_names, empty) in [
+        (["cpu_idle", "cpu_usage"], false),
+        (["cpu_usage", "renamed_idle"], false),
+        (["cpu_idle", "cpu_usage"], true),
+        (["cpu_usage", "renamed_idle"], true),
+    ] {
+        let wrong_schema = named_fields_schema(wrong_names);
+        let batches = if empty { vec![] } else { ipc_batches.clone() };
+        let (source, polls, drops) = df_source(batches, frame_schema.clone(), false);
+        assert!(
+            unpack_raw_series(
+                source,
+                wrong_schema,
+                RawLabelSource::Explicit,
+                RawSeriesOrdering::ReadKeyThenTime,
             )
             .is_err()
         );

@@ -14,11 +14,11 @@
 
 //! Streaming boundary between finite raw-series chunks and DataFusion record batches.
 //!
-//! Schema fields identify codec layout and ordinal payload fields; additional application metadata
-//! is permitted when stable across the stream. The caller-provided [`RawLabelSource`] is the label
-//! binding, not authenticated by the frame schema or field provenance. This adapter preserves scan
-//! candidates only: it is not a residual filter, authorization check, remote transport, or
-//! compaction boundary.
+//! Schema fields identify the ordered logical payload fields and codec layout; additional
+//! application metadata is permitted when stable across the stream. The caller-provided
+//! [`RawLabelSource`] is the label binding, not authenticated by the frame schema or field
+//! provenance. This adapter preserves scan candidates only; it is not a residual filter,
+//! authorization check, remote transport, or compaction boundary.
 
 use std::pin::Pin;
 use std::sync::Arc;
