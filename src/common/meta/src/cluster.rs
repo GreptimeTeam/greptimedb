@@ -106,7 +106,7 @@ fn calculate_node_id(addr: &str) -> u64 {
 }
 
 /// The information of a node in the cluster.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeInfo {
     /// The peer information. [node_id, address]
     pub peer: Peer,
@@ -148,7 +148,7 @@ pub enum Role {
     Metasrv,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NodeStatus {
     Datanode(DatanodeStatus),
     Frontend(FrontendStatus),
@@ -171,7 +171,7 @@ impl NodeStatus {
 }
 
 /// The status of a datanode.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatanodeStatus {
     /// The read capacity units during this period.
     pub rcus: i64,
@@ -186,7 +186,7 @@ pub struct DatanodeStatus {
 }
 
 /// The status of a frontend.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FrontendStatus {
     /// The workloads of the frontend.
     #[serde(default)]
@@ -194,7 +194,7 @@ pub struct FrontendStatus {
 }
 
 /// The status of a flownode.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlownodeStatus {
     /// The workloads of the flownode.
     #[serde(default)]
@@ -202,7 +202,7 @@ pub struct FlownodeStatus {
 }
 
 /// The status of a metasrv.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetasrvStatus {
     pub is_leader: bool,
 }

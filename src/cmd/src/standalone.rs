@@ -681,6 +681,8 @@ impl StartCommand {
         ));
 
         let ddl_context = DdlContext {
+            affinity_resolver: None,
+            peer_alloc_context_provider: None,
             node_manager: node_manager.clone(),
             cache_invalidator: layered_cache_registry.clone(),
             memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),

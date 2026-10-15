@@ -22,6 +22,7 @@ use client::inserter::InsertOptions;
 use common_base::Plugins;
 use common_catalog::consts::{MIN_USER_FLOW_ID, MIN_USER_TABLE_ID};
 use common_event_recorder::{DEFAULT_COMPACTION_TIME_WINDOW, EventRecorderImpl, EventRecorderRef};
+use common_meta::affinity::{AffinityFallback, AffinityRef, NoopAffinity};
 use common_meta::ddl::flow_meta::FlowMetadataAllocator;
 use common_meta::ddl::table_meta::{TableMetadataAllocator, TableMetadataAllocatorRef};
 use common_meta::ddl::{
@@ -66,7 +67,8 @@ use crate::handler::region_lease_handler::{CustomizedRegionLeaseRenewerRef, Regi
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatMailbox, Pushers};
 use crate::metasrv::{
     ElectionRef, FLOW_ID_SEQ, METASRV_DATA_DIR, Metasrv, MetasrvInfo, MetasrvOptions,
-    RegionStatAwareSelectorRef, SelectTarget, SelectorContext, SelectorRef, TABLE_ID_SEQ,
+    RegionStatAwareSelectorRef, SelectTarget, SelectorContext, SelectorFactoryRef, SelectorRef,
+    TABLE_ID_SEQ,
 };
 use crate::peer::MetasrvPeerAllocator;
 use crate::procedure::region_migration::DefaultContextFactory;
@@ -274,6 +276,14 @@ impl MetasrvBuilder {
         ));
 
         let selector_ctx = SelectorContext {
+            affinity_fallback: plugins
+                .as_ref()
+                .and_then(|plugins| plugins.get::<AffinityFallback>())
+                .unwrap_or_default(),
+            affinity: plugins
+                .as_ref()
+                .and_then(|plugins| plugins.get::<AffinityRef>())
+                .unwrap_or_else(|| Arc::new(NoopAffinity)),
             peer_discovery: meta_peer_client.clone(),
         };
 
@@ -385,6 +395,10 @@ impl MetasrvBuilder {
             ),
         ));
         region_migration_manager.try_start()?;
+        let affinity_resolver = plugins
+            .as_ref()
+            .and_then(|plugins| plugins.get::<SelectorFactoryRef>())
+            .and_then(|factory| factory.build_affinity_resolver(meta_peer_client.clone()));
         let region_supervisor_selector = plugins
             .as_ref()
             .and_then(|plugins| plugins.get::<RegionStatAwareSelectorRef>());
@@ -422,6 +436,8 @@ impl MetasrvBuilder {
         let topic_stats_registry = Arc::new(TopicStatsRegistry::default());
 
         let ddl_context = DdlContext {
+            peer_alloc_context_provider: None,
+            affinity_resolver,
             node_manager: node_manager.clone(),
             cache_invalidator: cache_invalidator.clone(),
             memory_region_keeper: memory_region_keeper.clone(),
@@ -795,10 +811,99 @@ mod tests {
         options.gc.enable = false;
         options.gc.max_concurrent_tables = 0;
 
-        MetasrvBuilder::new()
+        let metasrv = MetasrvBuilder::new()
             .options(options)
             .build()
             .await
             .unwrap();
+        let context = metasrv.ddl_manager().create_context();
+        assert!(context.affinity_resolver.is_none());
+        assert!(context.peer_alloc_context_provider.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_builder_injects_affinity_components() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use common_meta::affinity::{
+            Affinity, AffinityRef, AffinityReference, AffinityRequirements, AffinityResolver,
+            AffinityResolverRef,
+        };
+        use common_meta::cluster::NodeInfo;
+        use common_meta::error::Result as MetaResult;
+
+        use crate::metasrv::{SelectorFactory, SelectorFactoryContext};
+
+        struct TestAffinity;
+
+        impl Affinity for TestAffinity {
+            fn matches(&self, _: &AffinityRequirements, _: &NodeInfo) -> bool {
+                true
+            }
+        }
+
+        struct TestResolver;
+
+        #[async_trait::async_trait]
+        impl AffinityResolver for TestResolver {
+            async fn resolve(
+                &self,
+                references: &[AffinityReference],
+            ) -> MetaResult<Vec<Option<AffinityRequirements>>> {
+                Ok(vec![None; references.len()])
+            }
+        }
+
+        struct RecordingFactory {
+            calls: Arc<AtomicUsize>,
+            resolver: AffinityResolverRef,
+        }
+
+        impl SelectorFactory for RecordingFactory {
+            fn build_affinity_resolver(&self, _: MetaPeerClientRef) -> Option<AffinityResolverRef> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Some(self.resolver.clone())
+            }
+
+            fn build(&self, ctx: SelectorFactoryContext) -> SelectorRef {
+                ctx.base_selector
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let resolver: AffinityResolverRef = Arc::new(TestResolver);
+        let affinity: AffinityRef = Arc::new(TestAffinity);
+        let plugins = Plugins::new();
+        plugins.insert(affinity.clone());
+        plugins.insert(AffinityFallback::Unconstrained);
+        plugins.insert(Arc::new(RecordingFactory {
+            calls: calls.clone(),
+            resolver: resolver.clone(),
+        }) as SelectorFactoryRef);
+        let metasrv = MetasrvBuilder::new()
+            .options(MetasrvOptions {
+                enable_telemetry: false,
+                ..Default::default()
+            })
+            .plugins(plugins)
+            .build()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            metasrv.selector_ctx().affinity_fallback,
+            AffinityFallback::Unconstrained
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(Arc::ptr_eq(&metasrv.selector_ctx().affinity, &affinity));
+        assert!(Arc::ptr_eq(
+            metasrv
+                .ddl_manager()
+                .create_context()
+                .affinity_resolver
+                .as_ref()
+                .unwrap(),
+            &resolver
+        ));
     }
 }
