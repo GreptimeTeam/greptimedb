@@ -54,7 +54,7 @@ pub trait RegionStatAwareSelector: Send + Sync {
         from_peer_id: u64,
         region_ids: &[RegionId],
         exclude_peer_ids: HashSet<u64>,
-        affinity: Option<AffinityRequirements>,
+        affinity: Option<&AffinityRequirements>,
     ) -> Result<Self::Output>;
 }
 

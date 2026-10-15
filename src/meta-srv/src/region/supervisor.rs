@@ -698,7 +698,7 @@ impl RegionSupervisor {
         match &self.selector {
             RegionSupervisorSelector::NaiveSelector(selector) => {
                 let opts = SelectorOptions {
-                    affinity,
+                    affinity: affinity.as_ref(),
                     min_required_items: regions.len(),
                     allow_duplication: true,
                     exclude_peer_ids,
@@ -728,7 +728,7 @@ impl RegionSupervisor {
                         from_peer_id,
                         regions,
                         exclude_peer_ids,
-                        affinity,
+                        affinity.as_ref(),
                     )
                     .await?;
                 ensure!(
@@ -1063,8 +1063,8 @@ pub(crate) mod tests {
             calls: Mutex<Vec<Option<AffinityRequirements>>>,
         }
         impl FailoverSelector {
-            fn select_peers(&self, affinity: Option<AffinityRequirements>) -> Result<Vec<Peer>> {
-                self.calls.lock().unwrap().push(affinity.clone());
+            fn select_peers(&self, affinity: Option<&AffinityRequirements>) -> Result<Vec<Peer>> {
+                self.calls.lock().unwrap().push(affinity.cloned());
                 if affinity.is_some() {
                     match self.outcome {
                         Outcome::Success => {}
@@ -1095,7 +1095,7 @@ pub(crate) mod tests {
             async fn select(
                 &self,
                 ctx: &SelectorContext,
-                opts: SelectorOptions,
+                opts: SelectorOptions<'_>,
             ) -> Result<Self::Output> {
                 assert_eq!(ctx.affinity_fallback, self.expected_fallback);
                 assert_eq!(opts.exclude_peer_ids, HashSet::from([8]));
@@ -1115,7 +1115,7 @@ pub(crate) mod tests {
                 source: u64,
                 regions: &[RegionId],
                 excluded: HashSet<u64>,
-                affinity: Option<AffinityRequirements>,
+                affinity: Option<&AffinityRequirements>,
             ) -> Result<Self::Output> {
                 assert_eq!(ctx.affinity_fallback, self.expected_fallback);
                 assert_eq!(source, 7);

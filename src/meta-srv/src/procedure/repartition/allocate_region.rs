@@ -158,9 +158,13 @@ impl ExecutePlan {
         let region_number_and_partition_exprs =
             AllocateRegion::prepare_region_allocation_data(&allocate_regions)?;
         let table_info_value = ctx.get_table_info_value().await?;
-        let groups = if let Some(resolver) = &ctx.affinity_resolver {
-            let affinity = resolve_allocation_affinity(ctx, resolver.as_ref()).await?;
-            group_allocations(table_id, &region_number_and_partition_exprs, &affinity)
+        let affinity = if let Some(resolver) = &ctx.affinity_resolver {
+            Some(resolve_allocation_affinity(ctx, resolver.as_ref()).await?)
+        } else {
+            None
+        };
+        let groups = if let Some(affinity) = &affinity {
+            group_allocations(table_id, &region_number_and_partition_exprs, affinity)
         } else {
             vec![AllocationGroup {
                 affinity: None,
@@ -174,7 +178,13 @@ impl ExecutePlan {
         for AllocationGroup { affinity, regions } in groups {
             let routes = ctx
                 .region_routes_allocator
-                .allocate(table_id, &regions, &PeerAllocContext { affinity })
+                .allocate(
+                    table_id,
+                    &regions,
+                    &PeerAllocContext {
+                        affinity: affinity.cloned(),
+                    },
+                )
                 .await
                 .context(error::AllocateRegionRoutesSnafu { table_id })?;
             new_allocated_region_routes.extend(routes);
@@ -500,10 +510,17 @@ fn collect_allocation_sources(
     sources
 }
 
+/// Owns requirements once per source; targets refer to them by index.
+#[derive(Debug)]
+struct AllocationAffinity {
+    requirements: Vec<Option<AffinityRequirements>>,
+    target_sources: HashMap<RegionId, usize>,
+}
+
 async fn resolve_allocation_affinity(
     ctx: &Context,
     resolver: &dyn AffinityResolver,
-) -> Result<HashMap<RegionId, AffinityRequirements>> {
+) -> Result<AllocationAffinity> {
     let table_id = ctx.persistent_ctx.table_id;
     let routes = ctx.get_table_route_value().await?;
     let sources =
@@ -538,39 +555,42 @@ async fn resolve_allocation_affinity(
             violated: "source affinity requirements are unavailable",
         }
     );
-    Ok(sources
-        .into_iter()
-        .filter_map(|(region_id, source_id)| {
-            let source_id = source_id?;
-            resolved[source_indices[&source_id]]
-                .clone()
-                .map(|requirements| (region_id, requirements))
-        })
-        .collect())
+    Ok(AllocationAffinity {
+        requirements: resolved,
+        target_sources: sources
+            .into_iter()
+            .filter_map(|(region_id, source_id)| {
+                source_id.map(|source_id| (region_id, source_indices[&source_id]))
+            })
+            .collect(),
+    })
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct AllocationGroup<'a> {
-    affinity: Option<AffinityRequirements>,
+    affinity: Option<&'a AffinityRequirements>,
     regions: Vec<(RegionNumber, &'a str)>,
 }
 
 fn group_allocations<'a>(
     table_id: TableId,
     regions: &'a [(RegionNumber, String)],
-    affinity: &HashMap<RegionId, AffinityRequirements>,
+    affinity: &'a AllocationAffinity,
 ) -> Vec<AllocationGroup<'a>> {
     let mut groups: Vec<AllocationGroup<'a>> = Vec::new();
     for (number, partition) in regions {
-        let requirements = affinity.get(&RegionId::new(table_id, *number));
+        let requirements = affinity
+            .target_sources
+            .get(&RegionId::new(table_id, *number))
+            .and_then(|index| affinity.requirements[*index].as_ref());
         if let Some(group) = groups
             .iter_mut()
-            .find(|group| group.affinity.as_ref() == requirements)
+            .find(|group| group.affinity == requirements)
         {
             group.regions.push((*number, partition.as_str()));
         } else {
             groups.push(AllocationGroup {
-                affinity: requirements.cloned(),
+                affinity: requirements,
                 regions: vec![(*number, partition.as_str())],
             });
         }
@@ -580,6 +600,7 @@ fn group_allocations<'a>(
 
 #[cfg(test)]
 mod tests {
+    use std::ptr;
     use std::sync::Arc;
 
     use api::v1::region::region_request::Body;
@@ -1234,26 +1255,42 @@ mod tests {
         let requirements = |zone: &str| {
             AffinityRequirements::new(HashMap::from([("ZONE".into(), zone.into())])).unwrap()
         };
-        let region_requirements = HashMap::from([
-            (RegionId::new(table_id, 1), requirements("a")),
-            (RegionId::new(table_id, 2), requirements("b")),
-            (RegionId::new(table_id, 3), requirements("a")),
-        ]);
+        let region_requirements = AllocationAffinity {
+            requirements: vec![
+                Some(requirements("a")),
+                Some(requirements("b")),
+                Some(requirements("a")),
+            ],
+            target_sources: HashMap::from([
+                (RegionId::new(table_id, 1), 0),
+                (RegionId::new(table_id, 2), 1),
+                (RegionId::new(table_id, 3), 2),
+            ]),
+        };
         let regions = vec![
             (1, "p1".into()),
             (2, "p2".into()),
             (3, "p3".into()),
             (4, "p4".into()),
         ];
+        let groups = group_allocations(table_id, &regions, &region_requirements);
+        assert!(ptr::eq(
+            groups[0].affinity.unwrap(),
+            region_requirements.requirements[0].as_ref().unwrap(),
+        ));
+        assert!(!ptr::eq(
+            region_requirements.requirements[0].as_ref().unwrap(),
+            region_requirements.requirements[2].as_ref().unwrap(),
+        ));
         assert_eq!(
-            group_allocations(table_id, &regions, &region_requirements),
+            groups,
             vec![
                 AllocationGroup {
-                    affinity: Some(requirements("a")),
+                    affinity: region_requirements.requirements[0].as_ref(),
                     regions: vec![(1, "p1"), (3, "p3")],
                 },
                 AllocationGroup {
-                    affinity: Some(requirements("b")),
+                    affinity: region_requirements.requirements[1].as_ref(),
                     regions: vec![(2, "p2")],
                 },
                 AllocationGroup {
@@ -1471,11 +1508,33 @@ mod tests {
                 HashMap::from([(RegionId::new(table_id, 3), b)]),
             ),
         ] {
+            let affinity = resolve_allocation_affinity(&ctx, &Resolver(resolved))
+                .await
+                .unwrap();
+            assert_eq!(affinity.requirements.len(), 2);
             assert_eq!(
-                resolve_allocation_affinity(&ctx, &Resolver(resolved))
-                    .await
-                    .unwrap(),
+                affinity.target_sources[&RegionId::new(table_id, 4)],
+                affinity.target_sources[&RegionId::new(table_id, 5)]
+            );
+            let actual = affinity
+                .target_sources
+                .iter()
+                .filter_map(|(target, index)| {
+                    affinity.requirements[*index]
+                        .as_ref()
+                        .map(|requirements| (*target, requirements))
+                })
+                .collect::<HashMap<_, _>>();
+            if let Some(first) = actual.get(&RegionId::new(table_id, 4)) {
+                let second = actual[&RegionId::new(table_id, 5)];
+                assert!(ptr::eq(*first, second));
+            }
+            assert_eq!(
+                actual,
                 expected
+                    .iter()
+                    .map(|(target, requirements)| (*target, requirements))
+                    .collect()
             );
         }
     }
@@ -1526,6 +1585,7 @@ mod tests {
             resolve_allocation_affinity(&ctx, &Resolver)
                 .await
                 .unwrap()
+                .target_sources
                 .is_empty()
         );
     }
