@@ -148,6 +148,9 @@ pub fn validate_matchers(matchers: &[LabelMatcher]) -> Result<()> {
             .build()
         })?;
         if matches!(matcher_type, MatcherType::Re | MatcherType::Nre) {
+            // Validate using the same regex engine as query execution.
+            // Its syntax differs from Prometheus's; e.g. `(?x) a` is accepted here
+            // but rejected by Prometheus.
             regex::Regex::new(&matcher.value).map_err(|e| {
                 error::InvalidPromRemoteRequestSnafu {
                     msg: format!("invalid regex for label '{}': {e}", matcher.name),

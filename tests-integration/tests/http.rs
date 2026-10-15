@@ -5460,7 +5460,11 @@ pub async fn test_prometheus_remote_schema_labels(store_type: StorageType) {
         .body(compressed_unknown_read_request)
         .send()
         .await;
-    assert_eq!(unknown_result.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(unknown_result.status(), StatusCode::OK);
+    let body = prom_store::snappy_decompress(&unknown_result.bytes().await).unwrap();
+    let response = ReadResponse::decode(&body[..]).unwrap();
+    assert_eq!(response.results.len(), 1);
+    assert!(response.results[0].timeseries.is_empty());
 
     guard.remove_all().await;
 }

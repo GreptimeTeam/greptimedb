@@ -678,6 +678,46 @@ mod tests {
             .build();
         let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
 
+        // Database selectors with no matching catalog/schema return empty results.
+        for database in [
+            "unknown_schema",
+            "unknown_catalog-prometheus",
+            "unknown_catalog-information_schema",
+        ] {
+            for selector in ["__schema__", "__database__", "x_greptime_database"] {
+                let request = ReadRequest {
+                    queries: vec![Query {
+                        start_timestamp_ms: 1000,
+                        end_timestamp_ms: 2000,
+                        matchers: vec![
+                            LabelMatcher {
+                                name: prom_store::METRIC_NAME_LABEL.to_string(),
+                                value: "missing_metric".to_string(),
+                                r#type: MatcherType::Eq as i32,
+                            },
+                            LabelMatcher {
+                                name: selector.to_string(),
+                                value: database.to_string(),
+                                r#type: MatcherType::Eq as i32,
+                            },
+                        ],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                };
+                let response = client
+                    .post("/v1/prometheus/read?db=prometheus")
+                    .body(prom_store::snappy_compress(&request.encode_to_vec()).unwrap())
+                    .send()
+                    .await;
+                assert_eq!(response.status(), 200, "{selector}={database}");
+                let body = prom_store::snappy_decompress(&response.bytes().await).unwrap();
+                let response = ReadResponse::decode(&body[..]).unwrap();
+                assert_eq!(response.results.len(), 1);
+                assert!(response.results[0].timeseries.is_empty());
+            }
+        }
+
         // Matcher syntax must be checked even when the metric does not exist.
         let mut matcher_statuses = Vec::new();
         for metric in ["metric1", "missing_metric"] {
