@@ -35,6 +35,7 @@ use datafusion::arrow::datatypes::{
 };
 use datafusion_common::{DataFusionError, Result as DfResult};
 use datatypes::data_type::{ConcreteDataType, DataType};
+use datatypes::series::histogram::{BucketSideView, HistogramBatchBuilder, HistogramView};
 use datatypes::types::{StructField, StructType};
 pub use encoding::{NativeHistogramError, encode_native_histogram, native_histogram_column_schema};
 use once_cell::sync::Lazy;
@@ -141,47 +142,7 @@ pub const CUSTOM_BUCKETS_SCHEMA: i32 = -53;
 const MIN_EXPONENTIAL_SCHEMA: i32 = -4;
 const MAX_EXPONENTIAL_SCHEMA: i32 = 8;
 
-/// Information carried by a native histogram about a possible counter reset.
-///
-/// The persisted and protobuf representation remains an `i32`. Unrecognized
-/// values are retained so data written by a newer producer can still round-trip.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CounterResetHint {
-    /// The payload must be inspected to determine whether a reset occurred.
-    Unknown,
-    /// This is the first histogram after a counter reset.
-    CounterReset,
-    /// No counter reset occurred since the previous histogram.
-    NotCounterReset,
-    /// This is a gauge histogram, so counter resets do not apply.
-    Gauge,
-    /// A value not understood by this version.
-    Unrecognized(i32),
-}
-
-impl From<i32> for CounterResetHint {
-    fn from(value: i32) -> Self {
-        match value {
-            0 => Self::Unknown,
-            1 => Self::CounterReset,
-            2 => Self::NotCounterReset,
-            3 => Self::Gauge,
-            value => Self::Unrecognized(value),
-        }
-    }
-}
-
-impl From<CounterResetHint> for i32 {
-    fn from(value: CounterResetHint) -> Self {
-        match value {
-            CounterResetHint::Unknown => 0,
-            CounterResetHint::CounterReset => 1,
-            CounterResetHint::NotCounterReset => 2,
-            CounterResetHint::Gauge => 3,
-            CounterResetHint::Unrecognized(value) => value,
-        }
-    }
-}
+pub use datatypes::series::histogram::CounterResetHint;
 
 /// Reset hint indicating that the payload must be inspected.
 pub const UNKNOWN_COUNTER_RESET_HINT: CounterResetHint = CounterResetHint::Unknown;
@@ -276,6 +237,38 @@ fn format_promql_histogram_float(value: f64) -> String {
         ('+', exponent.strip_prefix('+').unwrap_or(exponent))
     };
     format!("{mantissa}e{sign}{exponent:0>2}")
+}
+
+impl NativeHistogram {
+    /// Appends this histogram, borrowing its bucket and custom-bound slices as input.
+    /// Span metadata is staged into temporary column vectors; the builder copies all input
+    /// values into its owned result storage.
+    pub fn push_to(&self, builder: &mut HistogramBatchBuilder) -> datatypes::Result<u32> {
+        let positive_offsets: Vec<_> = self.positive_spans.iter().map(|span| span.offset).collect();
+        let positive_lengths: Vec<_> = self.positive_spans.iter().map(|span| span.length).collect();
+        let negative_offsets: Vec<_> = self.negative_spans.iter().map(|span| span.offset).collect();
+        let negative_lengths: Vec<_> = self.negative_spans.iter().map(|span| span.length).collect();
+        builder.push(HistogramView {
+            schema: self.schema,
+            zero_threshold: self.zero_threshold,
+            sum: self.sum,
+            count: self.count,
+            zero_count: self.zero_count,
+            reset_hint: self.reset_hint,
+            start_timestamp: self.start_timestamp,
+            custom_values: &self.custom_values,
+            positive: BucketSideView {
+                span_offsets: &positive_offsets,
+                span_lengths: &positive_lengths,
+                buckets: &self.positive_buckets,
+            },
+            negative: BucketSideView {
+                span_offsets: &negative_offsets,
+                span_lengths: &negative_lengths,
+                buckets: &self.negative_buckets,
+            },
+        })
+    }
 }
 
 impl NativeHistogram {
@@ -615,31 +608,13 @@ impl NativeHistogram {
             (&self.negative_spans, &self.negative_buckets)
         };
 
-        let mut result = Vec::with_capacity(counts.len());
-        for (idx, count) in side_bucket_indices(spans)?.into_iter().zip(counts) {
-            let upper = get_bound(idx, self.schema, &self.custom_values)?;
-            let lower = get_bound(idx.checked_sub(1)?, self.schema, &self.custom_values)?;
-            if positive {
-                result.push(Bucket {
-                    lower,
-                    upper,
-                    count: *count,
-                    boundary_rule: if self.uses_custom_buckets() && idx == 0 {
-                        BoundaryRule::ClosedBoth
-                    } else {
-                        BoundaryRule::OpenLeft
-                    },
-                });
-            } else {
-                result.push(Bucket {
-                    lower: -upper,
-                    upper: -lower,
-                    count: *count,
-                    boundary_rule: BoundaryRule::OpenRight,
-                });
-            }
-        }
-        Some(result)
+        build_side_buckets(
+            spans.iter().map(|span| (span.offset, span.length)),
+            counts,
+            self.schema,
+            &self.custom_values,
+            positive,
+        )
     }
 
     /// Estimates the value at quantile `q`.
@@ -652,83 +627,15 @@ impl NativeHistogram {
 
     /// Estimates the value at quantile `q` and reports the effect of NaN observations.
     pub fn quantile_with_info(&self, q: f64) -> (f64, Option<NativeHistogramQuantileInfo>) {
-        if q < 0.0 {
-            return (f64::NEG_INFINITY, None);
-        }
-        if q > 1.0 {
-            return (f64::INFINITY, None);
-        }
-        if self.count == 0.0 || q.is_nan() {
-            return (f64::NAN, None);
-        }
-
-        let Some(mut buckets) = self.all_buckets() else {
-            return (f64::NAN, None);
-        };
-        let bucket_total = buckets.iter().map(|bucket| bucket.count).sum::<f64>();
-        let has_nan_observations = self.sum.is_nan() && bucket_total < self.count;
-        let info = has_nan_observations.then_some(NativeHistogramQuantileInfo::NaNSkew);
-        let rank = q * self.count;
-        let mut count = 0.0;
-        for bucket in &mut buckets {
-            if bucket.count == 0.0 {
-                continue;
-            }
-            count += bucket.count;
-            if count < rank {
-                continue;
-            }
-
-            if !self.uses_custom_buckets() && bucket.lower < 0.0 && bucket.upper > 0.0 {
-                if self.negative_buckets.is_empty() && !self.positive_buckets.is_empty() {
-                    bucket.lower = 0.0;
-                } else if self.positive_buckets.is_empty() && !self.negative_buckets.is_empty() {
-                    bucket.upper = 0.0;
-                }
-            } else if self.uses_custom_buckets() {
-                if bucket.lower == f64::NEG_INFINITY {
-                    if bucket.upper <= 0.0 {
-                        return (bucket.upper, info);
-                    }
-                    bucket.lower = 0.0;
-                } else if bucket.upper == f64::INFINITY {
-                    return (bucket.lower, info);
-                }
-            }
-
-            let rank_in_bucket = rank - (count - bucket.count);
-            let fraction = rank_in_bucket / bucket.count;
-            if self.uses_custom_buckets() || (bucket.lower <= 0.0 && bucket.upper >= 0.0) {
-                return (
-                    bucket.lower + (bucket.upper - bucket.lower) * fraction,
-                    info,
-                );
-            }
-
-            let log_lower = bucket.lower.abs().log2();
-            let log_upper = bucket.upper.abs().log2();
-            if bucket.lower > 0.0 {
-                return (
-                    2.0_f64.powf(log_lower + (log_upper - log_lower) * fraction),
-                    info,
-                );
-            }
-            return (
-                -2.0_f64.powf(log_upper + (log_lower - log_upper) * (1.0 - fraction)),
-                info,
-            );
-        }
-
-        let info = if self.sum.is_nan() && count < self.count {
-            Some(if count < rank {
-                NativeHistogramQuantileInfo::NaNResult
-            } else {
-                NativeHistogramQuantileInfo::NaNSkew
-            })
-        } else {
-            None
-        };
-        (f64::NAN, info)
+        quantile_from_parts(
+            q,
+            self.schema,
+            self.count,
+            self.sum,
+            self.negative_buckets.is_empty(),
+            self.positive_buckets.is_empty(),
+            || self.all_buckets(),
+        )
     }
 
     /// Estimates the fraction of observations between `lower` and `upper`.
@@ -1047,26 +954,217 @@ fn add_reset_hint(left: CounterResetHint, right: CounterResetHint) -> CounterRes
     }
 }
 
-fn side_bucket_indices(spans: &[Span]) -> Option<Vec<i32>> {
+/// Estimates a quantile from histogram metadata and a lazily materialized bucket sequence.
+fn quantile_from_parts(
+    q: f64,
+    schema: i32,
+    count_total: f64,
+    sum: f64,
+    negative_empty: bool,
+    positive_empty: bool,
+    buckets: impl FnOnce() -> Option<Vec<Bucket>>,
+) -> (f64, Option<NativeHistogramQuantileInfo>) {
+    if q < 0.0 {
+        return (f64::NEG_INFINITY, None);
+    }
+    if q > 1.0 {
+        return (f64::INFINITY, None);
+    }
+    if count_total == 0.0 || q.is_nan() {
+        return (f64::NAN, None);
+    }
+    let Some(mut buckets) = buckets() else {
+        return (f64::NAN, None);
+    };
+    let bucket_total = buckets.iter().map(|bucket| bucket.count).sum::<f64>();
+    let has_nan_observations = sum.is_nan() && bucket_total < count_total;
+    let info = has_nan_observations.then_some(NativeHistogramQuantileInfo::NaNSkew);
+    let rank = q * count_total;
+    let mut count = 0.0;
+    for bucket in &mut buckets {
+        if bucket.count == 0.0 {
+            continue;
+        }
+        count += bucket.count;
+        if count < rank {
+            continue;
+        }
+        if schema != CUSTOM_BUCKETS_SCHEMA && bucket.lower < 0.0 && bucket.upper > 0.0 {
+            if negative_empty && !positive_empty {
+                bucket.lower = 0.0;
+            } else if positive_empty && !negative_empty {
+                bucket.upper = 0.0;
+            }
+        } else if schema == CUSTOM_BUCKETS_SCHEMA {
+            if bucket.lower == f64::NEG_INFINITY {
+                if bucket.upper <= 0.0 {
+                    return (bucket.upper, info);
+                }
+                bucket.lower = 0.0;
+            } else if bucket.upper == f64::INFINITY {
+                return (bucket.lower, info);
+            }
+        }
+        let rank_in_bucket = rank - (count - bucket.count);
+        let fraction = rank_in_bucket / bucket.count;
+        if schema == CUSTOM_BUCKETS_SCHEMA || (bucket.lower <= 0.0 && bucket.upper >= 0.0) {
+            return (
+                bucket.lower + (bucket.upper - bucket.lower) * fraction,
+                info,
+            );
+        }
+        let log_lower = bucket.lower.abs().log2();
+        let log_upper = bucket.upper.abs().log2();
+        if bucket.lower > 0.0 {
+            return (
+                2.0_f64.powf(log_lower + (log_upper - log_lower) * fraction),
+                info,
+            );
+        }
+        return (
+            -2.0_f64.powf(log_upper + (log_lower - log_upper) * (1.0 - fraction)),
+            info,
+        );
+    }
+    let info = if sum.is_nan() && count < count_total {
+        Some(if count < rank {
+            NativeHistogramQuantileInfo::NaNResult
+        } else {
+            NativeHistogramQuantileInfo::NaNSkew
+        })
+    } else {
+        None
+    };
+    (f64::NAN, info)
+}
+
+/// Quantile entrypoint operating directly on the columnar borrowed view.
+pub fn quantile_histogram_view(
+    view: &HistogramView<'_>,
+    q: f64,
+) -> (f64, Option<NativeHistogramQuantileInfo>) {
+    quantile_from_parts(
+        q,
+        view.schema,
+        view.count,
+        view.sum,
+        view.negative.buckets.is_empty(),
+        view.positive.buckets.is_empty(),
+        || {
+            let mut buckets =
+                build_view_side(view.negative, view.schema, view.custom_values, false)?;
+            buckets.reverse();
+            if view.zero_count != 0.0 {
+                buckets.push(Bucket {
+                    lower: -view.zero_threshold,
+                    upper: view.zero_threshold,
+                    count: view.zero_count,
+                    boundary_rule: BoundaryRule::ClosedBoth,
+                });
+            }
+            buckets.extend(build_view_side(
+                view.positive,
+                view.schema,
+                view.custom_values,
+                true,
+            )?);
+            Some(buckets)
+        },
+    )
+}
+
+fn build_view_side(
+    side: BucketSideView<'_>,
+    schema: i32,
+    custom_values: &[f64],
+    positive: bool,
+) -> Option<Vec<Bucket>> {
+    if side.span_offsets.len() != side.span_lengths.len() {
+        return None;
+    }
+    let mut total = 0usize;
+    for (span_index, (&offset, &length)) in
+        side.span_offsets.iter().zip(side.span_lengths).enumerate()
+    {
+        if length < 0 || (span_index > 0 && offset < 0) {
+            return None;
+        }
+        total = total.checked_add(length as usize)?;
+    }
+    if total != side.buckets.len() {
+        return None;
+    }
+    build_side_buckets(
+        side.span_offsets
+            .iter()
+            .copied()
+            .zip(side.span_lengths.iter().copied()),
+        side.buckets,
+        schema,
+        custom_values,
+        positive,
+    )
+}
+
+fn build_side_buckets(
+    spans: impl Iterator<Item = (i32, i32)>,
+    counts: &[f64],
+    schema: i32,
+    custom_values: &[f64],
+    positive: bool,
+) -> Option<Vec<Bucket>> {
+    let indices = bucket_indices(spans)?;
+    let mut result = Vec::with_capacity(counts.len());
+    for (idx, count) in indices.into_iter().zip(counts) {
+        let upper = get_bound(idx, schema, custom_values)?;
+        let lower = get_bound(idx.checked_sub(1)?, schema, custom_values)?;
+        result.push(if positive {
+            Bucket {
+                lower,
+                upper,
+                count: *count,
+                boundary_rule: if schema == CUSTOM_BUCKETS_SCHEMA && idx == 0 {
+                    BoundaryRule::ClosedBoth
+                } else {
+                    BoundaryRule::OpenLeft
+                },
+            }
+        } else {
+            Bucket {
+                lower: -upper,
+                upper: -lower,
+                count: *count,
+                boundary_rule: BoundaryRule::OpenRight,
+            }
+        });
+    }
+    Some(result)
+}
+
+fn bucket_indices(spans: impl Iterator<Item = (i32, i32)>) -> Option<Vec<i32>> {
     let mut indices = Vec::new();
     let mut current_index = 0i32;
     let mut first = true;
-    for (span_index, span) in spans.iter().enumerate() {
-        if span_index > 0 && span.offset < 0 {
+    for (span_index, (offset, length)) in spans.enumerate() {
+        if span_index > 0 && offset < 0 {
             return None;
         }
         if first {
-            current_index = span.offset;
+            current_index = offset;
             first = false;
         } else {
-            current_index = current_index.checked_add(span.offset)?;
+            current_index = current_index.checked_add(offset)?;
         }
-        for _ in 0..span.length {
+        for _ in 0..length {
             indices.push(current_index);
             current_index = current_index.checked_add(1)?;
         }
     }
     Some(indices)
+}
+
+fn side_bucket_indices(spans: &[Span]) -> Option<Vec<i32>> {
+    bucket_indices(spans.iter().map(|span| (span.offset, span.length)))
 }
 
 fn span_bucket_len(spans: &[Span]) -> Option<usize> {
@@ -1677,6 +1775,7 @@ pub fn build_histogram_array(values: &[Option<NativeHistogram>]) -> ArrayRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use datatypes::series::histogram::HistogramBatch;
 
     fn histogram(positive_spans: Vec<Span>, positive_buckets: Vec<f64>) -> NativeHistogram {
         let count = positive_buckets.iter().sum();
@@ -1694,6 +1793,215 @@ mod tests {
             positive_buckets,
             negative_buckets: Vec::new(),
         }
+    }
+
+    #[test]
+    fn borrowed_quantile_matches_owned_through_batch_builder() {
+        let mut owned = histogram(
+            vec![Span {
+                offset: 0,
+                length: 2,
+            }],
+            vec![1.0, 2.0],
+        );
+        owned.count = 5.0;
+        owned.zero_threshold = 0.5;
+        owned.zero_count = 1.0;
+        owned.start_timestamp = Some(123456);
+        owned.negative_spans = vec![Span {
+            offset: 0,
+            length: 1,
+        }];
+        owned.negative_buckets = vec![1.0];
+        let mut builder = HistogramBatchBuilder::new();
+        assert_eq!(owned.push_to(&mut builder).unwrap(), 0);
+        let batch = builder.finish().unwrap();
+        let view = batch.view(0).unwrap();
+        for q in [-0.1, 0.0, 0.1, 0.3, 0.5, 1.0, 1.1, f64::NAN] {
+            let expected = owned.quantile_with_info(q);
+            let actual = quantile_histogram_view(&view, q);
+            assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+            assert_eq!(actual.1, expected.1);
+        }
+        assert_eq!(view.reset_hint, owned.reset_hint);
+        assert_eq!(view.start_timestamp, owned.start_timestamp);
+        assert_eq!(view.count.to_bits(), owned.count.to_bits());
+        assert_eq!(view.sum.to_bits(), owned.sum.to_bits());
+    }
+
+    #[test]
+    fn owned_malformed_spans_keep_truncating_behavior() {
+        let malformed = NativeHistogram {
+            schema: 0,
+            zero_threshold: 0.0,
+            sum: 3.0,
+            reset_hint: CounterResetHint::Unknown,
+            start_timestamp: None,
+            custom_values: Vec::new(),
+            positive_spans: vec![Span {
+                offset: 0,
+                length: 1,
+            }],
+            negative_spans: Vec::new(),
+            count: 3.0,
+            zero_count: 0.0,
+            positive_buckets: vec![1.0, 2.0],
+            negative_buckets: Vec::new(),
+        };
+        assert_eq!(malformed.quantile(0.0), 0.5);
+        assert_eq!(malformed.fraction(0.0, 1.0), 1.0);
+
+        let negative_length = NativeHistogram {
+            positive_spans: vec![
+                Span {
+                    offset: 0,
+                    length: -1,
+                },
+                Span {
+                    offset: 0,
+                    length: 1,
+                },
+            ],
+            positive_buckets: vec![1.0],
+            count: 1.0,
+            ..histogram(Vec::new(), Vec::new())
+        };
+        assert_eq!(negative_length.quantile(0.0), 0.5);
+    }
+
+    #[test]
+    fn borrowed_custom_quantile_and_nan_info_match_owned() {
+        let owned = NativeHistogram {
+            schema: CUSTOM_BUCKETS_SCHEMA,
+            zero_threshold: 0.0,
+            sum: f64::NAN,
+            reset_hint: CounterResetHint::Unrecognized(91),
+            start_timestamp: Some(987),
+            custom_values: vec![-1.0, 1.0],
+            positive_spans: vec![Span {
+                offset: 0,
+                length: 3,
+            }],
+            negative_spans: Vec::new(),
+            count: 4.0,
+            zero_count: 0.0,
+            positive_buckets: vec![1.0, 1.0, 1.0],
+            negative_buckets: Vec::new(),
+        };
+        let mut builder = HistogramBatchBuilder::new();
+        owned.push_to(&mut builder).unwrap();
+        let batch = builder.finish().unwrap();
+        let view = batch.view(0).unwrap();
+        for q in [0.0, 0.5, 0.99, 1.0] {
+            let expected = owned.quantile_with_info(q);
+            let actual = quantile_histogram_view(&view, q);
+            assert_eq!(actual.0.to_bits(), expected.0.to_bits());
+            assert_eq!(actual.1, expected.1);
+        }
+    }
+
+    #[test]
+    fn borrowed_quantile_rejects_malformed_and_overflowing_spans() {
+        let owned = histogram(
+            vec![Span {
+                offset: 0,
+                length: 1,
+            }],
+            vec![1.0],
+        );
+        let mut builder = HistogramBatchBuilder::new();
+        owned.push_to(&mut builder).unwrap();
+        let batch = builder.finish().unwrap();
+        let mut view = batch.view(0).unwrap();
+        let malformed = [
+            BucketSideView {
+                span_offsets: &[0],
+                span_lengths: &[],
+                buckets: &[1.0],
+            },
+            BucketSideView {
+                span_offsets: &[i32::MAX],
+                span_lengths: &[1],
+                buckets: &[1.0],
+            },
+            BucketSideView {
+                span_offsets: &[0],
+                span_lengths: &[-1],
+                buckets: &[],
+            },
+            BucketSideView {
+                span_offsets: &[0],
+                span_lengths: &[2],
+                buckets: &[1.0],
+            },
+            BucketSideView {
+                span_offsets: &[0],
+                span_lengths: &[0],
+                buckets: &[1.0],
+            },
+            BucketSideView {
+                span_offsets: &[0, -1],
+                span_lengths: &[0, 1],
+                buckets: &[1.0],
+            },
+            BucketSideView {
+                span_offsets: &[0],
+                span_lengths: &[i32::MAX],
+                buckets: &[1.0],
+            },
+        ];
+        for side in malformed {
+            view.positive = side;
+            let (value, info) = quantile_histogram_view(&view, 0.5);
+            assert!(value.is_nan());
+            assert_eq!(info, None);
+        }
+        assert_eq!(
+            quantile_histogram_view(&view, -1.0),
+            (f64::NEG_INFINITY, None)
+        );
+        assert_eq!(quantile_histogram_view(&view, 2.0), (f64::INFINITY, None));
+    }
+
+    #[test]
+    fn sliced_histogram_view_remains_valid_after_original_owner_drops() {
+        let first = histogram(
+            vec![Span {
+                offset: 0,
+                length: 1,
+            }],
+            vec![2.0],
+        );
+        let mut second = histogram(
+            vec![Span {
+                offset: 1,
+                length: 1,
+            }],
+            vec![4.0],
+        );
+        second.schema = CUSTOM_BUCKETS_SCHEMA;
+        second.custom_values = vec![10.0];
+        second.reset_hint = CounterResetHint::Gauge;
+        second.start_timestamp = Some(789);
+        let expected_quantile = second.quantile_with_info(0.5);
+        let expected_bucket = second.positive_buckets[0];
+        let mut builder = HistogramBatchBuilder::new();
+        first.push_to(&mut builder).unwrap();
+        second.push_to(&mut builder).unwrap();
+        let batch = builder.finish().unwrap();
+        let sliced = HistogramBatch::try_from_arrow(batch.as_arrow().slice(1, 1)).unwrap();
+        drop(batch);
+        drop(first);
+        drop(second);
+        let view = sliced.view(0).unwrap();
+        assert_eq!(view.schema, CUSTOM_BUCKETS_SCHEMA);
+        assert_eq!(view.custom_values, &[10.0]);
+        assert_eq!(view.positive.span_offsets, &[1]);
+        assert_eq!(view.positive.span_lengths, &[1]);
+        assert_eq!(view.positive.buckets, &[expected_bucket]);
+        assert_eq!(view.reset_hint, CounterResetHint::Gauge);
+        assert_eq!(view.start_timestamp, Some(789));
+        assert_eq!(quantile_histogram_view(&view, 0.5), expected_quantile);
     }
 
     #[test]
