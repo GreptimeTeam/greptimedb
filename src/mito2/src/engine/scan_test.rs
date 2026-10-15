@@ -4763,12 +4763,18 @@ fn scan_field_values(batches: &[common_recordbatch::RecordBatch]) -> Vec<f64> {
 /// Raw Mito output contains candidates after projection, filtering, and MVCC read processing.
 #[tokio::test]
 async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
+    use std::collections::HashSet;
+
+    use api::v1::{Row, Value};
+    use common_recordbatch::filter;
     use datatypes::arrow::array::Array;
     use datatypes::series::raw::{RawSeriesOrdering, RawTimeAxis};
     use datatypes::series::samples::SampleRef;
     use datatypes::value::Value as DatumValue;
     use mito_codec::row_converter::build_primary_key_codec;
     use store_api::region_engine::{BoundTag, QueryScanContext, RawLabelSource};
+    use store_api::region_request::RegionDeleteRequest;
+    use table::predicate::Predicate;
 
     let mut env =
         TestEnv::with_prefix("test_mito_handle_query_raw_series_candidate_projection_and_mvcc")
@@ -4781,21 +4787,21 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
         .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
-    let row = |tag: &str, f0: Option<f64>, f1: Option<f64>, gate: f64, ts: i64| api::v1::Row {
+    let row = |tag: &str, f0: Option<f64>, f1: Option<f64>, gate: f64, ts: i64| Row {
         values: vec![
-            api::v1::Value {
+            Value {
                 value_data: Some(ValueData::StringValue(tag.to_string())),
             },
-            api::v1::Value {
+            Value {
                 value_data: f0.map(ValueData::F64Value),
             },
-            api::v1::Value {
+            Value {
                 value_data: f1.map(ValueData::F64Value),
             },
-            api::v1::Value {
+            Value {
                 value_data: Some(ValueData::F64Value(gate)),
             },
-            api::v1::Value {
+            Value {
                 value_data: Some(ValueData::TimestampMillisecondValue(ts)),
             },
         ],
@@ -4836,17 +4842,17 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
     engine
         .handle_request(
             region_id,
-            RegionRequest::Delete(store_api::region_request::RegionDeleteRequest {
+            RegionRequest::Delete(RegionDeleteRequest {
                 rows: Rows {
                     schema: test_util::delete_rows_schema(
                         &CreateRequestBuilder::new().field_num(3).build(),
                     ),
-                    rows: vec![api::v1::Row {
+                    rows: vec![Row {
                         values: vec![
-                            api::v1::Value {
+                            Value {
                                 value_data: Some(ValueData::StringValue("A".to_string())),
                             },
-                            api::v1::Value {
+                            Value {
                                 value_data: Some(ValueData::TimestampMillisecondValue(2000)),
                             },
                         ],
@@ -4912,7 +4918,7 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
                 .map(|f| f.name.as_ref())
                 .collect::<Vec<_>>()
         );
-        let mut closed_keys = std::collections::HashSet::<Vec<u8>>::new();
+        let mut closed_keys = HashSet::<Vec<u8>>::new();
         while let Some(chunk) = stream.try_next().await.unwrap() {
             assert!(chunk.metric.is_none());
             assert!(
@@ -5008,7 +5014,7 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
     }
     let candidate_count: usize = batches.iter().map(|batch| batch.num_rows()).sum();
     assert_eq!(4, candidate_count);
-    let predicate = table::predicate::Predicate::to_physical_expr(
+    let predicate = Predicate::to_physical_expr(
         &col("field_2").gt(lit(0.0_f64)),
         legacy.schema().arrow_schema(),
     )
@@ -5017,7 +5023,7 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
         .into_iter()
         .map(|batch| {
             let batch = batch.into_df_record_batch();
-            let filtered = common_recordbatch::filter::batch_filter(&batch, &predicate).unwrap();
+            let filtered = filter::batch_filter(&batch, &predicate).unwrap();
             filtered.project(&[0, 2, 3, 4]).unwrap()
         })
         .collect::<Vec<_>>();
@@ -5100,7 +5106,7 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
 async fn test_mito_raw_series_int64_predicate_uses_original_precision() {
     use datatypes::series::raw::RawTimeAxis;
     use datatypes::series::samples::SampleRef;
-    use store_api::region_engine::{QueryScanContext, RawLabelSource};
+    use store_api::region_engine::{BoundTag, QueryScanContext, RawLabelSource};
 
     let mut env =
         TestEnv::with_prefix("test_mito_raw_series_int64_predicate_uses_original_precision").await;
@@ -5157,7 +5163,7 @@ async fn test_mito_raw_series_int64_predicate_uses_original_precision() {
         .column_metadatas
         .iter()
         .filter(|c| c.semantic_type == SemanticType::Tag)
-        .map(|c| store_api::region_engine::BoundTag {
+        .map(|c| BoundTag {
             column_id: c.column_id,
             name: Arc::from(c.column_schema.name.as_str()),
         })
@@ -5214,6 +5220,8 @@ async fn test_mito_raw_series_int64_predicate_uses_original_precision() {
 /// Invalid predicate bindings decline before consumption; explicit labels decline and legacy still reads.
 #[tokio::test]
 async fn test_mito_raw_series_invalid_binding_before_legacy_read() {
+    use datatypes::series::raw::RawTimeAxis;
+    use datatypes::series::samples::SampleRef;
     use store_api::region_engine::{BoundTag, QueryScanContext, RawLabelSource};
     let mut env =
         TestEnv::with_prefix("test_mito_raw_series_invalid_binding_before_legacy_read").await;
@@ -5307,10 +5315,8 @@ async fn test_mito_raw_series_invalid_binding_before_legacy_read() {
             let tuples = chunks
                 .iter()
                 .map(|chunk| {
-                    let datatypes::series::raw::RawTimeAxis::Explicit(times) = &chunk.time;
-                    let datatypes::series::samples::SampleRef::Float(value) =
-                        chunk.fields.get(0).unwrap().sample(0)
-                    else {
+                    let RawTimeAxis::Explicit(times) = &chunk.time;
+                    let SampleRef::Float(value) = chunk.fields.get(0).unwrap().sample(0) else {
                         panic!("expected raw float sample");
                     };
                     (times[0], value)

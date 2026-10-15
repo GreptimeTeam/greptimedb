@@ -16,6 +16,7 @@
 
 mod raw;
 
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -30,22 +31,26 @@ use common_telemetry::warn;
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType};
 use datatypes::arrow::array::BinaryArray;
+use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::schema::SchemaRef;
+use datatypes::types::TimestampType;
 use futures::{StreamExt, TryStreamExt};
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::{
-    PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+    PartitionRange, PrepareRequest, QueryScanContext, RawLabelSource, RegionScanner,
+    ScannerProperties, SendableRawSeriesStream,
 };
+use table::predicate::Predicate;
 use tokio::sync::Semaphore;
 use tokio::sync::mpsc::error::{SendTimeoutError, TrySendError};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use crate::error::{
-    Error, InvalidSenderSnafu, JoinSnafu, PartitionOutOfRangeSnafu, Result, ScanMultiTimesSnafu,
-    ScanSeriesSnafu, TooManyFilesToReadSnafu,
+    Error, InvalidRecordBatchSnafu, InvalidSenderSnafu, JoinSnafu, PartitionOutOfRangeSnafu,
+    Result, ScanMultiTimesSnafu, ScanSeriesSnafu, TooManyFilesToReadSnafu,
 };
 use crate::read::ScannerMetrics;
 use crate::read::pruner::{PartitionPruner, Pruner, PrunerOptions};
@@ -571,13 +576,12 @@ impl RegionScanner for SeriesScan {
         ctx: &QueryScanContext,
         metrics_set: &ExecutionPlanMetricsSet,
         partition: usize,
-        label_source: &store_api::region_engine::RawLabelSource,
-    ) -> Result<Option<store_api::region_engine::SendableRawSeriesStream>, BoxedError> {
+        label_source: &RawLabelSource,
+    ) -> Result<Option<SendableRawSeriesStream>, BoxedError> {
         use api::v1::SemanticType;
         use common_query::native_histogram::is_native_histogram_value_type;
         use datatypes::series::samples::{FieldSpec, SeriesSchema};
         use store_api::metric_engine_consts::is_metric_engine_internal_column;
-        use store_api::region_engine::RawLabelSource;
         use store_api::storage::consts::{ReservedColumnId, is_internal_column};
 
         let input = &self.stream_ctx.input;
@@ -590,15 +594,15 @@ impl RegionScanner for SeriesScan {
             } => {
                 if !Arc::ptr_eq(metadata, physical_metadata) {
                     return Err(BoxedError::new(
-                        crate::error::InvalidRecordBatchSnafu {
+                        InvalidRecordBatchSnafu {
                             reason: "raw label source metadata does not match scanner snapshot"
                                 .to_string(),
                         }
                         .build(),
                     ));
                 }
-                let mut ids = std::collections::HashSet::new();
-                let mut names = std::collections::HashSet::new();
+                let mut ids = HashSet::new();
+                let mut names = HashSet::new();
                 for tag in logical_tags.iter() {
                     let column = metadata.column_by_id(tag.column_id).filter(|column| {
                         column.semantic_type == SemanticType::Tag
@@ -613,7 +617,7 @@ impl RegionScanner for SeriesScan {
                     });
                     if !valid || !ids.insert(tag.column_id) || !names.insert(tag.name.as_ref()) {
                         return Err(BoxedError::new(
-                            crate::error::InvalidRecordBatchSnafu {
+                            InvalidRecordBatchSnafu {
                                 reason: "invalid raw label binding".to_string(),
                             }
                             .build(),
@@ -641,7 +645,7 @@ impl RegionScanner for SeriesScan {
                 .find(|(_, (id, _))| *id == column.column_id)
             else {
                 return Err(BoxedError::new(
-                    crate::error::InvalidRecordBatchSnafu {
+                    InvalidRecordBatchSnafu {
                         reason: format!(
                             "selected field {} is missing from mapper batch schema",
                             output.name
@@ -658,10 +662,7 @@ impl RegionScanner for SeriesScan {
                 name: Arc::from(output.name.as_str()),
             });
         }
-        let time_is_millis = matches!(
-            metadata.time_index_type(),
-            datatypes::types::TimestampType::Millisecond(_)
-        );
+        let time_is_millis = matches!(metadata.time_index_type(), TimestampType::Millisecond(_));
         if fields.is_empty()
             || input.append_mode
             || input.series_row_selector.is_some()
@@ -692,15 +693,12 @@ impl RegionScanner for SeriesScan {
                     return Ok(None);
                 }
                 // Evaluate residuals with original types before raw conversion to Float64.
-                let Ok(physical) =
-                    table::predicate::Predicate::to_physical_expr(expr, &typed_schema)
-                else {
+                let Ok(physical) = Predicate::to_physical_expr(expr, &typed_schema) else {
                     return Ok(None);
                 };
                 if !matches!(
                     physical.data_type(&typed_schema),
-                    Ok(datatypes::arrow::datatypes::DataType::Boolean
-                        | datatypes::arrow::datatypes::DataType::Null)
+                    Ok(ArrowDataType::Boolean | ArrowDataType::Null)
                 ) {
                     return Ok(None);
                 }

@@ -306,10 +306,11 @@ impl MetricEngineInner {
 
 #[cfg(test)]
 mod test {
+    use std::collections::HashSet;
     use std::fmt;
 
     use api::v1::value::ValueData;
-    use api::v1::{Row, Rows, Value};
+    use api::v1::{ColumnSchema, Row, Rows, Value};
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use datafusion::physical_plan::DisplayFormatType;
@@ -587,7 +588,7 @@ mod test {
             .await
             .unwrap();
 
-        let write = |schema: Vec<api::v1::ColumnSchema>, tag_values: &[&[&str]], start: i64| {
+        let write = |schema: Vec<ColumnSchema>, tag_values: &[&[&str]], start: i64| {
             let rows = tag_values
                 .iter()
                 .enumerate()
@@ -783,8 +784,8 @@ mod test {
         let scan_context = QueryScanContext::default();
         let scan_metrics = ExecutionPlanMetricsSet::default();
         let mut samples = Vec::new();
-        let mut keys = std::collections::HashSet::new();
-        let mut decoded_jobs = std::collections::HashSet::new();
+        let mut keys = HashSet::new();
+        let mut decoded_jobs = HashSet::new();
         let mut last_markers = 0;
         for partition in 0..partitions {
             let stream = scanner

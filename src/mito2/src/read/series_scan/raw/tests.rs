@@ -18,9 +18,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
+use api::v1::SemanticType;
 use common_error::ext::ErrorExt;
 use common_query::native_histogram::{
-    CounterResetHint, NativeHistogram, Span, build_histogram_array,
+    CounterResetHint, NativeHistogram, Span, build_histogram_array, native_histogram_value_type,
 };
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_plan::expressions::{BinaryExpr, Column, lit as physical_lit};
@@ -31,25 +32,27 @@ use datatypes::arrow::array::{
     ArrayRef, BinaryArray, Int64Array, StructArray, TimestampMillisecondArray, UInt8Array,
     UInt64Array,
 };
-use datatypes::arrow::datatypes::{DataType, Field, Schema};
+use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::DataType as _;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::schema::ColumnSchema;
 use datatypes::series::raw::RawSeriesChunk;
-use datatypes::series::samples::SampleRef;
-use datatypes::series::samples::{FieldSpec, SeriesSchema};
-use futures::{StreamExt, stream};
-use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
+use datatypes::series::samples::{FieldSpec, SampleRef, SeriesSchema};
+use futures::{Stream, StreamExt, stream};
+use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
 use store_api::region_engine::{BoundTag, RawLabelSource, SendableRawSeriesStream};
 use store_api::storage::RegionId;
 
 use super::make_stream;
+use crate::error::{Error, InvalidRecordBatchSnafu, Result};
 use crate::read::scan_util::PartitionMetrics;
 use crate::read::series_scan::{FlatSeriesBatch, SeriesBatch};
 use crate::read::stream::{ScanBatch, ScanBatchStream};
 
 fn metrics() -> PartitionMetrics {
     PartitionMetrics::new(
-        store_api::storage::RegionId::new(1, 0),
+        RegionId::new(1, 0),
         0,
         "raw-test",
         Instant::now(),
@@ -82,7 +85,7 @@ fn batch(keys: &[&[u8]], times: &[i64], values: &[Option<i64>]) -> RecordBatch {
         Field::new("value", DataType::Int64, true),
         Field::new(
             "ts",
-            DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Millisecond, None),
+            DataType::Timestamp(TimeUnit::Millisecond, None),
             false,
         ),
         Field::new("__primary_key", DataType::Binary, false),
@@ -129,12 +132,12 @@ fn histogram_input() -> (RecordBatch, Vec<NativeHistogram>) {
     let fields = vec![
         Field::new(
             "histogram",
-            common_query::native_histogram::native_histogram_value_type().as_arrow_type(),
+            native_histogram_value_type().as_arrow_type(),
             true,
         ),
         Field::new(
             "ts",
-            DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Millisecond, None),
+            DataType::Timestamp(TimeUnit::Millisecond, None),
             false,
         ),
         Field::new("__primary_key", DataType::Binary, false),
@@ -147,39 +150,33 @@ fn histogram_input() -> (RecordBatch, Vec<NativeHistogram>) {
     )
 }
 
-fn input(items: Vec<crate::error::Result<ScanBatch>>) -> ScanBatchStream {
+fn input(items: Vec<Result<ScanBatch>>) -> ScanBatchStream {
     Box::pin(stream::iter(items))
 }
 
-fn metadata() -> Arc<store_api::metadata::RegionMetadata> {
-    metadata_with_field_type(datatypes::prelude::ConcreteDataType::int64_datatype())
+fn metadata() -> Arc<RegionMetadata> {
+    metadata_with_field_type(ConcreteDataType::int64_datatype())
 }
 
-fn metadata_with_field_type(
-    field_type: datatypes::prelude::ConcreteDataType,
-) -> Arc<store_api::metadata::RegionMetadata> {
+fn metadata_with_field_type(field_type: ConcreteDataType) -> Arc<RegionMetadata> {
     let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 0));
     builder.push_column_metadata(ColumnMetadata {
-        column_schema: datatypes::schema::ColumnSchema::new(
-            "tag",
-            datatypes::prelude::ConcreteDataType::string_datatype(),
-            true,
-        ),
-        semantic_type: api::v1::SemanticType::Tag,
+        column_schema: ColumnSchema::new("tag", ConcreteDataType::string_datatype(), true),
+        semantic_type: SemanticType::Tag,
         column_id: 0,
     });
     builder.push_column_metadata(ColumnMetadata {
-        column_schema: datatypes::schema::ColumnSchema::new(
+        column_schema: ColumnSchema::new(
             "ts",
-            datatypes::prelude::ConcreteDataType::timestamp_millisecond_datatype(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
             false,
         ),
-        semantic_type: api::v1::SemanticType::Timestamp,
+        semantic_type: SemanticType::Timestamp,
         column_id: 1,
     });
     builder.push_column_metadata(ColumnMetadata {
-        column_schema: datatypes::schema::ColumnSchema::new("value", field_type, true),
-        semantic_type: api::v1::SemanticType::Field,
+        column_schema: ColumnSchema::new("value", field_type, true),
+        semantic_type: SemanticType::Field,
         column_id: 2,
     });
     builder.primary_key(vec![0]);
@@ -190,7 +187,7 @@ fn convert_with_source(
     inner: ScanBatchStream,
     schema: Arc<SeriesSchema>,
     source: RawLabelSource,
-    field_type: datatypes::prelude::ConcreteDataType,
+    field_type: ConcreteDataType,
 ) -> SendableRawSeriesStream {
     make_stream(
         inner,
@@ -202,7 +199,7 @@ fn convert_with_source(
     )
 }
 
-fn primary_key_source(metadata: Arc<store_api::metadata::RegionMetadata>) -> RawLabelSource {
+fn primary_key_source(metadata: Arc<RegionMetadata>) -> RawLabelSource {
     RawLabelSource::PrimaryKey {
         metric_name: Arc::from("metric"),
         physical_metadata: metadata,
@@ -218,7 +215,7 @@ fn convert(inner: ScanBatchStream, schema: Arc<SeriesSchema>) -> SendableRawSeri
         inner,
         schema,
         primary_key_source(metadata()),
-        datatypes::prelude::ConcreteDataType::int64_datatype(),
+        ConcreteDataType::int64_datatype(),
     )
 }
 
@@ -227,8 +224,8 @@ struct DropSpy {
     drops: Arc<AtomicUsize>,
 }
 
-impl futures::Stream for DropSpy {
-    type Item = crate::error::Result<ScanBatch>;
+impl Stream for DropSpy {
+    type Item = Result<ScanBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         self.inner.as_mut().poll_next(cx)
@@ -244,8 +241,8 @@ impl Drop for DropSpy {
 fn values(chunk: &RawSeriesChunk) -> Vec<Option<f64>> {
     (0..chunk.time.len())
         .map(|i| match chunk.fields.get(0).unwrap().sample(i) {
-            datatypes::series::samples::SampleRef::Missing => None,
-            datatypes::series::samples::SampleRef::Float(v) => Some(v),
+            SampleRef::Missing => None,
+            SampleRef::Float(v) => Some(v),
             _ => unreachable!(),
         })
         .collect()
@@ -344,7 +341,7 @@ async fn typed_predicate_filters_before_numeric_samples_are_cast() {
         )))]),
         schema(),
         primary_key_source(metadata()),
-        vec![(0, datatypes::prelude::ConcreteDataType::int64_datatype())],
+        vec![(0, ConcreteDataType::int64_datatype())],
         metrics(),
         vec![predicate],
     );
@@ -373,7 +370,7 @@ async fn predicate_error_is_terminal() {
         )))]),
         schema(),
         primary_key_source(metadata()),
-        vec![(0, datatypes::prelude::ConcreteDataType::int64_datatype())],
+        vec![(0, ConcreteDataType::int64_datatype())],
         metrics(),
         vec![predicate],
     );
@@ -383,7 +380,7 @@ async fn predicate_error_is_terminal() {
 
 #[tokio::test]
 async fn upstream_error_is_terminal_after_yielded_prefix_without_flushing_pending() {
-    let upstream_error = crate::error::InvalidRecordBatchSnafu {
+    let upstream_error = InvalidRecordBatchSnafu {
         reason: "upstream injected failure".to_string(),
     }
     .build();
@@ -409,8 +406,7 @@ async fn upstream_error_is_terminal_after_yielded_prefix_without_flushing_pendin
     assert!(second.metric.is_none());
     assert!(!second.is_last);
     let error = output.next().await.unwrap().unwrap_err();
-    let Some(crate::error::Error::InvalidRecordBatch { reason, .. }) =
-        error.as_any().downcast_ref::<crate::error::Error>()
+    let Some(Error::InvalidRecordBatch { reason, .. }) = error.as_any().downcast_ref::<Error>()
     else {
         panic!("unexpected upstream error: {error}");
     };
@@ -446,7 +442,7 @@ async fn raw_stream_owns_schema_and_bound_source_metadata() {
         input(vec![]),
         schema.clone(),
         primary_key_source(metadata.clone()),
-        datatypes::prelude::ConcreteDataType::int64_datatype(),
+        ConcreteDataType::int64_datatype(),
     );
     drop(schema);
     drop(metadata);
@@ -499,9 +495,9 @@ async fn native_histogram_adapter_preserves_complete_payload() {
         input(vec![Ok(ScanBatch::RecordBatch(record))]),
         series_schema,
         primary_key_source(metadata_with_field_type(
-            common_query::native_histogram::native_histogram_value_type().clone(),
+            native_histogram_value_type().clone(),
         )),
-        common_query::native_histogram::native_histogram_value_type().clone(),
+        native_histogram_value_type().clone(),
     );
     assert!(matches!(
         raw.label_source(),

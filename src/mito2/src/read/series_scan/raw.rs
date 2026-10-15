@@ -21,31 +21,37 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 
 use common_error::ext::BoxedError;
+use common_query::error::Error as QueryError;
 use common_query::native_histogram::{
     histogram_samples_from_arrow, is_native_histogram_value_type,
 };
+use common_recordbatch::filter;
 use datafusion::physical_plan::PhysicalExpr;
 use datatypes::arrow::array::{
     Array, BinaryArray, DictionaryArray, Float64Array, StructArray, TimestampMillisecondArray,
 };
 use datatypes::arrow::buffer::Buffer;
 use datatypes::arrow::compute::cast;
-use datatypes::arrow::datatypes::UInt32Type;
+use datatypes::arrow::datatypes::{DataType, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::series::raw::{RawSeriesChunk, RawSeriesOrdering, RawTimeAxis};
 use datatypes::series::samples::{Samples, SeriesFields, SeriesSchema};
+use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
+use snafu::Location;
 use snafu::{IntoError, ResultExt};
 use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSeriesStream};
 
-use crate::error::{ComputeArrowSnafu, DataTypeMismatchSnafu, InvalidRecordBatchSnafu};
+use crate::error::{
+    ComputeArrowSnafu, DataTypeMismatchSnafu, Error, ExternalSnafu, InvalidRecordBatchSnafu,
+};
 use crate::read::scan_util::PartitionMetrics;
 use crate::read::series_scan::SeriesBatch;
 use crate::read::stream::{ScanBatch, ScanBatchStream};
 use crate::sst::parquet::flat_format::{primary_key_column_index, time_index_column_index};
 
-fn boxed(error: crate::error::Error) -> BoxedError {
+fn boxed(error: Error) -> BoxedError {
     BoxedError::new(error)
 }
 
@@ -113,19 +119,19 @@ fn chunk(
                 .downcast_ref::<StructArray>()
                 .ok_or_else(|| invalid("invalid native histogram array"))?;
             samples.push(histogram_samples_from_arrow(hist).map_err(|error| {
-                let source = common_query::error::Error::GeneralDataFusion {
+                let source = QueryError::GeneralDataFusion {
                     error,
-                    location: snafu::Location::new(file!(), line!(), column!()),
+                    location: Location::new(file!(), line!(), column!()),
                 };
                 BoxedError::new(
-                    crate::error::ExternalSnafu {
+                    ExternalSnafu {
                         context: "native histogram conversion".to_string(),
                     }
                     .into_error(BoxedError::new(source)),
                 )
             })?);
         } else {
-            let values = cast(&array, &datatypes::arrow::datatypes::DataType::Float64)
+            let values = cast(&array, &DataType::Float64)
                 .context(ComputeArrowSnafu)
                 .map_err(boxed)?;
             let values = values
@@ -153,7 +159,7 @@ fn chunk(
 struct RawStream {
     schema: Arc<SeriesSchema>,
     label_source: RawLabelSource,
-    inner: futures::stream::BoxStream<'static, Result<RawSeriesChunk, BoxedError>>,
+    inner: BoxStream<'static, Result<RawSeriesChunk, BoxedError>>,
 }
 
 impl Stream for RawStream {
@@ -196,14 +202,14 @@ pub(crate) fn make_stream(
             for record in records {
                 let mut record = record;
                 for predicate in &predicates {
-                    record = match common_recordbatch::filter::batch_filter(&record, predicate) {
+                    record = match filter::batch_filter(&record, predicate) {
                         Ok(record) => record,
                         Err(error) => {
-                            let source = common_query::error::Error::GeneralDataFusion {
+                            let source = QueryError::GeneralDataFusion {
                                 error,
-                                location: snafu::Location::new(file!(), line!(), column!()),
+                                location: Location::new(file!(), line!(), column!()),
                             };
-                            yield Err(BoxedError::new(crate::error::ExternalSnafu {
+                            yield Err(BoxedError::new(ExternalSnafu {
                                 context: "raw predicate evaluation".to_string(),
                             }.into_error(BoxedError::new(source))));
                             return;
