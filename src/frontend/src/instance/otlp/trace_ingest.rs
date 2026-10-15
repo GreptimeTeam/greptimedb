@@ -1132,10 +1132,7 @@ impl Instance {
                 let mut chunk_states = Vec::new();
                 // Convert each chunk once, then retain only its sparse values while
                 // request-wide schema planning runs.
-                for chunk in groups
-                    .into_iter()
-                    .flat_map(|group| chunk_owned(group.spans, self.trace_ingest_chunk_size))
-                {
+                for chunk in chunk_spans_across_groups(groups, self.trace_ingest_chunk_size) {
                     let batch_index = chunks.len();
                     let span_metadata = chunk.iter().map(TraceSpanMetadata::from).collect();
                     let (table_data, batch_schema) =
@@ -1170,17 +1167,14 @@ impl Instance {
                     .await?;
                 }
             } else {
-                for group in groups {
-                    let chunks = chunk_owned(group.spans, self.trace_ingest_chunk_size);
-                    for chunk in chunks {
-                        self.ingest_trace_chunk(
-                            &ingest_ctx,
-                            chunk,
-                            main_ctx.clone(),
-                            &mut ingest_state,
-                        )
-                        .await?;
-                    }
+                for chunk in chunk_spans_across_groups(groups, self.trace_ingest_chunk_size) {
+                    self.ingest_trace_chunk(
+                        &ingest_ctx,
+                        chunk,
+                        main_ctx.clone(),
+                        &mut ingest_state,
+                    )
+                    .await?;
                 }
             }
 
@@ -2448,6 +2442,20 @@ fn trace_logical_types_incompatible(
     left_datatype == right_datatype
         || !is_trace_reconcile_candidate_type(left_datatype)
         || !is_trace_reconcile_candidate_type(right_datatype)
+}
+
+/// Chunks the spans of all resource/scope groups together. Every span carries
+/// its own resource and scope attributes, so a chunk may mix groups; chunking per
+/// group instead would turn a collector batch of many small groups into many
+/// tiny inserts, each fanned out to every trace partition.
+fn chunk_spans_across_groups(
+    groups: Vec<TraceSpanGroup>,
+    chunk_size: usize,
+) -> Vec<Vec<TraceSpan>> {
+    chunk_owned(
+        groups.into_iter().flat_map(|group| group.spans).collect(),
+        chunk_size,
+    )
 }
 
 fn chunk_owned<T>(items: Vec<T>, chunk_size: usize) -> Vec<Vec<T>> {
