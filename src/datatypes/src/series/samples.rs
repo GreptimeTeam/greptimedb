@@ -355,8 +355,7 @@ impl Samples {
         }
     }
     /// Materialize chunks into one dense array. When all histogram-bearing chunks reference the
-    /// same table, reuse it; otherwise concatenate tables per chunk and remap indices, including
-    /// unused rows.
+    /// same Arrow table view, reuse it; otherwise concatenate tables per chunk and remap indices.
     pub fn into_dense(self) -> Result<Self> {
         let SampleStorage::Chunks(chunks, total_len) = self.storage else {
             return Ok(self);
@@ -390,9 +389,15 @@ impl Samples {
             SampleStorage::Mixed(mixed) => Some(&mixed.histograms.batch),
             SampleStorage::Float(_) | SampleStorage::Chunks(_, _) => None,
         });
-        let shared_batch = histogram_batches
-            .next()
-            .filter(|first| histogram_batches.all(|batch| Arc::ptr_eq(first, batch)));
+        let shared_batch = histogram_batches.next().filter(|first| {
+            histogram_batches.all(|batch| {
+                Arc::ptr_eq(first, batch)
+                    || first
+                        .as_arrow()
+                        .to_data()
+                        .ptr_eq(&batch.as_arrow().to_data())
+            })
+        });
         let needs_float = chunks.iter().any(|chunk| {
             matches!(
                 chunk.storage,

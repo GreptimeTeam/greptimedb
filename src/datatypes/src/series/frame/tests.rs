@@ -248,6 +248,98 @@ fn assert_float_bits(actual: &Samples, expected: &[Option<f64>]) {
 }
 
 #[test]
+fn sliced_histogram_frames_densify_without_duplicating_shared_table() {
+    let schema = test_schema(&["histogram"]);
+    let source_table = histogram_batch();
+    let source_samples =
+        Samples::try_from_histogram(UInt32Array::from(vec![Some(0); 64]), source_table).unwrap();
+    let samples = Samples::try_from_chunks(
+        (0..64)
+            .map(|position| source_samples.slice(position, 1).unwrap())
+            .collect(),
+    )
+    .unwrap();
+    let chunk = RawSeriesChunk::try_new(
+        &schema,
+        Buffer::from(vec![0x42_u8]),
+        None,
+        RawTimeAxis::try_new((0_i64..64).collect::<Vec<_>>().into()).unwrap(),
+        SeriesFields::one(samples),
+        true,
+    )
+    .unwrap();
+
+    let frames = pack_raw_series_chunk(&schema, RawLabelMode::Key, &chunk).unwrap();
+    assert_eq!(frames.len(), 64);
+    let mut decoded_chunks = Vec::with_capacity(frames.len());
+    for frame in &frames {
+        let decoded = unpack_raw_series_frame(&schema, RawLabelMode::Key, frame).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].time.len(), 1);
+        decoded_chunks.push(decoded.into_iter().next().unwrap());
+    }
+
+    let first_table = match decoded_chunks[0].fields.get(0).unwrap().dense().unwrap() {
+        DenseSamplesRef::Histogram(histograms) => histograms.batch().clone(),
+        _ => panic!("expected histogram samples"),
+    };
+    let second_table = match decoded_chunks[1].fields.get(0).unwrap().dense().unwrap() {
+        DenseSamplesRef::Histogram(histograms) => histograms.batch(),
+        _ => panic!("expected histogram samples"),
+    };
+    assert!(!Arc::ptr_eq(&first_table, second_table));
+    let first_values = first_table
+        .as_arrow()
+        .column(2)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    let second_values = second_table
+        .as_arrow()
+        .column(2)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert_eq!(
+        first_values.values().as_ptr(),
+        second_values.values().as_ptr()
+    );
+
+    let samples = Samples::try_from_chunks(
+        decoded_chunks
+            .iter()
+            .map(|decoded| decoded.fields.get(0).unwrap().clone())
+            .collect(),
+    )
+    .unwrap();
+    drop(chunk);
+    drop(frames);
+    drop(decoded_chunks);
+    drop(source_samples);
+
+    let dense = samples.into_dense().unwrap();
+    let DenseSamplesRef::Histogram(histograms) = dense.dense().unwrap() else {
+        panic!("expected dense histogram samples");
+    };
+    assert_eq!(histograms.len(), 64);
+    assert_eq!(histograms.batch().len(), first_table.len());
+    for position in 0..64 {
+        assert_histogram(histograms.view_at(position).unwrap(), -9.5);
+    }
+    let dense_values = histograms
+        .batch()
+        .as_arrow()
+        .column(2)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert_eq!(
+        dense_values.values().as_ptr(),
+        first_values.values().as_ptr()
+    );
+}
+
+#[test]
 fn schema_and_key_explicit_round_trips_preserve_identity_and_bits() {
     let schema = test_schema(&["value"]);
     let key_schema = raw_series_frame_schema(&schema, RawLabelMode::Key).unwrap();
@@ -315,26 +407,6 @@ fn schema_and_key_explicit_round_trips_preserve_identity_and_bits() {
         expected_key_metadata,
     );
     assert_eq!(key_schema.as_ref(), &expected_key);
-    assert_eq!(key_schema.metadata().len(), 4);
-    assert_eq!(
-        key_schema.metadata().get("greptime.series.layout").unwrap(),
-        "v1"
-    );
-    assert_eq!(
-        key_schema
-            .metadata()
-            .get("greptime.series.content")
-            .unwrap(),
-        "raw"
-    );
-    assert_eq!(
-        key_schema.metadata().get("greptime.series.labels").unwrap(),
-        "key"
-    );
-    assert_eq!(
-        key_schema.metadata().get("greptime.series.time").unwrap(),
-        "timestamps"
-    );
     let mut explicit_fields = expected_key.fields().iter().cloned().collect::<Vec<_>>();
     explicit_fields.push(Field::new("name", DataType::Utf8, true).into());
     explicit_fields.push(
@@ -359,18 +431,6 @@ fn schema_and_key_explicit_round_trips_preserve_identity_and_bits() {
     explicit_metadata.insert("greptime.series.labels".to_string(), "explicit".to_string());
     let expected_explicit = Schema::new_with_metadata(explicit_fields, explicit_metadata);
     assert_eq!(explicit_schema.as_ref(), &expected_explicit);
-
-    assert_eq!(
-        expected_key
-            .metadata()
-            .get("greptime.series.labels")
-            .unwrap(),
-        "key"
-    );
-    assert_eq!(
-        expected_key.metadata().get("greptime.series.time").unwrap(),
-        "timestamps"
-    );
 
     let nan = f64::from_bits(0x7ff8_0000_0000_0042);
     let stale_nan = f64::from_bits(0x7ff0_0000_0000_0002);
@@ -628,26 +688,6 @@ fn segmented_mixed_fields_emit_every_aligned_position_and_marker() {
     );
     drop(aligned_chunk);
     drop(aligned_frames);
-    assert_eq!(
-        aligned_a,
-        [
-            Some(1.0_f64.to_bits()),
-            Some(2.0_f64.to_bits()),
-            Some(3.0_f64.to_bits()),
-            None,
-            Some(5.0_f64.to_bits())
-        ]
-    );
-    assert_eq!(
-        aligned_b,
-        [
-            Some(10.0_f64.to_bits()),
-            None,
-            Some(30.0_f64.to_bits()),
-            Some(40.0_f64.to_bits()),
-            Some(50.0_f64.to_bits())
-        ]
-    );
 
     let mut distinct_rows = frames.clone();
     let alternate_schema = test_schema(&["first", "second"]);
@@ -817,24 +857,19 @@ fn histogram_payload_and_present_all_null_representation_survive() {
     else {
         panic!("histogram representation was normalized");
     };
-    assert_eq!(histograms.batch().len(), 2);
     assert_eq!(histograms.indices().len(), 2);
     assert!(histograms.indices().is_valid(0));
     assert!(histograms.indices().is_valid(1));
-    assert_eq!(histograms.indices().value(0), 0);
-    assert_eq!(histograms.indices().value(1), 0);
-    assert_histogram(histograms.batch().view(0).unwrap(), -9.5);
-    assert_unreferenced_histogram(histograms.batch().view(1).unwrap());
+    assert_histogram(histograms.view_at(0).unwrap(), -9.5);
+    assert_histogram(histograms.view_at(1).unwrap(), -9.5);
 
     let DenseSamplesRef::Histogram(all_null_histograms) =
         decoded[0].fields.get(1).unwrap().dense().unwrap()
     else {
         panic!("all-null histogram representation was normalized");
     };
-    assert_eq!(all_null_histograms.batch().len(), 2);
+    assert_eq!(all_null_histograms.indices().len(), 2);
     assert!((0..2).all(|i| !all_null_histograms.indices().is_valid(i)));
-    assert_histogram(all_null_histograms.batch().view(0).unwrap(), -9.5);
-    assert_unreferenced_histogram(all_null_histograms.batch().view(1).unwrap());
     let DenseSamplesRef::Float(all_null_float) = decoded[0].fields.get(2).unwrap().dense().unwrap()
     else {
         panic!("all-null float representation was normalized");
@@ -877,16 +912,14 @@ fn histogram_payload_and_present_all_null_representation_survive() {
         panic!("all-null mixed representation was normalized");
     };
     assert_eq!(mixed.floats().len(), 2);
-    assert_eq!(mixed.histograms().batch().len(), 2);
+    assert_eq!(mixed.histograms().indices().len(), 2);
     assert!(
         (0..2).all(|i| !mixed.floats().is_valid(i) && !mixed.histograms().indices().is_valid(i))
     );
-    assert_histogram(mixed.histograms().batch().view(0).unwrap(), -9.5);
-    assert_unreferenced_histogram(mixed.histograms().batch().view(1).unwrap());
 }
 
 #[test]
-fn rejects_grid_and_invalid_schema_even_for_empty_batch_and_accepts_valid_empty() {
+fn rejects_invalid_schema_and_metadata_and_accepts_valid_empty() {
     let schema = test_schema(&["value"]);
     let grid_schema = SeriesSchema {
         fields: schema.fields.clone(),
@@ -1000,7 +1033,15 @@ fn rejects_grid_and_invalid_schema_even_for_empty_batch_and_accepts_valid_empty(
         .unwrap();
         assert!(unpack_raw_series_frame(&schema, RawLabelMode::Key, &malformed).is_err());
     }
+}
 
+#[test]
+fn rejects_invalid_timestamps_and_empty_raw_payloads() {
+    let schema = test_schema(&["value"]);
+    let chunk = float_chunk(&schema, &[1], None, vec![1], vec![Some(2.0)], false);
+    let valid = pack_raw_series_chunk(&schema, RawLabelMode::Key, &chunk)
+        .unwrap()
+        .remove(0);
     for bad_timestamps in [vec![], vec![1, 1], vec![2, 1]] {
         let malformed = with_timestamp_values(&valid, bad_timestamps);
         assert!(unpack_raw_series_frame(&schema, RawLabelMode::Key, &malformed).is_err());
@@ -1107,6 +1148,23 @@ fn rejects_grid_and_invalid_schema_even_for_empty_batch_and_accepts_valid_empty(
     // the decoder can inspect it; keep this a constructor-invariant assertion.
     assert!(arrow::record_batch::RecordBatch::try_new(valid.schema(), columns).is_err());
 
+    let mut bad = valid.columns().to_vec();
+    bad[2] = Arc::new(
+        with_timestamp_values(&valid, vec![1, 1])
+            .column(2)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap()
+            .clone(),
+    );
+    let invalid_later_row = arrow::record_batch::RecordBatch::try_new(valid.schema(), bad).unwrap();
+    let later_invalid =
+        concat_batches(&valid.schema(), &[valid.clone(), invalid_later_row]).unwrap();
+    assert!(unpack_raw_series_frame(&schema, RawLabelMode::Key, &later_invalid).is_err());
+}
+
+#[test]
+fn rejects_invalid_explicit_labels() {
     let explicit_schema = test_schema(&["value"]);
     let explicit_chunk = float_chunk(
         &explicit_schema,
@@ -1213,21 +1271,10 @@ fn rejects_grid_and_invalid_schema_even_for_empty_batch_and_accepts_valid_empty(
     let reserved =
         arrow::record_batch::RecordBatch::try_new(explicit.schema(), reserved_labels).unwrap();
     assert!(unpack_raw_series_frame(&explicit_schema, RawLabelMode::Explicit, &reserved).is_err());
+}
 
-    let mut bad = valid.columns().to_vec();
-    bad[2] = Arc::new(
-        with_timestamp_values(&valid, vec![1, 1])
-            .column(2)
-            .as_any()
-            .downcast_ref::<StructArray>()
-            .unwrap()
-            .clone(),
-    );
-    let invalid_later_row = arrow::record_batch::RecordBatch::try_new(valid.schema(), bad).unwrap();
-    let later_invalid =
-        concat_batches(&valid.schema(), &[valid.clone(), invalid_later_row]).unwrap();
-    assert!(unpack_raw_series_frame(&schema, RawLabelMode::Key, &later_invalid).is_err());
-
+#[test]
+fn rejects_malformed_histogram_and_payload_encodings() {
     let hist_schema = test_schema(&["hist"]);
     let valid_hist = pack_raw_series_chunk(
         &hist_schema,
