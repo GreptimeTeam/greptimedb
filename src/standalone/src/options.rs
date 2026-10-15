@@ -239,6 +239,19 @@ mod tests {
     }
 
     #[test]
+    fn test_pipeline_host_access_config_forwarding() {
+        let defaults: StandaloneOptions = toml::from_str("").unwrap();
+        assert!(!defaults.pipeline.allow_vrl_host_access);
+        assert!(!defaults.frontend_options().pipeline.allow_vrl_host_access);
+        let options: StandaloneOptions =
+            toml::from_str("[pipeline]\nallow_vrl_host_access = true").unwrap();
+        assert!(options.frontend_options().pipeline.allow_vrl_host_access);
+        let serialized = toml::to_string(&options).unwrap();
+        let restored: StandaloneOptions = toml::from_str(&serialized).unwrap();
+        assert_eq!(options.pipeline, restored.pipeline);
+    }
+
+    #[test]
     fn test_logical_batcher_config_forwarding() {
         let opts: StandaloneOptions = toml::from_str("[pending_rows_batcher]\nprotocols = ['influxdb']\n[pending_rows_batcher.logical_table]\nprotocols = ['otlp', 'prom']\npending_rows_flush_interval = '10ms'").unwrap();
         let frontend = opts.frontend_options();

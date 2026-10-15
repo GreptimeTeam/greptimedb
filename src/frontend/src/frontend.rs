@@ -298,6 +298,18 @@ backoff_multiplier = 3.0
     }
 
     #[test]
+    fn test_pipeline_host_access_config() {
+        let defaults: FrontendOptions = toml::from_str("").unwrap();
+        assert!(!defaults.pipeline.allow_vrl_host_access);
+        let options: FrontendOptions =
+            toml::from_str("[pipeline]\nallow_vrl_host_access = true").unwrap();
+        assert!(options.pipeline.allow_vrl_host_access);
+        let serialized = toml::to_string(&options).unwrap();
+        let restored: FrontendOptions = toml::from_str(&serialized).unwrap();
+        assert_eq!(options.pipeline, restored.pipeline);
+    }
+
+    #[test]
     fn test_logical_batcher_protocols_from_env() {
         temp_env::with_vars(
             [

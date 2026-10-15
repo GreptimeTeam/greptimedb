@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use api::v1::CreateTableExpr;
 use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
@@ -56,7 +56,7 @@ pub struct PipelineOperator {
     catalog_manager: CatalogManagerRef,
     query_engine: QueryEngineRef,
     tables: RwLock<HashMap<String, PipelineTableRef>>,
-    cache_ttl: Duration,
+    options: PipelineOptions,
 }
 
 impl PipelineOperator {
@@ -99,7 +99,7 @@ impl PipelineOperator {
                 self.statement_executor.clone(),
                 table,
                 self.query_engine.clone(),
-                self.cache_ttl,
+                &self.options,
             )),
         );
     }
@@ -183,7 +183,7 @@ impl PipelineOperator {
             catalog_manager,
             tables: RwLock::new(HashMap::new()),
             query_engine,
-            cache_ttl: options.cache_ttl,
+            options: options.clone(),
         }
     }
 
@@ -281,7 +281,7 @@ impl PipelineOperator {
     }
 
     /// Compile a pipeline.
-    pub fn build_pipeline(pipeline: &str) -> Result<Pipeline> {
-        PipelineTable::compile_pipeline(pipeline)
+    pub fn build_pipeline(&self, pipeline: &str) -> Result<Pipeline> {
+        crate::parse_with_options(&crate::Content::Yaml(pipeline), &self.options)
     }
 }
