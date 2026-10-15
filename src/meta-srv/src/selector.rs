@@ -36,7 +36,7 @@ pub trait Selector: Send + Sync {
     type Context;
     type Output;
 
-    async fn select(&self, ctx: &Self::Context, opts: SelectorOptions) -> Result<Self::Output>;
+    async fn select(&self, ctx: &Self::Context, opts: SelectorOptions<'_>) -> Result<Self::Output>;
 }
 
 /// A selector that aware of region statistics
@@ -58,9 +58,9 @@ pub trait RegionStatAwareSelector: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-pub struct SelectorOptions {
+pub struct SelectorOptions<'a> {
     /// Resolved requirements used to filter candidate nodes.
-    pub affinity: Option<AffinityRequirements>,
+    pub affinity: Option<&'a AffinityRequirements>,
     /// Minimum number of selected results.
     pub min_required_items: usize,
     /// Whether duplicates are allowed in the selected result, default false.
@@ -71,7 +71,7 @@ pub struct SelectorOptions {
     pub workload_filter: Option<fn(&NodeWorkloads) -> bool>,
 }
 
-impl Default for SelectorOptions {
+impl Default for SelectorOptions<'_> {
     fn default() -> Self {
         Self {
             affinity: None,

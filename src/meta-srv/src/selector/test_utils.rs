@@ -57,7 +57,11 @@ impl Selector for RandomNodeSelector {
     type Context = SelectorContext;
     type Output = Vec<Peer>;
 
-    async fn select(&self, _ctx: &Self::Context, _opts: SelectorOptions) -> Result<Self::Output> {
+    async fn select(
+        &self,
+        _ctx: &Self::Context,
+        _opts: SelectorOptions<'_>,
+    ) -> Result<Self::Output> {
         let mut rng = rand::rng();
         let mut nodes = self.nodes.clone();
         nodes.shuffle(&mut rng);

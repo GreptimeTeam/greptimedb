@@ -68,7 +68,7 @@ impl MetasrvPeerAllocator {
         }
 
         let options = SelectorOptions {
-            affinity: alloc_context.affinity.clone(),
+            affinity: alloc_context.affinity.as_ref(),
             min_required_items,
             allow_duplication: true,
             exclude_peer_ids: HashSet::new(),
@@ -100,6 +100,7 @@ impl PeerAllocator for MetasrvPeerAllocator {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::ptr;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -131,6 +132,7 @@ mod tests {
     struct CountingSelector {
         base: RoundRobinSelector,
         calls: AtomicUsize,
+        requirements_address: AtomicUsize,
         outcome: Outcome,
     }
 
@@ -142,9 +144,14 @@ mod tests {
         async fn select(
             &self,
             ctx: &SelectorContext,
-            opts: SelectorOptions,
+            opts: SelectorOptions<'_>,
         ) -> Result<Self::Output> {
             self.calls.fetch_add(1, Ordering::Relaxed);
+            self.requirements_address.store(
+                opts.affinity
+                    .map_or(0, |requirements| ptr::from_ref(requirements) as usize),
+                Ordering::Relaxed,
+            );
             assert!(opts.allow_duplication);
             assert!(opts.exclude_peer_ids.is_empty());
             assert!(opts.workload_filter.is_some());
@@ -226,6 +233,7 @@ mod tests {
             let selector = Arc::new(CountingSelector {
                 base: RoundRobinSelector::default(),
                 calls: AtomicUsize::new(0),
+                requirements_address: AtomicUsize::new(0),
                 outcome,
             });
             let affinity: AffinityRef = if noop {
@@ -241,17 +249,19 @@ mod tests {
                 },
                 selector.clone(),
             );
-            let result = allocator
-                .alloc(
-                    2,
-                    &PeerAllocContext {
-                        affinity: has_requirements.then(|| {
-                            AffinityRequirements::new(HashMap::from([("pool".into(), "a".into())]))
-                                .unwrap()
-                        }),
-                    },
-                )
-                .await;
+            let alloc_context = PeerAllocContext {
+                affinity: has_requirements.then(|| {
+                    AffinityRequirements::new(HashMap::from([("pool".into(), "a".into())])).unwrap()
+                }),
+            };
+            let result = allocator.alloc(2, &alloc_context).await;
+            assert_eq!(
+                selector.requirements_address.load(Ordering::Relaxed),
+                alloc_context
+                    .affinity
+                    .as_ref()
+                    .map_or(0, |requirements| { ptr::from_ref(requirements) as usize }),
+            );
             assert_eq!(selector.calls.load(Ordering::Relaxed), expected_calls);
             if succeeds {
                 assert_eq!(result.unwrap(), vec![Peer::empty(1); 2]);

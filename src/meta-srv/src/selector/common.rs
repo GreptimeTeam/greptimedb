@@ -32,7 +32,7 @@ pub fn filter_out_excluded_peers(
 }
 
 /// According to the `opts`, choose peers from the `weight_array` through `weighted_choose`.
-pub fn choose_items<W>(opts: &SelectorOptions, weighted_choose: &mut W) -> Result<Vec<Peer>>
+pub fn choose_items<W>(opts: &SelectorOptions<'_>, weighted_choose: &mut W) -> Result<Vec<Peer>>
 where
     W: WeightedChoose<Peer>,
 {
@@ -319,6 +319,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_affinity_constrains_base_selectors() {
+        let affinity_requirements = requirements();
         for lease_based in [false, true] {
             for (use_exact_affinity, has_requirements) in
                 [(true, false), (true, true), (false, true)]
@@ -353,7 +354,7 @@ mod tests {
                     .select(
                         &ctx,
                         SelectorOptions {
-                            affinity: has_requirements.then(requirements),
+                            affinity: has_requirements.then_some(&affinity_requirements),
                             min_required_items: if enabled { 1 } else { 3 },
                             exclude_peer_ids: HashSet::from([3]),
                             workload_filter: Some(accept_ingest_workload),
@@ -380,6 +381,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_round_robin_filters_each_discovery_read_for_both_targets() {
+        let affinity_requirements = requirements();
         for target in [SelectTarget::Datanode, SelectTarget::Flownode] {
             let discovery = Arc::new(Discovery {
                 snapshots: vec![
@@ -400,7 +402,7 @@ mod tests {
             };
             let selector = RoundRobinSelector::new(target);
             let opts = SelectorOptions {
-                affinity: Some(requirements()),
+                affinity: Some(&affinity_requirements),
                 ..Default::default()
             };
             for _ in 0..2 {
@@ -415,6 +417,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_round_robin_excludes_peers_for_both_targets() {
+        let affinity_requirements = requirements();
         for target in [SelectTarget::Datanode, SelectTarget::Flownode] {
             let ctx = SelectorContext {
                 affinity_fallback: AffinityFallback::Error,
@@ -425,7 +428,7 @@ mod tests {
                 }),
                 affinity: Arc::new(ExactAffinity),
             };
-            for affinity in [None, Some(requirements())] {
+            for affinity in [None, Some(&affinity_requirements)] {
                 // Keep the topology fixed and vary only the exclusion set.
                 for (excluded, expected) in [(vec![], vec![1, 2]), (vec![1], vec![2, 2])] {
                     let selector = RoundRobinSelector::new(target);
@@ -433,7 +436,7 @@ mod tests {
                         .select(
                             &ctx,
                             SelectorOptions {
-                                affinity: affinity.clone(),
+                                affinity,
                                 min_required_items: 2,
                                 allow_duplication: true,
                                 exclude_peer_ids: excluded.into_iter().collect(),
@@ -469,6 +472,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_base_selector_affinity_fallback() {
+        let affinity_requirements = requirements();
         for lease_based in [false, true] {
             for fallback in [AffinityFallback::Error, AffinityFallback::Unconstrained] {
                 for has_requirements in [false, true] {
@@ -497,7 +501,7 @@ mod tests {
                             .select(
                                 &ctx,
                                 SelectorOptions {
-                                    affinity: has_requirements.then(requirements),
+                                    affinity: has_requirements.then_some(&affinity_requirements),
                                     min_required_items: required,
                                     allow_duplication: false,
                                     exclude_peer_ids: HashSet::from([3]),
@@ -537,6 +541,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_base_selector_discovery_error_does_not_fallback() {
+        let affinity_requirements = requirements();
         for lease_based in [false, true] {
             let discovery = Arc::new(Discovery {
                 snapshots: vec![],
@@ -557,7 +562,7 @@ mod tests {
                 .select(
                     &ctx,
                     SelectorOptions {
-                        affinity: Some(requirements()),
+                        affinity: Some(&affinity_requirements),
                         ..Default::default()
                     },
                 )
@@ -636,6 +641,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_based_affinity_fallback_queries() {
+        let affinity_requirements = requirements();
         for (has_requirements, fallback, required, fail_stats, expected_reads, available) in [
             (false, AffinityFallback::Unconstrained, 2, false, 1, 2),
             (true, AffinityFallback::Error, 2, false, 1, 1),
@@ -693,7 +699,7 @@ mod tests {
                 .select(
                     &ctx,
                     SelectorOptions {
-                        affinity: has_requirements.then(requirements),
+                        affinity: has_requirements.then_some(&affinity_requirements),
                         min_required_items: required,
                         allow_duplication: false,
                         exclude_peer_ids: HashSet::from([3]),

@@ -49,7 +49,7 @@ where
     async fn select_once(
         &self,
         ctx: &SelectorContext,
-        opts: &SelectorOptions,
+        opts: &SelectorOptions<'_>,
     ) -> Result<Vec<Peer>> {
         // 1. get alive datanodes.
         let alive_datanodes = ctx
@@ -60,7 +60,6 @@ where
             .into_iter()
             .filter(|node| {
                 opts.affinity
-                    .as_ref()
                     .is_none_or(|requirements| ctx.affinity.matches(requirements, node))
             })
             .map(|node| node.peer)
@@ -102,7 +101,11 @@ where
     type Context = SelectorContext;
     type Output = Vec<Peer>;
 
-    async fn select(&self, ctx: &Self::Context, mut opts: SelectorOptions) -> Result<Self::Output> {
+    async fn select(
+        &self,
+        ctx: &Self::Context,
+        mut opts: SelectorOptions<'_>,
+    ) -> Result<Self::Output> {
         match self.select_once(ctx, &opts).await {
             Err(error::Error::NoEnoughAvailableNode {
                 required,

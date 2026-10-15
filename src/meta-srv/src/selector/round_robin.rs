@@ -53,7 +53,11 @@ impl RoundRobinSelector {
         }
     }
 
-    async fn get_peers(&self, opts: &SelectorOptions, ctx: &SelectorContext) -> Result<Vec<Peer>> {
+    async fn get_peers(
+        &self,
+        opts: &SelectorOptions<'_>,
+        ctx: &SelectorContext,
+    ) -> Result<Vec<Peer>> {
         let mut peers = match self.select_target {
             SelectTarget::Datanode => ctx
                 .peer_discovery
@@ -63,7 +67,6 @@ impl RoundRobinSelector {
                 .into_iter()
                 .filter(|node| {
                     opts.affinity
-                        .as_ref()
                         .is_none_or(|requirements| ctx.affinity.matches(requirements, node))
                 })
                 .map(|node| node.peer)
@@ -77,7 +80,6 @@ impl RoundRobinSelector {
                 .into_iter()
                 .filter(|node| {
                     opts.affinity
-                        .as_ref()
                         .is_none_or(|requirements| ctx.affinity.matches(requirements, node))
                 })
                 .map(|node| node.peer)
@@ -103,7 +105,7 @@ impl RoundRobinSelector {
     async fn select_once(
         &self,
         ctx: &SelectorContext,
-        opts: &SelectorOptions,
+        opts: &SelectorOptions<'_>,
     ) -> Result<Vec<Peer>> {
         let peers = self.get_peers(opts, ctx).await?;
         // choose peers
@@ -125,7 +127,11 @@ impl Selector for RoundRobinSelector {
     type Context = SelectorContext;
     type Output = Vec<Peer>;
 
-    async fn select(&self, ctx: &Self::Context, mut opts: SelectorOptions) -> Result<Self::Output> {
+    async fn select(
+        &self,
+        ctx: &Self::Context,
+        mut opts: SelectorOptions<'_>,
+    ) -> Result<Self::Output> {
         match self.select_once(ctx, &opts).await {
             Err(error::Error::NoEnoughAvailableNode {
                 required,
