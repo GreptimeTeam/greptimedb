@@ -230,6 +230,7 @@ macro_rules! http_tests {
                 test_jaeger_query_api,
                 test_jaeger_query_api_for_trace_v1,
                 test_jaeger_query_api_for_trace_v2,
+                test_jaeger_search_limit_returns_latest_traces,
 
                 test_influxdb_write,
                 test_influxdb_write_with_hints,
@@ -11775,6 +11776,88 @@ pub async fn test_jaeger_query_api_for_trace_v2(
     }
     guard.remove_all().await;
     Ok(())
+}
+
+pub async fn test_jaeger_search_limit_returns_latest_traces(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_jaeger_search_limit").await;
+    let client = TestClient::new(app).await;
+
+    // Twelve single-span traces spread over all trace partitions. The oldest
+    // traces get the smallest ids and are written first, so neither id nor
+    // write order points at the newest ones.
+    let now = Utc::now().timestamp_nanos_opt().unwrap() as u64;
+    let traces = (0..12u64)
+        .map(|i| {
+            let start = now - (60 - i) * 1_000_000_000;
+            (format!("{:x}{:031x}", i, i + 1), start)
+        })
+        .collect::<Vec<_>>();
+    let spans = traces
+        .iter()
+        .map(|(trace_id, start)| {
+            json!({
+                "traceId": trace_id,
+                "spanId": &trace_id[16..],
+                "name": "op",
+                "kind": 2,
+                "startTimeUnixNano": start.to_string(),
+                "endTimeUnixNano": (start + 1_000).to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let content = json!({
+        "resourceSpans": [{
+            "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "svc"}}]},
+            "scopeSpans": [{"scope": {"name": "s"}, "spans": spans}],
+        }]
+    });
+    let req: ExportTraceServiceRequest = serde_json::from_value(content).unwrap();
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-pipeline-name"),
+                HeaderValue::from_static(GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME),
+            ),
+        ],
+        "/v1/otlp/v1/traces",
+        req.encode_to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let mut expected = traces[9..]
+        .iter()
+        .map(|(trace_id, _)| trace_id.clone())
+        .collect::<Vec<_>>();
+    expected.sort();
+    let path = format!(
+        "/v1/jaeger/api/traces?service=svc&operation=op&start={}&end={}&limit=3",
+        (now - 120_000_000_000) / 1_000,
+        now / 1_000
+    );
+    for _ in 0..5 {
+        let res = client.get(&path).send().await;
+        assert_eq!(StatusCode::OK, res.status());
+        let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+        let mut found = resp["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|trace| trace["traceID"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        found.sort();
+        assert_eq!(found, expected);
+    }
+
+    guard.remove_all().await;
 }
 
 pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
