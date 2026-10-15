@@ -2529,9 +2529,16 @@ impl Actor {
         {
             let path = self.io.object_path(object_seq);
             match result {
-                Ok(()) => info!(
-                    "Deleted the start object {path} of the object store WAL, whose prefix held no object, after refusing a region without its history"
-                ),
+                Ok(()) => {
+                    let mut catalog = self.catalog.write().unwrap_or_else(PoisonError::into_inner);
+                    if let Some(footer) = catalog.remove_object(object_seq) {
+                        METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS.dec();
+                        METRIC_OBJECT_STORE_WAL_INDEXED_BYTES.sub(object_len(&footer) as i64);
+                    }
+                    info!(
+                        "Deleted the start object {path} of the object store WAL, whose prefix held no object, after refusing a region without its history"
+                    );
+                }
                 Err(error) => warn!(
                     error;
                     "Failed to delete the start object {path} of the object store WAL after refusing a region without its history; the next open passes regions that never flushed"
@@ -4513,8 +4520,19 @@ mod tests {
         for _ in 0..2 {
             let store = open(object_store.clone(), &eager()).await;
             assert_eq!(vec![0], object_seqs(store.io.as_ref()).await);
+            let indexed_objects = METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS.get();
+            let indexed_bytes = METRIC_OBJECT_STORE_WAL_INDEXED_BYTES.get();
             assert!(missing_history(&store, region(1), 0).await.is_some());
             assert!(object_seqs(store.io.as_ref()).await.is_empty());
+            // The catalog and the indexed gauges no longer hold the object.
+            assert!(!store.catalog.read().unwrap().contains_object(0));
+            assert_eq!(
+                (indexed_objects - 1, indexed_bytes - object_len(&[]) as i64),
+                (
+                    METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS.get(),
+                    METRIC_OBJECT_STORE_WAL_INDEXED_BYTES.get()
+                )
+            );
 
             // The store accepts nothing more, and refuses again without a
             // second delete.
@@ -4609,6 +4627,41 @@ mod tests {
         // The next open finds the prefix empty and refuses the region again.
         let store = open(object_store, &eager()).await;
         assert!(missing_history(&store, region(1), 0).await.is_some());
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_keeps_indexing_a_start_object_whose_withdrawal_failed() {
+        let _serialized = SERIALIZED.lock().await;
+        let (io, mut parked) = ParkedIo::parking_creates(memory_store());
+        let store = open_over(io.clone(), &eager()).await;
+        io.deletes_parked.store(true, Ordering::SeqCst);
+        let indexed_objects = METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS.get();
+        let indexed_bytes = METRIC_OBJECT_STORE_WAL_INDEXED_BYTES.get();
+
+        let refused = {
+            let store = store.clone();
+            tokio::spawn(async move { store.check_region_history(&provider(region(1)), 0).await })
+        };
+        let (object_seq, release) = next_parked_operation(&mut parked).await;
+        assert_eq!(0, object_seq);
+        release.send(false).unwrap();
+        assert!(matches!(
+            timeout(WAIT, refused).await.unwrap().unwrap().unwrap_err(),
+            Error::MissingWalHistory { .. }
+        ));
+
+        // The object is still there, so the catalog and the indexed gauges
+        // keep it.
+        assert_eq!(vec![0], object_seqs(io.as_ref()).await);
+        assert!(store.catalog.read().unwrap().contains_object(0));
+        assert_eq!(
+            (indexed_objects, indexed_bytes),
+            (
+                METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS.get(),
+                METRIC_OBJECT_STORE_WAL_INDEXED_BYTES.get()
+            )
+        );
         store.stop().await.unwrap();
     }
 
