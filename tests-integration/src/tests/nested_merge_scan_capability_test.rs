@@ -1408,24 +1408,32 @@ async fn assert_raw_entrypoint_wrapper_contract(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn test_native_histogram_rows_ingest_into_mito() {
+async fn test_native_histogram_raw_flight_preserves_payload_across_flush() {
     use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
     use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram};
+    use api::v1::helper::{field_column_schema, tag_column_schema, time_index_column_schema};
     use api::v1::value::ValueData;
-    use api::v1::{
-        ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
-    };
+    use api::v1::{ColumnDataType, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType};
     use common_query::OutputData;
     use common_query::native_histogram::{
-        encode_native_histogram, native_histogram_column_schema, native_histogram_value_type,
+        CounterResetHint, encode_native_histogram, native_histogram_column_schema,
+        native_histogram_value_type,
     };
-    use datafusion::arrow::array::Int64Array;
+    use common_query::request::{QueryRequest as LogicalQueryRequest, RawSeriesTag};
+    use datafusion::common::TableReference;
     use datatypes::prelude::ConcreteDataType;
+    use datatypes::series::histogram::{BucketSideView, HistogramView};
+    use datatypes::series::raw::RawSeriesOrdering;
+    use datatypes::series::samples::SampleRef;
+    use futures_util::TryStreamExt;
+    use mito2::test_util::sst_util::new_primary_key;
     use store_api::codec::PrimaryKeyEncoding;
+    use store_api::region_engine::RawLabelSource;
 
     const TABLE: &str = "native_histogram_raw_flight_flush";
     common_telemetry::init_default_ut_logging();
-    let cluster = build_cluster("test_native_histogram_rows_ingest_into_mito").await;
+    let cluster =
+        build_cluster("test_native_histogram_raw_flight_preserves_payload_across_flush").await;
     let frontend = cluster.fe_instance().clone();
     execute_sql(
         &frontend,
@@ -1500,24 +1508,9 @@ async fn test_native_histogram_rows_ingest_into_mito() {
         .map(|histogram| encode_native_histogram(histogram).unwrap().into())
         .collect::<Vec<_>>();
     let mut schema = vec![
-        ColumnSchema {
-            column_name: "host".to_string(),
-            datatype: ColumnDataType::String as i32,
-            semantic_type: SemanticType::Tag as i32,
-            ..Default::default()
-        },
-        ColumnSchema {
-            column_name: "ts".to_string(),
-            datatype: ColumnDataType::TimestampMillisecond as i32,
-            semantic_type: SemanticType::Timestamp as i32,
-            ..Default::default()
-        },
-        ColumnSchema {
-            column_name: "float_value".to_string(),
-            datatype: ColumnDataType::Float64 as i32,
-            semantic_type: SemanticType::Field as i32,
-            ..Default::default()
-        },
+        tag_column_schema("host", ColumnDataType::String),
+        time_index_column_schema("ts", ColumnDataType::TimestampMillisecond),
+        field_column_schema("float_value", ColumnDataType::Float64),
     ];
     schema.push(histogram_column);
     let rows = [1_000, 2_000, 3_000, 4_000]
@@ -1554,7 +1547,7 @@ async fn test_native_histogram_rows_ingest_into_mito() {
 
     let leaders = region_leaders(&frontend, TABLE).await;
     assert_eq!(1, leaders.len(), "fixture is required to have one region");
-    let (datanode, _) = leaders.values().next().unwrap();
+    let (datanode, address) = leaders.values().next().unwrap();
     let region_id = *leaders.keys().next().unwrap();
     let region = region_server(&cluster, *datanode)
         .mito_engine()
@@ -1563,10 +1556,10 @@ async fn test_native_histogram_rows_ingest_into_mito() {
         .unwrap();
     let metadata = region.metadata();
     let histogram_column = metadata
-        .column_metadatas
-        .iter()
-        .find(|column| column.column_schema.name == "greptime_native_histogram")
-        .expect("region metadata must contain the native histogram field");
+        .column_by_name("greptime_native_histogram")
+        .unwrap();
+    let float_column = metadata.column_by_name("float_value").unwrap();
+    let host_column = metadata.column_by_name("host").unwrap();
     assert_eq!(SemanticType::Field, histogram_column.semantic_type);
     assert_eq!(
         native_histogram_value_type(),
@@ -1581,32 +1574,233 @@ async fn test_native_histogram_rows_ingest_into_mito() {
             .collect::<Vec<_>>()
     );
     assert_eq!(
-        ConcreteDataType::float64_datatype(),
-        metadata
-            .column_by_name("float_value")
-            .unwrap()
-            .column_schema
-            .data_type
+        &ConcreteDataType::float64_datatype(),
+        &float_column.column_schema.data_type
     );
-    assert!(region.find_committed_sequence() > 0);
+    let histogram_index = metadata
+        .column_index_by_name("greptime_native_histogram")
+        .unwrap();
+    let float_index = metadata.column_index_by_name("float_value").unwrap();
+    let projection = vec![histogram_index, float_index];
+    let binding = RawSeriesRequest {
+        version: 1,
+        physical_metadata: metadata.as_ref().clone(),
+        metric_name: TABLE.to_string(),
+        logical_tags: vec![RawSeriesTag {
+            column_id: host_column.column_id,
+            name: "host".to_string(),
+        }],
+        field_ids: vec![histogram_column.column_id, float_column.column_id],
+    };
+    let committed = region.find_committed_sequence();
+    assert!(committed > 0);
     assert!(region.manifest_sst_entries().await.is_empty());
 
-    let count = output_batches(
-        run_sql(
-            &frontend,
-            &format!("SELECT COUNT(*) FROM {TABLE}"),
-            query_ctx(),
-        )
-        .await,
+    let ctx = query_ctx();
+    ctx.set_snapshot(region_id, committed);
+    let base = plan_sql(&frontend, &format!("SELECT * FROM {TABLE}"), &ctx).await;
+    let source = table_source(&base).expect("ordinary plan must contain its table source");
+    let plan = LogicalPlanBuilder::scan_with_filters(
+        TableReference::bare(TABLE),
+        source,
+        Some(projection),
+        vec![],
     )
-    .await;
-    let count = count
-        .iter()
-        .next()
-        .expect("COUNT query must return a batch")
-        .column(0)
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .expect("COUNT(*) must return Int64");
-    assert_eq!(4, count.value(0));
+    .unwrap()
+    .build()
+    .unwrap();
+    let expected = [
+        HistogramView {
+            schema: 1,
+            zero_threshold: 0.001,
+            sum: 10.0,
+            count: 8.0,
+            zero_count: 1.0,
+            reset_hint: CounterResetHint::NotCounterReset,
+            start_timestamp: Some(500),
+            custom_values: &[],
+            positive: BucketSideView {
+                span_offsets: &[0],
+                span_lengths: &[3],
+                buckets: &[1.0, 3.0, 2.0],
+            },
+            negative: BucketSideView {
+                span_offsets: &[-2],
+                span_lengths: &[1],
+                buckets: &[1.0],
+            },
+        },
+        HistogramView {
+            schema: 2,
+            zero_threshold: 0.002,
+            sum: 20.0,
+            count: 6.5,
+            zero_count: 0.5,
+            reset_hint: CounterResetHint::Gauge,
+            start_timestamp: Some(750),
+            custom_values: &[],
+            positive: BucketSideView {
+                span_offsets: &[3],
+                span_lengths: &[2],
+                buckets: &[2.0, 3.5],
+            },
+            negative: BucketSideView {
+                span_offsets: &[-1],
+                span_lengths: &[1],
+                buckets: &[0.5],
+            },
+        },
+        HistogramView {
+            schema: -53,
+            zero_threshold: 0.0,
+            sum: -0.0,
+            count: 3.5,
+            zero_count: 0.0,
+            reset_hint: CounterResetHint::Unrecognized(77),
+            start_timestamp: None,
+            custom_values: &[1.5, 2.5],
+            positive: BucketSideView {
+                span_offsets: &[0],
+                span_lengths: &[3],
+                buckets: &[0.5, 1.25, 1.75],
+            },
+            negative: BucketSideView {
+                span_offsets: &[],
+                span_lengths: &[],
+                buckets: &[],
+            },
+        },
+    ];
+    let expected_key = new_primary_key(&["alpha"]);
+    let client = Client::with_query_and_control_managers(
+        ChannelManager::new(),
+        ChannelManager::new(),
+        [address.as_str()],
+    );
+    let requester = RegionRequester::new(client, false, false);
+    for after_flush in [false, true] {
+        if after_flush {
+            execute_sql(&frontend, &format!("ADMIN FLUSH_TABLE('{TABLE}')")).await;
+            assert!(!region.manifest_sst_entries().await.is_empty());
+            assert!(region.flushed_sequence() >= committed);
+        }
+        let baseline = rpc_requests(&cluster, *datanode);
+        let stream = requester
+            .handle_raw_series_query(
+                LogicalQueryRequest {
+                    header: Some(region_request_header(&ctx)),
+                    region_id: RegionId::from_u64(region_id),
+                    plan: plan.clone(),
+                },
+                binding.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            vec!["greptime_native_histogram", "float_value"],
+            stream
+                .schema()
+                .fields
+                .iter()
+                .map(|field| field.name.as_ref())
+                .collect::<Vec<_>>()
+        );
+        assert!(stream.schema().eval_grid.is_none());
+        match stream.label_source() {
+            RawLabelSource::PrimaryKey {
+                metric_name,
+                physical_metadata,
+                logical_tags,
+            } => {
+                assert_eq!(TABLE, metric_name.as_ref());
+                assert_eq!(metadata.as_ref(), physical_metadata.as_ref());
+                assert_eq!(1, logical_tags.len());
+                assert_eq!(host_column.column_id, logical_tags[0].column_id);
+                assert_eq!("host", logical_tags[0].name.as_ref());
+            }
+            RawLabelSource::Explicit => panic!("expected key-backed source"),
+        }
+        assert_eq!(RawSeriesOrdering::Contiguous, stream.ordering());
+        let chunks = stream.try_collect::<Vec<_>>().await.unwrap();
+        let mut timestamps = Vec::new();
+        for (chunk_index, chunk) in chunks.iter().enumerate() {
+            assert!(chunk.metric.is_none());
+            assert_eq!(expected_key, chunk.read_key.as_slice());
+            assert_eq!(2, chunk.fields.len());
+            assert!(!chunk.time.is_empty());
+            assert_eq!(chunk.time.len(), chunk.fields.get(0).unwrap().len());
+            assert_eq!(chunk.time.len(), chunk.fields.get(1).unwrap().len());
+            assert_eq!(chunk_index + 1 == chunks.len(), chunk.is_last);
+            for index in 0..chunk.time.len() {
+                let timestamp = chunk.time.timestamp(index).unwrap();
+                timestamps.push(timestamp);
+                let histogram = chunk.fields.get(0).unwrap().sample(index);
+                let float_value = chunk.fields.get(1).unwrap().sample(index);
+                match timestamp {
+                    1_000 => {
+                        let SampleRef::Histogram(actual) = histogram else {
+                            panic!("expected histogram at {timestamp}")
+                        };
+                        assert_histogram_view(actual, expected[0]);
+                        assert!(matches!(float_value, SampleRef::Missing));
+                    }
+                    2_000 => {
+                        let SampleRef::Histogram(actual) = histogram else {
+                            panic!("expected histogram at {timestamp}")
+                        };
+                        assert_histogram_view(actual, expected[1]);
+                        assert!(
+                            matches!(float_value, SampleRef::Float(value) if value.to_bits() == (-0.0_f64).to_bits())
+                        );
+                    }
+                    3_000 => {
+                        let SampleRef::Histogram(actual) = histogram else {
+                            panic!("expected histogram at {timestamp}")
+                        };
+                        assert_histogram_view(actual, expected[2]);
+                        assert!(
+                            matches!(float_value, SampleRef::Float(value) if value.to_bits() == 4.75_f64.to_bits())
+                        );
+                    }
+                    4_000 => {
+                        assert!(matches!(histogram, SampleRef::Missing));
+                        assert!(
+                            matches!(float_value, SampleRef::Float(value) if value.to_bits() == 7.25_f64.to_bits())
+                        );
+                    }
+                    timestamp => panic!("unexpected returned timestamp {timestamp}"),
+                }
+            }
+        }
+        assert_eq!(vec![1_000, 2_000, 3_000, 4_000], timestamps);
+        assert_eq!(baseline + 1, rpc_requests(&cluster, *datanode));
+    }
+
+    fn assert_histogram_view(actual: HistogramView<'_>, expected: HistogramView<'_>) {
+        assert_eq!(expected.schema, actual.schema);
+        assert_eq!(expected.reset_hint, actual.reset_hint);
+        assert_eq!(expected.start_timestamp, actual.start_timestamp);
+        assert_eq!(
+            expected.zero_threshold.to_bits(),
+            actual.zero_threshold.to_bits()
+        );
+        assert_eq!(expected.sum.to_bits(), actual.sum.to_bits());
+        assert_eq!(expected.count.to_bits(), actual.count.to_bits());
+        assert_eq!(expected.zero_count.to_bits(), actual.zero_count.to_bits());
+        let bits = |values: &[f64]| {
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bits(expected.custom_values), bits(actual.custom_values));
+        for (expected, actual) in [
+            (expected.positive, actual.positive),
+            (expected.negative, actual.negative),
+        ] {
+            assert_eq!(expected.span_offsets, actual.span_offsets);
+            assert_eq!(expected.span_lengths, actual.span_lengths);
+            assert_eq!(bits(expected.buckets), bits(actual.buckets));
+        }
+    }
 }
