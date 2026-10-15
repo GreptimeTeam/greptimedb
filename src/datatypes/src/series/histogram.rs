@@ -489,5 +489,4 @@ fn append32(b: &mut ListBuilder<Int32Builder>, v: &[i32]) {
 }
 
 #[cfg(test)]
-#[path = "histogram/tests.rs"]
 mod tests;
