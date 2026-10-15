@@ -23,6 +23,7 @@ use crate::series::samples::{SeriesFields, SeriesSchema};
 use crate::series::{MetricName, invalid_series};
 
 /// Explicit source timestamps in milliseconds for a raw series chunk.
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub enum RawTimeAxis {
     /// Source timestamps in strictly increasing order.
@@ -32,10 +33,29 @@ pub enum RawTimeAxis {
 impl RawTimeAxis {
     /// Validates and wraps strictly increasing timestamps; an empty axis is valid on its own.
     pub fn try_new(timestamps: ScalarBuffer<i64>) -> Result<Self> {
-        if timestamps.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return invalid_series("raw timestamps must be strictly increasing");
+        let axis = Self::Explicit(timestamps);
+        axis.try_len()?;
+        Ok(axis)
+    }
+
+    /// Returns the explicit timestamp buffer, if this axis uses explicit timestamps.
+    ///
+    /// Future axis variants may not have an explicit buffer.
+    pub fn as_explicit(&self) -> Option<&ScalarBuffer<i64>> {
+        match self {
+            Self::Explicit(values) => Some(values),
         }
-        Ok(Self::Explicit(timestamps))
+    }
+
+    fn try_len(&self) -> Result<usize> {
+        match self {
+            Self::Explicit(values) => {
+                if values.windows(2).any(|pair| pair[0] >= pair[1]) {
+                    return invalid_series("raw timestamps must be strictly increasing");
+                }
+                Ok(values.len())
+            }
+        }
     }
 
     /// Returns the number of timestamps.
@@ -125,10 +145,7 @@ impl RawSeriesChunk {
         if time.is_empty() {
             return invalid_series("raw series chunks must not be empty");
         }
-        let RawTimeAxis::Explicit(timestamps) = &time;
-        if timestamps.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return invalid_series("raw series timestamps must be strictly increasing");
-        }
+        time.try_len()?;
         Ok(Self {
             read_key,
             metric,
