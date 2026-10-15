@@ -21,12 +21,13 @@
 
 mod encoding;
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use datafusion::arrow::array::{
     Array, ArrayRef, Float64Array, Int32Array, Int64Array, ListArray, PrimitiveArray, StructArray,
-    TimestampMillisecondArray,
+    TimestampMillisecondArray, UInt32Array,
 };
 use datafusion::arrow::buffer::NullBuffer;
 use datafusion::arrow::datatypes::{
@@ -36,6 +37,7 @@ use datafusion::arrow::datatypes::{
 use datafusion_common::{DataFusionError, Result as DfResult};
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::series::histogram::{BucketSideView, HistogramBatchBuilder, HistogramView};
+use datatypes::series::samples::Samples;
 use datatypes::types::{StructField, StructType};
 pub use encoding::{NativeHistogramError, encode_native_histogram, native_histogram_column_schema};
 use once_cell::sync::Lazy;
@@ -1451,6 +1453,29 @@ where
     Ok((!values.is_null(row)).then(|| values.value(row)))
 }
 
+fn borrowed_list<'a, T>(
+    list: &'a ListArray,
+    values: &'a PrimitiveArray<T>,
+    row: usize,
+    name: &str,
+) -> DfResult<&'a [T::Native]>
+where
+    T: ArrowPrimitiveType,
+{
+    if list.is_null(row) {
+        return Ok(&[]);
+    }
+    let offsets = list.value_offsets();
+    let start = offsets[row] as usize;
+    let end = offsets[row + 1] as usize;
+    if (start..end).any(|index| values.is_null(index)) {
+        return Err(DataFusionError::Execution(format!(
+            "native histogram list field {name} contains null"
+        )));
+    }
+    Ok(&values.values()[start..end])
+}
+
 fn list_values<T>(array: &StructArray, name: &str, row: usize) -> DfResult<Vec<T::Native>>
 where
     T: ArrowPrimitiveType,
@@ -1515,6 +1540,178 @@ fn check_span_bucket_count(spans: &[Span], buckets: usize, name: &str) -> DfResu
         )));
     }
     Ok(())
+}
+
+/// Converts persisted native histograms directly into canonical columnar samples.
+///
+/// Bucket and custom-bound values are borrowed from Arrow until copied by the batch builder.
+pub fn histogram_samples_from_arrow(array: &StructArray) -> DfResult<Samples> {
+    let schema = primitive_child::<Int32Type>(array, SCHEMA_FIELD)?;
+    let threshold = primitive_child::<Float64Type>(array, ZERO_THRESHOLD_FIELD)?;
+    let sum = primitive_child::<Float64Type>(array, SUM_FIELD)?;
+    let hint = primitive_child::<Int32Type>(array, RESET_HINT_FIELD)?;
+    let start = primitive_child::<TimestampMillisecondType>(array, START_TIMESTAMP_FIELD)?;
+    let custom_list = list_child(array, CUSTOM_VALUES_FIELD)?;
+    let custom_values = list_primitive::<Float64Type>(custom_list, CUSTOM_VALUES_FIELD)?;
+    let positive_offsets_list = list_child(array, POSITIVE_SPAN_OFFSETS_FIELD)?;
+    let positive_offsets =
+        list_primitive::<Int32Type>(positive_offsets_list, POSITIVE_SPAN_OFFSETS_FIELD)?;
+    let positive_lengths_list = list_child(array, POSITIVE_SPAN_LENGTHS_FIELD)?;
+    let positive_lengths =
+        list_primitive::<Int32Type>(positive_lengths_list, POSITIVE_SPAN_LENGTHS_FIELD)?;
+    let negative_offsets_list = list_child(array, NEGATIVE_SPAN_OFFSETS_FIELD)?;
+    let negative_offsets =
+        list_primitive::<Int32Type>(negative_offsets_list, NEGATIVE_SPAN_OFFSETS_FIELD)?;
+    let negative_lengths_list = list_child(array, NEGATIVE_SPAN_LENGTHS_FIELD)?;
+    let negative_lengths =
+        list_primitive::<Int32Type>(negative_lengths_list, NEGATIVE_SPAN_LENGTHS_FIELD)?;
+    let count_f = primitive_child::<Float64Type>(array, COUNT_F64_FIELD)?;
+    let zero_f = primitive_child::<Float64Type>(array, ZERO_COUNT_F64_FIELD)?;
+    let positive_f_list = list_child(array, POSITIVE_BUCKETS_F64_FIELD)?;
+    let positive_f = list_primitive::<Float64Type>(positive_f_list, POSITIVE_BUCKETS_F64_FIELD)?;
+    let negative_f_list = list_child(array, NEGATIVE_BUCKETS_F64_FIELD)?;
+    let negative_f = list_primitive::<Float64Type>(negative_f_list, NEGATIVE_BUCKETS_F64_FIELD)?;
+    let count_i = primitive_child::<Int64Type>(array, COUNT_I64_FIELD)?;
+    let zero_i = primitive_child::<Int64Type>(array, ZERO_COUNT_I64_FIELD)?;
+    let positive_i_list = list_child(array, POSITIVE_BUCKETS_I64_FIELD)?;
+    let positive_i = list_primitive::<Int64Type>(positive_i_list, POSITIVE_BUCKETS_I64_FIELD)?;
+    let negative_i_list = list_child(array, NEGATIVE_BUCKETS_I64_FIELD)?;
+    let negative_i = list_primitive::<Int64Type>(negative_i_list, NEGATIVE_BUCKETS_I64_FIELD)?;
+
+    let mut builder = HistogramBatchBuilder::new();
+    let mut indices = Vec::with_capacity(array.len());
+    for row in 0..array.len() {
+        if array.is_null(row) {
+            indices.push(None);
+            continue;
+        }
+        let required = |values: &dyn Array, name: &str| -> DfResult<()> {
+            if values.is_null(row) {
+                Err(DataFusionError::Execution(format!(
+                    "native histogram field {name} is null"
+                )))
+            } else {
+                Ok(())
+            }
+        };
+        required(schema, SCHEMA_FIELD)?;
+        required(threshold, ZERO_THRESHOLD_FIELD)?;
+        required(sum, SUM_FIELD)?;
+        required(hint, RESET_HINT_FIELD)?;
+        let positive_offsets = borrowed_list(
+            positive_offsets_list,
+            positive_offsets,
+            row,
+            POSITIVE_SPAN_OFFSETS_FIELD,
+        )?;
+        let positive_lengths = borrowed_list(
+            positive_lengths_list,
+            positive_lengths,
+            row,
+            POSITIVE_SPAN_LENGTHS_FIELD,
+        )?;
+        let negative_offsets = borrowed_list(
+            negative_offsets_list,
+            negative_offsets,
+            row,
+            NEGATIVE_SPAN_OFFSETS_FIELD,
+        )?;
+        let negative_lengths = borrowed_list(
+            negative_lengths_list,
+            negative_lengths,
+            row,
+            NEGATIVE_SPAN_LENGTHS_FIELD,
+        )?;
+        let custom = borrowed_list(custom_list, custom_values, row, CUSTOM_VALUES_FIELD)?;
+        let (count, zero_count, positive_buckets, negative_buckets) = if !count_f.is_null(row) {
+            (
+                count_f.value(row),
+                if zero_f.is_null(row) {
+                    0.0
+                } else {
+                    zero_f.value(row)
+                },
+                Cow::Borrowed(borrowed_list(
+                    positive_f_list,
+                    positive_f,
+                    row,
+                    POSITIVE_BUCKETS_F64_FIELD,
+                )?),
+                Cow::Borrowed(borrowed_list(
+                    negative_f_list,
+                    negative_f,
+                    row,
+                    NEGATIVE_BUCKETS_F64_FIELD,
+                )?),
+            )
+        } else {
+            required(count_i, COUNT_I64_FIELD)?;
+            let p: Vec<f64> =
+                borrowed_list(positive_i_list, positive_i, row, POSITIVE_BUCKETS_I64_FIELD)?
+                    .iter()
+                    .map(|v| *v as f64)
+                    .collect();
+            let n: Vec<f64> =
+                borrowed_list(negative_i_list, negative_i, row, NEGATIVE_BUCKETS_I64_FIELD)?
+                    .iter()
+                    .map(|v| *v as f64)
+                    .collect();
+            (
+                count_i.value(row) as f64,
+                if zero_i.is_null(row) {
+                    0.0
+                } else {
+                    zero_i.value(row) as f64
+                },
+                Cow::Owned(p),
+                Cow::Owned(n),
+            )
+        };
+        let index = builder
+            .push(HistogramView {
+                schema: schema.value(row),
+                zero_threshold: threshold.value(row),
+                sum: sum.value(row),
+                count,
+                zero_count,
+                reset_hint: hint.value(row).into(),
+                start_timestamp: (!start.is_null(row)).then(|| start.value(row)),
+                custom_values: custom,
+                positive: BucketSideView {
+                    span_offsets: positive_offsets,
+                    span_lengths: positive_lengths,
+                    buckets: positive_buckets.as_ref(),
+                },
+                negative: BucketSideView {
+                    span_offsets: negative_offsets,
+                    span_lengths: negative_lengths,
+                    buckets: negative_buckets.as_ref(),
+                },
+            })
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        indices.push(Some(index));
+    }
+    let batch = builder
+        .finish()
+        .map_err(|e| DataFusionError::External(Box::new(e)))?;
+    Samples::try_from_histogram(UInt32Array::from(indices), batch)
+        .map_err(|e| DataFusionError::External(Box::new(e)))
+}
+
+fn list_primitive<'a, T>(list: &'a ListArray, name: &str) -> DfResult<&'a PrimitiveArray<T>>
+where
+    T: ArrowPrimitiveType,
+{
+    let values = list.values();
+    values
+        .as_any()
+        .downcast_ref::<PrimitiveArray<T>>()
+        .ok_or_else(|| {
+            DataFusionError::Execution(format!(
+                "native histogram list field {name} has invalid value type {}",
+                values.data_type()
+            ))
+        })
 }
 
 /// Decodes one native histogram row into the query-time [`NativeHistogram`] model.
@@ -1776,6 +1973,54 @@ pub fn build_histogram_array(values: &[Option<NativeHistogram>]) -> ArrayRef {
 mod tests {
     use super::*;
     use datatypes::series::histogram::HistogramBatch;
+
+    fn assert_histogram_view_eq(view: &HistogramView<'_>, expected: &NativeHistogram) {
+        assert_eq!(view.schema, expected.schema);
+        assert_eq!(
+            view.zero_threshold.to_bits(),
+            expected.zero_threshold.to_bits()
+        );
+        assert_eq!(view.sum.to_bits(), expected.sum.to_bits());
+        assert_eq!(view.count.to_bits(), expected.count.to_bits());
+        assert_eq!(view.zero_count.to_bits(), expected.zero_count.to_bits());
+        assert_eq!(view.reset_hint, expected.reset_hint);
+        assert_eq!(view.start_timestamp, expected.start_timestamp);
+        assert_eq!(view.custom_values.len(), expected.custom_values.len());
+        for (actual, expected) in view.custom_values.iter().zip(&expected.custom_values) {
+            assert_eq!(actual.to_bits(), expected.to_bits());
+        }
+        for (actual, expected_spans, expected_buckets) in [
+            (
+                &view.positive,
+                &expected.positive_spans,
+                &expected.positive_buckets,
+            ),
+            (
+                &view.negative,
+                &expected.negative_spans,
+                &expected.negative_buckets,
+            ),
+        ] {
+            assert_eq!(
+                actual.span_offsets,
+                expected_spans
+                    .iter()
+                    .map(|span| span.offset)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                actual.span_lengths,
+                expected_spans
+                    .iter()
+                    .map(|span| span.length)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(actual.buckets.len(), expected_buckets.len());
+            for (actual, expected) in actual.buckets.iter().zip(expected_buckets) {
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+        }
+    }
 
     fn histogram(positive_spans: Vec<Span>, positive_buckets: Vec<f64>) -> NativeHistogram {
         let count = positive_buckets.iter().sum();
@@ -2059,6 +2304,216 @@ mod tests {
             spans_from_indices_counts(vec![(i32::MIN, 1.0), (i32::MAX, 2.0)]),
             None
         );
+    }
+
+    #[test]
+    fn direct_arrow_samples_preserve_payload_and_null_rows() {
+        let mut expected = histogram(
+            vec![Span {
+                offset: 0,
+                length: 2,
+            }],
+            vec![1.0, 3.0],
+        );
+        expected.negative_spans = vec![Span {
+            offset: -2,
+            length: 1,
+        }];
+        expected.negative_buckets = vec![7.0];
+        expected.schema = 3;
+        expected.zero_threshold = f64::from_bits(0x3fb9_9999_9999_999a);
+        expected.sum = f64::from_bits(0x7ff8_0000_0000_0042);
+        expected.zero_count = -0.0;
+        expected.custom_values = vec![f64::from_bits(0x3ff0_0000_0000_0001)];
+        expected.positive_spans = vec![
+            Span {
+                offset: 2,
+                length: 1,
+            },
+            Span {
+                offset: 1,
+                length: 1,
+            },
+        ];
+        expected.positive_buckets = vec![1.0, 3.0];
+        expected.reset_hint = CounterResetHint::Unrecognized(42);
+        expected.start_timestamp = Some(1234);
+        let array = build_histogram_array(&[Some(expected.clone()), None]);
+        let array = array.as_any().downcast_ref::<StructArray>().unwrap();
+        let samples = histogram_samples_from_arrow(array).unwrap();
+        assert_eq!(samples.len(), 2);
+        let datatypes::series::samples::SampleRef::Histogram(view) = samples.sample(0) else {
+            panic!("expected histogram sample");
+        };
+        assert_histogram_view_eq(&view, &expected);
+        assert!(matches!(
+            samples.sample(1),
+            datatypes::series::samples::SampleRef::Missing
+        ));
+    }
+
+    #[test]
+    fn direct_arrow_conversion_handles_sliced_parent_and_owns_result() {
+        let mut first = histogram(
+            vec![Span {
+                offset: 3,
+                length: 2,
+            }],
+            vec![8.0, 9.0],
+        );
+        first.custom_values = vec![4.0];
+        first.negative_spans = vec![Span {
+            offset: 1,
+            length: 1,
+        }];
+        first.negative_buckets = vec![6.0];
+        let mut second = histogram(
+            vec![Span {
+                offset: -1,
+                length: 1,
+            }],
+            vec![2.0],
+        );
+        second.negative_spans = vec![Span {
+            offset: 2,
+            length: 1,
+        }];
+        second.negative_buckets = vec![3.0];
+        second.custom_values = vec![0.5];
+        second.start_timestamp = Some(77);
+        second.reset_hint = CounterResetHint::Unrecognized(99);
+        second.zero_count = -0.0;
+        let owner = build_histogram_array(&[Some(first), Some(second.clone())]);
+        let sliced = owner.slice(1, 1);
+        let samples = {
+            let struct_array = sliced.as_any().downcast_ref::<StructArray>().unwrap();
+            histogram_samples_from_arrow(struct_array).unwrap()
+        };
+        drop(sliced);
+        drop(owner);
+        let datatypes::series::samples::SampleRef::Histogram(view) = samples.sample(0) else {
+            panic!("expected histogram sample");
+        };
+        assert_histogram_view_eq(&view, &second);
+    }
+
+    #[test]
+    fn direct_arrow_entrypoint_preserves_empty_and_all_null_rows() {
+        for (values, expected_len) in [(&[][..], 0), (&[None, None][..], 2)] {
+            let array = build_histogram_array(values);
+            let array = array.as_any().downcast_ref::<StructArray>().unwrap();
+            let samples = histogram_samples_from_arrow(array).unwrap();
+            assert_eq!(samples.len(), expected_len);
+            assert!((0..expected_len).all(|index| matches!(
+                samples.sample(index),
+                datatypes::series::samples::SampleRef::Missing
+            )));
+        }
+    }
+
+    #[test]
+    fn direct_arrow_integer_buckets_remain_absolute_and_float_family_wins() {
+        let value = histogram(
+            vec![Span {
+                offset: 0,
+                length: 2,
+            }],
+            vec![1.0, 3.0],
+        );
+        let array = build_histogram_array(&[Some(value)]);
+        let source = array.as_any().downcast_ref::<StructArray>().unwrap();
+        let mut columns = source.columns().to_vec();
+        let index = |name: &str| {
+            source
+                .fields()
+                .iter()
+                .position(|f| f.name() == name)
+                .unwrap()
+        };
+        columns[index(COUNT_F64_FIELD)] = Arc::new(Float64Array::from(vec![None]));
+        columns[index(COUNT_I64_FIELD)] = Arc::new(Int64Array::from(vec![Some(4)]));
+        columns[index(POSITIVE_BUCKETS_I64_FIELD)] =
+            Arc::new(ListArray::from_iter_primitive::<Int64Type, _, _>([Some(
+                vec![Some(1), Some(3)],
+            )]));
+        let integer = StructArray::new(source.fields().clone(), columns, None);
+        let samples = histogram_samples_from_arrow(&integer).unwrap();
+        assert!(
+            matches!(samples.sample(0), datatypes::series::samples::SampleRef::Histogram(view)
+            if view.count == 4.0 && view.positive.buckets == [1.0, 3.0])
+        );
+
+        let mut columns = integer.columns().to_vec();
+        columns[index(ZERO_COUNT_I64_FIELD)] = Arc::new(Int64Array::from(vec![None]));
+        columns[index(ZERO_COUNT_F64_FIELD)] = Arc::new(Float64Array::from(vec![None]));
+        columns[index(COUNT_F64_FIELD)] = Arc::new(Float64Array::from(vec![None]));
+        let integer_null_zero = StructArray::new(integer.fields().clone(), columns, None);
+        let samples = histogram_samples_from_arrow(&integer_null_zero).unwrap();
+        assert!(
+            matches!(samples.sample(0), datatypes::series::samples::SampleRef::Histogram(view)
+            if view.count == 4.0 && view.zero_count == 0.0 && view.positive.buckets == [1.0, 3.0])
+        );
+
+        let mut columns = integer.columns().to_vec();
+        columns[index(ZERO_COUNT_F64_FIELD)] = Arc::new(Float64Array::from(vec![None]));
+        columns[index(COUNT_F64_FIELD)] = Arc::new(Float64Array::from(vec![Some(5.0)]));
+        columns[index(POSITIVE_BUCKETS_F64_FIELD)] =
+            Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>([Some(
+                vec![Some(2.0), Some(4.0)],
+            )]));
+        let both_families = StructArray::new(integer.fields().clone(), columns, None);
+        let samples = histogram_samples_from_arrow(&both_families).unwrap();
+        assert!(
+            matches!(samples.sample(0), datatypes::series::samples::SampleRef::Histogram(view)
+            if view.count == 5.0 && view.zero_count == 0.0 && view.positive.buckets == [2.0, 4.0])
+        );
+    }
+
+    #[test]
+    fn direct_arrow_conversion_rejects_null_required_fields_and_list_items() {
+        let value = histogram(
+            vec![Span {
+                offset: 0,
+                length: 1,
+            }],
+            vec![1.0],
+        );
+        let array = build_histogram_array(&[Some(value)]);
+        let source = array.as_any().downcast_ref::<StructArray>().unwrap();
+        let mut columns = source.columns().to_vec();
+        let schema_idx = source
+            .fields()
+            .iter()
+            .position(|f| f.name() == SCHEMA_FIELD)
+            .unwrap();
+        columns[schema_idx] = Arc::new(Int32Array::from(vec![None]));
+        let malformed_scalar = StructArray::new(source.fields().clone(), columns, None);
+        assert!(histogram_samples_from_arrow(&malformed_scalar).is_err());
+
+        let mut columns = source.columns().to_vec();
+        let buckets_idx = source
+            .fields()
+            .iter()
+            .position(|f| f.name() == POSITIVE_BUCKETS_F64_FIELD)
+            .unwrap();
+        columns[buckets_idx] =
+            Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>([Some(
+                vec![None],
+            )]));
+        let malformed_item = StructArray::new(source.fields().clone(), columns, None);
+        assert!(histogram_samples_from_arrow(&malformed_item).is_err());
+
+        let mut columns = source.columns().to_vec();
+        let lengths_idx = source
+            .fields()
+            .iter()
+            .position(|f| f.name() == POSITIVE_SPAN_LENGTHS_FIELD)
+            .unwrap();
+        columns[lengths_idx] = Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>([Some(
+            vec![Some(2)],
+        )]));
+        let malformed_spans = StructArray::new(source.fields().clone(), columns, None);
+        assert!(histogram_samples_from_arrow(&malformed_spans).is_err());
     }
 
     #[test]
