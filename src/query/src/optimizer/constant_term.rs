@@ -18,6 +18,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use arrow::array::BooleanArray;
+use common_base::term_token::extract_term_probes;
 use common_function::scalars::matches_term::MatchesTermFinder;
 use datafusion::config::ConfigOptions;
 use datafusion::error::Result as DfResult;
@@ -179,12 +180,8 @@ impl PhysicalOptimizerRule for MatchesConstantTermOptimizer {
                             {
                                 let finder = MatchesTermFinder::new(term);
 
-                                // For debugging purpose. Not really precise but enough for most cases.
-                                let probes = term
-                                    .split(|c: char| !c.is_alphanumeric() && c != '_')
-                                    .filter(|s| !s.is_empty())
-                                    .map(|s| s.to_string())
-                                    .collect();
+                                // Shown in plans to explain fulltext bloom pruning.
+                                let probes = extract_term_probes(term);
 
                                 let expr = PreCompiledMatchesTermExpr {
                                     text: args[0].clone(),
@@ -201,10 +198,14 @@ impl PhysicalOptimizerRule for MatchesConstantTermOptimizer {
                     })?;
 
                     if new_pred.transformed {
-                        let exec = FilterExecBuilder::new(new_pred.data, filter.input().clone())
-                            .with_default_selectivity(filter.default_selectivity())
-                            .apply_projection_by_ref(filter.projection().as_ref())
-                            .and_then(|x| x.build())?;
+                        // `FilterExecBuilder::from(&FilterExec)` already carries over the
+                        // input, projection, default selectivity, batch size and fetch, so
+                        // only the predicate has to be replaced. Re-applying the projection
+                        // is not only pointless but wrong: `apply_projection` composes with
+                        // the projection copied from the builder.
+                        let exec = FilterExecBuilder::from(filter)
+                            .with_predicate(new_pred.data)
+                            .build()?;
                         return Ok(Transformed::yes(Arc::new(exec) as _));
                     }
                 }
@@ -491,7 +492,7 @@ mod tests {
         let plan_str = get_plan_string(&physical_plan).join("\n");
         assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"foo\", probes: [\"foo\"]"));
         assert!(plan_str.contains(
-            "MatchesConstTerm(text@0, term: \"hello wo_rld\", probes: [\"hello\", \"wo_rld\"]"
+            "MatchesConstTerm(text@0, term: \"hello wo_rld\", probes: [\"hello\", \"wo\", \"rld\"]"
         ));
         assert!(plan_str.contains("MatchesConstTerm(text@0, term: \"world\", probes: [\"world\"]"));
         assert!(

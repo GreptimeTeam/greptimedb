@@ -1262,13 +1262,13 @@ async fn test_all_region_infos() {
 async fn test_all_index_metas_list_all_types() {
     test_all_index_metas_list_all_types_with_format(false, r#"
 PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6000), index_type: "bloom_filter", target_type: "column", target_key: "1", target_json: "{\"column\":1}", blob_size: 751, meta_json: Some("{\"bloom\":{\"bloom_filter_size\":640,\"row_count\":20,\"rows_per_segment\":2,\"segment_count\":10}}"), node_id: None }
-PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6000), index_type: "fulltext_bloom", target_type: "column", target_key: "4", target_json: "{\"column\":4}", blob_size: 89, meta_json: Some("{\"bloom\":{\"bloom_filter_size\":64,\"row_count\":20,\"rows_per_segment\":4,\"segment_count\":5},\"fulltext\":{\"analyzer\":\"English\",\"case_sensitive\":false}}"), node_id: None }
+PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6000), index_type: "fulltext_bloom", target_type: "column", target_key: "4", target_json: "{\"column\":4}", blob_size: 89, meta_json: Some("{\"bloom\":{\"bloom_filter_size\":64,\"row_count\":20,\"rows_per_segment\":4,\"segment_count\":5},\"fulltext\":{\"analyzer\":\"English\",\"bloom_version\":2,\"case_sensitive\":false}}"), node_id: None }
 PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6000), index_type: "fulltext_tantivy", target_type: "column", target_key: "5", target_json: "{\"column\":5}", blob_size: 1000, meta_json: Some("{\"fulltext\":{\"analyzer\":\"Chinese\",\"case_sensitive\":true}}"), node_id: None }
 PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6000), index_type: "inverted", target_type: "column", target_key: "1", target_json: "{\"column\":1}", blob_size: 518, meta_json: Some("{\"inverted\":{\"base_offset\":0,\"bitmap_type\":\"Roaring\",\"fst_size\":150,\"inverted_index_size\":518,\"null_bitmap_size\":8,\"relative_fst_offset\":368,\"relative_null_bitmap_offset\":0,\"segment_row_count\":1024,\"total_row_count\":20}}"), node_id: None }
 PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6000), index_type: "inverted", target_type: "column", target_key: "2", target_json: "{\"column\":2}", blob_size: 515, meta_json: Some("{\"inverted\":{\"base_offset\":0,\"bitmap_type\":\"Roaring\",\"fst_size\":147,\"inverted_index_size\":515,\"null_bitmap_size\":8,\"relative_fst_offset\":368,\"relative_null_bitmap_offset\":0,\"segment_row_count\":1024,\"total_row_count\":20}}"), node_id: None }"#).await;
     test_all_index_metas_list_all_types_with_format(true, r#"
 PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6000), index_type: "bloom_filter", target_type: "column", target_key: "1", target_json: "{\"column\":1}", blob_size: 751, meta_json: Some("{\"bloom\":{\"bloom_filter_size\":640,\"row_count\":20,\"rows_per_segment\":2,\"segment_count\":10}}"), node_id: None }
-PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6000), index_type: "fulltext_bloom", target_type: "column", target_key: "4", target_json: "{\"column\":4}", blob_size: 89, meta_json: Some("{\"bloom\":{\"bloom_filter_size\":64,\"row_count\":20,\"rows_per_segment\":4,\"segment_count\":5},\"fulltext\":{\"analyzer\":\"English\",\"case_sensitive\":false}}"), node_id: None }
+PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6000), index_type: "fulltext_bloom", target_type: "column", target_key: "4", target_json: "{\"column\":4}", blob_size: 89, meta_json: Some("{\"bloom\":{\"bloom_filter_size\":64,\"row_count\":20,\"rows_per_segment\":4,\"segment_count\":5},\"fulltext\":{\"analyzer\":\"English\",\"bloom_version\":2,\"case_sensitive\":false}}"), node_id: None }
 PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6000), index_type: "fulltext_tantivy", target_type: "column", target_key: "5", target_json: "{\"column\":5}", blob_size: 1000, meta_json: Some("{\"fulltext\":{\"analyzer\":\"Chinese\",\"case_sensitive\":true}}"), node_id: None }
 PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6000), index_type: "inverted", target_type: "column", target_key: "1", target_json: "{\"column\":1}", blob_size: 518, meta_json: Some("{\"inverted\":{\"base_offset\":0,\"bitmap_type\":\"Roaring\",\"fst_size\":150,\"inverted_index_size\":518,\"null_bitmap_size\":8,\"relative_fst_offset\":368,\"relative_null_bitmap_offset\":0,\"segment_row_count\":1024,\"total_row_count\":20}}"), node_id: None }
 PuffinIndexMetaEntry { table_dir: "test/", index_file_path: "test/11_0000000001/index/<file_id>.puffin", region_id: 47244640257(11, 1), table_id: 11, region_number: 1, region_group: 0, region_sequence: 1, file_id: "<file_id>", index_file_size: Some(6000), index_type: "inverted", target_type: "column", target_key: "2", target_json: "{\"column\":2}", blob_size: 515, meta_json: Some("{\"inverted\":{\"base_offset\":0,\"bitmap_type\":\"Roaring\",\"fst_size\":147,\"inverted_index_size\":515,\"null_bitmap_size\":8,\"relative_fst_offset\":368,\"relative_null_bitmap_offset\":0,\"segment_row_count\":1024,\"total_row_count\":20}}"), node_id: None }"#).await;
@@ -1500,7 +1500,10 @@ async fn check_request_skip_wal_recovery(flat_format: bool, skip_wal: bool) {
     let before = RecordBatches::try_collect(stream).await.unwrap();
     assert_eq!(before.iter().map(|b| b.num_rows()).sum::<usize>(), 4);
 
-    reopen_region(&engine, region_id, table_dir, false, HashMap::new()).await;
+    // Stop the engine directly, without region close, to exercise WAL-only recovery.
+    let engine =
+        restart_without_region_close(&mut env, engine, flat_format, region_id, table_dir).await;
+
     let stream = engine
         .scan_to_stream(region_id, ScanRequest::default())
         .await
@@ -1625,7 +1628,7 @@ async fn check_request_skip_wal_mixed_batch_recovery(
     skip_wal: bool,
     flush_before_reopen: bool,
 ) {
-    use crate::region_write_ctx::RegionWriteCtx;
+    use crate::region_write_ctx::{RegionWriteCtx, WriteSource};
     use crate::request::OptionOutputTx;
     use crate::test_util::LogStoreImpl;
     use crate::wal::Wal;
@@ -1657,6 +1660,7 @@ async fn check_request_skip_wal_mixed_batch_recovery(
         &region.version_control,
         region.provider.clone(),
         None,
+        WriteSource::Request,
     );
     let mut receivers = Vec::with_capacity(4);
     for (index, (skip, timestamp)) in [(false, 0), (skip_wal, 0), (false, 0), (skip_wal, 1)]
@@ -1692,8 +1696,7 @@ async fn check_request_skip_wal_mixed_batch_recovery(
     ctx.add_wal_entry(&mut writer).unwrap();
     let response = writer.write_to_wal().await.unwrap();
     assert_eq!(response.last_entry_ids.get(&region_id), Some(&1));
-    ctx.write_memtable().await;
-    ctx.publish_sequence_and_entry_id();
+    ctx.write_memtables().await;
     drop(ctx);
     for rx in receivers {
         assert_eq!(rx.await.unwrap().unwrap(), 2);
@@ -1751,9 +1754,13 @@ async fn check_request_skip_wal_mixed_batch_recovery(
         );
     }
 
-    // A no-flush close discards memtables. Only WAL-backed rows recover
-    // unless an explicit flush has already persisted all requests.
-    reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+    // Bypass region close so only WAL-backed rows recover unless the explicit
+    // flush above persisted all requests.
+    let engine =
+        restart_without_region_close(&mut env, engine, flat_format, region_id, table_dir).await;
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
     let loses_skipped_rows = skip_wal && !flush_before_reopen;
     let mut expected_values = if loses_skipped_rows {
         vec![(0, 20.0), (1000, 1.0), (3000, 21.0)]
@@ -1829,4 +1836,39 @@ async fn request_skip_wal_values(engine: &MitoEngine, region_id: RegionId) -> Ve
         .collect::<Vec<_>>();
     values.sort_unstable_by_key(|(timestamp, _)| *timestamp);
     values
+}
+
+/// Restarts workers without closing regions, preserving WAL-only recovery coverage.
+async fn restart_without_region_close(
+    env: &mut TestEnv,
+    engine: MitoEngine,
+    flat_format: bool,
+    region_id: RegionId,
+    table_dir: String,
+) -> MitoEngine {
+    let engine = env
+        .reopen_engine(
+            engine,
+            MitoConfig {
+                default_flat_format: flat_format,
+                ..Default::default()
+            },
+        )
+        .await;
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Open(RegionOpenRequest {
+                engine: String::new(),
+                table_dir,
+                options: HashMap::new(),
+                skip_wal_replay: false,
+                path_type: PathType::Bare,
+                checkpoint: None,
+                requirements: Default::default(),
+            }),
+        )
+        .await
+        .unwrap();
+    engine
 }

@@ -77,12 +77,8 @@ impl FileReferenceManager {
     }
 
     fn ref_file_set(&self, region_id: RegionId) -> Option<HashSet<FileRef>> {
-        let file_refs = if let Some(file_refs) = self.files_per_region.get(&region_id) {
-            file_refs.clone()
-        } else {
-            // region id not found.
-            return None;
-        };
+        // region id not found.
+        let file_refs = self.files_per_region.get(&region_id)?.clone();
 
         if file_refs.files.is_empty() {
             // still return an empty manifest to indicate no files are referenced.
@@ -277,6 +273,7 @@ mod tests {
             indexes: vec![ColumnIndexMetadata {
                 column_id: 0,
                 created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+                ..Default::default()
             }],
             index_file_size: 4096,
             index_version: 0,

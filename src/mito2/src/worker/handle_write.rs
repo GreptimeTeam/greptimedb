@@ -26,14 +26,14 @@ use store_api::storage::RegionId;
 
 use crate::error::{
     InvalidRequestSnafu, PartitionExprVersionMismatchSnafu, RegionNotFoundSnafu, RegionStateSnafu,
-    RejectWriteSnafu, Result,
+    RejectWriteInStagingSnafu, RejectWriteSnafu, Result,
 };
 use crate::metrics;
 use crate::metrics::{
     WRITE_REJECT_TOTAL, WRITE_ROWS_TOTAL, WRITE_STAGE_ELAPSED, WRITE_STALL_TOTAL,
 };
 use crate::region::{RegionLeaderState, RegionRoleState};
-use crate::region_write_ctx::RegionWriteCtx;
+use crate::region_write_ctx::{RegionWriteCtx, WriteSource};
 use crate::request::{SenderBulkRequest, SenderWriteRequest, WriteRequest};
 use crate::wal::Wal;
 use crate::worker::RegionWorkerLoop;
@@ -126,9 +126,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             if region_ctxs.len() == 1 {
                 // fast path for single region.
                 let mut region_ctx = region_ctxs.into_values().next().unwrap();
-                region_ctx.write_memtable().await;
-                region_ctx.write_bulk().await;
-                region_ctx.publish_sequence_and_entry_id();
+                region_ctx.write_memtables().await;
                 put_rows += region_ctx.put_num;
                 delete_rows += region_ctx.delete_num;
             } else {
@@ -137,9 +135,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     .map(|mut region_ctx| {
                         // use tokio runtime to schedule tasks.
                         common_runtime::spawn_global(async move {
-                            region_ctx.write_memtable().await;
-                            region_ctx.write_bulk().await;
-                            region_ctx.publish_sequence_and_entry_id();
+                            region_ctx.write_memtables().await;
                             (region_ctx.put_num, region_ctx.delete_num)
                         })
                     })
@@ -339,7 +335,7 @@ impl<S> RegionWorkerLoop<S> {
                         if region.reject_all_writes_in_staging() {
                             sender_req
                                 .sender
-                                .send(RejectWriteSnafu { region_id }.fail());
+                                .send(RejectWriteInStagingSnafu { region_id }.fail());
                             continue;
                         }
 
@@ -348,6 +344,7 @@ impl<S> RegionWorkerLoop<S> {
                             &region.version_control,
                             region.provider.clone(),
                             Some(region.region_stats.written_bytes.clone()),
+                            WriteSource::Request,
                         );
 
                         e.insert(region_ctx);
@@ -402,7 +399,7 @@ impl<S> RegionWorkerLoop<S> {
             if region.reject_all_writes_in_staging() {
                 sender_req
                     .sender
-                    .send(RejectWriteSnafu { region_id }.fail());
+                    .send(RejectWriteInStagingSnafu { region_id }.fail());
                 continue;
             }
             let expected_version = region.expected_partition_expr_version();
@@ -484,7 +481,9 @@ impl<S> RegionWorkerLoop<S> {
                     RegionRoleState::Leader(RegionLeaderState::Writable)
                     | RegionRoleState::Leader(RegionLeaderState::Staging) => {
                         if region.reject_all_writes_in_staging() {
-                            bulk_req.sender.send(RejectWriteSnafu { region_id }.fail());
+                            bulk_req
+                                .sender
+                                .send(RejectWriteInStagingSnafu { region_id }.fail());
                             continue;
                         }
                         let region_ctx = RegionWriteCtx::new(
@@ -492,6 +491,7 @@ impl<S> RegionWorkerLoop<S> {
                             &region.version_control,
                             region.provider.clone(),
                             Some(region.region_stats.written_bytes.clone()),
+                            WriteSource::Request,
                         );
 
                         e.insert(region_ctx);
@@ -531,7 +531,9 @@ impl<S> RegionWorkerLoop<S> {
                 continue;
             };
             if region.reject_all_writes_in_staging() {
-                bulk_req.sender.send(RejectWriteSnafu { region_id }.fail());
+                bulk_req
+                    .sender
+                    .send(RejectWriteInStagingSnafu { region_id }.fail());
                 continue;
             }
             let expected_version = region.expected_partition_expr_version();
@@ -897,6 +899,7 @@ mod tests {
             &version_control,
             Provider::raft_engine_provider(region_id.as_u64()),
             None,
+            WriteSource::Request,
         );
         let (tx, rx) = oneshot::channel();
         ctx.push_mutation(
@@ -946,6 +949,7 @@ mod tests {
                 &version_control,
                 Provider::raft_engine_provider(region_id.as_u64()),
                 None,
+                WriteSource::Request,
             );
             let (tx, rx) = oneshot::channel();
             assert!(ctx.push_bulk(OptionOutputTx::from(tx), new_bulk_part(1), None, skip_wal));
@@ -959,9 +963,7 @@ mod tests {
         if skip_wal {
             let ctx = contexts.get_mut(&region_id).unwrap();
             assert_eq!(ctx.next_entry_id(), 1);
-            ctx.write_memtable().await;
-            ctx.write_bulk().await;
-            ctx.publish_sequence_and_entry_id();
+            ctx.write_memtables().await;
             assert_eq!(version_control.committed_sequence(), 1);
             assert_eq!(version_control.current().last_entry_id, 0);
         }
@@ -995,9 +997,7 @@ mod tests {
         assert_eq!(entry_id + 1, region_ctxs[&ok_region].next_entry_id());
 
         for region_ctx in region_ctxs.values_mut() {
-            region_ctx.write_memtable().await;
-            region_ctx.write_bulk().await;
-            region_ctx.publish_sequence_and_entry_id();
+            region_ctx.write_memtables().await;
         }
 
         assert_eq!(
@@ -1034,6 +1034,7 @@ mod tests {
             &version_control,
             Provider::raft_engine_provider(region_id.as_u64()),
             None,
+            WriteSource::Request,
         );
         let (tx, rx) = oneshot::channel();
         assert!(ctx.push_bulk(OptionOutputTx::from(tx), new_bulk_part(3), None, skip_wal));
@@ -1050,9 +1051,7 @@ mod tests {
 
         let write_handle = tokio::spawn(async move {
             let mut region_ctx = region_ctxs.remove(&region_id).unwrap();
-            region_ctx.write_memtable().await;
-            region_ctx.write_bulk().await;
-            region_ctx.publish_sequence_and_entry_id();
+            region_ctx.write_memtables().await;
         });
 
         tokio::time::timeout(

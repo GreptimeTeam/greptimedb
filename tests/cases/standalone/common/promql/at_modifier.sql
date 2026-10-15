@@ -258,11 +258,12 @@ TQL EVAL (330, 390, '60s') predict_linear(at_modifier_gauge{host="a"}[5m] offset
 -- on its own and `timestamp()` reports the timestamp of the sample the anchor selected at every
 -- step (300s here). Its plan keeps the anchored selection below the replay of the grid and projects
 -- the timestamp above it.
---
--- Only an `@` without an `offset` is asserted here: the value of `timestamp()` for an anchored
--- selector that also carries an `offset` is a pre-existing question of its own, out of scope here.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 240, '60s') timestamp(at_modifier_gauge @ 300);
+
+-- With an `offset`, the anchor selects the sample at 240s, and `timestamp()` reports 240s.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 120, '60s') timestamp(at_modifier_gauge @ 300 offset 1m);
 
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
@@ -271,30 +272,24 @@ TQL EVAL (0, 240, '60s') timestamp(at_modifier_gauge @ 300);
 TQL EXPLAIN (0, 240, '60s') timestamp(at_modifier_gauge @ 300);
 
 -- 11. `label_join` above an anchored selector. The call rewrites the label the input series are
--- told apart by (`host` becomes the empty string), so it is never promoted: it must stay above the
+-- told apart by (`host` becomes `a-a` and `b-b`), so it is never promoted: it must stay above the
 -- per-series replay of the selector and be evaluated at every step. Both hosts are still reported,
 -- with their own value, at every step. A promoted `label_join` would instead be replayed through
 -- the labels it just rewrote and report the two series as a single timeline, i.e. one mixed row
 -- per step.
---
--- The invariant asserted here is scoped to the replay: it must not drop or mix the input rows.
--- It is not a claim about the final PromQL semantics of this query: joining `host` to one value
--- leaves two samples with the same label set at the same timestamp, which Prometheus rejects,
--- while `label_join` does not validate that yet (`label_replace` errors on such a rewrite
--- instead). That duplicate-labelset validation gap is pre-existing and out of scope here.
 -- SQLNESS SORT_RESULT 3 1
-TQL EVAL (300, 480, '60s') label_join(at_modifier_gauge @ 300, "host", "", "");
+TQL EVAL (300, 480, '60s') label_join(at_modifier_gauge @ 300, "host", "-", "host", "host");
 
 -- The same join below another call: neither is promoted, and both are evaluated at every step over
 -- the per-series replay of the anchored selector.
 -- SQLNESS SORT_RESULT 3 1
-TQL EVAL (300, 480, '60s') abs(label_join(at_modifier_gauge @ 300, "host", "", ""));
+TQL EVAL (300, 480, '60s') abs(label_join(at_modifier_gauge @ 300, "host", "-", "host", "host"));
 
 -- A range call below the join is still promoted on its own (it is the direct call over the
 -- anchored range selector): the anchored window is folded once per series, and the join above that
 -- replay reports the rate of both hosts at every step.
 -- SQLNESS SORT_RESULT 3 1
-TQL EVAL (300, 480, '60s') label_join(rate(at_modifier_counter_total[5m] @ 300), "host", "", "");
+TQL EVAL (300, 480, '60s') label_join(rate(at_modifier_counter_total[5m] @ 300), "host", "-", "host", "host");
 
 DROP TABLE at_modifier_gauge;
 

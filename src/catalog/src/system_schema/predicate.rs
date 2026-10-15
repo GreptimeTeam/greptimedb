@@ -214,6 +214,22 @@ impl Predicate {
             _ => None,
         }
     }
+
+    /// Collects the values that constrain `column` to be equal to them at this
+    /// predicate's top-level conjunctions.
+    ///
+    /// Constraints under `Or`/`Not` are ignored because they don't guarantee
+    /// that `column` equals a single value.
+    fn collect_eq_values<'a>(&'a self, column: &str, values: &mut Vec<&'a Value>) {
+        match self {
+            Predicate::Eq(c, v) if c == column => values.push(v),
+            Predicate::And(left, right) => {
+                left.collect_eq_values(column, values);
+                right.collect_eq_values(column, values);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Perform SQL left LIKE right, return `None` if fail to evaluate.
@@ -266,6 +282,25 @@ impl Predicates {
             Self {
                 predicates: Vec::new(),
             }
+        }
+    }
+
+    /// Returns the single equality value that constrains `column` in the
+    /// top-level conjunctions of the predicates.
+    ///
+    /// Returns `None` if there is no equality constraint on `column`, or if
+    /// the predicates constrain it with multiple distinct values.
+    pub fn find_eq_value(&self, column: &str) -> Option<&Value> {
+        let mut values = Vec::new();
+        for predicate in &self.predicates {
+            predicate.collect_eq_values(column, &mut values);
+        }
+
+        let (first, rest) = values.split_first()?;
+        if rest.iter().all(|v| v == first) {
+            Some(*first)
+        } else {
+            None
         }
     }
 
@@ -554,6 +589,71 @@ mod tests {
             matches!(&predicates.predicates[1], Predicate::NotEq(column, v) if column == "b"
                      && match_string_value(v, "b_value"))
         );
+    }
+
+    #[test]
+    fn test_find_eq_value() {
+        fn eq(name: &str, value: &str) -> Predicate {
+            Predicate::Eq(name.to_string(), Value::from(value))
+        }
+
+        fn and(left: Predicate, right: Predicate) -> Predicate {
+            Predicate::And(Box::new(left), Box::new(right))
+        }
+
+        fn or(left: Predicate, right: Predicate) -> Predicate {
+            Predicate::Or(Box::new(left), Box::new(right))
+        }
+
+        fn predicates(predicates: Vec<Predicate>) -> Predicates {
+            Predicates { predicates }
+        }
+
+        // No predicates, no equality value.
+        assert!(predicates(vec![]).find_eq_value("a").is_none());
+
+        // No equality on the column.
+        let p = predicates(vec![Predicate::NotEq("a".to_string(), Value::from("x"))]);
+        assert!(p.find_eq_value("a").is_none());
+        assert!(p.find_eq_value("b").is_none());
+
+        // Simple equality.
+        let p = predicates(vec![eq("a", "x")]);
+        let v = p.find_eq_value("a").unwrap();
+        assert!(match_string_value(v, "x"));
+        assert!(p.find_eq_value("b").is_none());
+
+        // Duplicated equality on the same value.
+        let p = predicates(vec![and(eq("a", "x"), eq("a", "x"))]);
+        let v = p.find_eq_value("a").unwrap();
+        assert!(match_string_value(v, "x"));
+
+        // Conflicting equalities reject the lookup.
+        let p = predicates(vec![and(eq("a", "x"), eq("a", "y"))]);
+        assert!(p.find_eq_value("a").is_none());
+
+        // Conflicting equalities in separate predicates reject the lookup too.
+        let p = predicates(vec![eq("a", "x"), eq("a", "y")]);
+        assert!(p.find_eq_value("a").is_none());
+
+        // Equality nested in deeper conjunctions.
+        let p = predicates(vec![and(and(eq("b", "y"), eq("a", "x")), eq("a", "x"))]);
+        let v = p.find_eq_value("a").unwrap();
+        assert!(match_string_value(v, "x"));
+
+        // Equality under a disjunction or a negation doesn't constrain the column.
+        let p = predicates(vec![or(eq("a", "x"), eq("a", "x"))]);
+        assert!(p.find_eq_value("a").is_none());
+        let p = predicates(vec![Predicate::Not(Box::new(eq("a", "x")))]);
+        assert!(p.find_eq_value("a").is_none());
+
+        // Equality value in a top-level conjunction composed of separate predicates.
+        let p = predicates(vec![
+            eq("a", "x"),
+            Predicate::Like("b".to_string(), "%y".to_string(), false),
+        ]);
+        let v = p.find_eq_value("a").unwrap();
+        assert!(match_string_value(v, "x"));
     }
 
     #[test]

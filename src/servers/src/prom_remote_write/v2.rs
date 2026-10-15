@@ -658,7 +658,7 @@ fn resolve_series_labels<'a>(
     let mut tags = Vec::with_capacity(labels_refs.len() / 2);
     label_names.clear();
 
-    for pair in labels_refs.chunks_exact(2) {
+    for pair in labels_refs.as_chunks::<2>().0 {
         let name = symbol_ref(symbols, pair[0], "label name")?;
         let value = symbol_ref(symbols, pair[1], "label value")?;
         validate_label(name)?;

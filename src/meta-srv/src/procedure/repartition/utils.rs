@@ -82,7 +82,7 @@ pub fn merge_and_validate_region_wal_options(
     table_id: TableId,
 ) -> Result<RegionWalOptions> {
     // Doesn't allow overwriting existing WAL options.
-    for (region_number, _) in new_region_wal_options.iter() {
+    for region_number in new_region_wal_options.keys() {
         if region_wal_options.contains_key(region_number) {
             return error::UnexpectedSnafu {
                 violated: format!(

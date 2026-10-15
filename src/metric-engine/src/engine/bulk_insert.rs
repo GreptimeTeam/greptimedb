@@ -354,17 +354,38 @@ mod tests {
 
     #[tokio::test]
     async fn test_bulk_insert_physical_region_passthrough() {
-        check_bulk_insert_physical_region_passthrough(false).await;
-        check_bulk_insert_physical_region_passthrough(true).await;
+        check_bulk_insert_physical_region_passthrough(false, false, false).await;
+        check_bulk_insert_physical_region_passthrough(true, false, false).await;
     }
 
-    async fn check_bulk_insert_physical_region_passthrough(skip_wal: bool) {
+    #[tokio::test]
+    async fn test_bulk_insert_physical_region_close_recovery() {
+        check_bulk_insert_physical_region_passthrough(false, true, false).await;
+        check_bulk_insert_physical_region_passthrough(true, true, false).await;
+    }
+
+    #[tokio::test]
+    async fn test_physical_bulk_partition_columns_preserve_stored_rows() {
+        for skip_wal in [false, true] {
+            let stripped =
+                check_bulk_insert_physical_region_passthrough(skip_wal, true, false).await;
+            let retained =
+                check_bulk_insert_physical_region_passthrough(skip_wal, true, true).await;
+            assert_eq!(retained, stripped, "skip_wal={skip_wal}");
+        }
+    }
+
+    async fn check_bulk_insert_physical_region_passthrough(
+        skip_wal: bool,
+        close: bool,
+        retain_partition_columns: bool,
+    ) -> String {
         // Use flat format so that BulkMemtable is used (supports write_bulk).
         let mito_config = MitoConfig {
             default_flat_format: true,
             ..Default::default()
         };
-        let env = TestEnv::with_mito_config("", mito_config, Default::default()).await;
+        let mut env = TestEnv::with_mito_config("", mito_config, Default::default()).await;
         env.init_metric_region().await;
         env.metric().inner.flush_task.stop().await.unwrap();
         let physical_region_id = env.default_physical_region_id();
@@ -388,7 +409,11 @@ mod tests {
             index: 2,
             column_id: 2, // column_id for "job" in the physical table
         }];
-        let non_tag_indices = vec![0, 1]; // timestamp, value
+        let non_tag_indices = if retain_partition_columns {
+            vec![0, 1, 2] // timestamp, value, and the job partition column
+        } else {
+            vec![0, 1] // timestamp, value
+        };
         let second_batch = build_logical_batch(3, 3);
         let physical_batch = modify_batch_sparse(
             second_batch,
@@ -397,6 +422,10 @@ mod tests {
             &non_tag_indices,
         )
         .unwrap();
+        assert_eq!(
+            physical_batch.column_by_name("job").is_some(),
+            retain_partition_columns
+        );
         let request = build_bulk_request(physical_region_id, physical_batch, skip_wal);
         let response = env
             .metric()
@@ -414,20 +443,23 @@ mod tests {
         let batches = RecordBatches::try_collect(stream).await.unwrap();
         assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 6);
 
-        // Closing without a flush must recover only WAL-backed data. Recreate
-        // the wrapper too, so its metadata cache cannot hide missing metadata.
         let stat = env.mito().region_statistic(physical_region_id).unwrap();
         assert_eq!(stat.sst_num, 0);
-        env.metric()
-            .handle_request(
-                physical_region_id,
-                RegionRequest::Close(RegionCloseRequest {
-                    flush_on_close: false,
-                }),
-            )
-            .await
-            .unwrap();
-        let reopened = MetricEngine::try_new(env.mito(), Default::default()).unwrap();
+        let reopened = if close {
+            env.metric()
+                .handle_request(
+                    physical_region_id,
+                    RegionRequest::Close(RegionCloseRequest::default()),
+                )
+                .await
+                .unwrap();
+            // Recreating the wrapper prevents its metadata cache from hiding data loss.
+            MetricEngine::try_new(env.mito(), Default::default()).unwrap()
+        } else {
+            // Stopping workers without Close exercises recovery from WAL alone.
+            env.reopen_engine(Default::default()).await;
+            env.metric()
+        };
         reopened.inner.flush_task.stop().await.unwrap();
         reopened
             .handle_request(
@@ -446,6 +478,11 @@ mod tests {
             )
             .await
             .unwrap();
+        let stat = env
+            .mito()
+            .region_statistic(crate::utils::to_data_region_id(physical_region_id))
+            .unwrap();
+        assert_eq!(stat.sst_num > 0, skip_wal && close);
         let stream = reopened
             .scan_to_stream(logical_region_id, ScanRequest::default())
             .await
@@ -453,8 +490,9 @@ mod tests {
         let batches = RecordBatches::try_collect(stream).await.unwrap();
         assert_eq!(
             batches.iter().map(|b| b.num_rows()).sum::<usize>(),
-            if skip_wal { 0 } else { 6 },
+            if skip_wal && !close { 0 } else { 6 },
         );
+        batches.pretty_print().unwrap()
     }
 
     #[tokio::test]

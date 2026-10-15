@@ -130,6 +130,20 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Subquery step must be positive"))]
+    ZeroSubqueryStep {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "invalid expression type \"range vector\" for range query, must be Scalar or instant Vector"
+    ))]
+    RangeVectorInRangeQuery {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "The end time must be greater than start time, start: {:?}, end: {:?}",
         start,
@@ -138,6 +152,16 @@ pub enum Error {
     InvalidTimeRange {
         start: i64,
         end: i64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "The subquery child window is outside the representable millisecond range: {}",
+        timestamp
+    ))]
+    SubqueryTimestampOutOfRange {
+        timestamp: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -217,12 +241,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("vector cannot contain metrics with the same labelset"))]
-    SameLabelSet {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid regular expression in label_replace(): {}", regex))]
     InvalidRegularExpression {
         regex: String,
@@ -249,14 +267,16 @@ impl ErrorExt for Error {
             | MultipleVector { .. }
             | ExpectRangeSelector { .. }
             | ZeroRangeSelector { .. }
+            | RangeVectorInRangeQuery { .. }
+            | ZeroSubqueryStep { .. }
             | InvalidTimeRange { .. }
+            | SubqueryTimestampOutOfRange { .. }
             | ColumnNotFound { .. }
             | FunctionInvalidArgument { .. }
             | UnsupportedVectorMatch { .. }
             | CombineTableColumnMismatch { .. }
             | UnexpectedPlanExpr { .. }
             | UnsupportedMatcherOp { .. }
-            | SameLabelSet { .. }
             | TimestampOutOfRange { .. }
             | SystemTimeOutOfRange { .. }
             | AtModifierTimestampOutOfRange { .. }

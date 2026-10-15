@@ -29,6 +29,7 @@ use frontend::error::Error;
 use frontend::instance::Instance;
 use operator::error::Error as OperatorError;
 use query::datafusion::QUERY_PARALLELISM_HINT;
+use query::options::QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN;
 use rstest::rstest;
 use rstest_reuse::apply;
 use servers::error as server_error;
@@ -254,6 +255,697 @@ WHERE greptime_timestamp = (
     assert!(
         explain.contains("MergeSortExec"),
         "query_parallelism=1 with five regions should keep the distributed merge stage stable; explain:\n{explain}"
+    );
+}
+
+#[apply(both_instances_cases)]
+async fn test_metric_logical_scan_tag_order(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE f04_scan_phy (
+            host STRING PRIMARY KEY,
+            val DOUBLE,
+            ts TIMESTAMP TIME INDEX
+        ) ENGINE = metric WITH (physical_metric_table = 'true')"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE f04_scan_logical (
+            host STRING PRIMARY KEY,
+            val DOUBLE,
+            ts TIMESTAMP TIME INDEX
+        ) ENGINE = metric WITH (on_physical_table = 'f04_scan_phy')"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        "INSERT INTO f04_scan_logical (host, val, ts) VALUES \
+         ('a', 1, 0), ('b', 2, 0), ('c', 3, 0), ('d', 4, 0), \
+         ('e', 5, 0), ('f', 6, 0), ('g', 7, 0), ('h', 8, 0)",
+    )
+    .await;
+
+    // The ordered rows are compared exactly as printed. Sorting them before
+    // comparing (or comparing them unordered) would accept a scan that returns
+    // the physical table's tag order instead of the requested `host` order.
+    async fn ordered_rows(instance: &Arc<Instance>, sql: &str, parallelism: usize) -> String {
+        execute_sql_with_query_parallelism(instance, sql, parallelism)
+            .await
+            .data
+            .pretty_print()
+            .await
+    }
+
+    let all_hosts = "\
++------+---------------------+-----+
+| host | ts                  | val |
++------+---------------------+-----+
+| a    | 1970-01-01T00:00:00 | 1.0 |
+| b    | 1970-01-01T00:00:00 | 2.0 |
+| c    | 1970-01-01T00:00:00 | 3.0 |
+| d    | 1970-01-01T00:00:00 | 4.0 |
+| e    | 1970-01-01T00:00:00 | 5.0 |
+| f    | 1970-01-01T00:00:00 | 6.0 |
+| g    | 1970-01-01T00:00:00 | 7.0 |
+| h    | 1970-01-01T00:00:00 | 8.0 |
++------+---------------------+-----+";
+    let first_three_hosts = "\
++------+---------------------+-----+
+| host | ts                  | val |
++------+---------------------+-----+
+| a    | 1970-01-01T00:00:00 | 1.0 |
+| b    | 1970-01-01T00:00:00 | 2.0 |
+| c    | 1970-01-01T00:00:00 | 3.0 |
++------+---------------------+-----+";
+
+    // `host` is NOT NULL, so `NULLS FIRST` and the SQL default `NULLS LAST` return the same
+    // rows. The `NULLS FIRST` queries spell out the ordering the scan used to claim, so the
+    // optimizer may drop the sort and expose a wrong tag order; the `NULLS LAST` queries
+    // keep the sort. Both are replayed in memory and after flushing the physical table.
+    let mut mismatches = Vec::new();
+    for flushed in [false, true] {
+        if flushed {
+            execute_sql(&frontend, "ADMIN FLUSH_TABLE('f04_scan_phy')").await;
+        }
+        for parallelism in [1, 4] {
+            for (query, expected) in [
+                (
+                    "SELECT host, ts, val FROM f04_scan_logical ORDER BY host NULLS FIRST",
+                    all_hosts,
+                ),
+                (
+                    "SELECT host, ts, val FROM f04_scan_logical ORDER BY host NULLS FIRST LIMIT 3",
+                    first_three_hosts,
+                ),
+                (
+                    "SELECT host, ts, val FROM f04_scan_logical ORDER BY host NULLS LAST",
+                    all_hosts,
+                ),
+                (
+                    "SELECT host, ts, val FROM f04_scan_logical ORDER BY host NULLS LAST LIMIT 3",
+                    first_three_hosts,
+                ),
+            ] {
+                let actual = ordered_rows(&frontend, query, parallelism).await;
+                if actual.trim() != expected.trim() {
+                    mismatches.push(format!(
+                        "query `{query}` with query_parallelism={parallelism} flushed={flushed} \
+                         returned:\n{actual}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "logical metric table rows are not ordered by host, expected `a`..`h`:\n{}",
+        mismatches.join("\n---\n")
+    );
+}
+
+/// The uppercase tag `"A"` sorts before the physical `__table_id`/`__tsid` row key prefix
+/// by name, but it is not a prefix of the row key. A scan that claims it as ordering or
+/// partitioning lets the optimizer skip the sort or the repartition the query needs, so the
+/// per-host count comes back split across scan partitions in physical tsid order.
+#[apply(both_instances_cases)]
+async fn test_metric_logical_scan_uppercase_tag_order(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE f04_upper_phy (
+            "A" STRING,
+            marker STRING,
+            val DOUBLE,
+            ts TIMESTAMP TIME INDEX,
+            PRIMARY KEY ("A", marker)
+        ) ENGINE = metric WITH (physical_metric_table = 'true')"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE f04_upper_logical (
+            "A" STRING,
+            marker STRING,
+            val DOUBLE,
+            ts TIMESTAMP TIME INDEX,
+            PRIMARY KEY ("A", marker)
+        ) ENGINE = metric WITH (on_physical_table = 'f04_upper_phy')"#,
+    )
+    .await;
+
+    // 8 hosts x 4 markers x 2 timestamps = 64 rows. Every host spans four series, so a count
+    // computed per scan partition would return several rows per host with partial counts.
+    let mut rows = Vec::with_capacity(64);
+    for host in 0..8 {
+        for marker in ["a", "b", "c", "d"] {
+            for ts in [1000, 2000] {
+                rows.push(format!("('h{host}', '{marker}', {host}, {ts})"));
+            }
+        }
+    }
+    execute_sql(
+        &frontend,
+        &format!(
+            "INSERT INTO f04_upper_logical (\"A\", marker, val, ts) VALUES {}",
+            rows.join(", ")
+        ),
+    )
+    .await;
+
+    let expected = "\
++----+---+
+| A  | n |
++----+---+
+| h0 | 8 |
+| h1 | 8 |
+| h2 | 8 |
+| h3 | 8 |
+| h4 | 8 |
+| h5 | 8 |
+| h6 | 8 |
+| h7 | 8 |
++----+---+";
+
+    // The rows are compared exactly as printed: sorting them before comparing would accept
+    // a wrong count or a wrong row order. `NULLS FIRST` spells out the ordering the scan
+    // used to claim, so the optimizer may drop the sort; the default `NULLS LAST` keeps it
+    // and a failure there can only come from a wrong partitioning claim. Both orders are
+    // replayed in memory and after flushing the physical table.
+    let queries = [
+        "SELECT \"A\", count(*) AS n FROM f04_upper_logical GROUP BY \"A\" ORDER BY \"A\"",
+        "SELECT \"A\", count(*) AS n FROM f04_upper_logical GROUP BY \"A\" ORDER BY \"A\" NULLS FIRST",
+    ];
+
+    let mut mismatches = Vec::new();
+    for flushed in [false, true] {
+        if flushed {
+            execute_sql(&frontend, "ADMIN FLUSH_TABLE('f04_upper_phy')").await;
+        }
+        for parallelism in [1, 4] {
+            for query in queries {
+                let actual = execute_sql_with_query_parallelism(&frontend, query, parallelism)
+                    .await
+                    .data
+                    .pretty_print()
+                    .await;
+                if actual.trim() != expected.trim() {
+                    mismatches.push(format!(
+                        "query `{query}` with query_parallelism={parallelism} flushed={flushed} \
+                         returned:\n{actual}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "logical metric table must return one row of eight per host in `A` order:\n{}",
+        mismatches.join("\n---\n")
+    );
+}
+
+/// The small shape of the same problem: four rows and two groups. Each host has two series,
+/// so the count must not be computed per scan partition, and `ORDER BY "A"` pins the exact
+/// row order at query_parallelism 4 as well as at 1.
+#[apply(both_instances_cases)]
+async fn test_metric_logical_scan_small_group_count(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE f04_upper_min_phy (
+            "A" STRING,
+            marker STRING,
+            val DOUBLE,
+            ts TIMESTAMP TIME INDEX,
+            PRIMARY KEY ("A", marker)
+        ) ENGINE = metric WITH (physical_metric_table = 'true')"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE f04_upper_min_logical (
+            "A" STRING,
+            marker STRING,
+            val DOUBLE,
+            ts TIMESTAMP TIME INDEX,
+            PRIMARY KEY ("A", marker)
+        ) ENGINE = metric WITH (on_physical_table = 'f04_upper_min_phy')"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        "INSERT INTO f04_upper_min_logical (\"A\", marker, val, ts) VALUES \
+         ('h0', 'a', 1, 1000), ('h0', 'b', 2, 1000), \
+         ('h1', 'a', 3, 1000), ('h1', 'b', 4, 1000)",
+    )
+    .await;
+
+    let expected = "\
++----+---+
+| A  | n |
++----+---+
+| h0 | 2 |
+| h1 | 2 |
++----+---+";
+    // `NULLS FIRST` spells out the ordering the scan used to claim and is replayed next to
+    // the default `NULLS LAST` order, in memory and after flushing the physical table.
+    let queries = [
+        "SELECT \"A\", count(*) AS n FROM f04_upper_min_logical GROUP BY \"A\" ORDER BY \"A\"",
+        "SELECT \"A\", count(*) AS n FROM f04_upper_min_logical GROUP BY \"A\" ORDER BY \"A\" NULLS FIRST",
+    ];
+
+    let mut mismatches = Vec::new();
+    for flushed in [false, true] {
+        if flushed {
+            execute_sql(&frontend, "ADMIN FLUSH_TABLE('f04_upper_min_phy')").await;
+        }
+        for parallelism in [1, 4] {
+            for query in queries {
+                let actual = execute_sql_with_query_parallelism(&frontend, query, parallelism)
+                    .await
+                    .data
+                    .pretty_print()
+                    .await;
+                if actual.trim() != expected.trim() {
+                    mismatches.push(format!(
+                        "query `{query}` with query_parallelism={parallelism} flushed={flushed} \
+                         returned:\n{actual}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "small logical metric grouping must return [h0, 2] and [h1, 2]:\n{}",
+        mismatches.join("\n---\n")
+    );
+}
+
+#[apply(both_instances_cases)]
+async fn test_partitioned_merge_scan_left_join_repartitions(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+    execute_sql(
+        &frontend,
+        r#"
+CREATE TABLE join_repro (
+    k STRING,
+    kind STRING,
+    v DOUBLE,
+    ts TIMESTAMP NOT NULL,
+    TIME INDEX (ts)
+)
+PARTITION ON COLUMNS (k) (
+    k < '1',
+    k >= '1' AND k < '2',
+    k >= '2' AND k < '3',
+    k >= '3' AND k < '4',
+    k >= '4' AND k < '5',
+    k >= '5' AND k < '6',
+    k >= '6' AND k < '7',
+    k >= '7' AND k < '8',
+    k >= '8' AND k < '9',
+    k >= '9' AND k < 'a',
+    k >= 'a' AND k < 'b',
+    k >= 'b' AND k < 'c',
+    k >= 'c' AND k < 'd',
+    k >= 'd' AND k < 'e',
+    k >= 'e' AND k < 'f',
+    k >= 'f'
+)
+ENGINE = mito
+WITH (append_mode = 'true')
+"#,
+    )
+    .await;
+
+    let mut rows = Vec::new();
+    for key in [
+        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'z',
+    ] {
+        rows.push(format!("('{key}', 'root', 1.0, '2024-01-01 00:00:00')"));
+        if key != 'z' {
+            for _ in 0..3 {
+                rows.push(format!("('{key}', 'child', 1.0, '2024-01-01 00:00:00')"));
+            }
+        }
+    }
+    execute_sql(
+        &frontend,
+        &format!("INSERT INTO join_repro VALUES {}", rows.join(",")),
+    )
+    .await;
+
+    let aggregate_sql = r#"SELECT count(*) roots, count(c.n) roots_with_children, sum(c.n) children
+FROM (SELECT k FROM join_repro WHERE kind = 'root') r
+LEFT JOIN (SELECT k, count(*) n FROM join_repro WHERE kind = 'child' GROUP BY k) c ON c.k = r.k"#;
+    for parallelism in [16, 8] {
+        let output = execute_sql_with_query_parallelism(&frontend, aggregate_sql, parallelism)
+            .await
+            .data
+            .pretty_print()
+            .await;
+        assert_eq!(
+            output,
+            "+-------+---------------------+----------+\n| roots | roots_with_children | children |\n+-------+---------------------+----------+\n| 17    | 16                  | 48       |\n+-------+---------------------+----------+"
+        );
+
+        let explain = execute_sql_with_query_parallelism(
+            &frontend,
+            &format!("EXPLAIN {aggregate_sql}"),
+            parallelism,
+        )
+        .await
+        .data
+        .pretty_print()
+        .await;
+        assert!(
+            explain.contains("HashJoinExec: mode=Partitioned"),
+            "query_parallelism={parallelism} should use a partitioned hash join; explain:\n{explain}"
+        );
+        assert!(
+            explain.contains("RepartitionExec: partitioning=Hash([k@0]"),
+            "query_parallelism={parallelism} should repartition on the join key; explain:\n{explain}"
+        );
+
+        let ordered_sql = r#"SELECT r.k, c.n
+FROM (SELECT k FROM join_repro WHERE kind = 'root') r
+LEFT JOIN (SELECT k, count(*) n FROM join_repro WHERE kind = 'child' GROUP BY k) c ON c.k = r.k
+ORDER BY r.k"#;
+        let ordered = execute_sql_with_query_parallelism(&frontend, ordered_sql, parallelism)
+            .await
+            .data
+            .pretty_print()
+            .await;
+        assert_eq!(
+            ordered,
+            r#"+---+---+
+| k | n |
++---+---+
+| 0 | 3 |
+| 1 | 3 |
+| 2 | 3 |
+| 3 | 3 |
+| 4 | 3 |
+| 5 | 3 |
+| 6 | 3 |
+| 7 | 3 |
+| 8 | 3 |
+| 9 | 3 |
+| a | 3 |
+| b | 3 |
+| c | 3 |
+| d | 3 |
+| e | 3 |
+| f | 3 |
+| z |   |
++---+---+"#
+        );
+
+        let pruned_sql = r#"SELECT count(*) roots, count(c.n) roots_with_children, sum(c.n) children
+FROM (SELECT k FROM join_repro WHERE kind = 'root' AND k >= '1' AND k < '9') r
+LEFT JOIN (SELECT k, count(*) n FROM join_repro WHERE kind = 'child' AND k < '8' GROUP BY k) c ON c.k = r.k"#;
+        let pruned = execute_sql_with_query_parallelism(&frontend, pruned_sql, parallelism)
+            .await
+            .data
+            .pretty_print()
+            .await;
+        assert_eq!(
+            pruned,
+            "+-------+---------------------+----------+\n| roots | roots_with_children | children |\n+-------+---------------------+----------+\n| 8     | 7                   | 21       |\n+-------+---------------------+----------+"
+        );
+
+        let pruned_explain = execute_sql_with_query_parallelism(
+            &frontend,
+            &format!("EXPLAIN {pruned_sql}"),
+            parallelism,
+        )
+        .await
+        .data
+        .pretty_print()
+        .await;
+        assert!(
+            pruned_explain.contains("HashJoinExec: mode=Partitioned"),
+            "query_parallelism={parallelism} pruned join should remain partitioned; explain:\n{pruned_explain}"
+        );
+        let hash_repartition_lines = pruned_explain
+            .lines()
+            .filter(|line| line.contains("RepartitionExec: partitioning=Hash([k@0]"))
+            .count();
+        assert_eq!(
+            hash_repartition_lines, 2,
+            "query_parallelism={parallelism} pruned join should repartition both inputs on k; explain:\n{pruned_explain}"
+        );
+    }
+}
+
+/// Regression test for `MatchesConstantTermOptimizer` dropping `FilterExec`'s `fetch`.
+///
+/// On a single-partition plan the `LIMIT` is enforced by the `fetch` that the physical
+/// `LimitPushdown` rule leaves on the `FilterExec`, so a rule rebuilding that `FilterExec`
+/// has to carry the `fetch` over. While it does not, the limit is silently lifted for
+/// `matches_term` filters and
+/// `SELECT count(*) FROM (SELECT ts, msg FROM t WHERE matches_term(msg, 'foo') LIMIT 1) s`
+/// returns the number of matching rows (2) instead of 1.
+///
+/// `query_parallelism=4` is expected to stay correct, because the limit is then materialized
+/// above the scan instead of being delegated to the `FilterExec`; the test pins down that
+/// contrast. The metric-engine logical table covers the same filter on a shared physical
+/// region.
+///
+/// Both matching rows share `ts` and `msg`, so the limited output does not depend on the
+/// order in which the scan returns them.
+#[apply(both_instances_cases)]
+async fn test_matches_term_subquery_limit_count(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+
+    execute_sql(
+        &frontend,
+        r#"
+CREATE TABLE f07_mito_msgs (
+    ts TIMESTAMP TIME INDEX,
+    host STRING PRIMARY KEY,
+    msg STRING,
+    val DOUBLE
+)
+ENGINE = mito
+"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"INSERT INTO f07_mito_msgs (ts, host, msg, val) VALUES
+    (0, 'host1', 'foo bar', 1.0),
+    (0, 'host2', 'foo bar', 2.0),
+    (0, 'host3', 'other baz', 3.0)"#,
+    )
+    .await;
+
+    execute_sql(
+        &frontend,
+        r#"
+CREATE TABLE f07_metric_phy (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE,
+    host STRING,
+    msg STRING,
+    PRIMARY KEY (host, msg)
+)
+ENGINE = metric
+WITH ('physical_metric_table' = '')
+"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"
+CREATE TABLE f07_metric_msgs (
+    ts TIMESTAMP TIME INDEX,
+    val DOUBLE,
+    host STRING,
+    msg STRING,
+    PRIMARY KEY (host, msg)
+)
+ENGINE = metric
+WITH ('on_physical_table' = 'f07_metric_phy')
+"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"INSERT INTO f07_metric_msgs (ts, host, msg, val) VALUES
+    (0, 'host1', 'foo bar', 1.0),
+    (0, 'host2', 'foo bar', 2.0),
+    (0, 'host3', 'other baz', 3.0)"#,
+    )
+    .await;
+
+    for table in ["f07_mito_msgs", "f07_metric_msgs"] {
+        let limited = format!("SELECT ts, msg FROM {table} WHERE matches_term(msg, 'foo') LIMIT 1");
+        let count = format!("SELECT count(*) FROM ({limited}) s");
+
+        let limit_rows = execute_sql_with_query_parallelism(&frontend, &limited, 1)
+            .await
+            .data
+            .pretty_print()
+            .await;
+        assert_eq!(
+            limit_rows,
+            r#"+---------------------+---------+
+| ts                  | msg     |
++---------------------+---------+
+| 1970-01-01T00:00:00 | foo bar |
++---------------------+---------+"#,
+            "query_parallelism=1: `{limited}` must return exactly the single limited row"
+        );
+
+        for parallelism in [1, 4] {
+            let count_rows = execute_sql_with_query_parallelism(&frontend, &count, parallelism)
+                .await
+                .data
+                .pretty_print()
+                .await;
+            assert_eq!(
+                count_rows,
+                r#"+----------+
+| count(*) |
++----------+
+| 1        |
++----------+"#,
+                "query_parallelism={parallelism}: the LIMIT 1 of the subquery must cap `{count}` to one row"
+            );
+        }
+    }
+}
+
+#[apply(both_instances_cases)]
+async fn test_partitioned_merge_scan_semi_join_repartitions(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+    execute_sql(
+        &frontend,
+        r#"
+CREATE TABLE semi_join_repro (
+    ts TIMESTAMP TIME INDEX,
+    key_id INT,
+    is_match BOOLEAN,
+    PRIMARY KEY (key_id)
+)
+PARTITION ON COLUMNS (key_id) (
+    key_id < 10,
+    key_id >= 10 AND key_id < 20,
+    key_id >= 20 AND key_id < 30,
+    key_id >= 30
+)
+ENGINE = mito
+"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"INSERT INTO semi_join_repro VALUES
+('2026-10-09 00:00:00', 1, false),
+('2026-10-09 00:00:01', 1, true),
+('2026-10-09 00:00:00', 11, false),
+('2026-10-09 00:00:01', 11, true),
+('2026-10-09 00:00:00', 21, false),
+('2026-10-09 00:00:01', 21, true),
+('2026-10-09 00:00:00', 31, false),
+('2026-10-09 00:00:01', 31, true)"#,
+    )
+    .await;
+
+    let query = r#"SELECT t.key_id, MIN(t.ts) AS first_ts
+FROM semi_join_repro t
+WHERE t.key_id IN (
+    SELECT s.key_id FROM semi_join_repro s WHERE s.is_match = true
+)
+GROUP BY t.key_id
+ORDER BY t.key_id"#;
+    let mut query_ctx = QueryContext::with_db_name(None);
+    query_ctx.set_extension(QUERY_PARALLELISM_HINT, "2");
+    query_ctx.set_extension(QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN, "true");
+    let query_ctx = Arc::new(query_ctx);
+    let output = execute_sql_with(&frontend, query, query_ctx.clone())
+        .await
+        .data
+        .pretty_print()
+        .await;
+    let expected = r#"+--------+---------------------+
+| key_id | first_ts            |
++--------+---------------------+
+| 1      | 2026-10-09T00:00:00 |
+| 11     | 2026-10-09T00:00:00 |
+| 21     | 2026-10-09T00:00:00 |
+| 31     | 2026-10-09T00:00:00 |
++--------+---------------------+"#;
+    assert_eq!(output, expected);
+
+    let explain = execute_sql_with(&frontend, &format!("EXPLAIN {query}"), query_ctx.clone())
+        .await
+        .data
+        .pretty_print()
+        .await;
+    assert!(
+        explain.contains("HashJoinExec: mode=Partitioned, join_type=LeftSemi"),
+        "parallel IN query should use a partitioned left-semi join; explain:\n{explain}"
+    );
+    assert!(
+        explain.contains("RepartitionExec: partitioning=Hash([key_id@1], 2)")
+            && explain.contains("RepartitionExec: partitioning=Hash([key_id@0], 2)"),
+        "parallel left-semi join should repartition both inputs on key_id; explain:\n{explain}"
+    );
+
+    let analyze_explain = execute_sql_with(
+        &frontend,
+        &format!("EXPLAIN ANALYZE VERBOSE {query}"),
+        query_ctx.clone(),
+    )
+    .await
+    .data
+    .pretty_print()
+    .await;
+    let has_remote_dyn_filter = |explain: &str| {
+        explain.lines().any(|line| {
+            line.contains("SeqScan: region=")
+                && line.contains("\"dyn_filters\"")
+                && line.contains("DynamicFilter")
+        })
+    };
+    assert!(
+        has_remote_dyn_filter(&analyze_explain),
+        "expected remote region SeqScan dyn_filters to include DynamicFilter; explain:\n{analyze_explain}"
+    );
+
+    let mut query_ctx_without_rdf = QueryContext::with_db_name(None);
+    query_ctx_without_rdf.set_extension(QUERY_PARALLELISM_HINT, "2");
+    query_ctx_without_rdf.set_extension(QUERY_ENABLE_REMOTE_DYNAMIC_FILTER_PUSHDOWN, "false");
+    let query_ctx_without_rdf = Arc::new(query_ctx_without_rdf);
+    let output_without_rdf = execute_sql_with(&frontend, query, query_ctx_without_rdf.clone())
+        .await
+        .data
+        .pretty_print()
+        .await;
+    assert_eq!(output_without_rdf, expected);
+
+    let analyze_explain_without_rdf = execute_sql_with(
+        &frontend,
+        &format!("EXPLAIN ANALYZE VERBOSE {query}"),
+        query_ctx_without_rdf,
+    )
+    .await
+    .data
+    .pretty_print()
+    .await;
+    assert!(
+        !analyze_explain_without_rdf
+            .lines()
+            .any(|line| line.contains("SeqScan: region=") && line.contains("\"dyn_filters\"")),
+        "expected no region SeqScan dyn_filters line when remote dynamic filter pushdown is disabled; explain:\n{analyze_explain_without_rdf}"
     );
 }
 
@@ -2648,7 +3340,7 @@ async fn test_execute_copy_from_orc_with_cast(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(
         &instance,
-        &format!("copy demo from '{}' WITH(FORMAT='orc');", &filepath),
+        &format!("copy demo from '{}' WITH(FORMAT='orc');", filepath),
     )
     .await
     .data;
@@ -2687,7 +3379,7 @@ async fn test_execute_copy_from_orc(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(
         &instance,
-        &format!("copy demo from '{}' WITH(FORMAT='orc');", &filepath),
+        &format!("copy demo from '{}' WITH(FORMAT='orc');", filepath),
     )
     .await
     .data;
@@ -2724,7 +3416,7 @@ async fn test_cast_type_issue_1594(instance: Arc<dyn MockInstance>) {
 
     let output = execute_sql(
         &instance,
-        &format!("copy tsbs_cpu from '{}' WITH(FORMAT='csv');", &filepath),
+        &format!("copy tsbs_cpu from '{}' WITH(FORMAT='csv');", filepath),
     )
     .await;
 
@@ -2762,7 +3454,7 @@ async fn test_copy_from_csv_skip_bad_records(instance: Arc<dyn MockInstance>) {
         &instance,
         &format!(
             "copy csv_skip_bad_records from '{}' WITH(FORMAT='csv', skip_bad_records='true');",
-            &filepath
+            filepath
         ),
     )
     .await

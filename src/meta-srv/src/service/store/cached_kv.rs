@@ -69,6 +69,9 @@ pub struct LeaderCachedKvBackend {
     check_leader: CheckLeaderRef,
     store: KvBackendRef,
     cache: ResettableKvBackendRef,
+    /// Incremented before and after each store mutation. The first increment
+    /// detects overlapping writers; the second invalidates cache fills that
+    /// read the old value while the store mutation was in flight.
     version: AtomicUsize,
     name: String,
 }
@@ -214,9 +217,11 @@ impl KvBackend for LeaderCachedKvBackend {
         let ver = self.create_new_version();
 
         let res = self.store.put(req.clone()).await?;
+        self.create_new_version();
         let _ = self.cache.put(req.clone()).await?;
 
-        if !self.validate_version(ver) {
+        // Only our own completion increment may follow the starting version.
+        if !self.validate_version(ver + 1) {
             self.invalid_key(req.key).await?;
         }
 
@@ -231,9 +236,11 @@ impl KvBackend for LeaderCachedKvBackend {
         let ver = self.create_new_version();
 
         let res = self.store.batch_put(req.clone()).await?;
+        self.create_new_version();
         let _ = self.cache.batch_put(req.clone()).await?;
 
-        if !self.validate_version(ver) {
+        // Only our own completion increment may follow the starting version.
+        if !self.validate_version(ver + 1) {
             let keys = req.kvs.into_iter().map(|kv| kv.key).collect::<Vec<_>>();
             self.invalid_keys(keys).await?;
         }
@@ -306,6 +313,7 @@ impl KvBackend for LeaderCachedKvBackend {
 
         let key = req.key.clone();
         let res = self.store.compare_and_put(req).await?;
+        self.create_new_version();
         // Delete key in the cache.
         //
         // Cache can not deal with the CAS operation, because it does
@@ -322,6 +330,7 @@ impl KvBackend for LeaderCachedKvBackend {
         let _ = self.create_new_version();
 
         let res = self.store.delete_range(req.clone()).await?;
+        self.create_new_version();
         let _ = self.cache.delete_range(req).await?;
         Ok(res)
     }
@@ -334,6 +343,7 @@ impl KvBackend for LeaderCachedKvBackend {
         let _ = self.create_new_version();
 
         let res = self.store.batch_delete(req.clone()).await?;
+        self.create_new_version();
         let _ = self.cache.batch_delete(req).await?;
         Ok(res)
     }
@@ -351,6 +361,7 @@ impl TxnService for LeaderCachedKvBackend {
         let _ = self.create_new_version();
 
         let res = self.store.txn(txn.clone()).await?;
+        self.create_new_version();
         let TxnRequest {
             success, failure, ..
         } = txn.into();
@@ -384,6 +395,7 @@ impl TxnService for LeaderCachedKvBackend {
 
 impl ResettableKvBackend for LeaderCachedKvBackend {
     fn reset(&self) {
+        self.create_new_version();
         self.cache.reset()
     }
 
@@ -394,9 +406,354 @@ impl ResettableKvBackend for LeaderCachedKvBackend {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use common_meta::kv_backend::txn::{Compare, CompareOp};
     use common_meta::rpc::KeyValue;
+    use futures::poll;
+    use tokio::sync::oneshot;
 
     use super::*;
+
+    /// Pauses one backend call at a known point, without relying on task scheduling.
+    #[derive(Default)]
+    struct Pause {
+        receiver: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    impl Pause {
+        fn arm(&self) -> oneshot::Sender<()> {
+            let (sender, receiver) = oneshot::channel();
+            assert!(self.receiver.lock().unwrap().replace(receiver).is_none());
+            sender
+        }
+
+        async fn wait(&self) {
+            let receiver = self.receiver.lock().unwrap().take();
+            if let Some(receiver) = receiver {
+                receiver.await.unwrap();
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct ControlledBackend {
+        inner: MemoryKvBackend<Error>,
+        before_write: Pause,
+        after_write: Pause,
+        after_read: Pause,
+    }
+
+    #[async_trait::async_trait]
+    impl TxnService for ControlledBackend {
+        type Error = Error;
+
+        async fn txn(&self, txn: Txn) -> Result<TxnResponse> {
+            self.before_write.wait().await;
+            let res = self.inner.txn(txn).await;
+            self.after_write.wait().await;
+            res
+        }
+
+        fn max_txn_ops(&self) -> usize {
+            self.inner.max_txn_ops()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl KvBackend for ControlledBackend {
+        fn name(&self) -> &str {
+            "ControlledBackend"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        async fn range(&self, req: RangeRequest) -> Result<RangeResponse> {
+            let res = self.inner.range(req).await;
+            self.after_read.wait().await;
+            res
+        }
+
+        async fn batch_get(&self, req: BatchGetRequest) -> Result<BatchGetResponse> {
+            let res = self.inner.batch_get(req).await;
+            self.after_read.wait().await;
+            res
+        }
+
+        async fn put(&self, req: PutRequest) -> Result<PutResponse> {
+            self.before_write.wait().await;
+            let res = self.inner.put(req).await;
+            self.after_write.wait().await;
+            res
+        }
+
+        async fn batch_put(&self, req: BatchPutRequest) -> Result<BatchPutResponse> {
+            self.before_write.wait().await;
+            let res = self.inner.batch_put(req).await;
+            self.after_write.wait().await;
+            res
+        }
+
+        async fn delete_range(&self, req: DeleteRangeRequest) -> Result<DeleteRangeResponse> {
+            self.before_write.wait().await;
+            let res = self.inner.delete_range(req).await;
+            self.after_write.wait().await;
+            res
+        }
+
+        async fn batch_delete(&self, req: BatchDeleteRequest) -> Result<BatchDeleteResponse> {
+            self.before_write.wait().await;
+            let res = self.inner.batch_delete(req).await;
+            self.after_write.wait().await;
+            res
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Write {
+        Txn,
+        TxnFailure,
+        Put,
+        BatchPut,
+        CompareAndPut,
+        DeleteRange,
+        BatchDelete,
+    }
+
+    const WRITES: [Write; 7] = [
+        Write::Txn,
+        Write::TxnFailure,
+        Write::Put,
+        Write::BatchPut,
+        Write::CompareAndPut,
+        Write::DeleteRange,
+        Write::BatchDelete,
+    ];
+    const KEY: &[u8] = b"route";
+
+    impl Write {
+        async fn execute(self, store: &LeaderCachedKvBackend, value: &[u8]) {
+            match self {
+                Self::Txn => {
+                    store
+                        .txn(Txn::new().and_then(vec![TxnOp::Put(KEY.to_vec(), value.to_vec())]))
+                        .await
+                        .unwrap();
+                }
+                Self::TxnFailure => {
+                    let res = store
+                        .txn(
+                            Txn::new()
+                                .when(vec![Compare::with_value_not_exists(
+                                    KEY.to_vec(),
+                                    CompareOp::Equal,
+                                )])
+                                .or_else(vec![TxnOp::Put(KEY.to_vec(), value.to_vec())]),
+                        )
+                        .await
+                        .unwrap();
+                    assert!(!res.succeeded);
+                }
+                Self::Put => {
+                    store
+                        .put(PutRequest::new().with_key(KEY).with_value(value))
+                        .await
+                        .unwrap();
+                }
+                Self::BatchPut => {
+                    store
+                        .batch_put(BatchPutRequest {
+                            kvs: vec![KeyValue {
+                                key: KEY.to_vec(),
+                                value: value.to_vec(),
+                            }],
+                            ..Default::default()
+                        })
+                        .await
+                        .unwrap();
+                }
+                Self::CompareAndPut => {
+                    let res = store
+                        .compare_and_put(
+                            CompareAndPutRequest::new()
+                                .with_key(KEY)
+                                .with_expect(b"old")
+                                .with_value(value),
+                        )
+                        .await
+                        .unwrap();
+                    assert!(res.success);
+                }
+                Self::DeleteRange => {
+                    store
+                        .delete_range(DeleteRangeRequest::new().with_key(KEY))
+                        .await
+                        .unwrap();
+                }
+                Self::BatchDelete => {
+                    store
+                        .batch_delete(BatchDeleteRequest {
+                            keys: vec![KEY.to_vec()],
+                            prev_kv: false,
+                        })
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+    }
+
+    async fn read(store: &LeaderCachedKvBackend, batch: bool) -> Option<KeyValue> {
+        if batch {
+            store
+                .batch_get(BatchGetRequest {
+                    keys: vec![KEY.to_vec()],
+                })
+                .await
+                .unwrap()
+                .kvs
+                .pop()
+        } else {
+            store.get(KEY).await.unwrap()
+        }
+    }
+
+    /// A cache miss reads the old value after a writer starts, then returns after
+    /// the writer has committed and updated/invalidated the cache (#9548).
+    #[tokio::test]
+    async fn test_cache_miss_overlaps_write() {
+        for write in WRITES {
+            for batch in [true, false] {
+                let backing = Arc::new(ControlledBackend::default());
+                backing
+                    .inner
+                    .put(PutRequest::new().with_key(KEY).with_value(b"old"))
+                    .await
+                    .unwrap();
+                let store = LeaderCachedKvBackend::with_always_leader(backing.clone());
+
+                let commit = backing.before_write.arm();
+                let writer = write.execute(&store, b"new");
+                tokio::pin!(writer);
+                assert!(poll!(writer.as_mut()).is_pending());
+
+                let return_read = backing.after_read.arm();
+                let reader = read(&store, batch);
+                tokio::pin!(reader);
+                assert!(poll!(reader.as_mut()).is_pending());
+
+                commit.send(()).unwrap();
+                writer.await;
+                return_read.send(()).unwrap();
+                assert_eq!(reader.await.unwrap().value(), b"old");
+
+                let durable = backing.inner.get(KEY).await.unwrap();
+                assert_eq!(
+                    read(&store, batch).await,
+                    durable,
+                    "{write:?}, batch={batch}"
+                );
+            }
+        }
+    }
+
+    /// Start order, commit order and response order can all differ. An older
+    /// put response must not overwrite the cache after a newer mutation.
+    #[tokio::test]
+    async fn test_overlapping_writes() {
+        for first in [Write::Put, Write::BatchPut] {
+            for second in WRITES {
+                for reverse_commit in [false, true] {
+                    let backing = Arc::new(ControlledBackend::default());
+                    backing
+                        .inner
+                        .put(PutRequest::new().with_key(KEY).with_value(b"old"))
+                        .await
+                        .unwrap();
+                    let store = LeaderCachedKvBackend::with_always_leader(backing.clone());
+
+                    let resume = if reverse_commit {
+                        backing.before_write.arm()
+                    } else {
+                        backing.after_write.arm()
+                    };
+                    // Keep the initial value so the second CAS succeeds.
+                    let writer = first.execute(&store, b"old");
+                    tokio::pin!(writer);
+                    assert!(poll!(writer.as_mut()).is_pending());
+                    second.execute(&store, b"new").await;
+                    resume.send(()).unwrap();
+                    writer.await;
+
+                    let durable = backing.inner.get(KEY).await.unwrap();
+                    assert_eq!(
+                        read(&store, true).await,
+                        durable,
+                        "{first:?}, {second:?}, reverse_commit={reverse_commit}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The later-started put commits first but returns last, after its stored
+    /// value has already been replaced by the first writer.
+    #[tokio::test]
+    async fn test_write_response_reordering() {
+        for first in WRITES {
+            for second in [Write::Put, Write::BatchPut] {
+                let backing = Arc::new(ControlledBackend::default());
+                backing
+                    .inner
+                    .put(PutRequest::new().with_key(KEY).with_value(b"old"))
+                    .await
+                    .unwrap();
+                let store = LeaderCachedKvBackend::with_always_leader(backing.clone());
+
+                let commit_first = backing.before_write.arm();
+                let first_writer = first.execute(&store, b"new");
+                tokio::pin!(first_writer);
+                assert!(poll!(first_writer.as_mut()).is_pending());
+
+                let return_second = backing.after_write.arm();
+                let second_writer = second.execute(&store, b"old");
+                tokio::pin!(second_writer);
+                assert!(poll!(second_writer.as_mut()).is_pending());
+
+                commit_first.send(()).unwrap();
+                first_writer.await;
+                return_second.send(()).unwrap();
+                second_writer.await;
+
+                let durable = backing.inner.get(KEY).await.unwrap();
+                assert_eq!(read(&store, true).await, durable, "{first:?}, {second:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_cache_miss_overlaps_reset() {
+        for batch in [true, false] {
+            let backing = Arc::new(ControlledBackend::default());
+            backing
+                .inner
+                .put(PutRequest::new().with_key(KEY).with_value(b"old"))
+                .await
+                .unwrap();
+            let store = LeaderCachedKvBackend::with_always_leader(backing.clone());
+
+            let return_read = backing.after_read.arm();
+            let reader = read(&store, batch);
+            tokio::pin!(reader);
+            assert!(poll!(reader.as_mut()).is_pending());
+            store.reset();
+            return_read.send(()).unwrap();
+            reader.await;
+            assert!(store.cache.get(KEY).await.unwrap().is_none());
+        }
+    }
 
     fn create_leader_cached_kv_backend() -> LeaderCachedKvBackend {
         let store = Arc::new(MemoryKvBackend::new());

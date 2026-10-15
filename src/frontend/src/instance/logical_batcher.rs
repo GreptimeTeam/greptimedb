@@ -48,6 +48,7 @@ impl Instance {
             LogicalTablePendingRowsBatcher::try_new(
                 self.partition_manager().clone(),
                 self.node_manager().clone(),
+                self.inserter.write_dispatcher().clone(),
                 self.catalog_manager().clone(),
                 self.table_flownode_set_cache().clone(),
                 true,
