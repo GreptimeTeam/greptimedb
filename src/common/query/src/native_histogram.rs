@@ -35,6 +35,7 @@ use datafusion::arrow::datatypes::{
 };
 use datafusion_common::{DataFusionError, Result as DfResult};
 use datatypes::data_type::{ConcreteDataType, DataType};
+pub use datatypes::series::histogram::CounterResetHint;
 use datatypes::types::{StructField, StructType};
 pub use encoding::{NativeHistogramError, encode_native_histogram, native_histogram_column_schema};
 use once_cell::sync::Lazy;
@@ -140,48 +141,6 @@ pub fn is_native_histogram_value_schema(name: &str, data_type: &ConcreteDataType
 pub const CUSTOM_BUCKETS_SCHEMA: i32 = -53;
 const MIN_EXPONENTIAL_SCHEMA: i32 = -4;
 const MAX_EXPONENTIAL_SCHEMA: i32 = 8;
-
-/// Information carried by a native histogram about a possible counter reset.
-///
-/// The persisted and protobuf representation remains an `i32`. Unrecognized
-/// values are retained so data written by a newer producer can still round-trip.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CounterResetHint {
-    /// The payload must be inspected to determine whether a reset occurred.
-    Unknown,
-    /// This is the first histogram after a counter reset.
-    CounterReset,
-    /// No counter reset occurred since the previous histogram.
-    NotCounterReset,
-    /// This is a gauge histogram, so counter resets do not apply.
-    Gauge,
-    /// A value not understood by this version.
-    Unrecognized(i32),
-}
-
-impl From<i32> for CounterResetHint {
-    fn from(value: i32) -> Self {
-        match value {
-            0 => Self::Unknown,
-            1 => Self::CounterReset,
-            2 => Self::NotCounterReset,
-            3 => Self::Gauge,
-            value => Self::Unrecognized(value),
-        }
-    }
-}
-
-impl From<CounterResetHint> for i32 {
-    fn from(value: CounterResetHint) -> Self {
-        match value {
-            CounterResetHint::Unknown => 0,
-            CounterResetHint::CounterReset => 1,
-            CounterResetHint::NotCounterReset => 2,
-            CounterResetHint::Gauge => 3,
-            CounterResetHint::Unrecognized(value) => value,
-        }
-    }
-}
 
 /// Reset hint indicating that the payload must be inspected.
 pub const UNKNOWN_COUNTER_RESET_HINT: CounterResetHint = CounterResetHint::Unknown;
@@ -1751,6 +1710,21 @@ mod tests {
             spans_from_indices_counts(vec![(i32::MIN, 1.0), (i32::MAX, 2.0)]),
             None
         );
+    }
+
+    #[test]
+    fn datatypes_reset_hints_round_trip_through_native_histogram() {
+        use datatypes::series::histogram::CounterResetHint as DatatypesCounterResetHint;
+
+        let values = [-1, 0, 1, 2, 3, 77, i32::MIN, i32::MAX];
+        for value in values {
+            let datatypes_hint = DatatypesCounterResetHint::from(value);
+            let query_hint: CounterResetHint = datatypes_hint;
+            let mut histogram = histogram(Vec::new(), Vec::new());
+            histogram.reset_hint = query_hint;
+            let datatypes_hint: DatatypesCounterResetHint = histogram.reset_hint;
+            assert_eq!(i32::from(datatypes_hint), value);
+        }
     }
 
     #[test]
