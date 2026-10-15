@@ -43,6 +43,26 @@ pub fn writes_temporary_files(store: &ObjectStore) -> bool {
     TEMPORARY_FILE_SCHEME == Some(store.info().scheme())
 }
 
+/// What a sweep did.
+///
+/// A sweep goes through its directories and files one at a time, and a failure
+/// on either doesn't stop it, so it reports what it reclaimed and what it
+/// couldn't.
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+pub struct SweepReport {
+    /// Temporary files deleted.
+    pub deleted: usize,
+    /// List and delete operations that failed.
+    pub failed: usize,
+}
+
+impl SweepReport {
+    fn merge(&mut self, other: SweepReport) {
+        self.deleted += other.deleted;
+        self.failed += other.failed;
+    }
+}
+
 /// Deletes the temporary files in `dirs` that are older than `older_than`.
 ///
 /// A non-append write goes to a temporary file next to its target and is
@@ -53,32 +73,35 @@ pub fn writes_temporary_files(store: &ObjectStore) -> bool {
 /// The caller runs this for a region that just became its writable leader, so a
 /// file that is old enough belongs to a writer that is gone. A store that
 /// doesn't write temporary files is left untouched. Failures are logged and
-/// don't stop the sweep. Returns the number of deleted files.
+/// don't stop the sweep.
 pub async fn sweep_temporary_files(
     store: &ObjectStore,
     dirs: &[String],
     older_than: Duration,
-) -> usize {
+) -> SweepReport {
     if !writes_temporary_files(store) {
-        return 0;
+        return SweepReport::default();
     }
 
-    let mut deleted = 0;
+    let mut report = SweepReport::default();
     for dir in dirs {
-        deleted += sweep_dir(store, dir, older_than).await;
+        report.merge(sweep_dir(store, dir, older_than).await);
     }
-    deleted
+    report
 }
 
-async fn sweep_dir(store: &ObjectStore, dir: &str, older_than: Duration) -> usize {
+async fn sweep_dir(store: &ObjectStore, dir: &str, older_than: Duration) -> SweepReport {
     let entries = match store.list(dir).await {
         Ok(entries) => entries,
         // Not every region has every directory, for example one that was never
         // repartitioned has no staging directory.
-        Err(error) if error.kind() == ErrorKind::NotFound => return 0,
+        Err(error) if error.kind() == ErrorKind::NotFound => return SweepReport::default(),
         Err(error) => {
             warn!(error; "Failed to list {dir} for temporary files");
-            return 0;
+            return SweepReport {
+                failed: 1,
+                ..Default::default()
+            };
         }
     };
 
@@ -87,7 +110,7 @@ async fn sweep_dir(store: &ObjectStore, dir: &str, older_than: Duration) -> usiz
         .as_millisecond()
         .saturating_sub(i64::try_from(older_than.as_millis()).unwrap_or(i64::MAX));
 
-    let mut deleted = 0;
+    let mut report = SweepReport::default();
     for entry in entries {
         if !is_temporary_file(entry.name()) {
             continue;
@@ -111,12 +134,15 @@ async fn sweep_dir(store: &ObjectStore, dir: &str, older_than: Duration) -> usiz
         // failure, and one file that can't be deleted must not keep the rest of
         // the directory from being swept.
         match store.delete(entry.path()).await {
-            Ok(()) => deleted += 1,
-            Err(error) => warn!(error; "Failed to delete temporary file {}", entry.path()),
+            Ok(()) => report.deleted += 1,
+            Err(error) => {
+                warn!(error; "Failed to delete temporary file {}", entry.path());
+                report.failed += 1;
+            }
         }
     }
 
-    deleted
+    report
 }
 
 fn is_temporary_file(name: &str) -> bool {
@@ -133,7 +159,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::layers::mock::{MockLayerBuilder, oio};
+    use crate::layers::mock::{MockLayer, MockLayerBuilder, OpDelete, oio};
     use crate::{Error, Result};
 
     const EXPIRED: Duration = Duration::from_millis(1);
@@ -144,26 +170,57 @@ mod tests {
         (directory, store)
     }
 
-    fn test_store_of_missing_dirs() -> (TempDir, ObjectStore) {
-        // Fs lists a directory it doesn't have as an empty one, but HDFS reports
-        // it as not found.
-        struct MissingLister;
-
-        impl oio::List for MissingLister {
-            async fn next(&mut self) -> Result<Option<oio::Entry>> {
-                Err(Error::new(ErrorKind::NotFound, "no such directory"))
-            }
-        }
-
+    fn test_store_of(layer: MockLayer) -> (TempDir, ObjectStore) {
         let directory = tempfile::tempdir().unwrap();
-        let layer = MockLayerBuilder::default()
-            .lister_factory(Arc::new(|_, _, _| Box::new(MissingLister)))
-            .build()
-            .unwrap();
         let store = Operator::new(Fs::default().root(directory.path().to_str().unwrap()))
             .unwrap()
             .layer(layer);
         (directory, store)
+    }
+
+    fn test_store_of_failing_list(kind: ErrorKind) -> (TempDir, ObjectStore) {
+        struct FailingLister(ErrorKind);
+
+        impl oio::List for FailingLister {
+            async fn next(&mut self) -> Result<Option<oio::Entry>> {
+                Err(Error::new(self.0, "Failed to list"))
+            }
+        }
+
+        let layer = MockLayerBuilder::default()
+            .lister_factory(Arc::new(move |_, _, _| Box::new(FailingLister(kind))))
+            .build()
+            .unwrap();
+        test_store_of(layer)
+    }
+
+    // A store that fails to delete every path containing `marker`.
+    fn test_store_of_failing_delete(marker: &'static str) -> (TempDir, ObjectStore) {
+        struct FailingDeleter {
+            inner: oio::Deleter,
+            marker: &'static str,
+        }
+
+        impl oio::Delete for FailingDeleter {
+            async fn delete(&mut self, path: &str, args: OpDelete) -> Result<()> {
+                if path.contains(self.marker) {
+                    return Err(Error::new(ErrorKind::Unexpected, "Failed to delete"));
+                }
+                self.inner.delete(path, args).await
+            }
+
+            async fn close(&mut self) -> Result<()> {
+                self.inner.close().await
+            }
+        }
+
+        let layer = MockLayerBuilder::default()
+            .deleter_factory(Arc::new(move |inner| {
+                Box::new(FailingDeleter { inner, marker })
+            }))
+            .build()
+            .unwrap();
+        test_store_of(layer)
     }
 
     async fn wait_until_expired() {
@@ -200,7 +257,13 @@ mod tests {
         store.write("data/42.parquet", "data").await.unwrap();
 
         wait_until_expired().await;
-        assert_eq!(1, sweep_dir(&store, "data/", EXPIRED).await);
+        assert_eq!(
+            SweepReport {
+                deleted: 1,
+                failed: 0
+            },
+            sweep_dir(&store, "data/", EXPIRED).await
+        );
 
         assert!(!store.exists(temporary).await.unwrap());
         assert!(store.exists("data/42.parquet").await.unwrap());
@@ -214,7 +277,7 @@ mod tests {
         store.write(temporary, "partial").await.unwrap();
 
         assert_eq!(
-            0,
+            SweepReport::default(),
             sweep_dir(&store, "data/", Duration::from_secs(24 * 60 * 60)).await
         );
 
@@ -223,14 +286,51 @@ mod tests {
 
     #[tokio::test]
     async fn test_sweep_dir_of_missing_directory() {
-        let (_directory, store) = test_store_of_missing_dirs();
+        // Fs lists a directory it doesn't have as an empty one, but HDFS reports
+        // it as not found.
+        let (_directory, store) = test_store_of_failing_list(ErrorKind::NotFound);
 
         // A region that was never repartitioned has no staging directory, so a
         // missing directory is an expected answer rather than a failure.
         assert_eq!(
-            0,
+            SweepReport::default(),
             sweep_dir(&store, "data/staging/blob/", Duration::ZERO).await
         );
+    }
+
+    #[tokio::test]
+    async fn test_sweep_dir_reports_failed_list() {
+        let (_directory, store) = test_store_of_failing_list(ErrorKind::Unexpected);
+
+        assert_eq!(
+            SweepReport {
+                deleted: 0,
+                failed: 1
+            },
+            sweep_dir(&store, "data/", Duration::ZERO).await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sweep_dir_keeps_going_after_failed_delete() {
+        let (_directory, store) = test_store_of_failing_delete("fail");
+        let failing = "data/.fail-42.parquet.greptime-53f0f4a6.tmp";
+        let sweepable = "data/.ok-42.parquet.greptime-53f0f4a6.tmp";
+        store.create_dir("data/").await.unwrap();
+        store.write(failing, "partial").await.unwrap();
+        store.write(sweepable, "partial").await.unwrap();
+
+        wait_until_expired().await;
+        assert_eq!(
+            SweepReport {
+                deleted: 1,
+                failed: 1
+            },
+            sweep_dir(&store, "data/", EXPIRED).await
+        );
+
+        assert!(store.exists(failing).await.unwrap());
+        assert!(!store.exists(sweepable).await.unwrap());
     }
 
     #[tokio::test]
@@ -243,7 +343,7 @@ mod tests {
         wait_until_expired().await;
         assert!(!writes_temporary_files(&store));
         assert_eq!(
-            0,
+            SweepReport::default(),
             sweep_temporary_files(&store, &["data/".to_string()], EXPIRED).await
         );
 
