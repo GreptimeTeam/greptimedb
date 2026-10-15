@@ -31,7 +31,7 @@ on:
         type: boolean
         default: false
       groups:
-        description: 'JSON list of cell groups, each overriding configs, sweep, extra_env, concurrency, rounds, rows, restart, plus idle_seconds, or mode crash with cycles, kill_after [min, max] and pin; empty = one group from the inputs above'
+        description: 'JSON list of cell groups, each overriding configs, sweep, extra_env, concurrency, rounds, rows, restart, plus idle_seconds and partitions (regions of the loaded table), or mode crash with cycles, kill_after [min, max] and pin, or mode drop with write_seconds; empty = one group from the inputs above'
         type: string
         default: ''
       instance_type:

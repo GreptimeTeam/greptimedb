@@ -224,6 +224,45 @@ crash_cycles() {
     done
 }
 
+# Writes the table `dropped` for write_seconds, drops it and kills the server right
+# away, while most of its objects are still indexed; restarts on the same prefix and
+# data home, then writes and flushes the table `kept` and samples the indexed objects
+# until the dropped table's objects are collected.
+drop_restart() {
+    local writers rows seconds started deadline indexed recovered sql_url=${OSWAL_SQL_URL:-http://127.0.0.1:4000/v1/sql?db=public}
+    writers=$(jq -r .concurrency <<< "$spec") rows=$(jq -r .batch_rows "$PLAN") seconds=$(jq -r .write_seconds <<< "$spec")
+    sql "CREATE TABLE dropped (seq BIGINT, ts TIMESTAMP TIME INDEX) WITH (append_mode = 'true')" >/dev/null
+    sql "CREATE TABLE kept (seq BIGINT, ts TIMESTAMP TIME INDEX) WITH (append_mode = 'true')" >/dev/null
+    python3 "$here/oswal-s3-bench-crash.py" write --dir "$dir/dropped" --url "$sql_url" --table dropped \
+        --writers "$writers" --first-seq 0 --rows "$rows" --seconds "$seconds"
+    phase=-written; scrape_retry indexed_objects || { echo "$id: metrics scrape failed" >&2; exit 4; }
+    sql "DROP TABLE dropped" >/dev/null
+    stop_server kill
+    phase=-restart started=$(now)
+    start_server
+    restart_seconds=$(elapsed "$started")
+    scrape_retry recovery_seconds_count || { echo "$id: metrics scrape failed" >&2; exit 4; }
+    recovered=$(awk '/^greptime_logstore_object_store_wal_recovered_objects_total / {print $2}' "$dir/metrics-restart.prom")
+    python3 "$here/oswal-s3-bench-crash.py" write --dir "$dir/kept" --url "$sql_url" --table kept \
+        --writers 1 --first-seq 0 --rows "$rows" --seconds 2
+    sql "ADMIN FLUSH_TABLE('kept')" >/dev/null
+    # The flushed watermark becomes durable with the next object, so every sample writes one row.
+    deadline=$((SECONDS + ${OSWAL_COLLECT_SECONDS:-120}))
+    while :; do
+        sql "INSERT INTO kept VALUES (-1, $SECONDS)" >/dev/null
+        # The samples have their own file; the final scrape and the log keep the restart's name.
+        phase=-collected
+        scrape_retry indexed_objects || { phase=-restart; echo "$id: metrics scrape failed" >&2; exit 4; }
+        phase=-restart
+        indexed=$(awk '/^greptime_logstore_object_store_wal_indexed_objects / {print $2}' "$dir/metrics-collected.prom")
+        printf '%s %s\n' "$(date +%s)" "$indexed" >> "$dir/collected.tsv"
+        # A start object, the newest object and kept's own may stay; the dropped table's go.
+        awk -v i="$indexed" -v r="${recovered:-0}" 'BEGIN {exit !(i <= 3 || 2 * i < r)}' && break
+        ((SECONDS < deadline)) || { echo "$id: $indexed of ${recovered:-?} recovered objects still indexed" >&2; exit 9; }
+        sleep 1
+    done
+}
+
 finish() {
     local rc=$?
     trap - EXIT
@@ -260,7 +299,7 @@ cell() {
     spec=$1 cid= wal_dir= home_dir= version= load_seconds= metrics_scraped=false id= phase=
     restart_scraped=false restart_seconds= restart_query_seconds= restart_count= server_cpu_seconds= host_cpu_busy=
     indexed_before_kill=
-    local concurrency setting started cpu_before host_before host_after
+    local concurrency setting started cpu_before host_before host_after corpus partitions load script
     id=$(jq -r .id <<< "$spec"); concurrency=$(jq -r .concurrency <<< "$spec")
     dir="$RESULTS/cells/$id" name="$OWNER-$id"
     mkdir -p "$dir"
@@ -269,7 +308,7 @@ cell() {
         "STORAGE__ROOT=$RUN_PREFIX/$id")
     [[ -z "${S3_CONTAINER_ENDPOINT:-}" ]] || settings+=("STORAGE__ENDPOINT=$S3_CONTAINER_ENDPOINT")
     # A restarted server needs the metadata the loaded one kept in its data home.
-    jq -e '.restart or .mode == "crash"' <<< "$spec" >/dev/null && settings+=(STORAGE__DATA_HOME=/oswal_home)
+    jq -e '.restart or .mode != "load"' <<< "$spec" >/dev/null && settings+=(STORAGE__DATA_HOME=/oswal_home)
     while IFS= read -r setting; do settings+=("$setting"); done \
         < <(jq -r '.wal | to_entries[] | "WAL__\(.key)=\(.value)"' <<< "$spec")
     docker_env=() mounts=()
@@ -293,7 +332,7 @@ cell() {
     else
         wal_device="s3://$S3_BUCKET/$RUN_PREFIX/$id/wal"
     fi
-    if jq -e '.restart or .mode == "crash"' <<< "$spec" >/dev/null; then
+    if jq -e '.restart or .mode != "load"' <<< "$spec" >/dev/null; then
         home_dir="$WAL_ROOT/$id-home"; mkdir -p "$home_dir"
         mounts+=(--mount "type=bind,src=$home_dir,dst=/oswal_home")
     fi
@@ -302,18 +341,27 @@ cell() {
     version=$(docker exec "$cid" greptime --version | sed -n 's/^version: //p')
     [[ -n "$version" ]]
     if jq -e '.mode == "crash"' <<< "$spec" >/dev/null; then crash_cycles; return; fi
+    if jq -e '.mode == "drop"' <<< "$spec" >/dev/null; then drop_restart; return; fi
+    corpus="$CORPUS_DIR/corpus-$(jq -r .rows <<< "$spec")" partitions=$(jq -r '.partitions // 1' <<< "$spec")
+    # Only the load phase, run exactly as run-agent-observability.sh runs it, or with the
+    # loader writing into a table split into regions that the cell created first.
+    load=(scripts/agent-observability/greptimedb.sh load) script=()
+    if ((partitions > 1)); then
+        sql "$(python3 "$here/oswal-s3-bench.py" table --summary "$corpus/summary.json" --partitions "$partitions")" >/dev/null
+        load=(/work/oswal-s3-bench-load.sh)
+        script=(--mount "type=bind,src=$here/oswal-s3-bench-load.sh,dst=/work/oswal-s3-bench-load.sh,readonly")
+    fi
     cpu_before=$(server_cpu) host_before=$(host_cpu)
     started=$(now)
-    # Only the load phase, run exactly as run-agent-observability.sh runs it.
     runtime --name "$name-load" --network host \
-        --mount "type=bind,src=$CORPUS_DIR/corpus-$(jq -r .rows <<< "$spec"),dst=/work/corpus,readonly" \
+        --mount "type=bind,src=$corpus,dst=/work/corpus,readonly" ${script[@]+"${script[@]}"} \
         --mount "type=bind,src=$dir,dst=/results" \
         -e GRPC_ENDPOINT=127.0.0.1:4001 -e "DATA_PROFILE=$(jq -r .data_profile <<< "$spec")" -e RESULT_NAME=greptimedb-1 \
         -e "ENDPOINT=http://127.0.0.1:4000/v1/sql?db=public&format=greptimedb_v1" \
         -e "TARGET_IMAGE=$GREPTIMEDB_IMAGE" -e "TARGET_VERSION=$version" -e "TARGET_DIGEST=${GREPTIMEDB_IMAGE##*@}" \
         -e "TARGET_ID=$name" -e TARGET_HOST=127.0.0.1 -e PREPARE_WORKERS= -e "MAX_IN_FLIGHT=$concurrency" \
         -e "GREPTIMEDB_BATCH_SIZE=$(jq -r .batch_rows "$PLAN")" --entrypoint /bin/bash \
-        "$RUNTIME_IMAGE" scripts/agent-observability/greptimedb.sh load > "$dir/load.log" 2>&1
+        "$RUNTIME_IMAGE" "${load[@]}" > "$dir/load.log" 2>&1
     load_seconds=$(elapsed "$started")
     host_after=$(host_cpu)
     server_cpu_seconds=$(awk -v a="$cpu_before" -v b="$(server_cpu)" 'BEGIN {if (a != "" && b != "") printf "%.3f", b - a}')
@@ -322,6 +370,16 @@ cell() {
         'BEGIN {split(a, x, " "); split(b, y, " "); if (y[2] > x[2]) printf "%.4f", (y[1] - x[1]) / (y[2] - x[2])}')
     jq -e --argjson rows "$(jq .rows <<< "$spec")" '.count_before == 0 and .count_after == $rows' \
         "$dir/greptimedb-1/load-result.json" >/dev/null
+    if ((partitions > 1)); then
+        # The server's own account of the rows each region took.
+        sql "SELECT p.partition_name, s.region_id, s.region_rows, s.written_bytes_since_open
+             FROM information_schema.partitions p JOIN information_schema.region_statistics s
+             ON p.greptime_partition_id = s.region_id
+             WHERE p.table_schema = 'public' AND p.table_name = 'agent_observations'
+             ORDER BY s.region_id" > "$dir/regions.json"
+        jq -e --argjson n "$partitions" '[.output[0].records.rows[] | select(.[2] > 0)] | length == $n' \
+            "$dir/regions.json" >/dev/null || { echo "$id: fewer than $partitions regions took rows" >&2; exit 8; }
+    fi
     # An idle window: what the server sends with no writes, between two scrapes.
     if jq -e '.idle_seconds > 0' <<< "$spec" >/dev/null; then
         phase=-idle; scrape_metrics || { echo "$id: metrics scrape failed" >&2; exit 4; }; phase=

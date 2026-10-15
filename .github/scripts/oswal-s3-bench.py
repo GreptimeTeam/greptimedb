@@ -29,6 +29,7 @@ import re
 import sys
 import time
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 SMOKE_ROWS = 50_000
@@ -44,9 +45,43 @@ WAL_CONFIGS = {
 BASELINES = ("R", "R0")
 # The pipeline depths an image built with the overrides reads; their defaults on main.
 DEPTHS = {"GREPTIMEDB_OSWAL_MAX_IN_FLIGHT_CREATES": 4, "GREPTIMEDB_OSWAL_MAX_SEALED_BATCHES": None,
-          "GREPTIMEDB_OSWAL_RECOVERY_CONCURRENCY": 8}
+          "GREPTIMEDB_OSWAL_RECOVERY_CONCURRENCY": 64}
 # Restart cells seal ten times as often as the default so recovery has thousands of objects.
 RESTART_FLUSH_INTERVAL = "10ms"
+# The loader's CREATE TABLE for the agent observability workload at the pinned runtime image.
+AGENT_TABLE = """CREATE TABLE `agent_observations` (
+  `event_time` TIMESTAMP(3) NOT NULL,
+  `biz_date` DATE NOT NULL,
+  `trace_id` STRING NOT NULL SKIPPING INDEX,
+  `session_id` STRING NOT NULL,
+  `observation_id` STRING NOT NULL SKIPPING INDEX,
+  `parent_observation_id` STRING NULL SKIPPING INDEX,
+  `seq_no` BIGINT NOT NULL,
+  `type` STRING NOT NULL INVERTED INDEX,
+  `status` STRING NOT NULL INVERTED INDEX,
+  `tenant` STRING NOT NULL,
+  `app` STRING NOT NULL,
+  `environment` STRING NOT NULL,
+  `task_category` STRING NULL,
+  `trace_archetype` STRING NULL,
+  `model` STRING NULL,
+  `tool_name` STRING NULL,
+  `input` STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false', granularity = '10240', false_positive_rate = '0.01'),
+  `output` STRING NULL FULLTEXT INDEX WITH(analyzer = 'English', backend = 'bloom', case_sensitive = 'false', granularity = '10240', false_positive_rate = '0.01'),
+  `input_tokens` BIGINT NULL,
+  `output_tokens` BIGINT NULL,
+  `total_cost` DOUBLE NULL,
+  `latency_ms` BIGINT NULL,
+  `payload` JSON2 NOT NULL,
+  TIME INDEX (`event_time`),
+  PRIMARY KEY (`tenant`, `app`, `environment`)
+)
+{partitions}ENGINE=mito
+WITH(
+  append_mode = 'true',
+  'compaction.type' = 'twcs',
+  'compaction.twcs.time_window' = '2h'
+)"""
 GROUP_NAME = re.compile(r"[a-z][a-z0-9]{0,11}")
 RESERVED_ENV = ("GREPTIMEDB_STANDALONE__STORAGE__", "GREPTIMEDB_STANDALONE__WAL__")
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -141,17 +176,34 @@ def check_depths(env: dict) -> None:
         raise ValueError(f"MAX_SEALED_BATCHES {sealed} is below MAX_IN_FLIGHT_CREATES {creates} plus 2")
 
 
+def partitioned_table(summary: dict, partitions: int) -> str:
+    """The loader's table split into equal event_time ranges over the corpus window. The
+    generator draws event times uniformly from that window, so every range gets an equal
+    share of the rows and every batch writes to every region."""
+    def millis(text):
+        return int(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp() * 1000)
+    start, end = millis(summary["start"]), millis(summary["end"])
+    bounds = [start + (end - start) * i // partitions for i in range(1, partitions)]
+    if len(set(bounds)) != len(bounds) or not start < bounds[0]:
+        raise ValueError(f"the corpus window {summary['start']}..{summary['end']} is too short for {partitions} ranges")
+    ranges = [f"`event_time` < {bounds[0]}"]
+    ranges += [f"`event_time` >= {low} AND `event_time` < {high}" for low, high in zip(bounds, bounds[1:])]
+    ranges.append(f"`event_time` >= {bounds[-1]}")
+    clause = "PARTITION ON COLUMNS (`event_time`) (\n  " + ",\n  ".join(ranges) + "\n)\n"
+    return AGENT_TABLE.format(partitions=clause)
+
+
 def group_cells(group: dict, smoke: bool) -> list:
     """The cells of one group, in run order; a group without a name is the top-level inputs."""
     name, mode = group.get("name", ""), group.get("mode", "load")
-    if mode not in ("load", "crash"):
-        raise ValueError(f"group {name!r}: mode must be load or crash, got {mode!r}")
+    if mode not in ("load", "crash", "drop"):
+        raise ValueError(f"group {name!r}: mode must be load, crash or drop, got {mode!r}")
     concurrency = str(group["concurrency"])
     levels = [positive("concurrency", level.strip(), 256) for level in concurrency.split(",")]
     if len(set(levels)) != len(levels):
         raise ValueError(f"concurrency repeats a level: {concurrency!r}")
     chosen = [config.strip() for config in str(group["configs"]).split(",")]
-    allowed = set(WAL_CONFIGS) - (set(BASELINES) if mode == "crash" else set())
+    allowed = set(WAL_CONFIGS) - (set(BASELINES) if mode != "load" else set())
     if not chosen or len(set(chosen)) != len(chosen) or not set(chosen) <= allowed:
         raise ValueError(f"group {name!r}: configs must be distinct names among {', '.join(sorted(allowed))}, "
                          f"got {group['configs']!r}")
@@ -165,6 +217,9 @@ def group_cells(group: dict, smoke: bool) -> list:
     rounds = 1 if smoke else positive("rounds", str(group["rounds"]), 10)
     idle = int(group.get("idle_seconds", 0))
     common = {"group": name, "mode": mode, "restart": restart, "idle_seconds": idle}
+    partitions = int(group.get("partitions", 1))
+    if partitions != 1 and (mode != "load" or not 2 <= partitions <= 64):
+        raise ValueError(f"group {name!r}: partitions must be in 2..64 and needs mode load")
     if mode == "load":
         if not 0 <= idle <= 600:
             raise ValueError(f"group {name!r}: idle_seconds must be in 0..600")
@@ -173,7 +228,14 @@ def group_cells(group: dict, smoke: bool) -> list:
         if min_objects < 0 or (min_objects and not restart):
             raise ValueError(f"group {name!r}: min_objects needs restart and must not be negative")
         common |= {"rows": rows, "data_profile": DATA_PROFILES.get(rows, "custom"),
-                   "min_objects": 0 if smoke else min_objects}
+                   "min_objects": 0 if smoke else min_objects, "partitions": partitions}
+    elif mode == "drop":
+        # Writes one table for write_seconds, drops it, kills and restarts the server, then
+        # writes and flushes another table and watches the dropped table's objects go.
+        write_seconds = int(group.get("write_seconds", 30))
+        if not 1 <= write_seconds <= 600 or restart or idle:
+            raise ValueError(f"group {name!r}: write_seconds must be in 1..600, without restart or idle")
+        common |= {"write_seconds": min(write_seconds, 10) if smoke else write_seconds}
     else:
         cycles = int(group.get("cycles", 5))
         kill_after = [int(v) for v in group.get("kill_after", [3, 10])]
@@ -212,7 +274,8 @@ def parse_groups(text: str, defaults: dict) -> list:
     groups = json.loads(text)
     if not isinstance(groups, list) or not groups or not all(isinstance(g, dict) for g in groups):
         raise ValueError("groups must be a non-empty JSON list of objects")
-    known = set(defaults) | {"name", "mode", "idle_seconds", "cycles", "kill_after", "pin", "min_objects"}
+    known = set(defaults) | {"name", "mode", "idle_seconds", "cycles", "kill_after", "pin", "min_objects",
+                             "partitions", "write_seconds"}
     names = [g.get("name") for g in groups]
     for group, name in zip(groups, names):
         if not isinstance(name, str) or not GROUP_NAME.fullmatch(name):
@@ -334,6 +397,9 @@ def main() -> int:
     regions = commands.add_parser("regions")
     for name in ("bucket", "runner"):
         regions.add_argument(f"--{name}", required=True)
+    table = commands.add_parser("table")
+    table.add_argument("--summary", type=Path, required=True)
+    table.add_argument("--partitions", type=int, required=True)
     manifest = commands.add_parser("manifest")
     for name in ("results", "runtime-image", "instance-type", "region", "prefix"):
         manifest.add_argument(f"--{name}", required=True)
@@ -359,6 +425,8 @@ def main() -> int:
     elif args.command == "regions":
         check_regions(args.bucket, args.runner)
         print(f"bucket and runner both in {args.runner}")
+    elif args.command == "table":
+        print(partitioned_table(json.loads(args.summary.read_text()), args.partitions))
     elif args.command == "manifest":
         results = Path(args.results)
         manifest = build_manifest(json.loads((results / "plan.json").read_text()),

@@ -20,6 +20,7 @@ batch sequence numbers, inserts `rows` rows per batch and stops at the first
 statement that is not acknowledged, so a stripe has at most one attempted but
 unacknowledged batch: the one in flight at the kill. Every request is logged
 with its status and the time it ended, on the same clock as the kill stamps.
+With `--seconds` the writers also stop once that long has passed.
 """
 
 from __future__ import annotations
@@ -50,12 +51,12 @@ def insert(url: str, table: str, seq: int, rows: int) -> str:
         return "000"
 
 
-def writer(args, index: int) -> None:
+def writer(args, index: int, deadline: float) -> None:
     directory, seq = Path(args.dir), args.first_seq + index
     with open(directory / f"attempted-{index}.log", "a") as attempted, \
             open(directory / f"requests-{index}.log", "a") as requests, \
             open(directory / f"acked-{index}.log", "a") as acked:
-        while True:
+        while time.monotonic() < deadline:
             attempted.write(f"{seq}\n")
             attempted.flush()
             code = insert(args.url, args.table, seq, args.rows)
@@ -71,7 +72,8 @@ def writer(args, index: int) -> None:
 
 def write(args) -> int:
     os.makedirs(args.dir, exist_ok=True)
-    threads = [threading.Thread(target=writer, args=(args, i)) for i in range(args.writers)]
+    deadline = time.monotonic() + args.seconds if args.seconds else float("inf")
+    threads = [threading.Thread(target=writer, args=(args, i, deadline)) for i in range(args.writers)]
     for thread in threads:
         thread.start()
     for thread in threads:
@@ -170,6 +172,7 @@ def main() -> int:
     w.add_argument("--table", default="crash")
     for name in ("writers", "first-seq", "rows"):
         w.add_argument(f"--{name}", type=int, required=True)
+    w.add_argument("--seconds", type=float, default=0, help="stop after this long; 0 writes until a failure")
     c = commands.add_parser("check")
     c.add_argument("--run-dir", type=Path, required=True)
     c.add_argument("--cycle", type=int, required=True)

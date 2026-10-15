@@ -178,6 +178,33 @@ class PlanTest(unittest.TestCase):
             self.assertEqual(done.returncode, 0, done.stderr)
             self.assertTrue(done.stdout.startswith(expected), done.stdout)
 
+    def test_a_partitioned_group_and_a_drop_group(self):
+        groups = [{"name": "multi", "configs": "R,D", "concurrency": "8,32", "partitions": 8},
+                  {"name": "drop", "mode": "drop", "configs": "D", "rounds": 1, "write_seconds": 45}]
+        plan = bench.build_plan("8", "2000000", "1000", "1", smoke=False, groups=json.dumps(groups))
+        cells = {c["id"]: c for c in plan["cells"]}
+        self.assertEqual(list(cells), ["multi-1-8-R", "multi-1-8-D", "multi-1-32-R", "multi-1-32-D", "drop-1-8-D"])
+        self.assertEqual({c["partitions"] for c in plan["cells"] if c["mode"] == "load"}, {8})
+        self.assertEqual((cells["drop-1-8-D"]["write_seconds"], cells["drop-1-8-D"]["mode"]), (45, "drop"))
+        self.assertNotIn("rows", cells["drop-1-8-D"])
+        self.assertEqual([c["rows"] for c in plan["corpora"]], [2_000_000])
+        smoke = bench.build_plan("8", "2000000", "1000", "1", smoke=True, groups=json.dumps(groups))
+        self.assertEqual(next(c for c in smoke["cells"] if c["mode"] == "drop")["write_seconds"], 10)
+        self.assertEqual(bench.build_plan("8", "6000", "1000", "1", smoke=False)["cells"][0]["partitions"], 1)
+
+    def test_the_partitioned_table_splits_the_corpus_window_into_equal_ranges(self):
+        ddl = bench.partitioned_table({"start": "2026-07-10T00:00:00Z", "end": "2026-07-10T01:00:00Z"}, 8)
+        start = 1783641600000
+        bounds = [int(b) for b in re.findall(r"`event_time` < (\d+)", ddl)]
+        self.assertEqual(bounds, [start + 450_000 * i for i in range(1, 8)])
+        self.assertIn(f"`event_time` >= {start + 450_000 * 7}\n)\nENGINE=mito", ddl)
+        self.assertEqual(ddl.count("`event_time` >="), 7)
+        self.assertTrue(ddl.startswith("CREATE TABLE `agent_observations` ("))
+        self.assertIn("PRIMARY KEY (`tenant`, `app`, `environment`)\n)\nPARTITION ON COLUMNS (`event_time`) (", ddl)
+        self.assertNotIn("{partitions}", ddl)
+        with self.assertRaises(ValueError):
+            bench.partitioned_table({"start": "2026-07-10T00:00:00Z", "end": "2026-07-10T00:00:00.004Z"}, 8)
+
     def test_invalid_groups_are_rejected(self):
         for groups in ([], [{"configs": "D"}], [{"name": "Bad"}], [{"name": "a"}, {"name": "a"}],
                        [{"name": "a", "colour": "red"}], [{"name": "a", "mode": "crash", "configs": "R"}],
@@ -185,7 +212,12 @@ class PlanTest(unittest.TestCase):
                        [{"name": "a", "mode": "crash", "configs": "D", "kill_after": [9, 5]}],
                        [{"name": "a", "mode": "soak"}], [{"name": "a", "idle_seconds": 601}],
                        [{"name": "a", "configs": "D", "min_objects": 6000}],
-                       [{"name": "a", "configs": "D", "restart": True, "min_objects": -1}]):
+                       [{"name": "a", "configs": "D", "restart": True, "min_objects": -1}],
+                       [{"name": "a", "configs": "D", "partitions": 65}], [{"name": "a", "configs": "D", "partitions": 0}],
+                       [{"name": "a", "mode": "crash", "configs": "D", "partitions": 8}],
+                       [{"name": "a", "mode": "drop", "configs": "R"}],
+                       [{"name": "a", "mode": "drop", "configs": "D", "write_seconds": 0}],
+                       [{"name": "a", "mode": "drop", "configs": "D", "restart": True}]):
             with self.subTest(groups=groups), self.assertRaises(ValueError):
                 bench.build_plan("8", "6000", "1000", "1", smoke=False, groups=json.dumps(groups))
 
@@ -312,7 +344,7 @@ class CrashOracleTest(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory:
                 run = Path(directory)
                 args = SimpleNamespace(dir=str(run / "cycle-1"), url=f"http://127.0.0.1:{server.server_port}/v1/sql",
-                                       table="crash", writers=2, first_seq=0, rows=3)
+                                       table="crash", writers=2, first_seq=0, rows=3, seconds=0)
                 crash.write(args)
                 found = {}
                 for body in inserted:
@@ -323,6 +355,37 @@ class CrashOracleTest(unittest.TestCase):
                 for index in range(2):
                     attempted = (run / "cycle-1" / f"attempted-{index}.log").read_text().split()
                     self.assertEqual([int(seq) % 2 for seq in attempted], [index] * len(attempted))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+class WriterDeadlineTest(unittest.TestCase):
+    def test_writers_stop_at_the_deadline_with_every_batch_acknowledged(self):
+        import http.server
+        import threading
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                run = Path(directory)
+                crash.write(SimpleNamespace(dir=str(run / "cycle-1"), url=f"http://127.0.0.1:{server.server_port}/",
+                                            table="dropped", writers=2, first_seq=0, rows=2, seconds=0.3))
+                result = crash.verify(run, {}, 2, True, 1)
+                self.assertGreater(result["cycle_acked_batches"], 0)
+                self.assertEqual(result["verify_errors"], [])
+                for index in range(2):
+                    self.assertTrue((run / "cycle-1" / f"exit-{index}.log").exists())
         finally:
             server.shutdown()
             server.server_close()
@@ -396,7 +459,7 @@ class SummaryTest(unittest.TestCase):
             cell = next(r for r in rows if r["id"] == "1-8-D-2")
             self.assertEqual(cell["restart"], {"wall_seconds": 3.5, "query_seconds": 4.25, "rows": 6000,
                                                "recovery_seconds": 1.5, "recovered_objects": 118,
-                                               "indexed_before_kill": 117, "min_objects": 6000})
+                                               "indexed_before_kill": 117, "min_objects": 6000, "replay": None})
             self.assertEqual(cell["server_cpu_cores"], 2.0)
             output = summary.render({}, rows, summary.ratios(rows))
             self.assertIn("| 1-8-D-2 | MAX_IN_FLIGHT_CREATES=2 | 120 | 117 (under 6,000) | 3.50 | 4.25 | 1.500 | 118 "
@@ -453,6 +516,78 @@ class SummaryTest(unittest.TestCase):
                           "| 4.50 | 2.500 | 5,399 | 1 | pass |", output)
             self.assertIn("| pin-1-8-D | 1 | 540.0 | 20.0 | 10.0 | 1.91 | no | write 9,000 | — |", output)
             self.assertIn("| pin-1-8-D | 300, 600, missing | 1 | 0 | 601 |", output)
+
+    def test_partitioned_load_cells_report_client_latency_entries_and_regions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            metrics = (ACK_BUCKETS + "greptime_logstore_object_store_wal_object_entries_sum 4000\n"
+                       "greptime_logstore_object_store_wal_object_entries_count 500\n"
+                       "greptime_logstore_object_store_wal_object_bytes_count 500\n")
+            self.write_cell(root, "1-8-D", 80.0, metrics=metrics, partitions=8)
+            path = root / "cells" / "1-8-D"
+            transcript = [{"step": "create_table", "duration_seconds": 9.0}]
+            transcript += [{"step": "grpc_write_batch", "status": "success", "duration_seconds": d / 1000}
+                           for d in range(1, 101)]
+            (path / "greptimedb-1" / "load-transcript.jsonl").write_text(
+                "".join(json.dumps(r) + "\n" for r in transcript))
+            (path / "regions.json").write_text(json.dumps({"output": [{"records": {"rows": [
+                [f"p{i}", 4398046511104 + i, 750 + i, 1000] for i in range(8)]}}]}))
+            cell = summary.load_cell(path)
+            self.assertEqual((cell["client_p50"], cell["client_p99"]), (0.05, 0.099))
+            self.assertEqual((cell["entries_per_object"], cell["appends_per_object"]), (8.0, 0.2))
+            self.assertEqual(cell["region_rows"], [750 + i for i in range(8)])
+            output = summary.render({}, [cell], [])
+            self.assertIn("| 1-8-D | 50.0 / 99.0 | 8.0 | 0.20 | 8 | 750 / 757 |", output)
+
+    def test_restarts_report_what_each_region_replayed(self):
+        log = ("INFO mito2::region::opener: Replay WAL for region: 4398046511104(1024, 0), provider: ObjectStore("
+               'ObjectStoreProvider { region_id: 4398046511104(1024, 0), prefix: "wal" }), rows recovered: 0, '
+               "replay from entry id: 1048578, last entry id: 1048577, total timeseries replayed: 0, elapsed: 60.581µs\n"
+               "INFO mito2::region::opener: Replay WAL for region: 4402341478400(1025, 0), provider: ObjectStore("
+               'ObjectStoreProvider { region_id: 4402341478400(1025, 0), prefix: "wal" }), rows recovered: 12625000, '
+               "replay from entry id: 4853858306, last entry id: 8164212737, total timeseries replayed: 82, "
+               "elapsed: 95.150155247s\n"
+               "INFO mito2::region::opener: Replay WAL for region: 4402341478401(1025, 1), provider: ObjectStore("
+               'ObjectStoreProvider { region_id: 4402341478401(1025, 1), prefix: "wal" }), rows recovered: 5, '
+               "replay from entry id: 8164212736, last entry id: 8164212737, total timeseries replayed: 1, "
+               "elapsed: 12.5ms\n")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            (path / "server-restart.log").write_text(log)
+            metrics = summary.parse_metrics("greptime_logstore_object_store_wal_read_seconds_sum 95.15\n"
+                                            "greptime_logstore_object_store_wal_read_seconds_count 3\n")
+            result = summary.replay(path / "server-restart.log", metrics)
+            self.assertEqual((result["rows"], result["objects"], result["read_seconds"], result["reads"]),
+                             (12_625_005, 3158 + 1, 95.15, 3))
+            self.assertAlmostEqual(result["seconds"], 95.150155247)
+            self.assertEqual([r["region"] for r in result["regions"]], [4402341478400, 4402341478401])
+            self.assertIsNone(summary.replay(path / "absent.log", metrics))
+            raft = log.replace("ObjectStore(", "RaftEngine(")
+            (path / "server-restart.log").write_text(raft)
+            self.assertIsNone(summary.replay(path / "server-restart.log", metrics)["objects"])
+
+    def test_a_drop_cell_reports_the_objects_collected_after_its_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "cells" / "drop-1-8-D"
+            (path / "dropped").mkdir(parents=True)
+            (path / "cell.json").write_text(json.dumps({
+                "id": "drop-1-8-D", "group": "drop", "mode": "drop", "round": 1, "concurrency": 8, "config": "D",
+                "wal": bench.WAL_CONFIGS["D"], "exit_code": 0, "restart_seconds": 2.5, "restart_scraped": True}))
+            write_lines(path / "dropped" / "acked-0.log", [0, 8, 16])
+            write_lines(path / "dropped" / "acked-1.log", [1, 9])
+            (path / "metrics-written.prom").write_text("greptime_logstore_object_store_wal_indexed_objects 300\n")
+            (path / "metrics-restart.prom").write_text(
+                "greptime_logstore_object_store_wal_recovered_objects_total 280\n"
+                "greptime_logstore_object_store_wal_release_records_total 1\n"
+                "greptime_logstore_object_store_wal_deleted_objects_total 279\n")
+            (path / "collected.tsv").write_text("100 281\n101 120\n104 2\n")
+            cell = summary.load_cell(path)
+            self.assertEqual(cell["drop"], {"acked_batches": 5, "indexed_before_drop": 300, "restart_seconds": 2.5,
+                                            "recovered_objects": 280, "release_records": 1, "indexed_at_end": 2,
+                                            "deleted_after_restart": 279, "seconds_to_collect": 4})
+            output = summary.render({}, [cell], [])
+            self.assertIn("| drop-1-8-D | 5 | 300 | 2.50 | 280 | 1 | 2 | 279 | 4 | collected |", output)
 
     def test_untouched_counters_are_zero_only_for_an_active_object_store_wal(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -524,13 +659,19 @@ print(json.dumps({"output": [{"records": {"rows": [[k, v * int(sys.argv[2])] for
         "$FAKE_FOUND" "$FAKE_BATCH_ROWS"; exit 0; }
 done
 for arg in "$@"; do
+    [[ "$arg" != *region_statistics* ]] || { python3 -c 'import json, sys
+print(json.dumps({"output": [{"records": {"rows": [[f"p{i}", i, int(n), 1] for i, n in enumerate(sys.argv[1].split(","))]}}]}))' \
+        "$FAKE_REGION_ROWS"; exit 0; }
+done
+for arg in "$@"; do
     [[ "$arg" != */v1/sql* ]] || { echo "{\"output\": [{\"records\": {\"rows\": [[${FAKE_COUNT:-6000}]]}}]}"; exit 0; }
     [[ "$arg" != */metrics ]] || {
         [[ "$FAKE_METRICS_RC" == 0 ]] || exit "$FAKE_METRICS_RC"
         printf '%s\n' 'greptime_logstore_object_store_wal_poisoned_total 1' 'other_total 2'
         [[ -z "${FAKE_FULL_METRICS:-}" ]] || printf '%s\n' \
             "greptime_logstore_object_store_wal_indexed_objects $FAKE_FULL_METRICS" \
-            'greptime_logstore_object_store_wal_recovery_seconds_count 1'
+            'greptime_logstore_object_store_wal_recovery_seconds_count 1' \
+            "greptime_logstore_object_store_wal_recovered_objects_total ${FAKE_RECOVERED:-0}"
         exit 0;
     }
 done
@@ -663,8 +804,9 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
             self.assertEqual(log.count("/metrics"), 2)
             self.assertIn(f"type=bind,src={root}/corpus/corpus-6000,dst=/work/corpus,readonly", log)
 
-    def run_crash(self, root, metrics_rc=0, pin=False, sample_rc=0, full_metrics="5"):
-        """A crash cell against fake docker and a stub SQL endpoint that the fake kill takes down."""
+    def run_crash(self, root, metrics_rc=0, pin=False, sample_rc=0, full_metrics="5", groups=None, env=None):
+        """A crash cell, or another group that writes through the crash writer, against fake docker
+        and a stub SQL endpoint that the fake kill takes down."""
         import http.server
         import threading
         flag, found = root / "killed", root / "found.log"
@@ -692,13 +834,13 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
 
         server = Server(("127.0.0.1", 0), Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
-        groups = json.dumps([{"name": "crash", "configs": "D", "mode": "crash", "cycles": 2, "kill_after": [1, 1],
-                              "pin": pin}])
+        groups = groups or json.dumps([{"name": "crash", "configs": "D", "mode": "crash", "cycles": 2,
+                                        "kill_after": [1, 1], "pin": pin}])
         old = os.environ.copy()
         os.environ.update({"OSWAL_SQL_URL": f"http://127.0.0.1:{server.server_port}/v1/sql",
                            "FAKE_KILL_FLAG": str(flag), "FAKE_FOUND": str(found), "FAKE_BATCH_ROWS": "1000",
                            "OSWAL_SAMPLE_SECONDS": "0.2", "FAKE_SAMPLE_RC": str(sample_rc),
-                           "FAKE_FULL_METRICS": full_metrics})
+                           "FAKE_FULL_METRICS": full_metrics} | (env or {}))
         try:
             return self.run_cells(root, load_rc=0, metrics_rc=metrics_rc, groups=groups)
         finally:
@@ -761,6 +903,54 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
                 recorded = json.loads((root / "results" / "cells" / "rec-1-8-D" / "cell.json").read_text())
                 self.assertEqual((recorded["exit_code"], recorded["indexed_before_kill"], recorded["restart_count"]),
                                  (exit_code, 5, 6000))
+
+    def test_a_partitioned_cell_creates_its_table_and_checks_every_region_took_rows(self):
+        for region_rows, exit_code in (("750,750,750,750,750,750,750,750", 0), ("1000,1000,1000,0,1000,1000,1000,0", 8)):
+            with self.subTest(region_rows=region_rows), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "corpus" / "corpus-6000").mkdir(parents=True)
+                (root / "corpus" / "corpus-6000" / "summary.json").write_text(json.dumps(
+                    {"start": "2026-07-10T00:00:00Z", "end": "2026-07-10T01:00:00Z"}))
+                groups = json.dumps([{"name": "multi", "configs": "D", "partitions": 8}])
+                old = os.environ.copy()
+                os.environ["FAKE_REGION_ROWS"] = region_rows
+                try:
+                    cells, _, log, _ = self.run_cells(root, load_rc=0, groups=groups)
+                finally:
+                    os.environ.clear()
+                    os.environ.update(old)
+                cell = root / "results" / "cells" / "multi-1-8-D"
+                self.assertEqual(json.loads((cell / "cell.json").read_text())["exit_code"], exit_code,
+                                 cells.stdout + cells.stderr)
+                self.assertIn("PARTITION ON COLUMNS (`event_time`)", urllib.parse.unquote_plus(log))
+                self.assertIn(f"type=bind,src={SCRIPTS}/oswal-s3-bench-load.sh,dst=/work/oswal-s3-bench-load.sh,readonly",
+                              log)
+                self.assertIn(" /work/oswal-s3-bench-load.sh", log)
+                self.assertNotIn("greptimedb.sh load", log)
+                self.assertEqual(len(json.loads((cell / "regions.json").read_text())["output"][0]["records"]["rows"]), 8)
+
+    def test_a_drop_cell_restarts_and_waits_for_the_dropped_objects_to_go(self):
+        for indexed, recovered, exit_code in (("2", "0", 0), ("50", "200", 0), ("50", "60", 9)):
+            with self.subTest(indexed=indexed, recovered=recovered), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                groups = json.dumps([{"name": "drop", "mode": "drop", "configs": "D", "write_seconds": 1}])
+                cells, _, log, _ = self.run_crash(root, full_metrics=indexed, groups=groups,
+                                                  env={"FAKE_RECOVERED": recovered, "OSWAL_COLLECT_SECONDS": "1"})
+                cell = root / "results" / "cells" / "drop-1-8-D"
+                recorded = json.loads((cell / "cell.json").read_text())
+                self.assertEqual(recorded["exit_code"], exit_code, cells.stdout + cells.stderr)
+                self.assertIsInstance(recorded["restart_seconds"], float)
+                sql = urllib.parse.unquote_plus(log)
+                for statement in ("CREATE TABLE dropped", "CREATE TABLE kept", "DROP TABLE dropped",
+                                  "ADMIN FLUSH_TABLE('kept')", "INSERT INTO kept VALUES (-1, "):
+                    self.assertIn(statement, sql)
+                self.assertLess(sql.index("DROP TABLE dropped"), log.index("docker kill --signal KILL fakecid"))
+                self.assertEqual(log.count("docker kill --signal KILL fakecid"), 1)
+                self.assertTrue(list((cell / "dropped").glob("acked-*.log")))
+                self.assertTrue(list((cell / "kept").glob("acked-*.log")))
+                for name in ("metrics-written.prom", "metrics-restart.prom", "server-written.log",
+                             "server-restart.log", "collected.tsv"):
+                    self.assertTrue((cell / name).exists(), name)
 
     def test_a_crash_cycle_without_its_scrapes_fails_the_cell(self):
         with tempfile.TemporaryDirectory() as directory:

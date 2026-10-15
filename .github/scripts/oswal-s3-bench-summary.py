@@ -29,6 +29,12 @@ COUNTERS = ("created_objects_total", "stalled_appends_total", "poisoned_total",
 # The Raft Engine controls every object store WAL cell is compared with: fsync per write and the default.
 BASELINES = ("R", "R0")
 SAMPLE = re.compile(r'([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{([^}]*)\})?\s+(\S+)')
+# Mito's line for every region it opened, with the WAL range it replayed.
+REPLAY = re.compile(r"Replay WAL for region: (\d+)\(.*?provider: (\w+).*?rows recovered: (\d+), "
+                    r"replay from entry id: (\d+), last entry id: (\d+),.*?elapsed: ([0-9.]+)(ns|µs|us|ms|s)\b")
+UNITS = {"ns": 1e-9, "µs": 1e-6, "us": 1e-6, "ms": 1e-3, "s": 1.0}
+# An object store WAL entry id is the object sequence above a 20-bit position.
+POSITION_BITS = 20
 
 
 def parse_metrics(text: str) -> dict:
@@ -78,6 +84,49 @@ def read_metrics(path: Path) -> dict:
     return parse_metrics(path.read_text() if path.exists() else "")
 
 
+def ratio(a, b):
+    return a / b if a is not None and b else None
+
+
+def replay(log: Path, metrics: dict) -> dict | None:
+    """What a restarted server replayed: every region that had rows to replay, the objects of
+    its WAL range, and the log store's time serving region reads (`read_seconds`)."""
+    if not log.exists():
+        return None
+    regions = []
+    for match in REPLAY.finditer(log.read_text(errors="replace")):
+        region, provider, rows, first, last, elapsed, unit = match.groups()
+        if int(rows):
+            objects = (int(last) >> POSITION_BITS) - (int(first) >> POSITION_BITS) + 1 \
+                if provider == "ObjectStore" else None
+            regions.append({"region": int(region), "rows": int(rows), "seconds": float(elapsed) * UNITS[unit],
+                            "objects": objects})
+    samples = metrics["samples"]
+    return {"regions": regions, "rows": sum(r["rows"] for r in regions),
+            "seconds": max((r["seconds"] for r in regions), default=None),
+            "objects": sum(r["objects"] or 0 for r in regions) if regions and regions[0]["objects"] else None,
+            "read_seconds": samples.get("read_seconds_sum"), "reads": samples.get("read_seconds_count")}
+
+
+def client_latency(path: Path) -> tuple:
+    """The 50th and 99th percentile of the loader's own time per write request."""
+    durations = []
+    if path.exists():
+        for line in path.read_text().splitlines():
+            record = json.loads(line) if line.strip() else {}
+            if record.get("step") == "grpc_write_batch" and record.get("status") == "success":
+                durations.append(record["duration_seconds"])
+    durations.sort()
+    return tuple(durations[max(0, math.ceil(q * len(durations)) - 1)] if durations else None for q in (0.5, 0.99))
+
+
+def region_rows(path: Path) -> list | None:
+    """Rows per region of a partitioned load cell, as the server reported them after the load."""
+    if not path.exists():
+        return None
+    return [int(row[2]) for row in json.loads(path.read_text())["output"][0]["records"]["rows"]]
+
+
 def interval_seconds(wal: dict) -> float:
     value = wal.get("FLUSH_INTERVAL", "100ms")
     return float(value[:-2]) / 1000 if value.endswith("ms") else float(value.rstrip("s"))
@@ -115,7 +164,8 @@ def crash_cycles(path: Path, wal: dict) -> list:
                   "indexed_before_kill": before.get("indexed_objects"),
                   "recovery_seconds": after["samples"].get("recovery_seconds_sum") if once else None,
                   "recovered_objects": after["samples"].get("recovered_objects_total", 0 if once else None),
-                  "restart_requests": after["requests"]}
+                  "restart_requests": after["requests"],
+                  "replay": replay(path / f"server-restart-{cycle['cycle']}.log", after)}
     return cycles
 
 
@@ -145,6 +195,13 @@ def load_cell(path: Path, spec: dict | None = None) -> dict:
                       ("object_bytes", "object_bytes")):
         buckets = metrics["buckets"].get(name, [])
         row[f"{key}_p50"], row[f"{key}_p99"] = quantile(0.5, buckets), quantile(0.99, buckets)
+    row["client_p50"], row["client_p99"] = client_latency(path / "greptimedb-1" / "load-transcript.jsonl")
+    # An entry is one region's write; an append, counted only in the durable mode, carries one or more.
+    samples = metrics["samples"]
+    row["entries_per_object"] = ratio(samples.get("object_entries_sum"), samples.get("object_entries_count"))
+    row["appends_per_object"] = ratio(samples.get("append_ack_seconds_count"), samples.get("object_bytes_count"))
+    row["partitions"] = cell.get("partitions", 1)
+    row["region_rows"] = region_rows(path / "regions.json")
     if cell.get("restart"):
         # A restarted process observed exactly one recovery, so the sum is its duration.
         count = restarted["samples"].get("recovery_seconds_count")
@@ -155,6 +212,7 @@ def load_cell(path: Path, spec: dict | None = None) -> dict:
             "recovered_objects": restarted["samples"].get("recovered_objects_total")
             if cell.get("restart_scraped") else None,
             "indexed_before_kill": cell.get("indexed_before_kill"), "min_objects": cell.get("min_objects", 0),
+            "replay": replay(path / "server-restart.log", restarted),
         }
     # The counters register on their first event, so a scrape of an object store WAL
     # that created objects omits the ones that never moved: those are zero, not unknown.
@@ -171,6 +229,21 @@ def load_cell(path: Path, spec: dict | None = None) -> dict:
         end = final["samples"].get("created_objects_total")
         row["idle"] = {"seconds": cell["idle_seconds"], "requests": idle["requests"],
                        "creates": None if end is None else end - metrics["samples"].get("created_objects_total", 0)}
+    if row["mode"] == "drop":
+        written = read_metrics(path / "metrics-written.prom")["samples"]
+        restarted_samples = restarted["samples"]
+        samples = [line.split() for line in (path / "collected.tsv").read_text().splitlines()
+                   if line.strip()] if (path / "collected.tsv").exists() else []
+        row["drop"] = {
+            "acked_batches": sum(len((p.read_text()).split()) for p in sorted((path / "dropped").glob("acked-*.log"))),
+            "indexed_before_drop": written.get("indexed_objects"),
+            "restart_seconds": cell.get("restart_seconds"),
+            "recovered_objects": restarted_samples.get("recovered_objects_total"),
+            "release_records": restarted_samples.get("release_records_total"),
+            "indexed_at_end": int(float(samples[-1][1])) if samples else None,
+            "deleted_after_restart": restarted_samples.get("deleted_objects_total"),
+            "seconds_to_collect": int(samples[-1][0]) - int(samples[0][0]) if samples else None,
+        }
     if row["mode"] == "crash":
         row["cycles"] = crash_cycles(path, cell.get("wal", {}))
         if (path / "objects.tsv").exists():
@@ -296,6 +369,45 @@ def render(run: dict, rows: list, pairs: list) -> str:
                 last = next((s for s in reversed(samples) if s[1] is not None), [None] * 4)
                 lines.append(f"| {r['id']} | {', '.join('missing' if s[1] is None else str(s[1]) for s in samples)} "
                              f"| {sum(s[1] is None for s in samples)} | {fmt(last[2])} | {fmt(last[3])} |")
+    details = [r for r in loads if any(r[k] is not None for k in ("client_p50", "entries_per_object", "region_rows"))]
+    if details:
+        lines += ["", "| Cell | Client p50 / p99 ms | Entries per object | Appends per object | Regions "
+                  "| Rows per region min / max |", "| --- | ---: | ---: | ---: | ---: | ---: |"]
+        for r in details:
+            spread = r["region_rows"] or []
+            lines.append(" | ".join([
+                f"| {label(r)}", pair(r["client_p50"], r["client_p99"], 1, 1000), fmt(r["entries_per_object"], 1),
+                fmt(r["appends_per_object"], 2), fmt(len(spread) if spread else r["partitions"]),
+                pair(min(spread), max(spread)) if spread else "—"]) + " |")
+    replays = [(r["id"], "—", r["restart"]) for r in loads if r.get("restart", {}).get("replay")]
+    replays += [(r["id"], fmt(c["cycle"]), c | {"wall_seconds": c.get("restart_seconds")})
+                for r in crashes for c in r["cycles"] if c.get("replay")]
+    if replays:
+        lines += ["", "| Cell | Cycle | Restart to /health s | Recovery s | Recovered objects | Regions replayed "
+                  "| Rows replayed | Objects replayed | Slowest region replay s | Read seconds (reads) |",
+                  "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |"]
+        for cell, cycle, x in replays:
+            y = x["replay"]
+            lines.append(" | ".join([
+                f"| {cell}", cycle, fmt(x.get("wall_seconds"), 2), fmt(x.get("recovery_seconds"), 3),
+                fmt(x.get("recovered_objects")), fmt(len(y["regions"])), fmt(y["rows"]), fmt(y["objects"]),
+                fmt(y["seconds"], 2), f"{fmt(y['read_seconds'], 2)} ({fmt(y['reads'])})"]) + " |")
+    drops = [r for r in rows if r.get("drop")]
+    if drops:
+        lines += ["", "| Cell | Acked batches before the drop | Indexed before the drop | Restart to /health s "
+                  "| Recovered objects | Release records | Indexed at the end | Deleted after the restart "
+                  "| Seconds to collect | Verdict |",
+                  "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |"]
+        for r in drops:
+            x = r["drop"]
+            # Objects the release already collected before the kill leave nothing to show.
+            verdict = "—" if x["indexed_at_end"] is None else \
+                "nothing left at the kill" if (x["recovered_objects"] or 0) <= 3 else \
+                "collected" if r["exit_code"] == 0 else "still indexed"
+            lines.append(" | ".join([
+                f"| {label(r)}", fmt(x["acked_batches"]), fmt(x["indexed_before_drop"]), fmt(x["restart_seconds"], 2),
+                fmt(x["recovered_objects"]), fmt(x["release_records"]), fmt(x["indexed_at_end"]),
+                fmt(x["deleted_after_restart"]), fmt(x["seconds_to_collect"]), verdict]) + " |")
     restarts = [r for r in rows if "restart" in r]
     if restarts:
         lines += ["", "| Cell | Overrides | Objects created | Indexed at kill | Restart to /health s | Restart to count s "
