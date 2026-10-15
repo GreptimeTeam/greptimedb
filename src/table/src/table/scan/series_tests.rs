@@ -19,6 +19,7 @@ use std::task::{Context, Poll};
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
+use common_query::request::RawSeriesRequest;
 use common_recordbatch::{
     QueryMemoryTracker, RecordBatch, RecordBatches, SendableRecordBatchStream,
 };
@@ -889,4 +890,56 @@ async fn memory_quota_failure_does_not_replay_raw_scan() {
     assert_eq!(state.lock().unwrap().legacy_calls, 0);
     assert_eq!(state.lock().unwrap().drops, 1);
     assert_eq!(tracker_for_assertion.current(), 0);
+}
+
+#[test]
+fn bound_series_scan_uses_open_scanner_metadata_without_execution() {
+    let schema = Arc::new(SeriesSchema {
+        fields: vec![FieldSpec {
+            name: Arc::from("value"),
+        }]
+        .into(),
+        eval_grid: None,
+    });
+    let (scan, state) = fixture(Some(schema), vec![]);
+    let actual = scan.scanner.lock().unwrap().metadata();
+    let request = RawSeriesRequest {
+        version: 1,
+        physical_metadata: (*actual).clone(),
+        metric_name: "cpu".to_string(),
+        logical_tags: vec![],
+        field_ids: vec![1],
+    };
+    let native = scan
+        .clone()
+        .try_to_bound_series_scan(&request)
+        .unwrap()
+        .unwrap();
+    assert_eq!(native.series_schema.fields[0].name.as_ref(), "value");
+    let RawLabelSource::PrimaryKey {
+        physical_metadata, ..
+    } = native.label_source()
+    else {
+        panic!("expected key labels")
+    };
+    assert!(Arc::ptr_eq(&actual, physical_metadata));
+    assert_eq!(state.lock().unwrap().preflights, 1);
+    let mut wrong_projection = request.clone();
+    wrong_projection.field_ids = vec![2];
+    assert!(
+        scan.clone()
+            .try_to_bound_series_scan(&wrong_projection)
+            .unwrap()
+            .is_none()
+    );
+    let mut wrong_metadata = request.clone();
+    wrong_metadata.physical_metadata.schema_version += 1;
+    assert!(
+        scan.clone()
+            .try_to_bound_series_scan(&wrong_metadata)
+            .is_err()
+    );
+    assert_eq!(state.lock().unwrap().preflights, 1);
+    assert_eq!(state.lock().unwrap().raw_calls, 0);
+    assert_eq!(state.lock().unwrap().legacy_calls, 0);
 }

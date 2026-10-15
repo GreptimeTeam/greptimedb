@@ -14,6 +14,11 @@
 
 mod base64_serde;
 mod initial_remote_dyn_filter_reg;
+mod raw_series_request;
+
+pub use self::raw_series_request::{
+    RAW_SERIES_REQUEST_EXTENSION_KEY, RawSeriesRequest, RawSeriesTag, take_raw_series_request,
+};
 
 use std::cell::Cell;
 use std::sync::Arc;

@@ -17,7 +17,9 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
+use api::v1::SemanticType;
 use common_error::ext::BoxedError;
+use common_query::request::RawSeriesRequest;
 use common_query::series_frame::pack_raw_series;
 use common_recordbatch::adapter::{RecordBatchStreamAdapter, RegionQueryStatCounters};
 use common_recordbatch::{
@@ -410,7 +412,49 @@ impl RegionScanExec {
             .query_stat_counters()
     }
 
-    /// Build a native raw-series leaf when the scanner's current preparation supports it.
+    /// Selects a native raw-series leaf only when the prepared scanner matches the binding.
+    pub fn try_to_bound_series_scan(
+        self: Arc<Self>,
+        binding: &RawSeriesRequest,
+    ) -> DfResult<Option<Arc<SeriesScanExec>>> {
+        let actual = {
+            let scanner = self.scanner.lock().unwrap();
+            let metadata = scanner.metadata();
+            let output_ids = self
+                .arrow_schema
+                .fields()
+                .iter()
+                .filter_map(|field| {
+                    metadata
+                        .column_by_name(field.name())
+                        .filter(|column| column.semantic_type == SemanticType::Field)
+                        .map(|column| column.column_id)
+                })
+                .collect::<Vec<_>>();
+            (metadata, output_ids)
+        };
+        if actual.1 != binding.field_ids {
+            return Ok(None);
+        }
+        let (expected_schema, source) = binding.bind(actual.0)?;
+        let Some(native) = self.clone().try_to_series_scan(source)? else {
+            return Ok(None);
+        };
+        if native.series_schema.eval_grid.is_some()
+            || native.series_schema.fields.len() != expected_schema.fields.len()
+            || native
+                .series_schema
+                .fields
+                .iter()
+                .zip(expected_schema.fields.iter())
+                .any(|(actual, expected)| actual.name != expected.name)
+        {
+            return Ok(None);
+        }
+        Ok(Some(native))
+    }
+
+    /// Builds a native raw-series leaf when the scanner's current preparation supports it.
     /// Finish partition preparation before selecting or executing this leaf. Callers must
     /// already have resolved the authorized scanner and logical binding; this method does not
     /// authenticate them.
