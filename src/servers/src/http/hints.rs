@@ -72,6 +72,15 @@ fn apply_hints(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
     use common_query::request::INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY as COMMON_INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY;
     use query::options::FLOW_SCHEDULED_TIME_MILLIS;
     use session::context::{QueryContextBuilder, generate_remote_query_id};
@@ -79,8 +88,46 @@ mod tests {
         INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, READ_PREFERENCE_EXTENSION_KEY,
         REMOTE_QUERY_ID_EXTENSION_KEY,
     };
+    use tower::ServiceExt;
 
-    use super::apply_hints;
+    use super::{apply_hints, extract_hints};
+
+    #[tokio::test]
+    async fn test_http_read_preference_hint_validation() {
+        async fn handler(called: axum::extract::State<Arc<AtomicBool>>) -> StatusCode {
+            called.store(true, Ordering::SeqCst);
+            StatusCode::OK
+        }
+
+        for (value, dedicated, status, called) in [
+            ("bad", None, StatusCode::BAD_REQUEST, false),
+            ("follower", None, StatusCode::BAD_REQUEST, false),
+            ("leader", None, StatusCode::OK, true),
+            ("LEADER", None, StatusCode::OK, true),
+            ("bad", Some("leader"), StatusCode::OK, true),
+        ] {
+            let called_flag = Arc::new(AtomicBool::new(false));
+            let mut request = Request::builder()
+                .uri("/")
+                .header("x-greptime-hints", format!("read_preference={value}"));
+            if let Some(preference) = dedicated {
+                request = request.header("x-greptime-read-preference", preference);
+            }
+            let response = Router::new()
+                .route("/", get(handler))
+                .with_state(called_flag.clone())
+                .layer(axum::middleware::from_fn(
+                    crate::http::read_preference::extract_read_preference,
+                ))
+                .layer(axum::middleware::from_fn(extract_hints))
+                .layer(axum::Extension(QueryContextBuilder::default().build()))
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status, "read_preference={value}");
+            assert_eq!(called_flag.load(Ordering::SeqCst), called, "{value}");
+        }
+    }
 
     #[test]
     fn test_apply_hints_ignores_reserved_extension_keys_only() {
