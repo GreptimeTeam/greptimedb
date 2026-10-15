@@ -39,6 +39,7 @@ use datatypes::arrow::datatypes::DataType as ArrowDataType;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
+use datatypes::series::raw::RawSeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::types::TimestampType;
 use futures::{StreamExt, TryStreamExt};
@@ -797,6 +798,10 @@ impl RegionScanner for SeriesScan {
         let batches = self
             .scan_batch_in_partition(ctx, partition, metrics.clone(), metrics_set)
             .map_err(BoxedError::new)?;
+        let ordering = match self.mode {
+            SeriesScanMode::Legacy => RawSeriesOrdering::ReadKeyThenTime,
+            SeriesScanMode::TwoPhase => RawSeriesOrdering::Contiguous,
+        };
         Ok(Some(raw::make_stream(
             batches,
             preparation.schema,
@@ -804,6 +809,7 @@ impl RegionScanner for SeriesScan {
             preparation.fields,
             metrics,
             preparation.predicates,
+            ordering,
         )))
     }
 

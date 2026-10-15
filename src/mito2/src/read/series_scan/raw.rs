@@ -127,6 +127,7 @@ fn chunk(
 struct RawStream {
     schema: Arc<SeriesSchema>,
     label_source: RawLabelSource,
+    ordering: RawSeriesOrdering,
     inner: BoxStream<'static, Result<RawSeriesChunk, BoxedError>>,
 }
 
@@ -145,7 +146,7 @@ impl RawSeriesStream for RawStream {
         &self.label_source
     }
     fn ordering(&self) -> RawSeriesOrdering {
-        RawSeriesOrdering::Contiguous
+        self.ordering
     }
 }
 
@@ -156,15 +157,16 @@ pub(crate) fn make_stream(
     fields: Vec<(usize, ConcreteDataType)>,
     metrics: PartitionMetrics,
     predicates: Vec<Arc<dyn PhysicalExpr>>,
+    ordering: RawSeriesOrdering,
 ) -> SendableRawSeriesStream {
     let output_schema = schema.clone();
     let stream = async_stream::stream! {
         let mut input = inner;
         let mut pending: Option<RawSeriesChunk> = None;
         while let Some(item) = input.next().await {
-            let (records, is_legacy) = match item {
-                Ok(ScanBatch::Series(SeriesBatch::Flat(flat))) => (flat.batches.into_vec(), true),
-                Ok(ScanBatch::RecordBatch(batch)) => (vec![batch], false),
+            let records = match item {
+                Ok(ScanBatch::Series(SeriesBatch::Flat(flat))) => flat.batches.into_vec(),
+                Ok(ScanBatch::RecordBatch(batch)) => vec![batch],
                 Err(error) => { yield Err(BoxedError::new(error)); return; }
             };
             for record in records {
@@ -237,7 +239,7 @@ pub(crate) fn make_stream(
                     };
                     metrics.inc_convert_batch_cost(begun.elapsed());
                     if let Some(old) = pending.as_ref()
-                        && is_legacy
+                        && ordering == RawSeriesOrdering::ReadKeyThenTime
                         && old.read_key.as_slice() != current.read_key.as_slice()
                         && current.read_key.as_slice() <= old.read_key.as_slice()
                     {
@@ -264,6 +266,7 @@ pub(crate) fn make_stream(
     Box::pin(RawStream {
         schema,
         label_source,
+        ordering,
         inner: Box::pin(stream),
     })
 }

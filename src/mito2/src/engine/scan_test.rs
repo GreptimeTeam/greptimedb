@@ -4908,7 +4908,7 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
             .scan_series_partition(&QueryScanContext::default(), &metrics, partition, &source)
             .unwrap()
             .expect("supported millisecond PerSeries scan");
-        assert_eq!(RawSeriesOrdering::Contiguous, stream.ordering());
+        assert_eq!(RawSeriesOrdering::ReadKeyThenTime, stream.ordering());
         assert!(stream.schema().eval_grid.is_none());
         assert_eq!(
             vec!["field_1", "field_0"],
@@ -5226,6 +5226,598 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
             ("B".to_string(), 3000, 70.0, None)
         ],
         visible
+    );
+}
+
+#[tokio::test]
+async fn test_mito_regional_raw_merge_preserves_global_key_order_and_labels() {
+    use api::v1::{Row, Value};
+    use common_query::series_frame::{pack_raw_series, unpack_raw_series};
+    use datatypes::arrow::array::Array;
+    use datatypes::series::raw::RawSeriesOrdering;
+    use datatypes::series::samples::{SampleRef, SeriesSchema};
+    use datatypes::value::Value as DatumValue;
+    use mito_codec::row_converter::build_primary_key_codec;
+    use promql::source::{materialize_raw_labels, merge_ordered_raw_series};
+    use store_api::region_engine::{BoundTag, QueryScanContext, RawLabelSource};
+    use store_api::region_request::RegionDeleteRequest;
+
+    let mut env = TestEnv::with_prefix("test_mito_regional_raw_merge").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let regions = [RegionId::new(1, 1), RegionId::new(1, 2)];
+    let mut request = CreateRequestBuilder::new().field_num(3).build();
+    request
+        .options
+        .insert("memtable.type".into(), "bulk".into());
+    let schema = test_util::rows_schema(&request);
+    for region in regions {
+        engine
+            .handle_request(region, RegionRequest::Create(request.clone()))
+            .await
+            .unwrap();
+    }
+    let make_row = |tag: &str, f0: Option<f64>, f1: f64, gate: f64, time: i64| Row {
+        values: vec![
+            Some(ValueData::StringValue(tag.into())),
+            f0.map(ValueData::F64Value),
+            Some(ValueData::F64Value(f1)),
+            Some(ValueData::F64Value(gate)),
+            Some(ValueData::TimestampMillisecondValue(time)),
+        ]
+        .into_iter()
+        .map(|value_data| Value { value_data })
+        .collect(),
+    };
+    for (region, rows) in [
+        (
+            regions[0],
+            vec![
+                make_row("A", Some(10.0), 1.0, 1.0, 10),
+                make_row("A", None, 3.0, 1.0, 30),
+                make_row("B", Some(-0.0), 5.0, 1.0, 10),
+            ],
+        ),
+        (
+            regions[1],
+            vec![
+                make_row("A", Some(20.0), 2.0, 1.0, 20),
+                make_row("A", Some(40.0), 4.0, 1.0, 40),
+                make_row("C", Some(60.0), 6.0, 1.0, 10),
+            ],
+        ),
+    ] {
+        test_util::put_rows(
+            &engine,
+            region,
+            Rows {
+                schema: schema.clone(),
+                rows,
+            },
+        )
+        .await;
+    }
+    test_util::flush_region(&engine, regions[0], None).await;
+    test_util::flush_region(&engine, regions[1], None).await;
+    test_util::put_rows(
+        &engine,
+        regions[0],
+        Rows {
+            schema: schema.clone(),
+            rows: vec![
+                make_row("A", Some(11.0), 11.0, 1.0, 10),
+                make_row("A", Some(50.0), 5.0, 0.0, 50),
+                make_row("B", Some(60.0), 6.0, 1.0, 60),
+            ],
+        },
+    )
+    .await;
+    engine
+        .handle_request(
+            regions[0],
+            RegionRequest::Delete(RegionDeleteRequest {
+                rows: Rows {
+                    schema: test_util::delete_rows_schema(
+                        &CreateRequestBuilder::new().field_num(3).build(),
+                    ),
+                    rows: vec![row(vec![
+                        ValueData::StringValue("B".into()),
+                        ValueData::TimestampMillisecondValue(60),
+                    ])],
+                },
+                hint: None,
+                partition_expr_version: None,
+            }),
+        )
+        .await
+        .unwrap();
+    let request = ScanRequest {
+        projection: Some(vec![2, 1, 4]),
+        filters: vec![col("field_2").gt(lit(0.0_f64))],
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        preserve_pk_dictionary_encoding: true,
+        ..Default::default()
+    };
+    let mut streams = Vec::new();
+    let mut metadata_for_codec = None;
+    let mut expected_schema: Option<Arc<SeriesSchema>> = None;
+    let metrics = ExecutionPlanMetricsSet::default();
+    for region in regions {
+        let selected = engine.scanner(region, request.clone()).await.unwrap();
+        let mut scanner: Box<dyn RegionScanner> = match selected {
+            Scanner::Series(series) => {
+                assert_eq!("legacy", series.mode());
+                Box::new(series)
+            }
+            _ => panic!("PerSeries request must select a series scanner"),
+        };
+        let metadata = scanner.metadata();
+        metadata_for_codec.get_or_insert_with(|| metadata.clone());
+        let source = RawLabelSource::PrimaryKey {
+            metric_name: Arc::from("fixture_metric"),
+            physical_metadata: metadata.clone(),
+            logical_tags: metadata
+                .column_metadatas
+                .iter()
+                .filter(|column| {
+                    column.semantic_type == SemanticType::Tag
+                        && !store_api::storage::consts::is_internal_column(
+                            &column.column_schema.name,
+                        )
+                        && !store_api::metric_engine_consts::is_metric_engine_internal_column(
+                            &column.column_schema.name,
+                        )
+                })
+                .map(|column| BoundTag {
+                    column_id: column.column_id,
+                    name: Arc::from(column.column_schema.name.as_str()),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        };
+        let ranges = scanner
+            .properties()
+            .partitions
+            .clone()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        assert!(!ranges.is_empty(), "region scan needs an input range");
+        let partition_count = 2;
+        let mut partitions = vec![Vec::new(); partition_count];
+        for (index, range) in ranges.into_iter().enumerate() {
+            partitions[index % partition_count].push(range);
+        }
+        scanner
+            .prepare(PrepareRequest {
+                ranges: Some(partitions),
+                target_partitions: Some(partition_count),
+                ..Default::default()
+            })
+            .unwrap();
+        let partition_count = scanner.properties().num_partitions();
+        assert!(
+            partition_count > 1,
+            "prepare must use multiple supplied native range partitions"
+        );
+        for partition in 0..partition_count {
+            let stream = scanner
+                .scan_series_partition(&QueryScanContext::default(), &metrics, partition, &source)
+                .unwrap()
+                .expect("native raw input");
+            assert_eq!(RawSeriesOrdering::ReadKeyThenTime, stream.ordering());
+            assert_eq!(
+                vec!["field_1", "field_0"],
+                stream
+                    .schema()
+                    .fields
+                    .iter()
+                    .map(|field| field.name.as_ref())
+                    .collect::<Vec<_>>()
+            );
+            if let Some(schema) = &expected_schema {
+                assert_eq!(
+                    schema
+                        .fields
+                        .iter()
+                        .map(|field| field.name.as_ref())
+                        .collect::<Vec<_>>(),
+                    stream
+                        .schema()
+                        .fields
+                        .iter()
+                        .map(|field| field.name.as_ref())
+                        .collect::<Vec<_>>()
+                );
+            } else {
+                expected_schema = Some(Arc::clone(stream.schema()));
+            }
+            streams.push(stream);
+        }
+        // Each scanner owns the same schema and explicitly bound source.
+    }
+    let merged = merge_ordered_raw_series(streams).unwrap();
+    let merged_schema = Arc::clone(merged.schema());
+    let binding = merged.label_source().clone();
+    let ordering = merged.ordering();
+    assert_eq!(RawSeriesOrdering::ReadKeyThenTime, ordering);
+    let packed = pack_raw_series(merged).unwrap();
+    let unpacked = unpack_raw_series(packed, merged_schema, binding, ordering).unwrap();
+    let mut materialized = materialize_raw_labels(unpacked).unwrap();
+    let mut actual = Vec::new();
+    while let Some(chunk) = materialized.try_next().await.unwrap() {
+        let metric = chunk.metric.as_ref().unwrap();
+        assert_eq!(Some("fixture_metric"), metric.name());
+        let tag = metric.get("tag_0").unwrap().to_string();
+        for index in 0..chunk.time.len() {
+            let SampleRef::Float(f1) = chunk.fields.get(0).unwrap().sample(index) else {
+                panic!("field_1 float")
+            };
+            let f0 = match chunk.fields.get(1).unwrap().sample(index) {
+                SampleRef::Float(value) => Some(value.to_bits()),
+                SampleRef::Missing => None,
+                _ => panic!("unexpected field_0 sample type"),
+            };
+            actual.push((
+                chunk.read_key.to_vec(),
+                tag.clone(),
+                chunk.time.timestamp(index).unwrap(),
+                f1.to_bits(),
+                f0,
+                chunk.is_last && index + 1 == chunk.time.len(),
+            ));
+        }
+    }
+    assert!(
+        actual
+            .windows(2)
+            .all(|pair| pair[0].0 < pair[1].0 || (pair[0].0 == pair[1].0 && pair[0].2 < pair[1].2)),
+        "merged stream must be ordered by full read key then time"
+    );
+    let metadata = metadata_for_codec.unwrap();
+    let codec = build_primary_key_codec(&metadata);
+    let mut expected = Vec::new();
+    for (tag, time, f1, f0) in [
+        ("A", 10, 11.0_f64, Some(11.0_f64)),
+        ("A", 20, 2.0, Some(20.0)),
+        ("A", 30, 3.0, None),
+        ("A", 40, 4.0, Some(40.0)),
+        ("B", 10, 5.0, Some(-0.0_f64)),
+        ("C", 10, 6.0, Some(60.0)),
+    ] {
+        let mut key = Vec::new();
+        codec
+            .encode_values(
+                &[(metadata.primary_key[0], DatumValue::String(tag.into()))],
+                &mut key,
+            )
+            .unwrap();
+        expected.push((key, tag, time, f1.to_bits(), f0.map(f64::to_bits)));
+    }
+    let duplicate_key = expected[0].0.clone();
+    assert_eq!(
+        expected
+            .iter()
+            .map(|(key, _, _, _, _)| key.clone())
+            .collect::<Vec<_>>(),
+        actual.iter().map(|row| row.0.clone()).collect::<Vec<_>>()
+    );
+    let visible = actual
+        .iter()
+        .map(|(_, tag, time, f1, f0, _)| (tag.as_str(), *time, *f1, *f0))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        expected
+            .iter()
+            .map(|(_, tag, time, f1, f0)| (*tag, *time, *f1, *f0))
+            .collect::<Vec<_>>(),
+        visible
+    );
+    let mut legacy_batches = Vec::new();
+    for region in regions {
+        let mut legacy_request = request.clone();
+        legacy_request.projection = Some(vec![0, 1, 2, 3, 4]);
+        legacy_request.filters.clear();
+        legacy_request.preserve_pk_dictionary_encoding = false;
+        let legacy = engine.handle_query(region, legacy_request).await.unwrap();
+        for partition in 0..legacy.properties().num_partitions() {
+            legacy_batches.extend(
+                legacy
+                    .scan_partition(&QueryScanContext::default(), &metrics, partition)
+                    .unwrap()
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .unwrap(),
+            );
+        }
+    }
+    let mut legacy_visible = Vec::new();
+    for batch in &legacy_batches {
+        let batch = batch.df_record_batch();
+        let tags = batch
+            .column_by_name("tag_0")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let f0 = batch
+            .column_by_name("field_0")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let f1 = batch
+            .column_by_name("field_1")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let times = batch
+            .column_by_name("ts")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        let gate = batch
+            .column_by_name("field_2")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        for row in 0..batch.num_rows() {
+            if gate.value(row) > 0.0 {
+                legacy_visible.push((
+                    tags.value(row).to_string(),
+                    times.value(row),
+                    f1.value(row).to_bits(),
+                    if f0.is_null(row) {
+                        None
+                    } else {
+                        Some(f0.value(row).to_bits())
+                    },
+                ));
+            }
+        }
+    }
+    legacy_visible.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    let mut raw_visible = actual
+        .iter()
+        .map(|(_, tag, time, f1, f0, _)| (tag.clone(), *time, *f1, *f0))
+        .collect::<Vec<_>>();
+    raw_visible.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    assert_eq!(
+        legacy_visible, raw_visible,
+        "raw candidates after field_2 predicate must match legacy scan"
+    );
+    test_util::put_rows(
+        &engine,
+        regions[1],
+        Rows {
+            schema: schema.clone(),
+            rows: vec![make_row("A", Some(99.0), 99.0, 1.0, 30)],
+        },
+    )
+    .await;
+    let mut duplicate_inputs = Vec::new();
+    for region in regions {
+        let scanner = engine.handle_query(region, request.clone()).await.unwrap();
+        let metadata = scanner.metadata();
+        let source = RawLabelSource::PrimaryKey {
+            metric_name: Arc::from("fixture_metric"),
+            physical_metadata: metadata.clone(),
+            logical_tags: metadata
+                .column_metadatas
+                .iter()
+                .filter(|column| {
+                    column.semantic_type == SemanticType::Tag
+                        && !store_api::storage::consts::is_internal_column(
+                            &column.column_schema.name,
+                        )
+                        && !store_api::metric_engine_consts::is_metric_engine_internal_column(
+                            &column.column_schema.name,
+                        )
+                })
+                .map(|column| BoundTag {
+                    column_id: column.column_id,
+                    name: Arc::from(column.column_schema.name.as_str()),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        };
+        let mut scanner = scanner;
+        let ranges = scanner
+            .properties()
+            .partitions
+            .clone()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let partition_count = 2;
+        let mut partitions = vec![Vec::new(); partition_count];
+        for (index, range) in ranges.into_iter().enumerate() {
+            partitions[index % partition_count].push(range);
+        }
+        scanner
+            .prepare(PrepareRequest {
+                ranges: Some(partitions),
+                target_partitions: Some(partition_count),
+                ..Default::default()
+            })
+            .unwrap();
+        for partition in 0..scanner.properties().num_partitions() {
+            duplicate_inputs.push(
+                scanner
+                    .scan_series_partition(
+                        &QueryScanContext::default(),
+                        &metrics,
+                        partition,
+                        &source,
+                    )
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+    }
+    let mut duplicate_merge = merge_ordered_raw_series(duplicate_inputs).unwrap();
+    let mut affected_key_last = Vec::new();
+    let duplicate_error = loop {
+        match duplicate_merge.try_next().await {
+            Ok(Some(chunk)) => {
+                if chunk.read_key.as_slice() == duplicate_key.as_slice() {
+                    affected_key_last.push(chunk.is_last);
+                }
+            }
+            Ok(None) => panic!("same full key/timestamp across regions must fail"),
+            Err(error) => break error.to_string(),
+        }
+    };
+    assert!(
+        duplicate_error.contains("timestamp") || duplicate_error.contains("time"),
+        "unexpected duplicate timestamp error: {duplicate_error}"
+    );
+    assert!(!affected_key_last.is_empty());
+    assert!(affected_key_last.iter().all(|is_last| !is_last));
+    assert!(
+        duplicate_merge.try_next().await.unwrap().is_none(),
+        "merge error must fuse stream"
+    );
+    for tag in ["A", "B", "C"] {
+        let key_rows = actual.iter().filter(|row| row.1 == tag).collect::<Vec<_>>();
+        assert_eq!(
+            1,
+            key_rows.iter().filter(|row| row.5).count(),
+            "global finality for {tag}"
+        );
+        assert!(key_rows.last().unwrap().5);
+        assert!(key_rows[..key_rows.len() - 1].iter().all(|row| !row.5));
+    }
+}
+
+#[tokio::test]
+async fn test_two_phase_native_raw_stream_is_rejected_by_ordered_merge() {
+    use datatypes::series::raw::RawSeriesOrdering;
+    use store_api::region_engine::{BoundTag, QueryScanContext, RawLabelSource};
+    use store_api::region_request::RegionPutRequest;
+
+    let mut env = TestEnv::with_prefix("test_two_phase_native_raw_merge_rejection").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_series_scan_v2: true,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let metadata = Arc::new(sst_region_metadata_with_encoding(
+        PrimaryKeyEncoding::Sparse,
+    ));
+    let mut create = CreateRequestBuilder::new().build();
+    create.column_metadatas = metadata.column_metadatas.clone();
+    create.primary_key = metadata.primary_key.clone();
+    create
+        .options
+        .insert(PRIMARY_KEY_ENCODING.to_string(), "sparse".to_string());
+    create
+        .options
+        .insert("memtable.type".to_string(), "bulk".to_string());
+    create
+        .options
+        .insert("sst_format".to_string(), "flat".to_string());
+    let full_schema = test_util::rows_schema(&create);
+    let mut key_schema = full_schema[0].clone();
+    key_schema.column_name = PRIMARY_KEY_COLUMN_NAME.to_string();
+    key_schema.datatype = ColumnDataType::Binary.into();
+    key_schema.semantic_type = SemanticType::Tag.into();
+    let row_schema = vec![key_schema, full_schema[5].clone(), full_schema[4].clone()];
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    let sparse_rows = Rows {
+        schema: row_schema,
+        rows: vec![
+            row(vec![
+                ValueData::BinaryValue(new_sparse_primary_key(&["a", "x"], &metadata, 10, 0)),
+                ValueData::TimestampMillisecondValue(10),
+                ValueData::U64Value(1),
+            ]),
+            row(vec![
+                ValueData::BinaryValue(new_sparse_primary_key(&["b", "y"], &metadata, 20, 0)),
+                ValueData::TimestampMillisecondValue(20),
+                ValueData::U64Value(2),
+            ]),
+        ],
+    };
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: sparse_rows,
+                hint: Some(WriteHint {
+                    primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
+                }),
+                skip_wal: false,
+                partition_expr_version: None,
+            }),
+        )
+        .await
+        .unwrap();
+    test_util::flush_region(&engine, region_id, None).await;
+    let request = ScanRequest {
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        preserve_pk_dictionary_encoding: true,
+        ..Default::default()
+    };
+    let selected = engine.scanner(region_id, request.clone()).await.unwrap();
+    let Scanner::Series(series) = selected else {
+        panic!("sparse PerSeries request must use SeriesScan");
+    };
+    assert_eq!("two_phase", series.mode());
+    let mut scanner = engine.handle_query(region_id, request).await.unwrap();
+    let metadata = scanner.metadata();
+    let source = RawLabelSource::PrimaryKey {
+        metric_name: Arc::from("fixture_metric"),
+        physical_metadata: metadata.clone(),
+        logical_tags: metadata
+            .column_metadatas
+            .iter()
+            .filter(|column| {
+                column.semantic_type == SemanticType::Tag
+                    && !store_api::storage::consts::is_internal_column(&column.column_schema.name)
+                    && !store_api::metric_engine_consts::is_metric_engine_internal_column(
+                        &column.column_schema.name,
+                    )
+            })
+            .map(|column| BoundTag {
+                column_id: column.column_id,
+                name: Arc::from(column.column_schema.name.as_str()),
+            })
+            .collect::<Vec<_>>()
+            .into(),
+    };
+    let ranges = scanner.properties().partitions.clone();
+    scanner
+        .prepare(PrepareRequest {
+            ranges: Some(ranges.clone()),
+            target_partitions: Some(ranges.len()),
+            ..Default::default()
+        })
+        .unwrap();
+    let metrics = ExecutionPlanMetricsSet::default();
+    let mut streams = Vec::new();
+    for partition in 0..ranges.len() {
+        let stream = scanner
+            .scan_series_partition(&QueryScanContext::default(), &metrics, partition, &source)
+            .unwrap()
+            .unwrap();
+        assert_eq!(RawSeriesOrdering::Contiguous, stream.ordering());
+        streams.push(stream);
+    }
+    let error = match promql::source::merge_ordered_raw_series(streams) {
+        Ok(_) => panic!("Contiguous two-phase input cannot satisfy ordered merge ordering"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("ordering") || error.to_string().contains("ordered"),
+        "expected ordering rejection, got: {error}"
     );
 }
 

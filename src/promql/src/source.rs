@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod merge;
+#[cfg(test)]
+mod tests;
+
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -24,8 +28,7 @@ use futures::Stream;
 use mito_codec::labels::{DecodedLabels, LabelProjection, PrimaryKeyLabelDecoder};
 use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSeriesStream};
 
-#[cfg(test)]
-mod tests;
+pub use merge::merge_ordered_raw_series;
 
 /// Materializes complete metric labels from a scan-bound raw-series source.
 ///
