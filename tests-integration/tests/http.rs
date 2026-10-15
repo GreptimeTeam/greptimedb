@@ -200,6 +200,7 @@ macro_rules! http_tests {
                 test_pipeline_suffix_template,
                 test_pipeline_context,
                 test_pipeline_with_vrl,
+                test_pipeline_vrl_host_access,
                 test_pipeline_with_hint_vrl,
                 test_pipeline_one_to_many_vrl,
                 test_pipeline_2,
@@ -3518,6 +3519,7 @@ enable_heap_profiling = true
 
 [pipeline]
 cache_ttl = "10s"
+allow_vrl_host_access = false
 
 [event_recorder]
 ttl = "2months 29days 2h 52m 48s"
@@ -7009,6 +7011,72 @@ table_suffix: _${type}
     .await;
 
     guard.remove_all().await;
+}
+
+pub async fn test_pipeline_vrl_host_access(storage_type: StorageType) {
+    let pipeline = r#"
+processors:
+  - vrl:
+      source: |
+        .value = is_string(get_env_var("GREPTIME_VRL_HOST_ACCESS_TEST") ?? "missing")
+        .
+transform:
+  - field: value
+    type: boolean
+"#;
+
+    for allow_vrl_host_access in [false, true] {
+        let mut instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+            "test_pipeline_vrl_host_access",
+        )
+        .with_default_store_type(storage_type)
+        .with_pipeline_options(pipeline::PipelineOptions {
+            // Force named dry-runs to reload and compile the stored definition.
+            cache_ttl: Duration::ZERO,
+            allow_vrl_host_access,
+        })
+        .build()
+        .await;
+        let server = HttpServerBuilder::new(HttpOptions::default())
+            .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
+            .build();
+        let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+        let response = client
+            .post("/v1/pipelines/_dryrun")
+            .header("Content-Type", "application/json")
+            .body(json!({"pipeline": pipeline, "data": "[{}]"}).to_string())
+            .send()
+            .await;
+        let expected_status = if allow_vrl_host_access {
+            StatusCode::OK
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        assert_eq!(response.status(), expected_status);
+        if !allow_vrl_host_access {
+            assert!(response.text().await.contains("undefined function"));
+        }
+
+        let response = client
+            .post("/v1/pipelines/host_policy")
+            .header("Content-Type", "application/x-yaml")
+            .body(pipeline)
+            .send()
+            .await;
+        assert_eq!(response.status(), expected_status);
+
+        if allow_vrl_host_access {
+            let response = client
+                .post("/v1/pipelines/_dryrun")
+                .header("Content-Type", "application/json")
+                .body(json!({"pipeline_name": "host_policy", "data": "[{}]"}).to_string())
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        instance.guard.remove_all().await;
+    }
 }
 
 pub async fn test_pipeline_with_vrl(storage_type: StorageType) {
