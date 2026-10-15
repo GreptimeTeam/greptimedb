@@ -133,7 +133,7 @@ fn sliced_axes_and_chunks_keep_shared_buffers_and_values_alive() {
     let time_owner: ScalarBuffer<i64> = vec![0, 10, 20, 30, 40, 80].into();
     let time_source = RawTimeAxis::try_new(time_owner.clone()).unwrap();
     let time = time_source.slice(1, 4).unwrap();
-    let RawTimeAxis::Explicit(time_buffer) = &time;
+    let time_buffer = time.as_explicit().unwrap();
     assert_eq!(time_buffer.as_ptr(), time_owner.as_ptr().wrapping_add(1));
 
     let nan_payload = f64::from_bits(0x7ff8_0000_0000_0042);

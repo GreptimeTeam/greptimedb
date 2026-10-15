@@ -4768,7 +4768,7 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
     use api::v1::{Row, Value};
     use common_recordbatch::filter;
     use datatypes::arrow::array::Array;
-    use datatypes::series::raw::{RawSeriesOrdering, RawTimeAxis};
+    use datatypes::series::raw::RawSeriesOrdering;
     use datatypes::series::samples::SampleRef;
     use datatypes::value::Value as DatumValue;
     use mito_codec::row_converter::build_primary_key_codec;
@@ -4925,7 +4925,7 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
                 !closed_keys.contains(chunk.read_key.as_slice()),
                 "no chunk may follow a key's is_last chunk"
             );
-            let RawTimeAxis::Explicit(times) = chunk.time;
+            let times = chunk.time.as_explicit().unwrap();
             assert_eq!(2, chunk.fields.len());
             assert_eq!(times.len(), chunk.fields.get(0).unwrap().len());
             assert_eq!(times.len(), chunk.fields.get(1).unwrap().len());
@@ -5104,7 +5104,6 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
 
 #[tokio::test]
 async fn test_mito_raw_series_int64_predicate_uses_original_precision() {
-    use datatypes::series::raw::RawTimeAxis;
     use datatypes::series::samples::SampleRef;
     use store_api::region_engine::{BoundTag, QueryScanContext, RawLabelSource};
 
@@ -5200,7 +5199,7 @@ async fn test_mito_raw_series_int64_predicate_uses_original_precision() {
         );
         let chunks = stream.try_collect::<Vec<_>>().await.unwrap();
         for chunk in chunks {
-            let RawTimeAxis::Explicit(axis) = chunk.time;
+            let axis = chunk.time.as_explicit().unwrap();
             times.extend(axis.iter().copied());
             for index in 0..axis.len() {
                 output_values.push((
@@ -5220,7 +5219,6 @@ async fn test_mito_raw_series_int64_predicate_uses_original_precision() {
 /// Invalid predicate bindings decline before consumption; explicit labels decline and legacy still reads.
 #[tokio::test]
 async fn test_mito_raw_series_invalid_binding_before_legacy_read() {
-    use datatypes::series::raw::RawTimeAxis;
     use datatypes::series::samples::SampleRef;
     use store_api::region_engine::{BoundTag, QueryScanContext, RawLabelSource};
     let mut env =
@@ -5315,7 +5313,7 @@ async fn test_mito_raw_series_invalid_binding_before_legacy_read() {
             let tuples = chunks
                 .iter()
                 .map(|chunk| {
-                    let RawTimeAxis::Explicit(times) = &chunk.time;
+                    let times = chunk.time.as_explicit().unwrap();
                     let SampleRef::Float(value) = chunk.fields.get(0).unwrap().sample(0) else {
                         panic!("expected raw float sample");
                     };

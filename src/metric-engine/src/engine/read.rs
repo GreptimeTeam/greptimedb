@@ -315,7 +315,6 @@ mod test {
     use common_error::status_code::StatusCode;
     use datafusion::physical_plan::DisplayFormatType;
     use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
-    use datatypes::series::raw::RawTimeAxis;
     use datatypes::series::samples::SampleRef;
     use futures_util::TryStreamExt;
     use futures_util::future::try_join_all;
@@ -835,7 +834,7 @@ mod test {
                 decoded_jobs.insert(job_value.to_string());
                 keys.insert(key_bytes.to_vec());
                 last_markers += usize::from(chunk.is_last);
-                let RawTimeAxis::Explicit(times) = chunk.time;
+                let times = chunk.time.as_explicit().unwrap();
                 samples.extend(times.iter().enumerate().map(|(index, time)| {
                     let value = match chunk.fields.get(0).unwrap().sample(index) {
                         SampleRef::Float(value) => value,
