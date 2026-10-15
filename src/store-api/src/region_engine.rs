@@ -551,12 +551,19 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     /// `None` means raw capability is absent before execution and permits a legacy scan instead.
     /// `Some` selects this entrypoint, including for an empty successful stream. Errors propagate;
     /// callers must not replay a failed raw scan through the legacy path. Use only one entrypoint
-    /// for a given scanner partition per execution.
+    /// for a given scanner partition per execution. The explicit label source is owned by the
+    /// returned stream and must be bound to this scanner's metadata snapshot.
+    ///
+    /// Output preserves the ordinary storage reader's pushdown and MVCC semantics. Inexact
+    /// pushed-down predicates can leave false-positive candidates, just as in `scan_partition`.
+    /// Callers must retain residual predicate columns until those predicates are evaluated and
+    /// apply the final projection afterward; raw capability does not mean filtering is complete.
     fn scan_series_partition(
         &self,
         _ctx: &QueryScanContext,
         _metrics_set: &ExecutionPlanMetricsSet,
         _partition: usize,
+        _label_source: &RawLabelSource,
     ) -> Result<Option<SendableRawSeriesStream>, BoxedError> {
         Ok(None)
     }
@@ -849,7 +856,7 @@ mod tests {
 
         assert!(
             scanner
-                .scan_series_partition(&ctx, &metrics, 0)
+                .scan_series_partition(&ctx, &metrics, 0, &RawLabelSource::Explicit)
                 .unwrap()
                 .is_none()
         );

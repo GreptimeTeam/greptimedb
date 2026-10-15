@@ -14,6 +14,8 @@
 
 //! Per-series scan implementation.
 
+mod raw;
+
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -562,6 +564,132 @@ impl RegionScanner for SeriesScan {
     ) -> Result<SendableRecordBatchStream, BoxedError> {
         self.scan_partition_impl(ctx, metrics_set, partition)
             .map_err(BoxedError::new)
+    }
+
+    fn scan_series_partition(
+        &self,
+        ctx: &QueryScanContext,
+        metrics_set: &ExecutionPlanMetricsSet,
+        partition: usize,
+        label_source: &store_api::region_engine::RawLabelSource,
+    ) -> Result<Option<store_api::region_engine::SendableRawSeriesStream>, BoxedError> {
+        use api::v1::SemanticType;
+        use common_query::native_histogram::is_native_histogram_value_type;
+        use datatypes::series::samples::{FieldSpec, SeriesSchema};
+        use store_api::metric_engine_consts::is_metric_engine_internal_column;
+        use store_api::region_engine::RawLabelSource;
+        use store_api::storage::consts::{ReservedColumnId, is_internal_column};
+
+        let input = &self.stream_ctx.input;
+        let metadata = input.mapper.metadata();
+        match label_source {
+            RawLabelSource::PrimaryKey {
+                physical_metadata,
+                logical_tags,
+                ..
+            } => {
+                if !Arc::ptr_eq(metadata, physical_metadata) {
+                    return Err(BoxedError::new(
+                        crate::error::InvalidRecordBatchSnafu {
+                            reason: "raw label source metadata does not match scanner snapshot"
+                                .to_string(),
+                        }
+                        .build(),
+                    ));
+                }
+                let mut ids = std::collections::HashSet::new();
+                let mut names = std::collections::HashSet::new();
+                for tag in logical_tags.iter() {
+                    let column = metadata.column_by_id(tag.column_id).filter(|column| {
+                        column.semantic_type == SemanticType::Tag
+                            && metadata.primary_key.contains(&tag.column_id)
+                    });
+                    let valid = column.is_some_and(|column| {
+                        column.column_schema.name == tag.name.as_ref()
+                            && tag.name.as_ref() != "__name__"
+                            && !is_internal_column(tag.name.as_ref())
+                            && !is_metric_engine_internal_column(tag.name.as_ref())
+                            && !ReservedColumnId::is_reserved(tag.column_id)
+                    });
+                    if !valid || !ids.insert(tag.column_id) || !names.insert(tag.name.as_ref()) {
+                        return Err(BoxedError::new(
+                            crate::error::InvalidRecordBatchSnafu {
+                                reason: "invalid raw label binding".to_string(),
+                            }
+                            .build(),
+                        ));
+                    }
+                }
+            }
+            RawLabelSource::Explicit => return Ok(None),
+        }
+        let selected = input.mapper.output_schema();
+        let mut fields = Vec::new();
+        let mut specs = Vec::new();
+        for output in selected.column_schemas() {
+            let Some(column) = metadata.column_metadatas.iter().find(|column| {
+                column.column_schema.name == output.name
+                    && column.semantic_type == SemanticType::Field
+            }) else {
+                continue;
+            };
+            let Some((index, (_, data_type))) = input
+                .mapper
+                .batch_schema()
+                .iter()
+                .enumerate()
+                .find(|(_, (id, _))| *id == column.column_id)
+            else {
+                return Err(BoxedError::new(
+                    crate::error::InvalidRecordBatchSnafu {
+                        reason: format!(
+                            "selected field {} is missing from mapper batch schema",
+                            output.name
+                        ),
+                    }
+                    .build(),
+                ));
+            };
+            if !data_type.is_numeric() && !is_native_histogram_value_type(data_type) {
+                return Ok(None);
+            }
+            fields.push((index, data_type.clone()));
+            specs.push(FieldSpec {
+                name: Arc::from(output.name.as_str()),
+            });
+        }
+        let time_is_millis = matches!(
+            metadata.time_index_type(),
+            datatypes::types::TimestampType::Millisecond(_)
+        );
+        if fields.is_empty()
+            || input.append_mode
+            || input.series_row_selector.is_some()
+            || !time_is_millis
+        {
+            return Ok(None);
+        }
+        let schema = Arc::new(SeriesSchema {
+            fields: specs.into(),
+            eval_grid: None,
+        });
+        let metrics = new_partition_metrics(
+            &self.stream_ctx,
+            ctx.explain_verbose,
+            metrics_set,
+            partition,
+            &self.metrics_list,
+        );
+        let batches = self
+            .scan_batch_in_partition(ctx, partition, metrics.clone(), metrics_set)
+            .map_err(BoxedError::new)?;
+        Ok(Some(raw::make_stream(
+            batches,
+            schema,
+            label_source.clone(),
+            fields,
+            metrics,
+        )))
     }
 
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
