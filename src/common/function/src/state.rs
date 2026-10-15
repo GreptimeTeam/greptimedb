@@ -92,6 +92,7 @@ impl FunctionState {
 
             async fn manage_region_follower(
                 &self,
+                _query_ctx: QueryContextRef,
                 _request: ManageRegionFollowerRequest,
             ) -> Result<()> {
                 Ok(())

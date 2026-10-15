@@ -86,6 +86,7 @@ macro_rules! sql_tests {
                 test_postgres_datestyle,
                 test_postgres_intervalstyle,
                 test_postgres_parameter_inference,
+                test_postgres_expression_depth,
                 test_postgres_regclass_bind_parameter,
                 test_postgres_uint64_parameter,
                 test_postgres_explain_bind_parameter,
@@ -1600,6 +1601,56 @@ pub async fn test_postgres_parameter_inference(store_type: StorageType) {
     rx.await.unwrap();
 
     let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+// Regression for #9553: reject the predicate before DataFusion's simplifier
+// overflows the worker stack, and keep the extended-query connection usable.
+pub async fn test_postgres_expression_depth(store_type: StorageType) {
+    let (mut guard, server) = setup_pg_server(store_type, "test_postgres_expression_depth").await;
+    let addr = server.bind_addr().unwrap();
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+    let connection = tokio::spawn(connection);
+    client
+        .simple_query(
+            "CREATE TABLE depth_guard (ts TIMESTAMP TIME INDEX, v INT); \
+             INSERT INTO depth_guard VALUES (0, 42)",
+        )
+        .await
+        .unwrap();
+
+    let query = |terms: usize| {
+        let predicate = std::iter::once("CAST(v AS BIGINT) = $1".to_string())
+            .chain((1..terms).map(|i| format!("CAST(v AS BIGINT) = {i}")))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        format!("SELECT count(*) FROM depth_guard WHERE {predicate}")
+    };
+    let row = client.query_one(&query(64), &[&42_i64]).await.unwrap();
+    assert_eq!(row.get::<_, i64>(0), 1);
+
+    for prefix in ["", "EXPLAIN ", "EXPLAIN ANALYZE "] {
+        let error = client
+            .query(&format!("{prefix}{}", query(512)), &[&42_i64])
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .as_db_error()
+                .unwrap()
+                .message()
+                .contains("Expression depth exceeds the maximum supported depth of 128"),
+            "{error}"
+        );
+        let row = client.query_one("SELECT 42::BIGINT", &[]).await.unwrap();
+        assert_eq!(row.get::<_, i64>(0), 42);
+    }
+
+    drop(client);
+    connection.await.unwrap().unwrap();
+    server.shutdown().await.unwrap();
     guard.remove_all().await;
 }
 

@@ -28,6 +28,9 @@ use crate::sst::file::RegionFileId;
 /// Mito engine background event listener.
 #[async_trait]
 pub trait EventListener: Send + Sync {
+    /// Notifies the background opener after the worker acknowledges region registration.
+    async fn on_region_open_registered(&self, _region_id: RegionId) {}
+
     /// Notifies the listener that a region is flushed successfully.
     fn on_flush_success(&self, region_id: RegionId) {
         let _ = region_id;
@@ -82,6 +85,15 @@ pub trait EventListener: Send + Sync {
 
     /// Notifies the listener after local compaction becomes non-cancellable and before commit.
     async fn on_compaction_commit_begin(&self, _region_id: RegionId) {}
+
+    /// Gates a particular unit before it reads or writes SSTs.
+    async fn on_compaction_unit_merge_begin(&self, _region_id: RegionId, _plan_id: u64) {}
+
+    /// Gates a persisted unit before its notification reaches the region worker.
+    async fn on_compaction_unit_committed(&self, _region_id: RegionId, _plan_id: u64) {}
+
+    /// Observes independent query visibility, before request-level completion.
+    fn on_compaction_unit_applied(&self, _region_id: RegionId, _plan_id: u64) {}
 
     /// Notifies the listener after compaction results are sent and before pending DDL dispatch.
     async fn on_compaction_result_notified(&self, _region_id: RegionId) {}

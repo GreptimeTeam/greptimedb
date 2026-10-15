@@ -36,7 +36,8 @@ use store_api::storage::{ScanRequest, TableId};
 use crate::error::{self, InternalSnafu};
 use crate::information_schema::Predicates;
 use crate::process_manager::ProcessManagerRef;
-use crate::system_schema::information_schema::InformationTable;
+use crate::system_schema::SystemTable;
+use crate::system_schema::information_schema::{InformationSchemaTableScope, InformationTable};
 
 /// Column names of `information_schema.process_list`
 pub const ID: &str = "id";
@@ -82,6 +83,12 @@ impl InformationSchemaProcessList {
 }
 
 impl InformationTable for InformationSchemaProcessList {
+    fn scope(&self) -> InformationSchemaTableScope {
+        InformationSchemaTableScope::Global
+    }
+}
+
+impl SystemTable for InformationSchemaProcessList {
     fn table_id(&self) -> TableId {
         INFORMATION_SCHEMA_PROCESS_LIST_TABLE_ID
     }

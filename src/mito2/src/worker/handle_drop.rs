@@ -115,6 +115,11 @@ where
         // Removes this region from region map to prevent other requests from accessing this region
         self.regions.remove_region(region_id);
         self.dropping_regions.insert_region(region.clone());
+        // The region is no longer served once it leaves the map, so unregister its
+        // runtime state before the fallible WAL cleanup below. Otherwise a WAL
+        // failure would leak the resident compaction/flush/index entries that only
+        // this cleanup and close/drop remove.
+        self.cleanup_dropped_region_runtime_state(region_id).await;
 
         // Delete region data in WAL.
         self.wal
@@ -124,7 +129,6 @@ where
                 &region.provider,
             )
             .await?;
-        self.cleanup_dropped_region_runtime_state(region_id).await;
 
         if let Some(store) = &self.series_index_store {
             crate::series_index::delete_catalogs(store, region_id).await;

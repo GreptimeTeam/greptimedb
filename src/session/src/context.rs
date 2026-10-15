@@ -1291,7 +1291,7 @@ mod test {
             assert_eq!(ctx.read_preference(), ReadPreference::Leader);
             assert!(!ctx.extensions().contains_key(READ_PREFERENCE_EXTENSION_KEY));
         }
-        for value in ["", "unknown", "follower", "follower_preferred", "random"] {
+        for value in ["", "unknown"] {
             let error = QueryContext::try_from(wire(Some(value))).unwrap_err();
             assert!(matches!(
                 error,

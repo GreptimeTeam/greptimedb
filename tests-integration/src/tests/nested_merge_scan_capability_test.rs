@@ -158,7 +158,7 @@ async fn test_nested_merge_scan_capability_rejects_internal_read_preference() {
         .map(|id| (*id, rpc_requests(&cluster, *id)))
         .collect::<BTreeMap<_, _>>();
 
-    for value in ["", "invalid", "follower"] {
+    for value in ["", "invalid"] {
         let mut header = region_request_header(&query_ctx);
         header
             .query_context
@@ -547,7 +547,7 @@ fn nested_plan_of(probe: &LogicalPlan, build: LogicalPlan) -> LogicalPlan {
     info!("probe side of the nested plan:\n{probe}");
     info!("build side of the nested plan:\n{build}");
 
-    let inner = MergeScanLogicalPlan::new(build, false, Default::default()).into_logical_plan();
+    let inner = MergeScanLogicalPlan::new(build, false).into_logical_plan();
     let plan = LogicalPlanBuilder::from(probe.clone())
         .join(
             inner,

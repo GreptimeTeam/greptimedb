@@ -88,7 +88,6 @@ pub struct GreptimeDbStandaloneBuilder {
     slow_query_options: SlowQueryOptions,
     event_recorder_options: EventRecorderOptions,
     auto_create_table: bool,
-    experimental_metric_export: bool,
     logical_batcher: Option<BatcherOptions>,
     table_batcher: BatcherOptions,
     mito_config: Option<mito2::config::MitoConfig>,
@@ -110,7 +109,6 @@ impl GreptimeDbStandaloneBuilder {
             },
             event_recorder_options: EventRecorderOptions::default(),
             auto_create_table: true,
-            experimental_metric_export: false,
             logical_batcher: None,
             table_batcher: BatcherOptions::default(),
             mito_config: None,
@@ -121,13 +119,6 @@ impl GreptimeDbStandaloneBuilder {
     #[must_use]
     pub fn with_mito_config(mut self, config: mito2::config::MitoConfig) -> Self {
         self.mito_config = Some(config);
-        self
-    }
-
-    /// Enables experimental Metric export for the standalone test instance.
-    #[must_use]
-    pub fn with_experimental_metric_export(mut self) -> Self {
-        self.experimental_metric_export = true;
         self
     }
 
@@ -398,7 +389,6 @@ impl GreptimeDbStandaloneBuilder {
             slow_query: self.slow_query_options.clone(),
             event_recorder: self.event_recorder_options.clone(),
             auto_create_table: self.auto_create_table,
-            experimental_metric_export: self.experimental_metric_export,
             pending_rows_batcher: PendingRowsBatcherOptions {
                 logical_table: self.logical_batcher.clone(),
                 table: self.table_batcher.clone(),

@@ -377,6 +377,11 @@ impl MitoRegion {
             == RegionRoleState::Leader(RegionLeaderState::EnteringStaging)
     }
 
+    /// Returns whether the region is truncating.
+    pub(crate) fn is_truncating(&self) -> bool {
+        self.manifest_ctx.state.load() == RegionRoleState::Leader(RegionLeaderState::Truncating)
+    }
+
     pub fn region_id(&self) -> RegionId {
         self.region_id
     }

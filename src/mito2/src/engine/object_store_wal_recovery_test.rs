@@ -22,12 +22,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use api::v1::Rows;
 use common_base::readable_size::ReadableSize;
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use common_wal::config::object_store::{
@@ -35,9 +35,12 @@ use common_wal::config::object_store::{
 };
 use common_wal::options::{ObjectStoreWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use log_store::ObjectStoreLogStore;
+use log_store::metrics::METRIC_OBJECT_STORE_WAL_FAILING;
 use log_store::object_store_wal::{WalHole, entry_id};
 use object_store::ObjectStore;
+use object_store::layers::mock::{self, MockLayerBuilder, oio};
 use object_store::services::Memory;
+use object_store::util::with_retry_layers;
 use rstest::rstest;
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
@@ -1354,4 +1357,107 @@ async fn test_flush_does_not_publish_a_frontier_for_a_lost_enqueued_backlog() {
             .manifest_flushed_entry_id
     );
     assert!(store.stop().await.is_err());
+}
+
+/// An in-memory object store behind the retry layer object storage has in
+/// production, whose writes fail with denied access while `denied` is set.
+fn denying_store(denied: Arc<AtomicBool>) -> ObjectStore {
+    let mock = MockLayerBuilder::default()
+        .writer_factory(Arc::new(move |_, _, inner| {
+            if denied.load(Ordering::SeqCst) {
+                Box::new(DeniedWriter)
+            } else {
+                inner
+            }
+        }))
+        .build()
+        .unwrap();
+    with_retry_layers(memory_store().layer(mock))
+}
+
+struct DeniedWriter;
+
+impl oio::Write for DeniedWriter {
+    async fn write(&mut self, _buffer: mock::Buffer) -> mock::Result<()> {
+        Ok(())
+    }
+
+    async fn close(&mut self) -> mock::Result<mock::Metadata> {
+        Err(mock::Error::new(
+            mock::ErrorKind::PermissionDenied,
+            "access denied",
+        ))
+    }
+
+    async fn abort(&mut self) -> mock::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_enqueued_writes_fail_fast_while_the_object_store_refuses_the_backlog() {
+    let mut env = TestEnv::with_prefix("object-store-wal-refused-backlog").await;
+    let denied = Arc::new(AtomicBool::new(false));
+    let store = open_store(&denying_store(denied.clone()), AckMode::Enqueued).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (_, schema) = create_region(&engine, REGION_A, &[]).await;
+
+    // The write is acknowledged, then the object store denies the create of
+    // its object, which the store keeps.
+    denied.store(true, Ordering::SeqCst);
+    put_rows(&engine, REGION_A, rows(&schema, 0, 3)).await;
+    let seal = spawn_seal(&store);
+    tokio::time::timeout(WAIT, async {
+        while METRIC_OBJECT_STORE_WAL_FAILING.get() == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the store must fail");
+
+    // A later write fails at once with a retryable error that names the
+    // refusal, and takes no entry id.
+    let error = try_put(&engine, REGION_A, rows(&schema, 3, 5))
+        .await
+        .unwrap_err();
+    assert_eq!(StatusCode::StorageUnavailable, error.status_code());
+    assert_eq!(RetryHint::Retryable, error.retry_hint());
+    assert!(
+        format!("{error:?}").contains("PermissionDenied"),
+        "{error:?}"
+    );
+    assert_eq!(
+        entry_id(1, 1),
+        region_recovery_state(&engine, REGION_A).await.last_entry_id
+    );
+
+    // A flush waits for the acknowledged entry instead of failing.
+    let flush = spawn_flush(&engine, REGION_A);
+    wait_for(store.wait_for_durability_waits(1)).await;
+    assert!(!flush.is_finished());
+
+    // Once the object store accepts writes again, the backlog is uploaded,
+    // the flush records the entry and writes are accepted again.
+    denied.store(false, Ordering::SeqCst);
+    tokio::time::timeout(WAIT, seal)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(WAIT, flush)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    put_rows(&engine, REGION_A, rows(&schema, 3, 5)).await;
+    assert_eq!(
+        RegionRecoveryState {
+            flushed_entry_id: entry_id(1, 1),
+            last_entry_id: entry_id(2, 1),
+            topic_latest_entry_id: entry_id(1, 1),
+            manifest_flushed_entry_id: entry_id(1, 1),
+            memtable_rows: 2,
+        },
+        region_recovery_state(&engine, REGION_A).await
+    );
 }

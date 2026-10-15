@@ -46,7 +46,10 @@ use crate::error::{
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::memtable::bulk::ENCODE_ROW_THRESHOLD;
-use crate::memtable::{BoxedRecordBatchIterator, EncodedRange, MemtableRanges, RangesOptions};
+use crate::memtable::{
+    BoxedRecordBatchIterator, EncodedRange, MemtableRange, MemtableRanges, RangesOptions,
+    group_by_sequence,
+};
 use crate::metrics::{
     FLUSH_BYTES_TOTAL, FLUSH_ELAPSED, FLUSH_FAILURE_TOTAL, FLUSH_FILE_TOTAL, FLUSH_REQUESTS_TOTAL,
     INFLIGHT_FLUSH_COUNT,
@@ -850,7 +853,10 @@ impl RegionFlushTask {
             metadata: version.metadata.clone(),
             source,
             cache_manager: self.cache_manager.clone(),
-            max_sequence: Some(max_sequence),
+            // Sources have disjoint sequence intervals. LastNonNull can still
+            // contain Puts and retained delete barriers for the same row.
+            max_sequence: (version.options.merge_mode() != MergeMode::LastNonNull)
+                .then_some(max_sequence),
             sst_write_format: if flat_format {
                 FormatType::Flat
             } else {
@@ -920,7 +926,7 @@ struct FlatSources {
     encoded: SmallVec<[(EncodedRange, SequenceNumber); 4]>,
 }
 
-/// Returns the max sequence and [FlatSource] for the given memtable.
+/// Builds sequence-disjoint sources and their maximum input sequences.
 fn memtable_flat_sources(
     schema: SchemaRef,
     mem_ranges: MemtableRanges,
@@ -928,188 +934,156 @@ fn memtable_flat_sources(
     options: &RegionOptions,
     field_column_start: usize,
 ) -> Result<FlatSources> {
-    let MemtableRanges { ranges } = mem_ranges;
+    let components = group_by_sequence(
+        mem_ranges.ranges.into_values().collect(),
+        |range: &MemtableRange| {
+            let stats = range.stats();
+            (stats.min_sequence, stats.max_sequence())
+        },
+    );
     let mut flat_sources = FlatSources {
         sources: SmallVec::new(),
         encoded: SmallVec::new(),
     };
-
-    if ranges.len() == 1 {
-        debug!("Flushing single flat range");
-
-        let only_range = ranges.into_values().next().unwrap();
-        let max_sequence = only_range.stats().max_sequence();
-        if let Some(encoded) = only_range.encoded() {
-            flat_sources.encoded.push((encoded, max_sequence));
-        } else {
-            let schema = only_range.record_batch_schema_hint().unwrap_or(schema);
-            let iter = only_range.build_record_batch_iter(None, None)?;
-            // Dedup according to append mode and merge mode.
-            // Even single range may have duplicate rows.
-            let iter = maybe_dedup_one(
-                options.append_mode,
-                options.merge_mode(),
-                field_column_start,
-                iter,
-            );
-            flat_sources
-                .sources
-                .push((FlatSource::new_iter(schema, iter), max_sequence));
-        };
-    } else {
-        let min_flush_rows = *ENCODE_ROW_THRESHOLD;
-        // Calculate total rows from non-encoded ranges.
-        let total_rows: usize = ranges
-            .values()
-            .filter(|r| r.encoded().is_none())
-            .map(|r| r.num_rows())
-            .sum();
-        debug!(
-            "Flushing multiple flat ranges, total_rows: {}, min_flush_rows: {}, num_ranges: {}",
-            total_rows,
-            min_flush_rows,
-            ranges.len()
-        );
-        let mut rows_remaining = total_rows;
-        let mut last_iter_rows = 0;
-        let num_ranges = ranges.len();
-        let mut input_iters = Vec::with_capacity(num_ranges);
-        let mut current_ranges = Vec::new();
-
-        let schemas = ranges
-            .values()
-            .filter(|range| range.encoded().is_none())
-            .map(|range| {
-                (
-                    range
-                        .record_batch_schema_hint()
-                        .unwrap_or_else(|| schema.clone()),
-                    range.num_rows() as u64,
-                )
-            })
-            .collect::<Vec<_>>();
-        let plans = Arc::new(collect_json2_rewrite_plans(metadata, &schemas)?);
-        let schema = rewrite_json2_schema(
-            schemas.first().map(|(schema, _)| schema).unwrap_or(&schema),
-            &plans,
-        );
-
-        for (_range_id, range) in ranges {
-            if let Some(encoded) = range.encoded() {
-                let max_sequence = range.stats().max_sequence();
-                flat_sources.encoded.push((encoded, max_sequence));
-                continue;
-            }
-
-            if let Some(actual) = range.record_batch_schema_hint() {
-                let actual = rewrite_json2_schema(&actual, &plans);
-                ensure!(
-                    actual == schema,
-                    UnexpectedSnafu {
-                        reason: format!(
-                            "Different schemas found in a MemtableRanges, expected: {}, actual: {}",
-                            schema, actual,
-                        ),
-                    }
-                )
-            }
-
-            let iter = range.build_record_batch_iter(None, None)?;
-            let iter: BoxedRecordBatchIterator = if plans.is_empty() {
-                iter
-            } else {
-                let plans = plans.clone();
-                Box::new(iter.map(move |batch| rewrite_json2_batch(batch?, &plans)))
-            };
-            input_iters.push(iter);
-            let range_rows = range.num_rows();
-            last_iter_rows += range_rows;
-            rows_remaining -= range_rows;
-            current_ranges.push(range);
-
-            // Flush if we have enough rows, but don't flush if the remaining rows
-            // would be less than DEFAULT_ROW_GROUP_SIZE (to avoid small last files).
-            if last_iter_rows >= min_flush_rows
-                && (rows_remaining == 0 || rows_remaining >= DEFAULT_ROW_GROUP_SIZE)
-            {
-                debug!(
-                    "Flush batch ready, rows: {}, min_rows: {}, num_iters: {}, remaining: {}",
-                    last_iter_rows,
-                    min_flush_rows,
-                    input_iters.len(),
-                    rows_remaining
-                );
-
-                // Calculate max_sequence from all merged ranges
-                let max_sequence = current_ranges
-                    .iter()
-                    .map(|r| r.stats().max_sequence())
-                    .max()
-                    .unwrap_or(0);
-                let batch_size =
-                    crate::batch_size::estimate_batch_size(current_ranges.iter().map(|range| {
-                        let stats = range.stats();
-                        (stats.num_rows() as u64, stats.bytes_allocated() as u64)
-                    }));
-
-                let input_iters =
-                    std::mem::replace(&mut input_iters, Vec::with_capacity(num_ranges));
-
-                let maybe_dedup = merge_and_dedup_with_batch_size(
+    let mut rows_remaining = components
+        .iter()
+        .filter(|component| component.len() != 1 || component[0].encoded().is_none())
+        .flatten()
+        .map(MemtableRange::num_rows)
+        .sum::<usize>();
+    let mut pending = Vec::new();
+    let mut pending_rows = 0;
+    for component in components {
+        // A standalone encoded component is an ordering barrier. Do not merge
+        // raw ranges on either side while uploading the intervening rows as-is.
+        if component.len() == 1
+            && let Some(encoded) = component[0].encoded()
+        {
+            if !pending.is_empty() {
+                flat_sources.sources.push(build_flush_source(
                     &schema,
-                    options.append_mode,
-                    options.merge_mode(),
+                    std::mem::take(&mut pending),
+                    metadata,
+                    options,
                     field_column_start,
-                    input_iters,
-                    batch_size,
-                )?;
-
-                flat_sources.sources.push((
-                    FlatSource::new_iter(schema.clone(), maybe_dedup),
-                    max_sequence,
-                ));
-                last_iter_rows = 0;
-                current_ranges.clear();
+                )?);
+                pending_rows = 0;
             }
-        }
-
-        // Handle remaining iters.
-        if !input_iters.is_empty() {
-            debug!(
-                "Flush remaining batch, rows: {}, min_rows: {}, num_iters: {}, remaining: {}",
-                last_iter_rows,
-                min_flush_rows,
-                input_iters.len(),
-                rows_remaining
-            );
-
-            let max_sequence = current_ranges
-                .iter()
-                .map(|r| r.stats().max_sequence())
-                .max()
-                .unwrap_or(0);
-            let batch_size =
-                crate::batch_size::estimate_batch_size(current_ranges.iter().map(|range| {
-                    let stats = range.stats();
-                    (stats.num_rows() as u64, stats.bytes_allocated() as u64)
-                }));
-
-            let maybe_dedup = merge_and_dedup_with_batch_size(
-                &schema,
-                options.append_mode,
-                options.merge_mode(),
-                field_column_start,
-                input_iters,
-                batch_size,
-            )?;
-
             flat_sources
-                .sources
-                .push((FlatSource::new_iter(schema, maybe_dedup), max_sequence));
+                .encoded
+                .push((encoded, component[0].stats().max_sequence()));
+            continue;
+        }
+        let component_rows = component.iter().map(MemtableRange::num_rows).sum::<usize>();
+        pending_rows += component_rows;
+        rows_remaining -= component_rows;
+        pending.extend(component);
+        // Only split between disjoint components, retaining the existing
+        // minimum-size rule for the final source.
+        if pending_rows >= *ENCODE_ROW_THRESHOLD
+            && (rows_remaining == 0 || rows_remaining >= DEFAULT_ROW_GROUP_SIZE)
+        {
+            flat_sources.sources.push(build_flush_source(
+                &schema,
+                std::mem::take(&mut pending),
+                metadata,
+                options,
+                field_column_start,
+            )?);
+            pending_rows = 0;
         }
     }
-
+    if !pending.is_empty() {
+        flat_sources.sources.push(build_flush_source(
+            &schema,
+            pending,
+            metadata,
+            options,
+            field_column_start,
+        )?);
+    }
     Ok(flat_sources)
+}
+
+/// Builds one sequence-contiguous source, decoding encoded ranges if their
+/// intervals overlap other ranges. JSON2 layouts are reconciled for this group.
+fn build_flush_source(
+    schema: &SchemaRef,
+    ranges: Vec<MemtableRange>,
+    metadata: &RegionMetadataRef,
+    options: &RegionOptions,
+    field_column_start: usize,
+) -> Result<(FlatSource, SequenceNumber)> {
+    let max_sequence = ranges
+        .iter()
+        .map(|range| range.stats().max_sequence())
+        .max()
+        .unwrap_or(0);
+    if let [range] = ranges.as_slice() {
+        // A single range needs no layout reconciliation, including legacy JSON2.
+        let schema = range
+            .record_batch_schema_hint()
+            .unwrap_or_else(|| schema.clone());
+        let iter = maybe_dedup_one(
+            options.append_mode,
+            options.merge_mode(),
+            field_column_start,
+            range.build_record_batch_iter(None, None)?,
+        );
+        return Ok((FlatSource::new_iter(schema, iter), max_sequence));
+    }
+    let batch_size = crate::batch_size::estimate_batch_size(ranges.iter().map(|range| {
+        let stats = range.stats();
+        (stats.num_rows() as u64, stats.bytes_allocated() as u64)
+    }));
+    let schemas = ranges
+        .iter()
+        .map(|range| {
+            (
+                range
+                    .record_batch_schema_hint()
+                    .unwrap_or_else(|| schema.clone()),
+                range.num_rows() as u64,
+            )
+        })
+        .collect::<Vec<_>>();
+    let plans = Arc::new(collect_json2_rewrite_plans(metadata, &schemas)?);
+    let schema = rewrite_json2_schema(
+        schemas.first().map(|(schema, _)| schema).unwrap_or(schema),
+        &plans,
+    );
+    let mut iters = Vec::with_capacity(ranges.len());
+    for range in ranges {
+        if let Some(actual) = range.record_batch_schema_hint() {
+            let actual = rewrite_json2_schema(&actual, &plans);
+            ensure!(
+                actual == schema,
+                UnexpectedSnafu {
+                    reason: format!(
+                        "Different schemas found in a MemtableRanges, expected: {}, actual: {}",
+                        schema, actual
+                    ),
+                }
+            );
+        }
+        let iter = range.build_record_batch_iter(None, None)?;
+        let iter: BoxedRecordBatchIterator = if plans.is_empty() {
+            iter
+        } else {
+            let plans = plans.clone();
+            Box::new(iter.map(move |batch| rewrite_json2_batch(batch?, &plans)))
+        };
+        iters.push(iter);
+    }
+    let iter = merge_and_dedup_with_batch_size(
+        &schema,
+        options.append_mode,
+        options.merge_mode(),
+        field_column_start,
+        iters,
+        batch_size,
+    )?;
+    Ok((FlatSource::new_iter(schema, iter), max_sequence))
 }
 
 /// Merges multiple record batch iterators and applies deduplication based on the specified mode.
@@ -1143,7 +1117,7 @@ fn memtable_flat_sources(
 /// 3. If `append_mode` is false, wraps the merge iterator with a `FlatDedupIterator` that
 ///    applies the specified merge mode:
 ///    - `LastRow`: Removes duplicate rows, keeping only the last one
-///    - `LastNonNull`: Removes duplicates but preserves the last non-null value for each field
+///    - `LastNonNull`: Folds fields between delete markers, retaining every marker
 ///
 /// # Examples
 ///
@@ -2373,7 +2347,7 @@ mod tests {
             1,
             std::iter::once(1000),
             std::iter::once(Some(1.0)),
-            1,
+            2,
         );
         converter.append_key_values(&kvs)?;
         let batch = converter.convert()?.batch;
@@ -2388,6 +2362,8 @@ mod tests {
                 )),
                 MemtableStats {
                     num_rows: 1,
+                    min_sequence: id as u64 + 1,
+                    max_sequence: id as u64 + 1,
                     ..Default::default()
                 },
             )
@@ -2406,7 +2382,7 @@ mod tests {
         ranges.insert(
             1,
             new_range(
-                0,
+                1,
                 TestIterBuilder {
                     schema: schema.clone(),
                     batch: Some(batch),

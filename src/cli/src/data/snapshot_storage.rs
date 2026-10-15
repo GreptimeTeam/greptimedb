@@ -21,6 +21,7 @@ use std::collections::BTreeSet;
 use std::path::Component;
 
 use async_trait::async_trait;
+use common_datasource::packed_writer::WRITE_BYTES;
 use futures::TryStreamExt;
 use object_store::services::{Azblob, Fs, Gcs, Oss, S3};
 use object_store::util::{with_instrument_layers, with_retry_layers};
@@ -570,13 +571,31 @@ impl OpenDalStorage {
 
     /// Writes bytes to a file.
     async fn write_file(&self, path: &str, data: Vec<u8>) -> Result<()> {
-        self.object_store
-            .write(path, data)
+        let mut writer = self
+            .object_store
+            .writer_with(path)
+            .chunk(WRITE_BYTES)
+            .concurrent(1)
             .await
-            .map(|_| ())
-            .context(StorageOperationSnafu {
-                operation: format!("write {}", path),
-            })
+            .with_context(|_| StorageOperationSnafu {
+                operation: format!("open writer {}", path),
+            })?;
+        let data = object_store::Buffer::from(data);
+        let result = async {
+            for chunk in data.chunks(WRITE_BYTES) {
+                writer.write(chunk).await?;
+            }
+            writer.close().await.map(|_| ())
+        }
+        .await;
+        if result.is_err()
+            && let Err(error) = writer.abort().await
+        {
+            common_telemetry::warn!(error; "Failed to abort snapshot metadata write");
+        }
+        result.with_context(|_| StorageOperationSnafu {
+            operation: format!("write {}", path),
+        })
     }
 
     /// Checks if a file exists using stat.
@@ -835,6 +854,96 @@ mod tests {
             OpenDalStorage::finish_local_store(object_store),
             Url::from_directory_path(dir).unwrap().as_ref(),
         )
+    }
+
+    #[tokio::test]
+    async fn snapshot_metadata_submissions_are_bounded_and_invoke_abort_on_failure() {
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use object_store::layers::mock::{Metadata, ObservedWriter, WriterObservations, oio};
+
+        struct FailWriter {
+            inner: oio::Writer,
+            writes: usize,
+            fail: Arc<AtomicUsize>,
+        }
+        impl oio::Write for FailWriter {
+            async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
+                self.writes += 1;
+                if self.fail.load(Ordering::SeqCst) == 1 && self.writes == 2 {
+                    return Err(object_store::Error::new(
+                        ErrorKind::Unexpected,
+                        "injected metadata write failure",
+                    ));
+                }
+                self.inner.write(bytes).await
+            }
+            async fn close(&mut self) -> object_store::Result<Metadata> {
+                if self.fail.load(Ordering::SeqCst) == 2 {
+                    return Err(object_store::Error::new(
+                        ErrorKind::Unexpected,
+                        "injected metadata close failure",
+                    ));
+                }
+                self.inner.close().await
+            }
+            async fn abort(&mut self) -> object_store::Result<()> {
+                self.inner.abort().await
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let mut storage = make_storage_with_rooted_fs(dir.path());
+        let observations = Arc::new(Mutex::new(WriterObservations::default()));
+        let fail = Arc::new(AtomicUsize::new(0));
+        storage.object_store = storage.object_store.layer(
+            MockLayerBuilder::default()
+                .writer_factory(Arc::new({
+                    let observations = observations.clone();
+                    let fail = fail.clone();
+                    move |_, _, inner| {
+                        Box::new(ObservedWriter::new(
+                            Box::new(FailWriter {
+                                inner,
+                                writes: 0,
+                                fail: fail.clone(),
+                            }),
+                            observations.clone(),
+                        ))
+                    }
+                }))
+                .build()
+                .unwrap(),
+        );
+        for length in [2 * WRITE_BYTES + 17, 1, 0] {
+            *observations.lock().unwrap() = WriterObservations::default();
+            let data = vec![42; length];
+            storage.write_file("metadata", data.clone()).await.unwrap();
+            assert_eq!(storage.read_file("metadata").await.unwrap(), data);
+            let observed = observations.lock().unwrap();
+            assert_eq!(observed.write_sizes.iter().sum::<usize>(), length);
+            assert!(observed.write_sizes.iter().all(|size| *size <= WRITE_BYTES));
+            assert_eq!(observed.close_calls, 1);
+            assert_eq!(observed.abort_calls, 0);
+        }
+        for failure in [1, 2] {
+            *observations.lock().unwrap() = WriterObservations::default();
+            fail.store(failure, Ordering::SeqCst);
+            assert!(
+                storage
+                    .write_file("failed", vec![42; 2 * WRITE_BYTES + 17])
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                observations.lock().unwrap().write_sizes.len(),
+                if failure == 1 { 2 } else { 3 }
+            );
+            let observed = observations.lock().unwrap();
+            assert_eq!(observed.close_calls, usize::from(failure == 2));
+            assert_eq!(observed.abort_calls, 1);
+        }
     }
 
     #[test]
