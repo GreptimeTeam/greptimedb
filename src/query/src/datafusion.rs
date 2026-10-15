@@ -41,9 +41,10 @@ use common_telemetry::tracing;
 use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
 use datafusion::datasource::DefaultTableSource;
-use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion::physical_plan::coop::CooperativeExec;
+use datafusion::physical_plan::{ChildrenPropertiesMode, ExecutionPlan, ReplaceChildrenOptions};
 use datafusion_common::ResolvedTableReference;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::{
@@ -637,10 +638,18 @@ impl QueryEngine for DatafusionQueryEngine {
         let mut ctx = QueryEngineContext::new(state, query_ctx.clone());
         let physical = self.create_physical_plan(&mut ctx, &plan).await?;
         let physical = self.optimize_physical_plan(&mut ctx, physical)?;
-        if physical.name() != REGION_SCAN_EXEC_NAME {
+        let cooperative = (physical.as_ref() as &dyn Any).downcast_ref::<CooperativeExec>();
+        let scan_candidate = cooperative.map_or(&physical, |plan| plan.input());
+        if scan_candidate.name() != REGION_SCAN_EXEC_NAME {
+            common_telemetry::debug!(
+                "Raw series physical plan rejected: root={}, scan candidate={}",
+                physical.name(),
+                scan_candidate.name(),
+            );
             return Err(unsupported());
         }
-        let Some(scan) = physical.downcast_ref::<RegionScanExec>() else {
+        let Some(scan) = (scan_candidate.as_ref() as &dyn Any).downcast_ref::<RegionScanExec>()
+        else {
             return Err(unsupported());
         };
         let ranges = scan.get_partition_ranges();
@@ -653,6 +662,14 @@ impl QueryEngine for DatafusionQueryEngine {
             return Err(unsupported());
         };
         let native_plan: Arc<dyn ExecutionPlan> = native;
+        let native_plan = if cooperative.is_some() {
+            physical.replace_children(
+                vec![native_plan],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )?
+        } else {
+            native_plan
+        };
         let wrapped = if let Some(wrapper) = self.plugins.get::<PhysicalPlanWrapperRef>() {
             wrapper.wrap(native_plan.clone(), query_ctx)
         } else {
