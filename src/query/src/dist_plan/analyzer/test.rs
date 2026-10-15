@@ -1633,6 +1633,116 @@ fn sibling_merge_scans_have_unique_remote_dyn_filter_producer_ids() {
     );
 }
 
+#[tokio::test]
+async fn having_bound_reaches_remote_scan_before_aggregate_splitting() {
+    for pushdown in [FilterPushDownType::Inexact, FilterPushDownType::Exact] {
+        let table = TestTable::table_with_filter_pushdown(0, "t".to_string(), pushdown);
+        let ctx = SessionContext::new();
+        ctx.register_table("t", Arc::new(DfTableProviderAdapter::new(table)))
+            .unwrap();
+        // Both region-local groups and groups requiring coordinator aggregation
+        // must receive the bound before MIN/SUM become state aggregates.
+        for group_by in ["pk1, pk2", "pk3"] {
+            let sql = format!(
+                "SELECT {group_by}, MIN(CAST(ts AS BIGINT)) FROM t GROUP BY {group_by}
+                 HAVING SUM(CASE WHEN number > 0 AND CAST(ts AS BIGINT) >= 10
+                     AND CAST(ts AS BIGINT) < 20 THEN 1 ELSE 0 END) > 0"
+            );
+            let state = ctx.state();
+            let plan = state.create_logical_plan(&sql).await.unwrap();
+            let plan = state
+                .analyzer()
+                .execute_and_check(plan, state.config_options(), |_, _| {})
+                .unwrap();
+            let planned = DistPlannerAnalyzer
+                .analyze(plan, state.config_options())
+                .unwrap();
+            let remote = find_merge_scan_for_table(&planned, "t").unwrap().input();
+            let scan = find_table_scan(remote, "t").unwrap();
+            let bound = datafusion_expr::cast(col("t.ts"), DataType::Int64).lt(lit(20_i64));
+            assert!(scan.filters.contains(&bound), "{planned}");
+            assert!(
+                planned.to_string().contains("> Int64(0)"),
+                "HAVING must remain: {planned}"
+            );
+            assert_remote_table_scan_filters_are_safe(&planned);
+        }
+    }
+}
+
+#[tokio::test]
+async fn frontend_having_does_not_reinfer_remote_bounds() {
+    let ctx = SessionContext::new();
+    for (id, name) in [(0, "t"), (1, "u")] {
+        let table = TestTable::table_with_filter_pushdown(
+            id,
+            name.to_string(),
+            FilterPushDownType::Inexact,
+        );
+        ctx.register_table(name, Arc::new(DfTableProviderAdapter::new(table)))
+            .unwrap();
+    }
+    for source in [
+        "SELECT t.pk3, t.ts, t.number FROM t JOIN u ON t.pk1 = u.pk1",
+        "SELECT pk3, ts, number FROM t UNION ALL SELECT pk3, ts, number FROM u",
+    ] {
+        let sql = format!(
+            "SELECT s.pk3, MIN(CAST(s.ts AS BIGINT)) FROM ({source}) s
+            GROUP BY s.pk3 HAVING SUM(CASE WHEN s.number > 0 AND CAST(s.ts AS BIGINT) < 20
+            THEN 1 ELSE 0 END) > 0"
+        );
+        let state = ctx.state();
+        let plan = state.create_logical_plan(&sql).await.unwrap();
+        let plan = state
+            .analyzer()
+            .execute_and_check(plan, state.config_options(), |_, _| {})
+            .unwrap();
+        let planned = DistPlannerAnalyzer
+            .analyze(plan, state.config_options())
+            .unwrap();
+        let remote = find_merge_scan_for_table(&planned, "t").unwrap().input();
+        let scan = find_table_scan(remote, "t").unwrap();
+        let bound = datafusion_expr::cast(col("t.ts"), DataType::Int64).lt(lit(20_i64));
+        assert!(scan.filters.contains(&bound), "{planned}");
+
+        let config = datafusion_optimizer::OptimizerContext::new();
+        let rule_only = Optimizer::with_rules(vec![Arc::new(InferAggregateInputBoundsRule)]);
+        assert_eq!(
+            planned,
+            rule_only
+                .optimize(planned.clone(), &config, |_, _| {})
+                .unwrap()
+        );
+
+        let mut optimizer = Optimizer::new();
+        let index = optimizer
+            .rules
+            .iter()
+            .position(|rule| rule.name() == "push_down_filter")
+            .unwrap();
+        optimizer
+            .rules
+            .insert(index, Arc::new(InferAggregateInputBoundsRule));
+        let optimized = optimizer.optimize(planned, &config, |_, _| {}).unwrap();
+        // MergeScan hides remote filters from this walk. Only HAVING should
+        // remain on the frontend, not another copy of the input bound.
+        let mut filters = 0;
+        optimized
+            .apply(|plan| {
+                filters += usize::from(matches!(plan, LogicalPlan::Filter(_)));
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap();
+        assert_eq!(1, filters, "{optimized}");
+        assert_eq!(
+            optimized,
+            optimizer
+                .optimize(optimized.clone(), &config, |_, _| {})
+                .unwrap()
+        );
+    }
+}
+
 #[test]
 fn pre_merge_scan_optimizer_eliminates_projected_false_filter() {
     init_default_ut_logging();
