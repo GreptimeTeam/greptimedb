@@ -122,6 +122,32 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     ) -> Result<(), Self::Error> {
         Ok(())
     }
+
+    /// Checks, before an existing region is replayed from its persisted
+    /// state, that the log store holds the region's WAL history through
+    /// `entry_id`, the largest replay watermark the region persisted, so that
+    /// an open against a WAL that lost that history fails instead of
+    /// silently replaying nothing.
+    ///
+    /// The default accepts, which keeps the behaviour of every log store that
+    /// does not override it.
+    async fn check_region_history(
+        &self,
+        _provider: &Provider,
+        _entry_id: EntryId,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Records that the WAL history of the provider's region starts in this
+    /// log store, as it does for a region created on it, so that
+    /// [`check_region_history`](Self::check_region_history) accepts a later
+    /// open of the region by the same log store.
+    ///
+    /// The default does nothing.
+    fn start_region_history(&self, _provider: &Provider) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 /// The response of an `append` operation.

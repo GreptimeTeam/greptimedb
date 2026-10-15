@@ -35,7 +35,9 @@ use common_wal::config::object_store::{
 };
 use common_wal::options::{ObjectStoreWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use log_store::ObjectStoreLogStore;
-use log_store::metrics::METRIC_OBJECT_STORE_WAL_FAILING;
+use log_store::metrics::{
+    METRIC_OBJECT_STORE_WAL_FAILING, METRIC_OBJECT_STORE_WAL_MISSING_HISTORY_ACCEPTED_TOTAL,
+};
 use log_store::object_store_wal::{WalHole, entry_id};
 use object_store::ObjectStore;
 use object_store::layers::mock::{self, MockLayerBuilder, oio};
@@ -47,8 +49,8 @@ use store_api::logstore::provider::Provider;
 use store_api::mito_engine_options::SKIP_WAL_KEY;
 use store_api::region_engine::{RegionEngine, RegionRole};
 use store_api::region_request::{
-    PathType, RegionDropRequest, RegionFlushRequest, RegionOpenRequest, RegionPutRequest,
-    RegionRequest, RegionTruncateRequest,
+    PathType, RegionCatchupRequest, RegionCloseRequest, RegionDropRequest, RegionFlushRequest,
+    RegionOpenRequest, RegionPutRequest, RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -652,8 +654,72 @@ async fn test_open_region_rejects_mismatched_wal_prefix() {
     assert!(!engine.is_region_exists(REGION_A));
 }
 
+/// Opens a store under [`PREFIX`] like [`open_store`] that lets a region
+/// open although the prefix does not hold its WAL history.
+async fn open_store_accepting_missing_history(
+    object_store: &ObjectStore,
+) -> Arc<ObjectStoreLogStore> {
+    let config = ObjectStoreWalConfig {
+        accept_missing_history: true,
+        ..store_config(AckMode::Durable)
+    };
+    ObjectStoreLogStore::try_new(object_store.clone(), &config, 0, STANDALONE_GENERATION)
+        .await
+        .unwrap()
+}
+
+/// Copies every WAL object under [`PREFIX`] from `from` to the same key in
+/// `to`, which is how the WAL moves to another location.
+async fn copy_wal_objects(from: &ObjectStore, to: &ObjectStore) {
+    for object_seq in wal_object_seqs(from).await {
+        let path = format!("{PREFIX}/objects/{object_seq:020}.wal");
+        let bytes = from.read(&path).await.unwrap().to_vec();
+        to.write(&path, bytes).await.unwrap();
+    }
+}
+
+/// The request that opens a region under [`PREFIX`] and replays its WAL.
+fn open_request(table_dir: &str) -> RegionOpenRequest {
+    RegionOpenRequest {
+        engine: String::new(),
+        table_dir: table_dir.to_string(),
+        options: wal_options(),
+        skip_wal_replay: false,
+        path_type: PathType::Bare,
+        checkpoint: None,
+        requirements: Default::default(),
+    }
+}
+
+async fn close_region(engine: &MitoEngine, region_id: RegionId) {
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        )
+        .await
+        .unwrap();
+}
+
+/// Asserts that an open of `region_id` failed because the WAL does not hold
+/// its history for `reason`, with the ways forward named.
+fn assert_missing_history(err: &BoxedError, region_id: RegionId, reason: &str) {
+    assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    let message = err.output_msg();
+    for expected in [
+        &region_id.to_string(),
+        PREFIX,
+        "the default storage (memory",
+        reason,
+        "copy every object under the prefix",
+        "`[wal].accept_missing_history = true`",
+    ] {
+        assert!(message.contains(expected), "unexpected error: {message}");
+    }
+}
+
 #[tokio::test]
-async fn test_reopen_on_empty_prefix_without_durable_entries() {
+async fn test_open_on_an_empty_prefix_requires_accepting_the_missing_history() {
     let mut env = TestEnv::with_prefix("object-store-wal-empty-prefix").await;
     let store = open_store(&memory_store(), AckMode::Durable).await;
     let engine = new_engine(&mut env, store.clone()).await;
@@ -668,16 +734,52 @@ async fn test_reopen_on_empty_prefix_without_durable_entries() {
     drop(engine);
     drop(store);
 
-    // A fresh object store holds no object under the prefix.
+    // A fresh object store holds no object under the prefix. Region B keeps
+    // no history in the WAL and opens from its SST alone. Nothing tells
+    // region A, which never wrote, from a region whose unflushed entries
+    // were left behind, so it does not open, and the refused open deletes
+    // the start object it wrote: a second start, as an orchestrator that
+    // restarts a failed process makes, finds the prefix empty again and
+    // refuses region A the same way.
+    let new_location = memory_store();
+    for _ in 0..2 {
+        let store = open_store(&new_location, AckMode::Durable).await;
+        let engine = new_engine(&mut env, store.clone()).await;
+        open_region(&engine, REGION_B, &table_dir_b, &[(SKIP_WAL_KEY, "true")])
+            .await
+            .unwrap();
+        assert_eq!(rows_b, scan_rows(&engine, REGION_B).await);
+        let err = open_region(&engine, REGION_A, &table_dir_a, &[])
+            .await
+            .unwrap_err();
+        assert_missing_history(
+            &err,
+            REGION_A,
+            "the prefix held no object when the WAL opened",
+        );
+        assert!(!engine.is_region_exists(REGION_A));
+        assert!(wal_object_seqs(&new_location).await.is_empty());
+        engine.stop().await.unwrap();
+        drop(engine);
+        drop(store);
+    }
+
+    // Accepting the missing history opens region A without it, counted
+    // once; region B is not checked.
     let object_store = memory_store();
-    let store = open_store(&object_store, AckMode::Durable).await;
+    let store = open_store_accepting_missing_history(&object_store).await;
     let engine = new_engine(&mut env, store.clone()).await;
+    let accepted = METRIC_OBJECT_STORE_WAL_MISSING_HISTORY_ACCEPTED_TOTAL.get();
     open_region(&engine, REGION_A, &table_dir_a, &[])
         .await
         .unwrap();
     open_region(&engine, REGION_B, &table_dir_b, &[(SKIP_WAL_KEY, "true")])
         .await
         .unwrap();
+    assert_eq!(
+        accepted + 1,
+        METRIC_OBJECT_STORE_WAL_MISSING_HISTORY_ACCEPTED_TOTAL.get()
+    );
 
     assert_eq!(0, latest(&store, REGION_A));
     assert_eq!(0, latest(&store, REGION_B));
@@ -709,6 +811,254 @@ async fn test_reopen_on_empty_prefix_without_durable_entries() {
         region_recovery_state(&engine, REGION_A).await.last_entry_id
     );
     assert_eq!(2, engine.get_region_statistic(REGION_A).unwrap().num_rows);
+}
+
+#[tokio::test]
+async fn test_reopen_a_region_created_on_an_empty_prefix_without_writes() {
+    let mut env = TestEnv::with_prefix("object-store-wal-created-region").await;
+    let store = open_store(&memory_store(), AckMode::Durable).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (table_dir, _) = create_region(&engine, REGION_A, &[]).await;
+
+    // The region's history starts in this store, so it opens again on it,
+    // directly and through a catch-up, although it holds no entry.
+    close_region(&engine, REGION_A).await;
+    open_region(&engine, REGION_A, &table_dir, &[])
+        .await
+        .unwrap();
+    close_region(&engine, REGION_A).await;
+    engine
+        .handle_request(
+            REGION_A,
+            RegionRequest::Open(RegionOpenRequest {
+                skip_wal_replay: true,
+                ..open_request(&table_dir)
+            }),
+        )
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            REGION_A,
+            RegionRequest::Catchup(RegionCatchupRequest {
+                set_writable: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    assert!(region(&engine, REGION_A).is_writable());
+    assert_eq!(
+        EMPTY_RECOVERY_STATE,
+        region_recovery_state(&engine, REGION_A).await
+    );
+}
+
+#[tokio::test]
+async fn test_moving_the_wal_keeps_the_history_only_with_its_objects() {
+    let mut env = TestEnv::with_prefix("object-store-wal-move").await;
+    let old_location = memory_store();
+    let store = open_store(&old_location, AckMode::Durable).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
+    // Object 1 holds the region's rows, which are never flushed.
+    let mut writer = SealedWriter::new(&store);
+    writer
+        .put_and_seal(&engine, vec![(REGION_A, rows(&schema, 0, 10))])
+        .await;
+    let rows_before = scan_rows(&engine, REGION_A).await;
+    engine.stop().await.unwrap();
+    drop(engine);
+    drop(writer);
+    drop(store);
+
+    // On a location without the objects the region opens neither directly
+    // nor through a catch-up after an open that skipped the replay.
+    let store = open_store(&memory_store(), AckMode::Durable).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let reason = "the prefix held no object when the WAL opened";
+    let err = open_region(&engine, REGION_A, &table_dir, &[])
+        .await
+        .unwrap_err();
+    assert_missing_history(&err, REGION_A, reason);
+    engine
+        .handle_request(
+            REGION_A,
+            RegionRequest::Open(RegionOpenRequest {
+                skip_wal_replay: true,
+                ..open_request(&table_dir)
+            }),
+        )
+        .await
+        .unwrap();
+    let err = engine
+        .handle_request(
+            REGION_A,
+            RegionRequest::Catchup(RegionCatchupRequest {
+                set_writable: true,
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_missing_history(&err, REGION_A, reason);
+    assert!(!region(&engine, REGION_A).is_writable());
+    // A repeated create of the existing region fails the same way rather
+    // than creating the region again over its manifest.
+    close_region(&engine, REGION_A).await;
+    let request = CreateRequestBuilder::new()
+        .insert_option(WAL_OPTIONS_KEY, &wal_options()[WAL_OPTIONS_KEY])
+        .build();
+    assert_eq!(table_dir, request.table_dir);
+    let err = engine
+        .handle_request(REGION_A, RegionRequest::Create(request))
+        .await
+        .unwrap_err();
+    assert_missing_history(&err, REGION_A, reason);
+    assert!(!engine.is_region_exists(REGION_A));
+    engine.stop().await.unwrap();
+    drop(engine);
+    drop(store);
+
+    // Moving the WAL means copying every object: the region replays all of
+    // its rows on the new location.
+    let new_location = memory_store();
+    copy_wal_objects(&old_location, &new_location).await;
+    let store = open_store(&new_location, AckMode::Durable).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    open_region(&engine, REGION_A, &table_dir, &[])
+        .await
+        .unwrap();
+    assert_eq!(rows_before, scan_rows(&engine, REGION_A).await);
+    assert_eq!(10, engine.get_region_statistic(REGION_A).unwrap().num_rows);
+}
+
+#[tokio::test]
+async fn test_open_region_fails_when_its_watermark_is_above_the_wal_objects() {
+    let mut env = TestEnv::with_prefix("object-store-wal-watermark-above").await;
+    let store = open_store(&memory_store(), AckMode::Durable).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (table_dir_a, schema_a) = create_region(&engine, REGION_A, &[]).await;
+    let (table_dir_b, schema_b) = create_region(&engine, REGION_B, &[]).await;
+    // Region A flushes its entry of object 2, region B is truncated after its
+    // entry of object 3.
+    let mut writer = SealedWriter::new(&store);
+    writer
+        .put_and_seal(&engine, vec![(REGION_A, rows(&schema_a, 0, 2))])
+        .await;
+    writer
+        .put_and_seal(&engine, vec![(REGION_A, rows(&schema_a, 2, 4))])
+        .await;
+    flush_region(&engine, REGION_A, None).await;
+    writer
+        .put_and_seal(&engine, vec![(REGION_B, rows(&schema_b, 0, 2))])
+        .await;
+    engine
+        .handle_request(
+            REGION_B,
+            RegionRequest::Truncate(RegionTruncateRequest::All),
+        )
+        .await
+        .unwrap();
+    let manifest_a = region(&engine, REGION_A).manifest_ctx.manifest().await;
+    assert_eq!(entry_id(2, 1), manifest_a.flushed_entry_id);
+    let manifest_b = region(&engine, REGION_B).manifest_ctx.manifest().await;
+    assert_eq!(Some(entry_id(3, 1)), manifest_b.truncated_entry_id);
+    engine.stop().await.unwrap();
+    drop(engine);
+    drop(writer);
+    drop(store);
+
+    // The other location holds the start object 0 and object 1 of region C.
+    let other_location = memory_store();
+    let store = open_store(&other_location, AckMode::Durable).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let region_c = RegionId::new(1, 3);
+    let (table_dir_c, schema_c) = create_region(&engine, region_c, &[]).await;
+    let mut writer = SealedWriter::new(&store);
+    writer
+        .put_and_seal(&engine, vec![(region_c, rows(&schema_c, 0, 3))])
+        .await;
+    engine.stop().await.unwrap();
+    drop(engine);
+    drop(writer);
+    drop(store);
+
+    // Its prefix held entries only in objects below 2, so neither watermark
+    // can name one of its objects, while region C, whose history it holds,
+    // opens. Every start adds a start object, which holds no entry, so a
+    // second start after the refused one refuses the regions as well.
+    for _ in 0..2 {
+        let store = open_store(&other_location, AckMode::Durable).await;
+        let engine = new_engine(&mut env, store.clone()).await;
+        for (region_id, table_dir, watermark) in [
+            (REGION_A, &table_dir_a, entry_id(2, 1)),
+            (REGION_B, &table_dir_b, entry_id(3, 1)),
+        ] {
+            let err = open_region(&engine, region_id, table_dir, &[])
+                .await
+                .unwrap_err();
+            let reason = format!(
+                "its watermark, entry {watermark}, names object {}, but the prefix held entries only in objects below 2 when the WAL opened",
+                watermark >> 20
+            );
+            assert_missing_history(&err, region_id, &reason);
+            assert!(!engine.is_region_exists(region_id));
+        }
+        open_region(&engine, region_c, &table_dir_c, &[])
+            .await
+            .unwrap();
+        assert_eq!(3, engine.get_region_statistic(region_c).unwrap().num_rows);
+        engine.stop().await.unwrap();
+        drop(engine);
+        drop(store);
+    }
+}
+
+#[tokio::test]
+async fn test_reopen_after_collection_left_only_the_newest_object() {
+    let mut env = TestEnv::with_prefix("object-store-wal-newest-object").await;
+    let object_store = memory_store();
+    let store = open_store(&object_store, AckMode::Durable).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (table_dir_a, schema_a) = create_region(&engine, REGION_A, &[]).await;
+    let (table_dir_b, schema_b) = create_region(&engine, REGION_B, &[]).await;
+    // Region A flushes object 1; object 2 of region B carries the boundary
+    // past it, so once region B flushes too only object 2 is left.
+    let mut writer = SealedWriter::new(&store);
+    writer
+        .put_and_seal(&engine, vec![(REGION_A, rows(&schema_a, 0, 2))])
+        .await;
+    flush_region(&engine, REGION_A, None).await;
+    writer
+        .put_and_seal(&engine, vec![(REGION_B, rows(&schema_b, 0, 3))])
+        .await;
+    flush_region(&engine, REGION_B, None).await;
+    wait_for_collection(&store).await;
+    assert_eq!(vec![2], wal_object_seqs(&object_store).await);
+    engine.stop().await.unwrap();
+    drop(engine);
+    drop(writer);
+    drop(store);
+
+    // The object region A flushed is gone, but the newest object stays and
+    // keeps the next sequence above it, so both regions open.
+    let store = open_store(&object_store, AckMode::Durable).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    open_region(&engine, REGION_A, &table_dir_a, &[])
+        .await
+        .unwrap();
+    open_region(&engine, REGION_B, &table_dir_b, &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        entry_id(1, 1),
+        region_recovery_state(&engine, REGION_A)
+            .await
+            .flushed_entry_id
+    );
+    assert_eq!(2, engine.get_region_statistic(REGION_A).unwrap().num_rows);
+    assert_eq!(3, engine.get_region_statistic(REGION_B).unwrap().num_rows);
 }
 
 #[rstest]

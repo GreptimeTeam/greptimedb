@@ -97,6 +97,17 @@ lazy_static! {
         "object store logstore skipped corrupted segments total",
     )
     .unwrap();
+
+    /// Counter of regions the object store logstore let open although its
+    /// prefix does not hold their WAL history, because
+    /// `accept_missing_history` is set; their writes that were not flushed
+    /// are lost.
+    pub static ref METRIC_OBJECT_STORE_WAL_MISSING_HISTORY_ACCEPTED_TOTAL: IntCounter = register_int_counter!(
+        "greptime_logstore_object_store_wal_missing_history_accepted_total",
+        "object store logstore regions opened without their WAL history total",
+    )
+    .unwrap();
+
     /// Counter of objects the object store logstore deleted because no
     /// region needs them any more.
     pub static ref METRIC_OBJECT_STORE_WAL_DELETED_OBJECTS_TOTAL: IntCounter = register_int_counter!(
