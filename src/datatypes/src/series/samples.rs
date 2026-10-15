@@ -314,8 +314,9 @@ impl Samples {
             }
         }
     }
-    /// Materialize chunks into one dense array; histogram tables are concatenated per chunk,
-    /// including repeated shared tables (no registry/deduplication is performed).
+    /// Materialize chunks into one dense array. When all histogram-bearing chunks reference the
+    /// same table, reuse it; otherwise concatenate tables per chunk and remap indices, including
+    /// unused rows.
     pub fn into_dense(self) -> Result<Self> {
         let SampleStorage::Chunks(chunks, total_len) = self.storage else {
             return Ok(self);
@@ -344,6 +345,14 @@ impl Samples {
             return Ok(Self::from_float(values.clone()));
         }
 
+        let mut histogram_batches = chunks.iter().filter_map(|chunk| match &chunk.storage {
+            SampleStorage::Histogram(histogram) => Some(&histogram.batch),
+            SampleStorage::Mixed(mixed) => Some(&mixed.histograms.batch),
+            SampleStorage::Float(_) | SampleStorage::Chunks(_, _) => None,
+        });
+        let shared_batch = histogram_batches
+            .next()
+            .filter(|first| histogram_batches.all(|batch| Arc::ptr_eq(first, batch)));
         let mut tables: Vec<&dyn Array> = Vec::new();
         let mut indices = UInt32Builder::with_capacity(total_len);
         let mut floats = arrow::array::Float64Builder::with_capacity(total_len);
@@ -357,7 +366,9 @@ impl Samples {
                     return invalid("nested sample chunks were not flattened");
                 }
             };
-            if let Some(histogram) = histogram {
+            if shared_batch.is_none()
+                && let Some(histogram) = histogram
+            {
                 tables.push(histogram.batch.as_arrow());
             }
             for position in 0..chunk.len() {
@@ -379,7 +390,9 @@ impl Samples {
                     _ => indices.append_null(),
                 }
             }
-            if let Some(histogram) = histogram {
+            if shared_batch.is_none()
+                && let Some(histogram) = histogram
+            {
                 base = base
                     .checked_add(u32::try_from(histogram.batch.len()).map_err(|_| {
                         InvalidSeriesSnafu {
@@ -392,18 +405,22 @@ impl Samples {
                     })?;
             }
         }
-        let table = arrow_result(concat(&tables))?;
-        let struct_array = table
-            .as_any()
-            .downcast_ref::<arrow::array::StructArray>()
-            .ok_or_else(|| {
-                InvalidSeriesSnafu {
-                    reason: "histogram concatenation returned a non-struct array",
-                }
-                .build()
-            })?
-            .clone();
-        let batch = Arc::new(HistogramBatch::try_from_arrow(struct_array)?);
+        let batch = if let Some(batch) = shared_batch {
+            Arc::clone(batch)
+        } else {
+            let table = arrow_result(concat(&tables))?;
+            let struct_array = table
+                .as_any()
+                .downcast_ref::<arrow::array::StructArray>()
+                .ok_or_else(|| {
+                    InvalidSeriesSnafu {
+                        reason: "histogram concatenation returned a non-struct array",
+                    }
+                    .build()
+                })?
+                .clone();
+            Arc::new(HistogramBatch::try_from_arrow(struct_array)?)
+        };
         let histogram = HistogramSamples::try_new(indices.finish(), batch)?;
         let floats = floats.finish();
         if chunks.iter().any(|chunk| {
