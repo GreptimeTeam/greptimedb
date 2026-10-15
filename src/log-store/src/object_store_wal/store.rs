@@ -361,8 +361,17 @@ impl ObjectStoreLogStore {
         METRIC_OBJECT_STORE_WAL_RECOVERY_SECONDS
             .observe(recovery_started_at.elapsed().as_secs_f64());
         publish_indexed(&catalog);
+        // A chain without any segment holds no history, so the start object
+        // reclaims every object below it. A start object that another
+        // instance withdraws after this recovery listed it is then below the
+        // boundary, and its delete leaves this chain complete.
+        let start_boundary = if durable_entry_ids.is_empty() {
+            next_object_seq
+        } else {
+            reclaim_boundary
+        };
         let (start, moved_past) =
-            start_epoch(io.as_ref(), next_object_seq, tip, reclaim_boundary).await?;
+            start_epoch(io.as_ref(), next_object_seq, tip, start_boundary).await?;
         let epoch = start.epoch;
         // The epoch identifies this instance in every object it writes.
         info!(
@@ -605,7 +614,8 @@ impl ObjectStoreLogStore {
     /// watermark in the `enqueued` mode. No durable boundary passes the
     /// newest object holding entries: a batch carries at most the sequence
     /// after the last indexed object, which is below the batch, and a start
-    /// object carries the boundary recovery found. So that object stays, and
+    /// object carries the boundary recovery found, or its own sequence on a
+    /// chain without segments. So that object stays, and
     /// recovery indexes it on the chain of the tip. The segment of release
     /// records counts as entries: it never holds the reclaim boundary, so an
     /// object holding only releases can be the one that collection keeps
@@ -4631,6 +4641,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_store_withdrawal_keeps_the_chain_of_a_successor() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let (io, mut parked) = ParkedIo::parking_creates(object_store.clone());
+        let store = open_over(io.clone(), &eager()).await;
+        io.deletes_parked.store(true, Ordering::SeqCst);
+
+        // While the withdrawal of start object 0 waits on its delete, a
+        // successor opens the prefix, links its start object 1 to object 0
+        // and stops before any append.
+        let refused = {
+            let store = store.clone();
+            tokio::spawn(async move { store.check_region_history(&provider(region(1)), 0).await })
+        };
+        let (object_seq, release) = next_parked_operation(&mut parked).await;
+        assert_eq!(0, object_seq);
+        let successor = open(object_store.clone(), &eager()).await;
+        assert_eq!(vec![0, 1], object_seqs(successor.io.as_ref()).await);
+        successor.stop().await.unwrap();
+        release.send(true).unwrap();
+        timeout(WAIT, refused).await.unwrap().unwrap().unwrap_err();
+        store.stop().await.unwrap();
+
+        // Object 1 reclaims the deleted object 0, so its chain is complete.
+        let store = open(object_store, &eager()).await;
+        assert_eq!(vec![1, 2], object_seqs(store.io.as_ref()).await);
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_store_keeps_indexing_a_start_object_whose_withdrawal_failed() {
         let _serialized = SERIALIZED.lock().await;
         let (io, mut parked) = ParkedIo::parking_creates(memory_store());
@@ -7455,9 +7495,12 @@ mod tests {
             } else {
                 (0, 1, None)
             };
-            let same = encode_object(chain_header(start_seq, epoch, tip), &[])
-                .unwrap()
-                .bytes;
+            // A prefix without segments is reclaimed up to the start object.
+            let header = Header {
+                reclaim_boundary: start_seq,
+                ..chain_header(start_seq, epoch, tip)
+            };
+            let same = encode_object(header, &[]).unwrap().bytes;
             let io = Arc::new(RacingIo {
                 inner: ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap(),
                 late: Mutex::new(Some((start_seq, same))),
