@@ -21,7 +21,7 @@ use store_api::logstore::LogStore;
 
 use crate::error::{self, Result};
 use crate::region::MitoRegion;
-use crate::region::opener::replay_memtable;
+use crate::region::opener::{check_wal_history, replay_memtable};
 use crate::wal::Wal;
 use crate::wal::entry_distributor::WalEntryReceiver;
 
@@ -89,6 +89,12 @@ impl<S: LogStore> RegionCatchupTask<S> {
             "Trying to replay memtable for region: {region_id}, provider: {:?}, replay from entry id: {replay_from_entry_id}, flushed entry id: {flushed_entry_id}",
             self.region.provider
         );
+        check_wal_history(
+            &self.wal,
+            &self.region.provider,
+            &self.region.version_control.current().version,
+        )
+        .await?;
         let timer = Instant::now();
         let wal_entry_reader = self
             .entry_receiver

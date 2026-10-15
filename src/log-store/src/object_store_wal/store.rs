@@ -42,16 +42,18 @@ use tokio_util::task::AbortOnDropHandle;
 use crate::error::{
     CorruptedWalObjectSnafu, Error, IncompleteWalEntrySnafu, InvalidProviderSnafu,
     InvalidWalObjectSnafu, InvalidWalObjectStoreSnafu, MismatchedWalPrefixSnafu,
-    MismatchedWalRegionSnafu, ObjectStoreWalFailingSnafu, ObjectStoreWalSnafu,
-    ObjectStoreWalStoppedSnafu, Result, StaleWalObjectSnafu, UnconfirmedWalEpochStartSnafu,
-    WalObjectSequenceExhaustedSnafu, WalObjectSequenceUnsettledSnafu, WalSegmentFetchSnafu,
+    MismatchedWalRegionSnafu, MissingWalHistorySnafu, ObjectStoreWalFailingSnafu,
+    ObjectStoreWalSnafu, ObjectStoreWalStoppedSnafu, Result, StaleWalObjectSnafu,
+    UnconfirmedWalEpochStartSnafu, WalObjectSequenceExhaustedSnafu,
+    WalObjectSequenceUnsettledSnafu, WalSegmentFetchSnafu, WalStartWithdrawnSnafu,
 };
 use crate::metrics::{
     METRIC_OBJECT_STORE_WAL_APPEND_ACK_SECONDS, METRIC_OBJECT_STORE_WAL_CREATE_CONFLICTS_TOTAL,
     METRIC_OBJECT_STORE_WAL_CREATE_FAILURES_TOTAL, METRIC_OBJECT_STORE_WAL_CREATED_OBJECTS_TOTAL,
     METRIC_OBJECT_STORE_WAL_DELETED_OBJECTS_TOTAL, METRIC_OBJECT_STORE_WAL_FAILED_DELETES_TOTAL,
     METRIC_OBJECT_STORE_WAL_FAILING, METRIC_OBJECT_STORE_WAL_INDEXED_BYTES,
-    METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS, METRIC_OBJECT_STORE_WAL_OBJECT_BYTES,
+    METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS,
+    METRIC_OBJECT_STORE_WAL_MISSING_HISTORY_ACCEPTED_TOTAL, METRIC_OBJECT_STORE_WAL_OBJECT_BYTES,
     METRIC_OBJECT_STORE_WAL_OBJECT_ENTRIES, METRIC_OBJECT_STORE_WAL_POISONED_TOTAL,
     METRIC_OBJECT_STORE_WAL_READ_SECONDS, METRIC_OBJECT_STORE_WAL_RECOVERED_OBJECTS_TOTAL,
     METRIC_OBJECT_STORE_WAL_RECOVERY_SECONDS, METRIC_OBJECT_STORE_WAL_REJECTED_APPENDS_TOTAL,
@@ -144,8 +146,17 @@ const RECOVERY_TAIL_WINDOW: usize = 64 * 1024;
 /// once and returns, in both modes, once that object is durable and indexed.
 pub struct ObjectStoreLogStore {
     prefix: String,
+    /// The storage the prefix is read from, as configured, for messages.
+    storage: String,
     ack_mode: AckMode,
     on_corrupted_segment: CorruptedSegmentAction,
+    accept_missing_history: bool,
+    /// Whether the prefix held no object when the store opened.
+    found_empty: bool,
+    /// The sequence above the newest object holding entries that recovery
+    /// indexed, zero when it indexed none.
+    history_end: u64,
+    started_regions: StartedRegions,
     io: Arc<dyn WalObjectIo>,
     catalog: Arc<RwLock<ObjectCatalog>>,
     obsolete_entry_ids: ObsoleteEntryIds,
@@ -174,6 +185,12 @@ pub struct ObjectStoreLogStore {
 }
 
 type ObsoleteEntryIds = Arc<Mutex<HashMap<RegionId, EntryId>>>;
+
+/// Regions whose history starts in the store: those created on it and those
+/// it opened by accepting a missing history. The store registers a region and
+/// the actor decides a withdrawal under this lock, so neither misses the
+/// other.
+type StartedRegions = Arc<Mutex<HashSet<RegionId>>>;
 
 type WalHoles = Arc<Mutex<HashMap<RegionId, BTreeMap<u64, WalHole>>>>;
 
@@ -332,14 +349,29 @@ impl ObjectStoreLogStore {
                 ),
             }
         );
+        let found_empty = next_object_seq == 0;
+        let history_end = durable_entry_ids
+            .values()
+            .map(|entry_id| sequence_floor(*entry_id))
+            .max()
+            .unwrap_or(0);
         // Only a recovery that succeeded is reported, so that the objects
         // counted and the time measured are those of the same recoveries.
         METRIC_OBJECT_STORE_WAL_RECOVERED_OBJECTS_TOTAL.inc_by(recovered_objects);
         METRIC_OBJECT_STORE_WAL_RECOVERY_SECONDS
             .observe(recovery_started_at.elapsed().as_secs_f64());
         publish_indexed(&catalog);
+        // A chain without any segment holds no history, so the start object
+        // reclaims every object below it. A start object that another
+        // instance withdraws after this recovery listed it is then below the
+        // boundary, and its delete leaves this chain complete.
+        let start_boundary = if durable_entry_ids.is_empty() {
+            next_object_seq
+        } else {
+            reclaim_boundary
+        };
         let (start, moved_past) =
-            start_epoch(io.as_ref(), next_object_seq, tip, reclaim_boundary).await?;
+            start_epoch(io.as_ref(), next_object_seq, tip, start_boundary).await?;
         let epoch = start.epoch;
         // The epoch identifies this instance in every object it writes.
         info!(
@@ -377,8 +409,11 @@ impl ObjectStoreLogStore {
         #[cfg(any(test, feature = "testing"))]
         let (durability_waits_tx, durability_waits_rx) = watch::channel(0);
 
+        let started_regions = StartedRegions::default();
         let actor = Actor {
             io: io.clone(),
+            started_regions: started_regions.clone(),
+            withdrawal: Withdrawal::Kept,
             catalog: catalog.clone(),
             obsolete_entry_ids: obsolete_entry_ids.clone(),
             wal_holes: wal_holes.clone(),
@@ -430,10 +465,19 @@ impl ObjectStoreLogStore {
         #[cfg(test)]
         LIVE_ACTORS.fetch_add(1, Ordering::SeqCst);
         common_runtime::spawn_global(actor.run());
+        let storage = match config.storage_provider.as_str() {
+            "" => format!("the default storage ({})", io.storage()),
+            name => format!("storage provider {name:?} ({})", io.storage()),
+        };
         Ok(Arc::new(Self {
             prefix,
+            storage,
             ack_mode: config.ack_mode,
             on_corrupted_segment: config.on_corrupted_segment,
+            accept_missing_history: config.accept_missing_history,
+            found_empty,
+            history_end,
+            started_regions,
             io,
             catalog,
             obsolete_entry_ids,
@@ -550,6 +594,97 @@ impl ObjectStoreLogStore {
             .ok()
             .context(ObjectStoreWalStoppedSnafu)?;
         response_rx.await.ok().context(ObjectStoreWalStoppedSnafu)?
+    }
+
+    /// Returns why the prefix cannot hold the WAL history of `region_id`
+    /// through the watermark `entry_id`, or `None` when it can.
+    ///
+    /// Two invariants of a prefix decide it. First, a prefix that any store
+    /// opened is never empty afterwards, unless that store withdrew its start
+    /// object, see [`withdraw_start`](Self::withdraw_start): every open writes
+    /// its start object before it admits an append, and collection deletes
+    /// only objects below the reclaim boundary of the last indexed object,
+    /// which carries a boundary at or below its own sequence (a larger one
+    /// fails its header check), so the newest indexed object always stays.
+    /// Second, a watermark a region persisted names an object at or below
+    /// the newest object holding entries that any later recovery of the
+    /// prefix indexes. The entry it names was durable and indexed when the
+    /// watermark was persisted, since an append of the `durable` mode returns
+    /// only then and Mito waits for durability before it publishes a
+    /// watermark in the `enqueued` mode. No durable boundary passes the
+    /// newest object holding entries: a batch carries at most the sequence
+    /// after the last indexed object, which is below the batch, and a start
+    /// object carries the boundary recovery found, or its own sequence on a
+    /// chain without segments. So that object stays, and
+    /// recovery indexes it on the chain of the tip. The segment of release
+    /// records counts as entries: it never holds the reclaim boundary, so an
+    /// object holding only releases can be the one that collection keeps
+    /// while it deletes every older object. Objects without segments, such as
+    /// the start objects of opens this check refused, do not move it.
+    ///
+    /// So the history is missing when this store found the prefix empty, or
+    /// when the watermark names an object above the newest one holding
+    /// entries that it found, unless the region's history starts in this
+    /// store or the catalog holds the region's entries through the
+    /// watermark: those of a region written since the store opened.
+    fn missing_history(&self, region_id: RegionId, entry_id: EntryId) -> Option<String> {
+        if self
+            .started_regions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&region_id)
+        {
+            return None;
+        }
+        if self
+            .catalog
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .region_max_entry_id(region_id)
+            .is_some_and(|max_entry_id| max_entry_id >= entry_id)
+        {
+            return None;
+        }
+        if self.found_empty {
+            return Some("the prefix held no object when the WAL opened".to_string());
+        }
+        let sequence_floor = sequence_floor(entry_id);
+        (sequence_floor > self.history_end).then(|| {
+            let held = match self.history_end {
+                0 => "no entry".to_string(),
+                history_end => format!("entries only in objects below {history_end}"),
+            };
+            format!(
+                "its watermark, entry {entry_id}, names object {}, but the prefix held {held} when the WAL opened",
+                sequence_floor - 1
+            )
+        })
+    }
+
+    /// Deletes the start object of a store that found its prefix empty and
+    /// whose open of an existing region is refused, so that the next open
+    /// finds the prefix empty again and refuses the region as well, instead
+    /// of passing a region that never flushed. The actor gives the object up
+    /// only while the store has admitted nothing, has no batch, holds no
+    /// other object and no region's history started in it, and from then on
+    /// the store accepts nothing, since a later object would link to the
+    /// deleted one. The actor owns the delete like any collection, so `stop`
+    /// waits for it and a cancelled caller does not abandon it, and every
+    /// refusal returns only once it settled. A failed delete, or a crash
+    /// before the delete completes, leaves the start object behind, and the
+    /// next open passes a region that never flushed.
+    async fn withdraw_start(&self) {
+        let (response_tx, response_rx) = oneshot::channel();
+        if self
+            .command_tx
+            .send(Command::Withdraw {
+                response: response_tx,
+            })
+            .await
+            .is_ok()
+        {
+            let _ = response_rx.await;
+        }
     }
 }
 
@@ -942,7 +1077,12 @@ impl LogStore for ObjectStoreLogStore {
     /// object is raised above the object `entry_id` names unless it is there
     /// already, so a watermark assigned under another prefix, or one whose
     /// object this prefix no longer holds, is never passed by a new id. Zero
-    /// names no object and needs no floor.
+    /// names no object and needs no floor. Before Mito opens a region that
+    /// writes this WAL from its persisted state, it calls
+    /// [`check_region_history`](LogStore::check_region_history), which
+    /// refuses a watermark naming an object at or above the next sequence
+    /// the store found unless `accept_missing_history` is set, so the floor
+    /// moves for such a region only once that loss was accepted.
     ///
     /// The watermark and the floor are applied together by the actor: a call
     /// cancelled before its command is queued publishes neither, while a
@@ -1044,6 +1184,51 @@ impl LogStore for ObjectStoreLogStore {
             .context(ObjectStoreWalStoppedSnafu)?;
         response_rx.await.ok().context(ObjectStoreWalStoppedSnafu)?
     }
+
+    /// Fails with [`Error::MissingWalHistory`] when the prefix cannot hold
+    /// the history of the provider's region through `entry_id`, unless
+    /// `accept_missing_history` is set: then the region's writes that were
+    /// not flushed are lost, which is logged and counted.
+    async fn check_region_history(&self, provider: &Provider, entry_id: EntryId) -> Result<()> {
+        let region_id = self.region_of(provider)?;
+        let Some(reason) = self.missing_history(region_id, entry_id) else {
+            return self.check_terminal();
+        };
+        if !self.accept_missing_history {
+            if self.found_empty {
+                self.withdraw_start().await;
+            }
+            return MissingWalHistorySnafu {
+                region_id,
+                prefix: self.prefix.clone(),
+                storage: self.storage.clone(),
+                reason,
+            }
+            .fail();
+        }
+        self.check_terminal()?;
+        warn!(
+            "Opening region {region_id} without its WAL history, as accept_missing_history allows: prefix {} on {} does not hold it, {reason}; the region's writes above entry {entry_id} that were not flushed are lost",
+            self.prefix, self.storage
+        );
+        METRIC_OBJECT_STORE_WAL_MISSING_HISTORY_ACCEPTED_TOTAL.inc();
+        self.start_region_history(provider)
+    }
+
+    /// Records the provider's region as one whose history starts in this
+    /// store, which is kept in memory: a later store on the prefix judges
+    /// the region by its watermark and the objects it finds.
+    fn start_region_history(&self, provider: &Provider) -> Result<()> {
+        let region_id = self.region_of(provider)?;
+        let mut started_regions = self
+            .started_regions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // A withdrawal records its terminal error under the same lock.
+        self.check_terminal()?;
+        started_regions.insert(region_id);
+        Ok(())
+    }
 }
 
 type AppendResponse = oneshot::Sender<Result<AppendBatchResponse>>;
@@ -1075,6 +1260,9 @@ enum Command {
         full: bool,
         response: oneshot::Sender<Result<()>>,
     },
+    /// Answered once the store keeps its start object, or once the delete
+    /// of the start object it gave up settled.
+    Withdraw { response: oneshot::Sender<()> },
     Stop {
         response: oneshot::Sender<Result<()>>,
     },
@@ -1150,6 +1338,19 @@ impl SealedBatch {
 }
 
 type CreateOutcome = (u64, Result<PutResult>);
+
+/// Whether the store gave up its start object, see
+/// [`Actor::handle_withdraw`].
+enum Withdrawal {
+    Kept,
+    /// The delete of the start object `object_seq` is in flight; `waiters`
+    /// are answered once it settled.
+    Deleting {
+        object_seq: u64,
+        waiters: Vec<oneshot::Sender<()>>,
+    },
+    Settled,
+}
 
 /// The state of an `enqueued` store whose backlog the object store refuses
 /// with an error that requires intervention, see [`requires_intervention`],
@@ -1242,6 +1443,8 @@ impl Failing {
 /// complete before `stop` returns.
 struct Actor {
     io: Arc<dyn WalObjectIo>,
+    started_regions: StartedRegions,
+    withdrawal: Withdrawal,
     catalog: Arc<RwLock<ObjectCatalog>>,
     obsolete_entry_ids: ObsoleteEntryIds,
     wal_holes: WalHoles,
@@ -1356,6 +1559,9 @@ impl Actor {
                     }
                     Some(Command::Release { region_id, full, response }) => {
                         self.handle_release(region_id, full, response);
+                    }
+                    Some(Command::Withdraw { response }) => {
+                        self.handle_withdraw(response);
                     }
                     Some(Command::Stop { response }) => {
                         self.handle_stop(response);
@@ -2114,6 +2320,79 @@ impl Actor {
         self.durability_waits.send_modify(|count| *count += 1);
     }
 
+    /// Gives up the start object while it is the only object this store
+    /// knows of: the catalog indexes nothing else, nothing was ever handed an
+    /// id, no batch, append or release waits, no other object was listed or
+    /// created, no region's history started in the store, and the store is
+    /// neither failing nor terminal. A release seals its own batch without
+    /// handing an id, so the catalog decides once its object is indexed, and
+    /// the object it may then leave alone holds a segment. The store then
+    /// records a terminal error, so nothing is admitted that would link to
+    /// the object, and deletes it like a collected object; `response` is
+    /// answered once that delete settled, or at once when the store keeps
+    /// the object. A later request waits for the same delete.
+    fn handle_withdraw(&mut self, response: oneshot::Sender<()>) {
+        match &mut self.withdrawal {
+            Withdrawal::Kept => {}
+            Withdrawal::Deleting { waiters, .. } => {
+                waiters.push(response);
+                return;
+            }
+            Withdrawal::Settled => {
+                let _ = response.send(());
+                return;
+            }
+        }
+        let started_regions = self
+            .started_regions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !started_regions.is_empty()
+            || terminal(&self.terminal_error).is_some()
+            || self.failing.is_some()
+            || !self.issued_entry_ids.is_empty()
+            || !self.open_batch.is_empty()
+            || !self.sealed.is_empty()
+            || !self.creates.is_empty()
+            || self.stalled.is_some()
+            || !self.unindexed.is_empty()
+            || !self.failed_releases.is_empty()
+        {
+            let _ = response.send(());
+            return;
+        }
+        // The start object is the one object indexed, and the only one
+        // without segments: a release object can be indexed alone once it
+        // collected the start object.
+        let start_object = {
+            let catalog = self.catalog.read().unwrap_or_else(PoisonError::into_inner);
+            let mut objects = catalog.objects_in_order();
+            match (objects.next(), objects.next()) {
+                (Some((object_seq, [])), None) => Some(object_seq),
+                _ => None,
+            }
+        };
+        let Some(object_seq) = start_object else {
+            let _ = response.send(());
+            return;
+        };
+        let path = self.io.object_path(object_seq);
+        self.terminal_error
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert_with(|| Arc::new(WalStartWithdrawnSnafu { path }.build()));
+        drop(started_regions);
+        self.deleting.start(object_seq);
+        let io = self.io.clone();
+        self.deletes.push(Box::pin(async move {
+            (object_seq, io.delete(object_seq).await)
+        }));
+        self.withdrawal = Withdrawal::Deleting {
+            object_seq,
+            waiters: vec![response],
+        };
+    }
+
     /// Makes sure no id of the region at or below `entry_id` is assigned
     /// from now on, then records the obsolete watermark of the region;
     /// neither is done when the sequence cannot be raised.
@@ -2252,6 +2531,36 @@ impl Actor {
     /// succeeded, then settles its attempt, so a read that the attempt
     /// releases sees the outcome in the catalog.
     fn on_delete_completed(&mut self, object_seq: u64, result: Result<()>) {
+        if let Withdrawal::Deleting {
+            object_seq: withdrawn,
+            waiters,
+        } = &mut self.withdrawal
+            && *withdrawn == object_seq
+        {
+            let path = self.io.object_path(object_seq);
+            match result {
+                Ok(()) => {
+                    let mut catalog = self.catalog.write().unwrap_or_else(PoisonError::into_inner);
+                    if let Some(footer) = catalog.remove_object(object_seq) {
+                        METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS.dec();
+                        METRIC_OBJECT_STORE_WAL_INDEXED_BYTES.sub(object_len(&footer) as i64);
+                    }
+                    info!(
+                        "Deleted the start object {path} of the object store WAL, whose prefix held no object, after refusing a region without its history"
+                    );
+                }
+                Err(error) => warn!(
+                    error;
+                    "Failed to delete the start object {path} of the object store WAL after refusing a region without its history; the next open passes regions that never flushed"
+                ),
+            }
+            for waiter in waiters.drain(..) {
+                let _ = waiter.send(());
+            }
+            self.withdrawal = Withdrawal::Settled;
+            self.deleting.finish(object_seq);
+            return;
+        }
         match result {
             Ok(()) => {
                 self.unindexed.remove(&object_seq);
@@ -3187,6 +3496,9 @@ pub(crate) trait WalObjectIo: Send + Sync {
     async fn list(&self) -> Result<Vec<ListedObject>>;
 
     fn object_path(&self, object_seq: u64) -> String;
+
+    /// Describes the object store the objects live in, for messages.
+    fn storage(&self) -> String;
 }
 
 #[async_trait::async_trait]
@@ -3213,6 +3525,10 @@ impl WalObjectIo for ObjectStoreIo {
 
     fn object_path(&self, object_seq: u64) -> String {
         ObjectStoreIo::object_path(self, object_seq)
+    }
+
+    fn storage(&self) -> String {
+        ObjectStoreIo::storage(self)
     }
 }
 
@@ -4116,6 +4432,500 @@ mod tests {
         store.stop().await.unwrap();
     }
 
+    /// Returns the message of the missing history error the check of
+    /// `region_id` at `entry_id` fails with, or `None` when it passes.
+    async fn missing_history(
+        store: &ObjectStoreLogStore,
+        region_id: RegionId,
+        entry_id: EntryId,
+    ) -> Option<String> {
+        match store
+            .check_region_history(&provider(region_id), entry_id)
+            .await
+        {
+            Ok(()) => None,
+            Err(error @ Error::MissingWalHistory { .. }) => {
+                assert_eq!(
+                    common_error::status_code::StatusCode::InvalidArguments,
+                    error.status_code()
+                );
+                Some(error.to_string())
+            }
+            Err(error) => panic!("unexpected error: {error:?}"),
+        }
+    }
+
+    /// Copies every object under the prefix of `from` to the same key in `to`.
+    async fn copy_objects(from: &ObjectStore, to: &ObjectStore) {
+        let io = ObjectStoreIo::new(from.clone(), PREFIX).unwrap();
+        for object in io.list().await.unwrap() {
+            let bytes = from.read(&object.path).await.unwrap().to_vec();
+            to.write(&object.path, bytes).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_store_history_is_missing_from_a_prefix_found_empty() {
+        let _serialized = SERIALIZED.lock().await;
+        let config = ObjectStoreWalConfig {
+            storage_provider: "wal-store".to_string(),
+            ..eager()
+        };
+        let object_store = memory_store();
+        let store = open(object_store.clone(), &config).await;
+
+        // A region written since the store opened holds its history through
+        // its entries, not past them.
+        let written = append(&store, region(2), "a").await.unwrap().last_entry_ids[&region(2)];
+        assert_eq!(None, missing_history(&store, region(2), 0).await);
+        assert_eq!(None, missing_history(&store, region(2), written).await);
+        assert!(
+            missing_history(&store, region(2), written + 1)
+                .await
+                .is_some()
+        );
+
+        // No other region has a history under a prefix that held no object,
+        // not even one that never flushed. The store admitted an append, so
+        // it keeps its objects.
+        for entry_id in [0, id(0, 1), id(7, 1)] {
+            let message = missing_history(&store, region(1), entry_id).await.unwrap();
+            for expected in [
+                &region(1).to_string(),
+                PREFIX,
+                // A memory store names itself by its address as its bucket.
+                "storage provider \"wal-store\" (memory, bucket ",
+                "root \"/\")",
+                "the prefix held no object when the WAL opened",
+                "copy every object under the prefix",
+                "`[wal].accept_missing_history = true`",
+            ] {
+                assert!(message.contains(expected), "{message}");
+            }
+        }
+        assert_eq!(vec![1], object_seqs(store.io.as_ref()).await);
+
+        // A region created on the store has its history here without any
+        // entry.
+        store.start_region_history(&provider(region(3))).unwrap();
+        assert_eq!(None, missing_history(&store, region(3), 0).await);
+
+        // The provider must select the store's prefix.
+        let foreign = Provider::object_store_provider(region(1), "wal/datanodes/9/epochs/2".into());
+        assert!(matches!(
+            store.check_region_history(&foreign, 0).await.unwrap_err(),
+            Error::MismatchedWalPrefix { .. }
+        ));
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_withdraws_its_start_object_when_it_refuses_a_region() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+
+        // Every open of the prefix refuses the region, since each refusal
+        // deletes the start object the open wrote and the next open finds
+        // the prefix empty again.
+        for _ in 0..2 {
+            let store = open(object_store.clone(), &eager()).await;
+            assert_eq!(vec![0], object_seqs(store.io.as_ref()).await);
+            let indexed_objects = METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS.get();
+            let indexed_bytes = METRIC_OBJECT_STORE_WAL_INDEXED_BYTES.get();
+            assert!(missing_history(&store, region(1), 0).await.is_some());
+            assert!(object_seqs(store.io.as_ref()).await.is_empty());
+            // The catalog and the indexed gauges no longer hold the object.
+            assert!(!store.catalog.read().unwrap().contains_object(0));
+            assert_eq!(
+                (indexed_objects - 1, indexed_bytes - object_len(&[]) as i64),
+                (
+                    METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS.get(),
+                    METRIC_OBJECT_STORE_WAL_INDEXED_BYTES.get()
+                )
+            );
+
+            // The store accepts nothing more, and refuses again without a
+            // second delete.
+            assert!(missing_history(&store, region(2), 0).await.is_some());
+            let entry = Entry::Naive(NaiveEntry {
+                provider: provider(region(2)),
+                region_id: region(2),
+                entry_id: 0,
+                data: b"a".to_vec(),
+            });
+            for error in [
+                store.append_batch(vec![entry]).await.unwrap_err(),
+                store
+                    .start_region_history(&provider(region(3)))
+                    .unwrap_err(),
+            ] {
+                assert!(
+                    matches!(unwrap_shared(&error), Error::WalStartWithdrawn { .. }),
+                    "{error:?}"
+                );
+            }
+            store.stop().await.unwrap();
+        }
+
+        // A store whose region history started keeps its start object.
+        let store = open(object_store.clone(), &eager()).await;
+        store.start_region_history(&provider(region(3))).unwrap();
+        assert!(missing_history(&store, region(1), 0).await.is_some());
+        assert_eq!(vec![0], object_seqs(store.io.as_ref()).await);
+        assert_eq!(None, missing_history(&store, region(3), 0).await);
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_withdrawal_outlives_its_caller_and_holds_up_stop() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let (io, mut parked) = ParkedIo::parking_creates(object_store.clone());
+        let store = open_over(io.clone(), &eager()).await;
+        io.deletes_parked.store(true, Ordering::SeqCst);
+
+        // The refusal that withdraws the start object is cancelled once the
+        // actor started its delete.
+        let first = {
+            let store = store.clone();
+            tokio::spawn(async move { store.check_region_history(&provider(region(1)), 0).await })
+        };
+        let (object_seq, release) = next_parked_operation(&mut parked).await;
+        assert_eq!(0, object_seq);
+        first.abort();
+
+        // A later withdrawal request and stop reach the actor, and a
+        // durability wait queued behind them is answered, so the actor
+        // handled both; neither is answered while the delete is in flight.
+        let (withdrawn_tx, mut withdrawn) = oneshot::channel();
+        store
+            .command_tx
+            .send(Command::Withdraw {
+                response: withdrawn_tx,
+            })
+            .await
+            .unwrap();
+        store.begin_stop();
+        let (stopped_tx, mut stopped) = oneshot::channel();
+        store
+            .command_tx
+            .send(Command::Stop {
+                response: stopped_tx,
+            })
+            .await
+            .unwrap();
+        let (answered_tx, answered) = oneshot::channel();
+        store
+            .command_tx
+            .send(Command::WaitDurable {
+                region_id: region(1),
+                entry_id: 1,
+                response: answered_tx,
+            })
+            .await
+            .unwrap();
+        timeout(WAIT, answered).await.unwrap().unwrap().unwrap_err();
+        assert!(withdrawn.try_recv().is_err());
+        assert!(stopped.try_recv().is_err());
+
+        release.send(true).unwrap();
+        timeout(WAIT, withdrawn).await.unwrap().unwrap();
+        timeout(WAIT, stopped).await.unwrap().unwrap().unwrap();
+        assert!(object_seqs(io.as_ref()).await.is_empty());
+        assert!(missing_history(&store, region(2), 0).await.is_some());
+
+        // The next open finds the prefix empty and refuses the region again.
+        let store = open(object_store, &eager()).await;
+        assert!(missing_history(&store, region(1), 0).await.is_some());
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_withdrawal_keeps_the_chain_of_a_successor() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let (io, mut parked) = ParkedIo::parking_creates(object_store.clone());
+        let store = open_over(io.clone(), &eager()).await;
+        io.deletes_parked.store(true, Ordering::SeqCst);
+
+        // While the withdrawal of start object 0 waits on its delete, a
+        // successor opens the prefix, links its start object 1 to object 0
+        // and stops before any append.
+        let refused = {
+            let store = store.clone();
+            tokio::spawn(async move { store.check_region_history(&provider(region(1)), 0).await })
+        };
+        let (object_seq, release) = next_parked_operation(&mut parked).await;
+        assert_eq!(0, object_seq);
+        let successor = open(object_store.clone(), &eager()).await;
+        assert_eq!(vec![0, 1], object_seqs(successor.io.as_ref()).await);
+        successor.stop().await.unwrap();
+        release.send(true).unwrap();
+        timeout(WAIT, refused).await.unwrap().unwrap().unwrap_err();
+        store.stop().await.unwrap();
+
+        // Object 1 reclaims the deleted object 0, so its chain is complete.
+        let store = open(object_store, &eager()).await;
+        assert_eq!(vec![1, 2], object_seqs(store.io.as_ref()).await);
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_keeps_indexing_a_start_object_whose_withdrawal_failed() {
+        let _serialized = SERIALIZED.lock().await;
+        let (io, mut parked) = ParkedIo::parking_creates(memory_store());
+        let store = open_over(io.clone(), &eager()).await;
+        io.deletes_parked.store(true, Ordering::SeqCst);
+        let indexed_objects = METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS.get();
+        let indexed_bytes = METRIC_OBJECT_STORE_WAL_INDEXED_BYTES.get();
+
+        let refused = {
+            let store = store.clone();
+            tokio::spawn(async move { store.check_region_history(&provider(region(1)), 0).await })
+        };
+        let (object_seq, release) = next_parked_operation(&mut parked).await;
+        assert_eq!(0, object_seq);
+        release.send(false).unwrap();
+        assert!(matches!(
+            timeout(WAIT, refused).await.unwrap().unwrap().unwrap_err(),
+            Error::MissingWalHistory { .. }
+        ));
+
+        // The object is still there, so the catalog and the indexed gauges
+        // keep it.
+        assert_eq!(vec![0], object_seqs(io.as_ref()).await);
+        assert!(store.catalog.read().unwrap().contains_object(0));
+        assert_eq!(
+            (indexed_objects, indexed_bytes),
+            (
+                METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS.get(),
+                METRIC_OBJECT_STORE_WAL_INDEXED_BYTES.get()
+            )
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_history_is_missing_above_the_newest_object_holding_entries() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        // The start object 0, then objects 1 and 2 of region 1.
+        let store = open(object_store.clone(), &eager()).await;
+        append(&store, region(1), "a").await.unwrap();
+        append(&store, region(1), "b").await.unwrap();
+        store.stop().await.unwrap();
+
+        // Every restart writes one more start object, but the newest object
+        // holding entries stays object 2, so a refused open does not let
+        // the next one pass a watermark of object 3.
+        for start_object in [3, 4] {
+            let store = open(object_store.clone(), &eager()).await;
+            assert!(
+                store.storage.starts_with("the default storage (memory, ")
+                    && store.storage.ends_with("root \"/\")"),
+                "{}",
+                store.storage
+            );
+            for region_id in [region(1), region(2)] {
+                for entry_id in [0, id(1, 1), id(2, 1), id(2, POSITION_LIMIT - 1)] {
+                    assert_eq!(None, missing_history(&store, region_id, entry_id).await);
+                }
+                for entry_id in [id(3, 1), id(9, 1)] {
+                    let message = missing_history(&store, region_id, entry_id).await.unwrap();
+                    let reason = format!(
+                        "its watermark, entry {entry_id}, names object {}, but the prefix held entries only in objects below 3 when the WAL opened",
+                        entry_id >> 20
+                    );
+                    assert!(message.contains(&reason), "{message}");
+                }
+            }
+            assert_eq!(
+                Some(&start_object),
+                object_seqs(store.io.as_ref()).await.last()
+            );
+            store.stop().await.unwrap();
+        }
+
+        // An entry written since then lies above the objects found, and the
+        // catalog holds it.
+        let store = open(object_store, &eager()).await;
+        let written = append(&store, region(2), "c").await.unwrap().last_entry_ids[&region(2)];
+        assert_eq!(id(6, 1), written);
+        assert_eq!(None, missing_history(&store, region(2), written).await);
+        assert!(missing_history(&store, region(1), written).await.is_some());
+        store.stop().await.unwrap();
+
+        // A prefix that holds only start objects holds no entry.
+        let object_store = memory_store();
+        open(object_store.clone(), &eager())
+            .await
+            .stop()
+            .await
+            .unwrap();
+        let store = open(object_store, &eager()).await;
+        assert_eq!(None, missing_history(&store, region(1), 0).await);
+        let message = missing_history(&store, region(1), id(0, 1)).await.unwrap();
+        assert!(
+            message.contains("names object 0, but the prefix held no entry when the WAL opened"),
+            "{message}"
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_history_survives_collection_down_to_the_newest_object() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let store = open(object_store.clone(), &eager()).await;
+        // Region 1 flushes object 1; object 2 of region 2 carries the boundary
+        // past it, so only object 2 is left once region 2 flushes it too.
+        let flushed_1 = append(&store, region(1), "a").await.unwrap().last_entry_ids[&region(1)];
+        store
+            .obsolete(&provider(region(1)), region(1), flushed_1)
+            .await
+            .unwrap();
+        let flushed_2 = append(&store, region(2), "b").await.unwrap().last_entry_ids[&region(2)];
+        store
+            .obsolete(&provider(region(2)), region(2), flushed_2)
+            .await
+            .unwrap();
+        assert_eq!(vec![2], collected_object_seqs(&store).await);
+        store.stop().await.unwrap();
+
+        // The object region 1 flushed is gone, but the newest object stays
+        // and keeps the next sequence above it.
+        let store = open(object_store, &eager()).await;
+        assert_eq!(0, latest(&store, region(1)));
+        assert_eq!(None, missing_history(&store, region(1), flushed_1).await);
+        assert_eq!(None, missing_history(&store, region(2), flushed_2).await);
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_history_survives_collection_down_to_a_release_object() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let store = open(object_store.clone(), &eager()).await;
+        // Region 1 flushes object 1; the release of region 2 seals object 2,
+        // which holds only its release record and carries the boundary past
+        // object 1.
+        let flushed = append(&store, region(1), "a").await.unwrap().last_entry_ids[&region(1)];
+        store
+            .obsolete(&provider(region(1)), region(1), flushed)
+            .await
+            .unwrap();
+        store
+            .release_region(&provider(region(2)), region(2))
+            .await
+            .unwrap();
+        assert_eq!(vec![2], collected_object_seqs(&store).await);
+        store.stop().await.unwrap();
+
+        // The object holding the release record bounds the history.
+        let store = open(object_store, &eager()).await;
+        assert_eq!(None, missing_history(&store, region(1), flushed).await);
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_keeps_its_objects_after_a_release_when_it_refuses_a_region() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let store = open(object_store.clone(), &eager()).await;
+        // The release seals object 1, which collects the start object.
+        store
+            .release_region(&provider(region(2)), region(2))
+            .await
+            .unwrap();
+        assert_eq!(vec![1], collected_object_seqs(&store).await);
+
+        // The refusal leaves the object holding the release record, and the
+        // store keeps accepting appends.
+        assert!(missing_history(&store, region(1), 0).await.is_some());
+        assert_eq!(vec![1], object_seqs(store.io.as_ref()).await);
+        append(&store, region(3), "a").await.unwrap();
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_history_moves_with_a_copy_of_the_objects() {
+        let _serialized = SERIALIZED.lock().await;
+        let old_location = memory_store();
+        let store = open(old_location.clone(), &eager()).await;
+        let flushed = append(&store, region(1), "a").await.unwrap().last_entry_ids[&region(1)];
+        store
+            .obsolete(&provider(region(1)), region(1), flushed)
+            .await
+            .unwrap();
+        let unflushed = append(&store, region(1), "b").await.unwrap().last_entry_ids[&region(1)];
+        assert_eq!(vec![2], collected_object_seqs(&store).await);
+        store.stop().await.unwrap();
+
+        // Another location without the objects does not hold the history.
+        let store = open(memory_store(), &eager()).await;
+        assert!(missing_history(&store, region(1), flushed).await.is_some());
+        store.stop().await.unwrap();
+
+        // A copy of every object does, and replays the unflushed entry.
+        let new_location = memory_store();
+        copy_objects(&old_location, &new_location).await;
+        let store = open(new_location, &eager()).await;
+        assert_eq!(None, missing_history(&store, region(1), flushed).await);
+        assert_eq!(
+            expected_entries(region(1), &[(unflushed, "b")]),
+            read_entries(&store, region(1), flushed + 1).await
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_accepts_a_missing_history_when_configured() {
+        let _serialized = SERIALIZED.lock().await;
+        let config = ObjectStoreWalConfig {
+            accept_missing_history: true,
+            ..eager()
+        };
+        let store = open(memory_store(), &config).await;
+        let accepted = METRIC_OBJECT_STORE_WAL_MISSING_HISTORY_ACCEPTED_TOTAL.get();
+        store
+            .check_region_history(&provider(region(1)), id(5, 1))
+            .await
+            .unwrap();
+        assert_eq!(
+            accepted + 1,
+            METRIC_OBJECT_STORE_WAL_MISSING_HISTORY_ACCEPTED_TOTAL.get()
+        );
+
+        // The accepted region's history starts in this store, so a second
+        // open of it is not counted again, and neither is a history the
+        // prefix holds.
+        store
+            .check_region_history(&provider(region(1)), id(5, 1))
+            .await
+            .unwrap();
+        let written = append(&store, region(2), "a").await.unwrap().last_entry_ids[&region(2)];
+        store
+            .check_region_history(&provider(region(2)), written)
+            .await
+            .unwrap();
+        assert_eq!(
+            accepted + 1,
+            METRIC_OBJECT_STORE_WAL_MISSING_HISTORY_ACCEPTED_TOTAL.get()
+        );
+
+        // Once Mito records the accepted watermark, the region's next id is
+        // above it.
+        store
+            .obsolete(&provider(region(1)), region(1), id(5, 1))
+            .await
+            .unwrap();
+        assert_eq!(
+            HashMap::from([(region(1), id(6, 1))]),
+            append(&store, region(1), "b").await.unwrap().last_entry_ids
+        );
+        store.stop().await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_store_rejects_exhausted_sequence() {
         let _serialized = SERIALIZED.lock().await;
@@ -4206,8 +5016,13 @@ mod tests {
         let (append_tx, _) = mpsc::channel(APPEND_BUFFER);
         let store = ObjectStoreLogStore {
             prefix: PREFIX.to_string(),
+            storage: String::new(),
             ack_mode: AckMode::Durable,
             on_corrupted_segment: CorruptedSegmentAction::Skip,
+            accept_missing_history: false,
+            found_empty: false,
+            history_end: 0,
+            started_regions: StartedRegions::default(),
             io: Arc::new(ObjectStoreIo::new(memory_store(), PREFIX).unwrap()),
             catalog: Arc::default(),
             obsolete_entry_ids: ObsoleteEntryIds::default(),
@@ -6680,9 +7495,12 @@ mod tests {
             } else {
                 (0, 1, None)
             };
-            let same = encode_object(chain_header(start_seq, epoch, tip), &[])
-                .unwrap()
-                .bytes;
+            // A prefix without segments is reclaimed up to the start object.
+            let header = Header {
+                reclaim_boundary: start_seq,
+                ..chain_header(start_seq, epoch, tip)
+            };
+            let same = encode_object(header, &[]).unwrap().bytes;
             let io = Arc::new(RacingIo {
                 inner: ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap(),
                 late: Mutex::new(Some((start_seq, same))),
@@ -8538,6 +9356,10 @@ mod tests {
         fn object_path(&self, object_seq: u64) -> String {
             self.inner.object_path(object_seq)
         }
+
+        fn storage(&self) -> String {
+            self.inner.storage()
+        }
     }
 
     /// Object access whose first create lets another object land at a given
@@ -8575,6 +9397,10 @@ mod tests {
 
         fn object_path(&self, object_seq: u64) -> String {
             self.inner.object_path(object_seq)
+        }
+
+        fn storage(&self) -> String {
+            self.inner.storage()
         }
     }
 
@@ -8703,6 +9529,10 @@ mod tests {
 
         fn object_path(&self, object_seq: u64) -> String {
             self.inner.object_path(object_seq)
+        }
+
+        fn storage(&self) -> String {
+            self.inner.storage()
         }
     }
 
@@ -8850,6 +9680,10 @@ mod tests {
 
         fn object_path(&self, object_seq: u64) -> String {
             self.inner.object_path(object_seq)
+        }
+
+        fn storage(&self) -> String {
+            self.inner.storage()
         }
     }
 
