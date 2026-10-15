@@ -318,6 +318,34 @@ fn densifying_histogram_and_mixed_chunks_keeps_shared_table() {
     }
     assert_eq!(values.histograms.indices().value(3), 0);
     assert_eq!(values.histograms.indices().value(6), 0);
+
+    let all_null_mixed = Samples::try_from_mixed(
+        Float64Array::new_null(2),
+        HistogramSamples::try_new(UInt32Array::from(vec![None, Some(0)]), table.clone()).unwrap(),
+    )
+    .unwrap();
+    let dense = Samples::try_from_chunks(vec![
+        Samples::try_from_histogram(UInt32Array::from(vec![None]), table.clone()).unwrap(),
+        all_null_mixed,
+    ])
+    .unwrap()
+    .into_dense()
+    .unwrap();
+    let DenseSamplesRef::Mixed(values) = dense.dense().unwrap() else {
+        panic!()
+    };
+    assert_eq!(dense.len(), 3);
+    assert!(Arc::ptr_eq(values.histograms.batch(), &table));
+    assert_eq!(values.floats.null_count(), 3);
+    assert!(values.histograms.indices().is_null(0));
+    assert!(values.histograms.indices().is_null(1));
+    assert_eq!(values.histograms.indices().value(2), 0);
+    assert!(matches!(dense.sample(0), SampleRef::Missing));
+    assert!(matches!(dense.sample(1), SampleRef::Missing));
+    assert!(same_sample(
+        dense.sample(2),
+        SampleRef::Histogram(table.view(0).unwrap())
+    ));
 }
 
 #[test]
