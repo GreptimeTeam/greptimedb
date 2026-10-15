@@ -86,6 +86,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::any::Any;
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -94,14 +95,25 @@ mod tests {
     use api::v1::meta::heartbeat_request::NodeWorkloads;
     use common_meta::affinity::{Affinity, AffinityFallback, AffinityRequirements, NoopAffinity};
     use common_meta::cluster::{DatanodeStatus, NodeInfo, NodeStatus};
-    use common_meta::error::Result as MetaResult;
+    use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, Stat};
+    use common_meta::error::{Error as MetaError, Result as MetaResult};
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::kv_backend::{KvBackend, KvBackendRef, ResettableKvBackend, TxnService};
     use common_meta::peer::{Peer, PeerDiscovery};
+    use common_meta::rpc::store::{
+        BatchDeleteRequest, BatchDeleteResponse, BatchGetRequest, BatchGetResponse,
+        BatchPutRequest, BatchPutResponse, DeleteRangeRequest, DeleteRangeResponse, PutRequest,
+        PutResponse, RangeRequest, RangeResponse,
+    };
 
+    use crate::cluster::MetaPeerClientBuilder;
     use crate::discovery::utils::accept_ingest_workload;
     use crate::metasrv::{SelectTarget, SelectorContext, SelectorRef};
     use crate::selector::common::{choose_items, filter_out_excluded_peers};
     use crate::selector::lease_based::LeaseBasedSelector;
+    use crate::selector::load_based::LoadBasedSelector;
     use crate::selector::round_robin::RoundRobinSelector;
+    use crate::selector::weight_compute::RegionNumsBasedWeightCompute;
     use crate::selector::weighted_choose::{RandomWeightedChoose, WeightedItem};
     use crate::selector::{Selector, SelectorOptions};
 
@@ -556,6 +568,162 @@ mod tests {
                 crate::error::Error::ListActiveDatanodes { .. }
             ));
             assert_eq!(discovery.reads.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    struct CountingStatBackend {
+        inner: MemoryKvBackend<MetaError>,
+        reads: AtomicUsize,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl TxnService for CountingStatBackend {
+        type Error = MetaError;
+    }
+
+    #[async_trait::async_trait]
+    impl KvBackend for CountingStatBackend {
+        fn name(&self) -> &str {
+            "counting-stat-backend"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        async fn batch_get(&self, req: BatchGetRequest) -> MetaResult<BatchGetResponse> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            if self.fail {
+                return common_meta::error::UnexpectedSnafu {
+                    err_msg: "stat backend unavailable",
+                }
+                .fail();
+            }
+            self.inner.batch_get(req).await
+        }
+
+        async fn range(&self, req: RangeRequest) -> MetaResult<RangeResponse> {
+            self.inner.range(req).await
+        }
+
+        async fn put(&self, req: PutRequest) -> MetaResult<PutResponse> {
+            self.inner.put(req).await
+        }
+
+        async fn batch_put(&self, req: BatchPutRequest) -> MetaResult<BatchPutResponse> {
+            self.inner.batch_put(req).await
+        }
+
+        async fn delete_range(&self, req: DeleteRangeRequest) -> MetaResult<DeleteRangeResponse> {
+            self.inner.delete_range(req).await
+        }
+
+        async fn batch_delete(&self, req: BatchDeleteRequest) -> MetaResult<BatchDeleteResponse> {
+            self.inner.batch_delete(req).await
+        }
+    }
+
+    impl ResettableKvBackend for CountingStatBackend {
+        fn reset(&self) {
+            self.inner.reset();
+        }
+
+        fn as_kv_backend_ref(self: Arc<Self>) -> KvBackendRef {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn test_load_based_affinity_fallback_queries() {
+        for (has_requirements, fallback, required, fail_stats, expected_reads, available) in [
+            (false, AffinityFallback::Unconstrained, 2, false, 1, 2),
+            (true, AffinityFallback::Error, 2, false, 1, 1),
+            (true, AffinityFallback::Unconstrained, 2, false, 2, 2),
+            (true, AffinityFallback::Unconstrained, 3, false, 2, 2),
+            (true, AffinityFallback::Unconstrained, 2, true, 1, 0),
+        ] {
+            let backend = Arc::new(CountingStatBackend {
+                inner: MemoryKvBackend::new(),
+                reads: AtomicUsize::new(0),
+                fail: fail_stats,
+            });
+            for id in 1..=4 {
+                let value = DatanodeStatValue {
+                    stats: vec![Stat {
+                        id,
+                        addr: format!("node-{id}"),
+                        region_num: id,
+                        ..Default::default()
+                    }],
+                };
+                backend
+                    .put(
+                        PutRequest::new()
+                            .with_key(Vec::<u8>::from(DatanodeStatKey { node_id: id }))
+                            .with_value(Vec::<u8>::try_from(value).unwrap()),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let client = Arc::new(
+                MetaPeerClientBuilder::default()
+                    .election(None)
+                    .in_memory(backend.clone())
+                    .build()
+                    .unwrap(),
+            );
+            let selector = LoadBasedSelector::new(RegionNumsBasedWeightCompute, client);
+            let discovery = Arc::new(Discovery {
+                snapshots: vec![vec![
+                    node(1, Some("a"), true),
+                    node(2, Some("b"), true),
+                    node(3, Some("a"), true),
+                    node(4, Some("a"), false),
+                ]],
+                reads: AtomicUsize::new(0),
+                fail: false,
+            });
+            let ctx = SelectorContext {
+                peer_discovery: discovery.clone(),
+                affinity: Arc::new(ExactAffinity),
+                affinity_fallback: fallback,
+            };
+            let result = selector
+                .select(
+                    &ctx,
+                    SelectorOptions {
+                        affinity: has_requirements.then(requirements),
+                        min_required_items: required,
+                        allow_duplication: false,
+                        exclude_peer_ids: HashSet::from([3]),
+                        workload_filter: Some(accept_ingest_workload),
+                    },
+                )
+                .await;
+            assert_eq!(discovery.reads.load(Ordering::Relaxed), expected_reads);
+            assert_eq!(backend.reads.load(Ordering::Relaxed), expected_reads);
+            if fail_stats {
+                assert!(matches!(
+                    result.unwrap_err(),
+                    crate::error::Error::KvBackend { .. }
+                ));
+            } else if available < required {
+                assert!(
+                    matches!(result.unwrap_err(), crate::error::Error::NoEnoughAvailableNode {
+                    required: actual_required, available: actual_available, ..
+                } if actual_required == required && actual_available == available)
+                );
+            } else {
+                assert_eq!(
+                    result
+                        .unwrap()
+                        .into_iter()
+                        .map(|peer| peer.id)
+                        .collect::<HashSet<_>>(),
+                    HashSet::from([1, 2])
+                );
+            }
         }
     }
 }
