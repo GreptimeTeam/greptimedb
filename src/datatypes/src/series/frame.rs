@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Finite Arrow batches for raw series chunks. Field names are ordinal (`f0`, `f1`, ...);
-//! callers bind those positions to their logical names, which this frame cannot authenticate.
+//! Finite Arrow batches for raw series chunks. Field names preserve the logical series schema in order.
 
 #[cfg(test)]
 mod tests;
@@ -50,7 +49,7 @@ pub enum RawLabelMode {
     Explicit,
 }
 
-/// Builds the typed schema for a raw frame using ordinal domain fields.
+/// Builds the typed schema for a raw frame, preserving logical field names and order.
 pub fn raw_series_frame_schema(schema: &SeriesSchema, mode: RawLabelMode) -> Result<SchemaRef> {
     if schema.eval_grid.is_some() {
         return invalid_series("raw series schema cannot have an evaluation grid");
@@ -88,8 +87,7 @@ pub fn raw_series_frame_schema(schema: &SeriesSchema, mode: RawLabelMode) -> Res
     let fields: Fields = schema
         .fields
         .iter()
-        .enumerate()
-        .map(|(i, _)| Field::new(format!("f{i}"), payload.clone(), false))
+        .map(|field| Field::new(field.name.as_ref(), payload.clone(), false))
         .collect();
     let mut columns = vec![
         Field::new("read_key", DataType::Binary, false),

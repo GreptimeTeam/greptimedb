@@ -340,6 +340,58 @@ fn sliced_histogram_frames_densify_without_duplicating_shared_table() {
 }
 
 #[test]
+fn raw_frame_field_names_bind_payloads_to_their_schema() {
+    let schema = test_schema(&["cpu_usage", "cpu_idle"]);
+    let fields = SeriesFields::try_from_vec(vec![
+        Samples::from_float(Float64Array::from(vec![Some(1.0), Some(2.0)])),
+        Samples::from_float(Float64Array::from(vec![Some(10.0), Some(20.0)])),
+    ])
+    .unwrap();
+
+    for mode in [RawLabelMode::Key, RawLabelMode::Explicit] {
+        let metric = (mode == RawLabelMode::Explicit).then(|| metric(Some("host"), &[]));
+        let chunk = RawSeriesChunk::try_new(
+            &schema,
+            Buffer::from(vec![0xaa_u8]),
+            metric,
+            RawTimeAxis::try_new(vec![100, 200].into()).unwrap(),
+            fields.clone(),
+            true,
+        )
+        .unwrap();
+        let batch = &pack_raw_series_chunk(&schema, mode, &chunk).unwrap()[0];
+        let payloads = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        assert_eq!(
+            payloads
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>(),
+            ["cpu_usage", "cpu_idle"]
+        );
+
+        let decoded = unpack_raw_series_frame(&schema, mode, batch).unwrap();
+        assert_eq!(decoded[0].read_key.as_slice(), &[0xaa]);
+        assert!(decoded[0].is_last);
+        let RawTimeAxis::Explicit(times) = &decoded[0].time;
+        assert_eq!(times.as_ref(), &[100, 200]);
+        assert_float_bits(decoded[0].fields.get(0).unwrap(), &[Some(1.0), Some(2.0)]);
+        assert_float_bits(decoded[0].fields.get(1).unwrap(), &[Some(10.0), Some(20.0)]);
+
+        assert!(
+            unpack_raw_series_frame(&test_schema(&["cpu_idle", "cpu_usage"]), mode, batch).is_err()
+        );
+        assert!(
+            unpack_raw_series_frame(&test_schema(&["cpu_usage", "cpu_busy"]), mode, batch).is_err()
+        );
+    }
+}
+
+#[test]
 fn schema_and_key_explicit_round_trips_preserve_identity_and_bits() {
     let schema = test_schema(&["value"]);
     let key_schema = raw_series_frame_schema(&schema, RawLabelMode::Key).unwrap();
@@ -400,7 +452,7 @@ fn schema_and_key_explicit_round_trips_preserve_identity_and_bits() {
             ),
             Field::new(
                 "fields",
-                DataType::Struct(vec![Field::new("f0", payload, false)].into()),
+                DataType::Struct(vec![Field::new("value", payload, false)].into()),
                 false,
             ),
         ],
