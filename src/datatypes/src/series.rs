@@ -13,10 +13,10 @@
 // limitations under the License.
 
 pub mod histogram;
+pub mod samples;
 pub mod time;
 
 #[cfg(test)]
-#[path = "series/tests.rs"]
 mod tests;
 
 use std::sync::Arc;

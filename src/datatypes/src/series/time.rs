@@ -20,7 +20,6 @@ use snafu::OptionExt;
 use crate::error::{InvalidSeriesSnafu, Result};
 
 #[cfg(test)]
-#[path = "time/tests.rs"]
 mod tests;
 
 /// Value description of a non-empty, fixed-step evaluation grid.
