@@ -317,7 +317,7 @@ impl Samples {
     /// Materialize chunks into one dense array; histogram tables are concatenated per chunk,
     /// including repeated shared tables (no registry/deduplication is performed).
     pub fn into_dense(self) -> Result<Self> {
-        let SampleStorage::Chunks(chunks, _) = self.storage else {
+        let SampleStorage::Chunks(chunks, total_len) = self.storage else {
             return Ok(self);
         };
         let all_float = chunks
@@ -345,8 +345,8 @@ impl Samples {
         }
 
         let mut tables: Vec<&dyn Array> = Vec::new();
-        let mut indices = UInt32Builder::new();
-        let mut floats = arrow::array::Float64Builder::new();
+        let mut indices = UInt32Builder::with_capacity(total_len);
+        let mut floats = arrow::array::Float64Builder::with_capacity(total_len);
         let mut base = 0u32;
         for chunk in chunks.iter() {
             let (float_values, histogram) = match &chunk.storage {
@@ -465,14 +465,14 @@ impl ExactSizeIterator for SamplesIter<'_> {
 }
 
 #[derive(Clone, Debug)]
-enum Fields<T> {
-    One(T),
-    Many(Box<[T]>),
+enum Fields {
+    One(Samples),
+    Many(Box<[Samples]>),
 }
 /// Field values using inline storage for a single field.
 #[derive(Clone, Debug)]
 pub struct SeriesFields {
-    storage: Fields<Samples>,
+    storage: Fields,
 }
 impl SeriesFields {
     /// Create a one-field collection without allocating a field list.

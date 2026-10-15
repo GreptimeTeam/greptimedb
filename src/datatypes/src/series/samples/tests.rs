@@ -385,6 +385,14 @@ fn densification_preserves_values_nulls_nan_and_remaps_multitable_histograms() {
     let DenseSamplesRef::Mixed(dense_mixed) = dense.dense().unwrap() else {
         panic!()
     };
+    assert!(
+        dense_mixed.histograms().indices().get_buffer_memory_size()
+            + dense_mixed.floats().get_buffer_memory_size()
+            < 4096,
+        "retained numeric buffer bytes: {}",
+        dense_mixed.histograms().indices().get_buffer_memory_size()
+            + dense_mixed.floats().get_buffer_memory_size()
+    );
     assert_eq!(dense_mixed.histograms.indices().value(4), 1);
     assert_eq!(dense_mixed.histograms.indices().value(5), 4);
     assert_eq!(dense_mixed.histograms.batch().len(), 5);
