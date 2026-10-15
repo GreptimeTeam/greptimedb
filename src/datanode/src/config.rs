@@ -124,6 +124,16 @@ impl DatanodeOptions {
                 .unwrap()
                 .sanitize(&self.storage.data_home);
         }
+
+        // Manual override for region engine options from environment variables
+        // as config-rs has limited support for Vec<Enum> overrides.
+        if let Some(val) = std::env::var(\"GREPTIMEDB_REGION_ENGINE_MITO_NUM_WORKERS\").ok() {
+            if let Some(num) = val.parse::<usize>().ok() {
+                if let Some(RegionEngineConfig::Mito(mito)) = self.region_engine.iter_mut().find(|e| matches!(e, RegionEngineConfig::Mito(_))) {
+                    mito.num_workers = num;
+                }
+            }
+        }
     }
 }
 
