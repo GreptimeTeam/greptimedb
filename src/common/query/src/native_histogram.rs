@@ -589,18 +589,12 @@ impl NativeHistogram {
     }
 
     fn all_buckets(&self) -> Option<Vec<Bucket>> {
-        let mut buckets = self.side_buckets(false)?;
-        buckets.reverse();
-        if self.zero_count != 0.0 {
-            buckets.push(Bucket {
-                lower: -self.zero_threshold,
-                upper: self.zero_threshold,
-                count: self.zero_count,
-                boundary_rule: BoundaryRule::ClosedBoth,
-            });
-        }
-        buckets.extend(self.side_buckets(true)?);
-        Some(buckets)
+        Some(assemble_bucket_sides(
+            self.side_buckets(false)?,
+            self.zero_threshold,
+            self.zero_count,
+            self.side_buckets(true)?,
+        ))
     }
 
     fn side_buckets(&self, positive: bool) -> Option<Vec<Bucket>> {
@@ -1053,26 +1047,33 @@ pub fn quantile_histogram_view(
         view.negative.buckets.is_empty(),
         view.positive.buckets.is_empty(),
         || {
-            let mut buckets =
-                build_view_side(view.negative, view.schema, view.custom_values, false)?;
-            buckets.reverse();
-            if view.zero_count != 0.0 {
-                buckets.push(Bucket {
-                    lower: -view.zero_threshold,
-                    upper: view.zero_threshold,
-                    count: view.zero_count,
-                    boundary_rule: BoundaryRule::ClosedBoth,
-                });
-            }
-            buckets.extend(build_view_side(
-                view.positive,
-                view.schema,
-                view.custom_values,
-                true,
-            )?);
-            Some(buckets)
+            Some(assemble_bucket_sides(
+                build_view_side(view.negative, view.schema, view.custom_values, false)?,
+                view.zero_threshold,
+                view.zero_count,
+                build_view_side(view.positive, view.schema, view.custom_values, true)?,
+            ))
         },
     )
+}
+
+fn assemble_bucket_sides(
+    mut negative: Vec<Bucket>,
+    zero_threshold: f64,
+    zero_count: f64,
+    positive: Vec<Bucket>,
+) -> Vec<Bucket> {
+    negative.reverse();
+    if zero_count != 0.0 {
+        negative.push(Bucket {
+            lower: -zero_threshold,
+            upper: zero_threshold,
+            count: zero_count,
+            boundary_rule: BoundaryRule::ClosedBoth,
+        });
+    }
+    negative.extend(positive);
+    negative
 }
 
 fn build_view_side(
@@ -1973,6 +1974,54 @@ pub fn build_histogram_array(values: &[Option<NativeHistogram>]) -> ArrayRef {
 mod tests {
     use super::*;
     use datatypes::series::histogram::HistogramBatch;
+
+    #[test]
+    fn assembles_bucket_sides_in_order_and_preserves_zero_count_semantics() {
+        let bucket = |lower, upper, count, boundary_rule| Bucket {
+            lower,
+            upper,
+            count,
+            boundary_rule,
+        };
+        let negative = vec![
+            bucket(-3.0, -2.0, 1.0, BoundaryRule::OpenRight),
+            bucket(-4.0, -3.0, 2.0, BoundaryRule::OpenRight),
+        ];
+        let positive = vec![bucket(2.0, 3.0, 4.0, BoundaryRule::OpenLeft)];
+
+        for (zero_count, expected) in [
+            (
+                5.0,
+                vec![
+                    bucket(-4.0, -3.0, 2.0, BoundaryRule::OpenRight),
+                    bucket(-3.0, -2.0, 1.0, BoundaryRule::OpenRight),
+                    bucket(-0.5, 0.5, 5.0, BoundaryRule::ClosedBoth),
+                    bucket(2.0, 3.0, 4.0, BoundaryRule::OpenLeft),
+                ],
+            ),
+            (
+                0.0,
+                vec![
+                    bucket(-4.0, -3.0, 2.0, BoundaryRule::OpenRight),
+                    bucket(-3.0, -2.0, 1.0, BoundaryRule::OpenRight),
+                    bucket(2.0, 3.0, 4.0, BoundaryRule::OpenLeft),
+                ],
+            ),
+            (
+                -0.0,
+                vec![
+                    bucket(-4.0, -3.0, 2.0, BoundaryRule::OpenRight),
+                    bucket(-3.0, -2.0, 1.0, BoundaryRule::OpenRight),
+                    bucket(2.0, 3.0, 4.0, BoundaryRule::OpenLeft),
+                ],
+            ),
+        ] {
+            assert_eq!(
+                assemble_bucket_sides(negative.clone(), 0.5, zero_count, positive.clone()),
+                expected
+            );
+        }
+    }
 
     fn assert_histogram_view_eq(view: &HistogramView<'_>, expected: &NativeHistogram) {
         assert_eq!(view.schema, expected.schema);
