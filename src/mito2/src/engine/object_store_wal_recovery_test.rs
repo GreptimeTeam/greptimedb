@@ -1126,23 +1126,10 @@ async fn test_drop_cancels_a_flush_waiting_for_wal_durability() {
     wait_for(store.wait_for_durability_waits(1)).await;
     assert!(!flush.is_finished());
 
-    // The drop cancels the flush instead of waiting behind the upload.
-    tokio::time::timeout(
-        WAIT,
-        engine.handle_request(
-            REGION_A,
-            RegionRequest::Drop(RegionDropRequest {
-                fast_path: false,
-                force: false,
-                partial_drop: false,
-            }),
-        ),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(!engine.is_region_exists(REGION_A));
-    assert_eq!(vec![0], wal_object_seqs(&object_store).await);
+    // The drop cancels the flush instead of waiting behind the upload. Its
+    // release of the region then waits for its own object, which is created
+    // after the upload.
+    let dropped = spawn_drop(&engine, REGION_A);
     assert!(
         tokio::time::timeout(WAIT, flush)
             .await
@@ -1150,13 +1137,122 @@ async fn test_drop_cancels_a_flush_waiting_for_wal_durability() {
             .unwrap()
             .is_err()
     );
+    wait_for(store.wait_for_parked_creates(2)).await;
+    assert!(!dropped.is_finished());
+    assert_eq!(vec![0], wal_object_seqs(&object_store).await);
 
     store.release_creates();
+    tokio::time::timeout(WAIT, dropped)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(!engine.is_region_exists(REGION_A));
     tokio::time::timeout(WAIT, seal)
         .await
         .unwrap()
         .unwrap()
         .unwrap();
+}
+
+fn spawn_drop(
+    engine: &MitoEngine,
+    region_id: RegionId,
+) -> tokio::task::JoinHandle<std::result::Result<(), BoxedError>> {
+    let engine = engine.clone();
+    tokio::spawn(async move {
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Drop(RegionDropRequest {
+                    fast_path: false,
+                    force: false,
+                    partial_drop: false,
+                }),
+            )
+            .await
+            .map(|_| ())
+    })
+}
+
+#[rstest]
+#[case::graceful(false, false)]
+#[case::abrupt(true, false)]
+#[case::failed_release(false, true)]
+#[tokio::test]
+async fn test_restart_after_a_drop_collects_the_objects_of_the_dropped_region(
+    #[case] abrupt: bool,
+    #[case] release_fails: bool,
+) {
+    let mut env = TestEnv::with_prefix("object-store-wal-drop-restart").await;
+    let object_store = memory_store();
+    let store = open_store(&object_store, AckMode::Durable).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (_, schema_a) = create_region(&engine, REGION_A, &[]).await;
+    let (table_dir_b, schema_b) = create_region(&engine, REGION_B, &[]).await;
+
+    // Object 1 holds entries of both regions and object 2 of region A. The
+    // drop releases region A in object 3, and region B, which is not
+    // flushed, holds the boundary at object 1.
+    let mut writer = SealedWriter::new(&store);
+    writer
+        .put_and_seal(
+            &engine,
+            vec![
+                (REGION_A, rows(&schema_a, 0, 2)),
+                (REGION_B, rows(&schema_b, 0, 3)),
+            ],
+        )
+        .await;
+    writer
+        .put_and_seal(&engine, vec![(REGION_A, rows(&schema_a, 2, 4))])
+        .await;
+    if release_fails {
+        store.fail_creates();
+    }
+    let dropped = tokio::time::timeout(WAIT, spawn_drop(&engine, REGION_A))
+        .await
+        .unwrap()
+        .unwrap();
+    // A drop whose release fails succeeds all the same, and the stop creates
+    // the record in object 4.
+    dropped.unwrap();
+    assert!(!engine.is_region_exists(REGION_A));
+    store.allow_creates();
+    wait_for_collection(&store).await;
+    let released_in = if release_fails { 4 } else { 3 };
+    drop(writer);
+    if abrupt {
+        crash(engine, store).await;
+    } else {
+        engine.stop().await.unwrap();
+        drop(engine);
+        store.stop().await.unwrap();
+        drop(store);
+    }
+    assert_eq!(
+        vec![1, 2, released_in],
+        wal_object_seqs(&object_store).await
+    );
+
+    // Nothing is written before the restart, and region A is never opened
+    // again.
+    let store = open_store(&object_store, AckMode::Durable).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    open_region(&engine, REGION_B, &table_dir_b, &[])
+        .await
+        .unwrap();
+
+    // Once region B is flushed no object holds a live segment, and the next
+    // object carries the boundary past all of them.
+    flush_region(&engine, REGION_B, None).await;
+    let mut writer = SealedWriter::new(&store);
+    writer
+        .put_and_seal(&engine, vec![(REGION_B, rows(&schema_b, 3, 5))])
+        .await;
+    wait_for_collection(&store).await;
+    assert_eq!(vec![released_in + 2], wal_object_seqs(&object_store).await);
+    assert_eq!(5, engine.get_region_statistic(REGION_B).unwrap().num_rows);
 }
 
 #[rstest]

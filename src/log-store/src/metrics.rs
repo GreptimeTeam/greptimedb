@@ -111,6 +111,13 @@ lazy_static! {
         "object store logstore failed object deletes total",
     )
     .unwrap();
+    /// Counter of release records in the objects the object store logstore
+    /// indexed, including records carried over from batches that failed.
+    pub static ref METRIC_OBJECT_STORE_WAL_RELEASE_RECORDS_TOTAL: IntCounter = register_int_counter!(
+        "greptime_logstore_object_store_wal_release_records_total",
+        "object store logstore release records made durable total",
+    )
+    .unwrap();
 
     /// How long an object of the object store logstore takes to become durable
     /// once its batch is sealed, sampled for every conditional create that
@@ -294,7 +301,8 @@ lazy_static! {
 
     /// Counter of appends the object store logstore rejected while its
     /// backlog is refused, see the gauge above. They take no entry id and
-    /// fail with a retryable error.
+    /// fail with a retryable error. Releases of dropped regions failed in
+    /// that state count too; their records wait for the next object.
     pub static ref METRIC_OBJECT_STORE_WAL_REJECTED_APPENDS_TOTAL: IntCounter = register_int_counter!(
         "greptime_logstore_object_store_wal_rejected_appends_total",
         "object store logstore appends rejected while the object store refuses the backlog total",

@@ -8591,6 +8591,7 @@ dependencies = [
  "humantime-serde",
  "itertools 0.14.0",
  "lazy_static",
+ "log-store",
  "mito-codec",
  "mito2",
  "moka",
