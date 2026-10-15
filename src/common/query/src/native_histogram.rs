@@ -36,6 +36,7 @@ use datafusion::arrow::datatypes::{
 };
 use datafusion_common::{DataFusionError, Result as DfResult};
 use datatypes::data_type::{ConcreteDataType, DataType};
+pub use datatypes::series::histogram::CounterResetHint;
 use datatypes::series::histogram::{BucketSideView, HistogramBatchBuilder, HistogramView};
 use datatypes::series::samples::Samples;
 use datatypes::types::{StructField, StructType};
@@ -143,8 +144,6 @@ pub fn is_native_histogram_value_schema(name: &str, data_type: &ConcreteDataType
 pub const CUSTOM_BUCKETS_SCHEMA: i32 = -53;
 const MIN_EXPONENTIAL_SCHEMA: i32 = -4;
 const MAX_EXPONENTIAL_SCHEMA: i32 = 8;
-
-pub use datatypes::series::histogram::CounterResetHint;
 
 /// Reset hint indicating that the payload must be inspected.
 pub const UNKNOWN_COUNTER_RESET_HINT: CounterResetHint = CounterResetHint::Unknown;
@@ -2563,6 +2562,21 @@ mod tests {
         )]));
         let malformed_spans = StructArray::new(source.fields().clone(), columns, None);
         assert!(histogram_samples_from_arrow(&malformed_spans).is_err());
+    }
+
+    #[test]
+    fn datatypes_reset_hints_round_trip_through_native_histogram() {
+        use datatypes::series::histogram::CounterResetHint as DatatypesCounterResetHint;
+
+        let values = [-1, 0, 1, 2, 3, 77, i32::MIN, i32::MAX];
+        for value in values {
+            let datatypes_hint = DatatypesCounterResetHint::from(value);
+            let query_hint: CounterResetHint = datatypes_hint;
+            let mut histogram = histogram(Vec::new(), Vec::new());
+            histogram.reset_hint = query_hint;
+            let datatypes_hint: DatatypesCounterResetHint = histogram.reset_hint;
+            assert_eq!(i32::from(datatypes_hint), value);
+        }
     }
 
     #[test]
