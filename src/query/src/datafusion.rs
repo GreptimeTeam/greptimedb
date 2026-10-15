@@ -1108,7 +1108,11 @@ mod tests {
         let mut wire = api::v1::QueryContext::default();
         wire.extensions
             .insert("query.parallelism".to_string(), "0".to_string());
-        assert!(QueryContext::try_from(wire).is_err());
+        let restored = QueryContext::try_from(wire).unwrap();
+        assert!(matches!(
+            engine.engine_context(Arc::new(restored)),
+            Err(crate::error::Error::InvalidQueryContextExtension { .. })
+        ));
     }
 
     #[tokio::test]
