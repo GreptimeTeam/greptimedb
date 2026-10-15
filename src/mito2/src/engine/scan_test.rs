@@ -5350,6 +5350,10 @@ async fn test_mito_regional_raw_merge_preserves_global_key_order_and_labels() {
             }
             _ => panic!("PerSeries request must select a series scanner"),
         };
+        assert_eq!(
+            RawSeriesOrdering::ReadKeyThenTime,
+            scanner.raw_series_ordering()
+        );
         let metadata = scanner.metadata();
         metadata_for_codec.get_or_insert_with(|| metadata.clone());
         let source = RawLabelSource::PrimaryKey {
@@ -5404,6 +5408,7 @@ async fn test_mito_regional_raw_merge_preserves_global_key_order_and_labels() {
                 .scan_series_partition(&QueryScanContext::default(), &metrics, partition, &source)
                 .unwrap()
                 .expect("native raw input");
+            assert_eq!(scanner.raw_series_ordering(), stream.ordering());
             assert_eq!(RawSeriesOrdering::ReadKeyThenTime, stream.ordering());
             assert_eq!(
                 vec!["field_1", "field_0"],
@@ -5772,6 +5777,7 @@ async fn test_two_phase_native_raw_stream_is_rejected_by_ordered_merge() {
     };
     assert_eq!("two_phase", series.mode());
     let mut scanner = engine.handle_query(region_id, request).await.unwrap();
+    assert_eq!(RawSeriesOrdering::Contiguous, scanner.raw_series_ordering());
     let metadata = scanner.metadata();
     let source = RawLabelSource::PrimaryKey {
         metric_name: Arc::from("fixture_metric"),
@@ -5808,6 +5814,7 @@ async fn test_two_phase_native_raw_stream_is_rejected_by_ordered_merge() {
             .scan_series_partition(&QueryScanContext::default(), &metrics, partition, &source)
             .unwrap()
             .unwrap();
+        assert_eq!(scanner.raw_series_ordering(), stream.ordering());
         assert_eq!(RawSeriesOrdering::Contiguous, stream.ordering());
         streams.push(stream);
     }

@@ -20,6 +20,7 @@ use std::task::{Context, Poll};
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_query::request::RawSeriesRequest;
+use common_query::series_frame::raw_series_frame_ordering;
 use common_recordbatch::{
     QueryMemoryTracker, RecordBatch, RecordBatches, SendableRecordBatchStream,
 };
@@ -62,6 +63,8 @@ struct State {
     polls: usize,
     drops: usize,
     resets: usize,
+    planned_ordering: Option<RawSeriesOrdering>,
+    stream_ordering: Option<RawSeriesOrdering>,
 }
 
 fn raw_error(reason: &str) -> BoxedError {
@@ -81,6 +84,7 @@ struct RawStream {
     state: Arc<Mutex<State>>,
     fail_first_poll: bool,
     error_after_poll: Option<usize>,
+    ordering: RawSeriesOrdering,
 }
 
 impl Drop for RawStream {
@@ -112,7 +116,7 @@ impl RawSeriesStream for RawStream {
         &self.source
     }
     fn ordering(&self) -> RawSeriesOrdering {
-        RawSeriesOrdering::ReadKeyThenTime
+        self.ordering
     }
 }
 
@@ -148,6 +152,13 @@ impl RegionScanner for TestScanner {
     }
     fn metadata(&self) -> store_api::metadata::RegionMetadataRef {
         self.metadata.clone()
+    }
+    fn raw_series_ordering(&self) -> RawSeriesOrdering {
+        self.state
+            .lock()
+            .unwrap()
+            .planned_ordering
+            .unwrap_or(RawSeriesOrdering::ReadKeyThenTime)
     }
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
         self.properties.prepare(request);
@@ -188,7 +199,11 @@ impl RegionScanner for TestScanner {
         if state.raw_none {
             return Ok(None);
         }
+        let ordering = state
+            .stream_ordering
+            .unwrap_or(RawSeriesOrdering::ReadKeyThenTime);
         Ok(Some(Box::pin(RawStream {
+            ordering,
             schema: state
                 .stream_schema
                 .clone()
@@ -402,20 +417,139 @@ async fn supported_empty_stream_remains_native_with_declared_frame_schema() {
         .unwrap()
         .unwrap();
     let mut stream = plan.execute(0, context()).unwrap();
+    assert_eq!(stream.schema(), plan.schema());
     assert!(stream.next().await.is_none());
     assert_eq!(state.lock().unwrap().drops, 1);
     drop(stream);
     assert_eq!(
         plan.schema(),
-        datatypes::series::frame::raw_series_frame_schema(
+        raw_series_frame_schema_with_ordering(
             plan.series_schema(),
-            RawLabelMode::Explicit
+            RawLabelMode::Explicit,
+            RawSeriesOrdering::ReadKeyThenTime
         )
         .unwrap()
     );
     let state = state.lock().unwrap();
     assert_eq!(state.raw_calls, 1);
     assert_eq!(state.legacy_calls, 0);
+}
+
+#[tokio::test]
+async fn planned_ordering_is_preserved_for_empty_and_nonempty_frames() {
+    for ordering in [
+        RawSeriesOrdering::ReadKeyThenTime,
+        RawSeriesOrdering::Contiguous,
+    ] {
+        for nonempty in [false, true] {
+            let schema = series_schema();
+            let chunks = if nonempty {
+                vec![chunk(&schema)]
+            } else {
+                vec![]
+            };
+            let (scan, state) = fixture(Some(schema), chunks);
+            {
+                let mut state = state.lock().unwrap();
+                state.planned_ordering = Some(ordering);
+                state.stream_ordering = Some(ordering);
+            }
+            let plan = scan
+                .clone()
+                .try_to_series_scan(RawLabelSource::Explicit)
+                .unwrap()
+                .unwrap();
+            let planned_schema = plan.schema();
+            assert_eq!(
+                ordering,
+                raw_series_frame_ordering(&planned_schema).unwrap()
+            );
+            {
+                let state = state.lock().unwrap();
+                assert_eq!(0, state.raw_calls);
+                assert_eq!(0, state.polls);
+                assert_eq!(0, state.legacy_calls);
+            }
+            let stream = plan.execute(0, context()).unwrap();
+            assert_eq!(stream.schema(), planned_schema);
+            assert_eq!(
+                plan.properties().equivalence_properties().schema(),
+                &planned_schema
+            );
+            assert_eq!(
+                ordering,
+                raw_series_frame_ordering(stream.schema().as_ref()).unwrap()
+            );
+            let frames = stream.try_collect::<Vec<_>>().await.unwrap();
+            assert_eq!(usize::from(nonempty), frames.len());
+            for frame in &frames {
+                assert_eq!(planned_schema.as_ref(), frame.schema().as_ref());
+                assert_eq!(
+                    ordering,
+                    raw_series_frame_ordering(frame.schema().as_ref()).unwrap()
+                );
+            }
+            let state = state.lock().unwrap();
+            assert_eq!(1, state.raw_calls);
+            assert_eq!(0, state.legacy_calls);
+        }
+    }
+}
+
+#[tokio::test]
+async fn planned_and_stream_ordering_mismatches_fail_without_legacy_fallback() {
+    for (planned, actual) in [
+        (
+            RawSeriesOrdering::ReadKeyThenTime,
+            RawSeriesOrdering::Contiguous,
+        ),
+        (
+            RawSeriesOrdering::Contiguous,
+            RawSeriesOrdering::ReadKeyThenTime,
+        ),
+    ] {
+        let schema = series_schema();
+        let (scan, state) = fixture(Some(schema.clone()), vec![chunk(&schema)]);
+        state.lock().unwrap().planned_ordering = Some(planned);
+        let plan = scan
+            .clone()
+            .try_to_series_scan(RawLabelSource::Explicit)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            planned,
+            raw_series_frame_ordering(plan.schema().as_ref()).unwrap()
+        );
+        state.lock().unwrap().stream_ordering = Some(actual);
+        let error = plan
+            .execute(0, context())
+            .err()
+            .expect("ordering mismatch rejected before returning stream");
+        assert!(error.to_string().contains("ordering"), "{error}");
+        let state = state.lock().unwrap();
+        assert_eq!(1, state.raw_calls);
+        assert_eq!(0, state.polls);
+        assert_eq!(1, state.drops);
+        assert_eq!(0, state.legacy_calls);
+    }
+}
+
+#[tokio::test]
+async fn ordering_changed_after_planning_fails_before_raw_execution() {
+    let schema = series_schema();
+    let (scan, state) = fixture(Some(schema), vec![]);
+    let plan = scan
+        .clone()
+        .try_to_series_scan(RawLabelSource::Explicit)
+        .unwrap()
+        .unwrap();
+    state.lock().unwrap().planned_ordering = Some(RawSeriesOrdering::Contiguous);
+    assert!(plan.execute(0, context()).is_err());
+    let state = state.lock().unwrap();
+    assert_eq!(0, state.raw_calls);
+    assert_eq!(0, state.polls);
+    assert_eq!(0, state.drops);
+    assert_eq!(0, state.legacy_calls);
 }
 
 #[tokio::test]

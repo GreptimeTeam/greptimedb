@@ -982,7 +982,7 @@ async fn test_native_single_region_raw_flight_preserves_typed_filter_and_snapsho
         }
         RawLabelSource::Explicit => panic!("expected key-backed source"),
     }
-    assert_eq!(RawSeriesOrdering::Contiguous, raw.ordering());
+    assert_eq!(RawSeriesOrdering::ReadKeyThenTime, raw.ordering());
     assert_eq!(PrimaryKeyEncoding::Dense, metadata.primary_key_encoding);
     assert_eq!(&[host_id], metadata.primary_key.as_slice());
     let expected_key = new_primary_key(&["alpha"]);
@@ -1209,6 +1209,7 @@ async fn assert_raw_entrypoint_wrapper_contract(
 ) {
     use common_base::Plugins;
     use common_query::OutputData;
+    use common_query::series_frame::raw_series_frame_ordering;
     use datafusion::arrow::datatypes::DataType;
     use datafusion::common::TableReference;
     use datafusion::datasource::DefaultTableSource;
@@ -1218,6 +1219,7 @@ async fn assert_raw_entrypoint_wrapper_contract(
     use datafusion::physical_plan::coop::CooperativeExec;
     use datafusion::physical_plan::execution_plan::SchedulingType;
     use datafusion_expr::{col, lit};
+    use datatypes::series::raw::RawSeriesOrdering;
     use query::dummy_catalog::DummyTableProviderFactory;
     use query::options::QueryOptions;
     use query::physical_wrapper::{PhysicalPlanWrapper, PhysicalPlanWrapperRef};
@@ -1343,6 +1345,10 @@ async fn assert_raw_entrypoint_wrapper_contract(
     let native_schema = native_batches.schema();
     let native_schema = native_schema.arrow_schema();
     assert_eq!(native_root_schema.as_ref(), native_schema.as_ref());
+    assert_eq!(
+        RawSeriesOrdering::ReadKeyThenTime,
+        raw_series_frame_ordering(native_schema).unwrap()
+    );
     assert_eq!(
         vec!["read_key", "is_last", "time", "fields"],
         native_schema
@@ -1720,7 +1726,7 @@ async fn test_native_histogram_raw_flight_preserves_payload_across_flush() {
             }
             RawLabelSource::Explicit => panic!("expected key-backed source"),
         }
-        assert_eq!(RawSeriesOrdering::Contiguous, stream.ordering());
+        assert_eq!(RawSeriesOrdering::ReadKeyThenTime, stream.ordering());
         let chunks = stream.try_collect::<Vec<_>>().await.unwrap();
         let mut timestamps = Vec::new();
         for (chunk_index, chunk) in chunks.iter().enumerate() {

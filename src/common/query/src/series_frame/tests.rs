@@ -14,7 +14,7 @@
 
 mod lifecycle;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -33,6 +33,7 @@ use datatypes::arrow::ipc::{reader::StreamReader, writer::StreamWriter};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::series::Label;
 use datatypes::series::MetricName;
+use datatypes::series::frame::{RawLabelMode, raw_series_frame_schema};
 use datatypes::series::raw::{RawSeriesChunk, RawSeriesOrdering, RawTimeAxis};
 use datatypes::series::samples::{DenseSamplesRef, FieldSpec, Samples, SeriesFields, SeriesSchema};
 use futures_util::{Stream, StreamExt};
@@ -40,7 +41,7 @@ use store_api::region_engine::{
     BoundTag, RawLabelSource, RawSeriesStream, SendableRawSeriesStream,
 };
 
-use super::{pack_raw_series, unpack_raw_series};
+use super::{pack_raw_series, raw_series_frame_ordering, unpack_raw_series};
 
 fn schema() -> Arc<SeriesSchema> {
     Arc::new(SeriesSchema {
@@ -1536,5 +1537,123 @@ async fn named_frame_fields_roundtrip_and_reject_wrong_bindings_before_polling()
         );
         assert_eq!(polls.load(Ordering::SeqCst), 0);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
+fn raw_series_ordering_metadata_fixture() {
+    #[derive(serde::Deserialize)]
+    struct Case {
+        name: String,
+        metadata: HashMap<String, String>,
+        ordering: Option<String>,
+    }
+
+    let cases: Vec<Case> = serde_json::from_str(include_str!(
+        "../../../../../tests/compatibility/wire/raw_series_ordering/v1_metadata.json"
+    ))
+    .unwrap();
+    for case in cases {
+        let literal_ordering = match case.ordering.as_deref() {
+            Some("contiguous") => Some(RawSeriesOrdering::Contiguous),
+            Some("read_key_then_time") => Some(RawSeriesOrdering::ReadKeyThenTime),
+            Some(value) => panic!("{} has invalid fixture ordering {value}", case.name),
+            None => None,
+        };
+        let frame_schema = raw_series_frame_schema(&schema(), RawLabelMode::Explicit).unwrap();
+        let frame_schema = frame_schema.as_ref().clone().with_metadata(case.metadata);
+        match literal_ordering {
+            Some(expected) => assert_eq!(
+                raw_series_frame_ordering(&frame_schema)
+                    .unwrap_or_else(|error| panic!("{}: {error}", case.name)),
+                expected,
+                "{}",
+                case.name
+            ),
+            None => assert!(
+                raw_series_frame_ordering(&frame_schema).is_err(),
+                "{}",
+                case.name
+            ),
+        }
+    }
+}
+
+#[tokio::test]
+async fn pack_declares_ordering_on_every_batch_and_ipc_roundtrips_it() {
+    for ordering in [
+        RawSeriesOrdering::Contiguous,
+        RawSeriesOrdering::ReadKeyThenTime,
+    ] {
+        for chunks in [
+            vec![
+                chunk_with(b"a", &[1], vec![Some(1.0)], Some(metric()), false),
+                chunk_with(b"a", &[2], vec![None], Some(metric()), true),
+                chunk_with(b"b", &[3], vec![Some(3.0)], Some(metric()), true),
+            ],
+            vec![],
+        ] {
+            let is_empty = chunks.is_empty();
+            let expected_batch_count = if is_empty { 0 } else { 3 };
+            let canonical_schema =
+                raw_series_frame_schema(&schema(), RawLabelMode::Explicit).unwrap();
+            let mut expected_metadata = canonical_schema.metadata().clone();
+            expected_metadata.insert(
+                "greptime.series.ordering".to_string(),
+                match ordering {
+                    RawSeriesOrdering::Contiguous => "contiguous",
+                    RawSeriesOrdering::ReadKeyThenTime => "read_key_then_time",
+                }
+                .to_string(),
+            );
+            let (input, _, _) = raw(chunks, ordering);
+            let mut packed = pack_raw_series(input).unwrap();
+            let declared = packed.schema();
+            assert_eq!(declared.fields(), canonical_schema.fields());
+            assert_eq!(declared.metadata(), &expected_metadata);
+            assert_eq!(raw_series_frame_ordering(&declared).unwrap(), ordering);
+            let mut batches = Vec::new();
+            while let Some(batch) = packed.next().await {
+                let batch = batch.unwrap();
+                assert_eq!(batch.schema(), declared);
+                batches.push(batch);
+            }
+
+            let mut ipc = Vec::new();
+            {
+                let mut writer = StreamWriter::try_new(&mut ipc, &declared).unwrap();
+                for batch in &batches {
+                    writer.write(batch).unwrap();
+                }
+                writer.finish().unwrap();
+            }
+            let reader = StreamReader::try_new(Cursor::new(ipc), None).unwrap();
+            assert_eq!(reader.schema(), declared);
+            assert_eq!(
+                raw_series_frame_ordering(&reader.schema()).unwrap(),
+                ordering
+            );
+            let ipc_batches = reader.map(Result::unwrap).collect::<Vec<_>>();
+            assert_eq!(ipc_batches.len(), batches.len());
+            assert_eq!(ipc_batches.len(), expected_batch_count);
+            assert!(ipc_batches.iter().all(|batch| batch.schema() == declared));
+            let (source, _, _) = df_source(ipc_batches, declared, false);
+            let mut decoded =
+                unpack_raw_series(source, schema(), RawLabelSource::Explicit, ordering).unwrap();
+            if is_empty {
+                assert!(decoded.next().await.is_none());
+            } else {
+                for (key, time, value, last) in [
+                    (b"a".as_slice(), 1, Some(1.0), false),
+                    (b"a".as_slice(), 2, None, true),
+                    (b"b".as_slice(), 3, Some(3.0), true),
+                ] {
+                    let actual = decoded.next().await.unwrap().unwrap();
+                    assert_chunk(&actual, key, &[time], &[value], last);
+                    assert_metric(&actual, None);
+                }
+                assert!(decoded.next().await.is_none());
+            }
+        }
     }
 }

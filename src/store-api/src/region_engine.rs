@@ -563,6 +563,11 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
         Ok(None)
     }
 
+    /// Returns the guarantee for subsequent raw scans without consuming scanner state.
+    fn raw_series_ordering(&self) -> RawSeriesOrdering {
+        RawSeriesOrdering::Contiguous
+    }
+
     /// Scans a partition as raw series when this source supports that path.
     ///
     /// `None` means raw capability is absent before execution and permits a legacy scan instead.

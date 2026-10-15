@@ -27,6 +27,7 @@ use std::task::{Context, Poll};
 use common_error::ext::BoxedError;
 use common_recordbatch::{DfRecordBatch, DfSendableRecordBatchStream};
 use datafusion_common::DataFusionError;
+use datatypes::arrow::datatypes::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
 use datatypes::error::InvalidSeriesSnafu;
 use datatypes::series::MetricName;
 use datatypes::series::frame::{
@@ -44,6 +45,43 @@ pub use record_batches::{InputMapping, record_batches_to_raw_series};
 #[cfg(test)]
 mod tests;
 
+const ORDERING_KEY: &str = "greptime.series.ordering";
+
+/// Builds the canonical raw frame schema with the producer's guaranteed ordering.
+///
+/// Ordering records a producer guarantee; it is not inferred from frame contents.
+pub fn raw_series_frame_schema_with_ordering(
+    schema: &SeriesSchema,
+    mode: RawLabelMode,
+    ordering: RawSeriesOrdering,
+) -> datafusion_common::Result<ArrowSchemaRef> {
+    let schema = raw_series_frame_schema(schema, mode).map_err(codec_error)?;
+    let mut metadata = schema.metadata().clone();
+    metadata.insert(
+        ORDERING_KEY.to_string(),
+        match ordering {
+            RawSeriesOrdering::Contiguous => "contiguous",
+            RawSeriesOrdering::ReadKeyThenTime => "read_key_then_time",
+        }
+        .to_string(),
+    );
+    Ok(Arc::new(ArrowSchema::new_with_metadata(
+        schema.fields().clone(),
+        metadata,
+    )))
+}
+
+/// Reads the declared producer ordering, conservatively treating legacy frames as contiguous.
+pub fn raw_series_frame_ordering(
+    schema: &ArrowSchema,
+) -> datafusion_common::Result<RawSeriesOrdering> {
+    match schema.metadata().get(ORDERING_KEY).map(String::as_str) {
+        None | Some("contiguous") => Ok(RawSeriesOrdering::Contiguous),
+        Some("read_key_then_time") => Ok(RawSeriesOrdering::ReadKeyThenTime),
+        Some(_) => Err(invalid("unknown raw series ordering")),
+    }
+}
+
 /// Packs a storage raw-series stream into DataFusion record batches incrementally.
 ///
 /// Producers must keep each read key's chunks contiguous. Validation checks adjacent chunk
@@ -55,7 +93,7 @@ pub fn pack_raw_series(
     let label_source = source.label_source().clone();
     let ordering = source.ordering();
     let mode = label_mode(&label_source);
-    let frame_schema = raw_series_frame_schema(&schema, mode).map_err(codec_error)?;
+    let frame_schema = raw_series_frame_schema_with_ordering(&schema, mode, ordering)?;
     Ok(Box::pin(PackStream {
         source: Some(source),
         schema,
@@ -238,7 +276,14 @@ impl Stream for PackStream {
                         let batches = pack_raw_series_chunk(&this.schema, this.mode, &chunk)
                             .map_err(codec_error)?;
                         this.validator.validate(&chunk)?;
-                        Ok(batches)
+                        batches
+                            .into_iter()
+                            .map(|batch| {
+                                batch
+                                    .with_schema(this.frame_schema.clone())
+                                    .map_err(DataFusionError::from)
+                            })
+                            .collect::<datafusion_common::Result<Vec<_>>>()
                     })();
                     match result {
                         Ok(batches) => this.pending = batches.into_iter(),

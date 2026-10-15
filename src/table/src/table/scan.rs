@@ -20,7 +20,7 @@ use std::time::Instant;
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_query::request::RawSeriesRequest;
-use common_query::series_frame::pack_raw_series;
+use common_query::series_frame::{pack_raw_series, raw_series_frame_schema_with_ordering};
 use common_recordbatch::adapter::{
     RecordBatchStreamAdapter, RegionQueryStatCounters, SERIES_SCAN_EXEC_NAME,
 };
@@ -55,7 +55,7 @@ use datafusion_physical_expr::{
 };
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::compute::SortOptions;
-use datatypes::series::frame::{RawLabelMode, raw_series_frame_schema};
+use datatypes::series::frame::RawLabelMode;
 use datatypes::series::samples::SeriesSchema;
 use futures::{Stream, StreamExt};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
@@ -474,8 +474,11 @@ impl RegionScanExec {
         else {
             return Ok(None);
         };
-        let arrow_schema = raw_series_frame_schema(&schema, raw_label_mode(&label_source))
-            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let arrow_schema = raw_series_frame_schema_with_ordering(
+            &schema,
+            raw_label_mode(&label_source),
+            scanner.raw_series_ordering(),
+        )?;
         let partition_count = scanner.properties().num_partitions().max(1);
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(arrow_schema.clone()),
@@ -655,8 +658,12 @@ impl ExecutionPlan for SeriesScanExec {
             .ok_or_else(|| {
                 DataFusionError::Execution("raw series capability changed after planning".into())
             })?;
-        let current_frame = raw_series_frame_schema(&current, raw_label_mode(&self.label_source))
-            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let current_ordering = scanner.raw_series_ordering();
+        let current_frame = raw_series_frame_schema_with_ordering(
+            &current,
+            raw_label_mode(&self.label_source),
+            current_ordering,
+        )?;
         if current_frame != self.arrow_schema
             || scanner.properties().num_partitions().max(1) != partitions
         {
@@ -672,6 +679,11 @@ impl ExecutionPlan for SeriesScanExec {
                     "raw series capability disappeared during execution".into(),
                 )
             })?;
+        if raw.ordering() != current_ordering {
+            return Err(DataFusionError::Execution(
+                "raw series stream ordering does not match its planned guarantee".into(),
+            ));
+        }
         if raw.schema().fields.len() != self.series_schema.fields.len()
             || raw
                 .schema()

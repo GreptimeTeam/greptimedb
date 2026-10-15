@@ -35,14 +35,13 @@ use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::node_manager::Datanode;
 use common_query::error::Error as CommonQueryError;
 use common_query::request::{QueryRequest, RAW_SERIES_REQUEST_EXTENSION_KEY, RawSeriesRequest};
-use common_query::series_frame::unpack_raw_series;
+use common_query::series_frame::{raw_series_frame_ordering, unpack_raw_series};
 use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::error;
 use common_telemetry::tracing::Span;
 use common_telemetry::tracing_context::TracingContext;
-use datatypes::series::raw::RawSeriesOrdering;
 use futures_util::Stream;
 use prost::Message;
 use query::query_engine::DefaultSerializer;
@@ -165,20 +164,17 @@ impl RegionRequester {
             .extensions
             .insert(RAW_SERIES_REQUEST_EXTENSION_KEY.to_string(), extension);
         let stream = Datanode::handle_query(self, request).await?;
+        let ordering = raw_series_frame_ordering(stream.schema().arrow_schema().as_ref());
         let stream = Box::pin(DfRecordBatchStreamAdapter::new(stream));
-        unpack_raw_series(
-            stream,
-            expected_schema,
-            label_source,
-            RawSeriesOrdering::Contiguous,
-        )
-        .map_err(|error| {
-            BoxedError::new(CommonQueryError::GeneralDataFusion {
-                error,
-                location: location!(),
+        ordering
+            .and_then(|ordering| unpack_raw_series(stream, expected_schema, label_source, ordering))
+            .map_err(|error| {
+                BoxedError::new(CommonQueryError::GeneralDataFusion {
+                    error,
+                    location: location!(),
+                })
             })
-        })
-        .context(meta_error::ExternalSnafu)
+            .context(meta_error::ExternalSnafu)
     }
 
     pub async fn do_get_inner(&self, ticket: Ticket) -> Result<SendableRecordBatchStream> {

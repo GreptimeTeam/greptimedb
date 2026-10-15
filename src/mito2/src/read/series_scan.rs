@@ -769,6 +769,13 @@ impl RegionScanner for SeriesScan {
             .map_err(BoxedError::new)
     }
 
+    fn raw_series_ordering(&self) -> RawSeriesOrdering {
+        match self.mode {
+            SeriesScanMode::Legacy => RawSeriesOrdering::ReadKeyThenTime,
+            SeriesScanMode::TwoPhase => RawSeriesOrdering::Contiguous,
+        }
+    }
+
     fn raw_series_schema(
         &self,
         label_source: &RawLabelSource,
@@ -798,10 +805,7 @@ impl RegionScanner for SeriesScan {
         let batches = self
             .scan_batch_in_partition(ctx, partition, metrics.clone(), metrics_set)
             .map_err(BoxedError::new)?;
-        let ordering = match self.mode {
-            SeriesScanMode::Legacy => RawSeriesOrdering::ReadKeyThenTime,
-            SeriesScanMode::TwoPhase => RawSeriesOrdering::Contiguous,
-        };
+        let ordering = self.raw_series_ordering();
         Ok(Some(raw::make_stream(
             batches,
             preparation.schema,
