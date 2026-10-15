@@ -41,9 +41,9 @@ pub(crate) async fn tracked_sql_write(
         frontend,
         catalog,
         schema,
-        QueryRequest {
+        Some(QueryRequest {
             query: Some(Query::Sql(sql.to_string())),
-        },
+        }),
         &[],
         &HashMap::new(),
         &mut None,
@@ -51,11 +51,29 @@ pub(crate) async fn tracked_sql_write(
     .await
 }
 
+pub(crate) async fn check_tracked_writes(
+    frontend: &FrontendClient,
+    catalog: &str,
+    schema: &str,
+) -> Result<(), Error> {
+    tracked_query(
+        frontend,
+        catalog,
+        schema,
+        None,
+        &[],
+        &HashMap::new(),
+        &mut None,
+    )
+    .await
+    .map(|_| ())
+}
+
 pub(crate) async fn tracked_query(
     frontend: &FrontendClient,
     catalog: &str,
     schema: &str,
-    request: QueryRequest,
+    request: Option<QueryRequest>,
     extensions: &[(&str, &str)],
     snapshot_seqs: &HashMap<u64, u64>,
     peer_desc: &mut Option<PeerDesc>,
@@ -140,7 +158,12 @@ pub(crate) async fn tracked_query(
             .map(|(k, v)| (k.as_str(), v.as_str()))
             .collect();
         let phase_request = match &command {
-            Command::Write { .. } => request.clone(),
+            Command::Write { .. } => request
+                .as_ref()
+                .context(UnexpectedSnafu {
+                    reason: "Tracked Flow write command has no request",
+                })?
+                .clone(),
             Command::Open { .. } | Command::Close { .. } => QueryRequest {
                 query: Some(Query::Sql(String::new())),
             },
@@ -203,22 +226,7 @@ pub(crate) async fn tracked_query(
                 }
             },
             Err((code, msg)) => {
-                // Classify application-level rejections that will never succeed on
-                // retry against this frontend. This fail-fast is applied ONLY to
-                // `Open`, which is always pre-admission (no write has been
-                // dispatched yet), so a definitive rejection (an older frontend
-                // treats Open as empty SQL -> InvalidArguments; a non-internal
-                // channel rejects the extension -> PermissionDenied/Unsupported)
-                // can never have committed anything — safe to surface a terminal
-                // pre-write error instead of looping forever on a pinned frontend.
-                //
-                // `Write`/`Close` rejections are NOT classified this way: once a
-                // write may have been admitted, a rejection (e.g. WriterLost, or an
-                // UnknownCapability after a VIP moved Open->A/Write->B) leaves the
-                // outcome ambiguous. Treating it as "provably not dispatched" would
-                // let the caller replay and duplicate rows, so those fall through
-                // to the same-capability retry below like any ambiguous transport
-                // failure.
+                // Only Open is pre-admission; definitive rejection there is safe to surface.
                 if matches!(&command, Command::Open { .. }) && is_definitive_rejection(code) {
                     return Err(prewrite_reason(
                         format!("Frontend rejected tracked Flow open: {msg}"),
@@ -234,7 +242,11 @@ pub(crate) async fn tracked_query(
         };
         match (command.clone(), reply) {
             (Command::Open { .. }, Some(Reply::Opened { capability: cap })) if !cap.is_empty() => {
-                command = Command::Write { capability: cap };
+                command = if request.is_some() {
+                    Command::Write { capability: cap }
+                } else {
+                    Command::Close { capability: cap }
+                };
                 continue;
             }
             (Command::Open { .. }, Some(other)) => {
@@ -261,6 +273,12 @@ pub(crate) async fn tracked_query(
             }
             (Command::Close { .. }, Some(Reply::Closed)) => {
                 let Some((rows, cost, metrics, error)) = completion.take() else {
+                    if request.is_none() {
+                        return Ok(OutputWithMetrics::from_output(Output::new(
+                            OutputData::AffectedRows(0),
+                            OutputMeta::default(),
+                        )));
+                    }
                     return UnexpectedSnafu {
                         reason: "Close completed without positive write result",
                     }
@@ -516,6 +534,198 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct PreflightHandler {
+        opens: AtomicUsize,
+        closes: AtomicUsize,
+        reject_open: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl super::super::GrpcQueryHandlerWithBoxedError for PreflightHandler {
+        async fn do_query(
+            &self,
+            request: Request,
+            ctx: QueryContextRef,
+        ) -> Result<Output, BoxedError> {
+            let encoded = ctx.extensions().get(COMMAND_KEY).unwrap();
+            assert_empty_sql(&request);
+            match Command::decode(encoded).unwrap() {
+                Command::Open { .. } => {
+                    self.opens.fetch_add(1, Ordering::SeqCst);
+                    if self.reject_open {
+                        Err(BoxedError::new(PlainError::new(
+                            "preflight rejected".into(),
+                            StatusCode::PermissionDenied,
+                        )))
+                    } else {
+                        response(Reply::Opened {
+                            capability: "preflight-capability".into(),
+                        })
+                    }
+                }
+                Command::Close { capability } => {
+                    assert_eq!(capability, "preflight-capability");
+                    self.closes.fetch_add(1, Ordering::SeqCst);
+                    response(Reply::Closed)
+                }
+                Command::Write { .. } => panic!("preflight must not write"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn preflight_opens_and_closes_without_writing() {
+        let handler = Arc::new(PreflightHandler {
+            opens: AtomicUsize::default(),
+            closes: AtomicUsize::default(),
+            reject_open: false,
+        });
+        let trait_handler: Arc<dyn super::super::GrpcQueryHandlerWithBoxedError> = handler.clone();
+        let frontend = FrontendClient::from_grpc_handler(
+            Arc::downgrade(&trait_handler),
+            query::options::QueryOptions::default(),
+        )
+        .with_tracked_writes();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            frontend.check_tracked_writes("greptime", "public"),
+        )
+        .await
+        .expect("tracked-write preflight should finish within 10 seconds")
+        .unwrap();
+        assert_eq!(handler.opens.load(Ordering::SeqCst), 1);
+        assert_eq!(handler.closes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn preflight_preserves_definitive_open_error() {
+        let handler = Arc::new(PreflightHandler {
+            opens: AtomicUsize::default(),
+            closes: AtomicUsize::default(),
+            reject_open: true,
+        });
+        let trait_handler: Arc<dyn super::super::GrpcQueryHandlerWithBoxedError> = handler.clone();
+        let frontend = FrontendClient::from_grpc_handler(
+            Arc::downgrade(&trait_handler),
+            query::options::QueryOptions::default(),
+        )
+        .with_tracked_writes();
+        let error = tokio::time::timeout(
+            Duration::from_secs(10),
+            frontend.check_tracked_writes("greptime", "public"),
+        )
+        .await
+        .expect("tracked-write preflight rejection should finish within 10 seconds")
+        .unwrap_err();
+        assert_eq!(error.status_code(), StatusCode::PermissionDenied);
+        assert!(matches!(
+            &error,
+            Error::External { source, .. }
+                if source.as_any().downcast_ref::<TerminalError>().is_some_and(|terminal| {
+                    terminal.code == StatusCode::PermissionDenied as u32
+                        && terminal.message.contains("preflight rejected")
+                })
+        ));
+        assert_eq!(handler.opens.load(Ordering::SeqCst), 1);
+        assert_eq!(handler.closes.load(Ordering::SeqCst), 0);
+    }
+
+    #[derive(Debug)]
+    struct RejectionRetryHandler {
+        status: StatusCode,
+        opens: AtomicUsize,
+        writes: AtomicUsize,
+        closes: AtomicUsize,
+        capability: std::sync::Mutex<Option<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl super::super::GrpcQueryHandlerWithBoxedError for RejectionRetryHandler {
+        async fn do_query(
+            &self,
+            request: Request,
+            ctx: QueryContextRef,
+        ) -> Result<Output, BoxedError> {
+            let encoded = ctx.extensions().get(COMMAND_KEY).unwrap();
+            match Command::decode(encoded).unwrap() {
+                Command::Open { nonce } => {
+                    assert_empty_sql(&request);
+                    self.opens.fetch_add(1, Ordering::SeqCst);
+                    let mut capability = self.capability.lock().unwrap();
+                    let value = capability.get_or_insert_with(|| nonce);
+                    response(Reply::Opened {
+                        capability: value.clone(),
+                    })
+                }
+                Command::Write { capability } => {
+                    assert_eq!(request_sql(&request), "INSERT INTO t VALUES (11)");
+                    assert_eq!(self.capability.lock().unwrap().as_ref(), Some(&capability));
+                    if self.writes.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err(BoxedError::new(PlainError::new(
+                            "write rejection".into(),
+                            self.status,
+                        )))
+                    } else {
+                        response(Reply::Complete {
+                            rows: 2,
+                            cost: 0,
+                            metrics: None,
+                            error: None,
+                        })
+                    }
+                }
+                Command::Close { capability } => {
+                    assert_empty_sql(&request);
+                    assert_eq!(self.capability.lock().unwrap().as_ref(), Some(&capability));
+                    if self.closes.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err(BoxedError::new(PlainError::new(
+                            "close rejection".into(),
+                            self.status,
+                        )))
+                    } else {
+                        response(Reply::Closed)
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn post_admission_rejections_retry_same_capability_until_close() {
+        for status in [
+            StatusCode::Unsupported,
+            StatusCode::InvalidArguments,
+            StatusCode::PermissionDenied,
+        ] {
+            let handler = Arc::new(RejectionRetryHandler {
+                status,
+                opens: AtomicUsize::default(),
+                writes: AtomicUsize::default(),
+                closes: AtomicUsize::default(),
+                capability: std::sync::Mutex::new(None),
+            });
+            let trait_handler: Arc<dyn super::super::GrpcQueryHandlerWithBoxedError> =
+                handler.clone();
+            let frontend = FrontendClient::from_grpc_handler(
+                Arc::downgrade(&trait_handler),
+                query::options::QueryOptions::default(),
+            )
+            .with_tracked_writes();
+            let output = tokio::time::timeout(
+                Duration::from_secs(10),
+                frontend.tracked_sql_write("greptime", "public", "INSERT INTO t VALUES (11)"),
+            )
+            .await
+            .expect("post-admission retries should finish within 10 seconds")
+            .unwrap();
+            assert!(matches!(output.output.data, OutputData::AffectedRows(2)));
+            assert_eq!(handler.opens.load(Ordering::SeqCst), 1);
+            assert_eq!(handler.writes.load(Ordering::SeqCst), 2);
+            assert_eq!(handler.closes.load(Ordering::SeqCst), 2);
+        }
+    }
+
     #[tokio::test]
     async fn fails_fast_on_definitive_open_rejection() {
         let handler = Arc::new(LegacyRejectHandler::default());
@@ -524,9 +734,12 @@ mod tests {
         let frontend =
             FrontendClient::from_grpc_handler(weak, query::options::QueryOptions::default())
                 .with_tracked_writes();
-        let result = frontend
-            .tracked_sql_write("greptime", "public", "INSERT INTO t VALUES (7)")
-            .await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            frontend.tracked_sql_write("greptime", "public", "INSERT INTO t VALUES (7)"),
+        )
+        .await
+        .expect("definitive Open rejection should finish within 10 seconds");
         let err = result.expect_err("definitive Open rejection must not be retried forever");
         assert_eq!(err.status_code(), StatusCode::InvalidArguments);
         // The durable-execution layer keys repair off a TerminalError inside

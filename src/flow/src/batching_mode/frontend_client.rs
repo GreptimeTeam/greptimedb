@@ -239,6 +239,18 @@ impl DatabaseWithPeer {
 pub(crate) mod flow_write;
 
 impl FrontendClient {
+    /// Preflight tracked-write support by opening and closing a capability without writing.
+    #[cfg(feature = "enterprise")]
+    pub async fn check_tracked_writes(&self, catalog: &str, schema: &str) -> Result<(), Error> {
+        if !self.tracked_writes_enabled() {
+            return UnexpectedSnafu {
+                reason: "Tracked writes are not enabled on this frontend client",
+            }
+            .fail();
+        }
+        flow_write::check_tracked_writes(self, catalog, schema).await
+    }
+
     /// Execute a finite SQL write with receiver-issued completion tracking.
     #[cfg(feature = "enterprise")]
     pub async fn tracked_sql_write(
@@ -566,7 +578,7 @@ impl FrontendClient {
                 self,
                 catalog,
                 schema,
-                request,
+                Some(request),
                 &effective_extension_refs,
                 snapshot_seqs,
                 peer_desc,
