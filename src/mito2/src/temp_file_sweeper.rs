@@ -18,13 +18,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common_telemetry::info;
-use object_store::temp_file::{sweep_temporary_files, writes_temporary_files};
+use object_store::temp_file::{SweepReport, sweep_temporary_files, writes_temporary_files};
 use store_api::storage::RegionId;
 use tokio::sync::Semaphore;
 
 use crate::access_layer::{AccessLayer, AccessLayerRef};
 use crate::manifest::storage::manifest_dir;
 use crate::manifest::storage::staging::{staging_blob_path, staging_manifest_path};
+use crate::metrics::{SWEEP_ERRORS_TOTAL, SWEEP_FILES_DELETED_TOTAL, SWEEP_RUNS_TOTAL};
 use crate::sst::location::index_dir;
 
 /// Returns the directories that `region_id` writes non-append files into.
@@ -74,13 +75,21 @@ pub(crate) fn spawn_region_sweep(
         };
 
         let dirs = region_write_dirs(&access_layer, region_id);
-        let deleted = sweep_temporary_files(access_layer.object_store(), &dirs, older_than).await;
-        if deleted > 0 {
+        let report = sweep_temporary_files(access_layer.object_store(), &dirs, older_than).await;
+        record_sweep(&report);
+        if report.deleted > 0 {
             info!(
-                "Reclaimed {deleted} temporary file(s) of a crashed writer in region {region_id}"
+                "Reclaimed {} temporary file(s) of a crashed writer in region {region_id}",
+                report.deleted
             );
         }
     });
+}
+
+fn record_sweep(report: &SweepReport) {
+    SWEEP_RUNS_TOTAL.inc();
+    SWEEP_FILES_DELETED_TOTAL.inc_by(report.deleted as u64);
+    SWEEP_ERRORS_TOTAL.inc_by(report.failed as u64);
 }
 
 #[cfg(test)]
@@ -116,5 +125,21 @@ mod tests {
         assert!(dirs[2].ends_with("1_0000000002/manifest/"));
         assert!(dirs[3].ends_with("1_0000000002/staging/blob/"));
         assert!(dirs[4].ends_with("1_0000000002/staging/manifest/"));
+    }
+
+    #[test]
+    fn test_record_sweep() {
+        let runs = SWEEP_RUNS_TOTAL.get();
+        let deleted = SWEEP_FILES_DELETED_TOTAL.get();
+        let errors = SWEEP_ERRORS_TOTAL.get();
+
+        record_sweep(&SweepReport {
+            deleted: 2,
+            failed: 1,
+        });
+
+        assert_eq!(runs + 1, SWEEP_RUNS_TOTAL.get());
+        assert_eq!(deleted + 2, SWEEP_FILES_DELETED_TOTAL.get());
+        assert_eq!(errors + 1, SWEEP_ERRORS_TOTAL.get());
     }
 }
