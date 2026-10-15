@@ -23,7 +23,8 @@ use opendal::raw::{
     OpWrite, RpCreateDir, RpPresign, RpRename, RpStat, Service, ServiceInfo, Servicer, oio,
 };
 use opendal::{Buffer, Capability, ErrorKind, Metadata, OperationContext, Result};
-use uuid::Uuid;
+
+use crate::temp_file::temporary_path;
 
 /// Adds atomic writes and streaming copies to the native HDFS backend.
 #[derive(Debug, Clone)]
@@ -469,16 +470,6 @@ async fn delete_path(inner: &Servicer, context: &OperationContext, path: &str) -
     let mut deleter = inner.delete(context)?;
     deleter.delete(path, OpDelete::new()).await?;
     deleter.close().await
-}
-
-// A writer that dies before it renames the file leaves the temporary file
-// behind; the sweep in `temp_file` reclaims it.
-fn temporary_path(path: &str) -> String {
-    let suffix = format!(".greptime-{}.tmp", Uuid::new_v4());
-    match path.rsplit_once('/') {
-        Some((parent, name)) => format!("{parent}/.{name}{suffix}"),
-        None => format!(".{path}{suffix}"),
-    }
 }
 
 #[cfg(test)]
