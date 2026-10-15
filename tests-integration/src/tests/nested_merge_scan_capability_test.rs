@@ -13,11 +13,12 @@
 // limitations under the License.
 
 //! Exercises hand-built nested `MergeScan` plans at datanode execution, not optimizer behavior.
-//! The outer `handle_remote_read` request is in-process; inner region reads use real TCP Flight.
-//! The probe scan resolves against the request's region catalog, while the nested payload resolves
-//! against the engine catalog; distinct column names ensure these scopes cannot be confused.
-//! Success compares the complete duplicate-sensitive result multiset with frontend SQL and known
-//! rows. Missing inner tables and closed remote inner regions must each fail the whole query.
+//! Existing nested-plan tests use in-process outer `handle_remote_read` requests; inner region
+//! reads use real TCP Flight. The standalone requester baseline below calls an actual datanode's
+//! `handle_query` over TCP Flight. The probe scan resolves against the request's region catalog,
+//! while the nested payload resolves against the engine catalog; distinct column names ensure
+//! these scopes cannot be confused. Success compares complete duplicate-sensitive results with
+//! frontend SQL and known rows. Missing inner tables and closed remote inner regions must each fail.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -72,6 +73,85 @@ const BUILD_ROWS: &[(i32, i32, i32)] = &[
     (120, 30, 4),
     (121, 40, 5),
 ];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_region_requester_scan_over_tcp_flight() {
+    use common_meta::node_manager::Datanode;
+    use common_query::request::QueryRequest as LogicalQueryRequest;
+
+    common_telemetry::init_default_ut_logging();
+
+    let cluster = build_cluster("test_region_requester_scan_over_tcp_flight").await;
+    let frontend = cluster.fe_instance().clone();
+    prepare_tables(&frontend).await;
+
+    let leaders = region_leaders(&frontend, PROBE_TABLE).await;
+    assert_eq!(
+        2,
+        leaders.len(),
+        "expected every probe region to have a leader"
+    );
+
+    let sql = format!("SELECT a_id, probe_key, probe_v FROM {PROBE_TABLE} WHERE probe_key >= 20");
+    let reference = query_pretty(&frontend, &sql, query_ctx()).await;
+    let expected = multiset(table_cells(&reference));
+    assert_eq!(
+        vec![vec!["120", "30", "300"], vec!["2", "20", "200"]],
+        expected,
+        "unexpected filtered frontend SQL result:\n{reference}"
+    );
+
+    let query_ctx = query_ctx();
+    let plan = plan_sql(&frontend, &sql, &query_ctx).await;
+    let mut rows = Vec::new();
+    for (region_id, (datanode_id, address)) in &leaders {
+        let baseline = rpc_requests(&cluster, *datanode_id);
+        let client = Client::with_query_and_control_managers(
+            ChannelManager::new(),
+            ChannelManager::new(),
+            [address.as_str()],
+        );
+        let requester = RegionRequester::new(client, false, false);
+        let stream = Datanode::handle_query(
+            &requester,
+            LogicalQueryRequest {
+                header: Some(region_request_header(&query_ctx)),
+                region_id: RegionId::from_u64(*region_id),
+                plan: plan.clone(),
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("Flight query for region {region_id} failed: {e}"));
+        let batches = RecordBatches::try_collect(stream)
+            .await
+            .unwrap_or_else(|e| panic!("Flight stream for region {region_id} failed: {e}"));
+        for batch in batches.iter() {
+            let names = batch
+                .df_record_batch()
+                .schema_ref()
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(vec!["a_id", "probe_key", "probe_v"], names);
+        }
+        rows.extend(table_cells(
+            &batches
+                .pretty_print()
+                .expect("record batches are printable"),
+        ));
+        assert_eq!(
+            baseline + 1,
+            rpc_requests(&cluster, *datanode_id),
+            "expected exactly one DoGet for region {region_id} at datanode {datanode_id}"
+        );
+    }
+    assert_eq!(
+        expected,
+        multiset(rows),
+        "Flight results differ from SQL oracle:\n{reference}"
+    );
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_nested_merge_scan_capability_join_across_datanodes() {
