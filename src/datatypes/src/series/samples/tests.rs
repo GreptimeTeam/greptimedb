@@ -236,6 +236,135 @@ fn chunk_iterator_is_sequential_exact_and_handles_many_singletons() {
 }
 
 #[test]
+fn densifying_slices_keeps_shared_histogram_table() {
+    let table = batch(2.0, 3.0, &[4.0, 5.0]);
+    for index in [Some(0), None] {
+        let source =
+            Samples::try_from_histogram(UInt32Array::from(vec![index; 64]), table.clone()).unwrap();
+        let chunks = (0..64)
+            .map(|sample_index| source.slice(sample_index, 1).unwrap())
+            .collect();
+        let dense = Samples::try_from_chunks(chunks)
+            .unwrap()
+            .into_dense()
+            .unwrap();
+        drop(source);
+
+        assert_eq!(dense.len(), 64);
+        let DenseSamplesRef::Histogram(values) = dense.dense().unwrap() else {
+            panic!()
+        };
+        assert_eq!(values.batch().len(), 1);
+        assert!(Arc::ptr_eq(values.batch(), &table));
+        for sample_index in 0..64 {
+            match index {
+                Some(0) => {
+                    assert_eq!(values.indices().value(sample_index), 0);
+                    assert!(same_sample(
+                        dense.sample(sample_index),
+                        SampleRef::Histogram(table.view(0).unwrap())
+                    ));
+                }
+                None => {
+                    assert!(values.indices().is_null(sample_index));
+                    assert!(matches!(dense.sample(sample_index), SampleRef::Missing));
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
+#[test]
+fn densifying_histogram_and_mixed_chunks_keeps_shared_table() {
+    let stale = f64::from_bits(0x7ff0_0000_0000_0002);
+    let nan = f64::from_bits(0x7ff8_0000_0000_0042);
+    let table = batch(2.0, 3.0, &[4.0, 5.0]);
+    let histograms =
+        Samples::try_from_histogram(UInt32Array::from(vec![Some(0), None]), table.clone()).unwrap();
+    let mixed_histograms =
+        HistogramSamples::try_new(UInt32Array::from(vec![None, Some(0)]), table.clone()).unwrap();
+    let mixed =
+        Samples::try_from_mixed(Float64Array::from(vec![Some(-0.0), None]), mixed_histograms)
+            .unwrap();
+    let chunked = Samples::try_from_chunks(vec![
+        Samples::from_float(Float64Array::from(vec![Some(stale), None, Some(nan)])),
+        histograms,
+        mixed,
+    ])
+    .unwrap();
+    let expected = [
+        SampleRef::Float(stale),
+        SampleRef::Missing,
+        SampleRef::Float(nan),
+        SampleRef::Histogram(table.view(0).unwrap()),
+        SampleRef::Missing,
+        SampleRef::Float(-0.0),
+        SampleRef::Histogram(table.view(0).unwrap()),
+    ];
+    let dense = chunked.into_dense().unwrap();
+
+    assert_eq!(dense.len(), 7);
+    let DenseSamplesRef::Mixed(values) = dense.dense().unwrap() else {
+        panic!()
+    };
+    assert_eq!(values.histograms.batch().len(), 1);
+    assert!(Arc::ptr_eq(values.histograms.batch(), &table));
+    for (index, expected) in expected.into_iter().enumerate() {
+        assert!(
+            same_sample(expected, dense.sample(index)),
+            "position {index}"
+        );
+    }
+    assert_eq!(values.histograms.indices().value(3), 0);
+    assert_eq!(values.histograms.indices().value(6), 0);
+}
+
+#[test]
+fn densification_falls_back_for_distinct_shared_table_owners() {
+    let first = batch(2.0, 3.0, &[4.0, 5.0]);
+    let second = Arc::new(HistogramBatch::try_from_arrow(first.as_arrow().clone()).unwrap());
+
+    for (owners, expected_indices) in [
+        (vec![first.clone(), second.clone()], vec![0, 1]),
+        (
+            vec![first.clone(), first.clone(), second.clone()],
+            vec![0, 1, 2],
+        ),
+    ] {
+        let expected: Vec<_> = owners
+            .iter()
+            .map(|owner| SampleRef::Histogram(owner.view(0).unwrap()))
+            .collect();
+        let chunks = owners
+            .iter()
+            .map(|owner| {
+                Samples::try_from_histogram(UInt32Array::from(vec![Some(0)]), owner.clone())
+                    .unwrap()
+            })
+            .collect();
+        let dense = Samples::try_from_chunks(chunks)
+            .unwrap()
+            .into_dense()
+            .unwrap();
+
+        assert_eq!(dense.len(), owners.len());
+        let DenseSamplesRef::Histogram(values) = dense.dense().unwrap() else {
+            panic!()
+        };
+        assert_eq!(values.batch().len(), owners.len());
+        assert!(!Arc::ptr_eq(values.batch(), &first));
+        assert!(!Arc::ptr_eq(values.batch(), &second));
+        for (index, (expected, expected_index)) in
+            expected.into_iter().zip(expected_indices).enumerate()
+        {
+            assert_eq!(values.indices().value(index), expected_index);
+            assert!(same_sample(expected, dense.sample(index)));
+        }
+    }
+}
+
+#[test]
 fn densification_preserves_values_nulls_nan_and_remaps_multitable_histograms() {
     let stale = f64::from_bits(0x7ff0_0000_0000_0002);
     let float = Samples::from_float(Float64Array::from(vec![Some(1.0), None, Some(stale)]));
