@@ -1045,9 +1045,22 @@ fn float_fields_clones_and_series_keep_real_arrow_buffer_owner_alive() {
         fields,
     )
     .unwrap();
-    drop(cloned);
-    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    let DenseSamplesRef::Float(cloned_values) = cloned.get(0).unwrap().dense().unwrap() else {
+        panic!()
+    };
+    let DenseSamplesRef::Float(series_values) = series.fields.get(0).unwrap().dense().unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(
+        cloned_values.values().as_ptr(),
+        series_values.values().as_ptr()
+    );
+    assert_eq!(cloned_values.values(), &[7.0, 8.0]);
+
     drop(series);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    drop(cloned);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 

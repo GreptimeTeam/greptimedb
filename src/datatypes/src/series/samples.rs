@@ -624,7 +624,7 @@ impl Series {
         if fields.len() != schema.fields.len() {
             return invalid("series field count does not match schema");
         }
-        let time_len = checked_time_len(&time)?;
+        let time_len = time.try_len()?;
         if fields.iter().any(|f| f.len() != time_len) {
             return invalid("series field length does not match time axis");
         }
@@ -646,40 +646,5 @@ impl Series {
             time,
             fields,
         })
-    }
-}
-
-fn checked_time_len(time: &TimeAxis) -> Result<usize> {
-    match time {
-        TimeAxis::Grid(range) => Ok(range.len()),
-        TimeAxis::Explicit(timestamps) => {
-            if timestamps.windows(2).any(|pair| pair[0] >= pair[1]) {
-                return invalid("timestamps must be strictly increasing");
-            }
-            Ok(timestamps.len())
-        }
-        TimeAxis::ExplicitChunks(chunks) => {
-            let mut total = 0usize;
-            let mut previous = None;
-            for chunk in chunks.iter() {
-                total = total.checked_add(chunk.len()).ok_or_else(|| {
-                    InvalidSeriesSnafu {
-                        reason: "timestamp length overflow".to_string(),
-                    }
-                    .build()
-                })?;
-                if chunk.windows(2).any(|pair| pair[0] >= pair[1])
-                    || chunk
-                        .first()
-                        .is_some_and(|first| previous.is_some_and(|last| last >= *first))
-                {
-                    return invalid("timestamps must be strictly increasing across chunks");
-                }
-                if let Some(last) = chunk.last() {
-                    previous = Some(*last);
-                }
-            }
-            Ok(total)
-        }
     }
 }
