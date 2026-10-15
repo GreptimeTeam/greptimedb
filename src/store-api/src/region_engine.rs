@@ -548,6 +548,21 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
         partition: usize,
     ) -> Result<SendableRecordBatchStream, BoxedError>;
 
+    /// Checks whether this scanner can provide a raw-series scan for the given labels.
+    ///
+    /// This is a non-consuming preflight: it must not start a scan or otherwise consume
+    /// scanner state. It checks immutable label binding, schema, and typed residual-predicate
+    /// eligibility. Returning `Some` requires overriding `scan_series_partition` and
+    /// promises that it can execute with this label source. `None` means the raw path is
+    /// unsupported and an ordinary scan remains available. Execution must revalidate and
+    /// return errors rather than falling back if the binding or schema changed since preflight.
+    fn raw_series_schema(
+        &self,
+        _label_source: &RawLabelSource,
+    ) -> Result<Option<Arc<SeriesSchema>>, BoxedError> {
+        Ok(None)
+    }
+
     /// Scans a partition as raw series when this source supports that path.
     ///
     /// `None` means raw capability is absent before execution and permits a legacy scan instead.
@@ -869,6 +884,14 @@ mod tests {
         let scanner = SinglePartitionScanner::new(batches.as_stream(), false, metadata, None);
         let ctx = QueryScanContext::default();
         let metrics = ExecutionPlanMetricsSet::new();
+
+        // The default raw-scan preflight declines without consuming the legacy scan.
+        assert!(
+            scanner
+                .raw_series_schema(&RawLabelSource::Explicit)
+                .unwrap()
+                .is_none()
+        );
 
         // SinglePartitionScanner uses the default raw-scan implementation, which panics.
         let raw_scan = catch_unwind(AssertUnwindSafe(|| {

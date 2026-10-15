@@ -4994,7 +4994,7 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
     }
     // Compare keyed visible tuples through a separately opened legacy scanner.
     // A partition cannot be consumed through both paths.
-    let mut legacy_request = request;
+    let mut legacy_request = request.clone();
     legacy_request.projection = Some(vec![0, 3, 2, 1, 4]);
     legacy_request.preserve_pk_dictionary_encoding = false;
     let legacy = engine
@@ -5090,6 +5090,80 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
         .collect::<Vec<_>>();
     raw_visible.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     assert_eq!(raw_visible, visible);
+
+    // Exercise the production table physical consumer over a fresh real Mito scanner.
+    use common_query::series_frame::unpack_raw_series;
+    use datafusion::execution::TaskContext;
+    use datafusion::physical_plan::ExecutionPlan;
+    use table::table::scan::RegionScanExec;
+    let native_scanner = engine
+        .handle_query(region_id, request.clone())
+        .await
+        .unwrap();
+    let native_metadata = native_scanner.metadata();
+    let native_tags = native_metadata
+        .column_metadatas
+        .iter()
+        .filter(|c| c.semantic_type == SemanticType::Tag)
+        .map(|c| BoundTag {
+            column_id: c.column_id,
+            name: Arc::from(c.column_schema.name.as_str()),
+        })
+        .collect::<Vec<_>>();
+    let native_source = RawLabelSource::PrimaryKey {
+        metric_name: Arc::from("fixture_metric"),
+        physical_metadata: native_metadata,
+        logical_tags: native_tags.into(),
+    };
+    let native_plan = Arc::new(RegionScanExec::new(native_scanner, request.clone(), None).unwrap());
+    let native_plan = native_plan
+        .try_to_series_scan(native_source.clone())
+        .unwrap()
+        .expect("Mito raw-series capability");
+    let native_schema = native_plan.series_schema().clone();
+    let native_frames = native_plan
+        .execute(0, Arc::new(TaskContext::default()))
+        .unwrap();
+    let mut native = unpack_raw_series(
+        native_frames,
+        native_schema,
+        native_source,
+        RawSeriesOrdering::Contiguous,
+    )
+    .unwrap()
+    .try_collect::<Vec<_>>()
+    .await
+    .unwrap();
+    let mut native_visible = native
+        .drain(..)
+        .flat_map(|chunk| {
+            let times = chunk.time.as_explicit().unwrap();
+            (0..times.len())
+                .map(|i| {
+                    let SampleRef::Float(f1) = chunk.fields.get(0).unwrap().sample(i) else {
+                        panic!("expected f1 float")
+                    };
+                    let f0 = match chunk.fields.get(1).unwrap().sample(i) {
+                        SampleRef::Float(value) => Some(value),
+                        SampleRef::Missing => None,
+                        _ => panic!("expected f0 float or null"),
+                    };
+                    (chunk.read_key.to_vec(), times[i], f1, f0)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut expected_native = raw
+        .iter()
+        .map(|(key, time, f1, f0, _)| (key.to_vec(), *time, *f1, *f0))
+        .collect::<Vec<_>>();
+    let sort_native = |rows: &mut Vec<(Vec<u8>, i64, f64, Option<f64>)>| {
+        rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    };
+    sort_native(&mut native_visible);
+    sort_native(&mut expected_native);
+    assert_eq!(expected_native, native_visible);
+
     // Apply the typed predicate and final projection through the ordinary legacy filter path.
     assert_eq!(3, visible.len());
     assert_eq!(
@@ -5214,6 +5288,112 @@ async fn test_mito_raw_series_int64_predicate_uses_original_precision() {
     }
     assert_eq!(vec![2], times);
     assert_eq!(vec![(2, 20.0)], output_values);
+
+    // Validate the typed integer gate through RegionScanExec's actual physical consumer.
+    use common_query::series_frame::unpack_raw_series;
+    use datafusion::execution::TaskContext;
+    use datafusion::physical_plan::ExecutionPlan;
+    use datatypes::series::raw::RawSeriesOrdering;
+    use table::table::scan::RegionScanExec;
+    let native_request = ScanRequest {
+        projection: Some(vec![2, 3]),
+        filters: vec![
+            col("tag_0").eq(lit("series")),
+            col("field_0").gt(lit(boundary)),
+        ],
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        preserve_pk_dictionary_encoding: true,
+        ..Default::default()
+    };
+    let native_scanner = engine
+        .handle_query(region_id, native_request.clone())
+        .await
+        .unwrap();
+    let native_metadata = native_scanner.metadata();
+    let native_source = RawLabelSource::PrimaryKey {
+        metric_name: Arc::from("fixture_metric"),
+        physical_metadata: native_metadata.clone(),
+        logical_tags: Arc::from([BoundTag {
+            column_id: native_metadata.primary_key[0],
+            name: Arc::from("tag_0"),
+        }]),
+    };
+    let native_plan = Arc::new(RegionScanExec::new(native_scanner, native_request, None).unwrap())
+        .try_to_series_scan(native_source.clone())
+        .unwrap()
+        .expect("typed int64 gate is supported");
+    let native_schema = native_plan.series_schema().clone();
+    let frames = native_plan
+        .execute(0, Arc::new(TaskContext::default()))
+        .unwrap();
+    let chunks = unpack_raw_series(
+        frames,
+        native_schema,
+        native_source,
+        RawSeriesOrdering::Contiguous,
+    )
+    .unwrap()
+    .try_collect::<Vec<_>>()
+    .await
+    .unwrap();
+    let native_rows = chunks
+        .iter()
+        .flat_map(|chunk| {
+            let times = chunk.time.as_explicit().unwrap();
+            (0..times.len())
+                .map(|i| {
+                    let SampleRef::Float(value) = chunk.fields.get(0).unwrap().sample(i) else {
+                        panic!("expected float output field")
+                    };
+                    (times[i], value)
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(vec![(2, 20.0)], native_rows);
+
+    let empty_request = ScanRequest {
+        projection: Some(vec![2, 3]),
+        filters: vec![
+            col("tag_0").eq(lit("series")),
+            col("field_0").gt(lit(boundary + 1)),
+        ],
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        preserve_pk_dictionary_encoding: true,
+        ..Default::default()
+    };
+    let empty_scanner = engine
+        .handle_query(region_id, empty_request.clone())
+        .await
+        .unwrap();
+    let empty_metadata = empty_scanner.metadata();
+    let empty_source = RawLabelSource::PrimaryKey {
+        metric_name: Arc::from("fixture_metric"),
+        physical_metadata: empty_metadata.clone(),
+        logical_tags: Arc::from([BoundTag {
+            column_id: empty_metadata.primary_key[0],
+            name: Arc::from("tag_0"),
+        }]),
+    };
+    let empty_plan = Arc::new(RegionScanExec::new(empty_scanner, empty_request, None).unwrap())
+        .try_to_series_scan(empty_source.clone())
+        .unwrap()
+        .expect("statically empty scan still has native capability");
+    let empty_schema = empty_plan.series_schema().clone();
+    let empty_frames = empty_plan
+        .execute(0, Arc::new(TaskContext::default()))
+        .unwrap();
+    let empty_chunks = unpack_raw_series(
+        empty_frames,
+        empty_schema,
+        empty_source,
+        RawSeriesOrdering::Contiguous,
+    )
+    .unwrap()
+    .try_collect::<Vec<_>>()
+    .await
+    .unwrap();
+    assert!(empty_chunks.is_empty());
 }
 
 /// Invalid predicate bindings decline before consumption; explicit labels decline and legacy still reads.
@@ -5304,6 +5484,11 @@ async fn test_mito_raw_series_invalid_binding_before_legacy_read() {
                 name: Arc::from("tag_0"),
             }]),
         };
+        assert_eq!(
+            supported,
+            scanner.raw_series_schema(&valid_source).unwrap().is_some(),
+            "schema preflight case: {name}"
+        );
         let raw = scanner
             .scan_series_partition(&ctx, &metrics, 0, &valid_source)
             .unwrap();
@@ -5389,6 +5574,13 @@ async fn test_mito_raw_series_invalid_binding_before_legacy_read() {
     );
     assert!(
         scanner
+            .raw_series_schema(&RawLabelSource::Explicit)
+            .unwrap()
+            .is_none()
+    );
+    assert!(scanner.raw_series_schema(&valid_shape_bad_tag).is_err());
+    assert!(
+        scanner
             .scan_series_partition(&ctx, &metrics, 0, &valid_shape_bad_tag)
             .is_err()
     );
@@ -5426,5 +5618,71 @@ async fn test_mito_raw_series_invalid_binding_before_legacy_read() {
     assert_eq!(
         vec![("0".to_string(), 0.0, 0), ("1".to_string(), 1.0, 1000)],
         rows
+    );
+
+    // Runtime pruning wrappers are deliberately ineligible for native planning, and
+    // wrappers installed after planning must be caught at execute time.
+    use datafusion::execution::TaskContext;
+    use datafusion::physical_plan::ExecutionPlan;
+    use table::table::scan::RegionScanExec;
+    let dynamic_request = ScanRequest {
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        preserve_pk_dictionary_encoding: true,
+        ..Default::default()
+    };
+    let dynamic_source_for = |scanner: &dyn RegionScanner| {
+        let metadata = scanner.metadata();
+        RawLabelSource::PrimaryKey {
+            metric_name: Arc::from("fixture_metric"),
+            physical_metadata: metadata.clone(),
+            logical_tags: Arc::from([BoundTag {
+                column_id: metadata.primary_key[0],
+                name: Arc::from("tag_0"),
+            }]),
+        }
+    };
+    let make_dynamic = || {
+        Arc::new(DynamicFilterPhysicalExpr::new(
+            vec![Arc::new(Column::new("field_0", 1))],
+            physical_lit(true),
+        ))
+    };
+    let before = engine
+        .handle_query(region_id, dynamic_request.clone())
+        .await
+        .unwrap();
+    let before_source = dynamic_source_for(before.as_ref());
+    let before_scan = Arc::new(RegionScanExec::new(before, dynamic_request.clone(), None).unwrap());
+    assert_eq!(
+        vec![true],
+        before_scan.add_dyn_filters_to_predicate(vec![make_dynamic()])
+    );
+    assert!(
+        before_scan
+            .clone()
+            .try_to_series_scan(before_source)
+            .unwrap()
+            .is_none()
+    );
+
+    let after = engine
+        .handle_query(region_id, dynamic_request.clone())
+        .await
+        .unwrap();
+    let after_source = dynamic_source_for(after.as_ref());
+    let after_scan = Arc::new(RegionScanExec::new(after, dynamic_request, None).unwrap());
+    let after_plan = after_scan
+        .clone()
+        .try_to_series_scan(after_source)
+        .unwrap()
+        .expect("native plan before dynamic wrapper installation");
+    assert_eq!(
+        vec![true],
+        after_scan.add_dyn_filters_to_predicate(vec![make_dynamic()])
+    );
+    assert!(
+        after_plan
+            .execute(0, Arc::new(TaskContext::default()))
+            .is_err()
     );
 }

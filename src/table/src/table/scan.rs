@@ -18,7 +18,8 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 
 use common_error::ext::BoxedError;
-use common_recordbatch::adapter::RegionQueryStatCounters;
+use common_query::series_frame::pack_raw_series;
+use common_recordbatch::adapter::{RecordBatchStreamAdapter, RegionQueryStatCounters};
 use common_recordbatch::{
     DfRecordBatch, DfSendableRecordBatchStream, MemoryTrackedStream, QueryMemoryTracker,
     RecordBatch, SendableRecordBatchStream,
@@ -50,10 +51,12 @@ use datafusion_physical_expr::{
 };
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::compute::SortOptions;
+use datatypes::series::frame::{RawLabelMode, raw_series_frame_schema};
+use datatypes::series::samples::SeriesSchema;
 use futures::{Stream, StreamExt};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::region_engine::{
-    PartitionRange, PrepareRequest, QueryScanContext, RegionScannerRef,
+    PartitionRange, PrepareRequest, QueryScanContext, RawLabelSource, RegionScannerRef,
 };
 use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 
@@ -406,6 +409,247 @@ impl RegionScanExec {
             .properties()
             .query_stat_counters()
     }
+
+    /// Build a native raw-series leaf when the scanner's current preparation supports it.
+    /// Finish partition preparation before selecting or executing this leaf. Callers must
+    /// already have resolved the authorized scanner and logical binding; this method does not
+    /// authenticate them.
+    pub fn try_to_series_scan(
+        self: Arc<Self>,
+        label_source: RawLabelSource,
+    ) -> DfResult<Option<Arc<SeriesScanExec>>> {
+        if !self.pushed_dyn_filters.lock().unwrap().is_empty() {
+            return Ok(None);
+        }
+        let scanner = self.scanner.lock().unwrap();
+        let Some(schema) = scanner
+            .raw_series_schema(&label_source)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?
+        else {
+            return Ok(None);
+        };
+        let arrow_schema = raw_series_frame_schema(&schema, raw_label_mode(&label_source))
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        let partition_count = scanner.properties().num_partitions().max(1);
+        let properties = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(arrow_schema.clone()),
+            Partitioning::UnknownPartitioning(partition_count),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        ));
+        drop(scanner);
+        Ok(Some(Arc::new(SeriesScanExec {
+            scan: self,
+            label_source,
+            series_schema: schema,
+            arrow_schema,
+            properties,
+        })))
+    }
+}
+
+/// Native physical leaf that packs a prepared region scanner's raw series chunks.
+/// Do not prepare, reset, or execute concurrently through scanner aliases.
+pub struct SeriesScanExec {
+    scan: Arc<RegionScanExec>,
+    label_source: RawLabelSource,
+    series_schema: Arc<SeriesSchema>,
+    arrow_schema: ArrowSchemaRef,
+    properties: Arc<PlanProperties>,
+}
+
+impl std::fmt::Debug for SeriesScanExec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let source = match &self.label_source {
+            RawLabelSource::Explicit => "explicit",
+            RawLabelSource::PrimaryKey { .. } => "primary_key",
+        };
+        f.debug_struct("SeriesScanExec")
+            .field("source", &source)
+            .field("fields", &self.series_schema.fields.len())
+            .field(
+                "partitions",
+                &self.properties.output_partitioning().partition_count(),
+            )
+            .finish()
+    }
+}
+
+impl SeriesScanExec {
+    pub fn label_source(&self) -> &RawLabelSource {
+        &self.label_source
+    }
+    pub fn series_schema(&self) -> &Arc<SeriesSchema> {
+        &self.series_schema
+    }
+}
+
+fn raw_label_mode(source: &RawLabelSource) -> RawLabelMode {
+    match source {
+        RawLabelSource::PrimaryKey { .. } => RawLabelMode::Key,
+        RawLabelSource::Explicit => RawLabelMode::Explicit,
+    }
+}
+
+fn same_label_source(left: &RawLabelSource, right: &RawLabelSource) -> bool {
+    match (left, right) {
+        (RawLabelSource::Explicit, RawLabelSource::Explicit) => true,
+        (
+            RawLabelSource::PrimaryKey {
+                metric_name: lm,
+                physical_metadata: lp,
+                logical_tags: lt,
+            },
+            RawLabelSource::PrimaryKey {
+                metric_name: rm,
+                physical_metadata: rp,
+                logical_tags: rt,
+            },
+        ) => {
+            lm == rm
+                && Arc::ptr_eq(lp, rp)
+                && lt.len() == rt.len()
+                && lt
+                    .iter()
+                    .zip(rt.iter())
+                    .all(|(l, r)| l.name == r.name && l.column_id == r.column_id)
+        }
+        _ => false,
+    }
+}
+
+impl DisplayAs for SeriesScanExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let source = match &self.label_source {
+            RawLabelSource::Explicit => "explicit",
+            RawLabelSource::PrimaryKey { .. } => "primary_key",
+        };
+        write!(
+            f,
+            "SeriesScanExec: source={source}, fields={}, partitions={}",
+            self.series_schema.fields.len(),
+            self.properties.output_partitioning().partition_count()
+        )
+    }
+}
+
+impl ExecutionPlan for SeriesScanExec {
+    fn schema(&self) -> ArrowSchemaRef {
+        self.arrow_schema.clone()
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
+    ) -> datafusion_common::Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> datafusion_common::Result<Arc<dyn ExecutionPlan>> {
+        if !children.is_empty() {
+            return Err(DataFusionError::Plan("SeriesScanExec is a leaf".into()));
+        }
+        Ok(self)
+    }
+    fn name(&self) -> &str {
+        "SeriesScanExec"
+    }
+    fn metrics(&self) -> Option<MetricsSet> {
+        Some(self.scan.metric.clone_inner())
+    }
+    fn reset_state(self: Arc<Self>) -> DfResult<Arc<dyn ExecutionPlan>> {
+        self.scan.scanner.lock().unwrap().reset_state();
+        self.scan.pushed_dyn_filters.lock().unwrap().clear();
+        Ok(self)
+    }
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> datafusion_common::Result<DfSendableRecordBatchStream> {
+        let partitions = self.properties.output_partitioning().partition_count();
+        if partition >= partitions {
+            return Err(DataFusionError::Execution(format!(
+                "partition {partition} out of bounds for {partitions} partitions"
+            )));
+        }
+        if !self.scan.pushed_dyn_filters.lock().unwrap().is_empty() {
+            return Err(DataFusionError::Execution(
+                "dynamic filters changed after native series planning".into(),
+            ));
+        }
+        let tracing_context = TracingContext::from_json(context.session_id().as_str());
+        let span = tracing_context.attach(common_telemetry::tracing::info_span!(
+            "read_from_region",
+            partition = partition
+        ));
+        let _enter = span.enter();
+        let ctx = QueryScanContext {
+            explain_verbose: self.scan.explain_verbose,
+        };
+        let scanner = self.scan.scanner.lock().unwrap();
+        let current = scanner
+            .raw_series_schema(&self.label_source)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?
+            .ok_or_else(|| {
+                DataFusionError::Execution("raw series capability changed after planning".into())
+            })?;
+        let current_frame = raw_series_frame_schema(&current, raw_label_mode(&self.label_source))
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        if current_frame != self.arrow_schema
+            || scanner.properties().num_partitions().max(1) != partitions
+        {
+            return Err(DataFusionError::Execution(
+                "raw series schema or prepared partitions changed after planning".into(),
+            ));
+        }
+        let raw = scanner
+            .scan_series_partition(&ctx, &self.scan.metric, partition, &self.label_source)
+            .map_err(|e| DataFusionError::External(Box::new(e)))?
+            .ok_or_else(|| {
+                DataFusionError::Execution(
+                    "raw series capability disappeared during execution".into(),
+                )
+            })?;
+        if raw.schema().fields.len() != self.series_schema.fields.len()
+            || raw
+                .schema()
+                .fields
+                .iter()
+                .zip(self.series_schema.fields.iter())
+                .any(|(a, b)| a.name != b.name)
+            || raw.schema().eval_grid.is_some()
+            || !same_label_source(raw.label_source(), &self.label_source)
+        {
+            return Err(DataFusionError::Execution(
+                "raw series stream does not match its planned binding".into(),
+            ));
+        }
+        let packed = pack_raw_series(raw)?;
+        let stream = RecordBatchStreamAdapter::try_new(packed)
+            .map_err(|e| DataFusionError::External(Box::new(BoxedError::new(e))))?;
+        let stream: SendableRecordBatchStream = Box::pin(stream);
+        let stream = if let Some(tracker) = &self.scan.query_memory_tracker {
+            Box::pin(MemoryTrackedStream::new(stream, tracker.clone())) as SendableRecordBatchStream
+        } else {
+            stream
+        };
+        drop(_enter);
+        Ok(Box::pin(StreamWithMetricWrapper {
+            stream,
+            metric: StreamMetrics::new(&self.scan.metric, partition),
+            span,
+            await_timer: None,
+            dyn_filter: None,
+        }))
+    }
 }
 
 impl ExecutionPlan for RegionScanExec {
@@ -682,6 +926,10 @@ impl DfRecordBatchStream for StreamWithMetricWrapper {
         self.stream.schema().arrow_schema().clone()
     }
 }
+
+#[cfg(test)]
+#[path = "scan/series_tests.rs"]
+mod series_tests;
 
 #[cfg(test)]
 mod test {
