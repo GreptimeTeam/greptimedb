@@ -393,9 +393,16 @@ impl Samples {
         let shared_batch = histogram_batches
             .next()
             .filter(|first| histogram_batches.all(|batch| Arc::ptr_eq(first, batch)));
+        let needs_float = chunks.iter().any(|chunk| {
+            matches!(
+                chunk.storage,
+                SampleStorage::Float(_) | SampleStorage::Mixed(_)
+            )
+        });
         let mut tables: Vec<&dyn Array> = Vec::new();
         let mut indices = UInt32Builder::with_capacity(total_len);
-        let mut floats = arrow::array::Float64Builder::with_capacity(total_len);
+        let mut floats =
+            needs_float.then(|| arrow::array::Float64Builder::with_capacity(total_len));
         let mut base = 0u32;
         for chunk in chunks.iter() {
             let (float_values, histogram) = match &chunk.storage {
@@ -412,11 +419,13 @@ impl Samples {
                 tables.push(histogram.batch.as_arrow());
             }
             for position in 0..chunk.len() {
-                match float_values {
-                    Some(values) if values.is_valid(position) => {
-                        floats.append_value(values.value(position))
+                if let Some(floats) = &mut floats {
+                    match float_values {
+                        Some(values) if values.is_valid(position) => {
+                            floats.append_value(values.value(position));
+                        }
+                        _ => floats.append_null(),
                     }
-                    _ => floats.append_null(),
                 }
                 match histogram {
                     Some(histogram) if histogram.indices.is_valid(position) => {
@@ -462,14 +471,8 @@ impl Samples {
             Arc::new(HistogramBatch::try_from_arrow(struct_array)?)
         };
         let histogram = HistogramSamples::try_new(indices.finish(), batch)?;
-        let floats = floats.finish();
-        if chunks.iter().any(|chunk| {
-            matches!(
-                chunk.storage,
-                SampleStorage::Float(_) | SampleStorage::Mixed(_)
-            )
-        }) {
-            Self::try_from_mixed(floats, histogram)
+        if let Some(mut floats) = floats {
+            Self::try_from_mixed(floats.finish(), histogram)
         } else {
             Ok(Self {
                 storage: SampleStorage::Histogram(histogram),
