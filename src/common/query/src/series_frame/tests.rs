@@ -18,7 +18,7 @@ use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Wake, Waker};
 
 use common_error::ext::{BoxedError, PlainError};
 use common_error::status_code::StatusCode;
@@ -227,6 +227,41 @@ async fn pack_all(input: SendableRawSeriesStream) -> Vec<RecordBatch> {
     }
     out
 }
+
+#[tokio::test]
+async fn contiguous_adapter_does_not_certify_nonadjacent_recurrence() {
+    // A/B/A violates the producer's contiguous-key contract; adapters validate adjacent chunks
+    // only and preserve the supplied sequence rather than sorting, merging, or dropping rows.
+    let expected = [
+        (b"a".as_slice(), 1, 11.0),
+        (b"b".as_slice(), 2, 22.0),
+        (b"a".as_slice(), 3, 33.0),
+    ];
+    let input = expected
+        .iter()
+        .map(|(key, time, value)| {
+            chunk_with(key, &[*time], vec![Some(*value)], Some(metric()), true)
+        })
+        .collect();
+    let (source, _, _) = raw(input, RawSeriesOrdering::Contiguous);
+    let batches = pack_all(source).await;
+    let frame_schema = batches[0].schema();
+    let (source, _, _) = df_source(batches, frame_schema, false);
+    let mut decoded = unpack_raw_series(
+        source,
+        schema(),
+        RawLabelSource::Explicit,
+        RawSeriesOrdering::Contiguous,
+    )
+    .unwrap();
+
+    for (key, time, value) in expected {
+        let actual = decoded.next().await.unwrap().unwrap();
+        assert_chunk(&actual, key, &[time], &[Some(value)], true);
+        assert_metric(&actual, None);
+    }
+    assert!(decoded.next().await.is_none());
+}
 fn assert_metric(chunk: &RawSeriesChunk, host: Option<&str>) {
     let actual = chunk
         .metric
@@ -405,13 +440,13 @@ async fn invalid_sequence_reports_valid_prefix_then_one_terminal_error() {
             prefix: vec![(b"a", 1, false, None)],
         },
         Case {
-            name: "nonlocal_recurrence",
+            name: "key_decrease_after_intervening_keys",
             items: vec![
                 chunk(b"a", &[1], true),
                 chunk(b"b", &[2], true),
                 chunk(b"a", &[3], true),
             ],
-            order: RawSeriesOrdering::Contiguous,
+            order: RawSeriesOrdering::ReadKeyThenTime,
             expected_prefix_count: 2,
             prefix: vec![(b"a", 1, true, None), (b"b", 2, true, None)],
         },
@@ -896,7 +931,7 @@ async fn unpack_batch_sequence_error_is_atomic_for_all_rows() {
     ] {
         let (input, _, _) = raw(
             vec![chunk(key, &[time], true)],
-            RawSeriesOrdering::Contiguous,
+            RawSeriesOrdering::ReadKeyThenTime,
         );
         batches.extend(pack_all(input).await);
     }
@@ -906,7 +941,7 @@ async fn unpack_batch_sequence_error_is_atomic_for_all_rows() {
         source,
         schema(),
         RawLabelSource::Explicit,
-        RawSeriesOrdering::Contiguous,
+        RawSeriesOrdering::ReadKeyThenTime,
     )
     .unwrap();
     assert!(unpacked.next().await.unwrap().is_err());
@@ -1077,8 +1112,28 @@ async fn frame_application_metadata_is_stable_and_schema_change_rejected() {
     }
 }
 
+struct CountingWake(AtomicUsize);
+
+impl Wake for CountingWake {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn poll_unpacked(
+    stream: &mut SendableRawSeriesStream,
+    waker: &Waker,
+) -> Poll<Option<Result<RawSeriesChunk, BoxedError>>> {
+    stream.as_mut().poll_next(&mut Context::from_waker(waker))
+}
+
 #[tokio::test]
-async fn unpack_drains_many_empty_batches_before_the_next_row() {
+async fn unpack_bounds_empty_batches_per_poll_and_eventually_yields_row() {
+    const BUDGET: usize = 32;
     let (input, _, _) = raw(
         vec![chunk(b"after-empty", &[9], true)],
         RawSeriesOrdering::Contiguous,
@@ -1096,15 +1151,197 @@ async fn unpack_drains_many_empty_batches_before_the_next_row() {
         RawSeriesOrdering::Contiguous,
     )
     .unwrap();
-    assert_chunk(
-        &unpacked.next().await.unwrap().unwrap(),
-        b"after-empty",
-        &[9],
-        &[Some(9.0)],
+    let wake = Arc::new(CountingWake(AtomicUsize::new(0)));
+    let waker = Waker::from(wake.clone());
+
+    let before = polls.load(Ordering::SeqCst);
+    assert!(matches!(
+        poll_unpacked(&mut unpacked, &waker),
+        Poll::Pending
+    ));
+    assert_eq!(polls.load(Ordering::SeqCst) - before, BUDGET);
+    assert_eq!(wake.0.load(Ordering::SeqCst), 1);
+
+    let mut yielded = false;
+    let mut expected_wakes = 1;
+    for _ in 0..=10_000 / BUDGET {
+        let before = polls.load(Ordering::SeqCst);
+        let wakes_before = wake.0.load(Ordering::SeqCst);
+        match poll_unpacked(&mut unpacked, &waker) {
+            Poll::Pending => {
+                assert_eq!(polls.load(Ordering::SeqCst) - before, BUDGET);
+                expected_wakes += 1;
+                assert_eq!(wake.0.load(Ordering::SeqCst) - wakes_before, 1);
+                assert_eq!(wake.0.load(Ordering::SeqCst), expected_wakes);
+            }
+            Poll::Ready(Some(Ok(chunk))) => {
+                assert!(polls.load(Ordering::SeqCst) - before <= BUDGET + 1);
+                assert_eq!(polls.load(Ordering::SeqCst), 10_001);
+                assert_eq!(wake.0.load(Ordering::SeqCst), wakes_before);
+                assert_eq!(wake.0.load(Ordering::SeqCst), 10_000 / BUDGET);
+                assert_chunk(&chunk, b"after-empty", &[9], &[Some(9.0)], true);
+                yielded = true;
+                break;
+            }
+            other => panic!("unexpected poll result: {other:?}"),
+        }
+    }
+    assert!(yielded, "bounded polling should eventually yield the row");
+    assert!(matches!(
+        poll_unpacked(&mut unpacked, &waker),
+        Poll::Ready(None)
+    ));
+    assert_eq!(wake.0.load(Ordering::SeqCst), 10_000 / BUDGET);
+}
+
+#[test]
+fn unpack_yields_at_empty_batch_budget_before_observing_eof() {
+    const BUDGET: usize = 32;
+    let frame_schema = datatypes::series::frame::raw_series_frame_schema(
+        &schema(),
+        datatypes::series::frame::RawLabelMode::Explicit,
+    )
+    .unwrap();
+    let batches = vec![RecordBatch::new_empty(frame_schema.clone()); BUDGET];
+    let (source, polls, _) = df_source(batches, frame_schema, false);
+    let mut unpacked = unpack_raw_series(
+        source,
+        schema(),
+        RawLabelSource::Explicit,
+        RawSeriesOrdering::Contiguous,
+    )
+    .unwrap();
+    let wake = Arc::new(CountingWake(AtomicUsize::new(0)));
+    let waker = Waker::from(wake.clone());
+
+    assert!(matches!(
+        poll_unpacked(&mut unpacked, &waker),
+        Poll::Pending
+    ));
+    assert_eq!(polls.load(Ordering::SeqCst), BUDGET);
+    assert_eq!(wake.0.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        poll_unpacked(&mut unpacked, &waker),
+        Poll::Ready(None)
+    ));
+    assert_eq!(wake.0.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn unpack_propagates_upstream_pending_without_extra_wake() {
+    let frame_schema = datatypes::series::frame::raw_series_frame_schema(
+        &schema(),
+        datatypes::series::frame::RawLabelMode::Explicit,
+    )
+    .unwrap();
+    let (source, polls, _) = df_source(
+        vec![RecordBatch::new_empty(frame_schema.clone())],
+        frame_schema,
         true,
     );
-    assert_eq!(polls.load(Ordering::SeqCst), 10_001);
-    assert!(unpacked.next().await.is_none());
+    let mut unpacked = unpack_raw_series(
+        source,
+        schema(),
+        RawLabelSource::Explicit,
+        RawSeriesOrdering::Contiguous,
+    )
+    .unwrap();
+    let wake = Arc::new(CountingWake(AtomicUsize::new(0)));
+    let waker = Waker::from(wake.clone());
+
+    assert!(matches!(
+        poll_unpacked(&mut unpacked, &waker),
+        Poll::Pending
+    ));
+    assert_eq!(polls.load(Ordering::SeqCst), 2);
+    assert_eq!(wake.0.load(Ordering::SeqCst), 1, "only upstream wakes");
+}
+
+#[test]
+fn unpack_reports_bad_batch_at_budget_boundary_before_yielding() {
+    const BUDGET: usize = 32;
+    let frame_schema = datatypes::series::frame::raw_series_frame_schema(
+        &schema(),
+        datatypes::series::frame::RawLabelMode::Explicit,
+    )
+    .unwrap();
+    let mut batches = vec![RecordBatch::new_empty(frame_schema.clone()); BUDGET - 1];
+    batches.push(RecordBatch::new_empty(
+        datatypes::arrow::datatypes::Schema::empty().into(),
+    ));
+    let (source, polls, _) = df_source(batches, frame_schema, false);
+    let mut unpacked = unpack_raw_series(
+        source,
+        schema(),
+        RawLabelSource::Explicit,
+        RawSeriesOrdering::Contiguous,
+    )
+    .unwrap();
+    let wake = Arc::new(CountingWake(AtomicUsize::new(0)));
+    let waker = Waker::from(wake.clone());
+
+    assert!(matches!(
+        poll_unpacked(&mut unpacked, &waker),
+        Poll::Ready(Some(Err(_)))
+    ));
+    assert_eq!(polls.load(Ordering::SeqCst), BUDGET);
+    assert_eq!(wake.0.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        poll_unpacked(&mut unpacked, &waker),
+        Poll::Ready(None)
+    ));
+}
+
+#[test]
+fn unpack_surfaces_upstream_error_after_budget_yield_once() {
+    const BUDGET: usize = 32;
+    let frame_schema = datatypes::series::frame::raw_series_frame_schema(
+        &schema(),
+        datatypes::series::frame::RawLabelMode::Explicit,
+    )
+    .unwrap();
+    let error = datafusion_common::DataFusionError::External(Box::new(BoxedError::new(
+        PlainError::new("after empty batches".into(), StatusCode::Unsupported),
+    )));
+    let mut items = (0..BUDGET)
+        .map(|_| Ok(RecordBatch::new_empty(frame_schema.clone())))
+        .collect::<Vec<_>>();
+    items.push(Err(error));
+    let polls = Arc::new(AtomicUsize::new(0));
+    let source = Box::pin(DfMock {
+        schema: frame_schema,
+        items: items.into(),
+        polls: polls.clone(),
+        drops: Arc::new(AtomicUsize::new(0)),
+        pending: false,
+        emitted: false,
+    });
+    let mut unpacked = unpack_raw_series(
+        source,
+        schema(),
+        RawLabelSource::Explicit,
+        RawSeriesOrdering::Contiguous,
+    )
+    .unwrap();
+    let wake = Arc::new(CountingWake(AtomicUsize::new(0)));
+    let waker = Waker::from(wake.clone());
+
+    assert!(matches!(
+        poll_unpacked(&mut unpacked, &waker),
+        Poll::Pending
+    ));
+    assert_eq!(polls.load(Ordering::SeqCst), BUDGET);
+    let Poll::Ready(Some(Err(error))) = poll_unpacked(&mut unpacked, &waker) else {
+        panic!("upstream error should be returned after budget yield");
+    };
+    assert_eq!(
+        common_error::ext::ErrorExt::status_code(&error),
+        StatusCode::Unsupported
+    );
+    assert!(matches!(
+        poll_unpacked(&mut unpacked, &waker),
+        Poll::Ready(None)
+    ));
 }
 
 #[tokio::test]

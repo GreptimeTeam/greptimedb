@@ -73,7 +73,10 @@ impl RawTimeAxis {
     }
 }
 
-/// Ordering guarantee for chunks in one input stream.
+/// Producer ordering guarantee for chunks in one input stream. Producers MUST emit all chunks
+/// for each read key contiguously; adapters validate adjacent chunk conditions but do not certify
+/// nonadjacent recurrence for [`Self::Contiguous`]. An `A/B/A` sequence violates the producer
+/// contract even when a consumer cannot detect that recurrence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RawSeriesOrdering {
     /// Each read key's chunks are contiguous; distinct read keys need not be ordered.

@@ -498,8 +498,10 @@ pub enum RawLabelSource {
 
 /// A stream of raw series chunks with stable schema, label binding, and ordering.
 ///
-/// Chunks for a read key are contiguous, with strictly increasing timestamps within and across
-/// chunks. `is_last` marks the last chunk of that key in this stream, not across streams.
+/// Producers MUST emit chunks for each read key contiguously, with strictly increasing timestamps
+/// within and across chunks. Adapters validate adjacent chunk conditions but do not certify
+/// nonadjacent recurrence for [`RawSeriesOrdering::Contiguous`]; an A/B/A sequence violates the
+/// producer contract. `is_last` marks the last chunk of that key in this stream, not across streams.
 pub trait RawSeriesStream: Stream<Item = Result<RawSeriesChunk, BoxedError>> + Send {
     /// Returns the schema shared by all chunks; raw schemas have no evaluation grid.
     fn schema(&self) -> &Arc<SeriesSchema>;

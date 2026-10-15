@@ -20,7 +20,6 @@
 //! candidates only: it is not a residual filter, authorization check, remote transport, or
 //! compaction boundary.
 
-use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -42,6 +41,9 @@ use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSerie
 mod tests;
 
 /// Packs a storage raw-series stream into DataFusion record batches incrementally.
+///
+/// Producers must keep each read key's chunks contiguous. Validation checks adjacent chunk
+/// conditions but does not certify nonadjacent recurrence for `Contiguous` ordering.
 pub fn pack_raw_series(
     source: SendableRawSeriesStream,
 ) -> datafusion_common::Result<DfSendableRecordBatchStream> {
@@ -61,6 +63,9 @@ pub fn pack_raw_series(
 }
 
 /// Unpacks DataFusion batches using the caller's explicit scan binding and ordering.
+///
+/// Producers must keep each read key's chunks contiguous. Validation checks adjacent chunk
+/// conditions but does not certify nonadjacent recurrence for `Contiguous` ordering.
 ///
 /// The supplied binding is retained unchanged and is not validated as field provenance.
 pub fn unpack_raw_series(
@@ -109,17 +114,15 @@ fn invalid(reason: impl Into<String>) -> DataFusionError {
     )))
 }
 
-/// Cross-chunk validation state. Contiguous ordering retains complete owned keys for recurrence
-/// detection, so memory is O(total distinct complete-key bytes + distinct keys), plus current-key
-/// and metric state, until stream termination; there is no eviction or cap. This owns key bytes,
-/// never Arrow buffers that might pin larger payloads.
+/// Cross-chunk validation state. The producer must keep each key contiguous; this validator
+/// checks adjacent chunks only. It retains only the previous complete owned key (not an Arrow
+/// buffer), timestamp, metric, and finality.
 struct SequenceValidator {
     ordering: RawSeriesOrdering,
     previous_key: Option<Vec<u8>>,
     previous_timestamp: Option<i64>,
     previous_metric: Option<MetricName>,
     previous_is_last: bool,
-    closed: HashSet<Vec<u8>>,
 }
 
 impl SequenceValidator {
@@ -130,7 +133,6 @@ impl SequenceValidator {
             previous_timestamp: None,
             previous_metric: None,
             previous_is_last: false,
-            closed: HashSet::new(),
         }
     }
 
@@ -175,17 +177,10 @@ impl SequenceValidator {
                     {
                         return Err(invalid("raw series keys are not ordered"));
                     }
-                    if self.ordering == RawSeriesOrdering::Contiguous && self.closed.contains(key) {
-                        return Err(invalid("raw series key recurred after its contiguous run"));
-                    }
                 }
             }
         }
-        let owned_key = key.to_vec();
-        if chunk.is_last && self.ordering == RawSeriesOrdering::Contiguous {
-            self.closed.insert(owned_key.clone());
-        }
-        self.previous_key = Some(owned_key);
+        self.previous_key = Some(key.to_vec());
         self.previous_timestamp = Some(timestamp);
         self.previous_metric = chunk.metric.clone();
         self.previous_is_last = chunk.is_last;
@@ -296,7 +291,9 @@ impl Stream for UnpackStream {
     type Item = Result<RawSeriesChunk, BoxedError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        const MAX_EMPTY_BATCHES_PER_POLL: usize = 32;
         let this = &mut *self;
+        let mut empty_batches = 0;
         loop {
             if let Some(chunk) = this.pending.next() {
                 return Poll::Ready(Some(Ok(chunk)));
@@ -345,7 +342,17 @@ impl Stream for UnpackStream {
                         })
                     })();
                     match result {
-                        Ok(chunks) => this.pending = chunks.into_iter(),
+                        Ok(chunks) => {
+                            if chunks.is_empty() {
+                                empty_batches += 1;
+                                if empty_batches == MAX_EMPTY_BATCHES_PER_POLL {
+                                    cx.waker().wake_by_ref();
+                                    return Poll::Pending;
+                                }
+                            } else {
+                                this.pending = chunks.into_iter();
+                            }
+                        }
                         Err(error) => {
                             this.finish();
                             return Poll::Ready(Some(Err(BoxedError::new(
