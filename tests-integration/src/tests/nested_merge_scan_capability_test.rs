@@ -29,9 +29,12 @@ use client::region::RegionRequester;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_grpc::channel_manager::ChannelManager;
+use common_meta::error::Result as MetaResult;
 use common_query::Output;
+use common_query::request::RawSeriesRequest;
 use common_recordbatch::{RecordBatch, RecordBatches, SendableRecordBatchStream};
 use common_telemetry::info;
+use datafusion::logical_expr::TableSource;
 use datafusion_expr::{JoinType, LogicalPlan, LogicalPlanBuilder};
 use datanode::region_server::RegionServer;
 use frontend::instance::Instance;
@@ -41,6 +44,7 @@ use query::parser::QueryLanguageParser;
 use query::query_engine::DefaultSerializer;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::{QueryContext, QueryContextRef};
+use store_api::region_engine::SendableRawSeriesStream;
 use store_api::region_request::{RegionCloseRequest, RegionRequest};
 use store_api::storage::RegionId;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
@@ -826,4 +830,579 @@ fn table_cells(pretty: &str) -> Vec<Vec<String>> {
 fn multiset(mut rows: Vec<Vec<String>>) -> Vec<Vec<String>> {
     rows.sort();
     rows
+}
+
+fn table_source(plan: &LogicalPlan) -> Option<Arc<dyn TableSource>> {
+    match plan {
+        LogicalPlan::TableScan(scan) => Some(scan.source.clone()),
+        _ => plan.inputs().into_iter().find_map(table_source),
+    }
+}
+
+async fn expect_raw_unsupported(result: MetaResult<SendableRawSeriesStream>) -> String {
+    use futures_util::TryStreamExt;
+
+    match result {
+        Err(error) => error_chain(&error),
+        Ok(stream) => match stream.try_collect::<Vec<_>>().await {
+            Err(error) => error_chain(&error),
+            Ok(chunks) => panic!(
+                "unsupported raw query unexpectedly returned {} chunks",
+                chunks.len()
+            ),
+        },
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_native_single_region_raw_flight_preserves_typed_filter_and_snapshot() {
+    use common_meta::node_manager::Datanode;
+    use common_query::request::{QueryRequest as LogicalQueryRequest, RawSeriesTag};
+    use datafusion::arrow::array::{Array, Float64Array};
+    use datafusion::common::TableReference;
+    use datafusion_expr::{col, lit};
+    use datatypes::series::raw::RawSeriesOrdering;
+    use datatypes::series::samples::SampleRef;
+    use futures_util::TryStreamExt;
+    use mito2::test_util::sst_util::new_primary_key;
+    use store_api::codec::PrimaryKeyEncoding;
+    use store_api::region_engine::RawLabelSource;
+
+    const TABLE: &str = "native_raw_flight_single_region";
+    common_telemetry::init_default_ut_logging();
+    let cluster = build_cluster("test_native_single_region_raw_flight").await;
+    let frontend = cluster.fe_instance().clone();
+    execute_sql(&frontend, &format!(
+        "CREATE TABLE {TABLE} (host STRING, left_value DOUBLE, right_value DOUBLE, predicate_value BIGINT, ts TIMESTAMP, TIME INDEX (ts), PRIMARY KEY(host)) ENGINE=mito"
+    )).await;
+    execute_sql(&frontend, &format!(
+        "INSERT INTO {TABLE} VALUES ('alpha', 1.25, 11.0, 9007199254740992, 1000), ('alpha', NULL, -0.0, 9007199254740993, 2000), ('alpha', 3.75, 13.0, 9007199254740994, 3000)"
+    )).await;
+
+    let frontend_sql = format!(
+        "SELECT ts, left_value, right_value FROM {TABLE} WHERE predicate_value > 9007199254740992"
+    );
+    let normal_before = query_pretty(&frontend, &frontend_sql, query_ctx()).await;
+    assert_eq!(2, table_cells(&normal_before).len());
+
+    let leaders = region_leaders(&frontend, TABLE).await;
+    assert_eq!(1, leaders.len(), "fixture is required to have one region");
+    let (datanode, address) = leaders.values().next().unwrap();
+    let region_id = *leaders.keys().next().unwrap();
+    let engine = region_server(&cluster, *datanode).mito_engine().unwrap();
+    let region = engine.find_region(RegionId::from_u64(region_id)).unwrap();
+    let metadata = region.metadata();
+    let field_id = |name: &str| {
+        metadata
+            .column_metadatas
+            .iter()
+            .find(|column| column.column_schema.name == name)
+            .unwrap()
+            .column_id
+    };
+    let left_id = field_id("left_value");
+    let right_id = field_id("right_value");
+    let host_id = field_id("host");
+    let projection = ["right_value", "left_value"]
+        .iter()
+        .map(|name| {
+            metadata
+                .column_metadatas
+                .iter()
+                .position(|column| column.column_schema.name == *name)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let snapshot = region.find_committed_sequence();
+
+    let ctx = query_ctx();
+    ctx.set_snapshot(region_id, snapshot);
+    let base = plan_sql(&frontend, &format!("SELECT * FROM {TABLE}"), &ctx).await;
+    // Take only the provider source from the ordinary query plan; build a new root scan with
+    // the intended static predicate rather than submitting its SQL projection/filter parents.
+    let source = table_source(&base).expect("ordinary plan must contain its table source");
+    let filter = col("predicate_value").gt(lit(9_007_199_254_740_992_i64));
+    let plan = LogicalPlanBuilder::scan_with_filters(
+        TableReference::bare(TABLE),
+        source.clone(),
+        Some(projection.clone()),
+        vec![filter],
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+    let binding = RawSeriesRequest {
+        version: 1,
+        physical_metadata: metadata.as_ref().clone(),
+        metric_name: TABLE.to_string(),
+        logical_tags: vec![RawSeriesTag {
+            column_id: host_id,
+            name: "host".into(),
+        }],
+        // Deliberately swapped field order; the predicate column is not projected.
+        field_ids: vec![right_id, left_id],
+    };
+    let baseline = rpc_requests(&cluster, *datanode);
+    let client = Client::with_query_and_control_managers(
+        ChannelManager::new(),
+        ChannelManager::new(),
+        [address.as_str()],
+    );
+    let requester = RegionRequester::new(client, false, false);
+    let raw_request = LogicalQueryRequest {
+        header: Some(region_request_header(&ctx)),
+        region_id: RegionId::from_u64(region_id),
+        plan: plan.clone(),
+    };
+    let raw = requester
+        .handle_raw_series_query(raw_request, binding.clone())
+        .await
+        .unwrap();
+    assert_eq!(baseline + 1, rpc_requests(&cluster, *datanode));
+    assert_eq!(
+        vec!["right_value", "left_value"],
+        raw.schema()
+            .fields
+            .iter()
+            .map(|f| f.name.as_ref())
+            .collect::<Vec<_>>()
+    );
+    match raw.label_source() {
+        RawLabelSource::PrimaryKey {
+            metric_name,
+            physical_metadata,
+            logical_tags,
+        } => {
+            assert_eq!(TABLE, metric_name.as_ref());
+            assert_eq!(metadata.region_id, physical_metadata.region_id);
+            assert_eq!(metadata.primary_key, physical_metadata.primary_key);
+            assert_eq!(1, logical_tags.len());
+            assert_eq!(host_id, logical_tags[0].column_id);
+            assert_eq!("host", logical_tags[0].name.as_ref());
+        }
+        RawLabelSource::Explicit => panic!("expected key-backed source"),
+    }
+    assert_eq!(RawSeriesOrdering::Contiguous, raw.ordering());
+    assert_eq!(PrimaryKeyEncoding::Dense, metadata.primary_key_encoding);
+    assert_eq!(&[host_id], metadata.primary_key.as_slice());
+    let expected_key = new_primary_key(&["alpha"]);
+    let chunks = raw.try_collect::<Vec<_>>().await.unwrap();
+    assert!(!chunks.is_empty());
+    let mut timestamps = Vec::new();
+    for chunk in &chunks {
+        assert!(chunk.metric.is_none());
+        assert_eq!(
+            expected_key,
+            chunk.read_key.as_slice(),
+            "every chunk must retain the complete encoded primary key"
+        );
+        timestamps.extend_from_slice(chunk.time.as_explicit().unwrap());
+        assert_eq!(2, chunk.fields.len());
+        assert_eq!(chunk.time.len(), chunk.fields.get(0).unwrap().len());
+        assert_eq!(chunk.time.len(), chunk.fields.get(1).unwrap().len());
+        for index in 0..chunk.time.len() {
+            let right = chunk.fields.get(0).unwrap().sample(index);
+            let left = chunk.fields.get(1).unwrap().sample(index);
+            match chunk.time.timestamp(index).unwrap() {
+                2000 => {
+                    assert!(
+                        matches!(right, SampleRef::Float(value) if value == 0.0 && value.is_sign_negative())
+                    );
+                    assert!(matches!(left, SampleRef::Missing));
+                }
+                3000 => {
+                    assert!(matches!(right, SampleRef::Float(13.0)));
+                    assert!(matches!(left, SampleRef::Float(3.75)));
+                }
+                timestamp => panic!("unexpected returned timestamp {timestamp}"),
+            }
+        }
+    }
+    assert_eq!(vec![2000, 3000], timestamps);
+    assert!(
+        chunks
+            .iter()
+            .take(chunks.len() - 1)
+            .all(|chunk| !chunk.is_last)
+    );
+    assert!(chunks.last().unwrap().is_last);
+    let normal_after_raw = query_pretty(&frontend, &frontend_sql, query_ctx()).await;
+    assert_eq!(normal_before, normal_after_raw);
+
+    execute_sql(
+        &frontend,
+        &format!("INSERT INTO {TABLE} VALUES ('alpha', 4.75, 14.0, 9007199254740995, 4000)"),
+    )
+    .await;
+    // Re-run the identical plan against the OLD snapshot after the write.
+    let old_baseline = rpc_requests(&cluster, *datanode);
+    let old_again = requester
+        .handle_raw_series_query(
+            LogicalQueryRequest {
+                header: Some(region_request_header(&ctx)),
+                region_id: RegionId::from_u64(region_id),
+                plan: plan.clone(),
+            },
+            binding.clone(),
+        )
+        .await
+        .unwrap();
+    let old_again_chunks = old_again.try_collect::<Vec<_>>().await.unwrap();
+    assert_eq!(old_baseline + 1, rpc_requests(&cluster, *datanode));
+    let old_again_times = old_again_chunks
+        .iter()
+        .flat_map(|chunk| chunk.time.as_explicit().unwrap().iter().copied())
+        .collect::<Vec<_>>();
+    assert_eq!(vec![2000, 3000], old_again_times);
+
+    let mut wrong_binding = binding.clone();
+    wrong_binding.field_ids.swap(0, 1);
+    let wrong_order = requester
+        .handle_raw_series_query(
+            LogicalQueryRequest {
+                header: Some(region_request_header(&ctx)),
+                region_id: RegionId::from_u64(region_id),
+                plan: plan.clone(),
+            },
+            wrong_binding,
+        )
+        .await;
+    let wrong_order_error = expect_raw_unsupported(wrong_order).await;
+    assert!(
+        wrong_order_error.contains("unsupported native raw-series plan"),
+        "expected unsupported native raw-series plan error, got: {wrong_order_error}"
+    );
+    assert_eq!(old_baseline + 2, rpc_requests(&cluster, *datanode));
+
+    let parent_filter = LogicalPlanBuilder::from(plan.clone())
+        .filter(col("right_value").gt(lit(0.0_f64)))
+        .unwrap()
+        .build()
+        .unwrap();
+    let unsupported = requester
+        .handle_raw_series_query(
+            LogicalQueryRequest {
+                header: Some(region_request_header(&ctx)),
+                region_id: RegionId::from_u64(region_id),
+                plan: parent_filter,
+            },
+            binding.clone(),
+        )
+        .await;
+    let unsupported_error = expect_raw_unsupported(unsupported).await;
+    assert!(
+        unsupported_error.contains("unsupported native raw-series plan"),
+        "expected unsupported native raw-series plan error, got: {unsupported_error}"
+    );
+    assert_eq!(old_baseline + 3, rpc_requests(&cluster, *datanode));
+
+    let fresh_ctx = query_ctx();
+    fresh_ctx.set_snapshot(region_id, region.find_committed_sequence());
+    let fresh_baseline = rpc_requests(&cluster, *datanode);
+    let fresh = requester
+        .handle_raw_series_query(
+            LogicalQueryRequest {
+                header: Some(region_request_header(&fresh_ctx)),
+                region_id: RegionId::from_u64(region_id),
+                plan: plan.clone(),
+            },
+            binding.clone(),
+        )
+        .await
+        .unwrap();
+    let fresh_chunks = fresh.try_collect::<Vec<_>>().await.unwrap();
+    let fresh_times = fresh_chunks
+        .iter()
+        .flat_map(|chunk| chunk.time.as_explicit().unwrap().iter().copied())
+        .collect::<Vec<_>>();
+    assert_eq!(fresh_baseline + 1, rpc_requests(&cluster, *datanode));
+    assert_eq!(vec![2000, 3000, 4000], fresh_times);
+
+    // A raw marker must not contaminate an ordinary request using the same requester and context.
+    let ordinary_baseline = rpc_requests(&cluster, *datanode);
+    // The scan's pushed-down predicate is inexact for ordinary execution, so keep an explicit
+    // residual Filter above an unfiltered full-schema scan before projecting the output fields.
+    let ordinary_plan = LogicalPlanBuilder::scan_with_filters(
+        TableReference::bare(TABLE),
+        source.clone(),
+        None,
+        vec![],
+    )
+    .unwrap()
+    .filter(col("predicate_value").gt(lit(9_007_199_254_740_992_i64)))
+    .unwrap()
+    .project(vec![col("right_value"), col("left_value")])
+    .unwrap()
+    .build()
+    .unwrap();
+    let ordinary_stream = Datanode::handle_query(
+        &requester,
+        LogicalQueryRequest {
+            header: Some(region_request_header(&ctx)),
+            region_id: RegionId::from_u64(region_id),
+            plan: ordinary_plan,
+        },
+    )
+    .await
+    .unwrap();
+    let ordinary_batches = RecordBatches::try_collect(ordinary_stream).await.unwrap();
+    assert_eq!(ordinary_baseline + 1, rpc_requests(&cluster, *datanode));
+    let mut ordinary_rows = Vec::new();
+    for batch in ordinary_batches.iter() {
+        let batch = batch.df_record_batch();
+        assert_eq!(
+            vec!["right_value", "left_value"],
+            batch
+                .schema_ref()
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>()
+        );
+        let right = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("right_value column");
+        let left = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("left_value column");
+        for index in 0..batch.num_rows() {
+            ordinary_rows.push((right.value(index), left.is_null(index), left.value(index)));
+        }
+    }
+    assert_eq!(2, ordinary_rows.len());
+    assert!(ordinary_rows[0].0.is_sign_negative() && ordinary_rows[0].0 == 0.0);
+    assert!(ordinary_rows[0].1);
+    assert_eq!(13.0, ordinary_rows[1].0);
+    assert!(!ordinary_rows[1].1);
+    assert_eq!(3.75, ordinary_rows[1].2);
+
+    let ordinary_after = query_pretty(&frontend, &frontend_sql, query_ctx()).await;
+    let ordinary_rows = table_cells(&ordinary_after);
+    assert_eq!(3, ordinary_rows.len());
+    assert!(
+        ordinary_rows.contains(&vec![
+            "1970-01-01T00:00:04".to_string(),
+            "4.75".to_string(),
+            "14.0".to_string(),
+        ]),
+        "unexpected fresh ordinary result:\n{ordinary_after}"
+    );
+
+    assert_raw_entrypoint_wrapper_contract(
+        &cluster, *datanode, region_id, TABLE, &ctx, &plan, binding,
+    )
+    .await;
+}
+
+async fn assert_raw_entrypoint_wrapper_contract(
+    cluster: &GreptimeDbCluster,
+    datanode_id: u64,
+    region_id: u64,
+    table: &str,
+    query_ctx: &QueryContextRef,
+    plan: &LogicalPlan,
+    binding: RawSeriesRequest,
+) {
+    use common_base::Plugins;
+    use common_query::OutputData;
+    use datafusion::arrow::datatypes::DataType;
+    use datafusion::common::TableReference;
+    use datafusion::datasource::DefaultTableSource;
+    use datafusion::logical_expr::TableSource;
+    use datafusion::physical_plan::ExecutionPlan;
+    use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+    use datafusion::physical_plan::coop::CooperativeExec;
+    use datafusion::physical_plan::execution_plan::SchedulingType;
+    use datafusion_expr::{col, lit};
+    use query::dummy_catalog::DummyTableProviderFactory;
+    use query::options::QueryOptions;
+    use query::physical_wrapper::{PhysicalPlanWrapper, PhysicalPlanWrapperRef};
+    use query::query_engine::QueryEngineFactory;
+    use std::any::Any;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use table::table::scan::SeriesScanExec;
+
+    struct TestWrapper {
+        identity: bool,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl PhysicalPlanWrapper for TestWrapper {
+        fn wrap(
+            &self,
+            origin: Arc<dyn ExecutionPlan>,
+            _ctx: QueryContextRef,
+        ) -> Arc<dyn ExecutionPlan> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.identity {
+                origin
+            } else {
+                Arc::new(CoalescePartitionsExec::new(origin))
+            }
+        }
+    }
+
+    let region_id = RegionId::from_u64(region_id);
+    let region_server = region_server(cluster, datanode_id);
+    let region_engine = region_server
+        .find_engine(region_id)
+        .unwrap()
+        .expect("table region engine should be registered");
+    let provider = DummyTableProviderFactory
+        .create_table_provider(region_id, region_engine, Some(query_ctx.clone()))
+        .await
+        .unwrap();
+    let provider_source: Arc<dyn TableSource> =
+        Arc::new(DefaultTableSource::new(Arc::new(provider)));
+    let LogicalPlan::TableScan(scan) = plan else {
+        panic!("fixture plan must be a root table scan");
+    };
+    let scan = LogicalPlanBuilder::scan_with_filters(
+        TableReference::bare(table),
+        provider_source.clone(),
+        scan.projection.clone(),
+        scan.filters.clone(),
+    )
+    .unwrap()
+    .build()
+    .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let plugins_for = |identity| {
+        let plugins = Plugins::new();
+        plugins.insert(Arc::new(TestWrapper {
+            identity,
+            calls: calls.clone(),
+        }) as PhysicalPlanWrapperRef);
+        plugins
+    };
+    let make_engine = |identity| {
+        QueryEngineFactory::new_with_plugins(
+            catalog::memory::new_memory_catalog_manager().unwrap(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            plugins_for(identity),
+            QueryOptions::default(),
+        )
+        .query_engine()
+    };
+
+    let identity_engine = make_engine(true);
+    let identity_output = identity_engine
+        .execute_raw_series(scan.clone(), query_ctx.clone(), binding.clone())
+        .await
+        .unwrap();
+    assert_eq!(1, calls.load(Ordering::SeqCst));
+    let identity_plan = identity_output
+        .meta
+        .plan
+        .as_ref()
+        .expect("raw-series output should retain its physical plan");
+    let native_root_schema = identity_plan.schema();
+    {
+        let root = (identity_plan.as_ref() as &dyn Any)
+            .downcast_ref::<CooperativeExec>()
+            .expect("native raw-series root should be CooperativeExec");
+        let child = (root.input().as_ref() as &dyn Any)
+            .downcast_ref::<SeriesScanExec>()
+            .expect("native CooperativeExec input should be SeriesScanExec");
+        assert!(
+            child.children().is_empty(),
+            "SeriesScanExec should be a leaf"
+        );
+        let schema = child.schema();
+        assert_eq!(schema.as_ref(), identity_plan.schema().as_ref());
+        assert_eq!(
+            schema.as_ref(),
+            root.properties().equivalence_properties().schema().as_ref()
+        );
+    }
+    assert_eq!(
+        1,
+        identity_plan
+            .properties()
+            .output_partitioning()
+            .partition_count()
+    );
+    assert_eq!(
+        SchedulingType::Cooperative,
+        identity_plan.properties().scheduling_type
+    );
+    let OutputData::Stream(identity_stream) = identity_output.data else {
+        panic!("native raw-series entrypoint should return a stream");
+    };
+    let native_batches = RecordBatches::try_collect(identity_stream).await.unwrap();
+    assert!(native_batches.iter().next().is_some());
+    let native_schema = native_batches.schema();
+    let native_schema = native_schema.arrow_schema();
+    assert_eq!(native_root_schema.as_ref(), native_schema.as_ref());
+    assert_eq!(
+        vec!["read_key", "is_last", "time", "fields"],
+        native_schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>()
+    );
+    let DataType::Struct(fields) = native_schema.field_with_name("fields").unwrap().data_type()
+    else {
+        panic!("native raw-series fields column must be a struct");
+    };
+    assert_eq!(
+        vec!["right_value", "left_value"],
+        fields
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>()
+    );
+
+    calls.store(0, Ordering::SeqCst);
+    let wrapped_engine = make_engine(false);
+    let raw_error = match wrapped_engine
+        .execute_raw_series(scan.clone(), query_ctx.clone(), binding)
+        .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("same-schema one-partition nonidentity wrapper must be rejected"),
+    };
+    assert_eq!(1, calls.load(Ordering::SeqCst));
+    assert!(
+        raw_error
+            .to_string()
+            .contains("unsupported native raw-series plan")
+    );
+
+    let ordinary_plan = LogicalPlanBuilder::scan_with_filters(
+        TableReference::bare(table),
+        provider_source,
+        None,
+        vec![],
+    )
+    .unwrap()
+    .filter(col("predicate_value").gt(lit(9_007_199_254_740_992_i64)))
+    .unwrap()
+    .project(vec![col("right_value"), col("left_value")])
+    .unwrap()
+    .build()
+    .unwrap();
+    let ordinary = wrapped_engine
+        .execute(ordinary_plan, query_ctx.clone())
+        .await
+        .unwrap();
+    let OutputData::Stream(ordinary_stream) = ordinary.data else {
+        panic!("ordinary scan should return a stream");
+    };
+    let ordinary_batches = RecordBatches::try_collect(ordinary_stream).await.unwrap();
+    assert_eq!(
+        2,
+        table_cells(&ordinary_batches.pretty_print().unwrap()).len()
+    );
+    assert_eq!(2, calls.load(Ordering::SeqCst));
 }
