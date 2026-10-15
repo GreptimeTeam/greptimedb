@@ -682,6 +682,7 @@ impl StartCommand {
 
         let ddl_context = DdlContext {
             affinity_resolver: None,
+            affinity_fallback: Default::default(),
             peer_alloc_context_provider: None,
             node_manager: node_manager.clone(),
             cache_invalidator: layered_cache_registry.clone(),

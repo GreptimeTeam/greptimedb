@@ -291,6 +291,7 @@ impl GreptimeDbStandaloneBuilder {
         let ddl_manager = Arc::new(DdlManager::new(
             DdlContext {
                 affinity_resolver: None,
+                affinity_fallback: Default::default(),
                 peer_alloc_context_provider: None,
                 node_manager: node_manager.clone(),
                 cache_invalidator: cache_registry.clone(),

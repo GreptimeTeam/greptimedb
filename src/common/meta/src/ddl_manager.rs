@@ -1886,6 +1886,7 @@ mod tests {
         let ddl_manager = DdlManager::new(
             DdlContext {
                 affinity_resolver: None,
+                affinity_fallback: Default::default(),
                 peer_alloc_context_provider: None,
                 node_manager: Arc::new(DummyDatanodeManager),
                 cache_invalidator: Arc::new(DummyCacheInvalidator),
@@ -1954,6 +1955,7 @@ mod tests {
         DdlManager::new(
             DdlContext {
                 affinity_resolver: None,
+                affinity_fallback: Default::default(),
                 peer_alloc_context_provider: None,
                 node_manager: Arc::new(DummyDatanodeManager),
                 cache_invalidator: Arc::new(DummyCacheInvalidator),
