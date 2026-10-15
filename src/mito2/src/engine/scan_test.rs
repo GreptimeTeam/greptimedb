@@ -4772,6 +4772,7 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
     use datatypes::series::samples::SampleRef;
     use datatypes::value::Value as DatumValue;
     use mito_codec::row_converter::build_primary_key_codec;
+    use promql::source::materialize_raw_labels;
     use store_api::region_engine::{BoundTag, QueryScanContext, RawLabelSource};
     use store_api::region_request::RegionDeleteRequest;
     use table::predicate::Predicate;
@@ -5124,45 +5125,97 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
     let native_frames = native_plan
         .execute(0, Arc::new(TaskContext::default()))
         .unwrap();
-    let mut native = unpack_raw_series(
+    let unpacked = unpack_raw_series(
         native_frames,
         native_schema,
         native_source,
         RawSeriesOrdering::Contiguous,
     )
-    .unwrap()
-    .try_collect::<Vec<_>>()
-    .await
     .unwrap();
+    let native_schema = unpacked.schema().clone();
+    let materialized = materialize_raw_labels(unpacked).unwrap();
+    assert!(matches!(
+        materialized.label_source(),
+        RawLabelSource::Explicit
+    ));
+    let mut native = materialized.try_collect::<Vec<_>>().await.unwrap();
+    assert_eq!(
+        vec!["field_1", "field_0"],
+        native_schema
+            .fields
+            .iter()
+            .map(|field| field.name.as_ref())
+            .collect::<Vec<_>>()
+    );
     let mut native_visible = native
         .drain(..)
         .flat_map(|chunk| {
+            let metric = chunk.metric.as_ref().expect("materialized complete metric");
+            assert_eq!(Some("fixture_metric"), metric.name());
+            let labels = metric
+                .tags()
+                .iter()
+                .map(|label| (label.name.as_ref(), label.value.as_ref()))
+                .collect::<HashMap<_, _>>();
+            assert_eq!(1, labels.len());
+            let tag = labels["tag_0"].to_string();
+            assert!(tag == "A" || tag == "B");
             let times = chunk.time.as_explicit().unwrap();
-            (0..times.len())
-                .map(|i| {
-                    let SampleRef::Float(f1) = chunk.fields.get(0).unwrap().sample(i) else {
-                        panic!("expected f1 float")
-                    };
-                    let f0 = match chunk.fields.get(1).unwrap().sample(i) {
-                        SampleRef::Float(value) => Some(value),
-                        SampleRef::Missing => None,
-                        _ => panic!("expected f0 float or null"),
-                    };
-                    (chunk.read_key.to_vec(), times[i], f1, f0)
-                })
-                .collect::<Vec<_>>()
+            let key = chunk.read_key.to_vec();
+            let is_last = chunk.is_last;
+            let mut rows = Vec::with_capacity(times.len());
+            for (i, time) in times.iter().enumerate() {
+                let SampleRef::Float(f1) = chunk.fields.get(0).unwrap().sample(i) else {
+                    panic!("expected f1 float")
+                };
+                let f0 = match chunk.fields.get(1).unwrap().sample(i) {
+                    SampleRef::Float(value) => Some(value),
+                    SampleRef::Missing => None,
+                    _ => panic!("expected f0 float or null"),
+                };
+                rows.push((
+                    key.clone(),
+                    tag.clone(),
+                    *time,
+                    f1,
+                    f0,
+                    is_last && i + 1 == times.len(),
+                ));
+            }
+            rows
         })
         .collect::<Vec<_>>();
     let mut expected_native = raw
         .iter()
         .map(|(key, time, f1, f0, _)| (key.to_vec(), *time, *f1, *f0))
         .collect::<Vec<_>>();
-    let sort_native = |rows: &mut Vec<(Vec<u8>, i64, f64, Option<f64>)>| {
-        rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    let sort_native = |rows: &mut Vec<(Vec<u8>, String, i64, f64, Option<f64>, bool)>| {
+        rows.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)));
     };
     sort_native(&mut native_visible);
-    sort_native(&mut expected_native);
-    assert_eq!(expected_native, native_visible);
+    expected_native.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    assert_eq!(
+        expected_native,
+        native_visible
+            .iter()
+            .map(|(key, _, time, f1, f0, _)| (key.clone(), *time, *f1, *f0))
+            .collect::<Vec<_>>()
+    );
+    for key in &expected_keys {
+        assert_eq!(
+            1,
+            native_visible
+                .iter()
+                .filter(|(row_key, _, _, _, _, is_last)| row_key == key && *is_last)
+                .count()
+        );
+    }
+    let mut decoded_visible = native_visible
+        .iter()
+        .map(|(_, tag, time, f1, f0, _)| (tag.clone(), *time, *f1, *f0))
+        .collect::<Vec<_>>();
+    decoded_visible.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    assert_eq!(visible, decoded_visible);
 
     // Apply the typed predicate and final projection through the ordinary legacy filter path.
     assert_eq!(3, visible.len());
