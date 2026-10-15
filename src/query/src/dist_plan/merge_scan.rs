@@ -168,8 +168,20 @@ fn is_json_field(field: &Field) -> bool {
             == Some("Json")
 }
 
+/// Returns true when the remote field's nullability fits the expected field.
+///
+/// The remote physical optimizer may narrow a nullable column to non-nullable,
+/// as DataFusion's own schema invariant permits: `AggregateStatistics`
+/// replaces an aggregate over an empty region with a non-null literal. Batches
+/// are rebuilt with the expected schema, so the narrowing does not leak.
+/// Widening is rejected. Nested field nullability is part of the data type and
+/// still has to match exactly.
+fn nullability_compatible(expected_field: &Field, actual_field: &Field) -> bool {
+    expected_field.is_nullable() || !actual_field.is_nullable()
+}
+
 /// Returns true when two fields describe the same column semantics: same
-/// name, same data type, and same nullability.
+/// name, same data type, and compatible nullability.
 ///
 /// Arrow `Field` metadata is auxiliary information (indexing, encoding,
 /// compression hints, ...) and does not participate in the comparison. This
@@ -180,7 +192,7 @@ fn is_json_field(field: &Field) -> bool {
 fn fields_semantically_equal(expected_field: &Field, actual_field: &Field) -> bool {
     expected_field.name() == actual_field.name()
         && expected_field.data_type() == actual_field.data_type()
-        && expected_field.is_nullable() == actual_field.is_nullable()
+        && nullability_compatible(expected_field, actual_field)
 }
 
 /// Returns true when two fields are semantically equivalent JSON columns.
@@ -197,7 +209,7 @@ fn json_fields_compatible(expected_field: &Field, actual_field: &Field) -> bool 
     is_json_field(expected_field)
         && is_json_field(actual_field)
         && expected_field.name() == actual_field.name()
-        && expected_field.is_nullable() == actual_field.is_nullable()
+        && nullability_compatible(expected_field, actual_field)
         // Both must carry the same JSON marker.
         && expected_field.metadata().get(datatypes::schema::TYPE_KEY)
             == actual_field.metadata().get(datatypes::schema::TYPE_KEY)
@@ -213,14 +225,15 @@ fn json_fields_compatible(expected_field: &Field, actual_field: &Field) -> bool 
 /// Validates the remote schema before positional column handling.
 ///
 /// Field metadata (indexing/encoding/compression hints) is non-semantic at
-/// this boundary and is ignored: two fields are equal when their name, data
-/// type, and nullability match (see [`fields_semantically_equal`]). A
-/// timestamp timezone difference is the only intentional exception, accepted
-/// when the fields share the same timestamp unit, distinct timezones, and
-/// equal name and nullability. Top-level Arrow schema metadata is
-/// non-semantic at this boundary as well. JSON columns are compared
-/// semantically (see [`json_fields_compatible`]) because their wire and
-/// decoded representations use different physical arrow types.
+/// this boundary and is ignored: two fields are equal when their name and
+/// data type match and their nullability is compatible (see
+/// [`fields_semantically_equal`]). A timestamp timezone difference is the only
+/// intentional exception, accepted when the fields share the same timestamp
+/// unit, distinct timezones, equal name, and compatible nullability.
+/// Top-level Arrow schema metadata is non-semantic at this boundary as well.
+/// JSON columns are compared semantically (see [`json_fields_compatible`])
+/// because their wire and decoded representations use different physical
+/// arrow types.
 fn validate_remote_schema(
     expected: &ArrowSchema,
     actual: &ArrowSchema,
@@ -261,7 +274,7 @@ fn validate_remote_schema(
             ) if expected_unit == actual_unit
                 && expected_timezone != actual_timezone
                 && expected_field.name() == actual_field.name()
-                && expected_field.is_nullable() == actual_field.is_nullable()
+                && nullability_compatible(expected_field, actual_field)
         );
         if !timezone_only_difference {
             return Err(remote_schema_mismatch(format!(
@@ -2719,6 +2732,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn qbs_merge_scan_remote_schema_identity_emits_expected_schema_on_nullability_narrowing()
+    {
+        let batch = record_batch(
+            int64_schema(&["a", "b"]),
+            vec![
+                Arc::new(Int64Vector::from_slice([11])) as _,
+                Arc::new(Int64Vector::from_slice([12])) as _,
+            ],
+        );
+        let expected_schema = ArrowSchema::new(vec![
+            Field::new("a", TestArrowDataType::Int64, true),
+            Field::new("b", TestArrowDataType::Int64, false),
+        ]);
+        let batches = collect_merge_scan(merge_scan_exec(
+            vec![(RegionId::new(1024, 1), batch)],
+            expected_schema.clone(),
+            1,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(batches[0].schema().as_ref(), &expected_schema);
+    }
+
+    #[tokio::test]
     async fn qbs_merge_scan_remote_schema_identity_rejects_incompatible_type() {
         let batch = record_batch(
             Arc::new(Schema::new(vec![
@@ -2924,7 +2961,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_scan_remote_schema_identity_ignores_field_metadata_but_rejects_nullability_mismatch() {
+    fn merge_scan_remote_schema_identity_ignores_field_metadata_but_rejects_nullability_widening() {
         let expected = expected_int64_schema();
         let metadata_mismatch = ArrowSchema::new_with_metadata(
             vec![
@@ -2951,6 +2988,30 @@ mod tests {
         // semantic field comparison.
         assert!(validate_remote_schema(&expected, &metadata_mismatch, "test").is_ok());
         assert!(validate_remote_schema(&expected, &nullability_mismatch, "test").is_err());
+    }
+
+    #[test]
+    fn merge_scan_remote_schema_identity_accepts_top_level_nullability_narrowing_only() {
+        let state_type = |child_nullable| {
+            TestArrowDataType::Struct(arrow_schema::Fields::from(vec![Field::new(
+                "min[value]",
+                TestArrowDataType::Int64,
+                child_nullable,
+            )]))
+        };
+        let schema = |nullable, child_nullable| {
+            ArrowSchema::new(vec![Field::new(
+                "__min_state(t.v)",
+                state_type(child_nullable),
+                nullable,
+            )])
+        };
+
+        // `AggregateStatistics` turns the state aggregate over an empty region
+        // into a non-null struct literal.
+        assert!(validate_remote_schema(&schema(true, true), &schema(false, true), "test").is_ok());
+        assert!(validate_remote_schema(&schema(false, true), &schema(true, true), "test").is_err());
+        assert!(validate_remote_schema(&schema(true, true), &schema(true, false), "test").is_err());
     }
 
     #[test]
