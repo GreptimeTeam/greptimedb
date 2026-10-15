@@ -548,17 +548,22 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
 
     /// Scans a partition as raw series when this source supports that path.
     ///
-    /// `None` means raw capability is absent before execution and permits a legacy scan instead.
-    /// `Some` selects this entrypoint, including for an empty successful stream. Errors propagate;
-    /// callers must not replay a failed raw scan through the legacy path. Use only one entrypoint
-    /// for a given scanner partition per execution.
+    /// Implementations may return `None` when raw capability is absent before execution, permitting
+    /// a legacy scan instead. `Some` selects this entrypoint, including for an empty successful
+    /// stream. Errors propagate; callers must not replay a failed raw scan through the legacy path.
+    /// Use only one entrypoint for a given scanner partition per execution.
+    ///
+    /// # Panics
+    ///
+    /// The default implementation panics. Implementations must override this method to support
+    /// raw series scanning.
     fn scan_series_partition(
         &self,
         _ctx: &QueryScanContext,
         _metrics_set: &ExecutionPlanMetricsSet,
         _partition: usize,
     ) -> Result<Option<SendableRawSeriesStream>, BoxedError> {
-        Ok(None)
+        todo!()
     }
 
     /// Check if there is any predicate exclude region partition exprs that may be executed in this scanner.
@@ -811,7 +816,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn single_partition_scanner_preserves_legacy_fallback_after_raw_capability_miss() {
+    async fn single_partition_scanner_raw_scan_panics_and_preserves_legacy_read() {
         let schema = Arc::new(datatypes::schema::Schema::new(vec![
             ColumnSchema::new("value", ConcreteDataType::int32_datatype(), false),
             ColumnSchema::new(
@@ -847,12 +852,10 @@ mod tests {
         let ctx = QueryScanContext::default();
         let metrics = ExecutionPlanMetricsSet::new();
 
-        assert!(
-            scanner
-                .scan_series_partition(&ctx, &metrics, 0)
-                .unwrap()
-                .is_none()
-        );
+        let raw_scan = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            scanner.scan_series_partition(&ctx, &metrics, 0)
+        }));
+        assert!(raw_scan.is_err());
         let legacy = scanner.scan_partition(&ctx, &metrics, 0).unwrap();
         let legacy_batches = legacy.try_collect::<Vec<_>>().await.unwrap();
         assert_eq!(legacy_batches.len(), 1);
