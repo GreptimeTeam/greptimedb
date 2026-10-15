@@ -806,7 +806,7 @@ impl LocalGcWorker {
     /// Only `.puffin` files (not subdirectories) are included.
     async fn list_region_index_files(&self, region_id: RegionId) -> Result<Vec<Entry>> {
         let region_dir = self.access_layer.build_region_dir(region_id);
-        let index_dir = object_store::util::join_dir(&region_dir, "index");
+        let index_dir = location::index_dir(&region_dir);
 
         let mut lister = match self
             .access_layer

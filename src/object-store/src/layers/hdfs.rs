@@ -219,7 +219,10 @@ impl oio::Write for HdfsWriter {
                     Ok(metadata) => metadata,
                     Err(error) => {
                         drop(writer);
-                        let _ = delete_path(inner, context, temporary_path).await;
+                        if let Err(delete_error) = delete_path(inner, context, temporary_path).await
+                        {
+                            warn!(delete_error; "Failed to delete temporary file {temporary_path} after a failed HDFS close");
+                        }
                         return Err(error);
                     }
                 };
@@ -229,7 +232,9 @@ impl oio::Write for HdfsWriter {
                     .rename(inner, context, temporary_path, target_path)
                     .await
                 {
-                    let _ = delete_path(inner, context, temporary_path).await;
+                    if let Err(delete_error) = delete_path(inner, context, temporary_path).await {
+                        warn!(delete_error; "Failed to delete temporary file {temporary_path} after a failed HDFS rename");
+                    }
                     return Err(error);
                 }
 
@@ -424,7 +429,9 @@ async fn copy_via_read_write(
         Ok(metadata) => metadata,
         Err(error) => {
             drop(writer);
-            let _ = delete_path(&inner, context, &temporary_path).await;
+            if let Err(delete_error) = delete_path(&inner, context, &temporary_path).await {
+                warn!(delete_error; "Failed to delete temporary file {temporary_path} after a failed HDFS close");
+            }
             return Err(error);
         }
     };
@@ -434,7 +441,9 @@ async fn copy_via_read_write(
         .rename(&inner, context, &temporary_path, target_path)
         .await
     {
-        let _ = delete_path(&inner, context, &temporary_path).await;
+        if let Err(delete_error) = delete_path(&inner, context, &temporary_path).await {
+            warn!(delete_error; "Failed to delete temporary file {temporary_path} after a failed HDFS rename");
+        }
         return Err(error);
     }
 
@@ -462,7 +471,8 @@ async fn delete_path(inner: &Servicer, context: &OperationContext, path: &str) -
     deleter.close().await
 }
 
-// TODO(fengjiachun): Clean up temporary files left behind after a process crash.
+// A writer that dies before it renames the file leaves the temporary file
+// behind; the sweep in `temp_file` reclaims it.
 fn temporary_path(path: &str) -> String {
     let suffix = format!(".greptime-{}.tmp", Uuid::new_v4());
     match path.rsplit_once('/') {
@@ -563,6 +573,25 @@ mod tests {
                 .iter()
                 .all(|entry| !entry.path().contains(".greptime-"))
         );
+    }
+
+    #[tokio::test]
+    async fn test_list_reports_temporary_file_of_crashed_writer() {
+        // Regression test for #9591: a temporary file left by a crashed writer
+        // must stay visible to a sweep over the directory of its target.
+        let (_directory, store) = test_store();
+        store.create_dir("data/").await.unwrap();
+        let temporary = temporary_path("data/manifest.json");
+        assert!(temporary.starts_with("data/.manifest.json.greptime-"));
+        assert!(temporary.ends_with(".tmp"));
+        store.write(&temporary, "partial").await.unwrap();
+
+        let entries = store.list("data/").await.unwrap();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.path() == temporary)
+            .unwrap();
+        assert!(entry.metadata().last_modified().is_some());
     }
 
     #[tokio::test]

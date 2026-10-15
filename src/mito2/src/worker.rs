@@ -87,6 +87,7 @@ use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::IndexBuildScheduler;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
+use crate::temp_file_sweeper;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::wal::Wal;
 use crate::worker::handle_manifest::RegionEditQueues;
@@ -269,6 +270,7 @@ impl WorkerGroup {
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                     flush_semaphore: flush_semaphore.clone(),
+                    gc_limiter: gc_limiter.clone(),
                 }
                 .start()
             })
@@ -484,6 +486,7 @@ impl WorkerGroup {
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                     flush_semaphore: flush_semaphore.clone(),
+                    gc_limiter: gc_limiter.clone(),
                 }
                 .start()
             })
@@ -594,6 +597,8 @@ struct WorkerStarter<S> {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     flush_semaphore: Arc<Semaphore>,
+    /// Limiter shared with the GC jobs.
+    gc_limiter: GcLimiterRef,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -694,6 +699,7 @@ impl<S: LogStore> WorkerStarter<S> {
             partition_expr_fetcher: self.partition_expr_fetcher,
             flush_semaphore: self.flush_semaphore,
             plugins: self.plugins,
+            gc_limiter: self.gc_limiter,
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -1007,6 +1013,8 @@ struct RegionWorkerLoop<S> {
     flush_semaphore: Arc<Semaphore>,
     /// Plugins for flush hooks.
     plugins: Plugins,
+    /// Limiter shared with the GC jobs.
+    gc_limiter: GcLimiterRef,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -1417,6 +1425,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         sender: oneshot::Sender<SetRegionRoleStateResponse>,
     ) {
         if let Some(region) = self.regions.get_region(region_id) {
+            let sweep_older_than = self.config.gc.unknown_file_lingering_time;
+            let gc_limiter = self.gc_limiter.clone();
             // We need to do this in background as we need the manifest lock.
             common_runtime::spawn_global(async move {
                 match region.set_role_state_gracefully(region_role_state).await {
@@ -1425,6 +1435,16 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         let _ = sender.send(SetRegionRoleStateResponse::success(
                             SetRegionRoleStateSuccess::mito(last_entry_id),
                         ));
+                        // Only a writable leader reclaims what a writer that died
+                        // before it renamed its temporary file left behind.
+                        if region_role_state == SettableRegionRoleState::Leader {
+                            temp_file_sweeper::spawn_region_sweep(
+                                region.access_layer(),
+                                region_id,
+                                sweep_older_than,
+                                gc_limiter,
+                            );
+                        }
                     }
                     Err(e) => {
                         error!(e; "Failed to set region {} role state to {:?}", region_id, region_role_state);
