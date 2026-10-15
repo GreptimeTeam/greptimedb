@@ -92,6 +92,17 @@ impl TestEnv {
         }
     }
 
+    /// Returns a new env whose metric engine runs over `mito`, an engine of
+    /// `mito_env`.
+    pub fn with_mito_engine(mito_env: MitoTestEnv, mito: MitoEngine) -> Self {
+        let metric = MetricEngine::try_new(mito.clone(), EngineConfig::default()).unwrap();
+        Self {
+            mito_env,
+            mito,
+            metric,
+        }
+    }
+
     /// Returns a new env with specific `prefix` and `mito_env` for test.
     pub async fn with_mito_env(mut mito_env: MitoTestEnv) -> Self {
         let mito = mito_env.create_engine(MitoConfig::default()).await;

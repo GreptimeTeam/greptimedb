@@ -549,6 +549,10 @@ impl RegionMetadata {
 
     /// Checks whether it is a valid column.
     fn validate_column_metadata(column_metadata: &ColumnMetadata) -> Result<()> {
+        column_metadata
+            .column_schema
+            .compression_options()
+            .context(InvalidSchemaSnafu)?;
         if column_metadata.semantic_type == SemanticType::Timestamp {
             ensure!(
                 column_metadata.column_schema.data_type.is_timestamp(),

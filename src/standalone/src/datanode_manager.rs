@@ -32,7 +32,7 @@ use datanode::region_server::RegionServer;
 use servers::grpc::region_server::RegionServerHandler;
 use snafu::ResultExt;
 
-use crate::error::{InvokeRegionServerSnafu, Result};
+use crate::error::{InvalidRegionRequestSnafu, InvokeRegionServerSnafu, Result};
 
 pub struct StandaloneDatanodeManager {
     pub region_server: RegionServer,
@@ -73,7 +73,17 @@ impl RegionInvoker {
 
 #[async_trait]
 impl Datanode for RegionInvoker {
-    async fn handle(&self, request: RegionRequest) -> MetaResult<RegionResponse> {
+    async fn handle_request(&self, request: Arc<RegionRequest>) -> MetaResult<RegionResponse> {
+        // Local execution consumes the request; standalone does not retain it for retries.
+        let request = Arc::try_unwrap(request)
+            .map_err(|_| {
+                InvalidRegionRequestSnafu {
+                    reason: "local region request has multiple owners",
+                }
+                .build()
+            })
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)?;
         let span = request
             .header
             .as_ref()

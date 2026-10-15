@@ -121,14 +121,30 @@ where
         // this cleanup and close/drop remove.
         self.cleanup_dropped_region_runtime_state(region_id).await;
 
-        // Delete region data in WAL.
-        self.wal
+        // Deletes region data in WAL, and releases it so that this outlives a restart, which
+        // never opens the region again. A failure of the object store WAL does not fail the
+        // drop: the region has left the map, a drop request for it is not sent again, and a
+        // caller that drops several regions on one store, such as the metric engine, would
+        // leave the others undone, for instance once the release of one poisoned the store.
+        // The store keeps a failed release and writes it with its next object unless it is
+        // stopped or poisoned.
+        if let Err(e) = self
+            .wal
             .obsolete(
                 region_id,
                 region.version_control.current().last_entry_id,
                 &region.provider,
             )
-            .await?;
+            .await
+        {
+            if region.provider.as_object_store_provider().is_none() {
+                return Err(e);
+            }
+            error!(e; "Failed to obsolete the WAL of dropped region {}", region_id);
+        }
+        if let Err(e) = self.wal.release_region(region_id, &region.provider).await {
+            error!(e; "Failed to release the WAL of dropped region {}", region_id);
+        }
 
         if let Some(store) = &self.series_index_store {
             crate::series_index::delete_catalogs(store, region_id).await;

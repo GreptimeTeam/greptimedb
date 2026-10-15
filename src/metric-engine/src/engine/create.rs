@@ -21,7 +21,7 @@ use common_query::native_histogram::is_native_histogram_value_type;
 use common_telemetry::info;
 use common_time::{FOREVER, Timestamp};
 use datatypes::data_type::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
+use datatypes::schema::{COMPRESSION_KEY, ColumnSchema, SkippingIndexOptions};
 use datatypes::value::Value;
 use mito2::engine::MITO_ENGINE_NAME;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -390,6 +390,17 @@ impl MetricEngineInner {
                 && request.options.contains_key(LOGICAL_TABLE_METADATA_KEY)),
             ConflictRegionOptionSnafu {}
         );
+
+        if request.options.contains_key(LOGICAL_TABLE_METADATA_KEY) {
+            for column in &request.column_metadatas {
+                ensure!(
+                    !column.column_schema.metadata().contains_key(COMPRESSION_KEY),
+                    UnexpectedRequestSnafu {
+                        reason: "COMPRESSION is not supported on logical tables; configure it on the physical table".to_string(),
+                    }
+                );
+            }
+        }
 
         // check if field columns are either a normal metric value or a native histogram.
         let mut field_cols = Vec::new();

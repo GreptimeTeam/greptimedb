@@ -36,9 +36,10 @@ use crate::heartbeat::HeartbeatTask;
 use crate::instance::Instance;
 use crate::service_config::{
     InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, OtlpOptions,
-    PendingRowsBatcherOptions, PostgresOptions, PromStoreOptions,
+    PendingRowsBatcherOptions, PostgresOptions, PromStoreOptions, WriteRetryOptions,
 };
 
+/// Configures frontend protocols, query execution, and distributed write retries.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct FrontendOptions {
@@ -74,6 +75,8 @@ pub struct FrontendOptions {
     pub meta_client: Option<MetaClientOptions>,
     pub logging: LoggingOptions,
     pub datanode: DatanodeClientOptions,
+    /// Retry policy for retryable distributed write failures.
+    pub write_retry: WriteRetryOptions,
     pub user_provider: Option<String>,
     pub tracing: TracingOptions,
     pub query: QueryOptions,
@@ -110,6 +113,7 @@ impl Default for FrontendOptions {
             meta_client: None,
             logging: LoggingOptions::default(),
             datanode: DatanodeClientOptions::default(),
+            write_retry: WriteRetryOptions::default(),
             user_provider: None,
             tracing: TracingOptions::default(),
             query: QueryOptions::default(),
@@ -224,6 +228,72 @@ mod tests {
 
     type GrpcStream<T> =
         Pin<Box<dyn Stream<Item = std::result::Result<T, Status>> + Send + Sync + 'static>>;
+
+    #[test]
+    fn test_write_retry_config() {
+        let defaults: FrontendOptions = toml::from_str("").unwrap();
+        assert_eq!(defaults.write_retry, WriteRetryOptions::default());
+        let options: FrontendOptions = toml::from_str(
+            r#"
+[write_retry]
+max_retries = 5
+initial_backoff = "250ms"
+max_backoff = "5s"
+backoff_multiplier = 3.0
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            options.write_retry,
+            WriteRetryOptions {
+                max_retries: 5,
+                initial_backoff: Duration::from_millis(250),
+                max_backoff: Duration::from_secs(5),
+                backoff_multiplier: 3.0,
+            }
+        );
+        options.write_retry.validate().unwrap();
+        let serialized = toml::to_string(&options).unwrap();
+        let parsed: FrontendOptions = toml::from_str(&serialized).unwrap();
+        assert_eq!(options.write_retry, parsed.write_retry);
+        let disabled: FrontendOptions = toml::from_str("[write_retry]\nmax_retries = 0").unwrap();
+        assert_eq!(disabled.write_retry.max_retries, 0);
+        assert_eq!(
+            disabled.write_retry.initial_backoff,
+            defaults.write_retry.initial_backoff
+        );
+    }
+
+    #[test]
+    fn test_write_retry_config_from_env() {
+        temp_env::with_vars(
+            [
+                ("FRONTEND_RETRY_TEST__WRITE_RETRY__MAX_RETRIES", Some("4")),
+                (
+                    "FRONTEND_RETRY_TEST__WRITE_RETRY__INITIAL_BACKOFF",
+                    Some("500ms"),
+                ),
+                ("FRONTEND_RETRY_TEST__WRITE_RETRY__MAX_BACKOFF", Some("8s")),
+                (
+                    "FRONTEND_RETRY_TEST__WRITE_RETRY__BACKOFF_MULTIPLIER",
+                    Some("1.5"),
+                ),
+            ],
+            || {
+                let options =
+                    FrontendOptions::load_layered_options(None, "FRONTEND_RETRY_TEST").unwrap();
+                assert_eq!(
+                    options.write_retry,
+                    WriteRetryOptions {
+                        max_retries: 4,
+                        initial_backoff: Duration::from_millis(500),
+                        max_backoff: Duration::from_secs(8),
+                        backoff_multiplier: 1.5,
+                    }
+                );
+            },
+        );
+    }
 
     #[test]
     fn test_logical_batcher_protocols_from_env() {

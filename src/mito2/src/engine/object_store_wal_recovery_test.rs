@@ -22,12 +22,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use api::v1::Rows;
 use common_base::readable_size::ReadableSize;
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use common_wal::config::object_store::{
@@ -35,9 +35,12 @@ use common_wal::config::object_store::{
 };
 use common_wal::options::{ObjectStoreWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use log_store::ObjectStoreLogStore;
+use log_store::metrics::METRIC_OBJECT_STORE_WAL_FAILING;
 use log_store::object_store_wal::{WalHole, entry_id};
 use object_store::ObjectStore;
+use object_store::layers::mock::{self, MockLayerBuilder, oio};
 use object_store::services::Memory;
+use object_store::util::with_retry_layers;
 use rstest::rstest;
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
@@ -1123,23 +1126,10 @@ async fn test_drop_cancels_a_flush_waiting_for_wal_durability() {
     wait_for(store.wait_for_durability_waits(1)).await;
     assert!(!flush.is_finished());
 
-    // The drop cancels the flush instead of waiting behind the upload.
-    tokio::time::timeout(
-        WAIT,
-        engine.handle_request(
-            REGION_A,
-            RegionRequest::Drop(RegionDropRequest {
-                fast_path: false,
-                force: false,
-                partial_drop: false,
-            }),
-        ),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert!(!engine.is_region_exists(REGION_A));
-    assert_eq!(vec![0], wal_object_seqs(&object_store).await);
+    // The drop cancels the flush instead of waiting behind the upload. Its
+    // release of the region then waits for its own object, which is created
+    // after the upload.
+    let dropped = spawn_drop(&engine, REGION_A);
     assert!(
         tokio::time::timeout(WAIT, flush)
             .await
@@ -1147,13 +1137,122 @@ async fn test_drop_cancels_a_flush_waiting_for_wal_durability() {
             .unwrap()
             .is_err()
     );
+    wait_for(store.wait_for_parked_creates(2)).await;
+    assert!(!dropped.is_finished());
+    assert_eq!(vec![0], wal_object_seqs(&object_store).await);
 
     store.release_creates();
+    tokio::time::timeout(WAIT, dropped)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(!engine.is_region_exists(REGION_A));
     tokio::time::timeout(WAIT, seal)
         .await
         .unwrap()
         .unwrap()
         .unwrap();
+}
+
+fn spawn_drop(
+    engine: &MitoEngine,
+    region_id: RegionId,
+) -> tokio::task::JoinHandle<std::result::Result<(), BoxedError>> {
+    let engine = engine.clone();
+    tokio::spawn(async move {
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Drop(RegionDropRequest {
+                    fast_path: false,
+                    force: false,
+                    partial_drop: false,
+                }),
+            )
+            .await
+            .map(|_| ())
+    })
+}
+
+#[rstest]
+#[case::graceful(false, false)]
+#[case::abrupt(true, false)]
+#[case::failed_release(false, true)]
+#[tokio::test]
+async fn test_restart_after_a_drop_collects_the_objects_of_the_dropped_region(
+    #[case] abrupt: bool,
+    #[case] release_fails: bool,
+) {
+    let mut env = TestEnv::with_prefix("object-store-wal-drop-restart").await;
+    let object_store = memory_store();
+    let store = open_store(&object_store, AckMode::Durable).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (_, schema_a) = create_region(&engine, REGION_A, &[]).await;
+    let (table_dir_b, schema_b) = create_region(&engine, REGION_B, &[]).await;
+
+    // Object 1 holds entries of both regions and object 2 of region A. The
+    // drop releases region A in object 3, and region B, which is not
+    // flushed, holds the boundary at object 1.
+    let mut writer = SealedWriter::new(&store);
+    writer
+        .put_and_seal(
+            &engine,
+            vec![
+                (REGION_A, rows(&schema_a, 0, 2)),
+                (REGION_B, rows(&schema_b, 0, 3)),
+            ],
+        )
+        .await;
+    writer
+        .put_and_seal(&engine, vec![(REGION_A, rows(&schema_a, 2, 4))])
+        .await;
+    if release_fails {
+        store.fail_creates();
+    }
+    let dropped = tokio::time::timeout(WAIT, spawn_drop(&engine, REGION_A))
+        .await
+        .unwrap()
+        .unwrap();
+    // A drop whose release fails succeeds all the same, and the stop creates
+    // the record in object 4.
+    dropped.unwrap();
+    assert!(!engine.is_region_exists(REGION_A));
+    store.allow_creates();
+    wait_for_collection(&store).await;
+    let released_in = if release_fails { 4 } else { 3 };
+    drop(writer);
+    if abrupt {
+        crash(engine, store).await;
+    } else {
+        engine.stop().await.unwrap();
+        drop(engine);
+        store.stop().await.unwrap();
+        drop(store);
+    }
+    assert_eq!(
+        vec![1, 2, released_in],
+        wal_object_seqs(&object_store).await
+    );
+
+    // Nothing is written before the restart, and region A is never opened
+    // again.
+    let store = open_store(&object_store, AckMode::Durable).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    open_region(&engine, REGION_B, &table_dir_b, &[])
+        .await
+        .unwrap();
+
+    // Once region B is flushed no object holds a live segment, and the next
+    // object carries the boundary past all of them.
+    flush_region(&engine, REGION_B, None).await;
+    let mut writer = SealedWriter::new(&store);
+    writer
+        .put_and_seal(&engine, vec![(REGION_B, rows(&schema_b, 3, 5))])
+        .await;
+    wait_for_collection(&store).await;
+    assert_eq!(vec![released_in + 2], wal_object_seqs(&object_store).await);
+    assert_eq!(5, engine.get_region_statistic(REGION_B).unwrap().num_rows);
 }
 
 #[rstest]
@@ -1354,4 +1453,107 @@ async fn test_flush_does_not_publish_a_frontier_for_a_lost_enqueued_backlog() {
             .manifest_flushed_entry_id
     );
     assert!(store.stop().await.is_err());
+}
+
+/// An in-memory object store behind the retry layer object storage has in
+/// production, whose writes fail with denied access while `denied` is set.
+fn denying_store(denied: Arc<AtomicBool>) -> ObjectStore {
+    let mock = MockLayerBuilder::default()
+        .writer_factory(Arc::new(move |_, _, inner| {
+            if denied.load(Ordering::SeqCst) {
+                Box::new(DeniedWriter)
+            } else {
+                inner
+            }
+        }))
+        .build()
+        .unwrap();
+    with_retry_layers(memory_store().layer(mock))
+}
+
+struct DeniedWriter;
+
+impl oio::Write for DeniedWriter {
+    async fn write(&mut self, _buffer: mock::Buffer) -> mock::Result<()> {
+        Ok(())
+    }
+
+    async fn close(&mut self) -> mock::Result<mock::Metadata> {
+        Err(mock::Error::new(
+            mock::ErrorKind::PermissionDenied,
+            "access denied",
+        ))
+    }
+
+    async fn abort(&mut self) -> mock::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_enqueued_writes_fail_fast_while_the_object_store_refuses_the_backlog() {
+    let mut env = TestEnv::with_prefix("object-store-wal-refused-backlog").await;
+    let denied = Arc::new(AtomicBool::new(false));
+    let store = open_store(&denying_store(denied.clone()), AckMode::Enqueued).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (_, schema) = create_region(&engine, REGION_A, &[]).await;
+
+    // The write is acknowledged, then the object store denies the create of
+    // its object, which the store keeps.
+    denied.store(true, Ordering::SeqCst);
+    put_rows(&engine, REGION_A, rows(&schema, 0, 3)).await;
+    let seal = spawn_seal(&store);
+    tokio::time::timeout(WAIT, async {
+        while METRIC_OBJECT_STORE_WAL_FAILING.get() == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the store must fail");
+
+    // A later write fails at once with a retryable error that names the
+    // refusal, and takes no entry id.
+    let error = try_put(&engine, REGION_A, rows(&schema, 3, 5))
+        .await
+        .unwrap_err();
+    assert_eq!(StatusCode::StorageUnavailable, error.status_code());
+    assert_eq!(RetryHint::Retryable, error.retry_hint());
+    assert!(
+        format!("{error:?}").contains("PermissionDenied"),
+        "{error:?}"
+    );
+    assert_eq!(
+        entry_id(1, 1),
+        region_recovery_state(&engine, REGION_A).await.last_entry_id
+    );
+
+    // A flush waits for the acknowledged entry instead of failing.
+    let flush = spawn_flush(&engine, REGION_A);
+    wait_for(store.wait_for_durability_waits(1)).await;
+    assert!(!flush.is_finished());
+
+    // Once the object store accepts writes again, the backlog is uploaded,
+    // the flush records the entry and writes are accepted again.
+    denied.store(false, Ordering::SeqCst);
+    tokio::time::timeout(WAIT, seal)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(WAIT, flush)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    put_rows(&engine, REGION_A, rows(&schema, 3, 5)).await;
+    assert_eq!(
+        RegionRecoveryState {
+            flushed_entry_id: entry_id(1, 1),
+            last_entry_id: entry_id(2, 1),
+            topic_latest_entry_id: entry_id(1, 1),
+            manifest_flushed_entry_id: entry_id(1, 1),
+            memtable_rows: 2,
+        },
+        region_recovery_state(&engine, REGION_A).await
+    );
 }

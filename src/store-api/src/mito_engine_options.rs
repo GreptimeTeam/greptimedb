@@ -35,6 +35,8 @@ pub const COMPACTION_TYPE: &str = "compaction.type";
 pub const COMPACTION_OVERRIDE: &str = "compaction.override";
 /// TWCS compaction strategy.
 pub const COMPACTION_TYPE_TWCS: &str = "twcs";
+/// Prefix for TWCS compaction options.
+pub const COMPACTION_TWCS_PREFIX: &str = "compaction.twcs.";
 /// Option key for twcs min file num to trigger a compaction.
 pub const TWCS_TRIGGER_FILE_NUM: &str = "compaction.twcs.trigger_file_num";
 /// Option key for twcs min file num to trigger compaction in the active window.
@@ -57,6 +59,20 @@ pub const TWCS_TIME_WINDOW: &str = "compaction.twcs.time_window";
 pub const TWCS_REMOTE_COMPACTION: &str = "compaction.twcs.remote_compaction";
 /// Option key for twcs fallback to local.
 pub const TWCS_FALLBACK_TO_LOCAL: &str = "compaction.twcs.fallback_to_local";
+/// Table options that configure compaction.
+pub const COMPACTION_OPTION_KEYS: [&str; 11] = [
+    COMPACTION_TYPE,
+    COMPACTION_OVERRIDE,
+    TWCS_TRIGGER_FILE_NUM,
+    TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM,
+    TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER,
+    TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM,
+    TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER,
+    TWCS_MAX_OUTPUT_FILE_SIZE,
+    TWCS_TIME_WINDOW,
+    TWCS_REMOTE_COMPACTION,
+    TWCS_FALLBACK_TO_LOCAL,
+];
 /// Option key for memtable type.
 pub const MEMTABLE_TYPE: &str = "memtable.type";
 /// Option key for bulk memtable merge threshold.
@@ -145,42 +161,32 @@ pub fn normalize_twcs_trigger_options(
 
 /// Returns true if the `key` is a valid option key for the mito engine.
 pub fn is_mito_engine_option_key(key: &str) -> bool {
-    [
-        "ttl",
-        WRITE_BUFFER_SIZE_KEY,
-        AUTO_FLUSH_INTERVAL_KEY,
-        COMPACTION_TYPE,
-        COMPACTION_OVERRIDE,
-        TWCS_TRIGGER_FILE_NUM,
-        TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM,
-        TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER,
-        TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM,
-        TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER,
-        TWCS_MAX_OUTPUT_FILE_SIZE,
-        TWCS_TIME_WINDOW,
-        TWCS_REMOTE_COMPACTION,
-        TWCS_FALLBACK_TO_LOCAL,
-        "storage",
-        "index.inverted_index.ignore_column_ids",
-        "index.inverted_index.segment_row_count",
-        WAL_OPTIONS_KEY,
-        MEMTABLE_TYPE,
-        MEMTABLE_BULK_MERGE_THRESHOLD,
-        MEMTABLE_BULK_ENCODE_ROW_THRESHOLD,
-        MEMTABLE_BULK_ENCODE_BYTES_THRESHOLD,
-        MEMTABLE_BULK_MAX_MERGE_GROUPS,
-        MEMTABLE_PARTITION_TREE_INDEX_MAX_KEYS_PER_SHARD,
-        MEMTABLE_PARTITION_TREE_DATA_FREEZE_THRESHOLD,
-        MEMTABLE_PARTITION_TREE_FORK_DICTIONARY_BYTES,
-        // We don't allow to create a mito table with sparse primary key encoding directly.
-        APPEND_MODE_KEY,
-        MERGE_MODE_KEY,
-        SST_FORMAT_KEY,
-        MAX_ROW_GROUP_ROW_COUNT,
-        PRESERVE_ROW_SEQUENCE,
-        EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING,
-    ]
-    .contains(&key)
+    COMPACTION_OPTION_KEYS.contains(&key)
+        || [
+            "ttl",
+            WRITE_BUFFER_SIZE_KEY,
+            AUTO_FLUSH_INTERVAL_KEY,
+            "storage",
+            "index.inverted_index.ignore_column_ids",
+            "index.inverted_index.segment_row_count",
+            WAL_OPTIONS_KEY,
+            MEMTABLE_TYPE,
+            MEMTABLE_BULK_MERGE_THRESHOLD,
+            MEMTABLE_BULK_ENCODE_ROW_THRESHOLD,
+            MEMTABLE_BULK_ENCODE_BYTES_THRESHOLD,
+            MEMTABLE_BULK_MAX_MERGE_GROUPS,
+            MEMTABLE_PARTITION_TREE_INDEX_MAX_KEYS_PER_SHARD,
+            MEMTABLE_PARTITION_TREE_DATA_FREEZE_THRESHOLD,
+            MEMTABLE_PARTITION_TREE_FORK_DICTIONARY_BYTES,
+            // We don't allow to create a mito table with sparse primary key encoding directly.
+            APPEND_MODE_KEY,
+            MERGE_MODE_KEY,
+            SST_FORMAT_KEY,
+            MAX_ROW_GROUP_ROW_COUNT,
+            PRESERVE_ROW_SEQUENCE,
+            EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING,
+        ]
+        .contains(&key)
 }
 
 #[cfg(test)]

@@ -193,11 +193,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Datanode for MockDatanode {
-        async fn handle(
+        async fn handle_request(
             &self,
-            request: RegionRequest,
+            request: Arc<RegionRequest>,
         ) -> common_meta::error::Result<RegionResponse> {
-            self.requests.lock().unwrap().push(request.clone());
+            self.requests.lock().unwrap().push(request.as_ref().clone());
             match Self::command(&request) {
                 Command::Open { nonce } => {
                     if !matches!(request.body, Some(Body::Inserts(ref inserts)) if inserts.requests.is_empty())
@@ -338,7 +338,10 @@ mod tests {
         struct Unsupported;
         #[async_trait::async_trait]
         impl Datanode for Unsupported {
-            async fn handle(&self, _: RegionRequest) -> common_meta::error::Result<RegionResponse> {
+            async fn handle_request(
+                &self,
+                _: Arc<RegionRequest>,
+            ) -> common_meta::error::Result<RegionResponse> {
                 Ok(RegionResponse::new(0))
             }
             async fn handle_query(

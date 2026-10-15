@@ -259,39 +259,6 @@ pub enum Error {
         error: tokio::sync::oneshot::error::RecvError,
     },
 
-    #[snafu(display("Failed to wait for result of DumpIndex"))]
-    WaitDumpIndex {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: tokio::sync::oneshot::error::RecvError,
-    },
-
-    #[snafu(display("Failed to create writer"))]
-    CreateWriter {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: object_store::Error,
-    },
-
-    #[snafu(display("Failed to write index"))]
-    WriteIndex {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: object_store::Error,
-    },
-
-    #[snafu(display("Failed to read index, path: {path}"))]
-    ReadIndex {
-        #[snafu(implicit)]
-        location: Location,
-        #[snafu(source)]
-        error: object_store::Error,
-        path: String,
-    },
-
     #[snafu(display(
         "The length of meta if exceeded the limit: {}, actual: {}",
         limit,
@@ -427,6 +394,15 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to fetch a segment of WAL object, path: {}", path))]
+    WalSegmentFetch {
+        path: String,
+        #[snafu(source)]
+        error: tokio::task::JoinError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid WAL object, path: {}", path))]
     InvalidWalObject {
         path: String,
@@ -456,6 +432,15 @@ pub enum Error {
 
     #[snafu(display("Object store WAL operation failed"))]
     ObjectStoreWal {
+        source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Object store WAL rejects appends until the object store accepts its acknowledged backlog"
+    ))]
+    ObjectStoreWalFailing {
         source: Arc<Error>,
         #[snafu(implicit)]
         location: Location,
@@ -507,9 +492,9 @@ impl ErrorExt for Error {
             | DiscontinuousLogIndex { .. }
             | OrderedBatchProducerStopped { .. }
             | WaitProduceResultReceiver { .. }
-            | WaitDumpIndex { .. }
             | MetaLengthExceededLimit { .. }
-            | ObjectStoreWalStopped { .. } => StatusCode::Internal,
+            | ObjectStoreWalStopped { .. }
+            | WalSegmentFetch { .. } => StatusCode::Internal,
 
             CorruptedWalObject { .. }
             | WalObjectConflict { .. }
@@ -519,12 +504,10 @@ impl ErrorExt for Error {
 
             InvalidWalObject { source, .. } => source.status_code(),
             ObjectStoreWal { source, .. } => source.status_code(),
+            ObjectStoreWalFailing { .. } => StatusCode::StorageUnavailable,
 
             // Object store related errors
-            CreateWriter { .. }
-            | WriteIndex { .. }
-            | ReadIndex { .. }
-            | WalObjectStore { .. }
+            WalObjectStore { .. }
             | StaleWalObject { .. }
             | UnconfirmedWalEpochStart { .. }
             | Io { .. } => StatusCode::StorageUnavailable,
@@ -553,10 +536,7 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            CreateWriter { error, .. }
-            | WriteIndex { error, .. }
-            | ReadIndex { error, .. }
-            | WalObjectStore { error, .. } => retry_hint_from_opendal_error(error),
+            WalObjectStore { error, .. } => retry_hint_from_opendal_error(error),
             ObjectStoreWal { source, .. } => source.retry_hint(),
             Io { error, .. } => retry_hint_from_io_error(error),
             FetchEntry { .. }
@@ -564,7 +544,8 @@ impl ErrorExt for Error {
             | AddEntryLogBatch { .. }
             | WalObjectSequenceUnsettled { .. }
             | StaleWalObject { .. }
-            | UnconfirmedWalEpochStart { .. } => RetryHint::Retryable,
+            | UnconfirmedWalEpochStart { .. }
+            | ObjectStoreWalFailing { .. } => RetryHint::Retryable,
             ProduceRecord { error, .. } => match error {
                 rskafka::client::producer::Error::Client(error) => {
                     rskafka_client_error_to_retry_hint(error)

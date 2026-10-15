@@ -33,7 +33,7 @@ use futures::stream::BoxStream;
 use snafu::ResultExt;
 use store_api::logstore::entry::Entry;
 use store_api::logstore::provider::Provider;
-use store_api::logstore::{AppendBatchResponse, LogStore, WalIndex};
+use store_api::logstore::{AppendBatchResponse, LogStore};
 use store_api::storage::RegionId;
 
 use crate::error::{BuildEntrySnafu, DeleteWalSnafu, Result, WaitWalDurableSnafu, WriteWalSnafu};
@@ -163,7 +163,6 @@ impl<S: LogStore> Wal<S> {
         &self,
         provider: &Provider,
         region_id: RegionId,
-        location_id: Option<u64>,
     ) -> Box<dyn WalEntryReader> {
         match provider {
             Provider::RaftEngine(_) => Box::new(LogStoreEntryReader::new(
@@ -171,15 +170,9 @@ impl<S: LogStore> Wal<S> {
             )),
             // Entries of many regions share one namespace, so the reader filters by region.
             Provider::Kafka(_) | Provider::ObjectStore(_) => {
-                let reader = if let Some(location_id) = location_id {
-                    LogStoreRawEntryReader::new(self.store.clone())
-                        .with_wal_index(WalIndex::new(region_id, location_id))
-                } else {
-                    LogStoreRawEntryReader::new(self.store.clone())
-                };
-
                 Box::new(LogStoreEntryReader::new(RegionRawEntryReader::new(
-                    reader, region_id,
+                    LogStoreRawEntryReader::new(self.store.clone()),
+                    region_id,
                 )))
             }
             Provider::Noop => Box::new(NoopEntryReader),
@@ -194,7 +187,7 @@ impl<S: LogStore> Wal<S> {
         start_id: EntryId,
         provider: &'a Provider,
     ) -> Result<WalEntryStream<'a>> {
-        let mut reader = self.wal_entry_reader(provider, region_id, None);
+        let mut reader = self.wal_entry_reader(provider, region_id);
         reader.read(provider, start_id)
     }
 
@@ -222,6 +215,18 @@ impl<S: LogStore> Wal<S> {
         }
         self.store
             .delete_namespace(provider)
+            .await
+            .map_err(BoxedError::new)
+            .context(DeleteWalSnafu { region_id })
+    }
+
+    /// Releases every WAL entry of a dropped region, see [LogStore::release_region].
+    pub async fn release_region(&self, region_id: RegionId, provider: &Provider) -> Result<()> {
+        if let Provider::Noop = provider {
+            return Ok(());
+        }
+        self.store
+            .release_region(provider, region_id)
             .await
             .map_err(BoxedError::new)
             .context(DeleteWalSnafu { region_id })

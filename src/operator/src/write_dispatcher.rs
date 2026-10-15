@@ -22,9 +22,8 @@ use std::sync::Arc;
 use api::region::RegionResponse;
 use api::v1::region::{DeleteRequests, InsertRequests, RegionRequest, region_request::Body};
 use backon::{BackoffBuilder, ExponentialBuilder};
-use client::client_manager::NodeClients;
+use catalog::CatalogManagerRef;
 use common_error::ext::{BoxedError, ErrorExt, RetryHint};
-use common_meta::cache::TableInfoCacheRef;
 use common_meta::cache_invalidator::{CacheInvalidatorRef, Context};
 use common_meta::error::{Error, ExternalSnafu, Result, TableInfoNotFoundSnafu, UnexpectedSnafu};
 use common_meta::instruction::CacheIdent;
@@ -34,8 +33,10 @@ use common_meta::rpc::router;
 use futures::future;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use prometheus::Histogram;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::RegionId;
+use table::table_name::TableName;
+use tokio_util::sync::CancellationToken;
 
 pub use self::options::WriteRetryOptions;
 use crate::error::{self, FindRegionLeaderSnafu, RequestRegionSnafu};
@@ -75,17 +76,16 @@ impl WriteDispatcher {
     /// Enables shared remote sends and retries using frontend configuration and caches.
     pub fn with_retry(
         mut self,
-        clients: Arc<NodeClients>,
         options: WriteRetryOptions,
-        table_info_cache: TableInfoCacheRef,
+        catalog_manager: CatalogManagerRef,
         cache_invalidator: CacheInvalidatorRef,
     ) -> Self {
         if options.max_retries > 0 {
             self.retry = Some(WriteRetry {
-                clients,
+                node_manager: self.node_manager.clone(),
                 partition_manager: self.partition_manager.clone(),
                 options,
-                table_info_cache,
+                catalog_manager,
                 cache_invalidator,
             });
         } else {
@@ -170,10 +170,12 @@ impl WriteDispatcher {
     }
 
     /// Sends requests using routes already resolved by the caller.
+    /// Cancellation stops future retries while allowing in-flight requests to complete.
     pub(crate) async fn execute(
         &self,
         writes: Vec<(PeerRef, RegionRequest)>,
         histogram: Option<Histogram>,
+        cancellation: Option<&CancellationToken>,
     ) -> Result<RegionResponse> {
         let histogram = histogram.as_ref();
         let writes = if self.retry.is_some() {
@@ -194,7 +196,7 @@ impl WriteDispatcher {
                 .map(|(peer, request)| self.send(peer, request, histogram)),
         )
         .await;
-        self.finish(attempts, histogram).await
+        self.finish(attempts, histogram, cancellation).await
     }
 
     /// Sends the first attempt immediately so bulk encoding can overlap other sends.
@@ -231,10 +233,11 @@ impl WriteDispatcher {
         &self,
         attempts: Vec<WriteAttempt>,
         histogram: Option<&Histogram>,
+        cancellation: Option<&CancellationToken>,
     ) -> Result<RegionResponse> {
         if let Some(retry) = &self.retry {
             if retry.should_retry(&attempts, 0) {
-                return retry.retry(attempts, histogram).await;
+                return retry.retry(attempts, histogram, cancellation).await;
             }
             let mut response = RegionResponse::new(0);
             let failures = merge_attempts(attempts, &mut response)?;
@@ -271,16 +274,16 @@ impl WriteDispatcher {
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
-        self.execute(writes, histogram).await
+        self.execute(writes, histogram, None).await
     }
 }
 
 /// Sends shared requests and coordinates retries with refreshed routes.
 struct WriteRetry {
-    clients: Arc<NodeClients>,
+    node_manager: NodeManagerRef,
     partition_manager: PartitionRuleManagerRef,
     options: WriteRetryOptions,
-    table_info_cache: TableInfoCacheRef,
+    catalog_manager: CatalogManagerRef,
     cache_invalidator: CacheInvalidatorRef,
 }
 
@@ -293,15 +296,12 @@ pub(crate) struct RoutedWrite {
 impl WriteRetry {
     async fn send(&self, write: RoutedWrite, histogram: Option<&Histogram>) -> WriteAttempt {
         let _timer = histogram.map(Histogram::start_timer);
-        let requester = self.clients.make_region_requester(&write.peer).await;
+        let requester = self.node_manager.datanode(&write.peer).await;
         match requester.handle(Arc::clone(&write.request)).await {
             Ok(response) => WriteAttempt::Success(response),
             Err(error) => {
                 let request = error.retry_hint().is_retryable().then_some(write);
-                WriteAttempt::Failed {
-                    error: error.into(),
-                    request,
-                }
+                WriteAttempt::Failed { error, request }
             }
         }
     }
@@ -327,6 +327,7 @@ impl WriteRetry {
         &self,
         mut attempts: Vec<WriteAttempt>,
         histogram: Option<&Histogram>,
+        cancellation: Option<&CancellationToken>,
     ) -> Result<RegionResponse> {
         let mut response = RegionResponse::new(0);
         let mut backoff = ExponentialBuilder::default()
@@ -341,9 +342,20 @@ impl WriteRetry {
             let Some(delay) = backoff.next() else {
                 break;
             };
+            if let Some(cancellation) = cancellation {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => break,
+                    _ = tokio::time::sleep(delay) => {}
+                }
+            } else {
+                tokio::time::sleep(delay).await;
+            }
+            if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                break;
+            }
             let failures = merge_attempts(attempts, &mut response)?;
-            tokio::time::sleep(delay).await;
-
+            let mut first_error = None;
             let mut refresh = Vec::new();
             let mut pending = Vec::new();
             for (write, error) in failures {
@@ -352,9 +364,15 @@ impl WriteRetry {
                 } else {
                     pending.push(write);
                 }
+                first_error.get_or_insert(error);
             }
             if !refresh.is_empty() {
                 pending.extend(self.reroute_failed_writes(refresh).await?);
+            }
+            if let Some(error) =
+                first_error.filter(|_| cancellation.is_some_and(CancellationToken::is_cancelled))
+            {
+                return Err(error);
             }
             attempts =
                 future::join_all(pending.into_iter().map(|write| self.send(write, histogram)))
@@ -373,24 +391,72 @@ impl WriteRetry {
             .map(|write| write_region_id(&write.request))
             .collect::<Result<Vec<_>>>()?;
         self.invalidate_routes(&regions).await?;
-        let mut partitioners = HashMap::new();
+        let mut table_names = HashMap::new();
         for table_id in regions
             .iter()
             .map(|region| region.table_id())
             .collect::<HashSet<_>>()
         {
+            // Raw metadata is only used to recover the name of the failed request's table.
             let table_info = self
-                .table_info_cache
-                .get(table_id)
-                .await?
+                .catalog_manager
+                .table_info_by_id(table_id)
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?
                 .with_context(|| TableInfoNotFoundSnafu {
                     table: table_id.to_string(),
                 })?;
+            table_names.insert(
+                table_id,
+                TableName::new(
+                    &table_info.catalog_name,
+                    &table_info.schema_name,
+                    &table_info.name,
+                ),
+            );
+        }
+        // TableId invalidation refreshes metadata and routes, but TableCache is keyed by name.
+        // Use the refreshed names in case a table was renamed while the write was pending.
+        let caches = table_names
+            .values()
+            .cloned()
+            .map(CacheIdent::TableName)
+            .collect::<Vec<_>>();
+        self.cache_invalidator
+            .invalidate(&Context::default(), &caches)
+            .await?;
+        let mut partitioners = HashMap::new();
+        for (table_id, name) in table_names {
+            let table = self
+                .catalog_manager
+                .table(
+                    &name.catalog_name,
+                    &name.schema_name,
+                    &name.table_name,
+                    None,
+                )
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?
+                .with_context(|| TableInfoNotFoundSnafu {
+                    table: name.to_string(),
+                })?;
+            let table_info = table.table_info();
+            ensure!(
+                table_info.table_id() == table_id,
+                UnexpectedSnafu {
+                    err_msg: format!(
+                        "Table {name} changed ID from {table_id} to {} while retrying writes",
+                        table_info.table_id()
+                    ),
+                }
+            );
             let partitioner = TablePartitioner::try_new(&self.partition_manager, &table_info)
                 .await
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?;
-            partitioners.insert(table_id, partitioner);
+            partitioners.insert(table_id, (table_info, partitioner));
         }
         let mut rebuilt_requests = Vec::new();
         for write in writes {
@@ -401,11 +467,12 @@ impl WriteRetry {
                 .build()
             })?;
             let table_id = write_region_id(&request)?.table_id();
-            let partitioner = partitioners.get(&table_id).context(UnexpectedSnafu {
-                err_msg: "Refreshed write has no partition snapshot",
-            })?;
+            let (table_info, partitioner) =
+                partitioners.get(&table_id).context(UnexpectedSnafu {
+                    err_msg: "Refreshed write has no partition snapshot",
+                })?;
             let requests = partitioner
-                .rebuild_write_requests(request)
+                .rebuild_write_requests(request, table_info)
                 .map_err(BoxedError::new)
                 .context(ExternalSnafu)?;
             rebuilt_requests.extend(requests);

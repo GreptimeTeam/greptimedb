@@ -15,13 +15,12 @@
 use std::fmt;
 use std::sync::Arc;
 
+use common_base::term_token::{CharClass, classify_char};
 use datafusion_common::arrow::array::{Array, AsArray, BooleanArray, BooleanBuilder};
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::DataType;
 use datafusion_common::{DataFusionError, ScalarValue};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
-use icu_properties::props::Script;
-use icu_properties::{CodePointMapData, CodePointMapDataBorrowed};
 use memchr::memmem;
 
 use crate::function::Function;
@@ -232,37 +231,10 @@ pub struct MatchesTermFinder {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CharClass {
-    AsciiWord,
-    Han,
-    UnicodeWord,
-    Other,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TermKind {
     AsciiLike,
     UnicodeWord,
     HanContaining,
-}
-
-fn classify_char(c: char) -> CharClass {
-    if c.is_ascii_alphanumeric() {
-        CharClass::AsciiWord
-    } else if is_han(c) {
-        CharClass::Han
-    } else if c.is_alphanumeric() {
-        CharClass::UnicodeWord
-    } else {
-        CharClass::Other
-    }
-}
-
-static HAN_SCRIPT_DATA: CodePointMapDataBorrowed<'static, Script> =
-    CodePointMapData::<Script>::new();
-
-fn is_han(c: char) -> bool {
-    HAN_SCRIPT_DATA.get(c) == Script::Han
 }
 
 fn classify_term(term: &str) -> TermKind {
@@ -507,13 +479,5 @@ mod tests {
     fn han_terms_match_as_contiguous_substrings() {
         assert!(MatchesTermFinder::new("行账号").find("中国农业银行账号"));
         assert!(MatchesTermFinder::new("登录").find("登录手机号18888888888的动态key"));
-    }
-
-    #[test]
-    fn han_detection_uses_script_not_all_cjk() {
-        assert!(is_han('汉'));
-        assert!(is_han('\u{30000}'));
-        assert!(!is_han('あ'));
-        assert!(!is_han('한'));
     }
 }

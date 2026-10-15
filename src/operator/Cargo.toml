@@ -63,6 +63,7 @@ lazy_static.workspace = true
 meta-client.workspace = true
 meter-core.workspace = true
 meter-macros.workspace = true
+mito-codec.workspace = true
 moka = { workspace = true, features = ["future"] }
 object-store.workspace = true
 partition.workspace = true

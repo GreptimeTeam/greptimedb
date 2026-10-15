@@ -1417,17 +1417,17 @@ groups:
               legendFormat: '[{{instance}}]-[{{pod}}]'
         - title: Compaction OPS per Instance
           type: timeseries
-          description: Compaction OPS per Instance.
+          description: Published compaction units per second per Instance. A local unit is one input dependency group; a remote job counts as one unit.
           unit: ops
           queries:
-            - expr: sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_count{instance=~"$datanode"}[$__rate_interval]))
+            - expr: sum by(instance, pod, type) (rate(greptime_mito_compaction_total_elapsed_count{instance=~"$datanode"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
-              legendFormat: '[{{ instance }}]-[{{pod}}]'
+              legendFormat: '[{{ instance }}]-[{{pod}}]-[{{type}}]'
         - title: Inflight Compaction
           type: timeseries
-          description: Ongoing compaction task count
+          description: 'Ongoing compaction count: local units and remote jobs'
           unit: none
           queries:
             - expr: greptime_mito_inflight_compaction_count
@@ -1437,19 +1437,19 @@ groups:
               legendFormat: '[{{instance}}]-[{{pod}}]'
         - title: Compaction P99 and Avg per Instance
           type: timeseries
-          description: Compaction P99 and average per Instance.
+          description: Compaction unit P99 and average elapsed time per Instance. Local units are timed from task start through worker apply; remote jobs from request start.
           unit: s
           queries:
-            - expr: histogram_quantile(0.99, sum by(instance, pod, le) (rate(greptime_mito_compaction_total_elapsed_bucket{instance=~"$datanode"}[$__rate_interval])))
+            - expr: histogram_quantile(0.99, sum by(instance, pod, type, le) (rate(greptime_mito_compaction_total_elapsed_bucket{instance=~"$datanode"}[$__rate_interval])))
               datasource:
                 type: prometheus
                 uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}}]-p99'
-            - expr: sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_sum{instance=~"$datanode"}[$__rate_interval])) / sum by(instance, pod) (rate(greptime_mito_compaction_total_elapsed_count{instance=~"$datanode"}[$__rate_interval]))
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{type}}]-p99'
+            - expr: sum by(instance, pod, type) (rate(greptime_mito_compaction_total_elapsed_sum{instance=~"$datanode"}[$__rate_interval])) / sum by(instance, pod, type) (rate(greptime_mito_compaction_total_elapsed_count{instance=~"$datanode"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
-              legendFormat: '[{{instance}}]-[{{pod}}]-avg'
+              legendFormat: '[{{instance}}]-[{{pod}}]-[{{type}}]-avg'
         - title: Compaction Elapsed Time per Instance by Stage
           type: timeseries
           description: Compaction latency by stage

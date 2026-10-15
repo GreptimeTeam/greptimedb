@@ -105,7 +105,11 @@ pub trait ProcedureServiceHandler: Send + Sync {
     async fn query_procedure_state(&self, pid: &str) -> Result<ProcedureStateResponse>;
 
     /// Manage a region follower to a region.
-    async fn manage_region_follower(&self, request: ManageRegionFollowerRequest) -> Result<()>;
+    async fn manage_region_follower(
+        &self,
+        query_ctx: QueryContextRef,
+        request: ManageRegionFollowerRequest,
+    ) -> Result<()>;
 
     /// Get the catalog manager
     fn catalog_manager(&self) -> &CatalogManagerRef;

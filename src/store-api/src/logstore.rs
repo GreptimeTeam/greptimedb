@@ -30,22 +30,6 @@ pub use crate::logstore::entry::Id as EntryId;
 use crate::logstore::provider::Provider;
 use crate::storage::RegionId;
 
-// The information used to locate WAL index for the specified region.
-#[derive(Debug, Clone, Copy)]
-pub struct WalIndex {
-    pub region_id: RegionId,
-    pub location_id: u64,
-}
-
-impl WalIndex {
-    pub fn new(region_id: RegionId, location_id: u64) -> Self {
-        Self {
-            region_id,
-            location_id,
-        }
-    }
-}
-
 /// `LogStore` serves as a Write-Ahead-Log for storage engine.
 #[async_trait::async_trait]
 pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
@@ -64,7 +48,6 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         &self,
         provider: &Provider,
         id: EntryId,
-        index: Option<WalIndex>,
     ) -> Result<SendableEntryStream<'static, Entry, Self::Error>, Self::Error>;
 
     /// Creates a new `Namespace` from the given ref.
@@ -120,6 +103,22 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         &self,
         _provider: &Provider,
         _entry_id: EntryId,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// Releases every entry of a region the caller dropped, after `obsolete`
+    /// marked them obsolete, so that the log store keeps none of them even
+    /// across a restart, which never opens the region again to mark its
+    /// entries obsolete.
+    ///
+    /// The default does nothing and keeps each log store's existing handling
+    /// of a dropped region. A log store that keeps obsolete marks only in
+    /// memory overrides this method and returns once the release is durable.
+    async fn release_region(
+        &self,
+        _provider: &Provider,
+        _region_id: RegionId,
     ) -> Result<(), Self::Error> {
         Ok(())
     }
