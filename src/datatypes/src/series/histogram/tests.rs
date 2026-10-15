@@ -45,6 +45,16 @@ fn batch() -> Arc<HistogramBatch> {
 }
 
 #[test]
+fn tiny_histogram_batch_does_not_retain_large_default_buffers() {
+    let mut builder = HistogramBatchBuilder::new();
+    builder.push(row(None, CounterResetHint::Unknown)).unwrap();
+    let batch = builder.finish().unwrap();
+    let retained = batch.as_arrow().get_buffer_memory_size();
+
+    assert!(retained < 4096, "retained {retained} bytes");
+}
+
+#[test]
 fn builder_views_and_arrow_buffer_borrowing() {
     let empty = HistogramBatchBuilder::new();
     assert!(empty.finish().unwrap().is_empty());
