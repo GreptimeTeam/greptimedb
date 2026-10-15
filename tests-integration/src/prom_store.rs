@@ -34,7 +34,7 @@ mod tests {
     use frontend::instance::Instance;
     use prost::Message;
     use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
-    use servers::http::test_helpers::TestClient;
+    use servers::http::test_helpers::{TestClient, TestResponse};
     use servers::http::{HttpOptions, HttpServerBuilder};
     use servers::prom_store;
     use servers::prom_store::to_grpc_row_insert_requests;
@@ -678,48 +678,27 @@ mod tests {
             .build();
         let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
 
-        // Database selectors with no matching catalog/schema return empty results.
-        for database in [
-            "unknown_schema",
-            "unknown_catalog-prometheus",
-            "unknown_catalog-information_schema",
+        // Cover missing schemas/catalogs and each database label alias.
+        for (selector, database) in [
+            ("__schema__", "unknown_schema"),
+            ("__database__", "unknown_catalog-prometheus"),
+            ("x_greptime_database", "unknown_catalog-information_schema"),
         ] {
-            for selector in ["__schema__", "__database__", "x_greptime_database"] {
-                let request = ReadRequest {
-                    queries: vec![Query {
-                        start_timestamp_ms: 1000,
-                        end_timestamp_ms: 2000,
-                        matchers: vec![
-                            LabelMatcher {
-                                name: prom_store::METRIC_NAME_LABEL.to_string(),
-                                value: "missing_metric".to_string(),
-                                r#type: MatcherType::Eq as i32,
-                            },
-                            LabelMatcher {
-                                name: selector.to_string(),
-                                value: database.to_string(),
-                                r#type: MatcherType::Eq as i32,
-                            },
-                        ],
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                };
-                let response = client
-                    .post("/v1/prometheus/read?db=prometheus")
-                    .body(prom_store::snappy_compress(&request.encode_to_vec()).unwrap())
-                    .send()
-                    .await;
-                assert_eq!(response.status(), 200, "{selector}={database}");
-                let body = prom_store::snappy_decompress(&response.bytes().await).unwrap();
-                let response = ReadResponse::decode(&body[..]).unwrap();
-                assert_eq!(response.results.len(), 1);
-                assert!(response.results[0].timeseries.is_empty());
-            }
+            let mut query = remote_query("missing_metric");
+            query.matchers.push(LabelMatcher {
+                name: selector.to_string(),
+                value: database.to_string(),
+                r#type: MatcherType::Eq as i32,
+            });
+            let response = post_remote_read(&client, vec![query]).await;
+            assert_eq!(response.status(), 200, "{selector}={database}");
+            let body = prom_store::snappy_decompress(&response.bytes().await).unwrap();
+            let response = ReadResponse::decode(&body[..]).unwrap();
+            assert_eq!(response.results.len(), 1);
+            assert!(response.results[0].timeseries.is_empty());
         }
 
         // Matcher syntax must be checked even when the metric does not exist.
-        let mut matcher_statuses = Vec::new();
         for metric in ["metric1", "missing_metric"] {
             for (matcher_type, value, expected_status) in [
                 (99, "spark", 400),
@@ -730,45 +709,20 @@ mod tests {
                 (MatcherType::Re as i32, "spark", 200),
                 (MatcherType::Nre as i32, "api.*", 200),
             ] {
-                let request = ReadRequest {
-                    queries: vec![Query {
-                        start_timestamp_ms: 1000,
-                        end_timestamp_ms: 2000,
-                        matchers: vec![
-                            LabelMatcher {
-                                name: prom_store::METRIC_NAME_LABEL.to_string(),
-                                value: metric.to_string(),
-                                r#type: MatcherType::Eq as i32,
-                            },
-                            LabelMatcher {
-                                name: "job".to_string(),
-                                value: value.to_string(),
-                                r#type: matcher_type,
-                            },
-                        ],
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                };
-                let response = client
-                    .post("/v1/prometheus/read?db=prometheus")
-                    .body(prom_store::snappy_compress(&request.encode_to_vec()).unwrap())
-                    .send()
-                    .await;
-                matcher_statuses.push((
-                    metric,
-                    matcher_type,
+                let mut query = remote_query(metric);
+                query.matchers.push(LabelMatcher {
+                    name: "job".to_string(),
+                    value: value.to_string(),
+                    r#type: matcher_type,
+                });
+                let response = post_remote_read(&client, vec![query]).await;
+                assert_eq!(
                     response.status().as_u16(),
                     expected_status,
-                ));
+                    "metric={metric}, type={matcher_type}, value={value}"
+                );
             }
         }
-        assert!(
-            matcher_statuses
-                .iter()
-                .all(|(_, _, status, expected)| status == expected),
-            "{matcher_statuses:?}"
-        );
 
         // Missing metrics must retain their result slots in multi-query responses.
         for metrics in [
@@ -783,27 +737,8 @@ mod tests {
             ],
             vec!["missing_metric", "invalid_metric"],
         ] {
-            let request = ReadRequest {
-                queries: metrics
-                    .iter()
-                    .map(|metric| Query {
-                        start_timestamp_ms: 1000,
-                        end_timestamp_ms: 2000,
-                        matchers: vec![LabelMatcher {
-                            name: prom_store::METRIC_NAME_LABEL.to_string(),
-                            value: (*metric).to_string(),
-                            r#type: MatcherType::Eq as i32,
-                        }],
-                        ..Default::default()
-                    })
-                    .collect(),
-                ..Default::default()
-            };
-            let response = client
-                .post("/v1/prometheus/read?db=prometheus")
-                .body(prom_store::snappy_compress(&request.encode_to_vec()).unwrap())
-                .send()
-                .await;
+            let queries = metrics.iter().map(|metric| remote_query(metric)).collect();
+            let response = post_remote_read(&client, queries).await;
             if metrics.contains(&"invalid_metric") {
                 assert!(!response.status().is_success());
                 assert!(response.text().await.contains("Ambiguous value column"));
@@ -835,5 +770,30 @@ mod tests {
             let sql = format!("DESC TABLE {physical_table};");
             instance.do_query(&sql, ctx).await[0].as_ref().unwrap();
         }
+    }
+
+    fn remote_query(metric: &str) -> Query {
+        Query {
+            start_timestamp_ms: 1000,
+            end_timestamp_ms: 2000,
+            matchers: vec![LabelMatcher {
+                name: prom_store::METRIC_NAME_LABEL.to_string(),
+                value: metric.to_string(),
+                r#type: MatcherType::Eq as i32,
+            }],
+            ..Default::default()
+        }
+    }
+
+    async fn post_remote_read(client: &TestClient, queries: Vec<Query>) -> TestResponse {
+        let request = ReadRequest {
+            queries,
+            ..Default::default()
+        };
+        client
+            .post("/v1/prometheus/read?db=prometheus")
+            .body(prom_store::snappy_compress(&request.encode_to_vec()).unwrap())
+            .send()
+            .await
     }
 }
