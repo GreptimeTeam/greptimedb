@@ -673,6 +673,40 @@ impl RegionScanner for SeriesScan {
             fields: specs.into(),
             eval_grid: None,
         });
+        let typed_schema = input.mapper.input_arrow_schema(false);
+        let mut predicates = Vec::new();
+        if let Some(predicate) = input.predicate_group().predicate_without_region() {
+            use datafusion_common::tree_node::TreeNode;
+            use datafusion_expr::{Expr, Volatility};
+
+            for expr in predicate.exprs() {
+                // Fresh execution properties cannot preserve Stable or query-dependent semantics.
+                if expr
+                    .exists(|node| {
+                        Ok(matches!(node, Expr::ScalarFunction(function)
+                            if function.func.signature().volatility != Volatility::Immutable)
+                            || matches!(node, Expr::ScalarVariable(..)))
+                    })
+                    .unwrap_or(true)
+                {
+                    return Ok(None);
+                }
+                // Evaluate residuals with original types before raw conversion to Float64.
+                let Ok(physical) =
+                    table::predicate::Predicate::to_physical_expr(expr, &typed_schema)
+                else {
+                    return Ok(None);
+                };
+                if !matches!(
+                    physical.data_type(&typed_schema),
+                    Ok(datatypes::arrow::datatypes::DataType::Boolean
+                        | datatypes::arrow::datatypes::DataType::Null)
+                ) {
+                    return Ok(None);
+                }
+                predicates.push(physical);
+            }
+        }
         let metrics = new_partition_metrics(
             &self.stream_ctx,
             ctx.explain_verbose,
@@ -689,6 +723,7 @@ impl RegionScanner for SeriesScan {
             label_source.clone(),
             fields,
             metrics,
+            predicates,
         )))
     }
 

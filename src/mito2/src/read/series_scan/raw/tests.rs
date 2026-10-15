@@ -22,7 +22,11 @@ use common_error::ext::ErrorExt;
 use common_query::native_histogram::{
     CounterResetHint, NativeHistogram, Span, build_histogram_array,
 };
+use datafusion::physical_plan::PhysicalExpr;
+use datafusion::physical_plan::expressions::{BinaryExpr, Column, lit as physical_lit};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+use datafusion_common::ScalarValue;
+use datafusion_expr::Operator;
 use datatypes::arrow::array::{
     ArrayRef, BinaryArray, Int64Array, StructArray, TimestampMillisecondArray, UInt8Array,
     UInt64Array,
@@ -188,7 +192,14 @@ fn convert_with_source(
     source: RawLabelSource,
     field_type: datatypes::prelude::ConcreteDataType,
 ) -> SendableRawSeriesStream {
-    make_stream(inner, schema, source, vec![(0, field_type)], metrics())
+    make_stream(
+        inner,
+        schema,
+        source,
+        vec![(0, field_type)],
+        metrics(),
+        vec![],
+    )
 }
 
 fn primary_key_source(metadata: Arc<store_api::metadata::RegionMetadata>) -> RawLabelSource {
@@ -309,6 +320,65 @@ async fn chunks_preserve_keys_values_times_and_final_flags_for_both_input_shapes
             ]
         );
     }
+}
+
+#[tokio::test]
+async fn typed_predicate_filters_before_numeric_samples_are_cast() {
+    let threshold = 1_i64 << 53;
+    let predicate: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+        Arc::new(Column::new("value", 0)),
+        Operator::Gt,
+        physical_lit(ScalarValue::Int64(Some(threshold))),
+    ));
+    let mut output = make_stream(
+        input(vec![Ok(ScanBatch::RecordBatch(batch(
+            &[b"a", b"a", b"a", b"b", b"c"],
+            &[1, 2, 3, 1, 1],
+            &[
+                Some(threshold),
+                None,
+                Some(threshold + 1),
+                Some(threshold),
+                Some(threshold + 1),
+            ],
+        )))]),
+        schema(),
+        primary_key_source(metadata()),
+        vec![(0, datatypes::prelude::ConcreteDataType::int64_datatype())],
+        metrics(),
+        vec![predicate],
+    );
+    let chunk = output.next().await.unwrap().unwrap();
+    assert!(chunk.is_last);
+    assert_eq!(chunk.read_key.as_slice(), b"a");
+    assert_eq!(chunk.time.len(), 1);
+    assert_eq!(chunk.time.timestamp(0), Some(3));
+    assert_eq!(values(&chunk), vec![Some((threshold + 1) as f64)]);
+    let chunk = output.next().await.unwrap().unwrap();
+    assert_eq!(chunk.read_key.as_slice(), b"c");
+    assert!(chunk.is_last);
+    assert_eq!(chunk.time.timestamp(0), Some(1));
+    assert_eq!(values(&chunk), vec![Some((threshold + 1) as f64)]);
+    assert!(output.next().await.is_none());
+}
+
+#[tokio::test]
+async fn predicate_error_is_terminal() {
+    let predicate: Arc<dyn PhysicalExpr> = Arc::new(Column::new("value", 0));
+    let mut output = make_stream(
+        input(vec![Ok(ScanBatch::RecordBatch(batch(
+            &[b"a"],
+            &[1],
+            &[Some(1)],
+        )))]),
+        schema(),
+        primary_key_source(metadata()),
+        vec![(0, datatypes::prelude::ConcreteDataType::int64_datatype())],
+        metrics(),
+        vec![predicate],
+    );
+    assert!(output.next().await.unwrap().is_err());
+    assert!(output.next().await.is_none());
 }
 
 #[tokio::test]

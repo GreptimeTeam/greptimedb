@@ -24,6 +24,7 @@ use common_error::ext::BoxedError;
 use common_query::native_histogram::{
     histogram_samples_from_arrow, is_native_histogram_value_type,
 };
+use datafusion::physical_plan::PhysicalExpr;
 use datatypes::arrow::array::{
     Array, BinaryArray, DictionaryArray, Float64Array, StructArray, TimestampMillisecondArray,
 };
@@ -180,6 +181,7 @@ pub(crate) fn make_stream(
     label_source: RawLabelSource,
     fields: Vec<(usize, ConcreteDataType)>,
     metrics: PartitionMetrics,
+    predicates: Vec<Arc<dyn PhysicalExpr>>,
 ) -> SendableRawSeriesStream {
     let output_schema = schema.clone();
     let stream = async_stream::stream! {
@@ -192,6 +194,28 @@ pub(crate) fn make_stream(
                 Err(error) => { yield Err(BoxedError::new(error)); return; }
             };
             for record in records {
+                let mut record = record;
+                for predicate in &predicates {
+                    record = match common_recordbatch::filter::batch_filter(&record, predicate) {
+                        Ok(record) => record,
+                        Err(error) => {
+                            let source = common_query::error::Error::GeneralDataFusion {
+                                error,
+                                location: snafu::Location::new(file!(), line!(), column!()),
+                            };
+                            yield Err(BoxedError::new(crate::error::ExternalSnafu {
+                                context: "raw predicate evaluation".to_string(),
+                            }.into_error(BoxedError::new(source))));
+                            return;
+                        }
+                    };
+                    if record.num_rows() == 0 {
+                        break;
+                    }
+                }
+                if record.num_rows() == 0 {
+                    continue;
+                }
                 let mut start = 0;
                 while start < record.num_rows() {
                     let key = match read_key(&record, start) { Ok(key) => key, Err(error) => { yield Err(error); return; } };

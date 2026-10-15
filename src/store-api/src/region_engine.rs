@@ -556,8 +556,10 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     ///
     /// Output preserves the ordinary storage reader's pushdown and MVCC semantics. Inexact
     /// pushed-down predicates can leave false-positive candidates, just as in `scan_partition`.
-    /// Callers must retain residual predicate columns until those predicates are evaluated and
-    /// apply the final projection afterward; raw capability does not mean filtering is complete.
+    /// Implementations must preserve typed residual-predicate semantics before any lossy value
+    /// conversion, or return `None` before execution when they cannot. Callers must retain
+    /// residual predicate columns until those predicates are evaluated and apply the final
+    /// projection afterward; raw capability does not mean filtering is complete.
     fn scan_series_partition(
         &self,
         _ctx: &QueryScanContext,
