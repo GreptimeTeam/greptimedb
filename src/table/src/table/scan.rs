@@ -493,13 +493,21 @@ impl ExecutionPlan for RegionScanExec {
         let statistics = if scanner.properties().total_rows_is_exact()
             && !scanner.has_predicate_without_region()
         {
+            // Only the row count is known. DataFusion answers `count(col)` as
+            // `num_rows - null_count` and `count(DISTINCT col)` as `distinct_count`
+            // without scanning, so these must stay absent unless the schema
+            // guarantees them. Non-nullable columns (including the time index that
+            // `count(*)` is rewritten to) keep an exact zero null count.
             let column_statistics = self
                 .arrow_schema
                 .fields
                 .iter()
-                .map(|_| ColumnStatistics {
-                    distinct_count: Precision::Exact(self.total_rows),
-                    null_count: Precision::Exact(0), // all null rows are counted for append-only table
+                .map(|field| ColumnStatistics {
+                    null_count: if field.is_nullable() {
+                        Precision::Absent
+                    } else {
+                        Precision::Exact(0)
+                    },
                     ..Default::default()
                 })
                 .collect();
@@ -950,7 +958,8 @@ mod test {
             (true, true, Precision::Exact(3)),
             (false, true, Precision::Absent),
         ] {
-            let (schema, batch, metadata) = dynamic_filter_test_data(5685, false);
+            // Column `a` is nullable and `ts` is not.
+            let (schema, batch, metadata) = dynamic_filter_test_data(5685, true);
             let scanner = Box::new(RepeatableScanner {
                 batches: RecordBatches::try_new(schema, vec![batch]).unwrap(),
                 properties: ScannerProperties::default()
@@ -961,7 +970,17 @@ mod test {
                 dynamic_filters: Arc::new(Mutex::new(Vec::new())),
             });
             let plan = RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap();
-            assert_eq!(plan.partition_statistics(None).unwrap().num_rows, expected);
+            let stats = plan.partition_statistics(None).unwrap();
+            assert_eq!(stats.num_rows, expected);
+            if expected != Precision::Absent {
+                let [a, ts] = stats.column_statistics.as_slice() else {
+                    panic!("unexpected column statistics: {stats:?}");
+                };
+                assert_eq!(a.null_count, Precision::Absent);
+                assert_eq!(ts.null_count, Precision::Exact(0));
+                assert_eq!(a.distinct_count, Precision::Absent);
+                assert_eq!(ts.distinct_count, Precision::Absent);
+            }
             assert_eq!(
                 plan.partition_statistics(Some(0)).unwrap().num_rows,
                 Precision::Absent,
