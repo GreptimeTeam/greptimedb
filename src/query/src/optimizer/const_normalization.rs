@@ -17,7 +17,7 @@ use std::sync::Arc;
 use arrow_schema::{DataType, TimeUnit as ArrowTimeUnit};
 use datafusion::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion, TreeNodeRewriter};
-use datafusion_common::{DFSchemaRef, Result, ScalarValue};
+use datafusion_common::{DFSchema, DFSchemaRef, Result, ScalarValue};
 use datafusion_expr::expr::{Cast, InList, Like, TryCast};
 use datafusion_expr::{Between, BinaryExpr, Expr, ExprSchemable, LogicalPlan, Operator, lit};
 use datafusion_expr_common::casts::try_cast_literal_to_type;
@@ -36,7 +36,10 @@ impl AnalyzerRule for ConstNormalizationRule {
                 rewrite_plan_exprs(LogicalPlan::Filter(filter), schema)
             }
             LogicalPlan::TableScan(scan) => {
-                let schema = scan.projected_schema.clone();
+                let schema = Arc::new(DFSchema::try_from_qualified_schema(
+                    scan.table_name.clone(),
+                    &scan.source.schema(),
+                )?);
                 rewrite_plan_exprs(LogicalPlan::TableScan(scan), schema)
             }
             _ => Ok(Transformed::no(plan)),
@@ -810,6 +813,48 @@ mod tests {
             col("v").gt_eq(lit(100_000_i64)),
             "Filter: t.v >= Int64(100000)\n  TableScan: t",
         );
+    }
+
+    #[test]
+    fn test_normalize_scan_filter_with_unprojected_predicate_column() {
+        let schema = test_schema(vec![
+            Field::new("output", DataType::Float64, false),
+            Field::new("predicate", DataType::Int64, false),
+        ]);
+        let cases = [
+            (
+                col("predicate").gt(lit(9_007_199_254_740_993_i64)),
+                "predicate",
+            ),
+            (
+                col("t.predicate").gt(lit(9_007_199_254_740_993_i64)),
+                "t.predicate",
+            ),
+        ];
+
+        for (predicate, column) in cases {
+            let plan = LogicalPlanBuilder::scan_with_filters(
+                "t",
+                test_source(schema.clone()),
+                Some(vec![0]),
+                vec![predicate.clone()],
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+            let analyzed = analyze_plan(plan);
+            let LogicalPlan::TableScan(scan) = analyzed else {
+                panic!("expected table scan");
+            };
+            assert_eq!(scan.projection, Some(vec![0]));
+            assert_eq!(scan.projected_schema.fields().len(), 1);
+            assert_eq!(scan.projected_schema.field(0).name(), "output");
+            assert_eq!(
+                scan.filters,
+                vec![col(column).gt(lit(9_007_199_254_740_993_i64))]
+            );
+        }
     }
 
     #[test]
