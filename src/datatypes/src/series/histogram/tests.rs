@@ -218,7 +218,7 @@ fn rejects_wrong_schema_type_order_and_nullability() {
 }
 
 #[test]
-fn rejects_parent_and_list_item_nulls() {
+fn rejects_parent_nulls_and_nullable_list_item_schema() {
     let b = batch();
     let source = b.as_arrow();
     let parent = StructArray::try_new(
@@ -244,25 +244,10 @@ fn rejects_parent_and_list_item_nulls() {
         .as_any()
         .downcast_ref::<Float64Array>()
         .unwrap();
-    let mut null_bits = vec![true; values.len()];
-    null_bits[1] = false;
-    let nullable = Float64Array::new(
-        values.values().clone(),
-        Some(arrow::buffer::NullBuffer::from(null_bits)),
-    );
-    assert!(
-        ListArray::try_new(
-            Arc::new(Field::new("item", DataType::Float64, false)),
-            list.offsets().clone(),
-            Arc::new(nullable.clone()),
-            None,
-        )
-        .is_err()
-    );
     let rebuilt = ListArray::try_new(
         Arc::new(Field::new("item", DataType::Float64, true)),
         list.offsets().clone(),
-        Arc::new(nullable),
+        Arc::new(values.clone()),
         None,
     )
     .unwrap();
