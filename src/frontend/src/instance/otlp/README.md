@@ -113,11 +113,11 @@ The v1 path performs these steps before the normal chunk writes:
    `TraceBatchSchema` that records observed scalar types, sparse row presence,
    and binary logical types. Drop the dense request after collecting its
    lightweight schema observations.
-2. Mark a chunk for span-only fallback if one column contains both raw OTLP
-   bytes and arrays or key-value lists encoded as JSONB. Both use protobuf
-   `BinaryValue`, but a Greptime column cannot represent both logical schemas.
-   The chunk bypasses request-wide schema planning and is reconciled span by
-   span.
+2. Split a chunk into single-span planning units if one column contains both
+   raw OTLP bytes and arrays or key-value lists encoded as JSONB. Both use
+   protobuf `BinaryValue`, but a Greptime column cannot represent both logical
+   schemas. Only the spans whose logical types conflict are removed from the
+   request-wide plan; the other spans keep contributing to it.
 3. Aggregate the compatible observations into `TraceRequestSchema` and
    compare them with the existing table schema and the fixed types in
    [`trace_semconv.rs`](trace_semconv.rs).
@@ -150,7 +150,7 @@ determines the next action when that preparation fails:
 
 | Reaction | Behavior |
 | --- | --- |
-| `RetryPerSpan` | Prepare and write each span independently. Successful spans are accepted; deterministic per-span preparation failures are rejected. A v1 chunk with incompatible raw-binary and JSONB values starts here without attempting a chunk write. |
+| `RetryPerSpan` | Prepare and write each span independently. Successful spans are accepted; deterministic per-span preparation failures are rejected. |
 | `DiscardChunk` | Do not retry the chunk at span granularity. Count every span in the chunk as rejected. |
 | `Propagate` | Return retryable or unclassified failures instead of reporting a partial success. Retry hints take precedence over status-code classification. |
 
