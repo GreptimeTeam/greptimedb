@@ -214,6 +214,12 @@ impl Instance {
             .await
             .context(CatalogSnafu)?
         else {
+            debug!(
+                catalog = catalog_name,
+                schema = schema_name,
+                table = table_name,
+                "Table not found during remote read, returning empty result"
+            );
             return Ok(None);
         };
 
