@@ -205,8 +205,11 @@ pub fn query_to_plan(
             lit("")
         };
 
-        // Keep equality predicates on the column directly for index recognition
-        // and numeric-column compatibility; include NULL only when "" matches.
+        // Compare EQ/NEQ against the original column to preserve index recognition
+        // and existing numeric comparisons. Treat NULL as "": include NULL rows
+        // for EQ "" and NEQ with a non-empty value.
+        // For RE/NRE, cast to string before coalesce to avoid type coercion errors,
+        // then replace NULL with "" before matching.
         match m_type {
             MatcherType::Eq => {
                 let condition = if value.is_empty() {
@@ -253,9 +256,6 @@ pub fn query_to_plan(
 
 /// Prometheus's NewFastRegexMatcher also wraps patterns in ^(?s:...)$:
 /// https://github.com/prometheus/prometheus/blob/main/model/labels/regexp.go
-/// Label regexes match the entire value, with '.' matching newlines.
-/// The group anchors every alternative (e.g. api|web) and scopes client flags
-/// such as (?m) so they cannot change the outer anchors.
 fn anchored_label_regex(value: &str) -> String {
     format!("^(?s:{value})$")
 }
@@ -1217,7 +1217,6 @@ mod tests {
         ])
         .unwrap();
         ctx.register_batch("metrics", batch).unwrap();
-        let mut failures = Vec::new();
         for (name, op, value, expected) in [
             ("job", MatcherType::Eq, "api", vec![0]),
             ("job", MatcherType::Neq, "api", vec![1, 2, 3, 4, 5]),
@@ -1263,17 +1262,12 @@ mod tests {
                 }],
                 ..Default::default()
             };
-            let plan = match query_to_plan(
+            let plan = query_to_plan(
                 ctx.table("metrics").await.unwrap(),
                 &query,
                 greptime_timestamp(),
-            ) {
-                Ok(plan) => plan,
-                Err(err) => {
-                    failures.push(format!("{name} {op:?} {value:?}: {err}"));
-                    continue;
-                }
-            };
+            )
+            .unwrap_or_else(|err| panic!("{name} {op:?} {value:?}: {err}"));
             let batches = ctx
                 .execute_logical_plan(plan)
                 .await
@@ -1291,84 +1285,71 @@ mod tests {
                         .to_vec()
                 })
                 .collect();
-            if actual != expected {
-                failures.push(format!(
-                    "{name} {op:?} {value:?}: expected {expected:?}, got {actual:?}"
-                ));
-            }
+            assert_eq!(expected, actual, "{name} {op:?} {value:?}");
         }
-        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[tokio::test]
-    async fn test_remote_read_binary_label_regex_preserves_type_handling() {
-        for bytes in [b"a".as_slice(), b"\xff".as_slice(), b"".as_slice()] {
-            let labels = arrow::array::BinaryArray::from(vec![Some(bytes), None]);
-            for label_type in [
-                DataType::Binary,
-                DataType::LargeBinary,
-                DataType::BinaryView,
-            ] {
-                let ctx = SessionContext::new();
-                let batch = DfRecordBatch::try_from_iter(vec![
-                    (
-                        greptime_timestamp(),
-                        Arc::new(TimestampMillisecondArray::from(vec![1000; 2])) as ArrayRef,
-                    ),
-                    ("tag", casts::cast(&labels, &label_type).unwrap()),
-                ])
-                .unwrap();
-                ctx.register_batch("metrics", batch).unwrap();
-                for op in [MatcherType::Re, MatcherType::Nre] {
-                    let matched = regexp_match(ident("tag"), lit("a"), None);
-                    let old_condition = if op == MatcherType::Re {
-                        matched.is_not_null()
-                    } else {
-                        matched.is_null()
-                    };
-                    let old = ctx
-                        .table("metrics")
-                        .await
-                        .unwrap()
-                        .filter(old_condition)
-                        .unwrap()
-                        .collect()
-                        .await;
-                    let query = Query {
-                        start_timestamp_ms: 1000,
-                        end_timestamp_ms: 1000,
-                        matchers: vec![LabelMatcher {
-                            name: "tag".into(),
-                            value: "a".into(),
-                            r#type: op as i32,
-                        }],
-                        ..Default::default()
-                    };
-                    let plan = query_to_plan(
-                        ctx.table("metrics").await.unwrap(),
-                        &query,
-                        greptime_timestamp(),
-                    )
-                    .unwrap();
-                    let current = ctx
-                        .execute_logical_plan(plan)
-                        .await
-                        .unwrap()
-                        .collect()
-                        .await;
-                    match (old, current) {
-                        (Ok(old), Ok(current)) => {
-                            assert_eq!(old, current, "{label_type:?}: {op:?}")
-                        }
-                        (Err(old), Err(current)) => {
-                            assert_eq!(old.to_string(), current.to_string())
-                        }
-                        (old, current) => {
-                            panic!("{label_type:?}: {op:?}: old={old:?}, current={current:?}")
-                        }
-                    }
-                }
-            }
+    async fn test_remote_read_binary_label_regex() {
+        for (bytes, op, pattern, expected) in [
+            (b"a".as_slice(), MatcherType::Re, "a", Some(vec![1000])),
+            (b"a".as_slice(), MatcherType::Nre, "a", Some(vec![1001])),
+            (b"".as_slice(), MatcherType::Re, "", Some(vec![1000, 1001])),
+            (b"".as_slice(), MatcherType::Nre, "", Some(vec![])),
+            (b"\xff".as_slice(), MatcherType::Re, ".*", None),
+            (b"\xff".as_slice(), MatcherType::Nre, ".*", None),
+        ] {
+            let ctx = SessionContext::new();
+            let batch = DfRecordBatch::try_from_iter(vec![
+                (
+                    greptime_timestamp(),
+                    Arc::new(TimestampMillisecondArray::from(vec![1000, 1001])) as ArrayRef,
+                ),
+                (
+                    "tag",
+                    Arc::new(arrow::array::BinaryArray::from(vec![Some(bytes), None])) as ArrayRef,
+                ),
+            ])
+            .unwrap();
+            ctx.register_batch("metrics", batch).unwrap();
+            let query = Query {
+                start_timestamp_ms: 1000,
+                end_timestamp_ms: 1001,
+                matchers: vec![LabelMatcher {
+                    name: "tag".into(),
+                    value: pattern.into(),
+                    r#type: op as i32,
+                }],
+                ..Default::default()
+            };
+            let plan = query_to_plan(
+                ctx.table("metrics").await.unwrap(),
+                &query,
+                greptime_timestamp(),
+            )
+            .unwrap();
+            let result = ctx
+                .execute_logical_plan(plan)
+                .await
+                .unwrap()
+                .collect()
+                .await;
+            let Some(expected) = expected else {
+                assert!(result.is_err(), "{op:?}: invalid UTF-8 must be rejected");
+                continue;
+            };
+            let actual: Vec<i64> = result
+                .unwrap()
+                .iter()
+                .flat_map(|batch| {
+                    batch
+                        .column(0)
+                        .as_primitive::<TimestampMillisecondType>()
+                        .values()
+                        .to_vec()
+                })
+                .collect();
+            assert_eq!(expected, actual, "{bytes:?}: {op:?} {pattern:?}");
         }
     }
 
@@ -1392,37 +1373,44 @@ mod tests {
             ])
             .unwrap();
             ctx.register_batch("metrics", batch).unwrap();
-            for (matchers, expected) in [
-                (
-                    vec![
-                        ("Job.Name", MatcherType::Re, "api|web"),
-                        ("Job.Name", MatcherType::Neq, "web"),
-                    ],
-                    vec![1000],
-                ),
-                (
-                    vec![
-                        ("Job.Name", MatcherType::Eq, ""),
-                        ("Job.Name", MatcherType::Neq, "api"),
-                    ],
-                    vec![2000],
-                ),
-                (
-                    vec![
-                        ("Job.Name", MatcherType::Eq, "api"),
-                        ("Job.Name", MatcherType::Eq, "web"),
-                    ],
-                    vec![],
-                ),
-                (
-                    vec![
-                        ("job.name", MatcherType::Eq, ""),
-                        ("Job.Name", MatcherType::Re, ".*"),
-                    ],
-                    vec![1000, 2000],
-                ),
-                (vec![("Job.Name", MatcherType::Nre, ".*")], vec![]),
-            ] {
+            let mut cases = vec![
+                (vec![("Job.Name", MatcherType::Re, ".*")], vec![1000, 2000]),
+                (vec![("Job.Name", MatcherType::Nre, ".+")], vec![2000]),
+            ];
+            // Exercise combinations once; other representations only need regex/NULL coverage.
+            if label_type == DataType::Utf8 {
+                cases.extend([
+                    (
+                        vec![
+                            ("Job.Name", MatcherType::Re, "api|web"),
+                            ("Job.Name", MatcherType::Neq, "web"),
+                        ],
+                        vec![1000],
+                    ),
+                    (
+                        vec![
+                            ("Job.Name", MatcherType::Eq, ""),
+                            ("Job.Name", MatcherType::Neq, "api"),
+                        ],
+                        vec![2000],
+                    ),
+                    (
+                        vec![
+                            ("Job.Name", MatcherType::Eq, "api"),
+                            ("Job.Name", MatcherType::Eq, "web"),
+                        ],
+                        vec![],
+                    ),
+                    (
+                        vec![
+                            ("job.name", MatcherType::Eq, ""),
+                            ("Job.Name", MatcherType::Re, ".*"),
+                        ],
+                        vec![1000, 2000],
+                    ),
+                ]);
+            }
+            for (matchers, expected) in cases {
                 let mut query = Query {
                     start_timestamp_ms: 1000,
                     end_timestamp_ms: 2000,

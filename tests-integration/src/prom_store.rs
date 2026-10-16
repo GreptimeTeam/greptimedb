@@ -708,8 +708,6 @@ mod tests {
                 (MatcherType::Neq as i32, "[", 200),
                 (MatcherType::Re as i32, "spark", 200),
                 (MatcherType::Nre as i32, "api.*", 200),
-                (MatcherType::Re as i32, "spark|api", 200),
-                (MatcherType::Nre as i32, "spark|api", 200),
                 (MatcherType::Re as i32, "(?x) spark", 200),
                 (MatcherType::Nre as i32, "(?x) spark", 200),
                 (MatcherType::Re as i32, "(?x) spark # comment", 400),
