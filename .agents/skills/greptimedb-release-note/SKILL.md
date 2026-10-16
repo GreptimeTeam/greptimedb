@@ -33,8 +33,8 @@ tags (e.g. `v1.3.0-alpha.1-3c0e2a8d5-20260928-1790639248`).
 - New minor `vX.Y.0`: previous = the latest `vX.(Y-1).*` (for `v1.0.0`, the biggest `0.x`).
 - Pre-release `vX.Y.Z-{alpha,beta,rc}.N`: previous = the latest pre-release tag of the same
   `vX.Y.Z` (e.g. `v1.3.0-beta.1` for `v1.3.0-beta.2`). If there is none (the first alpha),
-  previous = the previous minor `.0` tag and the range is built as a new minor (§3), with the
-  pre-release tag as the tip.
+  see "First pre-release" in §3: the previous minor's `.0` may not be published yet, and since
+  v1.2 a `.0` tag sits on `release/vX.Y`, not on `main`.
 Double-check with the user.
 
 ## 3. Pick the range and generate
@@ -102,6 +102,24 @@ user which they prefer**):
 
 If the branch history is otherwise messy, the same "identify the picked PRs and keep only those"
 rule applies.
+
+### First pre-release (`X.Y.0-alpha.1`, cut from main)
+The base is the commit where the previous line's release branch left `main`. It exists when the
+alpha is cut, even if `vX.(Y-1).0` does not:
+```
+base=$(git merge-base <remote>/release/vX.(Y-1) <tag>)
+```
+If there is no `release/vX.(Y-1)`, use the newest published release tag that is an ancestor of
+the tag (`git merge-base --is-ancestor <candidate> <tag>`). Run `git cliff <base>..<tag>`, then
+subtract every PR that already shipped in a published `vX.(Y-1).*` release, pre-releases
+included. Take the union of the PR links in those release bodies and the `(#N)` line endings in
+the history of the newest published `vX.(Y-1).*` tag:
+```
+gh release view <published-vX.(Y-1)-tag> --repo GreptimeTeam/greptimedb | grep -oE 'pull/[0-9]+'
+git log <newest-published-vX.(Y-1)-tag> --format=%B | grep -oE '\(#[0-9]+\)$'
+```
+Either source alone misses PRs: a release body can omit a backport that its tag contains, and a
+backport commit can name only the backport PR.
 
 ### Pre-release (`X.Y.Z-{alpha,beta,rc}.N` after an earlier pre-release)
 **The tip is the tagged commit, not the release branch tip.** Resolve it from the remote and
