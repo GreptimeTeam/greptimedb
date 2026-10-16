@@ -11,10 +11,6 @@ default_column_prefix = "greptime"
 ## When `false`, a missing table is never auto-created even if the request sets the `auto_create_table` hint to `true`. Default: `true`.
 #+ auto_create_table = true
 
-## Enables experimental Parquet COPY DATABASE using shared Metric physical scans.
-## Resume requires the previous export and storage writes to have ended; HTTP timeout is not confirmation.
-#+ experimental_metric_export = false
-
 ## The user provider for authentication.
 ## Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"
 ## Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",
@@ -427,7 +423,7 @@ overwrite_entry_start_id = false
 #+ prefix = "wal"
 
 ## The interval of flushing buffered entries to the object store, at least `10ms`, defaults to `100ms`.
-## Each non-empty timer-triggered flush creates one object, and a batch that reaches `max_batch_bytes` is flushed immediately, so under sustained load the batch seals on size and the interval no longer matters.
+## Each non-empty timer-triggered flush creates one object, and a batch that reaches `max_batch_bytes` is flushed immediately, so the batch seals on size only when the admitted bytes reach `max_batch_bytes` before the next timer tick; otherwise it seals on the timer, whatever the load.
 ## When writes are sparse, a shorter interval lowers the acknowledgement latency of `durable` appends and raises the number of object requests: timer-triggered sealing creates at most one object per interval per node, and in `enqueued` mode the backlog thresholds can seal earlier. An `enqueued` append does not wait for its batch to seal once it is admitted, but the backlog thresholds can delay admission.
 ## **It's only used when the provider is `experimental_object_store`**.
 #+ flush_interval = "100ms"
@@ -452,6 +448,13 @@ overwrite_entry_start_id = false
 ## - `fail`: the read fails, so the region does not open.
 ## **It's only used when the provider is `experimental_object_store`**.
 #+ on_corrupted_segment = "skip"
+
+## Whether a region opens although the WAL objects under the prefix do not hold its history.
+## An existing region fails to open when the prefix held no object when the WAL opened, or when the flushed entry id of the region names an object above every object of the prefix that holds entries. Both happen after `storage_provider`, or the bucket or root of the provider it names, changed without the WAL objects being copied, or after the objects were deleted.
+## To move the WAL, stop the instance, copy every object under the prefix to the new location and then change the configuration; the regions open with all their writes.
+## When the old WAL is lost, set this to `true` for one start: the regions open without their writes that were not flushed, which are lost, a warning names each region, and `greptime_logstore_object_store_wal_missing_history_accepted_total` counts them. Turn it off again once the instance has written to the WAL after that start; until then a later start refuses a region whose flushed entry id names an object above every object of the prefix that holds entries.
+## **It's only used when the provider is `experimental_object_store`**.
+#+ accept_missing_history = false
 
 # The Kafka SASL configuration.
 # **It's only used when the provider is `kafka`**.
@@ -1099,6 +1102,10 @@ ttl = "90d"
 [pipeline]
 ## Time to live of the local pipeline cache. Default is `10s`.
 cache_ttl = "10s"
+## Allow VRL to access the server environment, filesystem, hostname, local timezone,
+## network, and logs. Default is false. Enable only for trusted pipeline authors.
+## Applies to pipeline creation, execution, and dry-runs. Requires a restart.
+allow_vrl_host_access = false
 
 ## Configuration options for the event recorder.
 [event_recorder]

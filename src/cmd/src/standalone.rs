@@ -328,6 +328,10 @@ impl App for Instance {
 pub struct StartCommand {
     #[clap(long)]
     http_addr: Option<String>,
+    /// The address to bind the dedicated public HTTP API server. Setting this
+    /// flag also enables the API server.
+    #[clap(long)]
+    http_api_server_addr: Option<String>,
     #[clap(long = "grpc-bind-addr", alias = "rpc-bind-addr", alias = "rpc-addr")]
     grpc_bind_addr: Option<String>,
     #[clap(long)]
@@ -416,6 +420,11 @@ impl StartCommand {
 
         if let Some(addr) = &self.http_addr {
             opts.http.addr.clone_from(addr);
+        }
+
+        if let Some(addr) = &self.http_api_server_addr {
+            opts.http.api_server_addr.clone_from(addr);
+            opts.http.enable_api_server = true;
         }
 
         if let Some(data_home) = &self.data_home {
@@ -672,6 +681,9 @@ impl StartCommand {
         ));
 
         let ddl_context = DdlContext {
+            affinity_resolver: None,
+            affinity_fallback: Default::default(),
+            peer_alloc_context_provider: None,
             node_manager: node_manager.clone(),
             cache_invalidator: layered_cache_registry.clone(),
             memory_region_keeper: Arc::new(MemoryRegionKeeper::default()),

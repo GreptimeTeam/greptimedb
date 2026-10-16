@@ -14,33 +14,34 @@
 
 use std::collections::HashSet;
 
-use ahash::{HashMap, HashMapExt};
 use api::v1::flow::{DirtyWindowRequest, DirtyWindowRequests};
 use api::v1::region::{
     BulkInsertRequest, RegionRequest, RegionRequestHeader, bulk_insert_request, region_request,
 };
 use api::v1::{ArrowIpc, PartitionExprVersion};
-use arrow::compute::filter_record_batch;
+use arrow::compute;
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use common_base::AffectedRows;
-use common_error::ext::BoxedError;
 use common_grpc::FlightData;
-use common_grpc::flight::{FlightEncoder, FlightMessage, record_batch_to_ipc};
+use common_grpc::flight::{FlightEncoder, FlightMessage};
 use common_telemetry::error;
 use common_telemetry::tracing_context::TracingContext;
-use futures::future::{join_all, try_join_all};
+use futures::future;
 use meter_core::data::MeterRecord;
 use meter_macros::write_meter;
 use session::context::{Channel, QueryContextRef};
-use snafu::{ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::RegionId;
 use table::TableRef;
 use table::metadata::TableInfoRef;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::Result;
 use crate::insert::Inserter;
-use crate::req_convert::insert::extract_timestamps;
+use crate::req_convert::TablePartitioner;
+use crate::req_convert::insert;
+use crate::write_dispatcher::WriteAttempt;
 use crate::{error, metrics};
 
 impl Inserter {
@@ -54,72 +55,28 @@ impl Inserter {
         batch: RecordBatch,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
-        let (rule, versions) = self
-            .partition_manager
-            .find_table_partition_rule(&table_info)
+        let requests = TablePartitioner::try_new(&self.partition_manager, &table_info)
             .await
-            .context(error::InvalidPartitionSnafu)?;
-        let masks = rule
-            .split_record_batch(&batch)
-            .context(error::SplitInsertSnafu)?;
-        let mut writes = Vec::with_capacity(masks.len());
-        for (region_number, mask) in masks {
-            if mask.select_none() {
-                continue;
-            }
-            let region_id = RegionId::new(table_info.table_id(), region_number);
-            let selected = if mask.select_all() {
-                batch.clone()
-            } else {
-                filter_record_batch(&batch, mask.array()).context(error::ComputeArrowSnafu)?
-            };
-            let (schema, data_header, payload) = record_batch_to_ipc(selected)
-                .map_err(BoxedError::new)
-                .context(error::ExternalSnafu)?;
-            let peer = self
-                .partition_manager
-                .find_region_leader(region_id)
-                .await
-                .context(error::FindRegionLeaderSnafu)?;
-            let request = RegionRequest {
+            .context(error::InvalidPartitionSnafu)?
+            .partition_bulk_insert_requests(batch, None, ctx.skip_wal())?;
+        let writes = requests
+            .into_iter()
+            .map(|request| RegionRequest {
                 header: Some(RegionRequestHeader {
                     dbname: ctx.get_db_string(),
                     tracing_context: TracingContext::from_current_span().to_w3c(),
                     ..Default::default()
                 }),
-                body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
-                    skip_wal: ctx.skip_wal(),
-                    region_id: region_id.as_u64(),
-                    partition_expr_version: versions
-                        .get(&region_number)
-                        .copied()
-                        .flatten()
-                        .map(|value| PartitionExprVersion { value }),
-                    // Let the datanode revalidate against its current schema.
-                    aligned_schema_version: None,
-                    body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
-                        schema,
-                        data_header,
-                        payload,
-                    })),
-                })),
-            };
-            writes.push((peer, request));
-        }
-        let results = join_all(writes.into_iter().map(|(peer, request)| async move {
-            self.node_manager
-                .datanode(&peer)
-                .await
-                .handle(request)
-                .await
-                .context(error::RequestInsertsSnafu)
-        }))
-        .await;
-        let affected_rows = results
-            .into_iter()
-            .map(|result| result.map(|response| response.affected_rows))
-            .sum::<Result<usize>>()?;
-        Ok(affected_rows)
+                body: Some(region_request::Body::BulkInsert(request)),
+            })
+            .collect();
+        let writes = self.write_dispatcher.prepare(writes).await?;
+        Ok(self
+            .write_dispatcher
+            .execute(writes, None, None)
+            .await
+            .context(error::RequestInsertsSnafu)?
+            .affected_rows)
     }
 
     /// Handle bulk insert request.
@@ -208,12 +165,6 @@ impl Inserter {
                 .get(&region_number)
                 .copied()
                 .unwrap_or_default();
-            let datanode = self
-                .partition_manager
-                .find_region_leader(region_id)
-                .await
-                .context(error::FindRegionLeaderSnafu)?;
-
             let request = RegionRequest {
                 header: Some(RegionRequestHeader {
                     tracing_context: TracingContext::from_current_span().to_w3c(),
@@ -233,12 +184,16 @@ impl Inserter {
                 })),
             };
 
-            let _datanode_handle_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
-                .with_label_values(&["datanode_handle"])
-                .start_timer();
-            let datanode = self.node_manager.datanode(&datanode).await;
-            let result = datanode
-                .handle(request)
+            let writes = self.write_dispatcher.prepare(vec![request]).await?;
+            let result = self
+                .write_dispatcher
+                .execute(
+                    writes,
+                    Some(
+                        metrics::HANDLE_BULK_INSERT_ELAPSED.with_label_values(&["datanode_handle"]),
+                    ),
+                    None,
+                )
                 .await
                 .context(error::RequestRegionSnafu)
                 .map(|r| r.affected_rows);
@@ -250,121 +205,143 @@ impl Inserter {
             return result;
         }
 
-        let mut mask_per_datanode = HashMap::with_capacity(region_masks.len());
-        for (region_number, mask) in region_masks {
-            let region_id = RegionId::new(table_id, region_number);
-            let datanode = self
-                .partition_manager
-                .find_region_leader(region_id)
-                .await
-                .context(error::FindRegionLeaderSnafu)?;
-            mask_per_datanode
-                .entry(datanode)
-                .or_insert_with(Vec::new)
-                .push((region_id, mask));
-        }
+        let regions = region_masks
+            .keys()
+            .map(|region| RegionId::new(table_id, *region))
+            .collect::<Vec<_>>();
+        let mut peers = self
+            .write_dispatcher
+            .resolve_peers(&regions)
+            .await
+            .context(error::FindRegionLeaderSnafu)?;
 
         let wait_all_datanode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
             .with_label_values(&["wait_all_datanode"])
             .start_timer();
 
-        let mut handles = Vec::with_capacity(mask_per_datanode.len());
+        // Dropping the caller stops retries without abandoning in-flight writes.
+        let cancellation = CancellationToken::new();
+        let _guard = cancellation.clone().drop_guard();
+        let mut handles = Vec::with_capacity(region_masks.len());
 
-        for (peer, masks) in mask_per_datanode {
-            for (region_id, mask) in masks {
-                if mask.select_none() {
-                    continue;
-                }
-                let partition_expr_version = partition_versions
-                    .get(&region_id.region_number())
-                    .copied()
-                    .unwrap_or_default();
-                let rb = record_batch.clone();
-                let schema_bytes = schema_bytes.clone();
-                let node_manager = self.node_manager.clone();
-                let peer = peer.clone();
-                let raw_header_and_data = if mask.select_all() {
-                    Some((
-                        raw_flight_data.data_header.clone(),
-                        raw_flight_data.data_body.clone(),
-                    ))
-                } else {
-                    None
-                };
-                let handle: common_runtime::JoinHandle<Result<api::region::RegionResponse>> =
-                    common_runtime::spawn_global(async move {
-                        let (header, payload) = if mask.select_all() {
-                            // SAFETY: raw data must be present, we can avoid re-encoding.
-                            raw_header_and_data.unwrap()
-                        } else {
-                            let filter_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
-                                .with_label_values(&["filter"])
-                                .start_timer();
-                            let batch = filter_record_batch(&rb, mask.array())
-                                .context(error::ComputeArrowSnafu)?;
-                            filter_timer.observe_duration();
-                            metrics::BULK_REQUEST_ROWS
-                                .with_label_values(&["rows_per_region"])
-                                .observe(batch.num_rows() as f64);
-
-                            let encode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
-                                .with_label_values(&["encode"])
-                                .start_timer();
-                            let mut iter = FlightEncoder::default()
-                                .encode(FlightMessage::RecordBatch(batch))
-                                .into_iter();
-                            let Some(flight_data) = iter.next() else {
-                                // Safety: `iter` on a type of `Vec1`, which is guaranteed to have
-                                // at least one element.
-                                unreachable!()
-                            };
-                            ensure!(
-                                iter.next().is_none(),
-                                error::NotSupportedSnafu {
-                                    feat: "bulk insert RecordBatch with dictionary arrays",
-                                }
-                            );
-                            encode_timer.observe_duration();
-                            (flight_data.data_header, flight_data.data_body)
-                        };
-                        let _datanode_handle_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
-                            .with_label_values(&["datanode_handle"])
-                            .start_timer();
-                        let request = RegionRequest {
-                            header: Some(RegionRequestHeader {
-                                tracing_context: TracingContext::from_current_span().to_w3c(),
-                                ..Default::default()
-                            }),
-                            body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
-                                skip_wal,
-                                region_id: region_id.as_u64(),
-                                partition_expr_version: partition_expr_version
-                                    .map(|value| PartitionExprVersion { value }),
-                                aligned_schema_version: None,
-                                body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
-                                    schema: schema_bytes,
-                                    data_header: header,
-                                    payload,
-                                })),
-                            })),
-                        };
-
-                        let datanode = node_manager.datanode(&peer).await;
-                        datanode
-                            .handle(request)
-                            .await
-                            .context(error::RequestRegionSnafu)
-                    });
-                handles.push(handle);
+        for (region_number, mask) in region_masks {
+            let region_id = RegionId::new(table_id, region_number);
+            if mask.select_none() {
+                continue;
             }
+            let partition_expr_version = partition_versions
+                .get(&region_id.region_number())
+                .copied()
+                .unwrap_or_default();
+            let peer = peers
+                .remove(&region_id)
+                .context(partition::error::FindLeaderSnafu {
+                    region_id,
+                    table_id,
+                })
+                .context(error::FindRegionLeaderSnafu)?;
+            let dispatcher = self.write_dispatcher.clone();
+            let rb = record_batch.clone();
+            let schema_bytes = schema_bytes.clone();
+            let raw_header_and_data = if mask.select_all() {
+                Some((
+                    raw_flight_data.data_header.clone(),
+                    raw_flight_data.data_body.clone(),
+                ))
+            } else {
+                None
+            };
+            let handle: common_runtime::JoinHandle<Result<WriteAttempt>> =
+                common_runtime::spawn_global(async move {
+                    let (header, payload) = if mask.select_all() {
+                        // SAFETY: raw data must be present, we can avoid re-encoding.
+                        raw_header_and_data.unwrap()
+                    } else {
+                        let filter_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
+                            .with_label_values(&["filter"])
+                            .start_timer();
+                        let batch = compute::filter_record_batch(&rb, mask.array())
+                            .context(error::ComputeArrowSnafu)?;
+                        filter_timer.observe_duration();
+                        metrics::BULK_REQUEST_ROWS
+                            .with_label_values(&["rows_per_region"])
+                            .observe(batch.num_rows() as f64);
+
+                        let encode_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
+                            .with_label_values(&["encode"])
+                            .start_timer();
+                        let mut iter = FlightEncoder::default()
+                            .encode(FlightMessage::RecordBatch(batch))
+                            .into_iter();
+                        let Some(flight_data) = iter.next() else {
+                            // Safety: `iter` on a type of `Vec1`, which is guaranteed to have
+                            // at least one element.
+                            unreachable!()
+                        };
+                        ensure!(
+                            iter.next().is_none(),
+                            error::NotSupportedSnafu {
+                                feat: "bulk insert RecordBatch with dictionary arrays",
+                            }
+                        );
+                        encode_timer.observe_duration();
+                        (flight_data.data_header, flight_data.data_body)
+                    };
+                    let request = RegionRequest {
+                        header: Some(RegionRequestHeader {
+                            tracing_context: TracingContext::from_current_span().to_w3c(),
+                            ..Default::default()
+                        }),
+                        body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
+                            skip_wal,
+                            region_id: region_id.as_u64(),
+                            partition_expr_version: partition_expr_version
+                                .map(|value| PartitionExprVersion { value }),
+                            aligned_schema_version: None,
+                            body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
+                                schema: schema_bytes,
+                                data_header: header,
+                                payload,
+                            })),
+                        })),
+                    };
+
+                    Ok(dispatcher
+                        .send(
+                            peer,
+                            request,
+                            Some(
+                                &metrics::HANDLE_BULK_INSERT_ELAPSED
+                                    .with_label_values(&["datanode_handle"]),
+                            ),
+                        )
+                        .await)
+                });
+            handles.push(handle);
         }
 
-        let region_responses = try_join_all(handles).await.context(error::JoinTaskSnafu)?;
+        let dispatcher = self.write_dispatcher.clone();
+        let rows_inserted = common_runtime::spawn_global(async move {
+            let results = future::try_join_all(handles)
+                .await
+                .context(error::JoinTaskSnafu)?;
+            let attempts = results.into_iter().collect::<Result<Vec<_>>>()?;
+            dispatcher
+                .finish(
+                    attempts,
+                    Some(
+                        &metrics::HANDLE_BULK_INSERT_ELAPSED
+                            .with_label_values(&["datanode_handle"]),
+                    ),
+                    Some(&cancellation),
+                )
+                .await
+                .context(error::RequestRegionSnafu)
+                .map(|response| response.affected_rows)
+        })
+        .await
+        .context(error::JoinTaskSnafu)??;
         wait_all_datanode_timer.observe_duration();
-        let mut rows_inserted: usize = 0;
-        for res in region_responses {
-            rows_inserted += res?.affected_rows;
-        }
         crate::metrics::DIST_INGEST_ROW_COUNT
             .with_label_values(&[db_name.as_str()])
             .inc_by(rows_inserted as u64);
@@ -393,7 +370,7 @@ impl Inserter {
                 return;
             }
 
-            let Ok(timestamps) = extract_timestamps(
+            let Ok(timestamps) = insert::extract_timestamps(
                 &record_batch,
                 &table_info
                     .meta

@@ -16,6 +16,8 @@ pub mod builder;
 mod dashboard;
 mod entity_graph;
 mod export_database;
+#[cfg(feature = "enterprise")]
+mod flow_write;
 mod grpc;
 mod import_packed;
 mod influxdb;
@@ -127,7 +129,6 @@ lazy_static! {
 #[derive(Clone)]
 pub struct Instance {
     frontend_peer_addr: String,
-    experimental_metric_export: bool,
     catalog_manager: CatalogManagerRef,
     pipeline_operator: Arc<PipelineOperator>,
     statement_executor: Arc<StatementExecutor>,
@@ -147,6 +148,13 @@ pub struct Instance {
     trace_aux_limiter: Option<RequestLimiter>,
     otlp_resource_info: bool,
     suspend: Arc<AtomicBool>,
+    #[cfg(feature = "enterprise")]
+    flow_write_registry: Arc<
+        common_grpc::flow_write::FlowWriteRegistry<
+            flow_write::WritePayload,
+            common_grpc::flow_write::Reply,
+        >,
+    >,
 
     // cache for otlp metrics
     // first layer key: db-string
@@ -322,25 +330,35 @@ impl Instance {
 
             let query_fut = self.exec_statement_with_timeout(
                 stmt,
-                query_ctx,
+                query_ctx.clone(),
                 query_interceptor,
                 timeout_recorder,
             );
 
-            CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+            #[cfg(feature = "enterprise")]
+            let result = if query_ctx.channel() == Channel::Internal
+                && query_ctx.extension(common_grpc::flow_write::CHILD_KEY) == Some("1")
+            {
+                query_fut.await
+            } else {
+                CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+                    .await
+                    .map_err(|_| error::CancelledSnafu.build())?
+            };
+            #[cfg(not(feature = "enterprise"))]
+            let result = CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
                 .await
-                .map_err(|_| error::CancelledSnafu.build())?
-                .map(|output| {
-                    let Output { meta, data } = output;
-
-                    let data = match data {
-                        OutputData::Stream(stream) => OutputData::Stream(Box::pin(
-                            CancellableStreamWrapper::new(stream, ticket),
-                        )),
-                        other => other,
-                    };
-                    Output { data, meta }
-                })
+                .map_err(|_| error::CancelledSnafu.build())?;
+            result.map(|output| {
+                let Output { meta, data } = output;
+                let data = match data {
+                    OutputData::Stream(stream) => {
+                        OutputData::Stream(Box::pin(CancellableStreamWrapper::new(stream, ticket)))
+                    }
+                    other => other,
+                };
+                Output { data, meta }
+            })
         } else {
             self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor, None)
                 .await
@@ -408,14 +426,6 @@ impl Instance {
                     return self
                         .copy_packed_database(arg.clone(), &stmt, query_ctx)
                         .await;
-                }
-                if let Statement::ShowVariables(show) = &stmt
-                    && show
-                        .variable
-                        .to_string()
-                        .eq_ignore_ascii_case("experimental_metric_export")
-                {
-                    return self.show_metric_export_capability();
                 }
                 if let Statement::Copy(sql::statements::copy::Copy::CopyDatabase(CopyDatabase::To(
                     arg,
@@ -1042,20 +1052,30 @@ impl Instance {
 
             let query_fut = self.exec_plan_with_timeout(plan, query_ctx.clone(), timeout_recorder);
 
-            CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+            #[cfg(feature = "enterprise")]
+            let result = if query_ctx.channel() == Channel::Internal
+                && query_ctx.extension(common_grpc::flow_write::CHILD_KEY) == Some("1")
+            {
+                query_fut.await
+            } else {
+                CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+                    .await
+                    .map_err(|_| error::CancelledSnafu.build())?
+            };
+            #[cfg(not(feature = "enterprise"))]
+            let result = CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
                 .await
-                .map_err(|_| error::CancelledSnafu.build())?
-                .map(|output| {
-                    let Output { meta, data } = output;
-
-                    let data = match data {
-                        OutputData::Stream(stream) => OutputData::Stream(Box::pin(
-                            CancellableStreamWrapper::new(stream, ticket),
-                        )),
-                        other => other,
-                    };
-                    Output { data, meta }
-                })
+                .map_err(|_| error::CancelledSnafu.build())?;
+            result.map(|output| {
+                let Output { meta, data } = output;
+                let data = match data {
+                    OutputData::Stream(stream) => {
+                        OutputData::Stream(Box::pin(CancellableStreamWrapper::new(stream, ticket)))
+                    }
+                    other => other,
+                };
+                Output { data, meta }
+            })
         } else {
             self.exec_plan_with_timeout(plan, query_ctx.clone(), None)
                 .await
@@ -2921,10 +2941,7 @@ mod tests {
         let catalog = catalog::memory::MemoryCatalogManager::new_with_table(source);
         let kv = Arc::new(MemoryKvBackend::new());
         let instance = FrontendBuilder::new(
-            FrontendOptions {
-                experimental_metric_export: true,
-                ..Default::default()
-            },
+            FrontendOptions::default(),
             kv.clone(),
             test_cache_registry(kv).unwrap(),
             catalog,
@@ -3477,7 +3494,7 @@ mod tests {
                 &instance,
                 ctx.clone(),
                 servers::http::jaeger::QueryTraceParams {
-                    service_name: "service".to_string(),
+                    service_name: Some("service".to_string()),
                     ..Default::default()
                 },
             )

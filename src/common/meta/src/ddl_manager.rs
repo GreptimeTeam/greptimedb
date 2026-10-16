@@ -33,6 +33,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::{RegionId, TableId};
 use table::table_name::TableName;
 
+use crate::affinity::PeerAllocContextProviderRef;
 use crate::ddl::alter_database::AlterDatabaseProcedure;
 use crate::ddl::alter_logical_tables::AlterLogicalTablesProcedure;
 use crate::ddl::alter_table::{AlterTableProcedure, RegionRouteChanged, only_sets_skip_wal};
@@ -297,6 +298,15 @@ impl DdlManager {
     #[cfg(feature = "enterprise")]
     pub fn with_create_flow_handler(mut self, create_flow_handler: CreateFlowHandlerRef) -> Self {
         self.create_flow_handler = Some(create_flow_handler);
+        self
+    }
+
+    /// Sets the provider used to build allocation inputs from queries.
+    pub fn with_peer_alloc_context_provider(
+        mut self,
+        provider: PeerAllocContextProviderRef,
+    ) -> Self {
+        self.ddl_context.peer_alloc_context_provider = Some(provider);
         self
     }
 
@@ -1875,6 +1885,9 @@ mod tests {
 
         let ddl_manager = DdlManager::new(
             DdlContext {
+                affinity_resolver: None,
+                affinity_fallback: Default::default(),
+                peer_alloc_context_provider: None,
                 node_manager: Arc::new(DummyDatanodeManager),
                 cache_invalidator: Arc::new(DummyCacheInvalidator),
                 table_metadata_manager,
@@ -1941,6 +1954,9 @@ mod tests {
 
         DdlManager::new(
             DdlContext {
+                affinity_resolver: None,
+                affinity_fallback: Default::default(),
+                peer_alloc_context_provider: None,
                 node_manager: Arc::new(DummyDatanodeManager),
                 cache_invalidator: Arc::new(DummyCacheInvalidator),
                 table_metadata_manager,

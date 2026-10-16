@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use common_meta::affinity::AffinityFallback;
 use common_meta::peer::Peer;
 use snafu::ResultExt;
 
-use crate::error::{ListActiveDatanodesSnafu, Result};
+use crate::error::{self, ListActiveDatanodesSnafu, Result};
 use crate::metasrv::SelectorContext;
 use crate::selector::common::{choose_items, filter_out_excluded_peers};
 use crate::selector::weighted_choose::{RandomWeightedChoose, WeightedItem};
@@ -25,12 +26,12 @@ use crate::selector::{Selector, SelectorOptions};
 #[derive(Default)]
 pub struct LeaseBasedSelector;
 
-#[async_trait::async_trait]
-impl Selector for LeaseBasedSelector {
-    type Context = SelectorContext;
-    type Output = Vec<Peer>;
-
-    async fn select(&self, ctx: &Self::Context, opts: SelectorOptions) -> Result<Self::Output> {
+impl LeaseBasedSelector {
+    async fn select_once(
+        &self,
+        ctx: &SelectorContext,
+        opts: &SelectorOptions<'_>,
+    ) -> Result<Vec<Peer>> {
         // 1. get alive datanodes.
         let alive_datanodes = ctx
             .peer_discovery
@@ -38,6 +39,10 @@ impl Selector for LeaseBasedSelector {
             .await
             .context(ListActiveDatanodesSnafu)?
             .into_iter()
+            .filter(|node| {
+                opts.affinity
+                    .is_none_or(|requirements| ctx.affinity.matches(requirements, node))
+            })
             .map(|node| node.peer)
             .collect::<Vec<_>>();
 
@@ -53,8 +58,35 @@ impl Selector for LeaseBasedSelector {
         // 3. choose peers by weight_array.
         filter_out_excluded_peers(&mut weight_array, &opts.exclude_peer_ids);
         let mut weighted_choose = RandomWeightedChoose::new(weight_array);
-        let selected = choose_items(&opts, &mut weighted_choose)?;
+        let selected = choose_items(opts, &mut weighted_choose)?;
 
         Ok(selected)
+    }
+}
+
+#[async_trait::async_trait]
+impl Selector for LeaseBasedSelector {
+    type Context = SelectorContext;
+    type Output = Vec<Peer>;
+
+    async fn select(
+        &self,
+        ctx: &Self::Context,
+        mut opts: SelectorOptions<'_>,
+    ) -> Result<Self::Output> {
+        match self.select_once(ctx, &opts).await {
+            Err(error::Error::NoEnoughAvailableNode {
+                required,
+                available,
+                ..
+            }) if opts.affinity.is_some()
+                && ctx.affinity_fallback == AffinityFallback::Unconstrained
+                && available < required =>
+            {
+                opts.affinity = None;
+                self.select_once(ctx, &opts).await
+            }
+            result => result,
+        }
     }
 }

@@ -38,7 +38,10 @@ use store_api::storage::{ScanRequest, TableId};
 use crate::CatalogManager;
 use crate::error::{CreateRecordBatchSnafu, InternalSnafu, Result};
 use crate::information_schema::Predicates;
-use crate::system_schema::information_schema::{InformationTable, REGION_STATISTICS};
+use crate::system_schema::SystemTable;
+use crate::system_schema::information_schema::{
+    InformationSchemaTableScope, InformationTable, REGION_STATISTICS,
+};
 use crate::system_schema::utils;
 
 const REGION_ID: &str = "region_id";
@@ -138,6 +141,12 @@ impl InformationSchemaRegionStatistics {
 }
 
 impl InformationTable for InformationSchemaRegionStatistics {
+    fn scope(&self) -> InformationSchemaTableScope {
+        InformationSchemaTableScope::Global
+    }
+}
+
+impl SystemTable for InformationSchemaRegionStatistics {
     fn table_id(&self) -> TableId {
         INFORMATION_SCHEMA_REGION_STATISTICS_TABLE_ID
     }

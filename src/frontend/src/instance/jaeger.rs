@@ -35,6 +35,7 @@ use datafusion::dataframe::DataFrame;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::SessionContext;
 use datafusion::functions::core::expr_fn::coalesce;
+use datafusion::functions_aggregate::expr_fn::max;
 use datafusion::functions_window::expr_fn::row_number;
 use datafusion_expr::select_expr::SelectExpr;
 use datafusion_expr::{Expr, ExprFunctionExt, SortExpr, col, lit, lit_timestamp_nano, wildcard};
@@ -59,6 +60,7 @@ use crate::instance::Instance;
 
 const DEFAULT_LIMIT: usize = 2000;
 const KEY_RN: &str = "greptime_rn";
+const KEY_LATEST_MATCH: &str = "greptime_latest_match";
 
 impl Instance {
     async fn check_jaeger_query_permission(&self, ctx: &QueryContextRef) -> ServerResult<()> {
@@ -202,8 +204,9 @@ impl JaegerQueryHandler for Instance {
 
         let mut filters = vec![];
 
-        // `service_name` is already validated in `from_jaeger_query_params()`, so no additional check needed here.
-        filters.push(col(SERVICE_NAME_COLUMN).eq(lit(query_params.service_name)));
+        if let Some(service_name) = query_params.service_name {
+            filters.push(col(SERVICE_NAME_COLUMN).eq(lit(service_name)));
+        }
 
         if let Some(operation_name) = query_params.operation_name {
             filters.push(col(SPAN_NAME_COLUMN).eq(lit(operation_name)));
@@ -225,11 +228,11 @@ impl JaegerQueryHandler for Instance {
             filters.push(col(DURATION_NANO_COLUMN).lt_eq(lit(max_duration)));
         }
 
-        // Get all distinct trace ids that match the filters.
+        // Get the ids of the most recent traces that match the filters.
         // It's equivalent to the following SQL query:
         //
         // ```
-        // SELECT DISTINCT trace_id
+        // SELECT trace_id
         // FROM
         //   {db}.{trace_table}
         // WHERE
@@ -239,21 +242,21 @@ impl JaegerQueryHandler for Instance {
         //   timestamp <= {end_time} AND
         //   duration >= {min_duration} AND
         //   duration <= {max_duration}
+        // GROUP BY trace_id
+        // ORDER BY max(timestamp) DESC, trace_id
         // LIMIT {limit}
         // ```.
-        let output = query_trace_table(
+        let output = find_latest_trace_ids(
             ctx.clone(),
             self,
-            vec![wildcard()],
             filters,
-            vec![],
-            Some(query_params.limit.unwrap_or(DEFAULT_LIMIT)),
+            query_params.limit.unwrap_or(DEFAULT_LIMIT),
             query_params.tags,
-            vec![col(TRACE_ID_COLUMN)],
         )
         .await?;
 
         // Get all traces that match the trace ids from the previous query.
+        // API v3 applies the time window only to the search, not to the returned spans.
         // It's equivalent to the following SQL query:
         //
         // ```
@@ -276,11 +279,15 @@ impl JaegerQueryHandler for Instance {
             ),
         ];
 
-        if let Some(start_time) = query_params.start_time {
+        if !query_params.fetch_full_trace
+            && let Some(start_time) = query_params.start_time
+        {
             filters.push(col(TIMESTAMP_COLUMN).gt_eq(lit_timestamp_nano(start_time)));
         }
 
-        if let Some(end_time) = query_params.end_time {
+        if !query_params.fetch_full_trace
+            && let Some(end_time) = query_params.end_time
+        {
             filters.push(col(TIMESTAMP_COLUMN).lt_eq(lit_timestamp_nano(end_time)));
         }
 
@@ -332,6 +339,79 @@ async fn query_trace_table(
     tags: Option<HashMap<String, JsonValue>>,
     distincts: Vec<Expr>,
 ) -> ServerResult<Output> {
+    let dataframe =
+        build_trace_dataframe(&ctx, instance, selects, filters, tags, &distincts).await?;
+
+    // Apply the distinct if needed.
+    let dataframe = if !distincts.is_empty() {
+        dataframe
+            .distinct_on(distincts.clone(), distincts, None)
+            .context(DataFusionSnafu)?
+    } else {
+        dataframe
+    };
+
+    // Apply the sorts if needed.
+    let dataframe = if !sorts.is_empty() {
+        dataframe.sort(sorts).context(DataFusionSnafu)?
+    } else {
+        dataframe
+    };
+
+    // Apply the limit if needed.
+    let dataframe = if let Some(limit) = limit {
+        dataframe.limit(0, Some(limit)).context(DataFusionSnafu)?
+    } else {
+        dataframe
+    };
+
+    execute_trace_dataframe(dataframe).await
+}
+
+/// Returns the ids of the `limit` traces whose latest span matching `filters`
+/// and `tags` is the most recent, newest first.
+///
+/// Ordering before the limit keeps a search that matches more traces than the
+/// limit deterministic.
+async fn find_latest_trace_ids(
+    ctx: QueryContextRef,
+    instance: &Instance,
+    filters: Vec<Expr>,
+    limit: usize,
+    tags: Option<HashMap<String, JsonValue>>,
+) -> ServerResult<Output> {
+    let dataframe =
+        build_trace_dataframe(&ctx, instance, vec![wildcard()], filters, tags, &[]).await?;
+    let dataframe = dataframe
+        .aggregate(
+            vec![col(TRACE_ID_COLUMN)],
+            vec![max(col(TIMESTAMP_COLUMN)).alias(KEY_LATEST_MATCH)],
+        )
+        .context(DataFusionSnafu)?
+        .sort(vec![
+            col(KEY_LATEST_MATCH).sort(false, false),
+            col(TRACE_ID_COLUMN).sort(true, false),
+        ])
+        .context(DataFusionSnafu)?
+        .limit(0, Some(limit))
+        .context(DataFusionSnafu)?
+        .select(vec![col(TRACE_ID_COLUMN)])
+        .context(DataFusionSnafu)?;
+
+    execute_trace_dataframe(dataframe).await
+}
+
+/// Reads the trace table, or the services or operations lookup table that
+/// answers `selects` and `distincts`, then projects `selects` and applies
+/// `filters` and the Jaeger tag filters.
+async fn build_trace_dataframe(
+    ctx: &QueryContextRef,
+    instance: &Instance,
+    selects: Vec<SelectExpr>,
+    filters: Vec<Expr>,
+    tags: Option<HashMap<String, JsonValue>>,
+    distincts: &[Expr],
+) -> ServerResult<DataFrame> {
     let trace_table_name = ctx
         .extension(JAEGER_QUERY_TABLE_NAME_KEY)
         .unwrap_or(TRACE_TABLE_NAME);
@@ -360,7 +440,7 @@ async fn query_trace_table(
             ctx.current_catalog(),
             &ctx.current_schema(),
             table_name,
-            Some(&ctx),
+            Some(ctx),
         )
         .await?
         .with_context(|| TableNotFoundSnafu {
@@ -397,30 +477,12 @@ async fn query_trace_table(
             df.filter(expr).context(DataFusionSnafu)
         })?;
 
-    // Apply the distinct if needed.
-    let dataframe = if !distincts.is_empty() {
-        dataframe
-            .distinct_on(distincts.clone(), distincts, None)
-            .context(DataFusionSnafu)?
-    } else {
-        dataframe
-    };
+    Ok(dataframe)
+}
 
-    // Apply the sorts if needed.
-    let dataframe = if !sorts.is_empty() {
-        dataframe.sort(sorts).context(DataFusionSnafu)?
-    } else {
-        dataframe
-    };
-
-    // Apply the limit if needed.
-    let dataframe = if let Some(limit) = limit {
-        dataframe.limit(0, Some(limit)).context(DataFusionSnafu)?
-    } else {
-        dataframe
-    };
-
-    // Execute the query and collect the result.
+/// Executes `dataframe` and wraps its stream into an [`Output`] with dictionary
+/// columns decoded to values.
+async fn execute_trace_dataframe(dataframe: DataFrame) -> ServerResult<Output> {
     let stream = dataframe.execute_stream().await.context(DataFusionSnafu)?;
 
     let output = Output::new_with_stream(Box::pin(
@@ -540,64 +602,37 @@ fn json_tag_filters(
     dataframe: &DataFrame,
     tags: HashMap<String, JsonValue>,
 ) -> ServerResult<Vec<Expr>> {
+    let has_resource_attributes = dataframe
+        .schema()
+        .has_column_with_unqualified_name(RESOURCE_ATTRIBUTES_COLUMN);
     let mut filters = vec![];
 
     // NOTE: The key of the tags may contain `.`, for example: `http.status_code`, so we need to use `["http.status_code"]` in json path to access the value.
     for (key, value) in tags.iter() {
-        if let JsonValue::String(value) = value {
-            filters.push(
-                dataframe
-                    .registry()
-                    .udf(JsonGetString::NAME)
-                    .context(DataFusionSnafu)?
-                    .call(vec![
-                        col(SPAN_ATTRIBUTES_COLUMN),
-                        lit(format!("[\"{}\"]", key)),
-                    ])
-                    .eq(lit(value)),
-            );
-        }
-        if let JsonValue::Number(value) = value {
-            if value.is_i64() {
-                filters.push(
-                    dataframe
-                        .registry()
-                        .udf(JsonGetInt::NAME)
-                        .context(DataFusionSnafu)?
-                        .call(vec![
-                            col(SPAN_ATTRIBUTES_COLUMN),
-                            lit(format!("[\"{}\"]", key)),
-                        ])
-                        .eq(lit(value.as_i64().unwrap())),
-                );
+        let (udf, value) = match value {
+            JsonValue::String(value) => (JsonGetString::NAME, lit(value)),
+            JsonValue::Number(value) if value.is_i64() => {
+                (JsonGetInt::NAME, lit(value.as_i64().unwrap()))
             }
-            if value.is_f64() {
-                filters.push(
-                    dataframe
-                        .registry()
-                        .udf(JsonGetFloat::NAME)
-                        .context(DataFusionSnafu)?
-                        .call(vec![
-                            col(SPAN_ATTRIBUTES_COLUMN),
-                            lit(format!("[\"{}\"]", key)),
-                        ])
-                        .eq(lit(value.as_f64().unwrap())),
-                );
+            JsonValue::Number(value) if value.is_f64() => {
+                (JsonGetFloat::NAME, lit(value.as_f64().unwrap()))
             }
-        }
-        if let JsonValue::Bool(value) = value {
-            filters.push(
-                dataframe
-                    .registry()
-                    .udf(JsonGetBool::NAME)
-                    .context(DataFusionSnafu)?
-                    .call(vec![
-                        col(SPAN_ATTRIBUTES_COLUMN),
-                        lit(format!("[\"{}\"]", key)),
-                    ])
-                    .eq(lit(*value)),
-            );
-        }
+            JsonValue::Bool(value) => (JsonGetBool::NAME, lit(*value)),
+            _ => continue,
+        };
+        let get = dataframe.registry().udf(udf).context(DataFusionSnafu)?;
+        let path = lit(format!("[\"{}\"]", key));
+        let span_value = get.call(vec![col(SPAN_ATTRIBUTES_COLUMN), path.clone()]);
+        // Same precedence as `json2_tag_filters`: a span attribute shadows a resource attribute.
+        let attribute = if has_resource_attributes {
+            coalesce(vec![
+                span_value,
+                get.call(vec![col(RESOURCE_ATTRIBUTES_COLUMN), path]),
+            ])
+        } else {
+            span_value
+        };
+        filters.push(attribute.eq(value));
     }
 
     Ok(filters)

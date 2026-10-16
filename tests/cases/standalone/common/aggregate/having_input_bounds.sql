@@ -1,0 +1,126 @@
+-- Matching spans and the earliest/latest spans deliberately live in different regions.
+CREATE TABLE having_input_bounds (
+    trace_id STRING,
+    service_name STRING,
+    span_name STRING,
+    product STRING,
+    duration BIGINT,
+    ts TIMESTAMP(9) TIME INDEX,
+    PRIMARY KEY (service_name)
+)
+PARTITION ON COLUMNS (service_name) (
+    service_name < 'm',
+    service_name >= 'm'
+)
+WITH ('append_mode' = 'true');
+
+INSERT INTO having_input_bounds VALUES
+    ('a', 'other', 'parent', NULL, 30, 5),
+    ('a', 'cart', 'GetCart', NULL, 6, 10),
+    ('a', 'frontend', 'GetProduct', 'product-7', 8, 15),
+    ('a', 'cart', 'GetCart', NULL, 6, 20),
+    ('a', 'other', 'parent', NULL, 30, 25),
+    ('b', 'other', 'parent', NULL, 1, 2),
+    ('b', 'frontend', 'GetProduct', 'product-x', 18, 12),
+    ('b', 'other', 'parent', NULL, 30, 22),
+    ('c', 'cart', 'GetCart', NULL, 5, 30),
+    ('d', 'frontend', NULL, 'product-7', 8, 15),
+    (NULL, 'other', 'parent', NULL, 2, 3),
+    (NULL, 'cart', 'GetCart', NULL, 6, 11),
+    (NULL, 'other', 'parent', NULL, 30, 25);
+
+-- T02 shape: only the upper bound may be inferred; preserve earlier spans and NULL keys.
+SELECT trace_id, MIN(CAST(ts AS BIGINT)) AS trace_start
+FROM having_input_bounds
+GROUP BY trace_id
+HAVING SUM(CASE WHEN service_name = 'cart' AND span_name = 'GetCart'
+    AND CAST(ts AS BIGINT) >= 10 AND CAST(ts AS BIGINT) < 20 THEN 1 ELSE 0 END) > 0
+ORDER BY trace_start, trace_id
+LIMIT 20;
+
+-- Pin the optimization itself: the remote scan has only the inferred time upper
+-- bound, while HAVING stays above aggregation. Result equality alone cannot prove this.
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
+-- SQLNESS REPLACE (MergeScanExec:.*) MergeScanExec: REDACTED
+EXPLAIN SELECT trace_id, MIN(CAST(ts AS BIGINT)) AS trace_start
+FROM having_input_bounds
+GROUP BY trace_id
+HAVING SUM(CASE WHEN service_name = 'cart' AND span_name = 'GetCart'
+    AND CAST(ts AS BIGINT) >= 10 AND CAST(ts AS BIGINT) < 20 THEN 1 ELSE 0 END) > 0
+ORDER BY trace_start, trace_id
+LIMIT 20;
+
+-- T03 shape: a span attribute is part of the existence condition, not an input filter.
+SELECT trace_id, MIN(CAST(ts AS BIGINT)) AS trace_start
+FROM having_input_bounds
+GROUP BY trace_id
+HAVING SUM(CASE WHEN service_name = 'frontend' AND span_name = 'GetProduct'
+    AND product = 'product-7' AND CAST(ts AS BIGINT) >= 10
+    AND CAST(ts AS BIGINT) < 20 THEN 1 ELSE 0 END) > 0
+ORDER BY trace_start, trace_id;
+
+-- T04 shape: bounds on a different expression must not become aggregate input bounds.
+SELECT trace_id, MIN(CAST(ts AS BIGINT)) AS trace_start
+FROM having_input_bounds
+GROUP BY trace_id
+HAVING SUM(CASE WHEN service_name = 'frontend' AND span_name = 'GetProduct'
+    AND duration >= 5 AND duration < 20 AND CAST(ts AS BIGINT) >= 10
+    AND CAST(ts AS BIGINT) < 20 THEN 1 ELSE 0 END) > 0
+ORDER BY trace_start, trace_id;
+
+-- MAX is symmetric: preserve later spans by inferring only the lower bound.
+-- Also check that the conditional SUM itself remains unchanged.
+SELECT trace_id, MAX(CAST(ts AS BIGINT)) AS trace_end,
+    SUM(CASE WHEN service_name = 'cart' AND CAST(ts AS BIGINT) >= 10
+        AND CAST(ts AS BIGINT) < 20 THEN 1 ELSE 0 END) AS matches
+FROM having_input_bounds
+GROUP BY trace_id
+HAVING matches >= 1
+ORDER BY trace_end, trace_id;
+
+-- Full-group aggregates forbid pruning, even when the MIN would be preserved.
+SELECT trace_id, MIN(CAST(ts AS BIGINT)) AS trace_start,
+    MAX(CAST(ts AS BIGINT)) AS trace_end, COUNT(*) AS spans
+FROM having_input_bounds
+GROUP BY trace_id
+HAVING SUM(CASE WHEN service_name = 'cart' AND CAST(ts AS BIGINT) >= 10
+    AND CAST(ts AS BIGINT) < 20 THEN 1 ELSE 0 END) > 0
+ORDER BY trace_start, trace_id;
+
+-- OR does not guarantee a matching span in every surviving group.
+SELECT trace_id, MIN(CAST(ts AS BIGINT)) AS trace_start
+FROM having_input_bounds
+GROUP BY trace_id
+HAVING SUM(CASE WHEN service_name = 'cart' AND CAST(ts AS BIGINT) < 20 THEN 1 ELSE 0 END) > 0
+    OR MIN(CAST(ts AS BIGINT)) > 20
+ORDER BY trace_start, trace_id;
+
+DROP TABLE having_input_bounds;
+
+-- A derived column must not move fallible arithmetic/casts ahead of its WHERE guard.
+CREATE TABLE having_guarded(k STRING, v BIGINT, d BIGINT, text_value STRING, ts TIMESTAMP TIME INDEX);
+INSERT INTO having_guarded VALUES ('a', 12, 0, 'bad', 1), ('a', 5, 1, '5', 2), ('b', 25, 1, '25', 3);
+
+SELECT k, MIN(r) FROM (
+    SELECT k, v / d AS r FROM having_guarded WHERE abs(d) > 0
+) s GROUP BY k
+HAVING SUM(CASE WHEN r < 20 THEN 1 ELSE 0 END) > 0
+ORDER BY k;
+
+SELECT k, MIN(r) FROM (
+    SELECT k, CAST(text_value AS BIGINT) AS r FROM having_guarded WHERE abs(d) > 0
+) s GROUP BY k
+HAVING SUM(CASE WHEN r < 20 THEN 1 ELSE 0 END) > 0
+ORDER BY k;
+
+CREATE VIEW having_guarded_view AS
+SELECT k, v / d AS r FROM having_guarded WHERE abs(d) > 0;
+
+SELECT k, MIN(r) FROM having_guarded_view GROUP BY k
+HAVING SUM(CASE WHEN r < 20 THEN 1 ELSE 0 END) > 0
+ORDER BY k;
+
+DROP VIEW having_guarded_view;
+DROP TABLE having_guarded;

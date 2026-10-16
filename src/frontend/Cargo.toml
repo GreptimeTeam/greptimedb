@@ -7,6 +7,8 @@ license.workspace = true
 [features]
 testing = []
 enterprise = [
+    "common-grpc/enterprise",
+    "session/enterprise",
     "common-meta/enterprise",
     "operator/enterprise",
     "sql/enterprise",

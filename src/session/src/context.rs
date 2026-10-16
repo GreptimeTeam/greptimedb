@@ -447,6 +447,11 @@ impl QueryContext {
         self.extensions.insert(key.into(), value.into());
     }
 
+    #[cfg(feature = "enterprise")]
+    pub fn remove_extension(&mut self, key: &str) {
+        self.extensions.remove(key);
+    }
+
     pub fn extension<S: AsRef<str>>(&self, key: S) -> Option<&str> {
         self.extensions.get(key.as_ref()).map(|v| v.as_str())
     }
@@ -974,7 +979,7 @@ mod test {
             assert_eq!(ctx.read_preference(), ReadPreference::Leader);
             assert!(!ctx.extensions().contains_key(READ_PREFERENCE_EXTENSION_KEY));
         }
-        for value in ["", "unknown", "follower", "follower_preferred", "random"] {
+        for value in ["", "unknown"] {
             let error = QueryContext::try_from(wire(Some(value))).unwrap_err();
             assert!(matches!(
                 error,

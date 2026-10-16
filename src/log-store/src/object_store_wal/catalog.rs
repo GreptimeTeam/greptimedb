@@ -25,7 +25,7 @@ use crate::error::{
     CorruptedWalObjectSnafu, InvalidWalEntryRangeSnafu, Result, WalObjectSequenceExhaustedSnafu,
 };
 use crate::object_store_wal::batch::{OBJECT_SEQ_LIMIT, sequence_floor};
-use crate::object_store_wal::format::FooterEntry;
+use crate::object_store_wal::format::{FooterEntry, RELEASE_REGION_ID};
 
 /// Indexes objects by sequence and, per region, the objects that hold entries
 /// of that region.
@@ -165,7 +165,9 @@ impl ObjectCatalog {
     ///
     /// A segment is live when its maximum entry id is above the watermark of
     /// its region, or its region has no watermark; a region whose watermark
-    /// is [`EntryId::MAX`] holds no live segment. Watermarks never move down
+    /// is [`EntryId::MAX`] holds no live segment, and neither does
+    /// [`RELEASE_REGION_ID`], whose records recovery reads only from the
+    /// objects it indexes. Watermarks never move down
     /// and a region first appears in an object above the boundary, so the
     /// scan starts at the previous boundary and never reads an object twice
     /// once the boundary has passed it.
@@ -176,9 +178,10 @@ impl ObjectCatalog {
     ) -> u64 {
         let live = self.objects.range(from..).find(|(_, footer)| {
             footer.iter().any(|entry| {
-                obsolete_entry_ids
-                    .get(&entry.region_id)
-                    .is_none_or(|obsolete| entry.max_entry_id > *obsolete)
+                entry.region_id != RELEASE_REGION_ID
+                    && obsolete_entry_ids
+                        .get(&entry.region_id)
+                        .is_none_or(|obsolete| entry.max_entry_id > *obsolete)
             })
         });
         match live {
@@ -511,7 +514,10 @@ mod tests {
         catalog
             .insert_object(
                 2,
-                vec![footer_entry(region_one, entry_id(2, 1), entry_id(2, 1))],
+                vec![
+                    footer_entry(region_one, entry_id(2, 1), entry_id(2, 1)),
+                    footer_entry(RELEASE_REGION_ID, entry_id(2, 1), entry_id(2, 1)),
+                ],
             )
             .unwrap();
         catalog
@@ -542,6 +548,7 @@ mod tests {
                 &[(region_one, entry_id(1, 2)), (region_two, entry_id(1, 1))]
             )
         );
+        // The segment of release records never holds the boundary.
         assert_eq!(
             3,
             boundary(

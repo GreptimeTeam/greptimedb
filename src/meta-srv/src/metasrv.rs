@@ -26,6 +26,7 @@ use common_base::readable_size::ReadableSize;
 use common_config::{Configurable, DEFAULT_DATA_HOME};
 use common_event_recorder::EventRecorderOptions;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
+use common_meta::affinity::{AffinityFallback, AffinityRef, AffinityResolverRef};
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::allocator::resource_id::ResourceIdAllocatorRef;
 use common_meta::ddl_manager::DdlManagerRef;
@@ -486,6 +487,10 @@ impl Display for SelectTarget {
 #[derive(Clone)]
 pub struct SelectorContext {
     pub peer_discovery: PeerDiscoveryRef,
+    /// Evaluator shared by datanode and flownode selection.
+    pub affinity: AffinityRef,
+    /// Whether selection may retry without affinity when candidates are insufficient.
+    pub affinity_fallback: AffinityFallback,
 }
 
 pub type SelectorRef = Arc<dyn Selector<Context = SelectorContext, Output = Vec<Peer>>>;
@@ -507,6 +512,14 @@ pub struct SelectorFactoryContext {
 /// Builds the final datanode selector metasrv should use.
 pub trait SelectorFactory: Send + Sync {
     fn build(&self, ctx: SelectorFactoryContext) -> SelectorRef;
+
+    /// Builds the resolver shared by allocation and failover callers.
+    fn build_affinity_resolver(
+        &self,
+        _meta_peer_client: MetaPeerClientRef,
+    ) -> Option<AffinityResolverRef> {
+        None
+    }
 }
 
 /// Shared selector factory plugin registered through [`common_base::Plugins`].
