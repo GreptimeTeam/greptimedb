@@ -298,14 +298,15 @@ pub(crate) struct RegionFlushTask {
 /// durable, counted from when the engine began to stop, unless the log store
 /// reports that it fails to make entries durable, see [wait_for_durable_wal].
 ///
-/// The flush asks the log store to drain first, so the object store WAL seals
-/// the entries the flush waits for at once instead of after its seal
-/// interval, however long that is, and a create on S3 takes about 50 ms at
-/// the median and 130 ms at the 99th percentile: a healthy store makes the
-/// last entries durable well within this bound, which would also cover the
-/// default seal interval of 100 ms many times over. Every flush counts from
-/// the same instant, so the stop waits for the WAL at most this long in all,
-/// well inside the 30 s an orchestrator commonly grants a stop.
+/// The engine asks the log store to drain when it begins to stop, so the
+/// object store WAL seals the entries it holds at once, while flushes still
+/// write their SSTs, and every later entry right after its admission, instead
+/// of after its seal interval, however long that is. A create on S3 takes
+/// about 50 ms at the median and 130 ms at the 99th percentile, so a healthy
+/// store makes the entries durable well within this bound, which would also
+/// cover the default seal interval of 100 ms many times over. Every flush
+/// counts from the same instant, so the stop waits for the WAL at most this
+/// long in all, well inside the 30 s an orchestrator commonly grants a stop.
 pub(crate) const STOP_DURABILITY_GRACE: Duration = Duration::from_secs(5);
 /// How often a flush of a stopping engine asks the log store whether it fails
 /// while it keeps waiting for the WAL.
@@ -962,12 +963,12 @@ impl RegionFlushTask {
 /// must a stopping engine for long: the log store stops only after the
 /// engine, so a wait for uploads that keep failing would hold the stop up for
 /// good. Once the engine begins to stop, the wait gives up at once while the
-/// log store reports that it fails to make entries durable. Otherwise it asks
-/// the log store to drain and gives up [STOP_DURABILITY_GRACE] after the stop
-/// began, which lets a healthy store upload its last entries so that a
-/// close-time flush keeps the writes that skipped the WAL. The barrier is
-/// polled first, so a flush whose entries are already durable commits while
-/// the engine stops.
+/// log store reports that it fails to make entries durable, and otherwise
+/// [STOP_DURABILITY_GRACE] after the stop began, which lets a healthy store,
+/// which drains once the engine begins to stop, upload its last entries so
+/// that a close-time flush keeps the writes that skipped the WAL. The barrier
+/// is polled first, so a flush whose entries are already durable commits
+/// while the engine stops.
 pub(crate) async fn wait_for_durable_wal(
     region_id: RegionId,
     barrier: &DurabilityBarrier,
@@ -1002,12 +1003,9 @@ pub(crate) async fn wait_for_durable_wal(
 /// Returns once a flush of a stopping engine gives up waiting for the WAL, with
 /// the reason: at once while the log store fails to make entries durable,
 /// otherwise once [STOP_DURABILITY_GRACE] passed since the engine began to
-/// stop. A log store that does not fail is asked to drain first.
+/// stop.
 async fn give_up_once_stopping(barrier: &DurabilityBarrier, stopping: &StopSignal) -> &'static str {
     let deadline = stopping.raised().await + STOP_DURABILITY_GRACE;
-    if !barrier.is_failing() {
-        let _ = tokio::time::timeout_at(deadline.into(), barrier.begin_drain()).await;
-    }
     loop {
         if barrier.is_failing() {
             return "the WAL fails to make entries durable";

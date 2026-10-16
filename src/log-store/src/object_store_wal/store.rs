@@ -35,7 +35,7 @@ use store_api::logstore::entry::{Entry, NaiveEntry};
 use store_api::logstore::provider::{ObjectStoreProvider, Provider};
 use store_api::logstore::{AppendBatchResponse, EntryId, LogStore, SendableEntryStream};
 use store_api::storage::RegionId;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::time::MissedTickBehavior;
 use tokio_util::task::AbortOnDropHandle;
 
@@ -129,11 +129,10 @@ const RECOVERY_TAIL_WINDOW: usize = 64 * 1024;
 /// A log store over the immutable WAL objects under one prefix.
 ///
 /// Appends are admitted into an open batch. A background actor seals the batch
-/// when it reaches the size limit or the flush interval elapses, or, once a
-/// caller asked the store to drain, as soon as a caller waits for a region it
-/// holds, and creates the object under the next sequence while it keeps
-/// admitting entries into the next batch; up to [`MAX_IN_FLIGHT_CREATES`]
-/// creates run at a time.
+/// when it reaches the size limit or the flush interval elapses, or after
+/// every admission once a caller asked the store to drain, and creates the
+/// object under the next sequence while it keeps admitting entries into the
+/// next batch; up to [`MAX_IN_FLIGHT_CREATES`] creates run at a time.
 /// Objects are indexed in the catalog in sequence order. In the `durable`
 /// acknowledgement mode an append returns once its object is durable and
 /// indexed, so an acknowledged entry never has a missing predecessor; in the
@@ -173,6 +172,8 @@ pub struct ObjectStoreLogStore {
     /// Whether the last create of the backlog failed, see
     /// [`is_failing`](LogStore::is_failing).
     last_create_failed: Arc<AtomicBool>,
+    /// Notified by [`begin_drain`](LogStore::begin_drain).
+    drain_requested: Arc<Notify>,
     command_tx: mpsc::Sender<Command>,
     append_tx: mpsc::Sender<QueuedAppend>,
     #[cfg(any(test, feature = "testing"))]
@@ -404,6 +405,7 @@ impl ObjectStoreLogStore {
         let terminal_error = TerminalError::default();
         let stopped = Arc::new(AtomicBool::new(false));
         let last_create_failed = Arc::new(AtomicBool::new(false));
+        let drain_requested = Arc::new(Notify::new());
         let (command_tx, command_rx) = mpsc::channel(COMMAND_BUFFER);
         let (append_tx, append_rx) = mpsc::channel(APPEND_BUFFER);
         #[cfg(any(test, feature = "testing"))]
@@ -434,6 +436,7 @@ impl ObjectStoreLogStore {
             terminal_error: terminal_error.clone(),
             stopped: stopped.clone(),
             last_create_failed: last_create_failed.clone(),
+            drain_requested: drain_requested.clone(),
             command_rx,
             append_rx,
             ack_mode: config.ack_mode,
@@ -507,6 +510,7 @@ impl ObjectStoreLogStore {
             terminal_error,
             stopped,
             last_create_failed,
+            drain_requested,
             command_tx,
             append_tx,
             #[cfg(any(test, feature = "testing"))]
@@ -1242,12 +1246,10 @@ impl LogStore for ObjectStoreLogStore {
             || self.stopped.load(Ordering::Acquire)
     }
 
-    /// Seals the open batch now and, until the store stops, as soon as a
-    /// [`wait_durable`](LogStore::wait_durable) waits for a region it holds,
-    /// instead of on the next tick of `flush_interval`.
-    async fn begin_drain(&self) {
-        // A closed channel means the actor already exited.
-        let _ = self.command_tx.send(Command::Drain).await;
+    /// Seals the open batch now and, until the store stops, after every
+    /// admission, instead of on the next tick of `flush_interval`.
+    fn begin_drain(&self) {
+        self.drain_requested.notify_one();
     }
 
     /// Fails with [`Error::MissingWalHistory`] when the prefix cannot hold
@@ -1328,9 +1330,6 @@ enum Command {
     /// Answered once the store keeps its start object, or once the delete
     /// of the start object it gave up settled.
     Withdraw { response: oneshot::Sender<()> },
-    /// Seals the open batch, and from then on whenever a caller waits for an
-    /// entry of a region it holds.
-    Drain,
     Stop {
         response: oneshot::Sender<Result<()>>,
     },
@@ -1520,6 +1519,7 @@ struct Actor {
     stopped: Arc<AtomicBool>,
     /// Set when a create of the backlog fails, cleared when one succeeds.
     last_create_failed: Arc<AtomicBool>,
+    drain_requested: Arc<Notify>,
     command_rx: mpsc::Receiver<Command>,
     append_rx: mpsc::Receiver<QueuedAppend>,
     ack_mode: AckMode,
@@ -1544,8 +1544,8 @@ struct Actor {
     /// error that requires intervention.
     failing: Option<Failing>,
     durable_waiters: Vec<DurableWaiter>,
-    /// Set by `begin_drain`: the open batch is sealed as soon as a caller
-    /// waits for an entry of a region it holds, not on the next tick.
+    /// Set by `begin_drain`: the open batch is sealed after every admission,
+    /// not on the next tick.
     draining: bool,
     /// Callers of `stop`, answered once nothing is in flight.
     stop: Vec<oneshot::Sender<Result<()>>>,
@@ -1604,6 +1604,7 @@ impl Actor {
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         // The first tick completes immediately.
         interval.tick().await;
+        let drain_requested = self.drain_requested.clone();
 
         loop {
             let probe_at = self.failing.as_ref().and_then(|failing| failing.probe_at);
@@ -1614,6 +1615,9 @@ impl Actor {
                     if !self.is_stopped() {
                         self.flush_open_batch();
                     }
+                }
+                _ = drain_requested.notified(), if !self.draining => {
+                    self.handle_drain();
                 }
                 Some((object_seq, result)) = self.creates.next(), if !self.creates.is_empty() => {
                     self.on_create_completed(object_seq, result);
@@ -1639,9 +1643,6 @@ impl Actor {
                     }
                     Some(Command::Withdraw { response }) => {
                         self.handle_withdraw(response);
-                    }
-                    Some(Command::Drain) => {
-                        self.handle_drain();
                     }
                     Some(Command::Stop { response }) => {
                         self.handle_stop(response);
@@ -1742,7 +1743,7 @@ impl Actor {
         }
         #[cfg(any(test, feature = "testing"))]
         self.admitted_appends.send_modify(|count| *count += 1);
-        if self.open_batch.should_seal() {
+        if self.draining || self.open_batch.should_seal() {
             self.flush_open_batch();
         }
     }
@@ -2408,14 +2409,11 @@ impl Actor {
         });
         #[cfg(any(test, feature = "testing"))]
         self.durability_waits.send_modify(|count| *count += 1);
-        if self.draining && !self.is_stopped() && self.open_batch.holds_region(region_id) {
-            self.flush_open_batch();
-        }
     }
 
-    /// Starts draining: the open batch is sealed now, and from then on
-    /// whenever a caller waits for an entry of a region it holds. Nothing
-    /// starts after stop began, which sealed the `enqueued` backlog.
+    /// Starts draining: the open batch is sealed now, and from then on after
+    /// every admission. Nothing starts after stop began, which sealed the
+    /// `enqueued` backlog.
     fn handle_drain(&mut self) {
         self.draining = true;
         if !self.is_stopped() {
@@ -5135,6 +5133,7 @@ mod tests {
             terminal_error: Arc::default(),
             stopped: Arc::new(AtomicBool::new(false)),
             last_create_failed: Arc::new(AtomicBool::new(false)),
+            drain_requested: Arc::default(),
             command_tx,
             append_tx,
             admitted_appends: watch::channel(0).1,
@@ -7863,25 +7862,21 @@ mod tests {
     }
 
     /// Once a caller asks the store to drain, the open batch is sealed at
-    /// once and, from then on, as soon as a caller waits for a region it
-    /// holds, so neither wait depends on the seal interval.
+    /// once and every later admission right after it, so no entry waits for
+    /// the seal interval.
     #[tokio::test]
-    async fn test_store_drain_seals_the_batches_callers_wait_for() {
+    async fn test_store_drain_seals_the_open_batch_and_every_later_admission() {
         let _serialized = SERIALIZED.lock().await;
         let store = open(memory_store(), &enqueued(manual())).await;
         let region_id = region(1);
 
         append(&store, region_id, "a1").await.unwrap();
-        let waiting = {
-            let store = store.clone();
-            tokio::spawn(async move { store.wait_durable(&provider(region_id), id(1, 1)).await })
-        };
-        timeout(WAIT, store.wait_for_durability_waits(1))
+        assert_eq!(0, store.durable_entry_id(&provider(region_id)).unwrap());
+        store.begin_drain();
+        timeout(WAIT, store.wait_durable(&provider(region_id), id(1, 1)))
             .await
             .unwrap()
             .unwrap();
-        store.begin_drain().await;
-        timeout(WAIT, waiting).await.unwrap().unwrap().unwrap();
 
         let response = append(&store, region_id, "a2").await.unwrap();
         assert_eq!(
@@ -7892,10 +7887,6 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            id(2, 1),
-            store.durable_entry_id(&provider(region_id)).unwrap()
-        );
     }
 
     #[tokio::test]

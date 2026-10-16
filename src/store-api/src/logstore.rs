@@ -117,14 +117,14 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         false
     }
 
-    /// Asks the log store to give the entries it acknowledged that
-    /// persistence as soon as it can rather than on its usual schedule, from
-    /// now until it stops, because a caller, such as a flush of a stopping
-    /// engine, waits for them in [`wait_durable`](Self::wait_durable) and will
-    /// not wait long.
+    /// Asks the log store to give the entries it acknowledged, and those it
+    /// acknowledges from now on until it stops, that persistence as soon as it
+    /// can rather than on its usual schedule, because its caller, such as an
+    /// engine that begins to stop, will soon wait for them in
+    /// [`wait_durable`](Self::wait_durable) and not for long.
     ///
     /// The default does nothing.
-    async fn begin_drain(&self) {}
+    fn begin_drain(&self) {}
 
     /// Releases every entry of a region the caller dropped, after `obsolete`
     /// marked them obsolete, so that the log store keeps none of them even

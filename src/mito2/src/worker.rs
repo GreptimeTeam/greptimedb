@@ -167,6 +167,8 @@ pub(crate) struct WorkerGroup {
     /// waits for the WAL to become durable gives up after a grace period, see
     /// [crate::flush::wait_for_durable_wal].
     stopping: StopSignal,
+    /// Asks the log store to drain, see [LogStore::begin_drain].
+    drain_wal: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl WorkerGroup {
@@ -246,6 +248,10 @@ impl WorkerGroup {
             Arc::new(new_compaction_memory_manager(compaction_limit_bytes));
         let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
         let stopping = StopSignal::default();
+        let drain_wal = {
+            let log_store = log_store.clone();
+            Arc::new(move || log_store.begin_drain())
+        };
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -294,14 +300,17 @@ impl WorkerGroup {
             intermediate_manager,
             schema_metadata_manager,
             stopping,
+            drain_wal,
         })
     }
 
-    /// Tells the group that it is about to stop: from now on a flush that
-    /// waits for the WAL to become durable gives up once the log store fails
-    /// or a grace period passed, so that closing regions and stopping the
-    /// group do not wait for long for a log store stopped after them.
+    /// Tells the group that it is about to stop: the log store drains, and
+    /// from now on a flush that waits for the WAL to become durable gives up
+    /// once the log store fails or a grace period passed, so that closing
+    /// regions and stopping the group do not wait for long for a log store
+    /// stopped after them.
     pub(crate) fn begin_stop(&self) {
+        (self.drain_wal)();
         self.stopping.raise();
     }
 
@@ -476,6 +485,10 @@ impl WorkerGroup {
             Arc::new(new_compaction_memory_manager(compaction_limit_bytes));
         let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
         let stopping = StopSignal::default();
+        let drain_wal = {
+            let log_store = log_store.clone();
+            Arc::new(move || log_store.begin_drain())
+        };
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
@@ -523,6 +536,7 @@ impl WorkerGroup {
             intermediate_manager,
             schema_metadata_manager,
             stopping,
+            drain_wal,
         })
     }
 
