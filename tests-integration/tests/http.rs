@@ -10539,6 +10539,56 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
         "unexpected error body: {body:?}"
     );
 
+    // Raw bytes and JSONB values of `x` from different resources share one chunk.
+    // That conflict must not keep the unrelated resource `c` out of schema
+    // planning: `n` is planned as String, so `c`'s value is not coerced to the
+    // Int64 that per-span writes would pick from resource `a` first.
+    let mixed_table_name = "trace_type_mixed_binary_json";
+    let mixed_resources = [
+        (
+            "mixed-a",
+            vec![
+                json!({"key": "x", "value": {"bytesValue": "AQI="}}),
+                make_int_attr("n", 1),
+            ],
+        ),
+        (
+            "mixed-b",
+            vec![json!({"key": "x", "value": {"arrayValue": {"values": [{"intValue": "1"}]}}})],
+        ),
+        ("mixed-c", vec![make_string_attr("n", "abc")]),
+    ];
+    let mut mixed_req = ExportTraceServiceRequest::default();
+    for (i, (service_name, attributes)) in mixed_resources.into_iter().enumerate() {
+        let id = 0x71 + i;
+        mixed_req.resource_spans.extend(
+            make_trace_v1_request(
+                service_name,
+                vec![make_trace_v1_span(
+                    &format!("{id:032x}"),
+                    &format!("{id:016x}"),
+                    service_name,
+                    1_736_480_942_446_000_000,
+                    1_736_480_942_446_100_000,
+                    attributes,
+                )],
+            )
+            .resource_spans,
+        );
+    }
+    let res = send_trace_v1_req(&client, mixed_table_name, mixed_req, false).await;
+    assert_eq!(StatusCode::OK, res.status());
+    validate_data(
+        "otlp_traces_v1_mixed_binary_json_rows",
+        &client,
+        &format!(
+            "select service_name, \"span_attributes.n\" from {} order by service_name",
+            mixed_table_name
+        ),
+        r#"[["mixed-a","1"],["mixed-c","abc"]]"#,
+    )
+    .await;
+
     guard.remove_all().await;
 }
 
