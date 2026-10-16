@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use common_query::prelude::{greptime_native_histogram, greptime_value};
-use datafusion::arrow::array::{Array, TimestampMillisecondArray, UInt64Array};
+use datafusion::arrow::array::{Array, Float64Array, TimestampMillisecondArray, UInt64Array};
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
@@ -39,6 +39,8 @@ use datafusion::physical_plan::{
 };
 use datafusion_expr::ident;
 use datatypes::arrow::compute;
+use datatypes::series::raw::RawTimeAxis;
+use datatypes::series::samples::{Samples, SeriesFields};
 use datatypes::timestamp::timestamp_array_to_primitive;
 use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
@@ -53,9 +55,8 @@ use crate::extension_plan::{
     nanoseconds_per_native_tick, prometheus_stale_sample_column, resolve_column_name,
     serialize_column_index, timestamp_unit,
 };
+use crate::instant_eval::{MAX_INSTANT_MANIPULATE_OUTPUT_POINTS, select_instants};
 use crate::metrics::PROMQL_SERIES_COUNT;
-
-const MAX_INSTANT_MANIPULATE_OUTPUT_POINTS: usize = 1_000_000;
 
 fn mixed_sample_fields(field: Option<&str>) -> [Option<&str>; 2] {
     let companion = match field {
@@ -679,6 +680,44 @@ impl InstantManipulateStream {
             // Returning Pending after consuming a ready batch without a wake can stall the stream.
             return Ok(RecordBatch::new_empty(self.schema.clone()));
         }
+        if let Some(timestamps) = ts_column
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .filter(|timestamps| timestamps.null_count() == 0)
+        {
+            let values = timestamps.values();
+            let float_fields: Option<Vec<_>> = self
+                .field_indices
+                .iter()
+                .flatten()
+                .map(|index| {
+                    input
+                        .column(*index)
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .cloned()
+                })
+                .collect();
+            if let Some(float_fields) = float_fields
+                && !float_fields.is_empty()
+                && values.windows(2).all(|pair| pair[0] < pair[1])
+            {
+                let time = RawTimeAxis::Explicit(values.clone());
+                let fields = SeriesFields::try_from_vec(
+                    float_fields.into_iter().map(Samples::from_float).collect(),
+                )
+                .map_err(|error| DataFusionError::Execution(error.to_string()))?;
+                let (indices, evaluation_timestamps) = select_instants(
+                    &time,
+                    &fields,
+                    self.start..=self.end,
+                    self.interval,
+                    self.lookback_delta,
+                    self.offset,
+                )?;
+                return self.take_record_batch_optional(input, indices, evaluation_timestamps);
+            }
+        }
         let scale = nanoseconds_per_native_tick(self.time_unit);
         let stale_sample_columns = self.field_indices.map(|index| {
             index.and_then(|index| prometheus_stale_sample_column(input.column(index).as_ref()))
@@ -865,6 +904,10 @@ fn reuse_constant_column(array: &Arc<dyn Array>, len: usize) -> DataFusionResult
 
     ScalarValue::try_from_array(array.as_ref(), 0)?.to_array_of_size(len)
 }
+
+#[cfg(test)]
+#[path = "instant_manipulate/typed_tests.rs"]
+mod typed_tests;
 
 #[cfg(test)]
 mod test {
