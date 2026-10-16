@@ -96,7 +96,7 @@ use sqlparser::ast::{Expr, Ident, UnaryOperator, Value as ParserValue};
 use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
-use store_api::mito_engine_options::APPEND_MODE_KEY;
+use store_api::mito_engine_options::{APPEND_MODE_KEY, TTL_KEY};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::TableRef;
 use table::dist_table::DistTable;
@@ -114,12 +114,13 @@ use crate::error::{
     DeserializePartitionExprSnafu, EmptyDdlExprSnafu, ExternalSnafu, ExtractTableNamesSnafu,
     FlowNotFoundSnafu, InvalidPartitionRuleSnafu, InvalidPartitionSnafu, InvalidSqlSnafu,
     InvalidTableNameSnafu, InvalidViewNameSnafu, InvalidViewStmtSnafu, NotSupportedSnafu,
-    PartitionExprToPbSnafu, Result, SchemaInUseSnafu, SchemaNotFoundSnafu, SchemaReadOnlySnafu,
-    SerializePartitionExprSnafu, SubstraitCodecSnafu, TableAlreadyExistsSnafu,
-    TableDdlReservedSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu, TableReadOnlySnafu,
-    UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
+    PartitionExprToPbSnafu, Result, RetentionTtlOnLogicalTableSnafu, SchemaInUseSnafu,
+    SchemaNotFoundSnafu, SchemaReadOnlySnafu, SerializePartitionExprSnafu, SubstraitCodecSnafu,
+    TableAlreadyExistsSnafu, TableDdlReservedSnafu, TableMetadataManagerSnafu, TableNotFoundSnafu,
+    TableReadOnlySnafu, UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper::{self, RepartitionRequest, RepartitionSource};
+use crate::insert::{ensure_no_retention_ttl_on_logical_table, is_retention_ttl};
 use crate::statement::StatementExecutor;
 use crate::statement::show::create_partitions_stmt;
 use crate::utils::{to_executor_context, to_executor_context_with_origin_frontend};
@@ -446,6 +447,9 @@ impl StatementExecutor {
         ctx: &QueryContextRef,
     ) -> Result<()> {
         ensure_table_definition_writable(&expr.schema_name, &expr.table_name)?;
+        // `ttl='instant'` stays on logical tables so the Inserter can forward
+        // rows to flows. Retention TTL is enforced by the physical table.
+        ensure_no_retention_ttl_on_logical_table(&expr.table_options)?;
         if let Some(partitions) = partitions
             && !partitions.exprs.is_empty()
         {
@@ -2114,6 +2118,19 @@ impl StatementExecutor {
         } else {
             // This is logical table. Annotation alters only rewrite its own
             // metadata; `AlterLogicalTablesProcedure` only handles column adds.
+            // `ttl='instant'` stays supported on logical tables (the Inserter
+            // uses it to forward rows to flows); retention TTLs are rejected.
+            let alters_retention_ttl = expr.kind.as_ref().is_some_and(|kind| match kind {
+                Kind::SetTableOptions(options) => options
+                    .table_options
+                    .iter()
+                    .any(|option| option.key == TTL_KEY && is_retention_ttl(&option.value)),
+                Kind::UnsetTableOptions(options) => options.keys.iter().any(|key| key == TTL_KEY),
+                _ => false,
+            });
+            if alters_retention_ttl {
+                return RetentionTtlOnLogicalTableSnafu.fail();
+            }
             let annotation_alter = match expr.kind.as_ref() {
                 Some(kind) => common_grpc_expr::annotation_alter_family(kind)
                     .context(AlterExprToRequestSnafu)?

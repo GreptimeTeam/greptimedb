@@ -37,7 +37,9 @@ use common_recordbatch::RecordBatches;
 use common_telemetry::{debug, tracing};
 use operator::insert::{
     AutoCreateTableType, InserterRef, PerTableSemanticIndex, apply_per_table_semantic_options,
-    build_create_table_expr, fill_table_options_for_create, parse_per_table_semantic_index,
+    apply_retention_ttl_hint, build_create_table_expr, fill_table_options_for_create,
+    parse_per_table_semantic_index, retention_ttl_hint,
+    retention_ttl_hint_on_existing_physical_table_reason,
 };
 use operator::statement::StatementExecutor;
 use prost::Message;
@@ -684,6 +686,12 @@ impl Instance {
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
         if table.is_some() {
+            if retention_ttl_hint(&ctx).is_some() {
+                return error::InvalidPromRemoteRequestSnafu {
+                    msg: retention_ttl_hint_on_existing_physical_table_reason(physical_table),
+                }
+                .fail();
+            }
             return Ok(());
         }
 
@@ -712,6 +720,9 @@ impl Instance {
         .map_err(BoxedError::new)
         .context(error::ExecuteGrpcQuerySnafu)?;
         create_table_expr.engine = METRIC_ENGINE_NAME.to_string();
+        // Retention hints apply only when this physical table is created.
+        // `ttl=instant` stays on the logical table.
+        apply_retention_ttl_hint(&mut create_table_expr.table_options, &ctx);
         fill_metric_physical_table_options(&mut create_table_expr.table_options);
 
         self.statement_executor
