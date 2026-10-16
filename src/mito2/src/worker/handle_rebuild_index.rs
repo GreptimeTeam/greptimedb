@@ -218,15 +218,20 @@ impl<S> RegionWorkerLoop<S> {
 
         let build_tasks = if request.file_metas.is_empty() {
             // If no specific files are provided, find files whose index is inconsistent with the region metadata.
+            // Check the version rather than the manifest: a publication committed
+            // to the manifest but not yet applied is still invisible to queries.
+            // Its build still holds the file, so the manual task waits for it.
             all_files
                 .values()
-                .filter_map(|file| {
-                    let file_meta = current_file_meta(file.meta_ref().file_id)?;
-                    (!file_meta.is_index_consistent_with_region(
+                .filter(|file| {
+                    !file.meta_ref().is_index_consistent_with_region(
                         &snapshot.metadata.column_metadatas,
                         &snapshot.index_options,
-                    ))
-                    .then(|| (file.clone(), file_meta))
+                    )
+                })
+                .filter_map(|file| {
+                    let file_meta = current_file_meta(file.meta_ref().file_id)?;
+                    Some((file.clone(), file_meta))
                 })
                 .collect::<Vec<_>>()
         } else {

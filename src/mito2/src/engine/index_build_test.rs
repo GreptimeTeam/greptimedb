@@ -1266,6 +1266,85 @@ async fn test_unrelated_schema_change_retries_stale_flush_index_build() {
 }
 
 #[tokio::test]
+async fn test_manual_build_waits_for_committed_publication_to_apply() {
+    let mut env =
+        TestEnv::with_prefix("test_manual_build_waits_for_committed_publication_to_apply_").await;
+    let gate = Arc::new(IndexPublicationGate::new(
+        IndexPublicationPhase::AfterManifestCommit,
+    ));
+    let engine = Arc::new(
+        env.create_engine_with(
+            async_build_mode_config(true),
+            None,
+            Some(gate.clone()),
+            None,
+        )
+        .await,
+    );
+
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new().build_with_index();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_and_flush(&engine, region_id, &column_schemas, 0..20).await;
+    // The flush build has committed its index to the manifest, but the worker
+    // has not applied it to the version.
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_entered(1))
+        .await
+        .expect("flush index build did not commit the manifest");
+
+    let engine_for_build = engine.clone();
+    let mut manual_build = tokio::spawn(async move {
+        engine_for_build
+            .handle_request(
+                region_id,
+                RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
+            )
+            .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut manual_build)
+            .await
+            .is_err(),
+        "manual build returned before the committed index was applied"
+    );
+
+    gate.release(1);
+    tokio::time::timeout(Duration::from_secs(10), manual_build)
+        .await
+        .expect("manual index build request did not finish")
+        .expect("manual index build task panicked")
+        .unwrap();
+
+    let version = engine.get_region(region_id).unwrap().version();
+    let files = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files.values())
+        .collect::<Vec<_>>();
+    assert_eq!(files.len(), 1);
+    assert!(files[0].meta_ref().is_index_consistent_with_region(
+        &version.metadata.column_metadatas,
+        &version.options.index_options,
+    ));
+}
+
+#[tokio::test]
 async fn test_manual_build_waits_for_schema_change_retry() {
     let mut env = TestEnv::with_prefix("test_manual_build_waits_for_schema_change_retry_").await;
     let gate = Arc::new(IndexPublicationGate::new(
