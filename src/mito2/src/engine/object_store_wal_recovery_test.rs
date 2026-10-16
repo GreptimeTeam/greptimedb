@@ -36,8 +36,7 @@ use common_wal::config::object_store::{
 use common_wal::options::{ObjectStoreWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use log_store::ObjectStoreLogStore;
 use log_store::metrics::{
-    METRIC_OBJECT_STORE_WAL_CREATE_FAILURES_TOTAL, METRIC_OBJECT_STORE_WAL_FAILING,
-    METRIC_OBJECT_STORE_WAL_MISSING_HISTORY_ACCEPTED_TOTAL,
+    METRIC_OBJECT_STORE_WAL_FAILING, METRIC_OBJECT_STORE_WAL_MISSING_HISTORY_ACCEPTED_TOTAL,
 };
 use log_store::object_store_wal::{WalHole, entry_id};
 use object_store::ObjectStore;
@@ -1979,24 +1978,14 @@ impl WalOutage {
         }
     }
 
-    /// Waits until a create of the sealed backlog met the outage.
+    /// Waits until a create of the sealed backlog met the outage: the store
+    /// is failing, handled a failed create, or has a create parked.
     async fn wait_until_met(self, store: &ObjectStoreLogStore) {
-        let met = || match self {
-            WalOutage::Refused => METRIC_OBJECT_STORE_WAL_FAILING.get() > 0,
-            WalOutage::Unreachable => METRIC_OBJECT_STORE_WAL_CREATE_FAILURES_TOTAL.get() > 0,
-            WalOutage::Stalled => false,
-        };
-        if self == WalOutage::Stalled {
-            wait_for(store.wait_for_parked_creates(1)).await;
-            return;
+        match self {
+            WalOutage::Refused => wait_for(store.wait_until_failing()).await,
+            WalOutage::Unreachable => wait_for(store.wait_for_failed_creates(1)).await,
+            WalOutage::Stalled => wait_for(store.wait_for_parked_creates(1)).await,
         }
-        tokio::time::timeout(WAIT, async {
-            while !met() {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await
-        .expect("a create must meet the outage");
     }
 
     /// Whether the log store's stop uploads the backlog: a stalled create
@@ -2021,7 +2010,6 @@ impl WalOutage {
     }
 }
 
-/// Returns the SST files of the regions under `table_dir`.
 async fn sst_files(env: &TestEnv, table_dir: &str) -> Vec<String> {
     env.get_object_store()
         .unwrap()
@@ -2035,7 +2023,6 @@ async fn sst_files(env: &TestEnv, table_dir: &str) -> Vec<String> {
         .collect()
 }
 
-/// Sends a put whose rows skip the WAL.
 async fn put_rows_skipping_wal(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
     engine
         .handle_request(
