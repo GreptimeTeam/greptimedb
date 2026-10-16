@@ -82,6 +82,8 @@ jobs:
           version: "latest"
       - name: Run check-version script tests
         run: uv run --no-project python .github/scripts/check-version-test.py
+      - name: Run previous-release-tag script tests
+        run: python3 .github/scripts/previous-release-tag-test.py
       - name: Run enterprise license check tests
         run: python3 scripts/check-enterprise-license-test.py
       - name: Run fuzz orchestration script tests
