@@ -92,6 +92,8 @@ TAG = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
 DIGEST = re.compile(r".+@sha256:[0-9a-f]{64}")
 # Rows/s of a load cell in 1000-row batches on c6id.2xlarge at the concurrency levels earlier runs
 # measured, interpolated on a log scale between them; durable writes slow down with several regions.
+# Smaller batches are taken to keep the request rate, so their rows/s shrink with the batch.
+MEASURED_BATCH_ROWS = 1000
 LOAD_RATES = {"durable": [(1, 9_000), (8, 34_000), (32, 55_000)],
               "durable, partitioned": [(1, 7_000), (8, 26_000), (32, 55_000)],
               "other": [(1, 28_000), (8, 60_000)]}
@@ -333,19 +335,19 @@ def load_rate(cell: dict) -> float:
     return points[-1][1]
 
 
-def cell_seconds(cell: dict) -> float:
+def cell_seconds(cell: dict, batch_rows: int) -> float:
     if cell["mode"] == "crash":
         return CELL_SECONDS + cell["cycles"] * (sum(cell["kill_after"]) / 2 + CYCLE_SECONDS)
     if cell["mode"] == "drop":
         return CELL_SECONDS + cell["write_seconds"] + RESTART_SECONDS / 2
-    return (CELL_SECONDS + cell["rows"] / load_rate(cell) + cell["idle_seconds"]
-            + (RESTART_SECONDS if cell["restart"] else 0))
+    rate = load_rate(cell) * min(1.0, batch_rows / MEASURED_BATCH_ROWS)
+    return CELL_SECONDS + cell["rows"] / rate + cell["idle_seconds"] + (RESTART_SECONDS if cell["restart"] else 0)
 
 
 def estimate_minutes(plan: dict) -> int:
     """The benchmark job's minutes on c6id.2xlarge, from the times of earlier runs."""
     generate = GENERATE_SECONDS_PER_MILLION * sum(corpus["rows"] for corpus in plan["corpora"]) / 1e6
-    cells = sum(cell_seconds(cell) for cell in plan["cells"])
+    cells = sum(cell_seconds(cell, plan["batch_rows"]) for cell in plan["cells"])
     return math.ceil((JOB_SECONDS + generate + cells * (1 + CLEANUP_SHARE)) / 60)
 
 

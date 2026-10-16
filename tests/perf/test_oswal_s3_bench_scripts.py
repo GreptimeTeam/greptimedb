@@ -293,23 +293,27 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(bench.estimate_minutes(plan), 75)
         cells = {c["id"]: c for c in plan["cells"]}
         # Durable at concurrency 8 writes 34,000 rows/s to one region and 26,000 to eight.
-        self.assertAlmostEqual(bench.cell_seconds(cells["single-1-8-D-base"]), 5 + 2_000_000 / 34_000)
-        self.assertAlmostEqual(bench.cell_seconds(cells["multi-1-8-D-pr1"]), 5 + 2_000_000 / 26_000)
-        self.assertAlmostEqual(bench.cell_seconds(cells["multi-1-8-E-pr2"]), 5 + 2_000_000 / 60_000)
+        self.assertAlmostEqual(bench.cell_seconds(cells["single-1-8-D-base"], 1000), 5 + 2_000_000 / 34_000)
+        self.assertAlmostEqual(bench.cell_seconds(cells["multi-1-8-D-pr1"], 1000), 5 + 2_000_000 / 26_000)
+        self.assertAlmostEqual(bench.cell_seconds(cells["multi-1-8-E-pr2"], 4000), 5 + 2_000_000 / 60_000)
+        # A smaller batch keeps the request rate: one-row batches write a thousandth of the rows.
+        self.assertAlmostEqual(bench.cell_seconds(cells["single-1-8-D-base"], 1), 5 + 2_000_000 / 34)
         durable = cells["single-1-8-D-base"]
         self.assertAlmostEqual(bench.load_rate(durable | {"concurrency": 4}), 9_000 + 25_000 * 2 / 3)
         self.assertEqual(bench.load_rate(durable | {"concurrency": 64}), 55_000)
         crash = bench.build_plan("8", "6000", "1000", "1", smoke=False, groups=json.dumps(
             [{"name": "c", "mode": "crash", "configs": "D", "cycles": 5, "kill_after": [5, 20]}]))["cells"][0]
-        self.assertEqual(bench.cell_seconds(crash), 5 + 5 * (12.5 + 15))
+        self.assertEqual(bench.cell_seconds(crash, 1), 5 + 5 * (12.5 + 15))
         command = [sys.executable, str(SCRIPTS / "oswal-s3-bench.py"), "plan", "--smoke", "false", "--concurrency",
-                   "8", "--rows", "2000000", "--batch-rows", "1000", "--rounds", "5", "--groups", groups,
+                   "8", "--rows", "2000000", "--rounds", "5", "--groups", groups,
                    "--images", images, "--warmup", "true", "--ttl-hours", "8"]
-        for timeout, returncode in (("75", 0), ("74", 1)):
-            done = subprocess.run(command + ["--timeout-minutes", timeout], capture_output=True, text=True, timeout=60)
-            with self.subTest(timeout=timeout):
-                self.assertEqual(done.returncode, returncode, done.stderr)
-                self.assertIn("about 75 minutes" if returncode == 0 else "more than the 74-minute", done.stdout + done.stderr)
+        for batch_rows, timeout, expected in (("1000", "75", "about 75 minutes"), ("1000", "74", "more than the 74-minute"),
+                                               ("1", "360", "more than the 360-minute")):
+            done = subprocess.run(command + ["--batch-rows", batch_rows, "--timeout-minutes", timeout],
+                                  capture_output=True, text=True, timeout=60)
+            with self.subTest(batch_rows=batch_rows, timeout=timeout):
+                self.assertEqual(done.returncode, 0 if expected.startswith("about") else 1, done.stderr)
+                self.assertIn(expected, done.stdout + done.stderr)
 
     def test_the_workflow_checks_every_image_before_an_instance_is_allocated(self):
         workflow = (SCRIPTS.parent / "workflows" / "oswal-s3-bench.yml").read_text()
