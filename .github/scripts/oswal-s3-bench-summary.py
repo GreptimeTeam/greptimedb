@@ -328,8 +328,8 @@ def render(run: dict, rows: list, pairs: list) -> str:
             *(fmt(r[c]) for c in COUNTERS[1:]), fmt(r["server_cpu_cores"], 2),
             "—" if r["host_cpu_busy"] is None else f"{r['host_cpu_busy']:.0%} of {r['host_cpus'] or '?'}",
             f"`{r['wal_device'] or '—'}` |"]))
-    lines += ["", "| Cell | WAL MB/s | Objects/s | Mean object MiB | Sealed on size | S3 operations during the load "
-              "| S3 operations of the restart | Idle s | Idle creates | Idle S3 operations |",
+    lines += ["", "| Cell | WAL MB/s | Objects/s | Mean object MiB | Sealed on size | OpenDAL S3 operations during the load "
+              "| OpenDAL S3 operations of the restart | Idle s | Idle creates | Idle OpenDAL S3 operations |",
               "| --- | ---: | ---: | ---: | --- | --- | --- | ---: | ---: | --- |"]
     for r in loads:
         idle = r.get("idle") or {}
@@ -359,7 +359,7 @@ def render(run: dict, rows: list, pairs: list) -> str:
                     fmt(c.get("restart_seconds"), 2), fmt(c.get("recovery_seconds"), 3),
                     fmt(c.get("recovered_objects")), fmt(c.get("pin_rows")), verdict]) + " |")
         lines += ["", "| Cell | Cycle | Load s | WAL MB/s | Objects/s | Mean object MiB | Sealed on size "
-                  "| S3 operations until the kill | S3 operations of the restart |",
+                  "| OpenDAL S3 operations until the kill | OpenDAL S3 operations of the restart |",
                   "| --- | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |"]
         for r in crashes:
             for c in r["cycles"]:

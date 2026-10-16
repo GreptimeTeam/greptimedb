@@ -172,7 +172,6 @@ sample_objects() {
 # against what was acknowledged. Nothing is cleaned between cycles.
 crash_cycles() {
     local writers rows cycles kill_min kill_max cycle cdir wpid spid= delay before after started restart_s query_s next=0 pin_count pin_args
-    local sampled
     local load_start complete sql_url=${OSWAL_SQL_URL:-http://127.0.0.1:4000/v1/sql?db=public}
     writers=$(jq -r .concurrency <<< "$spec") rows=$(jq -r .batch_rows "$PLAN") cycles=$(jq -r .cycles <<< "$spec")
     kill_min=$(jq -r '.kill_after[0]' <<< "$spec") kill_max=$(jq -r '.kill_after[1]' <<< "$spec")
@@ -186,8 +185,7 @@ crash_cycles() {
         cdir="$dir/cycle-$cycle" complete=true; mkdir -p "$cdir"
         # The counters of this server process before its writers start are the cycle's baseline.
         phase=-start-$cycle; scrape_retry indexed_objects || complete=false
-        load_start=$(now_ns) sampled=0
-        [[ ! -f "$dir/objects.tsv" ]] || sampled=$(wc -l < "$dir/objects.tsv")
+        load_start=$(now_ns)
         python3 "$here/oswal-s3-bench-crash.py" write --dir "$cdir" --url "$sql_url" \
             --writers "$writers" --first-seq "$next" --rows "$rows" &
         wpid=$!
@@ -226,10 +224,11 @@ crash_cycles() {
         ((verdict == 0)) || { echo "$id: cycle $cycle failed its check" >&2; exit 6; }
         # A cycle without its scrapes is not a measurement, whatever the table held.
         [[ "$complete" == true ]] || { echo "$id: cycle $cycle lost a metrics scrape" >&2; exit 4; }
-        # While the pin holds nothing is collected, so this cycle's samples never fall.
-        if jq -e .pin <<< "$spec" >/dev/null && [[ -f "$dir/objects.tsv" ]] && ! tail -n "+$((sampled + 1))" "$dir/objects.tsv" \
-            | awk '$2 != "missing" {if (seen && $2 < last) exit 1; last = $2; seen = 1}'; then
-            echo "$id: cycle $cycle collected objects while the pin held the WAL" >&2; exit 11
+        # While the pin holds, the server collects nothing between the scrape before the writers
+        # start and the one before the kill; an absent counter has not moved from zero.
+        if jq -e .pin <<< "$spec" >/dev/null && ! awk '/^greptime_logstore_object_store_wal_deleted_objects_total / {n[FILENAME] = $2}
+            END {exit !(n[ARGV[1]] + 0 == n[ARGV[2]] + 0)}' "$dir/metrics-start-$cycle.prom" "$dir/metrics-cycle-$cycle.prom"; then
+            echo "$id: cycle $cycle collected WAL objects while the pin held it" >&2; exit 11
         fi
         next=$(cat "$cdir"/attempted-*.log | sort -n | tail -1); next=$((next + 1))
     done

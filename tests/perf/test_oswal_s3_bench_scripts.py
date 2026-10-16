@@ -687,10 +687,6 @@ esac
 FAKE_CURL = r"""#!/usr/bin/env bash
 printf '%s\n' "curl $*" >> "$FAKE_LOG"
 [[ "$*" != *"--max-time 10"* || "${FAKE_SAMPLE_RC:-0}" == 0 ]] || exit "$FAKE_SAMPLE_RC"
-# With FAKE_SAMPLE_FALL every sample reports one indexed object fewer than the one before.
-[[ "$*" != *"--max-time 10"* || -z "${FAKE_SAMPLE_FALL:-}" ]] || {
-    n=$(cat "$FAKE_LOG.samples" 2>/dev/null || echo 100); echo $((n - 1)) > "$FAKE_LOG.samples"
-    echo "greptime_logstore_object_store_wal_indexed_objects $n"; exit 0; }
 for arg in "$@"; do
     [[ "$arg" != *"GROUP BY seq"* ]] || { python3 -c 'import collections, json, sys
 counts = collections.Counter(int(l) for l in open(sys.argv[1]) if l.strip())
@@ -711,6 +707,9 @@ for arg in "$@"; do
             "greptime_logstore_object_store_wal_indexed_objects $FAKE_FULL_METRICS" \
             'greptime_logstore_object_store_wal_recovery_seconds_count 1' \
             "greptime_logstore_object_store_wal_recovered_objects_total ${FAKE_RECOVERED:-0}"
+        # With FAKE_COLLECTING every scrape reports one more collected object than the one before.
+        [[ -z "${FAKE_COLLECTING:-}" ]] || { n=$(($(cat "$FAKE_LOG.deleted" 2>/dev/null || echo 0) + 1))
+            echo "$n" > "$FAKE_LOG.deleted"; echo "greptime_logstore_object_store_wal_deleted_objects_total $n"; }
         exit 0;
     }
 done
@@ -924,14 +923,15 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
             self.assertIn("WITH ('auto_flush_interval' = '1d')", urllib.parse.unquote_plus(log))
             self.assertEqual(len((cell / "cycles.jsonl").read_text().splitlines()), 2)
 
-    def test_a_pinned_cycle_fails_when_objects_are_collected(self):
+    def test_a_pinned_cycle_fails_when_objects_are_collected_even_without_samples(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            cells, _, _, _ = self.run_crash(root, pin=True, env={"FAKE_COUNT": "1", "FAKE_SAMPLE_FALL": "1"})
+            # The cycle ends before the first periodic sample; only its own two scrapes see the collection.
+            cells, _, _, _ = self.run_crash(root, pin=True, env={"FAKE_COUNT": "1", "FAKE_COLLECTING": "1",
+                                                                 "OSWAL_SAMPLE_SECONDS": "30"})
             cell = root / "results" / "cells" / "crash-1-8-D"
             self.assertEqual(json.loads((cell / "cell.json").read_text())["exit_code"], 11, cells.stdout + cells.stderr)
-            samples = [int(line.split()[1]) for line in (cell / "objects.tsv").read_text().splitlines()]
-            self.assertTrue(len(samples) >= 2 and samples == sorted(samples, reverse=True), samples)
+            self.assertFalse((cell / "objects.tsv").exists())
 
     def test_a_durable_pinned_cycle_fails_unless_its_pin_row_is_there_once(self):
         for count in ("0", "2"):
