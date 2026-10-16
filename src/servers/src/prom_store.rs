@@ -37,7 +37,7 @@ use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_telemetry::{tracing, warn};
 use datafusion::dataframe::DataFrame;
-use datafusion::prelude::{Expr, coalesce, ident, lit, regexp_match};
+use datafusion::prelude::{Expr, ident, lit, regexp_match};
 use datafusion_common::ScalarValue;
 use datafusion_expr::{ExprSchemable, LogicalPlan};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -205,43 +205,43 @@ pub fn query_to_plan(
             lit("")
         };
 
-        // Compare EQ/NEQ against the original column to preserve index recognition
-        // and existing numeric comparisons. Treat NULL as "": include NULL rows
-        // for EQ "" and NEQ with a non-empty value.
-        // For RE/NRE, cast to string before coalesce to avoid type coercion errors,
-        // then replace NULL with "" before matching.
-        match m_type {
-            MatcherType::Eq => {
-                let condition = if value.is_empty() {
-                    label.clone().eq(lit(value)).or(label.is_null())
-                } else {
-                    label.eq(lit(value))
-                };
-                conditions.push(condition);
-            }
-            MatcherType::Neq => {
-                let condition = if value.is_empty() {
-                    label.not_eq(lit(value))
-                } else {
-                    label.clone().not_eq(lit(value)).or(label.is_null())
-                };
-                conditions.push(condition);
-            }
+        // Like PromQL, include NULL when the matcher accepts the empty string.
+        // Keep EQ/NEQ on the original column for index and numeric comparisons.
+        let (condition, accepts_empty) = match m_type {
+            MatcherType::Eq => (label.clone().eq(lit(value)), value.is_empty()),
+            MatcherType::Neq => (label.clone().not_eq(lit(value)), !value.is_empty()),
             MatcherType::Re | MatcherType::Nre => {
                 let pattern = anchored_label_regex(value);
-                let label = label
+                let matches_empty = regex::Regex::new(&pattern)
+                    .map_err(|e| {
+                        error::InvalidPromRemoteRequestSnafu {
+                            msg: format!("invalid regex for label '{name}': {e}"),
+                        }
+                        .build()
+                    })?
+                    .is_match("");
+                let string_label = label
+                    .clone()
                     .cast_to(&DataType::Utf8, dataframe.schema())
                     .context(error::DataFrameSnafu)?;
-                let label = coalesce(vec![label, lit("")]);
-                let matched = regexp_match(label, lit(pattern), None);
-                let condition = if m_type == MatcherType::Re {
-                    matched.is_not_null()
+                let matched = regexp_match(string_label, lit(pattern), None);
+                if m_type == MatcherType::Re {
+                    (matched.is_not_null(), matches_empty)
                 } else {
-                    matched.is_null()
-                };
-                conditions.push(condition);
+                    // regexp_match(NULL, ...) is NULL too; do not mistake it
+                    // for a non-matching value before applying label semantics.
+                    (
+                        matched.is_null().and(label.clone().is_not_null()),
+                        !matches_empty,
+                    )
+                }
             }
-        }
+        };
+        conditions.push(if accepts_empty {
+            condition.or(label.is_null())
+        } else {
+            condition
+        });
     }
 
     // Safety: conditions MUST not be empty, reduce always return Some(expr).
@@ -1185,7 +1185,7 @@ mod tests {
 
         let ts_col = greptime_timestamp();
         let expected = format!(
-            "Filter: ?table?.{} >= TimestampMillisecond(1000, None) AND ?table?.{} <= TimestampMillisecond(2000, None) AND regexp_match(coalesce(?table?.job, Utf8(\"\")), Utf8(\"^(?s:.*prom.*)$\")) IS NOT NULL AND (?table?.instance != Utf8(\"localhost\") OR ?table?.instance IS NULL) AND ?table?.service.name = Utf8(\"api\") AND ?table?.Region = Utf8(\"us\")\n  TableScan: ?table?",
+            "Filter: ?table?.{} >= TimestampMillisecond(1000, None) AND ?table?.{} <= TimestampMillisecond(2000, None) AND regexp_match(?table?.job, Utf8(\"^(?s:.*prom.*)$\")) IS NOT NULL AND (?table?.instance != Utf8(\"localhost\") OR ?table?.instance IS NULL) AND ?table?.service.name = Utf8(\"api\") AND ?table?.Region = Utf8(\"us\")\n  TableScan: ?table?",
             ts_col, ts_col
         );
         assert_eq!(expected, display_string);
