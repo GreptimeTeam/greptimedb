@@ -15,11 +15,13 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    Array, Float64Array, Int64Array, ListArray, StringArray, StructArray, UInt32Array,
+    Array, BinaryArray, BooleanArray, Float64Array, Int64Array, ListArray, StringArray,
+    StructArray, UInt32Array,
 };
 use arrow::buffer::{Buffer, OffsetBuffer, ScalarBuffer};
 use arrow::compute::concat_batches;
 use arrow::datatypes::{DataType, Field, Schema};
+use arrow::ipc::{reader::StreamReader, writer::StreamWriter};
 
 use super::*;
 use crate::series::histogram::{BucketSideView, CounterResetHint, HistogramBatchBuilder};
@@ -67,7 +69,7 @@ fn float_chunk(
         schema,
         Buffer::from(key.to_vec()),
         metric,
-        RawTimeAxis::try_new(times.into()).unwrap(),
+        RawTimestamps::try_new(times.into()).unwrap(),
         SeriesFields::one(Samples::from_float(Float64Array::from(values))),
         is_last,
     )
@@ -247,6 +249,107 @@ fn assert_float_bits(actual: &Samples, expected: &[Option<f64>]) {
     }
 }
 
+/// Packs one owned chunk through the public cursor/builder pair, mirroring the explicit
+/// single-chunk wrapper: every batch the walk produces, then the final flush.
+fn pack_chunk_with_budget(
+    schema: &SeriesSchema,
+    mode: RawLabelMode,
+    chunk: &RawSeriesChunk,
+    max_rows: usize,
+    max_bytes: usize,
+) -> crate::error::Result<Vec<RecordBatch>> {
+    let mut builder = RawSeriesFrameBuilder::try_new(schema, mode, max_rows, max_bytes)?;
+    let mut cursor = RawSeriesChunkCursor::try_new(schema, mode, chunk.clone())?;
+    let mut batches = Vec::new();
+    while let Some(batch) = cursor.append_to(&mut builder)? {
+        batches.push(batch);
+    }
+    if let Some(batch) = builder.flush()? {
+        batches.push(batch);
+    }
+    Ok(batches)
+}
+
+/// Advances one owned chunk through an existing builder. A partially filled buffer stays buffered
+/// instead of becoming a batch of its own, which is what makes cross-chunk grouping observable.
+fn append_chunk(
+    builder: &mut RawSeriesFrameBuilder,
+    schema: &SeriesSchema,
+    mode: RawLabelMode,
+    chunk: &RawSeriesChunk,
+) -> crate::error::Result<Vec<RecordBatch>> {
+    let mut cursor = RawSeriesChunkCursor::try_new(schema, mode, chunk.clone())?;
+    let mut batches = Vec::new();
+    while let Some(batch) = cursor.append_to(builder)? {
+        batches.push(batch);
+    }
+    Ok(batches)
+}
+
+/// Decodes every batch with one reused decoder, so repeated calls exercise the cached schema.
+fn decode_batches(
+    schema: &SeriesSchema,
+    mode: RawLabelMode,
+    batches: &[RecordBatch],
+) -> Vec<RawSeriesChunk> {
+    let decoder = RawSeriesFrameDecoder::try_new(schema, mode).unwrap();
+    batches
+        .iter()
+        .flat_map(|batch| decoder.decode(batch).unwrap())
+        .collect()
+}
+
+/// Row-local histogram index and table lists of one field payload of a frame batch.
+fn frame_histogram_lists(batch: &RecordBatch, field: usize) -> (ListArray, ListArray) {
+    let histogram = frame_field_payload(batch, field)
+        .column(1)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    let indices = histogram
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap()
+        .clone();
+    let tables = histogram
+        .column(1)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap()
+        .clone();
+    (indices, tables)
+}
+
+/// Every row is expected to resolve index 0 inside its own table only, with the whole table
+/// retained and the other index entry null.
+fn assert_row_local_histogram_rows(rows: &[RawSeriesChunk]) {
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].time.as_buffer().as_ref(), &[1_i64, 2]);
+    assert_eq!(rows[1].time.as_buffer().as_ref(), &[3_i64, 4]);
+
+    let DenseSamplesRef::Histogram(first) = rows[0].fields.get(0).unwrap().dense().unwrap() else {
+        panic!("expected histogram samples");
+    };
+    assert_eq!(first.batch().len(), 2);
+    assert_eq!(first.indices().len(), 2);
+    assert_eq!(first.indices().value(0), 0);
+    assert!(!first.indices().is_valid(1));
+    assert_histogram(first.view_at(0).unwrap(), -9.5);
+    assert_unreferenced_histogram(first.batch().view(1).unwrap());
+
+    let DenseSamplesRef::Histogram(second) = rows[1].fields.get(0).unwrap().dense().unwrap() else {
+        panic!("expected histogram samples");
+    };
+    assert_eq!(second.batch().len(), 2);
+    assert_eq!(second.indices().len(), 2);
+    assert!(!second.indices().is_valid(0));
+    assert_eq!(second.indices().value(1), 0);
+    // A global index remap would resolve index 0 into the first row's table instead.
+    assert_histogram(second.view_at(1).unwrap(), 42.25);
+    assert_histogram_with_start(second.batch().view(1).unwrap(), 142.25, None);
+}
+
 #[test]
 fn sliced_histogram_frames_densify_without_duplicating_shared_table() {
     let schema = test_schema(&["histogram"]);
@@ -263,13 +366,22 @@ fn sliced_histogram_frames_densify_without_duplicating_shared_table() {
         &schema,
         Buffer::from(vec![0x42_u8]),
         None,
-        RawTimeAxis::try_new((0_i64..64).collect::<Vec<_>>().into()).unwrap(),
+        RawTimestamps::try_new((0_i64..64).collect::<Vec<_>>().into()).unwrap(),
         SeriesFields::one(samples),
         true,
     )
     .unwrap();
 
-    let frames = pack_raw_series_chunk(&schema, RawLabelMode::Key, &chunk).unwrap();
+    // One row per batch keeps the original segment-boundary granularity, so the shared-table fast
+    // paths below stay observable; the default budget coalesces the same rows later on.
+    let frames = pack_chunk_with_budget(
+        &schema,
+        RawLabelMode::Key,
+        &chunk,
+        1,
+        RawSeriesFrameBuilder::DEFAULT_MAX_BYTES,
+    )
+    .unwrap();
     assert_eq!(frames.len(), 64);
     let mut decoded_chunks = Vec::with_capacity(frames.len());
     for frame in &frames {
@@ -304,6 +416,24 @@ fn sliced_histogram_frames_densify_without_duplicating_shared_table() {
         first_values.values().as_ptr(),
         second_values.values().as_ptr()
     );
+
+    // The default budget groups the same 64 rows into one multirow batch; every row still decodes
+    // to its own slice of the shared table with bit-exact values.
+    let coalesced = pack_raw_series_chunk(&schema, RawLabelMode::Key, &chunk).unwrap();
+    assert_eq!(coalesced.len(), 1);
+    assert_eq!(coalesced[0].num_rows(), 64);
+    let coalesced_rows = decode_batches(&schema, RawLabelMode::Key, &coalesced);
+    assert_eq!(coalesced_rows.len(), 64);
+    for (position, row) in coalesced_rows.iter().enumerate() {
+        assert_eq!(row.primary_key.as_slice(), &[0x42]);
+        assert_eq!(row.time.timestamp(0), Some(position as i64));
+        let DenseSamplesRef::Histogram(histograms) = row.fields.get(0).unwrap().dense().unwrap()
+        else {
+            panic!("expected histogram samples");
+        };
+        assert_eq!(histograms.batch().len(), first_table.len());
+        assert_histogram(histograms.view_at(0).unwrap(), -9.5);
+    }
 
     let samples = Samples::try_from_chunks(
         decoded_chunks
@@ -354,7 +484,7 @@ fn raw_frame_field_names_bind_payloads_to_their_schema() {
             &schema,
             Buffer::from(vec![0xaa_u8]),
             metric,
-            RawTimeAxis::try_new(vec![100, 200].into()).unwrap(),
+            RawTimestamps::try_new(vec![100, 200].into()).unwrap(),
             fields.clone(),
             true,
         )
@@ -375,9 +505,9 @@ fn raw_frame_field_names_bind_payloads_to_their_schema() {
         );
 
         let decoded = unpack_raw_series_frame(&schema, mode, batch).unwrap();
-        assert_eq!(decoded[0].read_key.as_slice(), &[0xaa]);
+        assert_eq!(decoded[0].primary_key.as_slice(), &[0xaa]);
         assert!(decoded[0].is_last);
-        let RawTimeAxis::Explicit(times) = &decoded[0].time;
+        let times = decoded[0].time.as_buffer();
         assert_eq!(times.as_ref(), &[100, 200]);
         assert_float_bits(decoded[0].fields.get(0).unwrap(), &[Some(1.0), Some(2.0)]);
         assert_float_bits(decoded[0].fields.get(1).unwrap(), &[Some(10.0), Some(20.0)]);
@@ -499,7 +629,7 @@ fn schema_and_key_explicit_round_trips_preserve_identity_and_bits() {
     assert_eq!(packed.len(), 1);
     let decoded = unpack_raw_series_frame(&schema, RawLabelMode::Key, &packed[0]).unwrap();
     assert_eq!(decoded.len(), 1);
-    assert_eq!(decoded[0].read_key.as_slice(), &[0, 0xff, 0, 0x80]);
+    assert_eq!(decoded[0].primary_key.as_slice(), &[0, 0xff, 0, 0x80]);
     assert!(decoded[0].metric.is_none());
     assert!(decoded[0].is_last);
     assert_eq!(
@@ -520,7 +650,7 @@ fn schema_and_key_explicit_round_trips_preserve_identity_and_bits() {
     );
     let packed = pack_raw_series_chunk(&schema, RawLabelMode::Explicit, &explicit).unwrap();
     let decoded = unpack_raw_series_frame(&schema, RawLabelMode::Explicit, &packed[0]).unwrap();
-    assert_eq!(decoded[0].read_key.as_slice(), &[0x80, 0, 0xff]);
+    assert_eq!(decoded[0].primary_key.as_slice(), &[0x80, 0, 0xff]);
     assert!(!decoded[0].is_last);
     let labels = decoded[0].metric.as_ref().unwrap();
     assert_eq!(labels.name(), None);
@@ -577,28 +707,31 @@ fn segmented_mixed_fields_emit_every_aligned_position_and_marker() {
         &schema,
         Buffer::from(vec![0_u8, 0x91, 0xfe]),
         None,
-        RawTimeAxis::try_new(vec![10_i64, 20, 30, 40].into()).unwrap(),
+        RawTimestamps::try_new(vec![10_i64, 20, 30, 40].into()).unwrap(),
         SeriesFields::try_from_vec(vec![first, second]).unwrap(),
         true,
     )
     .unwrap();
+    // Variable field boundaries now group every aligned interval into one multirow batch instead
+    // of one batch per boundary, so decode the actual rows that batch carries.
     let frames = pack_raw_series_chunk(&schema, RawLabelMode::Key, &chunk).unwrap();
-    assert_eq!(frames.len(), 4);
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].num_rows(), 4);
     let mut observed_times = Vec::new();
     let mut observed_first = Vec::new();
     let mut observed_second = Vec::new();
     let mut observed_keys = Vec::new();
     let mut observed_markers = Vec::new();
-    for (frame_index, frame) in frames.iter().enumerate() {
-        let decoded = unpack_raw_series_frame(&schema, RawLabelMode::Key, frame).unwrap();
-        assert_eq!(decoded.len(), 1);
-        assert_eq!(decoded[0].is_last, frame_index == frames.len() - 1);
-        observed_markers.push(decoded[0].is_last);
-        assert_eq!(decoded[0].read_key.as_slice(), &[0, 0x91, 0xfe]);
-        observed_keys.push(decoded[0].read_key.as_slice().to_vec());
-        for position in 0..decoded[0].time.len() {
-            observed_times.push(decoded[0].time.timestamp(position).unwrap());
-            match decoded[0].fields.get(0).unwrap().sample(position) {
+    let rows = unpack_raw_series_frame(&schema, RawLabelMode::Key, &frames[0]).unwrap();
+    assert_eq!(rows.len(), 4);
+    for (row_index, row) in rows.iter().enumerate() {
+        assert_eq!(row.is_last, row_index == rows.len() - 1);
+        observed_markers.push(row.is_last);
+        assert_eq!(row.primary_key.as_slice(), &[0, 0x91, 0xfe]);
+        observed_keys.push(row.primary_key.as_slice().to_vec());
+        for position in 0..row.time.len() {
+            observed_times.push(row.time.timestamp(position).unwrap());
+            match row.fields.get(0).unwrap().sample(position) {
                 SampleRef::Missing => observed_first.push(("m", 0.0_f64.to_bits())),
                 SampleRef::Float(value) => observed_first.push(("f", value.to_bits())),
                 SampleRef::Histogram(histogram) => {
@@ -606,7 +739,7 @@ fn segmented_mixed_fields_emit_every_aligned_position_and_marker() {
                     observed_first.push(("h", histogram.sum.to_bits()));
                 }
             }
-            match decoded[0].fields.get(1).unwrap().sample(position) {
+            match row.fields.get(1).unwrap().sample(position) {
                 SampleRef::Missing => observed_second.push(("m", 0.0_f64.to_bits())),
                 SampleRef::Float(value) => observed_second.push(("f", value.to_bits())),
                 SampleRef::Histogram(histogram) => {
@@ -657,59 +790,59 @@ fn segmented_mixed_fields_emit_every_aligned_position_and_marker() {
         &aligned_schema,
         Buffer::from(vec![0xa1_u8]),
         None,
-        RawTimeAxis::try_new(vec![101_i64, 102, 103, 104, 105].into()).unwrap(),
+        RawTimestamps::try_new(vec![101_i64, 102, 103, 104, 105].into()).unwrap(),
         SeriesFields::try_from_vec(vec![a, b]).unwrap(),
         true,
     )
     .unwrap();
     let aligned_frames =
         pack_raw_series_chunk(&aligned_schema, RawLabelMode::Key, &aligned_chunk).unwrap();
+    assert_eq!(aligned_frames.len(), 1);
+    assert_eq!(aligned_frames[0].num_rows(), 3);
+    let aligned_rows =
+        unpack_raw_series_frame(&aligned_schema, RawLabelMode::Key, &aligned_frames[0]).unwrap();
+    assert_eq!(aligned_rows.len(), 3);
     let mut interval_lengths = Vec::new();
     let mut aligned_times = Vec::new();
     let mut aligned_a = Vec::new();
     let mut aligned_b = Vec::new();
-    for (i, batch) in aligned_frames.iter().enumerate() {
-        let decoded = unpack_raw_series_frame(&aligned_schema, RawLabelMode::Key, batch).unwrap();
-        assert_eq!(decoded[0].is_last, i == 2);
-        interval_lengths.push(decoded[0].time.len());
+    for (i, row) in aligned_rows.iter().enumerate() {
+        assert_eq!(row.is_last, i == aligned_rows.len() - 1);
+        interval_lengths.push(row.time.len());
         let start = aligned_times.len();
-        let DenseSamplesRef::Float(decoded_a) = decoded[0].fields.get(0).unwrap().dense().unwrap()
-        else {
+        let DenseSamplesRef::Float(decoded_a) = row.fields.get(0).unwrap().dense().unwrap() else {
             panic!("expected float field");
         };
-        let DenseSamplesRef::Float(decoded_b) = decoded[0].fields.get(1).unwrap().dense().unwrap()
-        else {
+        let DenseSamplesRef::Float(decoded_b) = row.fields.get(1).unwrap().dense().unwrap() else {
             panic!("expected float field");
         };
-        assert_eq!(
-            decoded_a.values().as_ptr(),
-            a_owner.values().as_ptr().wrapping_add(start)
-        );
-        assert_eq!(
-            decoded_b.values().as_ptr(),
-            b_owner.values().as_ptr().wrapping_add(start)
-        );
+        // Grouping several constituents into one row may copy their payloads, so compare values
+        // and validity bit-exactly instead of requiring the source buffers by pointer.
         for (decoded_values, owner) in [(&decoded_a, &a_owner), (&decoded_b, &b_owner)] {
-            match (decoded_values.nulls(), owner.nulls()) {
-                (Some(decoded_nulls), Some(owner_nulls)) => {
-                    assert_eq!(
-                        decoded_nulls.buffer().as_ptr(),
-                        owner_nulls.buffer().as_ptr()
-                    );
-                    assert_eq!(decoded_nulls.offset(), owner_nulls.offset() + start);
+            assert_eq!(decoded_values.len(), row.time.len());
+            for position in 0..decoded_values.len() {
+                match (
+                    decoded_values.is_valid(position),
+                    owner.is_valid(start + position),
+                ) {
+                    (true, true) => assert_eq!(
+                        decoded_values.value(position).to_bits(),
+                        owner.value(start + position).to_bits(),
+                        "grouping changed a value"
+                    ),
+                    (false, false) => {}
+                    _ => panic!("grouping changed validity representation"),
                 }
-                (None, None) => {}
-                _ => panic!("fragment changed validity representation"),
             }
         }
-        for position in 0..decoded[0].time.len() {
-            aligned_times.push(decoded[0].time.timestamp(position).unwrap());
-            aligned_a.push(match decoded[0].fields.get(0).unwrap().sample(position) {
+        for position in 0..row.time.len() {
+            aligned_times.push(row.time.timestamp(position).unwrap());
+            aligned_a.push(match row.fields.get(0).unwrap().sample(position) {
                 SampleRef::Missing => None,
                 SampleRef::Float(value) => Some(value.to_bits()),
                 SampleRef::Histogram(_) => panic!("expected float field"),
             });
-            aligned_b.push(match decoded[0].fields.get(1).unwrap().sample(position) {
+            aligned_b.push(match row.fields.get(1).unwrap().sample(position) {
                 SampleRef::Missing => None,
                 SampleRef::Float(value) => Some(value.to_bits()),
                 SampleRef::Histogram(_) => panic!("expected float field"),
@@ -757,7 +890,7 @@ fn segmented_mixed_fields_emit_every_aligned_position_and_marker() {
         &alternate_schema,
         Buffer::from(vec![0xde_u8, 0xad]),
         None,
-        RawTimeAxis::try_new(vec![100_i64].into()).unwrap(),
+        RawTimestamps::try_new(vec![100_i64].into()).unwrap(),
         SeriesFields::try_from_vec(vec![first_distinct, second_distinct]).unwrap(),
         false,
     )
@@ -781,7 +914,7 @@ fn segmented_mixed_fields_emit_every_aligned_position_and_marker() {
             .collect::<Vec<_>>(),
         [10, 20, 30, 40, 100]
     );
-    assert_eq!(decoded[4].read_key.as_slice(), &[0xde, 0xad]);
+    assert_eq!(decoded[4].primary_key.as_slice(), &[0xde, 0xad]);
     assert!(
         matches!(decoded[4].fields.get(0).unwrap().sample(0), SampleRef::Histogram(h) if h.sum.to_bits() == 123.0_f64.to_bits())
     );
@@ -807,7 +940,7 @@ fn segmented_mixed_fields_emit_every_aligned_position_and_marker() {
     assert_eq!(
         sliced_rows
             .iter()
-            .map(|row| row.read_key.as_slice())
+            .map(|row| row.primary_key.as_slice())
             .collect::<Vec<_>>(),
         [&[0xee][..], &[0xef][..], &[0xed][..]]
     );
@@ -837,7 +970,7 @@ fn segmented_mixed_fields_emit_every_aligned_position_and_marker() {
         &schema,
         Buffer::from(vec![0_u8, 0x91, 0xfe]),
         None,
-        RawTimeAxis::try_new(vec![50_i64, 60, 70, 80].into()).unwrap(),
+        RawTimestamps::try_new(vec![50_i64, 60, 70, 80].into()).unwrap(),
         chunk.fields.clone(),
         false,
     )
@@ -898,7 +1031,7 @@ fn histogram_payload_and_present_all_null_representation_survive() {
         &schema,
         Buffer::from(vec![0x12_u8, 0x00]),
         None,
-        RawTimeAxis::try_new(vec![1_i64, 2].into()).unwrap(),
+        RawTimestamps::try_new(vec![1_i64, 2].into()).unwrap(),
         fields,
         false,
     )
@@ -950,7 +1083,7 @@ fn histogram_payload_and_present_all_null_representation_survive() {
         &mixed_schema,
         Buffer::from(vec![0x42_u8]),
         None,
-        RawTimeAxis::try_new(vec![5_i64, 6].into()).unwrap(),
+        RawTimestamps::try_new(vec![5_i64, 6].into()).unwrap(),
         SeriesFields::one(mixed),
         false,
     )
@@ -1089,6 +1222,9 @@ fn rejects_invalid_schema_and_metadata_and_accepts_valid_empty() {
 
 #[test]
 fn rejects_invalid_timestamps_and_empty_raw_payloads() {
+    assert!(RawTimestamps::try_new(vec![1_i64, 1].into()).is_err());
+    assert!(RawTimestamps::try_new(vec![2_i64, 1].into()).is_err());
+
     let schema = test_schema(&["value"]);
     let chunk = float_chunk(&schema, &[1], None, vec![1], vec![Some(2.0)], false);
     let valid = pack_raw_series_chunk(&schema, RawLabelMode::Key, &chunk)
@@ -1335,7 +1471,7 @@ fn rejects_malformed_histogram_and_payload_encodings() {
             &hist_schema,
             Buffer::from(vec![1_u8]),
             None,
-            RawTimeAxis::try_new(vec![1_i64].into()).unwrap(),
+            RawTimestamps::try_new(vec![1_i64].into()).unwrap(),
             SeriesFields::one(
                 Samples::try_from_histogram(UInt32Array::from(vec![Some(0)]), histogram_batch())
                     .unwrap(),
@@ -1705,7 +1841,7 @@ fn decoded_key_and_payload_slices_keep_buffers_alive() {
             &schema,
             Buffer::from(vec![0xaa_u8, 0x10, 0x20, 0xbb]),
             None,
-            RawTimeAxis::try_new(vec![0_i64, 11, 22, 33].into())
+            RawTimestamps::try_new(vec![0_i64, 11, 22, 33].into())
                 .unwrap()
                 .slice(1, 2)
                 .unwrap(),
@@ -1776,9 +1912,9 @@ fn decoded_key_and_payload_slices_keep_buffers_alive() {
         .as_any()
         .downcast_ref::<arrow::array::Int64Array>()
         .unwrap();
-    let crate::series::raw::RawTimeAxis::Explicit(decoded_time) = &decoded[0].time;
+    let decoded_time = decoded[0].time.as_buffer();
     assert_eq!(decoded_time.as_ptr(), time_values.values().as_ptr());
-    let crate::series::raw::RawTimeAxis::Explicit(source_time) = &chunk.time;
+    let source_time = chunk.time.as_buffer();
     assert_eq!(decoded_time.as_ptr(), source_time.as_ptr());
     drop(owner);
     drop(chunk);
@@ -1790,7 +1926,7 @@ fn decoded_key_and_payload_slices_keep_buffers_alive() {
         decoded[0].fields.get(0).unwrap().sample(1),
         SampleRef::Missing
     ));
-    assert_eq!(decoded[0].read_key.as_slice(), &[0xaa, 0x10, 0x20, 0xbb]);
+    assert_eq!(decoded[0].primary_key.as_slice(), &[0xaa, 0x10, 0x20, 0xbb]);
 }
 
 #[test]
@@ -1855,7 +1991,7 @@ fn sliced_canonical_mixed_histogram_round_trip_keeps_buffers_alive() {
         &schema,
         Buffer::from(vec![0x42_u8]),
         None,
-        RawTimeAxis::try_new(vec![0_i64, 11, 22, 33].into())
+        RawTimestamps::try_new(vec![0_i64, 11, 22, 33].into())
             .unwrap()
             .slice(1, 2)
             .unwrap(),
@@ -1948,9 +2084,19 @@ fn sliced_canonical_mixed_histogram_round_trip_keeps_buffers_alive() {
             .values()
             .as_ptr()
     );
-    let crate::series::raw::RawTimeAxis::Explicit(source_times) = &chunk.time;
+    let source_times = chunk.time.as_buffer();
 
-    let frames = pack_raw_series_chunk(&schema, RawLabelMode::Key, &chunk).unwrap();
+    // One row per batch keeps this fixture's single constituents and their nonzero offsets
+    // observable: the default budget could coalesce several rows and copy their payloads.
+    let frames = pack_chunk_with_budget(
+        &schema,
+        RawLabelMode::Key,
+        &chunk,
+        1,
+        RawSeriesFrameBuilder::DEFAULT_MAX_BYTES,
+    )
+    .unwrap();
+    assert_eq!(frames.len(), 1);
     let packed = &frames[0];
     let packed_times = packed
         .column(2)
@@ -2064,7 +2210,7 @@ fn sliced_canonical_mixed_histogram_round_trip_keeps_buffers_alive() {
     else {
         panic!("histogram representation was normalized");
     };
-    let crate::series::raw::RawTimeAxis::Explicit(decoded_time_values) = &decoded[0].time;
+    let decoded_time_values = decoded[0].time.as_buffer();
     assert_eq!(decoded_time_values.as_ptr(), packed_times.values().as_ptr());
     assert_eq!(decoded_time_values, source_times);
     for (decoded_indices, source_indices) in [
@@ -2309,4 +2455,606 @@ fn public_segments_are_flat_ordered_and_retain_empty_dense_kinds() {
         all_empty.segments()[0].dense(),
         Some(DenseSamplesRef::Float(_))
     ));
+}
+
+#[test]
+fn cross_chunk_rows_coalesce_into_one_multirow_batch() {
+    let schema = test_schema(&["value"]);
+    let first = float_chunk(
+        &schema,
+        &[0xaa],
+        None,
+        vec![10, 20],
+        vec![Some(1.0), None],
+        false,
+    );
+    let second = float_chunk(
+        &schema,
+        &[0xbb],
+        None,
+        vec![30, 40, 50],
+        vec![Some(3.0), Some(4.0), None],
+        true,
+    );
+    assert_eq!(RawSeriesFrameBuilder::DEFAULT_MAX_ROWS, 256);
+    assert_eq!(RawSeriesFrameBuilder::DEFAULT_MAX_BYTES, 1 << 20);
+    let expected = raw_series_frame_schema(&schema, RawLabelMode::Key).unwrap();
+
+    let mut builder = RawSeriesFrameBuilder::try_new(
+        &schema,
+        RawLabelMode::Key,
+        RawSeriesFrameBuilder::DEFAULT_MAX_ROWS,
+        RawSeriesFrameBuilder::DEFAULT_MAX_BYTES,
+    )
+    .unwrap();
+    assert_eq!(builder.schema(), &expected);
+
+    let mut batches = append_chunk(&mut builder, &schema, RawLabelMode::Key, &first).unwrap();
+    batches.extend(append_chunk(&mut builder, &schema, RawLabelMode::Key, &second).unwrap());
+    if let Some(batch) = builder.flush().unwrap() {
+        batches.push(batch);
+    }
+    // Rows of both chunks coalesce into one batch: a partially filled buffer must survive the
+    // cursor boundary instead of becoming a batch of its own.
+    assert_eq!(batches.len(), 1);
+    let batch = &batches[0];
+    assert_eq!(batch.num_rows(), 2);
+    assert_eq!(batch.schema(), expected);
+    assert_eq!(
+        batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>(),
+        ["read_key", "is_last", "time", "fields"]
+    );
+    for (key, value) in [
+        ("greptime.series.layout", "v1"),
+        ("greptime.series.content", "raw"),
+        ("greptime.series.labels", "key"),
+        ("greptime.series.time", "timestamps"),
+    ] {
+        assert_eq!(
+            batch.schema().metadata().get(key).map(String::as_str),
+            Some(value)
+        );
+    }
+
+    let keys = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<BinaryArray>()
+        .unwrap();
+    assert_eq!(keys.value(0), &[0xaa]);
+    assert_eq!(keys.value(1), &[0xbb]);
+    let lasts = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .unwrap();
+    assert_eq!(
+        (0..2).map(|row| lasts.value(row)).collect::<Vec<_>>(),
+        [false, true]
+    );
+    let times = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap()
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    assert_eq!(times.value_offsets(), [0, 2, 5]);
+    assert_eq!(
+        times
+            .values()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .values()
+            .as_ref(),
+        &[10_i64, 20, 30, 40, 50]
+    );
+    let floats = frame_field_payload(batch, 0)
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    assert_eq!(floats.value_offsets(), [0, 2, 5]);
+    let float_values = floats
+        .values()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert_eq!(
+        (0..float_values.len())
+            .map(|position| float_values.is_valid(position))
+            .collect::<Vec<_>>(),
+        [true, false, true, true, false]
+    );
+    assert_eq!(float_values.value(0).to_bits(), 1.0_f64.to_bits());
+    assert_eq!(float_values.value(2).to_bits(), 3.0_f64.to_bits());
+    assert_eq!(float_values.value(3).to_bits(), 4.0_f64.to_bits());
+
+    let decoded = decode_batches(&schema, RawLabelMode::Key, &batches);
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(decoded[0].primary_key.as_slice(), &[0xaa]);
+    assert!(!decoded[0].is_last);
+    assert_eq!(
+        (0..decoded[0].time.len())
+            .map(|position| decoded[0].time.timestamp(position).unwrap())
+            .collect::<Vec<_>>(),
+        [10, 20]
+    );
+    assert_float_bits(decoded[0].fields.get(0).unwrap(), &[Some(1.0), None]);
+    assert_eq!(decoded[1].primary_key.as_slice(), &[0xbb]);
+    assert!(decoded[1].is_last);
+    assert_eq!(
+        (0..decoded[1].time.len())
+            .map(|position| decoded[1].time.timestamp(position).unwrap())
+            .collect::<Vec<_>>(),
+        [30, 40, 50]
+    );
+    assert_float_bits(
+        decoded[1].fields.get(0).unwrap(),
+        &[Some(3.0), Some(4.0), None],
+    );
+    assert_eq!(decoded.iter().map(|row| row.time.len()).sum::<usize>(), 5);
+}
+
+#[test]
+fn raw_frame_builder_emits_at_the_row_budget_without_another_cursor() {
+    let schema = test_schema(&["value"]);
+    let chunks = [
+        float_chunk(&schema, &[1], None, vec![1], vec![Some(1.0)], false),
+        float_chunk(&schema, &[2], None, vec![2], vec![Some(2.0)], false),
+        float_chunk(&schema, &[3], None, vec![3], vec![Some(3.0)], true),
+    ];
+
+    for max_rows in [2usize, 3] {
+        let mut builder = RawSeriesFrameBuilder::try_new(
+            &schema,
+            RawLabelMode::Key,
+            max_rows,
+            RawSeriesFrameBuilder::DEFAULT_MAX_BYTES,
+        )
+        .unwrap();
+        let mut emitted_at = None;
+        let mut batches = Vec::new();
+        for (index, chunk) in chunks.iter().enumerate() {
+            let produced = append_chunk(&mut builder, &schema, RawLabelMode::Key, chunk).unwrap();
+            assert!(produced.len() <= 1, "one cursor emits at most one batch");
+            if let Some(batch) = produced.first() {
+                assert!(
+                    emitted_at.replace(index).is_none(),
+                    "the row bound is reached once, without another cursor"
+                );
+                batches.push(batch.clone());
+            }
+        }
+        if let Some(batch) = builder.flush().unwrap() {
+            batches.push(batch);
+        }
+        // Three one-row chunks emit at the max_rows-th row: a budget of two is reached during the
+        // second chunk and a budget of three during the third, so no further cursor is needed.
+        assert_eq!(emitted_at, Some(max_rows - 1));
+        assert_eq!(batches[0].num_rows(), max_rows);
+        assert_eq!(
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+            3
+        );
+        assert!(batches.iter().all(|batch| batch.num_rows() <= max_rows));
+        let keys = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        assert_eq!(
+            (0..max_rows)
+                .map(|row| keys.value(row).to_vec())
+                .collect::<Vec<_>>(),
+            (1..=max_rows)
+                .map(|key| vec![key as u8])
+                .collect::<Vec<_>>()
+        );
+
+        let decoded = decode_batches(&schema, RawLabelMode::Key, &batches);
+        assert_eq!(decoded.len(), 3);
+        assert_eq!(
+            decoded
+                .iter()
+                .map(|row| row.time.timestamp(0).unwrap())
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+        assert_eq!(
+            decoded.iter().map(|row| row.is_last).collect::<Vec<_>>(),
+            [false, false, true]
+        );
+    }
+}
+
+#[test]
+fn raw_frame_builder_rejects_zero_budgets_and_bounds_offsets() {
+    let schema = test_schema(&["value"]);
+    // Zero in either budget is not a legal configuration; the literals take the parameter's type.
+    assert!(
+        RawSeriesFrameBuilder::try_new(
+            &schema,
+            RawLabelMode::Key,
+            0,
+            RawSeriesFrameBuilder::DEFAULT_MAX_BYTES,
+        )
+        .is_err()
+    );
+    assert!(
+        RawSeriesFrameBuilder::try_new(
+            &schema,
+            RawLabelMode::Key,
+            RawSeriesFrameBuilder::DEFAULT_MAX_ROWS,
+            0,
+        )
+        .is_err()
+    );
+    assert!(RawSeriesFrameBuilder::try_new(&schema, RawLabelMode::Key, 0, 0).is_err());
+    assert!(
+        RawSeriesFrameBuilder::try_new(
+            &schema,
+            RawLabelMode::Key,
+            1,
+            RawSeriesFrameBuilder::DEFAULT_MAX_BYTES,
+        )
+        .is_ok()
+    );
+
+    // Cumulative Arrow list offsets are bounded through the shared helper, so the limit is proven
+    // without allocating a two-gigabyte fixture.
+    assert_eq!(checked_offset(i32::MAX as usize).unwrap(), i32::MAX);
+    assert!(checked_offset(i32::MAX as usize + 1).is_err());
+    assert!(checked_offset(usize::MAX).is_err());
+}
+
+#[test]
+fn byte_budget_emits_legal_oversized_rows_without_dropping_them() {
+    let schema = test_schema(&["value"]);
+    let owner = Float64Array::from(vec![Some(1.0), Some(2.0), Some(3.0)]);
+    let samples = Samples::try_from_chunks(
+        (0..3)
+            .map(|position| Samples::from_float(owner.slice(position, 1)))
+            .collect(),
+    )
+    .unwrap();
+    let chunk = RawSeriesChunk::try_new(
+        &schema,
+        Buffer::from(vec![0x9a_u8]),
+        None,
+        RawTimestamps::try_new(vec![7_i64, 8, 9].into()).unwrap(),
+        SeriesFields::one(samples),
+        true,
+    )
+    .unwrap();
+
+    // A one-byte budget cannot hold any row, yet every legal row is still emitted as its own
+    // batch instead of being dropped or merged.
+    let batches = pack_chunk_with_budget(
+        &schema,
+        RawLabelMode::Key,
+        &chunk,
+        RawSeriesFrameBuilder::DEFAULT_MAX_ROWS,
+        1,
+    )
+    .unwrap();
+    assert_eq!(batches.len(), 3);
+    assert!(
+        batches
+            .iter()
+            .all(|batch| batch.num_rows() == 1 && batch.schema() == batches[0].schema()),
+        "an oversized row is emitted alone, never dropped"
+    );
+
+    let decoded = decode_batches(&schema, RawLabelMode::Key, &batches);
+    assert_eq!(decoded.len(), 3);
+    for (position, row) in decoded.iter().enumerate() {
+        assert_eq!(row.primary_key.as_slice(), &[0x9a]);
+        assert_eq!(row.time.timestamp(0), Some(7 + position as i64));
+        assert_eq!(row.is_last, position == 2);
+        assert_float_bits(row.fields.get(0).unwrap(), &[Some(position as f64 + 1.0)]);
+    }
+}
+
+#[test]
+fn byte_budget_flushes_before_exceeding_and_retries_the_pending_row() {
+    let schema = test_schema(&["value"]);
+    let chunks = [
+        float_chunk(&schema, &[1], None, vec![10], vec![Some(1.0)], false),
+        float_chunk(&schema, &[2], None, vec![20], vec![Some(2.0)], true),
+    ];
+    // The bound comes from the real rows instead of a fabricated counter: one byte less than
+    // both rows together fits the first row alone, so the second one must not join it.
+    let mut measured = Vec::with_capacity(chunks.len());
+    for chunk in &chunks {
+        let mut cursor =
+            RawSeriesChunkCursor::try_new(&schema, RawLabelMode::Key, chunk.clone()).unwrap();
+        measured.push(cursor.next_row().unwrap().unwrap().bytes);
+    }
+    let budget = measured[0] + measured[1] - 1;
+
+    let mut builder = RawSeriesFrameBuilder::try_new(
+        &schema,
+        RawLabelMode::Key,
+        RawSeriesFrameBuilder::DEFAULT_MAX_ROWS,
+        budget,
+    )
+    .unwrap();
+    let mut first =
+        RawSeriesChunkCursor::try_new(&schema, RawLabelMode::Key, chunks[0].clone()).unwrap();
+    assert!(first.append_to(&mut builder).unwrap().is_none());
+
+    let mut second =
+        RawSeriesChunkCursor::try_new(&schema, RawLabelMode::Key, chunks[1].clone()).unwrap();
+    let emitted = second.append_to(&mut builder).unwrap().unwrap();
+    assert_eq!(emitted.num_rows(), 1, "the first row is flushed alone");
+    // The second row stays pending across the flush and is retried, never dropped.
+    assert!(second.append_to(&mut builder).unwrap().is_none());
+    let remainder = builder.flush().unwrap().unwrap();
+    assert_eq!(remainder.num_rows(), 1);
+
+    let decoded = decode_batches(&schema, RawLabelMode::Key, &[emitted, remainder]);
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(decoded[0].primary_key.as_slice(), &[1]);
+    assert_eq!(decoded[1].primary_key.as_slice(), &[2]);
+    assert_eq!(decoded[0].time.timestamp(0), Some(10));
+    assert_eq!(decoded[1].time.timestamp(0), Some(20));
+    assert_eq!(
+        decoded.iter().map(|row| row.is_last).collect::<Vec<_>>(),
+        [false, true]
+    );
+    assert_float_bits(decoded[0].fields.get(0).unwrap(), &[Some(1.0)]);
+    assert_float_bits(decoded[1].fields.get(0).unwrap(), &[Some(2.0)]);
+
+    // A requested byte bound is clamped to the representable cumulative offset range, and that
+    // range is rejected before any child array is allocated.
+    let clamped = RawSeriesFrameBuilder::try_new(
+        &schema,
+        RawLabelMode::Key,
+        RawSeriesFrameBuilder::DEFAULT_MAX_ROWS,
+        usize::MAX,
+    )
+    .unwrap();
+    assert_eq!(clamped.max_bytes, i32::MAX as usize);
+    assert!(offset_buffer(&[i32::MAX as usize, 1]).is_err());
+}
+
+#[test]
+fn multirow_histogram_rows_keep_row_local_indices_and_tables() {
+    let schema = test_schema(&["histogram"]);
+    let first_table = histogram_batch();
+    let second_table = histogram_batch_with_sum(42.25);
+    let first_row =
+        Samples::try_from_histogram(UInt32Array::from(vec![Some(0), None]), first_table).unwrap();
+    let second_row =
+        Samples::try_from_histogram(UInt32Array::from(vec![None, Some(0)]), second_table).unwrap();
+    let fields = SeriesFields::one(Samples::try_from_chunks(vec![first_row, second_row]).unwrap());
+    let chunk = RawSeriesChunk::try_new(
+        &schema,
+        Buffer::from(vec![0x5a_u8]),
+        None,
+        RawTimestamps::try_new(vec![1_i64, 2, 3, 4].into()).unwrap(),
+        fields,
+        true,
+    )
+    .unwrap();
+
+    // The public wrapper groups two independent rows into one multirow batch.
+    let packed = pack_raw_series_chunk(&schema, RawLabelMode::Key, &chunk).unwrap();
+    assert_eq!(packed.len(), 1);
+    assert_eq!(packed[0].num_rows(), 2);
+
+    let (indices, tables) = frame_histogram_lists(&packed[0], 0);
+    let encoded_first = indices.value(0);
+    let encoded_first = encoded_first
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap();
+    assert_eq!(encoded_first.value(0), 0);
+    assert!(!encoded_first.is_valid(1));
+    let encoded_second = indices.value(1);
+    let encoded_second = encoded_second
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap();
+    assert!(!encoded_second.is_valid(0));
+    assert_eq!(
+        encoded_second.value(1),
+        0,
+        "row-local indices must not be remapped"
+    );
+    // The second row references its own table through a nonzero slice of the concatenated child.
+    assert_eq!(tables.value_offsets(), [0, 2, 4]);
+    let concatenated = tables
+        .values()
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    assert_eq!(concatenated.len(), 4);
+
+    let decoded = decode_batches(&schema, RawLabelMode::Key, std::slice::from_ref(&packed[0]));
+    assert_row_local_histogram_rows(&decoded);
+
+    // A real Arrow IPC round trip keeps the schema, the whole tables, the null index entries and
+    // the bit-exact payloads.
+    let mut ipc = Vec::new();
+    {
+        let mut writer = StreamWriter::try_new(&mut ipc, &packed[0].schema()).unwrap();
+        writer.write(&packed[0]).unwrap();
+        writer.finish().unwrap();
+    }
+    let reader = StreamReader::try_new(std::io::Cursor::new(ipc), None).unwrap();
+    let restored = reader.map(|batch| batch.unwrap()).collect::<Vec<_>>();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].schema(), packed[0].schema());
+    assert_eq!(restored[0].num_rows(), 2);
+    let (restored_indices, restored_tables) = frame_histogram_lists(&restored[0], 0);
+    assert_eq!(restored_tables.value_offsets(), tables.value_offsets());
+    let restored_second = restored_indices.value(1);
+    assert_eq!(
+        restored_second
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .unwrap()
+            .value(1),
+        0
+    );
+    let restored_rows = decode_batches(&schema, RawLabelMode::Key, &restored);
+    assert_row_local_histogram_rows(&restored_rows);
+}
+
+#[test]
+fn decoder_reuses_cached_schema_and_rejects_schema_evolution() {
+    let schema = test_schema(&["value"]);
+    let expected = raw_series_frame_schema(&schema, RawLabelMode::Key).unwrap();
+    let first = pack_raw_series_chunk(
+        &schema,
+        RawLabelMode::Key,
+        &float_chunk(
+            &schema,
+            &[1],
+            None,
+            vec![1, 2],
+            vec![Some(1.0), Some(2.0)],
+            false,
+        ),
+    )
+    .unwrap()
+    .remove(0);
+    let second = pack_raw_series_chunk(
+        &schema,
+        RawLabelMode::Key,
+        &float_chunk(&schema, &[2], None, vec![3], vec![Some(3.0)], true),
+    )
+    .unwrap()
+    .remove(0);
+
+    let key_decoder = RawSeriesFrameDecoder::try_new(&schema, RawLabelMode::Key).unwrap();
+    let decoded = key_decoder.decode(&first).unwrap();
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0].primary_key.as_slice(), &[1]);
+    assert_eq!(
+        (0..decoded[0].time.len())
+            .map(|position| decoded[0].time.timestamp(position).unwrap())
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    // The same decoder accepts a later valid batch before the malformed ones below.
+    let decoded = key_decoder.decode(&second).unwrap();
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0].primary_key.as_slice(), &[2]);
+    assert!(decoded[0].is_last);
+
+    // Unrelated metadata is not part of the raw frame contract.
+    let mut unrelated_metadata = second.schema().metadata().clone();
+    unrelated_metadata.insert("application.note".to_string(), "ignored".to_string());
+    let unrelated = arrow::record_batch::RecordBatch::try_new(
+        Arc::new(Schema::new_with_metadata(
+            expected.fields().clone(),
+            unrelated_metadata,
+        )),
+        second.columns().to_vec(),
+    )
+    .unwrap();
+    assert_eq!(key_decoder.decode(&unrelated).unwrap().len(), 1);
+
+    // Reserved metadata and evolved fields are rejected, including by a zero-row batch.
+    for (key, value) in [
+        ("greptime.series.layout", "v2"),
+        ("greptime.series.content", "evaluated"),
+        ("greptime.series.labels", "explicit"),
+        ("greptime.series.time", "grid"),
+    ] {
+        let mut metadata = second.schema().metadata().clone();
+        metadata.insert(key.to_string(), value.to_string());
+        let contaminated = arrow::record_batch::RecordBatch::try_new(
+            Arc::new(Schema::new_with_metadata(
+                expected.fields().clone(),
+                metadata,
+            )),
+            second.columns().to_vec(),
+        )
+        .unwrap();
+        assert!(
+            key_decoder.decode(&contaminated).is_err(),
+            "{key} must be rejected"
+        );
+    }
+    let evolved_schema = test_schema(&["other"]);
+    let evolved = pack_raw_series_chunk(
+        &evolved_schema,
+        RawLabelMode::Key,
+        &float_chunk(&evolved_schema, &[3], None, vec![4], vec![Some(4.0)], false),
+    )
+    .unwrap()
+    .remove(0);
+    assert!(key_decoder.decode(&evolved).is_err());
+    let empty_evolved = arrow::record_batch::RecordBatch::new_empty(
+        raw_series_frame_schema(&evolved_schema, RawLabelMode::Key).unwrap(),
+    );
+    assert!(key_decoder.decode(&empty_evolved).is_err());
+    // Rejections leave the cached schema usable, and a valid zero-row batch stays valid.
+    assert_eq!(key_decoder.decode(&first).unwrap().len(), 1);
+    assert!(
+        key_decoder
+            .decode(&arrow::record_batch::RecordBatch::new_empty(
+                expected.clone()
+            ))
+            .unwrap()
+            .is_empty()
+    );
+
+    // Explicit mode reuses one decoder for a present but nameless metric and a named one.
+    let explicit_decoder = RawSeriesFrameDecoder::try_new(&schema, RawLabelMode::Explicit).unwrap();
+    let nameless = pack_raw_series_chunk(
+        &schema,
+        RawLabelMode::Explicit,
+        &float_chunk(
+            &schema,
+            &[7],
+            Some(metric(None, &[("zone", "west")])),
+            vec![5],
+            vec![Some(5.0)],
+            true,
+        ),
+    )
+    .unwrap()
+    .remove(0);
+    let named = pack_raw_series_chunk(
+        &schema,
+        RawLabelMode::Explicit,
+        &float_chunk(
+            &schema,
+            &[8],
+            Some(metric(Some("cpu"), &[])),
+            vec![6],
+            vec![Some(6.0)],
+            false,
+        ),
+    )
+    .unwrap()
+    .remove(0);
+    let decoded = explicit_decoder.decode(&nameless).unwrap();
+    let labels = decoded[0].metric.as_ref().unwrap();
+    assert_eq!(labels.name(), None);
+    assert_eq!(labels.get("zone"), Some("west"));
+    assert_eq!(
+        explicit_decoder.decode(&named).unwrap()[0]
+            .metric
+            .as_ref()
+            .unwrap()
+            .name(),
+        Some("cpu")
+    );
+    // Label modes are not interchangeable.
+    assert!(explicit_decoder.decode(&first).is_err());
+    assert!(key_decoder.decode(&nameless).is_err());
 }
