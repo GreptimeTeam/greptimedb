@@ -191,6 +191,7 @@ macro_rules! http_tests {
 
                 test_pipeline_api,
                 test_pipeline_name_in_header,
+                test_json_stream_ingestion,
                 test_plain_text_ingestion,
                 test_pipeline_auto_transform,
                 test_pipeline_auto_transform_with_select,
@@ -202,6 +203,7 @@ macro_rules! http_tests {
                 test_pipeline_suffix_template,
                 test_pipeline_context,
                 test_pipeline_with_vrl,
+                test_pipeline_vrl_host_access,
                 test_pipeline_with_hint_vrl,
                 test_pipeline_one_to_many_vrl,
                 test_pipeline_2,
@@ -232,6 +234,7 @@ macro_rules! http_tests {
                 test_jaeger_v3_query_api,
                 test_jaeger_query_api_for_trace_v1,
                 test_jaeger_query_api_for_trace_v2,
+                test_jaeger_search_limit_returns_latest_traces,
 
                 test_influxdb_write,
                 test_influxdb_write_with_hints,
@@ -3700,6 +3703,7 @@ enable_heap_profiling = true
 
 [pipeline]
 cache_ttl = "10s"
+allow_vrl_host_access = false
 
 [event_recorder]
 ttl = "2months 29days 2h 52m 48s"
@@ -5642,7 +5646,11 @@ pub async fn test_prometheus_remote_schema_labels(store_type: StorageType) {
         .body(compressed_unknown_read_request)
         .send()
         .await;
-    assert_eq!(unknown_result.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(unknown_result.status(), StatusCode::OK);
+    let body = prom_store::snappy_decompress(&unknown_result.bytes().await).unwrap();
+    let response = ReadResponse::decode(&body[..]).unwrap();
+    assert_eq!(response.results.len(), 1);
+    assert!(response.results[0].timeseries.is_empty());
 
     guard.remove_all().await;
 }
@@ -7193,6 +7201,72 @@ table_suffix: _${type}
     guard.remove_all().await;
 }
 
+pub async fn test_pipeline_vrl_host_access(storage_type: StorageType) {
+    let pipeline = r#"
+processors:
+  - vrl:
+      source: |
+        .value = is_string(get_env_var("GREPTIME_VRL_HOST_ACCESS_TEST") ?? "missing")
+        .
+transform:
+  - field: value
+    type: boolean
+"#;
+
+    for allow_vrl_host_access in [false, true] {
+        let mut instance = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+            "test_pipeline_vrl_host_access",
+        )
+        .with_default_store_type(storage_type)
+        .with_pipeline_options(pipeline::PipelineOptions {
+            // Force named dry-runs to reload and compile the stored definition.
+            cache_ttl: Duration::ZERO,
+            allow_vrl_host_access,
+        })
+        .build()
+        .await;
+        let server = HttpServerBuilder::new(HttpOptions::default())
+            .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
+            .build();
+        let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+        let response = client
+            .post("/v1/pipelines/_dryrun")
+            .header("Content-Type", "application/json")
+            .body(json!({"pipeline": pipeline, "data": "[{}]"}).to_string())
+            .send()
+            .await;
+        let expected_status = if allow_vrl_host_access {
+            StatusCode::OK
+        } else {
+            StatusCode::BAD_REQUEST
+        };
+        assert_eq!(response.status(), expected_status);
+        if !allow_vrl_host_access {
+            assert!(response.text().await.contains("undefined function"));
+        }
+
+        let response = client
+            .post("/v1/pipelines/host_policy")
+            .header("Content-Type", "application/x-yaml")
+            .body(pipeline)
+            .send()
+            .await;
+        assert_eq!(response.status(), expected_status);
+
+        if allow_vrl_host_access {
+            let response = client
+                .post("/v1/pipelines/_dryrun")
+                .header("Content-Type", "application/json")
+                .body(json!({"pipeline_name": "host_policy", "data": "[{}]"}).to_string())
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        instance.guard.remove_all().await;
+    }
+}
+
 pub async fn test_pipeline_with_vrl(storage_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
@@ -8132,7 +8206,7 @@ transform:
         assert_eq!(
             body["error"],
             json!(
-                "Invalid request parameter: invalid content type: application/yaml, expected: one of application/json, application/x-ndjson, text/plain"
+                "Invalid request parameter: invalid content type: application/yaml, expected: one of application/json, application/x-json-stream, application/x-ndjson, text/plain"
             )
         );
 
@@ -8285,6 +8359,59 @@ transform:
         v,
         r#"[["hello",1716668197217000000],["hello world",1716668197218000000]]"#,
     );
+
+    guard.remove_all().await;
+}
+
+pub async fn test_json_stream_ingestion(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_json_stream_ingestion").await;
+
+    // handshake
+    let client = TestClient::new(app).await;
+
+    let pipeline_body = r#"
+processors:
+  - date:
+      field: time
+      formats:
+        - "%Y-%m-%d %H:%M:%S%.3f"
+transform:
+  - field: message
+    type: string
+  - field: time
+    type: time
+    index: timestamp
+"#;
+
+    // 1. create pipeline
+    let res = client
+        .post("/v1/pipelines/test")
+        .header("Content-Type", "application/x-yaml")
+        .body(pipeline_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 2. write data as concatenated JSON (the `json_stream` format of fluentbit)
+    let data_body = r#"{"time": "2024-05-25 20:16:37.217", "message": "hello"}{"time": "2024-05-25 20:16:37.218", "message": "hello world"}"#;
+    let res = client
+        .post("/v1/ingest?db=public&table=logs1&pipeline_name=test")
+        .header("Content-Type", "application/x-json-stream")
+        .body(data_body)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // 3. check data
+    validate_data(
+        "json_stream_ingestion",
+        &client,
+        "select message, time from logs1",
+        r#"[["hello",1716668197217000000],["hello world",1716668197218000000]]"#,
+    )
+    .await;
 
     guard.remove_all().await;
 }
@@ -12660,6 +12787,88 @@ pub async fn test_jaeger_query_api_for_trace_v2(
     }
     guard.remove_all().await;
     Ok(())
+}
+
+pub async fn test_jaeger_search_limit_returns_latest_traces(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_jaeger_search_limit").await;
+    let client = TestClient::new(app).await;
+
+    // Twelve single-span traces spread over all trace partitions. The oldest
+    // traces get the smallest ids and are written first, so neither id nor
+    // write order points at the newest ones.
+    let now = Utc::now().timestamp_nanos_opt().unwrap() as u64;
+    let traces = (0..12u64)
+        .map(|i| {
+            let start = now - (60 - i) * 1_000_000_000;
+            (format!("{:x}{:031x}", i, i + 1), start)
+        })
+        .collect::<Vec<_>>();
+    let spans = traces
+        .iter()
+        .map(|(trace_id, start)| {
+            json!({
+                "traceId": trace_id,
+                "spanId": &trace_id[16..],
+                "name": "op",
+                "kind": 2,
+                "startTimeUnixNano": start.to_string(),
+                "endTimeUnixNano": (start + 1_000).to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let content = json!({
+        "resourceSpans": [{
+            "resource": {"attributes": [{"key": "service.name", "value": {"stringValue": "svc"}}]},
+            "scopeSpans": [{"scope": {"name": "s"}, "spans": spans}],
+        }]
+    });
+    let req: ExportTraceServiceRequest = serde_json::from_value(content).unwrap();
+    let res = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-pipeline-name"),
+                HeaderValue::from_static(GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME),
+            ),
+        ],
+        "/v1/otlp/v1/traces",
+        req.encode_to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+
+    let mut expected = traces[9..]
+        .iter()
+        .map(|(trace_id, _)| trace_id.clone())
+        .collect::<Vec<_>>();
+    expected.sort();
+    let path = format!(
+        "/v1/jaeger/api/traces?service=svc&operation=op&start={}&end={}&limit=3",
+        (now - 120_000_000_000) / 1_000,
+        now / 1_000
+    );
+    for _ in 0..5 {
+        let res = client.get(&path).send().await;
+        assert_eq!(StatusCode::OK, res.status());
+        let resp: Value = serde_json::from_str(&res.text().await).unwrap();
+        let mut found = resp["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|trace| trace["traceID"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        found.sort();
+        assert_eq!(found, expected);
+    }
+
+    guard.remove_all().await;
 }
 
 pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {

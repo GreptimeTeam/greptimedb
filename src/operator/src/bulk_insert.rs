@@ -35,6 +35,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::RegionId;
 use table::TableRef;
 use table::metadata::TableInfoRef;
+use tokio_util::sync::CancellationToken;
 
 use crate::error::Result;
 use crate::insert::Inserter;
@@ -72,7 +73,7 @@ impl Inserter {
         let writes = self.write_dispatcher.prepare(writes).await?;
         Ok(self
             .write_dispatcher
-            .execute(writes, None)
+            .execute(writes, None, None)
             .await
             .context(error::RequestInsertsSnafu)?
             .affected_rows)
@@ -191,6 +192,7 @@ impl Inserter {
                     Some(
                         metrics::HANDLE_BULK_INSERT_ELAPSED.with_label_values(&["datanode_handle"]),
                     ),
+                    None,
                 )
                 .await
                 .context(error::RequestRegionSnafu)
@@ -217,6 +219,9 @@ impl Inserter {
             .with_label_values(&["wait_all_datanode"])
             .start_timer();
 
+        // Dropping the caller stops retries without abandoning in-flight writes.
+        let cancellation = CancellationToken::new();
+        let _guard = cancellation.clone().drop_guard();
         let mut handles = Vec::with_capacity(region_masks.len());
 
         for (region_number, mask) in region_masks {
@@ -328,6 +333,7 @@ impl Inserter {
                         &metrics::HANDLE_BULK_INSERT_ELAPSED
                             .with_label_values(&["datanode_handle"]),
                     ),
+                    Some(&cancellation),
                 )
                 .await
                 .context(error::RequestRegionSnafu)

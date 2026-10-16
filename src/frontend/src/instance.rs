@@ -16,6 +16,8 @@ pub mod builder;
 mod dashboard;
 mod entity_graph;
 mod export_database;
+#[cfg(feature = "enterprise")]
+mod flow_write;
 mod grpc;
 mod import_packed;
 mod influxdb;
@@ -146,6 +148,13 @@ pub struct Instance {
     trace_aux_limiter: Option<RequestLimiter>,
     otlp_resource_info: bool,
     suspend: Arc<AtomicBool>,
+    #[cfg(feature = "enterprise")]
+    flow_write_registry: Arc<
+        common_grpc::flow_write::FlowWriteRegistry<
+            flow_write::WritePayload,
+            common_grpc::flow_write::Reply,
+        >,
+    >,
 
     // cache for otlp metrics
     // first layer key: db-string
@@ -298,6 +307,21 @@ impl Instance {
 
     async fn query_statement(&self, stmt: Statement, query_ctx: QueryContextRef) -> Result<Output> {
         check_permission(self.plugins.clone(), &stmt, &query_ctx)?;
+        let query_ctx = if matches!(&stmt, Statement::SetVariables(_)) {
+            query_ctx
+        } else {
+            Arc::new(
+                query_ctx
+                    .query_option_snapshot()
+                    .map_err(|error| {
+                        query::error::InvalidQueryContextExtensionSnafu {
+                            reason: error.to_string(),
+                        }
+                        .build()
+                    })
+                    .context(PlanStatementSnafu)?,
+            )
+        };
 
         let query_interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
         let query_interceptor = query_interceptor.as_ref();
@@ -321,25 +345,35 @@ impl Instance {
 
             let query_fut = self.exec_statement_with_timeout(
                 stmt,
-                query_ctx,
+                query_ctx.clone(),
                 query_interceptor,
                 timeout_recorder,
             );
 
-            CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+            #[cfg(feature = "enterprise")]
+            let result = if query_ctx.channel() == Channel::Internal
+                && query_ctx.extension(common_grpc::flow_write::CHILD_KEY) == Some("1")
+            {
+                query_fut.await
+            } else {
+                CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+                    .await
+                    .map_err(|_| error::CancelledSnafu.build())?
+            };
+            #[cfg(not(feature = "enterprise"))]
+            let result = CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
                 .await
-                .map_err(|_| error::CancelledSnafu.build())?
-                .map(|output| {
-                    let Output { meta, data } = output;
-
-                    let data = match data {
-                        OutputData::Stream(stream) => OutputData::Stream(Box::pin(
-                            CancellableStreamWrapper::new(stream, ticket),
-                        )),
-                        other => other,
-                    };
-                    Output { data, meta }
-                })
+                .map_err(|_| error::CancelledSnafu.build())?;
+            result.map(|output| {
+                let Output { meta, data } = output;
+                let data = match data {
+                    OutputData::Stream(stream) => {
+                        OutputData::Stream(Box::pin(CancellableStreamWrapper::new(stream, ticket)))
+                    }
+                    other => other,
+                };
+                Output { data, meta }
+            })
         } else {
             self.exec_statement_with_timeout(stmt, query_ctx, query_interceptor, None)
                 .await
@@ -1033,20 +1067,30 @@ impl Instance {
 
             let query_fut = self.exec_plan_with_timeout(plan, query_ctx.clone(), timeout_recorder);
 
-            CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+            #[cfg(feature = "enterprise")]
+            let result = if query_ctx.channel() == Channel::Internal
+                && query_ctx.extension(common_grpc::flow_write::CHILD_KEY) == Some("1")
+            {
+                query_fut.await
+            } else {
+                CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
+                    .await
+                    .map_err(|_| error::CancelledSnafu.build())?
+            };
+            #[cfg(not(feature = "enterprise"))]
+            let result = CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
                 .await
-                .map_err(|_| error::CancelledSnafu.build())?
-                .map(|output| {
-                    let Output { meta, data } = output;
-
-                    let data = match data {
-                        OutputData::Stream(stream) => OutputData::Stream(Box::pin(
-                            CancellableStreamWrapper::new(stream, ticket),
-                        )),
-                        other => other,
-                    };
-                    Output { data, meta }
-                })
+                .map_err(|_| error::CancelledSnafu.build())?;
+            result.map(|output| {
+                let Output { meta, data } = output;
+                let data = match data {
+                    OutputData::Stream(stream) => {
+                        OutputData::Stream(Box::pin(CancellableStreamWrapper::new(stream, ticket)))
+                    }
+                    other => other,
+                };
+                Output { data, meta }
+            })
         } else {
             self.exec_plan_with_timeout(plan, query_ctx.clone(), None)
                 .await

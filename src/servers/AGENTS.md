@@ -43,6 +43,9 @@ cargo nextest run -p servers
 Keep protocol translation here and permissions/database behavior in frontend.
 Async table batching returns storage-completion futures with its early
 acknowledgements. Keep completion reporting independent of the caller's lifetime.
+Logical-table physical flushes retain partition columns in Arrow RPC payloads and
+pass all region writes to the operator write dispatcher together; the dispatcher
+owns peer resolution and retries. See `batcher/logical_table/region_write.rs`.
 
 `prom_remote_write/decode.rs` and `benches/prom_decode.rs` resolve
 `benches/write_request.pb.data` using `CARGO_MANIFEST_DIR` at **run time**

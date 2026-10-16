@@ -28,7 +28,7 @@ use api::v1::region::{
     region_request,
 };
 use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE};
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
 use common_procedure::error::Error as ProcedureError;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{error, info, warn};
@@ -61,7 +61,7 @@ use crate::wal_provider::RegionWalOptions;
 pub fn add_peer_context_if_needed(datanode: Peer) -> impl FnOnce(Error) -> Error {
     move |err| {
         error!(err; "Failed to operate datanode, peer: {}", datanode);
-        if !err.is_retry_later() {
+        if !err.retry_hint().is_retryable() {
             return Err::<(), BoxedError>(BoxedError::new(err))
                 .context(OperateDatanodeSnafu { peer: datanode })
                 .unwrap_err();
@@ -84,7 +84,7 @@ pub(crate) fn is_metric_engine_logical_table(
 /// This function determines whether the error should be retried and if poison cleanup is needed,
 /// then maps it to the appropriate procedure error variant.
 pub fn map_to_procedure_error(e: Error) -> ProcedureError {
-    match (e.is_retry_later(), e.need_clean_poisons()) {
+    match (e.retry_hint().is_retryable(), e.need_clean_poisons()) {
         (true, true) => ProcedureError::retry_later_and_clean_poisons(e),
         (true, false) => ProcedureError::retry_later(e),
         (false, true) => ProcedureError::external_and_clean_poisons(e),
@@ -256,7 +256,7 @@ pub fn handle_multiple_results<T: Debug>(results: Vec<Result<T>>) -> MultipleRes
         match result {
             Ok(value) => ok_results.push(value),
             Err(err) => {
-                if err.is_retry_later() {
+                if err.retry_hint().is_retryable() {
                     retryable_results.push(err);
                 } else {
                     non_retryable_results.push(err);
@@ -475,7 +475,73 @@ pub fn extract_column_metadatas(
 
 #[cfg(test)]
 mod tests {
+    use common_error::mock::MockError;
+    use common_error::status_code::StatusCode;
+
     use super::*;
+
+    fn external_error(retryable: bool) -> Error {
+        let source = MockError::new(StatusCode::Internal);
+        let source = if retryable {
+            BoxedError::new(Error::retry_later(source))
+        } else {
+            BoxedError::new(source)
+        };
+        Err::<(), _>(source)
+            .context(error::ExternalSnafu)
+            .unwrap_err()
+    }
+
+    #[test]
+    fn test_map_to_procedure_error() {
+        for retryable in [false, true] {
+            for clean_poisons in [false, true] {
+                let err = if retryable {
+                    Error::RetryLater {
+                        source: BoxedError::new(external_error(false)),
+                        clean_poisons,
+                    }
+                } else {
+                    Err::<(), _>(BoxedError::new(external_error(true)))
+                        .context(error::AbortProcedureSnafu { clean_poisons })
+                        .unwrap_err()
+                };
+                let err = map_to_procedure_error(err);
+                assert_eq!(err.is_retry_later(), retryable);
+                assert_eq!(err.need_clean_poisons(), clean_poisons);
+            }
+            let err = map_to_procedure_error(external_error(retryable));
+            assert_eq!(err.is_retry_later(), retryable);
+            assert!(!err.need_clean_poisons());
+        }
+    }
+
+    #[test]
+    fn test_handle_multiple_results_retry_hint() {
+        assert!(matches!(
+            handle_multiple_results(vec![Ok(()), Err(external_error(true))]),
+            MultipleResults::PartialRetryable(_)
+        ));
+        assert!(matches!(
+            handle_multiple_results::<()>(vec![
+                Err(external_error(true)),
+                Err(external_error(true))
+            ]),
+            MultipleResults::AllRetryable(_)
+        ));
+        assert!(matches!(
+            handle_multiple_results(vec![
+                Ok(()),
+                Err(external_error(true)),
+                Err(external_error(false))
+            ]),
+            MultipleResults::PartialNonRetryable(_)
+        ));
+        assert!(matches!(
+            handle_multiple_results::<()>(vec![Err(external_error(false))]),
+            MultipleResults::AllNonRetryable(_)
+        ));
+    }
 
     #[test]
     fn test_get_catalog_and_schema() {

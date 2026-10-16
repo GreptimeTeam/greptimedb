@@ -211,14 +211,6 @@ max_batch_bytes = "1MB"
 ## **It's only used when the provider is `kafka`**.
 consumer_wait_timeout = "100ms"
 
-## Whether to enable WAL index creation.
-## **It's only used when the provider is `kafka`**.
-create_index = false
-
-## The interval for dumping WAL indexes.
-## **It's only used when the provider is `kafka`**.
-dump_index_interval = "60s"
-
 ## Ignore missing entries during read WAL.
 ## **It's only used when the provider is `kafka`**.
 ##
@@ -265,6 +257,13 @@ overwrite_entry_start_id = false
 ## - `fail`: the read fails, so the region does not open.
 ## **It's only used when the provider is `experimental_object_store`**.
 #+ on_corrupted_segment = "skip"
+
+## Whether a region opens although the WAL objects under the prefix do not hold its history.
+## An existing region fails to open when the prefix held no object when the WAL opened, or when the flushed entry id of the region names an object above every object of the prefix that holds entries. Both happen after `storage_provider`, or the bucket or root of the provider it names, changed without the WAL objects being copied, or after the objects were deleted.
+## To move the WAL, stop the instance, copy every object under the prefix to the new location and then change the configuration; the regions open with all their writes.
+## When the old WAL is lost, set this to `true` for one start: the regions open without their writes that were not flushed, which are lost, a warning names each region, and `greptime_logstore_object_store_wal_missing_history_accepted_total` counts them. Turn it off again once the instance has written to the WAL after that start; until then a later start refuses a region whose flushed entry id names an object above every object of the prefix that holds entries.
+## **It's only used when the provider is `experimental_object_store`**.
+#+ accept_missing_history = false
 
 # The Kafka SASL configuration.
 # **It's only used when the provider is `kafka`**.

@@ -40,10 +40,6 @@ pub struct DatanodeKafkaConfig {
     pub kafka_topic: KafkaTopicConfig,
     // Automatically create topics for WAL.
     pub auto_create_topics: bool,
-    // Create index for WAL.
-    pub create_index: bool,
-    #[serde(with = "humantime_serde")]
-    pub dump_index_interval: Duration,
     /// Internal interval for fetching latest Kafka topic offsets.
     #[serde(with = "humantime_serde")]
     pub topic_latest_offset_fetch_interval: Duration,
@@ -60,8 +56,6 @@ impl Default for DatanodeKafkaConfig {
             consumer_wait_timeout: Duration::from_millis(100),
             kafka_topic: KafkaTopicConfig::default(),
             auto_create_topics: true,
-            create_index: false,
-            dump_index_interval: Duration::from_secs(60),
             topic_latest_offset_fetch_interval: DEFAULT_TOPIC_LATEST_OFFSET_FETCH_INTERVAL,
             overwrite_entry_start_id: false,
         }

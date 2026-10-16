@@ -21,6 +21,7 @@ use common_telemetry::warn;
 use futures::TryStreamExt;
 use object_store::ObjectStore;
 use snafu::{OptionExt, ensure};
+use store_api::metadata::RegionMetadataRef;
 
 use crate::error::{Result, UnexpectedSnafu};
 use crate::read::BoxedRecordBatchStream;
@@ -30,7 +31,6 @@ use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::prune::FlatPruneReader;
 use crate::read::read_columns::ReadColumns;
 use crate::region::MitoRegionRef;
-use crate::region::version::VersionRef;
 use crate::series_index::bucket::SeriesBucket;
 use crate::series_index::catalog::{
     RangeIndexEntry, SeriesIndexEntry, range_index_path, series_index_path, series_metadata,
@@ -65,18 +65,18 @@ async fn reader_input(
 pub(crate) async fn build_range_index(
     store: &ObjectStore,
     region: &MitoRegionRef,
-    version: &VersionRef,
+    metadata: &RegionMetadataRef,
     file: FileHandle,
 ) -> Result<Option<RangeIndexEntry>> {
     let file_id = file.file_id().file_id();
     let Some((context, mut selection)) = reader_input(region, file).await? else {
         return Ok(None);
     };
-    let mapper = FlatProjectionMapper::new(&version.metadata, [])?;
+    let mapper = FlatProjectionMapper::new(metadata, [])?;
     let compat = FlatCompatBatch::try_new(&mapper, context.read_format(), false)?;
     let path = range_index_path(region.region_id, file_id);
     let mut writer = SstRangeIndexWriter::try_new(
-        version.metadata.clone(),
+        metadata.clone(),
         store.clone(),
         &path,
         SstRangeIndexWriterOptions::default(),
@@ -127,13 +127,13 @@ pub(crate) async fn build_range_index(
 pub(crate) async fn build_series_index(
     store: &ObjectStore,
     region: &MitoRegionRef,
-    version: &VersionRef,
+    metadata: &RegionMetadataRef,
     bucket: &SeriesBucket,
     entry: &SeriesIndexEntry,
     purger: &IndexFilePurger,
 ) -> Result<SeriesIndexFileHandle> {
     let mut sources = Vec::<BoxedRecordBatchStream>::new();
-    let mapper = FlatProjectionMapper::new(&version.metadata, [])?;
+    let mapper = FlatProjectionMapper::new(metadata, [])?;
     let schema = mapper.input_arrow_schema(false);
     for file in &bucket.files {
         let Some((context, mut selection)) = reader_input(region, file.clone()).await? else {
@@ -182,7 +182,7 @@ pub(crate) async fn build_series_index(
     // TODO(yingwen): Deduplicate update-mode rows before series indexes are used by queries.
     let path = series_index_path(region.region_id, entry.index_uuid);
     let mut writer = SeriesIndexWriter::try_new(
-        version.metadata.clone(),
+        metadata.clone(),
         store.clone(),
         &path,
         SeriesIndexWriterOptions::default(),
@@ -226,6 +226,7 @@ mod tests {
     use store_api::region_engine::RegionEngine;
 
     use super::*;
+    use crate::region::version::VersionRef;
     use crate::series_index::bucket::{group_files_into_series_buckets, plan_series_indexes};
     use crate::series_index::catalog::{
         SeriesIndexCatalog, load_version_control, series_catalog_path, store_catalog,
@@ -280,7 +281,7 @@ mod tests {
         let mut range_bytes = HashMap::new();
         if build_ranges {
             for file in files {
-                let completed = build_range_index(&store, &region, &version, file.clone())
+                let completed = build_range_index(&store, &region, &version.metadata, file.clone())
                     .await
                     .unwrap()
                     .unwrap();
@@ -318,7 +319,7 @@ mod tests {
         let result = build_series_index(
             &store.clone().layer(layer),
             &region,
-            &version,
+            &version.metadata,
             &bucket,
             &entry,
             &purger,
@@ -466,14 +467,15 @@ mod tests {
         let store = ObjectStore::new(Memory::default()).unwrap();
         let (purger, _receiver) = series_index_channel(store.clone());
         for file in &bucket.files {
-            build_range_index(&store, &region, &version, file.clone())
+            build_range_index(&store, &region, &version.metadata, file.clone())
                 .await
                 .unwrap()
                 .unwrap();
         }
-        let _handle = build_series_index(&store, &region, &version, &bucket, &entry, &purger)
-            .await
-            .unwrap();
+        let _handle =
+            build_series_index(&store, &region, &version.metadata, &bucket, &entry, &purger)
+                .await
+                .unwrap();
         let bytes = store
             .read(&series_index_path(region.region_id, entry.index_uuid))
             .await
@@ -533,14 +535,14 @@ mod tests {
         let result: Result<Option<SeriesIndexFileHandle>> = async {
             for file in files {
                 let Some(entry) =
-                    build_range_index(&store, &region, &version, file.clone()).await?
+                    build_range_index(&store, &region, &version.metadata, file.clone()).await?
                 else {
                     // Defer series construction if a needed range is not ready.
                     return Ok(None);
                 };
                 completed.push(entry.file_id);
             }
-            build_series_index(&store, &region, &version, &bucket, &entry, &purger)
+            build_series_index(&store, &region, &version.metadata, &bucket, &entry, &purger)
                 .await
                 .map(Some)
         }
@@ -741,12 +743,12 @@ mod tests {
             .layer(write_layer);
         fail.store(fail_before_open, Ordering::Relaxed);
         let result = if !series {
-            build_range_index(&store, &region, &version, bucket.files[0].clone())
+            build_range_index(&store, &region, &version.metadata, bucket.files[0].clone())
                 .await
                 .map(|_| ())
         } else {
             let (purger, _receiver) = series_index_channel(store.clone());
-            build_series_index(&store, &region, &version, &bucket, &entry, &purger)
+            build_series_index(&store, &region, &version.metadata, &bucket, &entry, &purger)
                 .await
                 .map(|_| ())
         };

@@ -15,8 +15,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use api::region::RegionResponse;
-use api::v1::meta::Peer;
 use api::v1::region::RegionRequest;
 use arrow::array::{Float64Array, StringArray, TimestampMillisecondArray};
 use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema, TimeUnit};
@@ -29,11 +27,10 @@ use datatypes::schema::{ColumnSchema as DtColumnSchema, Schema as DtSchema};
 use partition::error::Result as PartitionResult;
 use partition::partition::{PartitionRule, PartitionRuleRef, RegionMask};
 use servers::batcher::logical_table::{
-    PhysicalFlushCatalogProvider, PhysicalFlushNodeRequester, PhysicalFlushPartitionProvider,
+    PhysicalFlushCatalogProvider, PhysicalFlushPartitionProvider, PhysicalFlushWriteDispatcher,
     PhysicalTableMetadata, RecordBatchWithTsIdx, TableBatch, flush_batch_physical,
 };
-use servers::error::{self, Result};
-use store_api::storage::RegionId;
+use servers::error;
 use table::test_util::table_info::test_table_info;
 use tokio::runtime::Runtime;
 
@@ -95,24 +92,17 @@ impl PhysicalFlushPartitionProvider for BenchPartitionProvider {
     async fn find_table_partition_rule(
         &self,
         _table_info: &table::metadata::TableInfo,
-    ) -> PartitionResult<PartitionRuleRef> {
-        Ok(Arc::new(SingleRegionPartitionRule))
-    }
-
-    async fn find_region_leader(&self, _region_id: RegionId) -> Result<Peer> {
-        Ok(Peer {
-            id: 1,
-            addr: "bench-node".to_string(),
-        })
+    ) -> PartitionResult<(PartitionRuleRef, HashMap<u32, Option<u64>>)> {
+        Ok((Arc::new(SingleRegionPartitionRule), HashMap::new()))
     }
 }
 
-struct BenchNodeRequester;
+struct BenchWriteDispatcher;
 
 #[async_trait]
-impl PhysicalFlushNodeRequester for BenchNodeRequester {
-    async fn handle(&self, _peer: &Peer, _request: RegionRequest) -> error::Result<RegionResponse> {
-        Ok(RegionResponse::new(0))
+impl PhysicalFlushWriteDispatcher for BenchWriteDispatcher {
+    async fn dispatch(&self, _requests: Vec<RegionRequest>) -> error::Result<usize> {
+        Ok(0)
     }
 }
 
@@ -224,7 +214,7 @@ fn bench_flush_batch_physical(c: &mut Criterion) {
         table: make_physical_table_metadata(num_tags),
     };
     let partition_provider = BenchPartitionProvider;
-    let node_requester = BenchNodeRequester;
+    let write_dispatcher = BenchWriteDispatcher;
 
     let mut group = c.benchmark_group("flush_batch_physical");
 
@@ -244,7 +234,7 @@ fn bench_flush_batch_physical(c: &mut Criterion) {
                             "phy",
                             &ctx,
                             &partition_provider,
-                            &node_requester,
+                            &write_dispatcher,
                             &catalog_provider,
                         )
                         .await
@@ -271,7 +261,7 @@ fn bench_flush_batch_physical(c: &mut Criterion) {
                             "phy",
                             &ctx,
                             &partition_provider,
-                            &node_requester,
+                            &write_dispatcher,
                             &catalog_provider,
                         )
                         .await
