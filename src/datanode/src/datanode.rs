@@ -100,6 +100,8 @@ pub struct Datanode {
     leases_notifier: Option<Arc<Notify>>,
     plugins: Plugins,
     object_store_log_store: Option<Arc<ObjectStoreLogStore>>,
+    /// The raft-engine WAL, if any. Stopped after the region server, see [Datanode::shutdown].
+    raft_engine_log_store: Option<Arc<RaftEngineLogStore>>,
 }
 
 impl Datanode {
@@ -178,6 +180,18 @@ impl Datanode {
                     .context(ShutdownInstanceSnafu),
             );
         }
+        // Regions keep references to the WAL that may outlive shutdown, so it has to be
+        // stopped explicitly for raft-engine to close its active log file.
+        if let Some(log_store) = &self.raft_engine_log_store {
+            record_shutdown_error(
+                &mut first_error,
+                log_store
+                    .stop()
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(ShutdownInstanceSnafu),
+            );
+        }
         first_error.map_or(Ok(()), Err)
     }
 
@@ -207,6 +221,7 @@ pub struct DatanodeBuilder {
     topic_stats_reporter: Option<Box<dyn TopicStatsReporter>>,
     open_regions_writable_override: Option<bool>,
     local_file_access: LocalFileAccess,
+    raft_engine_log_store: Option<Arc<RaftEngineLogStore>>,
     #[cfg(feature = "enterprise")]
     extension_range_provider_factory: Option<mito2::extension::BoxedExtensionRangeProviderFactory>,
     /// Set as soon as the object store log store exists so that a failed build can stop it.
@@ -224,6 +239,7 @@ impl DatanodeBuilder {
             cache_registry: None,
             open_regions_writable_override: None,
             local_file_access: LocalFileAccess::Disabled,
+            raft_engine_log_store: None,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
             topic_stats_reporter: None,
@@ -298,14 +314,20 @@ impl DatanodeBuilder {
         self.try_build().await
     }
 
-    /// Builds the datanode and stops the object store log store if a later step fails.
+    /// Builds the datanode and stops the log stores it opened if a later step fails.
     async fn try_build(&mut self) -> Result<Datanode> {
         let result = self.build_inner().await;
-        if result.is_err()
-            && let Some(log_store) = &self.object_store_log_store
-            && let Err(err) = log_store.stop().await
-        {
-            warn!(err; "Failed to stop the object store log store after a failed build");
+        if result.is_err() {
+            if let Some(log_store) = &self.object_store_log_store
+                && let Err(err) = log_store.stop().await
+            {
+                warn!(err; "Failed to stop the object store log store after a failed build");
+            }
+            if let Some(log_store) = &self.raft_engine_log_store
+                && let Err(err) = log_store.stop().await
+            {
+                warn!(err; "Failed to stop the raft-engine log store after a failed build");
+            }
         }
         result
     }
@@ -430,6 +452,7 @@ impl DatanodeBuilder {
             leases_notifier,
             plugins: self.plugins.clone(),
             object_store_log_store: self.object_store_log_store.take(),
+            raft_engine_log_store: self.raft_engine_log_store.take(),
         })
     }
 
@@ -662,6 +685,7 @@ impl DatanodeBuilder {
                 let log_store =
                     Self::build_raft_engine_log_store(&opts.storage.data_home, raft_engine_config)
                         .await?;
+                self.raft_engine_log_store = Some(log_store.clone());
 
                 let builder = MitoEngineBuilder::new(
                     &opts.storage.data_home,
@@ -1074,6 +1098,7 @@ mod tests {
     use common_test_util::temp_dir::{create_named_temp_file, create_temp_dir};
     use common_wal::config::DatanodeWalConfig;
     use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATION};
+    use common_wal::config::raft_engine::RaftEngineConfig;
     use log_store::ObjectStoreLogStore;
     use log_store::error::Error as LogStoreError;
     use meta_client::client::MetaClientBuilder;
@@ -1199,6 +1224,16 @@ mod tests {
     }
 
     /// Returns true if the store rejects even an empty append, which it does only once stopped.
+    /// Opens the raft-engine WAL under `data_home` again, which only succeeds once the previous
+    /// engine was released (raft-engine holds a lock on its directory while open).
+    async fn assert_raft_engine_wal_reopens(data_home: &str) {
+        let reopened =
+            DatanodeBuilder::build_raft_engine_log_store(data_home, &RaftEngineConfig::default())
+                .await
+                .unwrap();
+        reopened.stop().await.unwrap();
+    }
+
     async fn is_stopped(log_store: &ObjectStoreLogStore) -> bool {
         matches!(
             log_store.append_batch(vec![]).await,
@@ -1488,6 +1523,7 @@ mod tests {
         assert!(datanode.object_store_log_store.is_none());
         assert!(data_home.path().join("wal").exists());
         datanode.shutdown().await.unwrap();
+        assert_raft_engine_wal_reopens(data_home.path().to_str().unwrap()).await;
     }
 
     #[tokio::test]
@@ -1560,6 +1596,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_shutdown_closes_raft_engine_wal_after_engine_failures() {
+        common_telemetry::init_default_ut_logging();
+        let data_home = create_temp_dir("raft-engine-wal-shutdown-failure");
+        let builder = datanode_builder(
+            data_home.path().to_str().unwrap(),
+            DatanodeWalConfig::RaftEngine(RaftEngineConfig::default()),
+            Arc::new(MemoryKvBackend::new()),
+        );
+        let mut datanode = builder.build().await.unwrap();
+        let (engine, _) = MockRegionEngine::with_custom_apply_fn("failing", |engine| {
+            engine.handle_stop_mock_fn = Some(Box::new(|| {
+                error::UnexpectedSnafu {
+                    violated: "stop failed",
+                }
+                .fail()
+            }));
+        });
+        datanode.region_server().register_engine(engine);
+
+        let err = datanode.shutdown().await.unwrap_err();
+
+        assert_matches!(err, Error::StopRegionEngine { .. });
+        assert_raft_engine_wal_reopens(data_home.path().to_str().unwrap()).await;
+    }
+
+    #[tokio::test]
     async fn test_failed_build_stops_object_store_log_store() {
         common_telemetry::init_default_ut_logging();
         let data_home = create_temp_dir("object-store-wal-failed-build");
@@ -1577,6 +1639,27 @@ mod tests {
 
         let log_store = builder.object_store_log_store.as_ref().unwrap();
         assert!(is_stopped(log_store).await);
+    }
+
+    #[tokio::test]
+    async fn test_failed_build_stops_raft_engine_log_store() {
+        common_telemetry::init_default_ut_logging();
+        let data_home = create_temp_dir("raft-engine-wal-failed-build");
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        // Regions registered in the metadata but missing on disk fail the region open
+        // that runs after the log store and the engines are built.
+        setup_table_datanode(&(kv_backend.clone() as _)).await;
+        let mut builder = datanode_builder(
+            data_home.path().to_str().unwrap(),
+            DatanodeWalConfig::RaftEngine(RaftEngineConfig::default()),
+            kv_backend,
+        );
+
+        assert!(builder.try_build().await.is_err());
+
+        let log_store = builder.raft_engine_log_store.as_ref().unwrap();
+        assert!(!log_store.started());
+        assert_raft_engine_wal_reopens(data_home.path().to_str().unwrap()).await;
     }
 
     #[test]

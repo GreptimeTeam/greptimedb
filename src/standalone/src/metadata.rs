@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use common_config::KvBackendConfig;
 use common_error::ext::BoxedError;
-use common_meta::kv_backend::KvBackendRef;
+use common_meta::kv_backend::{ClosableKvBackendRef, KvBackendRef};
 use common_telemetry::{debug, info};
 use log_store::raft_engine::RaftEngineBackend;
 use snafu::{ResultExt, ensure};
@@ -24,8 +24,11 @@ use url::Url;
 
 use crate::error::{InvalidUrlSchemeSnafu, OpenMetadataKvBackendSnafu, ParseUrlSnafu, Result};
 
-/// Builds the metadata kvbackend.
-pub fn build_metadata_kvbackend(dir: String, config: KvBackendConfig) -> Result<KvBackendRef> {
+/// Opens the metadata kvbackend, which the caller has to close on shutdown.
+pub fn open_metadata_kvbackend(
+    dir: String,
+    config: KvBackendConfig,
+) -> Result<ClosableKvBackendRef> {
     info!(
         "Creating metadata kvbackend with dir: {}, config: {:?}",
         dir, config
@@ -35,6 +38,11 @@ pub fn build_metadata_kvbackend(dir: String, config: KvBackendConfig) -> Result<
         .context(OpenMetadataKvBackendSnafu)?;
 
     Ok(Arc::new(kv_backend))
+}
+
+/// Builds the metadata kvbackend.
+pub fn build_metadata_kvbackend(dir: String, config: KvBackendConfig) -> Result<KvBackendRef> {
+    open_metadata_kvbackend(dir, config).map(|kv_backend| kv_backend as KvBackendRef)
 }
 
 /// Builds the metadata kvbackend from a list of URLs.
