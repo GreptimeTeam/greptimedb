@@ -117,11 +117,11 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         false
     }
 
-    /// Asks the log store to give the entries it acknowledged, and those it
-    /// acknowledges from now on until it stops, that persistence as soon as it
-    /// can rather than on its usual schedule, because its caller, such as an
-    /// engine that begins to stop, will soon wait for them in
-    /// [`wait_durable`](Self::wait_durable) and not for long.
+    /// Asks the log store to take no more entries and to give those it
+    /// acknowledged that persistence as soon as it can rather than on its
+    /// usual schedule, because its caller, such as an engine that begins to
+    /// stop, will soon wait for them in [`wait_durable`](Self::wait_durable)
+    /// and not for long.
     ///
     /// The default does nothing.
     fn begin_drain(&self) {}

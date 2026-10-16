@@ -299,14 +299,14 @@ pub(crate) struct RegionFlushTask {
 /// reports that it fails to make entries durable, see [wait_for_durable_wal].
 ///
 /// The engine asks the log store to drain when it begins to stop, so the
-/// object store WAL seals the entries it holds at once, while flushes still
-/// write their SSTs, and every later entry right after its admission, instead
-/// of after its seal interval, however long that is. A create on S3 takes
-/// about 50 ms at the median and 130 ms at the 99th percentile, so a healthy
-/// store makes the entries durable well within this bound, which would also
-/// cover the default seal interval of 100 ms many times over. Every flush
-/// counts from the same instant, so the stop waits for the WAL at most this
-/// long in all, well inside the 30 s an orchestrator commonly grants a stop.
+/// object store WAL takes no more entries and seals those it holds at once,
+/// while flushes still write their SSTs, instead of after its seal interval,
+/// however long that is. A create on S3 takes about 50 ms at the median and
+/// 130 ms at the 99th percentile, so a healthy store makes the entries durable
+/// well within this bound, which would also cover the default seal interval
+/// of 100 ms many times over. Every flush counts from the same instant, so the
+/// stop waits for the WAL at most this long in all, well inside the 30 s an
+/// orchestrator commonly grants a stop.
 pub(crate) const STOP_DURABILITY_GRACE: Duration = Duration::from_secs(5);
 /// How often a flush of a stopping engine asks the log store whether it fails
 /// while it keeps waiting for the WAL.

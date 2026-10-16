@@ -129,10 +129,11 @@ const RECOVERY_TAIL_WINDOW: usize = 64 * 1024;
 /// A log store over the immutable WAL objects under one prefix.
 ///
 /// Appends are admitted into an open batch. A background actor seals the batch
-/// when it reaches the size limit or the flush interval elapses, or after
-/// every admission once a caller asked the store to drain, and creates the
-/// object under the next sequence while it keeps admitting entries into the
-/// next batch; up to [`MAX_IN_FLIGHT_CREATES`] creates run at a time.
+/// when it reaches the size limit or the flush interval elapses and creates
+/// the object under the next sequence while it keeps admitting entries into
+/// the next batch; up to [`MAX_IN_FLIGHT_CREATES`] creates run at a time. Once
+/// a caller asks the store to drain, it seals the open batch at once and
+/// refuses later appends.
 /// Objects are indexed in the catalog in sequence order. In the `durable`
 /// acknowledgement mode an append returns once its object is durable and
 /// indexed, so an acknowledged entry never has a missing predecessor; in the
@@ -1246,8 +1247,9 @@ impl LogStore for ObjectStoreLogStore {
             || self.stopped.load(Ordering::Acquire)
     }
 
-    /// Seals the open batch now and, until the store stops, after every
-    /// admission, instead of on the next tick of `flush_interval`.
+    /// Seals the open batch now instead of on the next tick of
+    /// `flush_interval`, and refuses every later append, also one held back,
+    /// with the stopped error.
     fn begin_drain(&self) {
         self.drain_requested.notify_one();
     }
@@ -1544,8 +1546,7 @@ struct Actor {
     /// error that requires intervention.
     failing: Option<Failing>,
     durable_waiters: Vec<DurableWaiter>,
-    /// Set by `begin_drain`: the open batch is sealed after every admission,
-    /// not on the next tick.
+    /// Set by `begin_drain`: no append is admitted any more.
     draining: bool,
     /// Callers of `stop`, answered once nothing is in flight.
     stop: Vec<oneshot::Sender<Result<()>>>,
@@ -1669,9 +1670,9 @@ impl Actor {
     }
 
     fn handle_append(&mut self, entries: Vec<Entry>, response: AppendResponse) {
-        // The append was queued before `stop` set the flag; nothing that is
-        // not durable yet gets admitted once it is set.
-        if self.is_stopped() {
+        // The append was queued before `stop` set the flag or the store began
+        // to drain; nothing that is not durable yet gets admitted after that.
+        if self.is_stopped() || self.draining {
             let _ = response.send(Err(ObjectStoreWalStoppedSnafu.build()));
             return;
         }
@@ -1743,7 +1744,7 @@ impl Actor {
         }
         #[cfg(any(test, feature = "testing"))]
         self.admitted_appends.send_modify(|count| *count += 1);
-        if self.draining || self.open_batch.should_seal() {
+        if self.open_batch.should_seal() {
             self.flush_open_batch();
         }
     }
@@ -1789,7 +1790,7 @@ impl Actor {
         if self.stalled.is_none() {
             return;
         }
-        if self.is_stopped() {
+        if self.is_stopped() || self.draining {
             if let Some((_, response)) = self.take_stalled() {
                 let _ = response.send(Err(ObjectStoreWalStoppedSnafu.build()));
             }
@@ -2411,14 +2412,15 @@ impl Actor {
         self.durability_waits.send_modify(|count| *count += 1);
     }
 
-    /// Starts draining: the open batch is sealed now, and from then on after
-    /// every admission. Nothing starts after stop began, which sealed the
-    /// `enqueued` backlog.
+    /// Starts draining: the open batch is sealed now, unless stop began,
+    /// which sealed the `enqueued` backlog, and the held-back append and every
+    /// later one are refused.
     fn handle_drain(&mut self) {
         self.draining = true;
         if !self.is_stopped() {
             self.flush_open_batch();
         }
+        self.release_stalled();
     }
 
     /// Gives up the start object while it is the only object this store
@@ -7862,10 +7864,9 @@ mod tests {
     }
 
     /// Once a caller asks the store to drain, the open batch is sealed at
-    /// once and every later admission right after it, so no entry waits for
-    /// the seal interval.
+    /// once rather than on the next tick, and every later append is refused.
     #[tokio::test]
-    async fn test_store_drain_seals_the_open_batch_and_every_later_admission() {
+    async fn test_store_drain_seals_the_open_batch_and_refuses_later_appends() {
         let _serialized = SERIALIZED.lock().await;
         let store = open(memory_store(), &enqueued(manual())).await;
         let region_id = region(1);
@@ -7877,16 +7878,8 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-
-        let response = append(&store, region_id, "a2").await.unwrap();
-        assert_eq!(
-            HashMap::from([(region_id, id(2, 1))]),
-            response.last_entry_ids
-        );
-        timeout(WAIT, store.wait_durable(&provider(region_id), id(2, 1)))
-            .await
-            .unwrap()
-            .unwrap();
+        assert_stopped(&append(&store, region_id, "a2").await.unwrap_err());
+        assert_eq!(id(1, 1), latest(&store, region_id));
     }
 
     #[tokio::test]
@@ -8050,6 +8043,32 @@ mod tests {
         timeout(WAIT, stop).await.unwrap().unwrap().unwrap();
         assert_eq!(vec![0, 1], object_seqs(io.as_ref()).await);
         assert!(parked.try_recv().is_err());
+    }
+
+    /// A drain refuses the append held back behind the backlog and every
+    /// later one with the stopped error, and the backlog still uploads.
+    #[tokio::test]
+    async fn test_store_enqueued_drain_refuses_a_stalled_append_and_uploads_the_backlog() {
+        let _serialized = SERIALIZED.lock().await;
+        let config = ObjectStoreWalConfig {
+            max_unpersisted_bytes: ReadableSize(1),
+            ..enqueued(manual())
+        };
+        let (store, _, _parked, stalled, release) = stall_second_append(config).await;
+        let region_id = region(1);
+
+        store.begin_drain();
+        assert_stopped(&timeout(WAIT, stalled).await.unwrap().unwrap().unwrap_err());
+        assert_stopped(&append(&store, region_id, "a3").await.unwrap_err());
+        release.send(true).unwrap();
+        timeout(WAIT, store.wait_durable(&provider(region_id), id(1, 1)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            expected_entries(region_id, &[(id(1, 1), "a1")]),
+            read_entries(&store, region_id, 1).await
+        );
     }
 
     #[tokio::test]

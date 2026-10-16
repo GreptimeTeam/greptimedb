@@ -304,11 +304,12 @@ impl WorkerGroup {
         })
     }
 
-    /// Tells the group that it is about to stop: the log store drains, and
-    /// from now on a flush that waits for the WAL to become durable gives up
-    /// once the log store fails or a grace period passed, so that closing
-    /// regions and stopping the group do not wait for long for a log store
-    /// stopped after them.
+    /// Tells the group that it is about to stop: the log store drains, so it
+    /// takes no more entries and makes those it holds durable, and from now on
+    /// a flush that waits for the WAL to become durable gives up once the log
+    /// store fails or a grace period passed, so that closing regions and
+    /// stopping the group do not wait for long for a log store stopped after
+    /// them.
     pub(crate) fn begin_stop(&self) {
         (self.drain_wal)();
         self.stopping.raise();

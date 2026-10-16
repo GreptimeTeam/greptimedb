@@ -2319,17 +2319,75 @@ async fn test_close_of_a_stopping_engine_flushes_a_region_whose_wal_is_durable(
     assert_eq!(5, engine.get_region_statistic(REGION_A).unwrap().num_rows);
 }
 
-/// With a healthy WAL, a stopping engine keeps every write. The WAL drains
-/// once the engine begins to stop, so the write still in its open batch then
-/// and the writes admitted afterwards become durable however long the seal
-/// interval is, before any flush waits for them. A region holding writes that
-/// skipped the WAL is then flushed when it closes, even when the close reaches
-/// its wait for the WAL after the grace period of the stop, as a close behind
-/// slow flushes would.
+/// With a healthy WAL, the close-time flush of a stopping engine waits for
+/// the upload of the region's last WAL entry, which was still in the open
+/// batch when the stop began: the WAL drains once the engine begins to stop,
+/// so the entry is sealed then, however long the seal interval is, and the
+/// flush commits once its create completes, within the grace period. No row
+/// is lost.
 #[tokio::test]
-async fn test_close_of_a_stopping_engine_keeps_writes_while_the_wal_is_healthy() {
+async fn test_close_of_a_stopping_engine_waits_for_a_healthy_wal() {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::with_prefix("object-store-wal-stop-healthy-flush").await;
+    let object_store = memory_store();
+    let store = open_store(&object_store, AckMode::Enqueued).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
+
+    store.hold_creates();
+    put_rows(&engine, REGION_A, rows(&schema, 0, 3)).await;
+    put_rows_skipping_wal(&engine, REGION_A, rows(&schema, 3, 5)).await;
+
+    let began = Instant::now();
+    engine.begin_stop();
+    // The store never seals a batch on its own.
+    wait_for(store.wait_for_parked_creates(1)).await;
+    let close = {
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            engine
+                .handle_request(
+                    REGION_A,
+                    RegionRequest::Close(RegionCloseRequest::default()),
+                )
+                .await
+        })
+    };
+    wait_for(store.wait_for_durability_waits(1)).await;
+    assert!(!close.is_finished());
+    store.release_creates();
+    tokio::time::timeout(WAIT, close)
+        .await
+        .expect("the close must finish once the WAL is durable")
+        .unwrap()
+        .unwrap();
+    assert!(
+        began.elapsed() < STOP_DURABILITY_GRACE,
+        "{:?}",
+        began.elapsed()
+    );
+    engine.stop().await.unwrap();
+    assert_eq!(1, sst_files(&env, &table_dir).await.len());
+    store.stop().await.unwrap();
+    drop(engine);
+    drop(store);
+
+    let (engine, state) = reopen(&mut env, &object_store, REGION_A, &table_dir).await;
+    assert_eq!(entry_id(1, 1), state.manifest_flushed_entry_id);
+    assert_eq!(0, state.memtable_rows);
+    assert_eq!(5, engine.get_region_statistic(REGION_A).unwrap().num_rows);
+}
+
+/// Once the engine begins to stop, its WAL takes no more entries and makes
+/// those it holds durable while the regions are still open, so a close-time
+/// flush that reaches its wait for the WAL only after the grace period of the
+/// stop, as a close behind slow flushes would, still commits. A WAL write
+/// after the stop began fails and is not applied; a write that skips the WAL
+/// is kept.
+#[tokio::test]
+async fn test_close_of_a_stopping_engine_after_the_grace_period_keeps_writes() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("object-store-wal-stop-late-close").await;
     let object_store = memory_store();
     let store = open_store(&object_store, AckMode::Enqueued).await;
     let engine = new_engine(&mut env, store.clone()).await;
@@ -2342,10 +2400,19 @@ async fn test_close_of_a_stopping_engine_keeps_writes_while_the_wal_is_healthy()
     engine.begin_stop();
     // The store never seals a batch on its own.
     wait_for(store.wait_durable(&provider(REGION_A), entry_id(1, 1))).await;
-    // The region takes writes until it closes; the next WAL write is sealed
-    // right after its admission.
-    put_rows(&engine, REGION_A, rows(&schema, 3, 5)).await;
-    wait_for(store.wait_durable(&provider(REGION_A), entry_id(2, 1))).await;
+    let error = engine
+        .handle_request(
+            REGION_A,
+            RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
+                rows: rows(&schema, 3, 5),
+                hint: None,
+                partition_expr_version: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(format!("{error:?}").contains("is stopped"), "{error:?}");
     put_rows_skipping_wal(&engine, REGION_A, rows(&schema, 5, 7)).await;
 
     tokio::time::sleep_until((began + STOP_DURABILITY_GRACE).into()).await;
@@ -2366,9 +2433,9 @@ async fn test_close_of_a_stopping_engine_keeps_writes_while_the_wal_is_healthy()
     drop(store);
 
     let (engine, state) = reopen(&mut env, &object_store, REGION_A, &table_dir).await;
-    assert_eq!(entry_id(2, 1), state.manifest_flushed_entry_id);
+    assert_eq!(entry_id(1, 1), state.manifest_flushed_entry_id);
     assert_eq!(0, state.memtable_rows);
-    assert_eq!(7, engine.get_region_statistic(REGION_A).unwrap().num_rows);
+    assert_eq!(5, engine.get_region_statistic(REGION_A).unwrap().num_rows);
 }
 
 /// A flush of a stopping engine whose WAL already stopped, so that its wait
