@@ -817,8 +817,8 @@ mod test {
             let chunks = stream.try_collect::<Vec<_>>().await.unwrap();
             for chunk in chunks {
                 assert!(chunk.metric.is_none());
-                assert!(!chunk.read_key.is_empty());
-                let key_bytes = chunk.read_key.as_slice();
+                assert!(!chunk.primary_key.is_empty());
+                let key_bytes = chunk.primary_key.as_slice();
                 let key_codec = SparsePrimaryKeyCodec::new(&physical_metadata);
                 let (table_id, _) = key_codec.decode_ids(key_bytes).unwrap();
                 assert_eq!(table_id, logical_a.table_id());
@@ -834,7 +834,7 @@ mod test {
                 decoded_jobs.insert(job_value.to_string());
                 keys.insert(key_bytes.to_vec());
                 last_markers += usize::from(chunk.is_last);
-                let times = chunk.time.as_explicit().unwrap();
+                let times = chunk.time.as_buffer().as_ref();
                 samples.extend(times.iter().enumerate().map(|(index, time)| {
                     let value = match chunk.fields.get(0).unwrap().sample(index) {
                         SampleRef::Float(value) => value,

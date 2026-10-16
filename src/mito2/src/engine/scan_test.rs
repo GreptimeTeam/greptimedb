@@ -4768,7 +4768,7 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
     use api::v1::{Row, Value};
     use common_recordbatch::filter;
     use datatypes::arrow::array::Array;
-    use datatypes::series::raw::RawSeriesOrdering;
+    use datatypes::series::SeriesOrdering;
     use datatypes::series::samples::SampleRef;
     use datatypes::value::Value as DatumValue;
     use mito_codec::row_converter::build_primary_key_codec;
@@ -4907,7 +4907,7 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
             .scan_series_partition(&QueryScanContext::default(), &metrics, partition, &source)
             .unwrap()
             .expect("supported millisecond PerSeries scan");
-        assert_eq!(RawSeriesOrdering::Contiguous, stream.ordering());
+        assert_eq!(SeriesOrdering::Contiguous, stream.ordering());
         assert!(stream.schema().eval_grid.is_none());
         assert_eq!(
             vec!["field_1", "field_0"],
@@ -4922,10 +4922,10 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
         while let Some(chunk) = stream.try_next().await.unwrap() {
             assert!(chunk.metric.is_none());
             assert!(
-                !closed_keys.contains(chunk.read_key.as_slice()),
+                !closed_keys.contains(chunk.primary_key.as_slice()),
                 "no chunk may follow a key's is_last chunk"
             );
-            let times = chunk.time.as_explicit().unwrap();
+            let times = chunk.time.as_buffer().as_ref();
             assert_eq!(2, chunk.fields.len());
             assert_eq!(times.len(), chunk.fields.get(0).unwrap().len());
             assert_eq!(times.len(), chunk.fields.get(1).unwrap().len());
@@ -4938,7 +4938,7 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
                     SampleRef::Missing => None,
                     _ => panic!("f0 type"),
                 };
-                let key = chunk.read_key.to_vec();
+                let key = chunk.primary_key.to_vec();
                 if let Some(previous) = previous_times.insert(key.clone(), *time) {
                     assert!(
                         previous < *time,
@@ -4946,10 +4946,10 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
                     );
                 }
                 if chunk.is_last {
-                    closed_keys.insert(chunk.read_key.to_vec());
+                    closed_keys.insert(chunk.primary_key.to_vec());
                 }
                 raw.push((
-                    chunk.read_key.clone(),
+                    chunk.primary_key.clone(),
                     *time,
                     f1,
                     f0,
@@ -5199,7 +5199,7 @@ async fn test_mito_raw_series_int64_predicate_uses_original_precision() {
         );
         let chunks = stream.try_collect::<Vec<_>>().await.unwrap();
         for chunk in chunks {
-            let axis = chunk.time.as_explicit().unwrap();
+            let axis = chunk.time.as_buffer().as_ref();
             times.extend(axis.iter().copied());
             for index in 0..axis.len() {
                 output_values.push((
@@ -5313,7 +5313,7 @@ async fn test_mito_raw_series_invalid_binding_before_legacy_read() {
             let tuples = chunks
                 .iter()
                 .map(|chunk| {
-                    let times = chunk.time.as_explicit().unwrap();
+                    let times = chunk.time.as_buffer().as_ref();
                     let SampleRef::Float(value) = chunk.fields.get(0).unwrap().sample(0) else {
                         panic!("expected raw float sample");
                     };

@@ -338,7 +338,7 @@ async fn chunks_preserve_keys_values_times_and_final_flags_for_both_input_shapes
         assert_eq!(
             chunks
                 .iter()
-                .map(|c| c.read_key.as_slice())
+                .map(|c| c.primary_key.as_slice())
                 .collect::<Vec<_>>(),
             vec![
                 b"prefix-full-key-a".as_slice(),
@@ -398,12 +398,12 @@ async fn typed_predicate_filters_before_numeric_samples_are_cast() {
     );
     let chunk = output.next().await.unwrap().unwrap();
     assert!(chunk.is_last);
-    assert_eq!(chunk.read_key.as_slice(), b"a");
+    assert_eq!(chunk.primary_key.as_slice(), b"a");
     assert_eq!(chunk.time.len(), 1);
     assert_eq!(chunk.time.timestamp(0), Some(3));
     assert_eq!(values(&chunk), vec![Some((threshold + 1) as f64)]);
     let chunk = output.next().await.unwrap().unwrap();
-    assert_eq!(chunk.read_key.as_slice(), b"c");
+    assert_eq!(chunk.primary_key.as_slice(), b"c");
     assert!(chunk.is_last);
     assert_eq!(chunk.time.timestamp(0), Some(1));
     assert_eq!(values(&chunk), vec![Some((threshold + 1) as f64)]);
@@ -457,13 +457,13 @@ async fn upstream_error_is_terminal_after_yielded_prefix_without_flushing_pendin
         schema(),
     );
     let first = output.next().await.unwrap().unwrap();
-    assert_eq!(first.read_key.as_slice(), b"a");
+    assert_eq!(first.primary_key.as_slice(), b"a");
     assert_eq!(first.time.timestamp(0), Some(1));
     assert_eq!(values(&first), vec![Some(1.0)]);
     assert!(first.metric.is_none());
     assert!(!first.is_last);
     let second = output.next().await.unwrap().unwrap();
-    assert_eq!(second.read_key.as_slice(), b"a");
+    assert_eq!(second.primary_key.as_slice(), b"a");
     assert_eq!(second.time.timestamp(0), Some(2));
     assert_eq!(values(&second), vec![Some(2.0)]);
     assert!(second.metric.is_none());
@@ -502,7 +502,10 @@ async fn dropping_raw_stream_drops_unfinished_input() {
         drops: drops.clone(),
     };
     let mut raw = convert(Box::pin(spy), schema());
-    assert_eq!(raw.next().await.unwrap().unwrap().read_key.as_slice(), b"a");
+    assert_eq!(
+        raw.next().await.unwrap().unwrap().primary_key.as_slice(),
+        b"a"
+    );
     drop(raw);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
@@ -532,7 +535,7 @@ async fn legacy_series_requires_increasing_keys_but_record_batches_do_not() {
         schema(),
     );
     let prefix = output.next().await.unwrap().unwrap();
-    assert_eq!(prefix.read_key.as_slice(), b"a");
+    assert_eq!(prefix.primary_key.as_slice(), b"a");
     assert_eq!(values(&prefix), vec![Some(1.0)]);
     assert_eq!(prefix.time.timestamp(0), Some(1));
     assert!(prefix.is_last);
@@ -549,12 +552,12 @@ async fn legacy_series_requires_increasing_keys_but_record_batches_do_not() {
         schema(),
     );
     let first = output.next().await.unwrap().unwrap();
-    assert_eq!(first.read_key.as_slice(), b"a");
+    assert_eq!(first.primary_key.as_slice(), b"a");
     assert_eq!(values(&first), vec![Some(1.0)]);
     assert_eq!(first.time.timestamp(0), Some(1));
     assert!(first.is_last);
     let second = output.next().await.unwrap().unwrap();
-    assert_eq!(second.read_key.as_slice(), b"b");
+    assert_eq!(second.primary_key.as_slice(), b"b");
     assert_eq!(values(&second), vec![Some(2.0)]);
     assert_eq!(second.time.timestamp(0), Some(1));
     assert!(second.is_last);
@@ -576,12 +579,12 @@ async fn legacy_series_requires_increasing_keys_but_record_batches_do_not() {
         schema(),
     );
     let first = output.next().await.unwrap().unwrap();
-    assert_eq!(first.read_key.as_slice(), b"b");
+    assert_eq!(first.primary_key.as_slice(), b"b");
     assert_eq!(values(&first), vec![Some(1.0)]);
     assert_eq!(first.time.timestamp(0), Some(1));
     assert!(first.is_last);
     let second = output.next().await.unwrap().unwrap();
-    assert_eq!(second.read_key.as_slice(), b"a");
+    assert_eq!(second.primary_key.as_slice(), b"a");
     assert_eq!(values(&second), vec![Some(2.0)]);
     assert_eq!(second.time.timestamp(0), Some(1));
     assert!(second.is_last);
@@ -605,10 +608,10 @@ async fn raw_key_shares_dictionary_values_and_survives_batch_drop() {
     let expected_ptr = values.value(1).as_ptr();
     let mut output = convert(input(vec![Ok(ScanBatch::RecordBatch(record))]), schema());
     let chunk = output.next().await.unwrap().unwrap();
-    assert_eq!(chunk.read_key.as_slice(), b"prefix-key");
-    assert_eq!(chunk.read_key.as_ptr(), expected_ptr);
+    assert_eq!(chunk.primary_key.as_slice(), b"prefix-key");
+    assert_eq!(chunk.primary_key.as_ptr(), expected_ptr);
     drop(output);
-    assert_eq!(chunk.read_key.as_slice(), b"prefix-key");
+    assert_eq!(chunk.primary_key.as_slice(), b"prefix-key");
 }
 
 #[tokio::test]
