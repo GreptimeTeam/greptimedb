@@ -25,7 +25,8 @@ use datatypes::arrow::buffer::Buffer;
 use datatypes::error::InvalidSeriesSnafu;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
-use datatypes::series::raw::{RawSeriesChunk, RawSeriesOrdering, RawTimestamps};
+use datatypes::series::SeriesOrdering;
+use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
 use datatypes::series::{Label, MetricName};
 use futures::{Stream, StreamExt};
@@ -51,6 +52,10 @@ struct MemorySource {
 impl PreparedSeriesSource for MemorySource {
     fn num_series(&self) -> usize {
         self.series.len()
+    }
+
+    fn label_source(&self) -> &RawLabelSource {
+        &self.label_source
     }
 
     fn series_info(&self, ordinal: usize) -> Result<SeriesInfo, BoxedError> {
@@ -128,8 +133,8 @@ impl RawSeriesStream for MemoryReader {
         &self.label_source
     }
 
-    fn ordering(&self) -> RawSeriesOrdering {
-        RawSeriesOrdering::Contiguous
+    fn ordering(&self) -> SeriesOrdering {
+        SeriesOrdering::Contiguous
     }
 }
 
@@ -142,6 +147,33 @@ fn metric(host: &str) -> MetricName {
         }],
     )
     .unwrap()
+}
+
+fn assert_same_label_source(expected: &RawLabelSource, actual: &RawLabelSource) {
+    match (expected, actual) {
+        (RawLabelSource::Explicit, RawLabelSource::Explicit) => {}
+        (
+            RawLabelSource::PrimaryKey {
+                metric_name: expected_name,
+                physical_metadata: expected_metadata,
+                logical_tags: expected_tags,
+            },
+            RawLabelSource::PrimaryKey {
+                metric_name: actual_name,
+                physical_metadata: actual_metadata,
+                logical_tags: actual_tags,
+            },
+        ) => {
+            assert_eq!(expected_name, actual_name);
+            assert!(Arc::ptr_eq(expected_metadata, actual_metadata));
+            assert_eq!(expected_tags.len(), actual_tags.len());
+            for (expected, actual) in expected_tags.iter().zip(actual_tags.iter()) {
+                assert_eq!(expected.name, actual.name);
+                assert_eq!(expected.column_id, actual.column_id);
+            }
+        }
+        _ => panic!("label source differs"),
+    }
 }
 
 fn schema() -> Arc<SeriesSchema> {
@@ -246,7 +278,11 @@ fn source_from_keys(explicit: bool, keys: Arc<[Buffer]>) -> Arc<MemorySource> {
             RawLabelSource::PrimaryKey {
                 metric_name: Arc::from("cpu"),
                 physical_metadata: Arc::new(primary_key_metadata()),
-                logical_tags: Arc::from([]),
+                logical_tags: vec![crate::region_engine::BoundTag {
+                    column_id: 1,
+                    name: Arc::from("host"),
+                }]
+                .into(),
             }
         },
         polls: Arc::new(AtomicUsize::new(0)),
@@ -255,10 +291,36 @@ fn source_from_keys(explicit: bool, keys: Arc<[Buffer]>) -> Arc<MemorySource> {
 }
 
 #[tokio::test]
-async fn prepared_identity_matches_chunks_in_both_label_modes_including_empty_reader() {
+async fn prepared_source_label_binding_is_available_before_readers_and_matches_chunks() {
     for explicit in [false, true] {
         let source = source(explicit);
         assert_eq!(source.num_series(), 2);
+        match (explicit, source.label_source()) {
+            (true, RawLabelSource::Explicit) => {}
+            (
+                false,
+                RawLabelSource::PrimaryKey {
+                    metric_name,
+                    physical_metadata,
+                    logical_tags,
+                },
+            ) => {
+                assert_eq!(metric_name.as_ref(), "cpu");
+                assert_eq!(
+                    physical_metadata
+                        .column_by_id(1)
+                        .unwrap()
+                        .column_schema
+                        .name,
+                    "host"
+                );
+                assert_eq!(logical_tags.len(), 1);
+                assert_eq!(logical_tags[0].column_id, 1);
+                assert_eq!(logical_tags[0].name.as_ref(), "host");
+            }
+            _ => panic!("unexpected source label binding"),
+        }
+        assert_eq!(source.polls.load(Ordering::SeqCst), 0);
         let first = source.series_info(0).unwrap();
         let second = source.series_info(1).unwrap();
         assert_eq!(first.primary_key, Buffer::from(vec![0x10, 0x01]));
@@ -278,11 +340,8 @@ async fn prepared_identity_matches_chunks_in_both_label_modes_including_empty_re
 
         let empty = source.read_series(1..1).unwrap();
         assert_eq!(empty.schema().fields.len(), 1);
-        assert_eq!(empty.ordering(), RawSeriesOrdering::Contiguous);
-        assert_eq!(
-            matches!(empty.label_source(), RawLabelSource::Explicit),
-            explicit
-        );
+        assert_eq!(empty.ordering(), SeriesOrdering::Contiguous);
+        assert_same_label_source(source.label_source(), empty.label_source());
         assert_eq!(source.polls.load(Ordering::SeqCst), 0);
         assert!(
             futures::TryStreamExt::try_collect::<Vec<_>>(empty)
@@ -293,15 +352,16 @@ async fn prepared_identity_matches_chunks_in_both_label_modes_including_empty_re
         assert_eq!(source.polls.load(Ordering::SeqCst), 0);
         let end = source.read_series(2..2).unwrap();
         assert_eq!(end.schema().fields.len(), 1);
-        assert_eq!(
-            matches!(end.label_source(), RawLabelSource::Explicit),
-            explicit
-        );
+        assert_eq!(end.ordering(), SeriesOrdering::Contiguous);
+        assert_same_label_source(source.label_source(), end.label_source());
+        assert_eq!(source.polls.load(Ordering::SeqCst), 0);
 
-        let chunks =
-            futures::TryStreamExt::try_collect::<Vec<_>>(source.read_series(0..2).unwrap())
-                .await
-                .unwrap();
+        let reader = source.read_series(0..2).unwrap();
+        assert_same_label_source(source.label_source(), reader.label_source());
+        assert_eq!(source.polls.load(Ordering::SeqCst), 0);
+        let chunks = futures::TryStreamExt::try_collect::<Vec<_>>(reader)
+            .await
+            .unwrap();
         assert_eq!(chunks.len(), 3);
         assert_eq!(source.polls.load(Ordering::SeqCst), 3);
         assert_eq!(chunks[1].time.timestamp(0), Some(10));
@@ -331,6 +391,7 @@ async fn prepared_identity_matches_chunks_in_both_label_modes_including_empty_re
 #[tokio::test]
 async fn empty_prepared_source_supports_its_empty_range() {
     let source = empty_source();
+    assert!(matches!(source.label_source(), RawLabelSource::Explicit));
     assert_eq!(source.num_series(), 0);
     let stream = source.read_series(0..0).unwrap();
     assert_eq!(stream.schema().fields.len(), 1);
