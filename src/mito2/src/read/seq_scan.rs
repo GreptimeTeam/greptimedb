@@ -106,10 +106,9 @@ impl SeqScan {
     )]
     pub fn build_stream(&self) -> Result<SendableRecordBatchStream, BoxedError> {
         let metrics_set = ExecutionPlanMetricsSet::new();
+        let ctx = QueryScanContext::default();
         let streams = (0..self.properties.partitions.len())
-            .map(|partition: usize| {
-                self.scan_partition(&QueryScanContext::default(), &metrics_set, partition)
-            })
+            .map(|partition: usize| self.scan_partition(&ctx, &metrics_set, partition))
             .collect::<Result<Vec<_>, _>>()?;
 
         let aggr_stream = ChainedRecordBatchStream::new(streams).map_err(BoxedError::new)?;
@@ -505,6 +504,9 @@ impl SeqScan {
 
     /// Checks resource limit for the scanner.
     pub(crate) fn check_scan_limit(&self) -> Result<()> {
+        if self.stream_ctx.input.uses_scan_memory_limit() {
+            return Ok(());
+        }
         // Check max file count limit for all partitions since we scan them in parallel.
         let total_max_files: usize = self
             .properties

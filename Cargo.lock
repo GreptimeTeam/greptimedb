@@ -14411,6 +14411,7 @@ dependencies = [
  "common-time",
  "common-wal",
  "datafusion-common",
+ "datafusion-execution",
  "datafusion-expr",
  "datafusion-physical-plan",
  "datatypes",

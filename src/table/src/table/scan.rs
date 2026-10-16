@@ -456,6 +456,7 @@ impl ExecutionPlan for RegionScanExec {
 
         let ctx = QueryScanContext {
             explain_verbose: self.explain_verbose,
+            memory_pool: context.memory_pool().clone(),
         };
         let stream = self
             .scanner
@@ -732,6 +733,7 @@ mod test {
         properties: ScannerProperties,
         metadata: store_api::metadata::RegionMetadataRef,
         dynamic_filters: Arc<Mutex<Vec<Arc<DynamicFilterPhysicalExpr>>>>,
+        observed_pool: Arc<Mutex<Option<Arc<dyn datafusion::execution::memory_pool::MemoryPool>>>>,
     }
 
     impl fmt::Display for RepeatableScanner {
@@ -770,10 +772,11 @@ mod test {
 
         fn scan_partition(
             &self,
-            _ctx: &QueryScanContext,
+            ctx: &QueryScanContext,
             _metrics_set: &ExecutionPlanMetricsSet,
             _partition: usize,
         ) -> Result<SendableRecordBatchStream, BoxedError> {
+            *self.observed_pool.lock().unwrap() = Some(ctx.memory_pool.clone());
             Ok(self.batches.as_stream())
         }
 
@@ -960,6 +963,7 @@ mod test {
                 batches,
                 properties: ScannerProperties::new(vec![vec![], vec![]], false, 0),
                 metadata: metadata.clone(),
+                observed_pool: Default::default(),
                 dynamic_filters: Arc::new(Mutex::new(Vec::new())),
             });
             let request = ScanRequest {
@@ -1220,6 +1224,31 @@ mod test {
     }
 
     #[test]
+    fn test_execute_forwards_runtime_memory_pool() {
+        let (schema, batch, metadata) = dynamic_filter_test_data(5686, false);
+        let observed_pool = Arc::new(Mutex::new(None));
+        let scanner = RepeatableScanner {
+            batches: RecordBatches::try_new(schema, vec![batch]).unwrap(),
+            properties: ScannerProperties::default(),
+            metadata,
+            dynamic_filters: Default::default(),
+            observed_pool: observed_pool.clone(),
+        };
+        let plan =
+            Arc::new(RegionScanExec::new(Box::new(scanner), ScanRequest::default(), None).unwrap());
+        for _ in 0..2 {
+            let context = SessionContext::new().task_ctx();
+            let pool = context.memory_pool().clone();
+            drop(plan.execute(0, context).unwrap());
+            assert!(Arc::ptr_eq(
+                observed_pool.lock().unwrap().as_ref().unwrap(),
+                &pool
+            ));
+            plan.scanner.lock().unwrap().reset_state();
+        }
+    }
+
+    #[test]
     fn test_count_statistics_require_exact_source_rows() {
         for (append_mode, exact, expected) in [
             (true, false, Precision::Absent),
@@ -1236,6 +1265,7 @@ mod test {
                     .with_total_rows_is_exact(exact),
                 metadata,
                 dynamic_filters: Arc::new(Mutex::new(Vec::new())),
+                observed_pool: Default::default(),
             });
             let plan = RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap();
             let stats = StatisticsContext::new()
@@ -1271,6 +1301,7 @@ mod test {
             properties: ScannerProperties::default(),
             metadata,
             dynamic_filters: scanner_dynamic_filters.clone(),
+            observed_pool: Default::default(),
         };
         let plan =
             Arc::new(RegionScanExec::new(Box::new(scanner), ScanRequest::default(), None).unwrap());
