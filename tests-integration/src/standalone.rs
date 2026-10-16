@@ -478,7 +478,7 @@ mod tests {
         let mut header = RegionRequestHeader::default();
         header.tracing_context = std::collections::HashMap::from([(
             "traceparent".to_string(),
-            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+            "00-11111111111111111111111111111111-2222222222222222-01".to_string(),
         )]);
         header.query_context = Some(ProtoQueryContext {
             current_catalog: "custom_catalog".to_string(),
