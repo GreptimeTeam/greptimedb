@@ -1,8 +1,0 @@
-name = "column_encoding_downgrade"
-reason = "Verify v1.1.4 can reopen a table whose columns carry COMPRESSION WITH (encoding = ...) and read the plain and delta encoded SSTs written by the current binary."
-introduced_by = "PR #9629"
-topologies = ["distributed", "standalone"]
-from_range = [">=v1.4.0-alpha.0"]
-to_range = ["=v1.1.4"]
-features = ["table", "downgrade", "sst", "compression", "encoding"]
-owner = "storage"
