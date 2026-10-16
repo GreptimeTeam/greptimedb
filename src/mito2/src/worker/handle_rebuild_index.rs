@@ -240,7 +240,6 @@ impl<S> RegionWorkerLoop<S> {
                 })
                 .collect::<Vec<_>>()
         };
-        drop(manifest);
 
         if build_tasks.is_empty() {
             debug!(

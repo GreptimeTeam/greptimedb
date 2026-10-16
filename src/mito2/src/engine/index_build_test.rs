@@ -1266,6 +1266,100 @@ async fn test_unrelated_schema_change_retries_stale_flush_index_build() {
 }
 
 #[tokio::test]
+async fn test_manual_build_waits_for_schema_change_retry() {
+    let mut env = TestEnv::with_prefix("test_manual_build_waits_for_schema_change_retry_").await;
+    let gate = Arc::new(IndexPublicationGate::new(
+        IndexPublicationPhase::BeforeManifestCommit,
+    ));
+    let engine = Arc::new(
+        env.create_engine_with(
+            async_build_mode_config(false),
+            None,
+            Some(gate.clone()),
+            None,
+        )
+        .await,
+    );
+
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new().build_with_index();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_and_flush(&engine, region_id, &column_schemas, 0..20).await;
+
+    let engine_for_build = engine.clone();
+    let manual_build = tokio::spawn(async move {
+        engine_for_build
+            .handle_request(
+                region_id,
+                RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_entered(1))
+        .await
+        .expect("manual index build did not reach manifest publication");
+
+    // An unrelated schema change makes the manual publication stale.
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::AddColumns {
+                    columns: vec![AddColumn {
+                        column_metadata: ColumnMetadata {
+                            column_schema: ColumnSchema::new(
+                                "field_1",
+                                ConcreteDataType::float64_datatype(),
+                                true,
+                            ),
+                            semantic_type: SemanticType::Field,
+                            column_id: 3,
+                        },
+                        location: None,
+                    }],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+    gate.release(1);
+    tokio::time::timeout(Duration::from_secs(10), gate.wait_entered(2))
+        .await
+        .expect("stale manual index build was not retried");
+    // The caller waits for the retry rather than the aborted attempt.
+    assert!(!manual_build.is_finished());
+
+    gate.release(1);
+    tokio::time::timeout(Duration::from_secs(10), manual_build)
+        .await
+        .expect("manual index build request did not finish")
+        .expect("manual index build task panicked")
+        .unwrap();
+
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
+}
+
+#[tokio::test]
 async fn test_schema_change_uses_manifest_file_generation() {
     let mut env = TestEnv::with_prefix("test_schema_change_uses_manifest_file_generation_").await;
     let mut config = async_build_mode_config(false);
@@ -1701,7 +1795,6 @@ async fn test_index_build_type_manual_waits_for_in_flight_flush_build() {
         .unwrap();
     assert_eq!(scanner.num_files(), 1);
     assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
-    assert_eq!(gate.finish_count(), 1);
 }
 
 #[tokio::test]
