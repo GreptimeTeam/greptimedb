@@ -1098,3 +1098,51 @@ fn bound_series_scan_uses_open_scanner_metadata_without_execution() {
     assert_eq!(state.lock().unwrap().raw_calls, 0);
     assert_eq!(state.lock().unwrap().legacy_calls, 0);
 }
+
+#[tokio::test]
+async fn raw_series_admission_captures_scanner_ordering_before_execution() {
+    for ordering in [
+        RawSeriesOrdering::ReadKeyThenTime,
+        RawSeriesOrdering::Contiguous,
+    ] {
+        let schema = series_schema();
+        let chunk = chunk(&schema);
+        let (scan, state) = fixture(Some(schema), vec![chunk]);
+        {
+            let mut state = state.lock().unwrap();
+            state.planned_ordering = Some(ordering);
+            state.stream_ordering = Some(ordering);
+        }
+
+        let plan = scan
+            .try_to_series_scan(RawLabelSource::Explicit)
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.raw_series_ordering(), ordering);
+        assert_eq!(
+            raw_series_frame_ordering(plan.schema().as_ref()).unwrap(),
+            ordering
+        );
+        {
+            let state = state.lock().unwrap();
+            assert_eq!(state.preflights, 1);
+            assert_eq!(state.raw_calls, 0);
+            assert_eq!(state.legacy_calls, 0);
+            assert_eq!(state.polls, 0);
+            assert_eq!(state.drops, 0);
+        }
+
+        state.lock().unwrap().planned_ordering = Some(match ordering {
+            RawSeriesOrdering::ReadKeyThenTime => RawSeriesOrdering::Contiguous,
+            RawSeriesOrdering::Contiguous => RawSeriesOrdering::ReadKeyThenTime,
+        });
+        assert_eq!(plan.raw_series_ordering(), ordering);
+        assert!(plan.execute(0, context()).is_err());
+        let state = state.lock().unwrap();
+        assert_eq!(state.preflights, 2);
+        assert_eq!(state.raw_calls, 0);
+        assert_eq!(state.legacy_calls, 0);
+        assert_eq!(state.polls, 0);
+        assert_eq!(state.drops, 0);
+    }
+}

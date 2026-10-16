@@ -19,6 +19,10 @@ mod json_expr_planner;
 mod pg_oid_alias_expr_planner;
 mod planner;
 
+#[cfg(test)]
+#[path = "datafusion/raw_series_admission_tests.rs"]
+mod raw_series_admission_tests;
+
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -53,6 +57,7 @@ use datafusion_expr::{
 };
 use datatypes::prelude::VectorRef;
 use datatypes::schema::Schema;
+use datatypes::series::raw::RawSeriesOrdering;
 use futures_util::StreamExt;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -67,10 +72,11 @@ pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::dist_plan::{
     DistPlannerOptions, MergeScanLogicalPlan, RemoteDynFilterReceiverInjectorRef,
 };
+use crate::dummy_catalog::DummyTableProvider;
 use crate::error::{
     CatalogSnafu, CreateRecordBatchSnafu, MissingTableMutationHandlerSnafu,
     MissingTimestampColumnSnafu, QueryExecutionSnafu, Result, TableMutationSnafu,
-    TableNotFoundSnafu, TableReadOnlySnafu, UnsupportedExprSnafu,
+    TableNotFoundSnafu, TableReadOnlySnafu, UnimplementedSnafu, UnsupportedExprSnafu,
 };
 use crate::executor::QueryExecutor;
 use crate::metrics::{
@@ -202,7 +208,113 @@ pub struct DatafusionQueryEngine {
     plugins: Plugins,
 }
 
+struct PreparedRawSeries {
+    context: QueryEngineContext,
+    plan: Arc<dyn ExecutionPlan>,
+    ordering: RawSeriesOrdering,
+}
+
 impl DatafusionQueryEngine {
+    async fn prepare_raw_series_plan(
+        &self,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+        binding: &RawSeriesRequest,
+    ) -> Result<Option<PreparedRawSeries>> {
+        if let Some(hint) = query_ctx.extension(QUERY_PARALLELISM_HINT)
+            && hint.parse::<usize>().ok() != Some(1)
+        {
+            return Ok(None);
+        }
+        if query_ctx
+            .extension(INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY)
+            .is_some()
+        {
+            return Ok(None);
+        }
+        let LogicalPlan::TableScan(scan) = &plan else {
+            return Ok(None);
+        };
+        if scan.fetch.is_some()
+            || scan.projection.is_none()
+            || !scan.statistics_requests.is_empty()
+            || scan.filters.iter().any(|e| !raw_expr_supported(e))
+        {
+            return Ok(None);
+        }
+        let Some(source) = scan.source.downcast_ref::<DefaultTableSource>() else {
+            return Ok(None);
+        };
+        let Some(provider) = source.table_provider.downcast_ref::<DummyTableProvider>() else {
+            return Ok(None);
+        };
+        let Some(provider) = provider.clone_for_raw_series() else {
+            return Ok(None);
+        };
+        let replacement = Arc::new(provider);
+        let new_source = Arc::new(DefaultTableSource::new(replacement));
+        let mut scan = scan.clone();
+        scan.source = new_source;
+        let plan = LogicalPlan::TableScan(scan);
+
+        let normal_ctx = self.engine_context(query_ctx.clone());
+        let mut state = normal_ctx.state().clone();
+        let config = state.config().clone().with_target_partitions(1);
+        *state.config_mut() = config;
+        let mut ctx = QueryEngineContext::new(state, query_ctx.clone());
+        let physical = self.create_physical_plan(&mut ctx, &plan).await?;
+        let physical = self.optimize_physical_plan(&mut ctx, physical)?;
+        let cooperative = (physical.as_ref() as &dyn Any).downcast_ref::<CooperativeExec>();
+        let scan_candidate = cooperative.map_or(&physical, |plan| plan.input());
+        if scan_candidate.name() != REGION_SCAN_EXEC_NAME {
+            common_telemetry::debug!(
+                "Raw series physical plan rejected: root={}, scan candidate={}",
+                physical.name(),
+                scan_candidate.name(),
+            );
+            return Ok(None);
+        }
+        let Some(scan) = (scan_candidate.as_ref() as &dyn Any).downcast_ref::<RegionScanExec>()
+        else {
+            return Ok(None);
+        };
+        let ranges = scan.get_partition_ranges();
+        let prepared = Arc::new(
+            scan.with_new_partitions(vec![ranges], 1)
+                .map_err(BoxedError::new)
+                .context(QueryExecutionSnafu)?,
+        );
+        let Some(native) = prepared.clone().try_to_bound_series_scan(binding)? else {
+            return Ok(None);
+        };
+        let ordering = native.raw_series_ordering();
+        let native_plan: Arc<dyn ExecutionPlan> = native;
+        let native_plan = if cooperative.is_some() {
+            physical.replace_children(
+                vec![native_plan],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )?
+        } else {
+            native_plan
+        };
+        let wrapped = if let Some(wrapper) = self.plugins.get::<PhysicalPlanWrapperRef>() {
+            wrapper.wrap(native_plan.clone(), query_ctx)
+        } else {
+            native_plan.clone()
+        };
+        if !Arc::ptr_eq(&native_plan, &wrapped)
+            || native_plan.schema() != wrapped.schema()
+            || wrapped.properties().output_partitioning().partition_count() != 1
+        {
+            return Ok(None);
+        }
+        Ok(Some(PreparedRawSeries {
+            context: ctx,
+            plan: wrapped,
+            ordering,
+        }))
+    }
+
     pub fn new(state: Arc<QueryEngineState>, plugins: Plugins) -> Self {
         Self { state, plugins }
     }
@@ -580,111 +692,37 @@ impl QueryEngine for DatafusionQueryEngine {
         }
     }
 
+    async fn prepare_raw_series(
+        &self,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+        binding: RawSeriesRequest,
+    ) -> Result<Option<RawSeriesOrdering>> {
+        Ok(self
+            .prepare_raw_series_plan(plan, query_ctx, &binding)
+            .await?
+            .map(|prepared| prepared.ordering))
+    }
+
     async fn execute_raw_series(
         &self,
         plan: LogicalPlan,
         query_ctx: QueryContextRef,
         binding: RawSeriesRequest,
     ) -> Result<Output> {
-        use crate::dummy_catalog::DummyTableProvider;
-        use crate::error::{QueryExecutionSnafu, UnimplementedSnafu};
-
-        let unsupported = || {
-            UnimplementedSnafu {
+        let Some(prepared) = self
+            .prepare_raw_series_plan(plan, query_ctx, &binding)
+            .await?
+        else {
+            return Err(UnimplementedSnafu {
                 operation: "unsupported native raw-series plan".to_string(),
             }
-            .build()
+            .build());
         };
-        if let Some(hint) = query_ctx.extension(QUERY_PARALLELISM_HINT)
-            && hint.parse::<usize>().ok() != Some(1)
-        {
-            return Err(unsupported());
-        }
-        if query_ctx
-            .extension(INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY)
-            .is_some()
-        {
-            return Err(unsupported());
-        }
-        let LogicalPlan::TableScan(scan) = &plan else {
-            return Err(unsupported());
-        };
-        if scan.fetch.is_some()
-            || scan.projection.is_none()
-            || !scan.statistics_requests.is_empty()
-            || scan.filters.iter().any(|e| !raw_expr_supported(e))
-        {
-            return Err(unsupported());
-        }
-        let Some(source) = scan.source.downcast_ref::<DefaultTableSource>() else {
-            return Err(unsupported());
-        };
-        let Some(provider) = source.table_provider.downcast_ref::<DummyTableProvider>() else {
-            return Err(unsupported());
-        };
-        let Some(provider) = provider.clone_for_raw_series() else {
-            return Err(unsupported());
-        };
-        let replacement = Arc::new(provider);
-        let new_source = Arc::new(DefaultTableSource::new(replacement));
-        let mut scan = scan.clone();
-        scan.source = new_source;
-        let plan = LogicalPlan::TableScan(scan);
-
-        let normal_ctx = self.engine_context(query_ctx.clone());
-        let mut state = normal_ctx.state().clone();
-        let config = state.config().clone().with_target_partitions(1);
-        *state.config_mut() = config;
-        let mut ctx = QueryEngineContext::new(state, query_ctx.clone());
-        let physical = self.create_physical_plan(&mut ctx, &plan).await?;
-        let physical = self.optimize_physical_plan(&mut ctx, physical)?;
-        let cooperative = (physical.as_ref() as &dyn Any).downcast_ref::<CooperativeExec>();
-        let scan_candidate = cooperative.map_or(&physical, |plan| plan.input());
-        if scan_candidate.name() != REGION_SCAN_EXEC_NAME {
-            common_telemetry::debug!(
-                "Raw series physical plan rejected: root={}, scan candidate={}",
-                physical.name(),
-                scan_candidate.name(),
-            );
-            return Err(unsupported());
-        }
-        let Some(scan) = (scan_candidate.as_ref() as &dyn Any).downcast_ref::<RegionScanExec>()
-        else {
-            return Err(unsupported());
-        };
-        let ranges = scan.get_partition_ranges();
-        let prepared = Arc::new(
-            scan.with_new_partitions(vec![ranges], 1)
-                .map_err(BoxedError::new)
-                .context(QueryExecutionSnafu)?,
-        );
-        let Some(native) = prepared.clone().try_to_bound_series_scan(&binding)? else {
-            return Err(unsupported());
-        };
-        let native_plan: Arc<dyn ExecutionPlan> = native;
-        let native_plan = if cooperative.is_some() {
-            physical.replace_children(
-                vec![native_plan],
-                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
-            )?
-        } else {
-            native_plan
-        };
-        let wrapped = if let Some(wrapper) = self.plugins.get::<PhysicalPlanWrapperRef>() {
-            wrapper.wrap(native_plan.clone(), query_ctx)
-        } else {
-            native_plan.clone()
-        };
-        if !Arc::ptr_eq(&native_plan, &wrapped)
-            || native_plan.schema() != wrapped.schema()
-            || wrapped.properties().output_partitioning().partition_count() != 1
-        {
-            return Err(unsupported());
-        }
-        let stream = self.execute_stream(&ctx, &wrapped)?;
+        let stream = self.execute_stream(&prepared.context, &prepared.plan)?;
         Ok(Output::new(
             OutputData::Stream(stream),
-            OutputMeta::new_with_plan(wrapped),
+            OutputMeta::new_with_plan(prepared.plan),
         ))
     }
 

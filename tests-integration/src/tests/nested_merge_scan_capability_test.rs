@@ -1226,11 +1226,14 @@ async fn assert_raw_entrypoint_wrapper_contract(
     use query::query_engine::QueryEngineFactory;
     use std::any::Any;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Mutex, Weak};
     use table::table::scan::SeriesScanExec;
 
     struct TestWrapper {
         identity: bool,
         calls: Arc<AtomicUsize>,
+        prepared_ordering: Arc<Mutex<Option<RawSeriesOrdering>>>,
+        prepared_plan: Arc<Mutex<Option<Weak<dyn ExecutionPlan>>>>,
     }
 
     impl PhysicalPlanWrapper for TestWrapper {
@@ -1240,6 +1243,13 @@ async fn assert_raw_entrypoint_wrapper_contract(
             _ctx: QueryContextRef,
         ) -> Arc<dyn ExecutionPlan> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(root) = (origin.as_ref() as &dyn Any).downcast_ref::<CooperativeExec>()
+                && let Some(child) =
+                    (root.input().as_ref() as &dyn Any).downcast_ref::<SeriesScanExec>()
+            {
+                *self.prepared_ordering.lock().unwrap() = Some(child.raw_series_ordering());
+                *self.prepared_plan.lock().unwrap() = Some(Arc::downgrade(&origin));
+            }
             if self.identity {
                 origin
             } else {
@@ -1273,11 +1283,15 @@ async fn assert_raw_entrypoint_wrapper_contract(
     .build()
     .unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
+    let prepared_ordering = Arc::new(Mutex::new(None));
+    let prepared_plan = Arc::new(Mutex::new(None));
     let plugins_for = |identity| {
         let plugins = Plugins::new();
         plugins.insert(Arc::new(TestWrapper {
             identity,
             calls: calls.clone(),
+            prepared_ordering: prepared_ordering.clone(),
+            prepared_plan: prepared_plan.clone(),
         }) as PhysicalPlanWrapperRef);
         plugins
     };
@@ -1297,6 +1311,42 @@ async fn assert_raw_entrypoint_wrapper_contract(
     };
 
     let identity_engine = make_engine(true);
+    assert_eq!(
+        Some(RawSeriesOrdering::ReadKeyThenTime),
+        identity_engine
+            .prepare_raw_series(scan.clone(), query_ctx.clone(), binding.clone())
+            .await
+            .unwrap()
+    );
+    assert_eq!(1, calls.load(Ordering::SeqCst));
+    assert_eq!(
+        Some(RawSeriesOrdering::ReadKeyThenTime),
+        *prepared_ordering.lock().unwrap()
+    );
+    assert!(
+        prepared_plan
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .upgrade()
+            .is_none(),
+        "preparation should release its physical plan"
+    );
+    let mut mismatched_binding = binding.clone();
+    mismatched_binding.physical_metadata.schema_version += 1;
+    let binding_error = identity_engine
+        .prepare_raw_series(scan.clone(), query_ctx.clone(), mismatched_binding)
+        .await
+        .unwrap_err();
+    assert!(
+        binding_error
+            .to_string()
+            .contains("Raw-series metadata mismatch")
+    );
+    calls.store(0, Ordering::SeqCst);
+    *prepared_ordering.lock().unwrap() = None;
+    *prepared_plan.lock().unwrap() = None;
     let identity_output = identity_engine
         .execute_raw_series(scan.clone(), query_ctx.clone(), binding.clone())
         .await
@@ -1370,9 +1420,20 @@ async fn assert_raw_entrypoint_wrapper_contract(
     );
 
     calls.store(0, Ordering::SeqCst);
+    *prepared_ordering.lock().unwrap() = None;
+    *prepared_plan.lock().unwrap() = None;
     let wrapped_engine = make_engine(false);
+    assert_eq!(
+        None,
+        wrapped_engine
+            .prepare_raw_series(scan.clone(), query_ctx.clone(), binding.clone())
+            .await
+            .unwrap()
+    );
+    assert_eq!(1, calls.load(Ordering::SeqCst));
+    calls.store(0, Ordering::SeqCst);
     let raw_error = match wrapped_engine
-        .execute_raw_series(scan.clone(), query_ctx.clone(), binding)
+        .execute_raw_series(scan.clone(), query_ctx.clone(), binding.clone())
         .await
     {
         Err(error) => error,

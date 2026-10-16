@@ -56,6 +56,7 @@ use datafusion_physical_expr::{
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::compute::SortOptions;
 use datatypes::series::frame::RawLabelMode;
+use datatypes::series::raw::RawSeriesOrdering;
 use datatypes::series::samples::SeriesSchema;
 use futures::{Stream, StreamExt};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
@@ -474,10 +475,11 @@ impl RegionScanExec {
         else {
             return Ok(None);
         };
+        let ordering = scanner.raw_series_ordering();
         let arrow_schema = raw_series_frame_schema_with_ordering(
             &schema,
             raw_label_mode(&label_source),
-            scanner.raw_series_ordering(),
+            ordering,
         )?;
         let partition_count = scanner.properties().num_partitions().max(1);
         let properties = Arc::new(PlanProperties::new(
@@ -492,6 +494,7 @@ impl RegionScanExec {
             label_source,
             series_schema: schema,
             arrow_schema,
+            ordering,
             properties,
         })))
     }
@@ -504,6 +507,7 @@ pub struct SeriesScanExec {
     label_source: RawLabelSource,
     series_schema: Arc<SeriesSchema>,
     arrow_schema: ArrowSchemaRef,
+    ordering: RawSeriesOrdering,
     properties: Arc<PlanProperties>,
 }
 
@@ -530,6 +534,11 @@ impl SeriesScanExec {
     }
     pub fn series_schema(&self) -> &Arc<SeriesSchema> {
         &self.series_schema
+    }
+
+    /// Returns the producer ordering captured when this scan was prepared.
+    pub fn raw_series_ordering(&self) -> RawSeriesOrdering {
+        self.ordering
     }
 
     pub fn query_load_region_id(&self) -> Option<u64> {
