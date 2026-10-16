@@ -582,6 +582,24 @@ lazy_static! {
         &[FILE_TYPE_LABEL],
     ).unwrap();
 
+    /// Counter for the number of temporary files deleted by the sweeper.
+    pub static ref SWEEP_FILES_DELETED_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_sweep_files_deleted_total",
+        "Total temporary files deleted by the sweeper",
+    ).unwrap();
+
+    /// Counter for the number of failures while sweeping temporary files.
+    pub static ref SWEEP_ERRORS_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_sweep_errors_total",
+        "Total failures while sweeping temporary files",
+    ).unwrap();
+
+    /// Counter for the number of temporary file sweeps run.
+    pub static ref SWEEP_RUNS_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_sweep_runs_total",
+        "Total temporary file sweeps run",
+    ).unwrap();
+
     /// Total number of files downloaded during cache fill on region open.
     pub static ref CACHE_FILL_DOWNLOADED_FILES: IntCounter = register_int_counter!(
         "mito_cache_fill_downloaded_files",

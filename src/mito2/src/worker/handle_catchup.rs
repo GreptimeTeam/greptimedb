@@ -28,6 +28,7 @@ use crate::region::MitoRegion;
 use crate::region::catchup::RegionCatchupTask;
 use crate::region::opener::RegionOpener;
 use crate::request::OptionOutputTx;
+use crate::temp_file_sweeper;
 use crate::wal::entry_distributor::WalEntryReceiver;
 use crate::worker::RegionWorkerLoop;
 
@@ -69,6 +70,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let catchup_regions = self.catchup_regions.clone();
         let wal = self.wal.clone();
         let allow_stale_entries = self.config.allow_stale_entries;
+        let sweep_older_than = self.config.gc.unknown_file_lingering_time;
+        let sweep_limiter = self.sweep_limiter.clone();
         common_runtime::spawn_global(async move {
             let mut task = RegionCatchupTask::new(region.clone(), wal, allow_stale_entries)
                 .with_entry_receiver(entry_receiver)
@@ -80,11 +83,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     if request.set_writable {
                         region.set_role(RegionRole::Leader);
                         // Finalize leadership: persist backfilled metadata.
-                        if let Err(err) = region
+                        match region
                             .set_role_state_gracefully(SettableRegionRoleState::Leader)
                             .await
                         {
-                            error!(err; "Failed to set region {region_id} to leader");
+                            Ok(()) => temp_file_sweeper::spawn_region_sweep(
+                                region.access_layer(),
+                                region_id,
+                                sweep_older_than,
+                                sweep_limiter,
+                            ),
+                            Err(err) => {
+                                error!(err; "Failed to set region {region_id} to leader");
+                            }
                         }
                     }
                     catchup_regions.remove_region(region_id);
