@@ -361,15 +361,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_bulk_insert_physical_region_passthrough() {
-        check_bulk_insert_physical_region_passthrough(false, false).await;
-        check_bulk_insert_physical_region_passthrough(true, false).await;
+        check_bulk_insert_physical_region_passthrough(false, false, false).await;
+        check_bulk_insert_physical_region_passthrough(true, false, false).await;
+    }
+
+    #[tokio::test]
+    async fn test_bulk_insert_physical_region_close_recovery() {
+        for retain_partition_columns in [false, true] {
+            check_bulk_insert_physical_region_passthrough(false, retain_partition_columns, true)
+                .await;
+            check_bulk_insert_physical_region_passthrough(true, retain_partition_columns, true)
+                .await;
+        }
     }
 
     #[tokio::test]
     async fn test_physical_bulk_partition_columns_preserve_stored_rows() {
         for skip_wal in [false, true] {
-            let stripped = check_bulk_insert_physical_region_passthrough(skip_wal, false).await;
-            let retained = check_bulk_insert_physical_region_passthrough(skip_wal, true).await;
+            let stripped =
+                check_bulk_insert_physical_region_passthrough(skip_wal, false, false).await;
+            let retained =
+                check_bulk_insert_physical_region_passthrough(skip_wal, true, false).await;
             assert_eq!(retained, stripped);
         }
     }
@@ -377,13 +389,14 @@ mod tests {
     async fn check_bulk_insert_physical_region_passthrough(
         skip_wal: bool,
         retain_partition_columns: bool,
+        close: bool,
     ) -> String {
         // Use flat format so that BulkMemtable is used (supports write_bulk).
         let mito_config = MitoConfig {
             default_flat_format: true,
             ..Default::default()
         };
-        let env = TestEnv::with_mito_config("", mito_config, Default::default()).await;
+        let mut env = TestEnv::with_mito_config("", mito_config, Default::default()).await;
         env.init_metric_region().await;
         env.metric().inner.flush_task.stop().await.unwrap();
         let physical_region_id = env.default_physical_region_id();
@@ -442,20 +455,23 @@ mod tests {
         assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 6);
         let stored_rows = batches.pretty_print().unwrap();
 
-        // Closing without a flush must recover only WAL-backed data. Recreate
-        // the wrapper too, so its metadata cache cannot hide missing metadata.
         let stat = env.mito().region_statistic(physical_region_id).unwrap();
         assert_eq!(stat.sst_num, 0);
-        env.metric()
-            .handle_request(
-                physical_region_id,
-                RegionRequest::Close(RegionCloseRequest {
-                    flush_on_close: false,
-                }),
-            )
-            .await
-            .unwrap();
-        let reopened = MetricEngine::try_new(env.mito(), Default::default()).unwrap();
+        let reopened = if close {
+            env.metric()
+                .handle_request(
+                    physical_region_id,
+                    RegionRequest::Close(RegionCloseRequest::default()),
+                )
+                .await
+                .unwrap();
+            // Recreating the wrapper prevents its metadata cache from hiding data loss.
+            MetricEngine::try_new(env.mito(), Default::default()).unwrap()
+        } else {
+            // Stopping workers without Close exercises recovery from WAL alone.
+            env.reopen_engine(Default::default()).await;
+            env.metric()
+        };
         reopened.inner.flush_task.stop().await.unwrap();
         reopened
             .handle_request(
@@ -474,6 +490,11 @@ mod tests {
             )
             .await
             .unwrap();
+        let stat = env
+            .mito()
+            .region_statistic(crate::utils::to_data_region_id(physical_region_id))
+            .unwrap();
+        assert_eq!(stat.sst_num > 0, skip_wal && close);
         let stream = reopened
             .scan_to_stream(logical_region_id, ScanRequest::default())
             .await
@@ -481,7 +502,7 @@ mod tests {
         let batches = RecordBatches::try_collect(stream).await.unwrap();
         assert_eq!(
             batches.iter().map(|b| b.num_rows()).sum::<usize>(),
-            if skip_wal { 0 } else { 6 },
+            if skip_wal && !close { 0 } else { 6 },
         );
         stored_rows
     }
