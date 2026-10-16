@@ -1728,6 +1728,7 @@ mod tests {
 
         (
             SenderBulkRequest {
+                skip_wal: false,
                 sender: OptionOutputTx::from(sender),
                 region_id,
                 request: converter.convert().unwrap(),

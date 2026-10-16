@@ -96,6 +96,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             None
         };
         pending_bulk_request.push(SenderBulkRequest {
+            skip_wal: request.skip_wal,
             sender,
             request: part,
             region_id: request.region_id,

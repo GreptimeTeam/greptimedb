@@ -62,6 +62,8 @@ use standalone::{StandaloneDatanodeManager, StandaloneRepartitionProcedureFactor
 use crate::test_util::{self, StorageType, TestGuard, create_tmp_dir_and_datanode_opts};
 
 pub struct GreptimeDbStandalone {
+    /// Storage engine for assertions across protocol and storage boundaries.
+    pub mito_engine: mito2::engine::MitoEngine,
     pub frontend: Arc<Frontend>,
     pub opts: StandaloneOptions,
     pub guard: TestGuard,
@@ -342,6 +344,7 @@ impl GreptimeDbStandaloneBuilder {
         };
 
         GreptimeDbStandalone {
+            mito_engine: datanode.region_server().mito_engine().unwrap(),
             frontend: Arc::new(frontend),
             opts,
             guard,
