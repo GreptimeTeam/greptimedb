@@ -22,7 +22,6 @@ mod set_operator;
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::sync::Arc;
 
-use arrow::datatypes::IntervalDayTime;
 use async_recursion::async_recursion;
 use catalog::table_source::DfTableSourceProvider;
 use common_error::ext::ErrorExt;
@@ -45,7 +44,7 @@ use datafusion::functions_aggregate::stddev::stddev_pop_udaf;
 use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion::functions_aggregate::variance::var_pop_udaf;
 use datafusion::functions_window::row_number::RowNumber;
-use datafusion::logical_expr::expr::{Alias, ScalarFunction, WindowFunction};
+use datafusion::logical_expr::expr::{Alias, Case, ScalarFunction, TryCast, WindowFunction};
 use datafusion::logical_expr::expr_rewriter::normalize_cols;
 use datafusion::logical_expr::{
     BinaryExpr, Cast, EmptyRelation, Extension, LogicalPlan, LogicalPlanBuilder, Operator,
@@ -2327,6 +2326,7 @@ impl PromPlanner {
             input.schema(),
             query_engine_state,
             range_fold_offset,
+            args.input.is_some(),
         )?;
         func_exprs.insert(0, self.create_time_index_column_expr()?);
         func_exprs.extend_from_slice(&self.create_tag_column_exprs()?);
@@ -3561,6 +3561,7 @@ impl PromPlanner {
         input_schema: &DFSchemaRef,
         query_engine_state: &QueryEngineState,
         range_fold_offset: Option<Millisecond>,
+        has_input_arg: bool,
     ) -> Result<(Vec<DfExpr>, Vec<String>)> {
         // TODO(ruihang): check function args list
         let mut other_input_exprs: VecDeque<DfExpr> = other_input_exprs.into();
@@ -3816,81 +3817,66 @@ impl PromPlanner {
                 ));
                 ScalarFunc::GeneratedExpr
             }
-            "minute" => {
-                // date_part('minute', time_index)
-                let expr = self.date_part_on_time_index("minute")?;
-                exprs.push(expr);
-                ScalarFunc::GeneratedExpr
-            }
-            "hour" => {
-                // date_part('hour', time_index)
-                let expr = self.date_part_on_time_index("hour")?;
-                exprs.push(expr);
-                ScalarFunc::GeneratedExpr
-            }
-            "month" => {
-                // date_part('month', time_index)
-                let expr = self.date_part_on_time_index("month")?;
-                exprs.push(expr);
-                ScalarFunc::GeneratedExpr
-            }
-            "year" => {
-                // date_part('year', time_index)
-                let expr = self.date_part_on_time_index("year")?;
-                exprs.push(expr);
-                ScalarFunc::GeneratedExpr
-            }
-            "day_of_month" => {
-                // date_part('day', time_index)
-                let expr = self.date_part_on_time_index("day")?;
-                exprs.push(expr);
-                ScalarFunc::GeneratedExpr
-            }
-            "day_of_week" => {
-                // date_part('dow', time_index)
-                let expr = self.date_part_on_time_index("dow")?;
-                exprs.push(expr);
-                ScalarFunc::GeneratedExpr
-            }
-            "day_of_year" => {
-                // date_part('doy', time_index)
-                let expr = self.date_part_on_time_index("doy")?;
-                exprs.push(expr);
-                ScalarFunc::GeneratedExpr
-            }
-            "days_in_month" => {
-                // date_part(
-                //     'days',
-                //     (date_trunc('month', <TIME INDEX>::date) + interval '1 month - 1 day')
-                // );
-                let day_lit_expr = "day".lit();
-                let month_lit_expr = "month".lit();
-                let interval_1month_lit_expr =
-                    DfExpr::Literal(ScalarValue::IntervalYearMonth(Some(1)), None);
-                let interval_1day_lit_expr = DfExpr::Literal(
-                    ScalarValue::IntervalDayTime(Some(IntervalDayTime::new(1, 0))),
-                    None,
-                );
-                let the_1month_minus_1day_expr = DfExpr::BinaryExpr(BinaryExpr {
-                    left: Box::new(interval_1month_lit_expr),
-                    op: Operator::Minus,
-                    right: Box::new(interval_1day_lit_expr),
-                });
-                let date_trunc_expr = DfExpr::ScalarFunction(ScalarFunction {
-                    func: datafusion_functions::datetime::date_trunc(),
-                    args: vec![month_lit_expr, self.create_time_index_column_expr()?],
-                });
-                let date_trunc_plus_interval_expr = DfExpr::BinaryExpr(BinaryExpr {
-                    left: Box::new(date_trunc_expr),
-                    op: Operator::Plus,
-                    right: Box::new(the_1month_minus_1day_expr),
-                });
-                let date_part_expr = DfExpr::ScalarFunction(ScalarFunction {
-                    func: datafusion_functions::datetime::date_part(),
-                    args: vec![day_lit_expr, date_trunc_plus_interval_expr],
-                });
-
-                exprs.push(date_part_expr);
+            "minute" | "hour" | "month" | "year" | "day_of_month" | "day_of_week"
+            | "day_of_year" | "days_in_month" => {
+                let date_part = match func.name {
+                    "minute" => Some("minute"),
+                    "hour" => Some("hour"),
+                    "month" => Some("month"),
+                    "year" => Some("year"),
+                    "day_of_month" => Some("day"),
+                    "day_of_week" => Some("dow"),
+                    "day_of_year" => Some("doy"),
+                    // `days_in_month` is built by `days_in_month_expr` and selects
+                    // no `date_part` unit.
+                    "days_in_month" => None,
+                    _ => unreachable!("not a date function: {func.name}"),
+                };
+                if has_input_arg {
+                    // With an argument, Prometheus reads each sample value as a Unix
+                    // timestamp in seconds (truncated towards zero, UTC), not as the time
+                    // index of the sample.
+                    for value in &self.ctx.field_columns {
+                        if Self::field_column_is_native_histogram(input_schema, value) {
+                            // Prometheus skips native histogram samples. An alternative
+                            // float column carries the value of the same sample.
+                            if !alternative_samples {
+                                exprs.push(DfExpr::ScalarFunction(ScalarFunction {
+                                    func: native_histogram_drop_udf(func.name),
+                                    args: vec![DfExpr::Column(Column::from_name(value))],
+                                }));
+                            }
+                            continue;
+                        }
+                        let timestamp_expr = Self::sample_value_timestamp_expr(value);
+                        let output = match date_part {
+                            Some(date_part) => DfExpr::ScalarFunction(ScalarFunction {
+                                func: datafusion_functions::datetime::date_part(),
+                                args: vec![date_part.lit(), timestamp_expr],
+                            }),
+                            None => Self::days_in_month_expr(timestamp_expr),
+                        };
+                        // Name the column after the function call: the timestamp
+                        // conversion above would otherwise become the column name of
+                        // the instant-vector result.
+                        exprs.push(output.alias(format!("{}({value})", func.name)));
+                    }
+                } else {
+                    // Without an argument, they read the evaluation instant, which the
+                    // time index of the input table carries.
+                    exprs.push(match date_part {
+                        Some(date_part) => self.date_part_on_time_index(date_part)?,
+                        None => {
+                            let input = self.ctx.time_index_column.clone().with_context(|| {
+                                TimeIndexNotFoundSnafu {
+                                    table: "<doesn't matter>",
+                                }
+                            })?;
+                            Self::days_in_month_expr(self.create_time_index_column_expr()?)
+                                .alias(format!("{}({})", func.name, input))
+                        }
+                    });
+                }
                 ScalarFunc::GeneratedExpr
             }
 
@@ -6548,6 +6534,93 @@ impl PromPlanner {
             args: vec![date_part.lit(), input_expr],
         });
         Ok(fn_expr)
+    }
+
+    /// Reads a sample value as a Unix timestamp in seconds, truncated towards zero,
+    /// like `int64(value)` in Prometheus' date functions.
+    ///
+    /// No portable Prometheus result exists for NaN, the infinities and values beyond
+    /// the `int64` range: Go leaves the conversion implementation-defined
+    /// (`golang/go#76264`, unimplemented) and `time.Unix` wraps saturated values.
+    /// Those samples are harmonized on the Unix epoch — what `int64(NaN)` yields on
+    /// arm64 today — instead of failing the whole query or dropping the row.
+    /// A NULL value is not a sample and stays NULL.
+    fn sample_value_timestamp_expr(value: &str) -> DfExpr {
+        let column = DfExpr::Column(Column::from_name(value));
+        DfExpr::Case(Case::new(
+            None,
+            vec![(
+                Box::new(DfExpr::IsNotNull(Box::new(column.clone()))),
+                Box::new(DfExpr::ScalarFunction(ScalarFunction {
+                    func: coalesce(),
+                    args: vec![
+                        DfExpr::TryCast(TryCast::new(
+                            Box::new(column),
+                            ArrowDataType::Timestamp(ArrowTimeUnit::Second, None),
+                        )),
+                        DfExpr::Literal(ScalarValue::TimestampSecond(Some(0), None), None),
+                    ],
+                })),
+            )],
+            None,
+        ))
+    }
+
+    /// Generate an expr that yields the number of days in the month the timestamp
+    /// falls in, like `32 - time.Date(t.Year(), t.Month(), 32, 0, 0, 0, 0, time.UTC).Day()`
+    /// in Prometheus.
+    ///
+    /// The calendar logic works on `date_part` components: `date_trunc("month", ts)`
+    /// scaled the timestamp to nanoseconds internally and failed with "Timestamp out of
+    /// range" for values beyond ~year 2262 (9.2e9 seconds). A NULL timestamp keeps
+    /// yielding NULL (no `ELSE` arm): the row is dropped like a missing sample.
+    fn days_in_month_expr(timestamp_expr: DfExpr) -> DfExpr {
+        let date_part = |unit: &str| {
+            DfExpr::ScalarFunction(ScalarFunction {
+                func: datafusion_functions::datetime::date_part(),
+                args: vec![unit.lit(), timestamp_expr.clone()],
+            })
+        };
+        let modulo = |expr: DfExpr, divisor: i32| {
+            DfExpr::BinaryExpr(BinaryExpr {
+                left: Box::new(expr),
+                op: Operator::Modulo,
+                right: Box::new(lit(divisor)),
+            })
+        };
+        let month = date_part("month");
+        let year = date_part("year");
+        // Proleptic Gregorian leap year, like Go's `time` package: every year divisible
+        // by 4, except centuries that are not divisible by 400.
+        let is_leap_year = modulo(year.clone(), 4).eq(lit(0i32)).and(
+            modulo(year.clone(), 100)
+                .not_eq(lit(0i32))
+                .or(modulo(year, 400).eq(lit(0i32))),
+        );
+        let months_with_31_days = [1i32, 3, 5, 7, 8, 10, 12]
+            .into_iter()
+            .map(lit)
+            .collect::<Vec<_>>();
+        let months_with_30_days = [4i32, 6, 9, 11].into_iter().map(lit).collect::<Vec<_>>();
+        DfExpr::Case(Case::new(
+            None,
+            vec![
+                (
+                    Box::new(month.clone().eq(lit(2i32)).and(is_leap_year)),
+                    Box::new(lit(29i32)),
+                ),
+                (Box::new(month.clone().eq(lit(2i32))), Box::new(lit(28i32))),
+                (
+                    Box::new(month.clone().in_list(months_with_31_days, false)),
+                    Box::new(lit(31i32)),
+                ),
+                (
+                    Box::new(month.in_list(months_with_30_days, false)),
+                    Box::new(lit(30i32)),
+                ),
+            ],
+            None,
+        ))
     }
 
     fn strip_tsid_column(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
