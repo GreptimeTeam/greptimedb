@@ -207,9 +207,21 @@ pub fn query_to_plan(
 
         // Like PromQL, include NULL when the matcher accepts the empty string.
         // Keep EQ/NEQ on the original column for index and numeric comparisons.
-        let (condition, accepts_empty) = match m_type {
-            MatcherType::Eq => (label.clone().eq(lit(value)), value.is_empty()),
-            MatcherType::Neq => (label.clone().not_eq(lit(value)), !value.is_empty()),
+        let condition = match m_type {
+            MatcherType::Eq => {
+                if value.is_empty() {
+                    label.clone().eq(lit(value)).or(label.is_null())
+                } else {
+                    label.eq(lit(value))
+                }
+            }
+            MatcherType::Neq => {
+                if value.is_empty() {
+                    label.not_eq(lit(value))
+                } else {
+                    label.clone().not_eq(lit(value)).or(label.is_null())
+                }
+            }
             MatcherType::Re | MatcherType::Nre => {
                 let pattern = anchored_label_regex(value);
                 let matches_empty = regex::Regex::new(&pattern)
@@ -226,22 +238,25 @@ pub fn query_to_plan(
                     .context(error::DataFrameSnafu)?;
                 let matched = regexp_match(string_label, lit(pattern), None);
                 if m_type == MatcherType::Re {
-                    (matched.is_not_null(), matches_empty)
+                    let condition = matched.is_not_null();
+                    if matches_empty {
+                        condition.or(label.is_null())
+                    } else {
+                        condition
+                    }
                 } else {
-                    // regexp_match(NULL, ...) is NULL too; do not mistake it
-                    // for a non-matching value before applying label semantics.
-                    (
-                        matched.is_null().and(label.clone().is_not_null()),
-                        !matches_empty,
-                    )
+                    let condition = matched.is_null();
+                    // A NULL input also produces NULL. Keep it only when the
+                    // negative matcher accepts the empty string.
+                    if matches_empty {
+                        condition.and(label.is_not_null())
+                    } else {
+                        condition
+                    }
                 }
             }
         };
-        conditions.push(if accepts_empty {
-            condition.or(label.is_null())
-        } else {
-            condition
-        });
+        conditions.push(condition);
     }
 
     // Safety: conditions MUST not be empty, reduce always return Some(expr).
