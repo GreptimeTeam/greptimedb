@@ -148,10 +148,9 @@ pub fn validate_matchers(matchers: &[LabelMatcher]) -> Result<()> {
             .build()
         })?;
         if matches!(matcher_type, MatcherType::Re | MatcherType::Nre) {
-            // Validate both the original syntax and the actual execution pattern.
-            // Wrapping can change validity (e.g. a trailing extended-mode comment).
-            // Its syntax differs from Prometheus's; e.g. `(?x) a` is accepted here
-            // but rejected by Prometheus.
+            // Like Prometheus, validate the raw regex first, then the anchored pattern.
+            // We use the same regex engine as query execution, whose syntax differs
+            // from Prometheus's: e.g. `(?x) a` is accepted here but rejected by Prometheus.
             regex::Regex::new(&matcher.value)
                 .and_then(|_| regex::Regex::new(&anchored_label_regex(&matcher.value)))
                 .map_err(|e| {
