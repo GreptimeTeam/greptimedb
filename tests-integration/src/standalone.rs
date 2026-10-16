@@ -425,11 +425,18 @@ impl GreptimeDbStandaloneBuilder {
 mod tests {
     use std::sync::Arc;
 
+    use api::region::RegionResponse;
     use api::v1::region::{
         ListMetadataRequest, RegionRequest, RegionRequestHeader, region_request,
     };
+    use api::v1::{QueryContext as ProtoQueryContext, SnapshotSequences};
+    use common_meta::error::Result as MetaResult;
+    use common_meta::node_manager::{Datanode, bind_raw_series_query};
     use common_meta::peer::Peer;
-    use common_query::request::{QueryRequest, RawSeriesRequest, RawSeriesTag};
+    use common_query::request::{
+        QueryRequest, RAW_SERIES_REQUEST_EXTENSION_KEY, RawSeriesRequest, RawSeriesTag,
+    };
+    use common_recordbatch::SendableRecordBatchStream;
     use datafusion::common::{ScalarValue, TableReference};
     use datafusion::logical_expr::TableSource;
     use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, col, lit};
@@ -445,6 +452,128 @@ mod tests {
 
     use super::GreptimeDbStandaloneBuilder;
     use crate::test_util::execute_sql;
+
+    struct NoExecutionDatanode;
+
+    #[async_trait::async_trait]
+    impl Datanode for NoExecutionDatanode {
+        async fn handle_request(&self, _request: Arc<RegionRequest>) -> MetaResult<RegionResponse> {
+            panic!("unexpected handle_request")
+        }
+
+        async fn handle_query(
+            &self,
+            _request: QueryRequest,
+        ) -> MetaResult<SendableRecordBatchStream> {
+            panic!("default prepare must not execute a query")
+        }
+    }
+
+    #[tokio::test]
+    async fn test_raw_series_binding_and_default_prepare_contract() {
+        let binding: RawSeriesRequest = serde_json::from_str(include_str!(
+            "../../tests/compatibility/wire/raw_series_request/v1_request.json"
+        ))
+        .unwrap();
+        let mut header = RegionRequestHeader::default();
+        header.tracing_context = std::collections::HashMap::from([(
+            "traceparent".to_string(),
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+        )]);
+        header.query_context = Some(ProtoQueryContext {
+            current_catalog: "custom_catalog".to_string(),
+            current_schema: "custom_schema".to_string(),
+            timezone: "Asia/Shanghai".to_string(),
+            channel: common_base::protocol::Channel::Mysql as u32,
+            snapshot_seqs: Some(SnapshotSequences {
+                snapshot_seqs: std::collections::HashMap::from([(
+                    binding.physical_metadata.region_id.as_u64(),
+                    77,
+                )]),
+                sst_min_sequences: std::collections::HashMap::new(),
+            }),
+            extensions: std::collections::HashMap::from([
+                ("raw-series-unrelated".to_string(), "preserved".to_string()),
+                (
+                    session::hints::READ_PREFERENCE_EXTENSION_KEY.to_string(),
+                    "follower".to_string(),
+                ),
+            ]),
+            explain: None,
+        });
+        let request = || QueryRequest {
+            header: Some(header.clone()),
+            region_id: binding.physical_metadata.region_id,
+            plan: LogicalPlanBuilder::empty(false).build().unwrap(),
+        };
+        let original_header = request().header.unwrap();
+        let (bound, schema, labels) = bind_raw_series_query(request(), &binding).unwrap();
+        assert_eq!(
+            vec!["aux", "value"],
+            schema
+                .fields
+                .iter()
+                .map(|f| f.name.as_ref())
+                .collect::<Vec<_>>()
+        );
+        match labels {
+            RawLabelSource::PrimaryKey {
+                metric_name,
+                logical_tags,
+                ..
+            } => {
+                assert_eq!("cpu", metric_name.as_ref());
+                assert_eq!(1, logical_tags.len());
+                assert_eq!(1, logical_tags[0].column_id);
+                assert_eq!("host", logical_tags[0].name.as_ref());
+            }
+            RawLabelSource::Explicit => panic!("expected key-backed source"),
+        }
+        let mut bound_header = bound.header.unwrap();
+        let extension = bound_header
+            .query_context
+            .as_mut()
+            .unwrap()
+            .extensions
+            .remove(RAW_SERIES_REQUEST_EXTENSION_KEY)
+            .unwrap();
+        assert_eq!(binding.to_extension_value().unwrap(), extension);
+        assert_eq!(original_header, bound_header);
+
+        let datanode = NoExecutionDatanode;
+        let mut invalid = binding.clone();
+        invalid.version = 42;
+        assert_eq!(
+            None,
+            datanode
+                .prepare_raw_series_query(request(), invalid)
+                .await
+                .unwrap()
+        );
+        let mut mismatch = request();
+        mismatch.region_id = store_api::storage::RegionId::from_u64(
+            binding.physical_metadata.region_id.as_u64() + 1,
+        );
+        let error = bind_raw_series_query(mismatch, &binding).unwrap_err();
+        assert!(format!("{error:?}").contains("region does not match"));
+        let mut invalid = binding.clone();
+        invalid.version = 42;
+        let error = bind_raw_series_query(request(), &invalid).unwrap_err();
+        assert!(format!("{error:?}").contains("Invalid raw-series request"));
+        let mut invalid_field = binding.clone();
+        invalid_field.field_ids = vec![u32::MAX];
+        let error = bind_raw_series_query(request(), &invalid_field).unwrap_err();
+        assert!(format!("{error:?}").contains("Invalid raw-series fields"));
+        let mut collision = request();
+        let mut context = session::context::QueryContext::with_db_name(None);
+        context.set_extension(RAW_SERIES_REQUEST_EXTENSION_KEY, "occupied");
+        collision.header = Some(RegionRequestHeader {
+            query_context: Some((&context).into()),
+            ..Default::default()
+        });
+        let error = bind_raw_series_query(collision, &binding).unwrap_err();
+        assert!(format!("{error:?}").contains("marker already exists"));
+    }
 
     fn table_source(plan: &LogicalPlan) -> Option<Arc<dyn TableSource>> {
         match plan {
@@ -561,6 +690,52 @@ mod tests {
             region_id,
             plan: plan.clone(),
         };
+        let mut parent_request = request();
+        parent_request.plan = LogicalPlanBuilder::from(plan.clone())
+            .filter(col("sample_value").gt(lit(ScalarValue::Float64(Some(0.0)))))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            None,
+            datanode
+                .prepare_raw_series_query(parent_request, binding.clone())
+                .await
+                .unwrap()
+        );
+        let mut wrong_region = request();
+        wrong_region.region_id = store_api::storage::RegionId::from_u64(region_id.as_u64() + 1);
+        assert!(
+            datanode
+                .prepare_raw_series_query(wrong_region, binding.clone())
+                .await
+                .is_err()
+        );
+        let mut marked_request = request();
+        marked_request
+            .header
+            .as_mut()
+            .unwrap()
+            .query_context
+            .as_mut()
+            .unwrap()
+            .extensions
+            .insert(
+                RAW_SERIES_REQUEST_EXTENSION_KEY.to_string(),
+                "occupied".to_string(),
+            );
+        assert!(
+            datanode
+                .prepare_raw_series_query(marked_request, binding.clone())
+                .await
+                .is_err()
+        );
+        let prepared = datanode
+            .prepare_raw_series_query(request(), binding.clone())
+            .await
+            .unwrap();
+        assert_eq!(Some(RawSeriesOrdering::ReadKeyThenTime), prepared);
+
         let raw = datanode
             .handle_raw_series_query(request(), binding.clone())
             .await
@@ -626,6 +801,11 @@ mod tests {
 
         let mut stale = binding;
         stale.physical_metadata.schema_version += 1;
+        let prepare_error = datanode
+            .prepare_raw_series_query(request(), stale.clone())
+            .await
+            .unwrap_err();
+        assert!(format!("{prepare_error:?}").contains("Raw-series metadata mismatch"));
         let error = match datanode.handle_raw_series_query(request(), stale).await {
             Ok(_) => panic!("stale raw-series metadata unexpectedly succeeded"),
             Err(error) => error,

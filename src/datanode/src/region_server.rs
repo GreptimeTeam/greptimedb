@@ -16,6 +16,9 @@ mod catalog;
 mod registrations;
 mod remote_dyn_filter;
 
+#[cfg(test)]
+mod raw_series_admission_tests;
+
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::ops::Deref;
@@ -54,6 +57,7 @@ use dashmap::DashMap;
 use datafusion::datasource::TableProvider;
 use datafusion_common::tree_node::TreeNode;
 use datatypes::schema::SchemaRef;
+use datatypes::series::raw::RawSeriesOrdering;
 use either::Either;
 use futures_util::future::try_join_all;
 use futures_util::{Stream, StreamExt};
@@ -93,6 +97,7 @@ use store_api::region_request::{
 };
 use store_api::storage::RegionId;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::task::AbortHandle;
 use tokio::time::{self, timeout};
 use tonic::{Request, Response, Result as TonicResult};
 
@@ -113,6 +118,14 @@ use crate::region_server::registrations::RemoteDynFilterRegistry;
 use crate::region_server::remote_dyn_filter::wrap_remote_dyn_filter_guarded_stream;
 
 const QUERY_RUNTIME_STREAM_BUFFER_SIZE: usize = 8;
+
+struct AbortOnDrop(AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 fn has_initial_remote_dyn_filter(
     header: &Option<RegionRequestHeader>,
@@ -394,28 +407,77 @@ impl RegionServer {
         Ok(maybe_guard_stream(stream, permit))
     }
 
+    /// Prepares a bound raw-series query without starting execution or creating a stream.
+    pub async fn prepare_raw_series_query(
+        &self,
+        request: QueryRequest,
+    ) -> Result<Option<RawSeriesOrdering>> {
+        let permit = if let Some(p) = &self.inner.parallelism {
+            Some(p.acquire().await?)
+        } else {
+            None
+        };
+        let inner = self.clone();
+        let task = common_runtime::spawn_query(async move {
+            let (request, query_ctx, binding) = inner.prepare_local_read(request).await?;
+            let binding = binding.context(InvalidQueryContextSnafu {
+                reason: "raw-series preparation requires a bound request".to_string(),
+            })?;
+            let result = inner
+                .inner
+                .query_engine
+                .prepare_raw_series(request.plan, query_ctx, binding)
+                .await
+                .context(ExecuteLogicalPlanSnafu);
+            drop(permit);
+            result
+        });
+        let abort_guard = AbortOnDrop(task.abort_handle());
+        let result = task.await.context(RuntimeJoinSnafu {
+            request_type: "raw-series preparation",
+        })?;
+        drop(abort_guard);
+        result
+    }
+
     #[tracing::instrument(skip_all)]
     pub async fn handle_read(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
         self.handle_read_inner(request).await
     }
 
-    async fn handle_read_inner(
-        &self,
-        mut request: QueryRequest,
-    ) -> Result<SendableRecordBatchStream> {
+    async fn handle_read_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
         let permit = if let Some(p) = &self.inner.parallelism {
             Some(p.acquire().await?)
         } else {
             None
         };
 
+        let (request, query_ctx, raw_series) = self.prepare_local_read(request).await?;
+        let region_id = request.region_id;
+        let cleanup = self.register_initial_remote_dyn_filter_cleanup(&query_ctx, region_id);
+        let stream = self
+            .inner
+            .handle_read_with_raw_series(request, query_ctx.clone(), raw_series)
+            .await?;
+        let stream = wrap_flow_region_watermark_stream(stream, region_id, &query_ctx);
+        let stream = if let Some(cleanup) = cleanup {
+            wrap_remote_dyn_filter_guarded_stream(stream, cleanup)
+        } else {
+            stream
+        };
+        Ok(maybe_guard_stream(stream, permit))
+    }
+
+    async fn prepare_local_read(
+        &self,
+        mut request: QueryRequest,
+    ) -> Result<(QueryRequest, QueryContextRef, Option<RawSeriesRequest>)> {
         let raw_series = take_raw_series_request(&mut request.header).map_err(|err| {
             crate::error::InvalidQueryContextSnafu {
                 reason: err.to_string(),
             }
             .build()
         })?;
-
         let ctx = request
             .header
             .as_ref()
@@ -428,7 +490,6 @@ impl RegionServer {
                 .build()
             })?;
         let query_ctx = Arc::new(ctx.unwrap_or_else(|| QueryContextBuilder::default().build()));
-
         ensure!(
             raw_series
                 .as_ref()
@@ -444,38 +505,17 @@ impl RegionServer {
                     .to_string()
             }
         );
-
-        let region_id = request.region_id;
         let injector_builder = NameAwareDataSourceInjectorBuilder::from_plan(&request.plan)
             .context(DataFusionSnafu)?;
         let mut injector = injector_builder
             .build(self, request.region_id, query_ctx.clone())
             .await?;
-
         let plan = request
             .plan
             .rewrite(&mut injector)
             .context(DataFusionSnafu)?
             .data;
-
-        let cleanup = self.register_initial_remote_dyn_filter_cleanup(&query_ctx, region_id);
-
-        let stream = self
-            .inner
-            .handle_read_with_raw_series(
-                QueryRequest { plan, ..request },
-                query_ctx.clone(),
-                raw_series,
-            )
-            .await?;
-
-        let stream = wrap_flow_region_watermark_stream(stream, region_id, &query_ctx);
-        let stream = if let Some(cleanup) = cleanup {
-            wrap_remote_dyn_filter_guarded_stream(stream, cleanup)
-        } else {
-            stream
-        };
-        Ok(maybe_guard_stream(stream, permit))
+        Ok((QueryRequest { plan, ..request }, query_ctx, raw_series))
     }
 
     /// Returns all opened and reportable regions.
