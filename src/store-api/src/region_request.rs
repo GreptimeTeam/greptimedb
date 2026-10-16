@@ -1561,7 +1561,7 @@ fn json_settings_from_proto(settings: v1::JsonSettings) -> Result<JsonSettings> 
             Ok(JsonTypeHint {
                 path: hint.path,
                 data_type,
-                inverted_index: false,
+                inverted_index: hint.inverted_index,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -2496,6 +2496,7 @@ mod tests {
                         path: vec!["service".to_string()],
                         data_type: ColumnDataType::String as i32,
                         datatype_extension: None,
+                        inverted_index: true,
                     }],
                     max_auto_expanded_paths: Some(10),
                 }),
@@ -2513,6 +2514,7 @@ mod tests {
         assert_eq!("payload", column_name);
         assert_eq!(Some(10), settings.max_auto_expanded_paths());
         assert_eq!(1, settings.type_hints().len());
+        assert!(settings.type_hints()[0].inverted_index);
     }
 
     #[test]
