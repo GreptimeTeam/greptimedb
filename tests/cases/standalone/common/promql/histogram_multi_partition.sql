@@ -32,6 +32,7 @@ insert into histogram_gap_bucket values
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE Hash\(\[ts@1\],.* Hash([ts@1],REDACTED
 -- SQLNESS REPLACE Hash\(\[le@0,\sts@1\],.* Hash([le@0, ts@1],REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 tql analyze (0, 10, '10s') histogram_quantile(0.5, sum by (le) (histogram_gap_bucket));
 
 -- SQLNESS SORT_RESULT 2 1

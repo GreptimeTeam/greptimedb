@@ -21,6 +21,7 @@ Affected Rows: 0
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
 select sum(val) from t group by host;
 
@@ -34,13 +35,13 @@ select sum(val) from t group by host;
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[host@0 as host], aggr=[sum(t.val)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[host@1 as host], aggr=[sum(t.val)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["val", "host"], "filters": ["host < Utf8(\"1024\") OR host IS NULL"], "time_range":REDACTED
 |_|_|_|
 | 1_| 1_|_ProjectionExec: expr=[sum(t.val)@1 as sum(t.val)] REDACTED
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[host@0 as host], aggr=[sum(t.val)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[host@1 as host], aggr=[sum(t.val)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["val", "host"], "filters": ["host >= Utf8(\"1024\") AND host IS NOT NULL"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+
@@ -53,6 +54,7 @@ select sum(val) from t group by host;
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
 select sum(val) from t;
 
@@ -68,12 +70,12 @@ select sum(val) from t;
 | 1_| 0_|_AggregateExec: mode=Final, gby=[], aggr=[__sum_state(t.val)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__sum_state(t.val)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["val"], "filters": ["host < Utf8(\"1024\") OR host IS NULL"], "time_range":REDACTED
 |_|_|_|
 | 1_| 1_|_AggregateExec: mode=Final, gby=[], aggr=[__sum_state(t.val)] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__sum_state(t.val)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["val"], "filters": ["host >= Utf8(\"1024\") AND host IS NOT NULL"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
 +-+-+-+
@@ -87,6 +89,7 @@ select sum(val) from t;
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- might write to different partitions
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze
 select sum(val) from t group by idc;
 
@@ -103,12 +106,12 @@ select sum(val) from t group by idc;
 | 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[idc@0 as idc], aggr=[__sum_state(t.val)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[idc@1 as idc], aggr=[__sum_state(t.val)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["val", "idc"], "filters": ["host < Utf8(\"1024\") OR host IS NULL"], "time_range":REDACTED
 |_|_|_|
 | 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[idc@0 as idc], aggr=[__sum_state(t.val)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[idc@1 as idc], aggr=[__sum_state(t.val)] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":REDACTED, "projection": ["val", "idc"], "filters": ["host >= Utf8(\"1024\") AND host IS NOT NULL"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+

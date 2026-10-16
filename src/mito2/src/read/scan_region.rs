@@ -1948,6 +1948,41 @@ pub(crate) fn exact_sequence_range(
     Ok((files, sequence_range))
 }
 
+/// Metadata totals for distinct SST files, not post-filter rows or actual read bytes.
+/// Older files may have unknown row and row-group counts represented by zero.
+#[derive(Default, serde::Serialize)]
+struct FileSummary {
+    files: usize,
+    rows: u64,
+    row_groups: u64,
+    size: u64,
+    index_size: u64,
+}
+
+impl FileSummary {
+    fn new<'a>(files: impl IntoIterator<Item = &'a FileHandle>) -> Self {
+        let mut summary = Self::default();
+        for file in files {
+            summary.files += 1;
+            summary.rows += file.meta_ref().num_rows;
+            summary.row_groups += file.meta_ref().num_row_groups;
+            summary.size += file.size();
+            summary.index_size += file.index_size();
+        }
+        summary
+    }
+}
+
+/// Keeps the existing debug-list spacing while escaping strings as JSON, including
+/// control characters for which Rust's Debug escaping is not valid JSON.
+struct ExplainString<'a>(&'a str);
+
+impl fmt::Debug for ExplainString<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&serde_json::to_string(self.0).map_err(|_| fmt::Error)?)
+    }
+}
+
 /// Context shared by different streams from a scanner.
 /// It contains the input and ranges to scan.
 pub struct StreamContext {
@@ -2048,10 +2083,99 @@ impl StreamContext {
             write!(f, ", \"distribution\":\"{}\"", distribution)?;
         }
 
+        self.format_scan_details(f)?;
         if verbose {
             self.format_verbose_content(f)?;
         }
 
+        Ok(())
+    }
+
+    fn format_scan_details(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let output_schema = self.input.mapper.output_schema();
+        if !output_schema.is_empty() {
+            write!(f, ", \"projection\": ")?;
+            f.debug_list()
+                .entries(
+                    output_schema
+                        .column_schemas()
+                        .iter()
+                        .map(|col| ExplainString(&col.name)),
+                )
+                .finish()?;
+        }
+        if let Some(predicate) = self.input.predicate.predicate() {
+            if !predicate.exprs().is_empty() {
+                let exprs: Vec<_> = predicate.exprs().iter().map(|e| e.to_string()).collect();
+                write!(f, ", \"filters\": ")?;
+                f.debug_list()
+                    .entries(exprs.iter().map(|e| ExplainString(e)))
+                    .finish()?;
+            }
+            if !predicate.dyn_filters().is_empty() {
+                let filters: Vec<_> = predicate
+                    .dyn_filters()
+                    .iter()
+                    .map(|filter| filter.to_string())
+                    .collect();
+                write!(f, ", \"dyn_filters\": ")?;
+                f.debug_list()
+                    .entries(filters.iter().map(|filter| ExplainString(filter)))
+                    .finish()?;
+            }
+        }
+        if let Some(time_range) = &self.input.time_range {
+            write!(
+                f,
+                ", \"time_range\": {:?}",
+                ExplainString(&time_range.to_string())
+            )?;
+        }
+        let summary = FileSummary::new(&self.input.files);
+        write!(
+            f,
+            ", \"file_summary\": {}",
+            serde_json::to_string(&summary).map_err(|_| fmt::Error)?
+        )?;
+
+        // Source indices are unique within a range even when a file is split into
+        // row groups. Memtables and extension sources must not count as files.
+        let file_offset = self.input.num_memtables();
+        let file_end = file_offset + self.input.num_files();
+        let mut max_range = None;
+        let mut max_files = 0;
+        for range in &self.ranges {
+            let files = range
+                .indices
+                .iter()
+                .filter(|source| (file_offset..file_end).contains(&source.index))
+                .count();
+            if files > max_files {
+                max_files = files;
+                max_range = Some(range);
+            }
+        }
+        if let Some(range) = max_range {
+            let summary = FileSummary::new(range.indices.iter().filter_map(|source| {
+                source
+                    .index
+                    .checked_sub(file_offset)
+                    .and_then(|index| self.input.files.get(index))
+            }));
+            let (start, end) = range.time_range;
+            // RangeMeta bounds are inclusive, just like the verbose file list.
+            let summary = serde_json::json!({
+                "time_range_start": format!("{}::{}", start.value(), start.unit()),
+                "time_range_end": format!("{}::{}", end.value(), end.unit()),
+                "files": summary.files,
+                "rows": summary.rows,
+                "row_groups": summary.row_groups,
+                "size": summary.size,
+                "index_size": summary.index_size,
+                "estimated_rows": range.num_rows,
+            });
+            write!(f, ", \"max_part_range\": {summary}")?;
+        }
         Ok(())
     }
 
@@ -2102,30 +2226,6 @@ impl StreamContext {
 
         impl fmt::Debug for InputWrapper<'_> {
             fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                let output_schema = self.input.mapper.output_schema();
-                if !output_schema.is_empty() {
-                    let names: Vec<_> = output_schema
-                        .column_schemas()
-                        .iter()
-                        .map(|col| &col.name)
-                        .collect();
-                    write!(f, ", \"projection\": {:?}", names)?;
-                }
-                if let Some(predicate) = &self.input.predicate.predicate() {
-                    if !predicate.exprs().is_empty() {
-                        let exprs: Vec<_> =
-                            predicate.exprs().iter().map(|e| e.to_string()).collect();
-                        write!(f, ", \"filters\": {:?}", exprs)?;
-                    }
-                    if !predicate.dyn_filters().is_empty() {
-                        let dyn_filters: Vec<_> = predicate
-                            .dyn_filters()
-                            .iter()
-                            .map(|f| format!("{}", f))
-                            .collect();
-                        write!(f, ", \"dyn_filters\": {:?}", dyn_filters)?;
-                    }
-                }
                 if !self.input.files.is_empty() {
                     write!(f, ", \"files\": ")?;
                     f.debug_list()
