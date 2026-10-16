@@ -39,33 +39,42 @@ Double-check with the user.
 
 ## 3. Pick the range and generate
 
-Key topology fact: a **minor tag** (e.g. `v1.0.0`) is an ancestor of `main`; **patch tags**
-(`v1.0.1`, `v1.0.2`) live on the `release/v1.0` branch and are **NOT** ancestors of `main`
-(they are cherry-picks with different SHAs). Verify with
+Key topology fact: **patch tags** (`v1.0.1`, `v1.0.2`) live on `release/vX.Y` and are **NOT**
+ancestors of `main` (they are cherry-picks with different SHAs). Up to v1.1 the `.0` tag was
+the point where `release/vX.Y` left `main`; from v1.2 the branch is cut before the `.0`, and
+pre-releases and the `.0` itself are tagged on the branch with backports. Verify with
 `git merge-base --is-ancestor <tag> <remote>/main`.
 
-### New minor (`X.Y.0`, cut from main)
-Note the two different tags here: the `git cliff` **base is the previous minor `.0` tag**
-(e.g. `v1.0.0`, an ancestor of `main`) — **not** the "previous version" from §2 (the latest
-patch, e.g. `v1.0.2`), which is only used below to decide which patch PRs to subtract.
+### New minor (`X.Y.0`)
+The note compares against the whole previous line: everything new since `release/vX.(Y-1)`
+left `main`, minus what any published `vX.(Y-1).*` release (pre-releases, `.0`, patches)
+already shipped. The line's own pre-releases (`vX.Y.0-beta.*`) are not subtracted; the `.0`
+note covers the whole minor.
 
-Base = the **previous minor tag** (e.g. `v1.0.0`); tip = the release commit (= `release/vX.Y`
-tip, usually `<remote>/main`):
+Base = the **previous minor tag** (e.g. `v1.1.0`); tip = the tagged `vX.Y.0` commit, resolved as
+in "Pre-release" below. Split the range at the point where `release/vX.Y` left `main`:
 ```
-GITHUB_TOKEN=$(gh auth token) git cliff <prev-minor-tag>..<release-commit> --tag vX.Y.0 \
-  -o /path/CHANGELOG-vX.Y.0.md
+bp=$(git merge-base <remote>/release/vX.Y <remote>/main)
 ```
-`cliff.toml`'s `ignore_tags` folds in-range nightly tags into the single section.
+- `<prev-minor-tag>..$bp` is on `main`; generate it with `git cliff`:
+  ```
+  GITHUB_TOKEN=$(gh auth token) git cliff <prev-minor-tag>..$bp --tag vX.Y.0 \
+    -o /path/CHANGELOG-vX.Y.0.md
+  ```
+  `cliff.toml`'s `ignore_tags` folds in-range nightly tags into the single section.
+- `$bp..<tip>` is the release branch: backports, squashed picks, and commits without a PR.
+  `git cliff` fails on such commits (`Filter call 'sort' failed`), so build this part as a
+  pre-release: collect the original PRs with the loop in "Pre-release" and add their bullets.
+  List the commits that carry no PR with
+  `git log --format='%h %s' $bp..<tip> | grep -vE '\(#[0-9]+\)$'`; drop mechanical ones, and
+  for a manual port of a `main` PR (the body says `cherry picked from commit` a SHA that is not
+  on `main`), find that PR by title and cite it.
 
-**Then subtract PRs already shipped in the intermediate patch releases** (`vX.(Y-1).1`,
-`.2`, …) — their main-branch commits are inside the range and would duplicate, and the
-audience cares about what's new vs the latest patch. Collect the PR set from the patch release
-bodies and remove matching lines:
-```
-gh release view vX.(Y-1).Z --repo GreptimeTeam/greptimedb | grep -oE 'pull/[0-9]+'
-```
-Remove every changelog bullet whose `#NNNN` is in that combined set (a small Python script is
-the reliable way — match `pull/<n>)` on lines starting with `*`).
+**Then subtract PRs already shipped in published `vX.(Y-1).*` releases**: their `main` commits
+are inside the range. Build the set as for the first pre-release (below): the PR links in
+every published `vX.(Y-1).*` release body, plus the `(#N)` line endings in the history of the
+newest published `vX.(Y-1).*` tag. Remove every changelog bullet whose `#NNNN` is in that set (a
+small Python script is the reliable way — match `pull/<n>)` on lines starting with `*`).
 
 ### Patch (`X.Y.Z`, Z>0, cherry-picks on the release branch)
 The previous patch tag is an ancestor of the release branch, so a plain range works **when the
@@ -165,6 +174,11 @@ commit that changes behavior gets a bullet in its group.
 > completes** — each retry resumes from the cache. If it keeps failing, fall back to (b).
 
 ### Groups (all paths)
+`git cliff` drops PRs whose title isn't a conventional commit (`filter_unconventional`). List
+them and add the user-facing ones by hand:
+```
+git log --format=%s <range> | grep -E '\(#[0-9]+\)$' | grep -vE '^[a-z]+(\([^)]*\))?!?: '
+```
 Use only the groups in `cliff.toml`. `git cliff` prints a `### Build` section for `build:` commits
 because no parser matches them; move a user-facing `build(deps)` fix to Bug Fixes and the rest to
 Miscellaneous Tasks. Keep each bullet list free of blank lines; a blank line turns it into a
