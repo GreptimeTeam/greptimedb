@@ -713,11 +713,11 @@ mod test {
         };
         let expected = r#"CREATE TABLE IF NOT EXISTS "trace_v2" (
   "timestamp" TIMESTAMP(9) NOT NULL,
-  "timestamp_end" TIMESTAMP(9) NULL,
+  "timestamp_end" TIMESTAMP(9) NULL COMPRESSION WITH(encoding = 'delta_binary_packed', type = 'zstd'),
   "duration_nano" BIGINT NULL,
-  "parent_span_id" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),
+  "parent_span_id" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM') COMPRESSION WITH(encoding = 'plain', page_size = '64KiB', type = 'zstd'),
   "trace_id" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),
-  "span_id" STRING NULL,
+  "span_id" STRING NULL COMPRESSION WITH(encoding = 'plain', page_size = '64KiB', type = 'zstd'),
   "span_kind" STRING NULL,
   "span_name" STRING NULL,
   "span_status_code" STRING NULL,
