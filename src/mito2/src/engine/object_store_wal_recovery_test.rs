@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use api::v1::Rows;
 use common_base::readable_size::ReadableSize;
@@ -56,6 +56,7 @@ use store_api::storage::{RegionId, ScanRequest};
 
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
+use crate::flush::STOP_DURABILITY_GRACE;
 use crate::region::MitoRegionRef;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, build_rows_for_key, flush_region, put_rows,
@@ -2200,14 +2201,16 @@ async fn test_engine_stop_runs_a_queued_flush_without_waiting_for_the_wal() {
 
 /// A stopping region server tells the engine first, then closes every
 /// region. Closing a region that holds writes that skipped the WAL flushes
-/// it, and that flush gives up at its wait for the WAL instead of holding the
-/// close up: the close fails and the writes that skipped the WAL are lost.
+/// it, and that flush gives up its wait for the WAL instead of holding the
+/// close up: at once while the WAL fails to upload, and after the grace
+/// period of the stop when a create never answers. The close fails and the
+/// writes that skipped the WAL are lost.
 #[rstest]
 #[case(WalOutage::Refused)]
 #[case(WalOutage::Unreachable)]
 #[case(WalOutage::Stalled)]
 #[tokio::test]
-async fn test_close_of_a_stopping_engine_does_not_wait_for_the_wal(#[case] outage: WalOutage) {
+async fn test_close_of_a_stopping_engine_gives_up_on_the_wal(#[case] outage: WalOutage) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::with_prefix("object-store-wal-stop-closing-flush").await;
     let denied = Arc::new(AtomicBool::new(false));
@@ -2222,6 +2225,7 @@ async fn test_close_of_a_stopping_engine_does_not_wait_for_the_wal(#[case] outag
     outage.wait_until_met(&store).await;
     put_rows_skipping_wal(&engine, REGION_A, rows(&schema, 3, 5)).await;
 
+    let began = Instant::now();
     engine.begin_stop();
     let error = tokio::time::timeout(
         WAIT,
@@ -2234,6 +2238,14 @@ async fn test_close_of_a_stopping_engine_does_not_wait_for_the_wal(#[case] outag
     .expect("the close must not wait for the WAL")
     .unwrap_err();
     assert_eq!(StatusCode::Cancelled, error.status_code(), "{error:?}");
+    // A failing WAL is given up at once, a create that never answers after
+    // the grace period.
+    assert_eq!(
+        outage == WalOutage::Stalled,
+        began.elapsed() >= STOP_DURABILITY_GRACE,
+        "{:?}",
+        began.elapsed()
+    );
     tokio::time::timeout(WAIT, engine.stop())
         .await
         .expect("the engine must stop")
@@ -2303,6 +2315,55 @@ async fn test_close_of_a_stopping_engine_flushes_a_region_whose_wal_is_durable(
         .unwrap();
     let state = region_recovery_state(&engine, REGION_A).await;
     assert_eq!(flushed_entry_id, state.manifest_flushed_entry_id);
+    assert_eq!(0, state.memtable_rows);
+    assert_eq!(5, engine.get_region_statistic(REGION_A).unwrap().num_rows);
+}
+
+/// With a healthy WAL, a flush of a stopping engine keeps waiting for the
+/// last entries to become durable within the grace period of the stop: a
+/// region holding writes that skipped the WAL and a WAL write still in the
+/// open batch when the stop begins is flushed when it closes, and no row is
+/// lost.
+#[tokio::test]
+async fn test_close_of_a_stopping_engine_keeps_writes_while_the_wal_is_healthy() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("object-store-wal-stop-healthy-flush").await;
+    let object_store = memory_store();
+    // The open batch is sealed by the timer, within the grace period.
+    let config = ObjectStoreWalConfig {
+        flush_interval: Duration::from_secs(1),
+        ..store_config(AckMode::Enqueued)
+    };
+    let store =
+        ObjectStoreLogStore::try_new(object_store.clone(), &config, 0, STANDALONE_GENERATION)
+            .await
+            .unwrap();
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
+
+    put_rows(&engine, REGION_A, rows(&schema, 0, 3)).await;
+    put_rows_skipping_wal(&engine, REGION_A, rows(&schema, 3, 5)).await;
+    assert_eq!(0, latest(&store, REGION_A));
+
+    engine.begin_stop();
+    tokio::time::timeout(
+        WAIT,
+        engine.handle_request(
+            REGION_A,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        ),
+    )
+    .await
+    .expect("the close must not wait past the grace period")
+    .unwrap();
+    engine.stop().await.unwrap();
+    assert_eq!(1, sst_files(&env, &table_dir).await.len());
+    store.stop().await.unwrap();
+    drop(engine);
+    drop(store);
+
+    let (engine, state) = reopen(&mut env, &object_store, REGION_A, &table_dir).await;
+    assert_eq!(entry_id(1, 1), state.manifest_flushed_entry_id);
     assert_eq!(0, state.memtable_rows);
     assert_eq!(5, engine.get_region_statistic(REGION_A).unwrap().num_rows);
 }

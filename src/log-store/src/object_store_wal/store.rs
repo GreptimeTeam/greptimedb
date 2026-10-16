@@ -168,6 +168,9 @@ pub struct ObjectStoreLogStore {
     read_prefetch_budget: Arc<Semaphore>,
     terminal_error: TerminalError,
     stopped: Arc<AtomicBool>,
+    /// Whether the last create of the backlog failed, see
+    /// [`is_failing`](LogStore::is_failing).
+    last_create_failed: Arc<AtomicBool>,
     command_tx: mpsc::Sender<Command>,
     append_tx: mpsc::Sender<QueuedAppend>,
     #[cfg(any(test, feature = "testing"))]
@@ -398,6 +401,7 @@ impl ObjectStoreLogStore {
         let deleting = Arc::new(DeletingObjects::default());
         let terminal_error = TerminalError::default();
         let stopped = Arc::new(AtomicBool::new(false));
+        let last_create_failed = Arc::new(AtomicBool::new(false));
         let (command_tx, command_rx) = mpsc::channel(COMMAND_BUFFER);
         let (append_tx, append_rx) = mpsc::channel(APPEND_BUFFER);
         #[cfg(any(test, feature = "testing"))]
@@ -427,6 +431,7 @@ impl ObjectStoreLogStore {
             wal_holes: wal_holes.clone(),
             terminal_error: terminal_error.clone(),
             stopped: stopped.clone(),
+            last_create_failed: last_create_failed.clone(),
             command_rx,
             append_rx,
             ack_mode: config.ack_mode,
@@ -498,6 +503,7 @@ impl ObjectStoreLogStore {
             read_prefetch_budget: Arc::new(Semaphore::new(READ_PREFETCH_BYTES)),
             terminal_error,
             stopped,
+            last_create_failed,
             command_tx,
             append_tx,
             #[cfg(any(test, feature = "testing"))]
@@ -1224,6 +1230,15 @@ impl LogStore for ObjectStoreLogStore {
         response_rx.await.ok().context(ObjectStoreWalStoppedSnafu)?
     }
 
+    /// True while the last create of a batch the store keeps failed, which
+    /// includes the store being failing, see [`Failing`], and once the store
+    /// recorded a terminal error or stopped. A create that succeeds clears it.
+    fn is_failing(&self) -> bool {
+        self.last_create_failed.load(Ordering::Acquire)
+            || terminal(&self.terminal_error).is_some()
+            || self.stopped.load(Ordering::Acquire)
+    }
+
     /// Fails with [`Error::MissingWalHistory`] when the prefix cannot hold
     /// the history of the provider's region through `entry_id`, unless
     /// `accept_missing_history` is set: then the region's writes that were
@@ -1489,6 +1504,8 @@ struct Actor {
     wal_holes: WalHoles,
     terminal_error: TerminalError,
     stopped: Arc<AtomicBool>,
+    /// Set when a create of the backlog fails, cleared when one succeeds.
+    last_create_failed: Arc<AtomicBool>,
     command_rx: mpsc::Receiver<Command>,
     append_rx: mpsc::Receiver<QueuedAppend>,
     ack_mode: AckMode,
@@ -2017,6 +2034,8 @@ impl Actor {
             self.start_deletes();
             return;
         };
+        self.last_create_failed
+            .store(result.is_err(), Ordering::Release);
         match result {
             Ok(_) => {
                 self.sealed[index].state = CreateState::Created;
@@ -5082,6 +5101,7 @@ mod tests {
             read_prefetch_budget: Arc::new(Semaphore::new(READ_PREFETCH_BYTES)),
             terminal_error: Arc::default(),
             stopped: Arc::new(AtomicBool::new(false)),
+            last_create_failed: Arc::new(AtomicBool::new(false)),
             command_tx,
             append_tx,
             admitted_appends: watch::channel(0).1,

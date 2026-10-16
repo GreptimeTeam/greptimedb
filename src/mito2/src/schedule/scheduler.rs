@@ -321,11 +321,10 @@ mod wal_barrier_test {
     use store_api::logstore::provider::Provider;
     use store_api::storage::RegionId;
     use tokio::sync::oneshot;
-    use tokio_util::sync::CancellationToken;
 
     use super::{LocalScheduler, Scheduler};
     use crate::error::Result;
-    use crate::flush::wait_for_durable_wal;
+    use crate::flush::{StopSignal, wait_for_durable_wal};
     use crate::schedule::CancellableTaskState;
     use crate::wal::Wal;
 
@@ -333,9 +332,10 @@ mod wal_barrier_test {
 
     /// A graceful stop of the flush scheduler waits for its running jobs and
     /// runs its queued ones. Once the engine is stopping, a job that waits
-    /// for the WAL to become durable gives up, whether it was running or
-    /// queued, so the stop does not wait for a create that never completes,
-    /// while a job whose wait is satisfied still proceeds.
+    /// for the WAL to become durable gives up after the grace period of the
+    /// stop, whether it was running or queued, so the stop does not wait for
+    /// a create that never completes, while a job whose wait is satisfied
+    /// still proceeds.
     #[tokio::test]
     async fn test_stopping_releases_scheduled_waits_for_the_wal() {
         let config = ObjectStoreWalConfig {
@@ -369,7 +369,7 @@ mod wal_barrier_test {
 
         // One job runs and waits for the entry, the second is queued behind
         // it.
-        let stopping = CancellationToken::new();
+        let stopping = StopSignal::default();
         let scheduler = LocalScheduler::new(1);
         let schedule_wait = |entry_id| {
             let (done_tx, done_rx) = oneshot::channel::<Result<()>>();
@@ -396,7 +396,7 @@ mod wal_barrier_test {
             .unwrap()
             .unwrap();
 
-        stopping.cancel();
+        stopping.raise();
         tokio::time::timeout(WAIT, scheduler.stop(true))
             .await
             .expect("the scheduler must stop")

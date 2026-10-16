@@ -55,20 +55,30 @@ pub type WalEntryStream<'a> = BoxStream<'a, Result<(EntryId, WalEntry)>>;
 /// hands out entry ids that a crash can lose, and a manifest watermark that
 /// names such an id would skip the entries assigned again after a restart.
 #[derive(Clone)]
-pub(crate) struct DurabilityBarrier(
-    Arc<dyn Fn(EntryId) -> BoxFuture<'static, Result<()>> + Send + Sync>,
-);
+pub(crate) struct DurabilityBarrier {
+    wait: Arc<dyn Fn(EntryId) -> BoxFuture<'static, Result<()>> + Send + Sync>,
+    failing: Arc<dyn Fn() -> bool + Send + Sync>,
+}
 
 impl DurabilityBarrier {
     /// Returns once the region is durable through `entry_id`.
     pub(crate) async fn wait(&self, entry_id: EntryId) -> Result<()> {
-        (self.0)(entry_id).await
+        (self.wait)(entry_id).await
+    }
+
+    /// Returns whether the log store currently fails to make entries
+    /// durable, see [LogStore::is_failing].
+    pub(crate) fn is_failing(&self) -> bool {
+        (self.failing)()
     }
 
     /// A barrier that never waits, for tests without a log store.
     #[cfg(test)]
     pub(crate) fn noop() -> Self {
-        Self(Arc::new(|_| Box::pin(async { Ok(()) })))
+        Self {
+            wait: Arc::new(|_| Box::pin(async { Ok(()) })),
+            failing: Arc::new(|| false),
+        }
     }
 }
 
@@ -144,21 +154,25 @@ impl<S: LogStore> Wal<S> {
         provider: &Provider,
     ) -> DurabilityBarrier {
         let store = self.store.clone();
+        let failing_store = self.store.clone();
         let provider = provider.clone();
-        DurabilityBarrier(Arc::new(move |entry_id| {
-            let store = store.clone();
-            let provider = provider.clone();
-            Box::pin(async move {
-                if let Provider::Noop = provider {
-                    return Ok(());
-                }
-                store
-                    .wait_durable(&provider, entry_id)
-                    .await
-                    .map_err(BoxedError::new)
-                    .context(WaitWalDurableSnafu { region_id })
-            })
-        }))
+        DurabilityBarrier {
+            wait: Arc::new(move |entry_id| {
+                let store = store.clone();
+                let provider = provider.clone();
+                Box::pin(async move {
+                    if let Provider::Noop = provider {
+                        return Ok(());
+                    }
+                    store
+                        .wait_durable(&provider, entry_id)
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(WaitWalDurableSnafu { region_id })
+                })
+            }),
+            failing: Arc::new(move || failing_store.is_failing()),
+        }
     }
 
     /// Checks that the log store holds the WAL history of the region through

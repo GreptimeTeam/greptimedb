@@ -57,7 +57,6 @@ use store_api::region_engine::{
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
-use tokio_util::sync::CancellationToken;
 
 use crate::access_layer::new_fs_cache_store;
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
@@ -66,7 +65,7 @@ use crate::compaction::CompactionScheduler;
 use crate::compaction::memory_manager::{CompactionMemoryManager, new_compaction_memory_manager};
 use crate::config::MitoConfig;
 use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
-use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
+use crate::flush::{FlushScheduler, StopSignal, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::gc::{GcLimiter, GcLimiterRef};
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
@@ -165,8 +164,9 @@ pub(crate) struct WorkerGroup {
     /// Schema metadata manager.
     schema_metadata_manager: SchemaMetadataManagerRef,
     /// Raised once the group begins to stop and kept raised: a flush that
-    /// waits for the WAL to become durable gives up then.
-    stopping: CancellationToken,
+    /// waits for the WAL to become durable gives up after a grace period, see
+    /// [crate::flush::wait_for_durable_wal].
+    stopping: StopSignal,
 }
 
 impl WorkerGroup {
@@ -245,7 +245,7 @@ impl WorkerGroup {
         let compaction_memory_manager =
             Arc::new(new_compaction_memory_manager(compaction_limit_bytes));
         let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
-        let stopping = CancellationToken::new();
+        let stopping = StopSignal::default();
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -298,10 +298,11 @@ impl WorkerGroup {
     }
 
     /// Tells the group that it is about to stop: from now on a flush that
-    /// waits for the WAL to become durable gives up, so that closing regions
-    /// and stopping the group do not wait for a log store stopped after them.
+    /// waits for the WAL to become durable gives up once the log store fails
+    /// or a grace period passed, so that closing regions and stopping the
+    /// group do not wait for long for a log store stopped after them.
     pub(crate) fn begin_stop(&self) {
-        self.stopping.cancel();
+        self.stopping.raise();
     }
 
     /// Stops the worker group.
@@ -474,7 +475,7 @@ impl WorkerGroup {
         let compaction_memory_manager =
             Arc::new(new_compaction_memory_manager(compaction_limit_bytes));
         let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
-        let stopping = CancellationToken::new();
+        let stopping = StopSignal::default();
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
@@ -614,7 +615,7 @@ struct WorkerStarter<S> {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     flush_semaphore: Arc<Semaphore>,
-    stopping: CancellationToken,
+    stopping: StopSignal,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -1028,7 +1029,7 @@ struct RegionWorkerLoop<S> {
     /// Semaphore to control flush concurrency.
     flush_semaphore: Arc<Semaphore>,
     /// Raised once the worker group begins to stop.
-    stopping: CancellationToken,
+    stopping: StopSignal,
     /// Plugins for flush hooks.
     plugins: Plugins,
 }

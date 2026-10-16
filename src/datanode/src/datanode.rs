@@ -1584,14 +1584,15 @@ mod tests {
         assert!(is_stopped(log_store).await);
     }
 
-    /// Builds a datanode on an `enqueued` object store WAL whose creates fail
-    /// from now on, and creates a region on it with `rows` written through the
-    /// WAL and `skipped_rows` written past it. Returns the datanode, its log
-    /// store and the region.
-    async fn datanode_with_failing_wal(
+    /// Builds a datanode on an `enqueued` object store WAL, whose creates fail
+    /// from now on if `failing`, and creates a region on it with `rows`
+    /// written through the WAL and `skipped_rows` written past it. Returns the
+    /// datanode, its log store and the region.
+    async fn datanode_with_object_store_wal(
         data_home: &str,
         rows: usize,
         skipped_rows: usize,
+        failing: bool,
     ) -> (Datanode, Arc<ObjectStoreLogStore>, RegionId) {
         let config = ObjectStoreWalConfig {
             ack_mode: AckMode::Enqueued,
@@ -1617,7 +1618,9 @@ mod tests {
             .await
             .unwrap();
 
-        log_store.fail_creates();
+        if failing {
+            log_store.fail_creates();
+        }
         for (skip_wal, range) in [(false, 0..rows), (true, rows..rows + skipped_rows)] {
             if range.is_empty() {
                 continue;
@@ -1649,7 +1652,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let data_home = create_temp_dir("object-store-wal-shutdown-flush");
         let (mut datanode, log_store, region_id) =
-            datanode_with_failing_wal(data_home.path().to_str().unwrap(), 3, 0).await;
+            datanode_with_object_store_wal(data_home.path().to_str().unwrap(), 3, 0, true).await;
         let flush = {
             let region_server = datanode.region_server();
             tokio::spawn(async move {
@@ -1687,7 +1690,7 @@ mod tests {
         common_telemetry::init_default_ut_logging();
         let data_home = create_temp_dir("object-store-wal-shutdown-closing-flush");
         let (mut datanode, log_store, region_id) =
-            datanode_with_failing_wal(data_home.path().to_str().unwrap(), 3, 2).await;
+            datanode_with_object_store_wal(data_home.path().to_str().unwrap(), 3, 2, true).await;
 
         let err = tokio::time::timeout(WAIT, datanode.shutdown())
             .await
@@ -1696,6 +1699,24 @@ mod tests {
 
         assert_matches!(err, Error::HandleRegionRequest { region_id: id, .. } if id == region_id);
         assert_eq!(StatusCode::Cancelled, err.status_code());
+        assert!(is_stopped(&log_store).await);
+    }
+
+    /// With a healthy WAL, the close-time flush of a region that holds writes
+    /// that skipped the WAL waits for the last WAL entries to become durable
+    /// within the grace period of the stop: the close flushes the region and
+    /// the shutdown succeeds.
+    #[tokio::test]
+    async fn test_shutdown_flushes_a_region_while_the_wal_is_healthy() {
+        common_telemetry::init_default_ut_logging();
+        let data_home = create_temp_dir("object-store-wal-shutdown-healthy-flush");
+        let (mut datanode, log_store, _) =
+            datanode_with_object_store_wal(data_home.path().to_str().unwrap(), 3, 2, false).await;
+
+        tokio::time::timeout(WAIT, datanode.shutdown())
+            .await
+            .expect("the shutdown must finish")
+            .unwrap();
         assert!(is_stopped(&log_store).await);
     }
 

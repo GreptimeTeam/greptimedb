@@ -107,6 +107,16 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
         Ok(())
     }
 
+    /// Returns whether the log store currently fails to give appended entries
+    /// that persistence, so that a caller about to give up a wait in
+    /// [`wait_durable`](Self::wait_durable), such as a flush of a stopping
+    /// engine, need not wait any longer.
+    ///
+    /// The default returns false.
+    fn is_failing(&self) -> bool {
+        false
+    }
+
     /// Releases every entry of a region the caller dropped, after `obsolete`
     /// marked them obsolete, so that the log store keeps none of them even
     /// across a restart, which never opens the region again to mark its
