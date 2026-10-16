@@ -14,6 +14,14 @@ on:
         description: 'Full image reference with a tag or digest; used instead of greptimedb_tag when set'
         type: string
         default: ''
+      images:
+        description: 'JSON list of 2..4 {"label", "image"} to compare on one instance instead of greptimedb_tag and greptimedb_image: every cell runs once per image, in an order that reverses every other round; a label is up to 8 lowercase letters and digits, an image a full reference with a tag or digest, the first the reference of the ratios'
+        type: string
+        default: ''
+      warmup:
+        description: Before round 1, run the first load cell once per image and leave it out of every statistic
+        type: boolean
+        default: false
       configs:
         description: 'WAL configurations: R (Raft Engine, sync_write), R0 (Raft Engine, standalone default), D (durable), E (enqueued)'
         type: string
@@ -47,7 +55,7 @@ on:
         type: number
         default: 1000
       rounds:
-        description: Rounds; the configuration order alternates between rounds (R, D, E then E, D, R)
+        description: Rounds; the configuration and image order alternates between rounds (R, D, E then E, D, R)
         type: number
         default: 2
       runtime_image:
@@ -68,6 +76,8 @@ env:
   SMOKE: ${{ inputs.smoke }}
   GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
   GREPTIMEDB_IMAGE_INPUT: ${{ inputs.greptimedb_image }}
+  OSWAL_IMAGES: ${{ inputs.images }}
+  WARMUP: ${{ inputs.warmup }}
   CONFIGS: ${{ inputs.configs }}
   EXTRA_ENV: ${{ inputs.extra_env }}
   RESTART: ${{ inputs.restart }}
@@ -86,7 +96,7 @@ jobs:
     timeout-minutes: 15
     outputs:
       instance_type: ${{ steps.runner.outputs.instance_type }}
-      greptimedb_ref: ${{ steps.plan.outputs.greptimedb_ref }}
+      greptimedb_images: ${{ steps.images.outputs.greptimedb_images }}
       runtime_image: ${{ steps.runtime.outputs.runtime_image }}
     steps:
     - uses: actions/checkout@v4
@@ -103,8 +113,15 @@ jobs:
         python3 greptimedb/.github/scripts/oswal-s3-bench.py plan --smoke "$SMOKE" \
           --concurrency "$CONCURRENCY" --rows "$ROWS" --batch-rows "$BATCH_ROWS" --rounds "$ROUNDS" \
           --configs "$CONFIGS" --extra-env "$EXTRA_ENV" --restart "$RESTART" --groups "$OSWAL_GROUPS" \
+          --images "$OSWAL_IMAGES" --warmup "$WARMUP" \
           --timeout-minutes "$BENCHMARK_TIMEOUT_MINUTES" --ttl-hours "$JANITOR_TTL_HOURS"
-        python3 greptimedb/.github/scripts/oswal-s3-bench.py image --tag "$GREPTIMEDB_TAG" --image "$GREPTIMEDB_IMAGE_INPUT"
+        python3 greptimedb/.github/scripts/oswal-s3-bench.py image --tag "$GREPTIMEDB_TAG" --image "$GREPTIMEDB_IMAGE_INPUT" \
+          --images "$OSWAL_IMAGES"
+    - name: Pull every GreptimeDB image and record its version
+      id: images
+      env:
+        REQUESTED_IMAGES: ${{ steps.plan.outputs.requested_images }}
+      run: bash greptimedb/.github/scripts/oswal-s3-bench-run.sh check-images "$REQUESTED_IMAGES"
     - name: Resolve CI runner
       id: runner
       run: python3 greptimedb/.github/scripts/ci-runner-config.py --provider AWS --instance-type "$REQUESTED_INSTANCE_TYPE"
@@ -158,7 +175,7 @@ jobs:
     timeout-minutes: ${{ fromJSON(format('{0}', inputs.benchmark_timeout_minutes)) }}
     env:
       INSTANCE_TYPE: ${{ inputs.smoke && 'ubuntu-latest' || needs.validate.outputs.instance_type }}
-      GREPTIMEDB_REF: ${{ needs.validate.outputs.greptimedb_ref }}
+      GREPTIMEDB_IMAGES: ${{ needs.validate.outputs.greptimedb_images }}
       RUNTIME_IMAGE: ${{ needs.validate.outputs.runtime_image }}
       RUN_PREFIX: oswal-bench/${{ github.run_id }}-${{ github.run_attempt }}
       OWNER: o11ybench-oswal-${{ github.run_id }}-${{ github.run_attempt }}
@@ -188,8 +205,9 @@ jobs:
         bash greptimedb/.github/scripts/oswal-s3-bench-run.sh pull
         python3 greptimedb/.github/scripts/oswal-s3-bench.py plan --smoke "$SMOKE" --output "$PLAN" \
           --concurrency "$CONCURRENCY" --rows "$ROWS" --batch-rows "$BATCH_ROWS" --rounds "$ROUNDS" \
-          --configs "$CONFIGS" --extra-env "$EXTRA_ENV" --restart "$RESTART" --groups "$OSWAL_GROUPS"
-        python3 greptimedb/.github/scripts/oswal-s3-bench.py manifest --results "$RESULTS" \
+          --configs "$CONFIGS" --extra-env "$EXTRA_ENV" --restart "$RESTART" --groups "$OSWAL_GROUPS" \
+          --images "$OSWAL_IMAGES" --warmup "$WARMUP"
+        python3 greptimedb/.github/scripts/oswal-s3-bench.py manifest --results "$RESULTS" --images "$GREPTIMEDB_IMAGES" \
           --runtime-image "$RUNTIME_IMAGE" --instance-type "$INSTANCE_TYPE" --region "$S3_REGION" --prefix "$RUN_PREFIX"
     - name: Probe the bucket
       env:
