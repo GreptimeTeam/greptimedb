@@ -1914,3 +1914,97 @@ async fn test_build_series_index_rejects_non_metric_region() {
     );
     engine.stop().await.unwrap();
 }
+
+#[rstest::rstest]
+#[tokio::test]
+async fn test_sync_flush_indexes_encoded_bulk_parts(#[values(true, false)] create_on_flush: bool) {
+    let mut env = TestEnv::with_prefix("test_sync_flush_indexes_encoded_bulk_parts_").await;
+    let listener = Arc::new(IndexBuildListener::default());
+    let mut config = MitoConfig {
+        default_flat_format: true,
+        min_compaction_interval: Duration::from_secs(3600),
+        ..Default::default()
+    };
+    assert_eq!(config.index.build_mode, IndexBuildMode::Sync);
+    if !create_on_flush {
+        config.inverted_index.create_on_flush = Mode::Disable;
+        config.fulltext_index.create_on_flush = Mode::Disable;
+        config.bloom_filter_index.create_on_flush = Mode::Disable;
+    }
+    let engine = env
+        .create_engine_with(config, None, Some(listener.clone()), None)
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    let mut request = CreateRequestBuilder::new()
+        .insert_option("memtable.type", "bulk")
+        .insert_option("memtable.bulk.merge_threshold", "2")
+        .insert_option("memtable.bulk.encode_row_threshold", "1")
+        .build_with_index();
+    // `build_with_index` only adds inverted indexes on tags; also cover a skipping index.
+    let field = request
+        .column_metadatas
+        .iter_mut()
+        .find(|c| c.column_schema.name == "field_0")
+        .unwrap();
+    field.column_schema = field
+        .column_schema
+        .clone()
+        .with_skipping_options(SkippingIndexOptions::new_unchecked(
+            1024,
+            0.01,
+            SkippingIndexType::BloomFilter,
+        ))
+        .unwrap();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Each write is large enough to become its own bulk part.
+    for (start, end) in [(0, 2000), (2000, 4000)] {
+        let rows = Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(start, end),
+        };
+        put_rows(&engine, region_id, rows).await;
+    }
+    // Merges the two parts into an encoded part, which flush uploads as-is.
+    let version = engine.get_region(region_id).unwrap().version();
+    for memtable in version.memtables.list_memtables() {
+        memtable.compact(false).unwrap();
+    }
+    flush_region(&engine, region_id, None).await;
+    if !create_on_flush {
+        // Indexes disabled on flush must not schedule a build that reads the SST back.
+        assert_listener_counts(&listener, 0, 0);
+        let files = current_file_metas(&engine, region_id).await;
+        assert!(files[0].available_indexes.is_empty());
+        return;
+    }
+    tokio::time::timeout(Duration::from_secs(10), listener.wait_finish(1))
+        .await
+        .expect("no index build for the encoded flush output");
+
+    let metadata = engine.get_region(region_id).unwrap().metadata();
+    let files = current_file_metas(&engine, region_id).await;
+    assert_eq!(files.len(), 1);
+    assert!(
+        files[0].is_index_consistent_with_region(&metadata.column_metadatas),
+        "flushed file has no index: {:?}",
+        files[0]
+    );
+    assert!(files[0].inverted_index_available());
+    assert!(files[0].bloom_filter_index_available());
+}
