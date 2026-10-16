@@ -22,59 +22,51 @@ use crate::error::{InvalidSeriesSnafu, Result};
 use crate::series::samples::{SeriesFields, SeriesSchema};
 use crate::series::{MetricName, invalid_series};
 
-/// Explicit source timestamps in milliseconds for a raw series chunk.
-#[non_exhaustive]
+/// Strictly increasing source timestamps in milliseconds for a raw series chunk.
+///
+/// Its private buffer ensures timestamps are validated once at construction. Direct
+/// construction is intentionally unavailable:
+///
+/// ```compile_fail
+/// use arrow::buffer::ScalarBuffer;
+/// use datatypes::series::raw::RawTimestamps;
+///
+/// let timestamps = RawTimestamps {
+///     values: ScalarBuffer::from(vec![1_i64, 2]),
+/// };
+/// ```
 #[derive(Clone, Debug)]
-pub enum RawTimeAxis {
-    /// Source timestamps in strictly increasing order.
-    Explicit(ScalarBuffer<i64>),
+pub struct RawTimestamps {
+    values: ScalarBuffer<i64>,
 }
 
-impl RawTimeAxis {
-    /// Validates and wraps strictly increasing timestamps; an empty axis is valid on its own.
-    pub fn try_new(timestamps: ScalarBuffer<i64>) -> Result<Self> {
-        let axis = Self::Explicit(timestamps);
-        axis.try_len()?;
-        Ok(axis)
+impl RawTimestamps {
+    /// Validates and wraps strictly increasing timestamps; an empty wrapper is valid.
+    pub fn try_new(values: ScalarBuffer<i64>) -> Result<Self> {
+        if values.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return invalid_series("raw timestamps must be strictly increasing");
+        }
+        Ok(Self { values })
     }
 
-    /// Returns the explicit timestamp buffer, if this axis uses explicit timestamps.
-    ///
-    /// Future axis variants may not have an explicit buffer.
-    pub fn as_explicit(&self) -> Option<&ScalarBuffer<i64>> {
-        match self {
-            Self::Explicit(values) => Some(values),
-        }
-    }
-
-    fn try_len(&self) -> Result<usize> {
-        match self {
-            Self::Explicit(values) => {
-                if values.windows(2).any(|pair| pair[0] >= pair[1]) {
-                    return invalid_series("raw timestamps must be strictly increasing");
-                }
-                Ok(values.len())
-            }
-        }
+    /// Returns the underlying timestamp buffer.
+    pub fn as_buffer(&self) -> &ScalarBuffer<i64> {
+        &self.values
     }
 
     /// Returns the number of timestamps.
     pub fn len(&self) -> usize {
-        match self {
-            Self::Explicit(values) => values.len(),
-        }
+        self.values.len()
     }
 
-    /// Returns whether the axis has no timestamps.
+    /// Returns whether there are no timestamps.
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.values.is_empty()
     }
 
     /// Returns the timestamp at `index`, or `None` when out of bounds.
     pub fn timestamp(&self, index: usize) -> Option<i64> {
-        match self {
-            Self::Explicit(values) => values.get(index).copied(),
-        }
+        self.values.get(index).copied()
     }
 
     /// Returns a zero-copy slice, reporting overflowing or out-of-range bounds as an error.
@@ -82,14 +74,14 @@ impl RawTimeAxis {
         let end = offset
             .checked_add(len)
             .with_context(|| InvalidSeriesSnafu {
-                reason: "raw time axis slice bounds overflow".to_string(),
+                reason: "raw timestamps slice bounds overflow".to_string(),
             })?;
         if end > self.len() {
-            return invalid_series("raw time axis slice is out of bounds");
+            return invalid_series("raw timestamps slice is out of bounds");
         }
-        match self {
-            Self::Explicit(values) => Ok(Self::Explicit(values.slice(offset, len))),
-        }
+        Ok(Self {
+            values: self.values.slice(offset, len),
+        })
     }
 }
 
@@ -99,9 +91,9 @@ impl RawTimeAxis {
 /// contract even when a consumer cannot detect that recurrence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RawSeriesOrdering {
-    /// Each read key's chunks are contiguous; distinct read keys need not be ordered.
+    /// Each complete primary key's chunks are contiguous; distinct keys need not be ordered.
     Contiguous,
-    /// Chunks are ordered by read key and then by timestamp.
+    /// Chunks are ordered by complete primary key and then by timestamp.
     ReadKeyThenTime,
 }
 
@@ -112,27 +104,29 @@ pub enum RawSeriesOrdering {
 #[derive(Clone, Debug)]
 pub struct RawSeriesChunk {
     /// Complete encoded identity of the source series, not a TSID or hash alone.
-    pub read_key: Buffer,
-    /// `None` leaves labels unmaterialized in the complete read key; `Some` contains
-    /// complete explicit labels.
+    pub primary_key: Buffer,
+    /// `None` denotes an encoded key under bound-label mode; `Some` contains complete
+    /// explicit labels and retains their identity.
     pub metric: Option<MetricName>,
     /// Source timestamps aligned with every field.
-    pub time: RawTimeAxis,
+    pub time: RawTimestamps,
     /// Field values aligned with the source timestamps.
     pub fields: SeriesFields,
-    /// Whether this is the final chunk for this input stream's series, not all regions.
+    /// Whether this is the final chunk for this series in the input stream exposing it.
+    /// Merge code must recompute finalization globally across all relevant inputs before
+    /// downstream finalization.
     pub is_last: bool,
 }
 
 impl RawSeriesChunk {
-    /// Creates a nonempty chunk after checking its explicit time axis and schema alignment.
+    /// Creates a nonempty chunk after checking its time axis and schema alignment.
     ///
     /// Validation is local to this chunk and does not verify ordering between chunks.
     pub fn try_new(
         schema: &SeriesSchema,
-        read_key: Buffer,
+        primary_key: Buffer,
         metric: Option<MetricName>,
-        time: RawTimeAxis,
+        time: RawTimestamps,
         fields: SeriesFields,
         is_last: bool,
     ) -> Result<Self> {
@@ -148,9 +142,8 @@ impl RawSeriesChunk {
         if time.is_empty() {
             return invalid_series("raw series chunks must not be empty");
         }
-        time.try_len()?;
         Ok(Self {
-            read_key,
+            primary_key,
             metric,
             time,
             fields,
