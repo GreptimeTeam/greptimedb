@@ -197,6 +197,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     region_id: region.region_id,
                     build_type: IndexBuildType::SchemaChange,
                     file_metas: Vec::new(),
+                    result_senders: Vec::new(),
                 },
                 OptionOutputTx::new(None),
             )

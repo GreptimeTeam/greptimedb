@@ -1147,7 +1147,10 @@ async fn test_consecutive_schema_changes_publish_latest_index_generation() {
     let files = current_file_metas(&engine, region_id).await;
     assert_eq!(files.len(), 1);
     assert!(
-        files[0].is_index_consistent_with_region(&version.metadata.column_metadatas),
+        files[0].is_index_consistent_with_region(
+            &version.metadata.column_metadatas,
+            &version.options.index_options,
+        ),
         "the published index must match the latest schema generation, file: {:?}, metadata: {:?}",
         files[0],
         version.metadata
@@ -1166,10 +1169,10 @@ async fn test_consecutive_schema_changes_publish_latest_index_generation() {
     let reopened = engine.get_region(region_id).unwrap();
     let reopened_files = current_file_metas(&engine, region_id).await;
     assert_eq!(reopened_files.len(), 1);
-    assert!(
-        reopened_files[0]
-            .is_index_consistent_with_region(&reopened.version().metadata.column_metadatas)
-    );
+    assert!(reopened_files[0].is_index_consistent_with_region(
+        &reopened.version().metadata.column_metadatas,
+        &reopened.version().options.index_options,
+    ));
 }
 
 #[tokio::test]
@@ -1250,7 +1253,11 @@ async fn test_unrelated_schema_change_retries_stale_flush_index_build() {
     let region = engine.get_region(region_id).unwrap();
     let files = current_file_metas(&engine, region_id).await;
     assert_eq!(files.len(), 1);
-    assert!(files[0].is_index_consistent_with_region(&region.version().metadata.column_metadatas));
+    let version = region.version();
+    assert!(files[0].is_index_consistent_with_region(
+        &version.metadata.column_metadatas,
+        &version.options.index_options,
+    ));
     let scanner = engine
         .scanner(region_id, ScanRequest::default())
         .await
@@ -1339,7 +1346,10 @@ async fn test_schema_change_uses_manifest_file_generation() {
     let files = current_file_metas(&engine, region_id).await;
     assert_eq!(files.len(), 1);
     assert!(
-        files[0].is_index_consistent_with_region(&version.metadata.column_metadatas),
+        files[0].is_index_consistent_with_region(
+            &version.metadata.column_metadatas,
+            &version.options.index_options,
+        ),
         "the latest index definition was not published"
     );
 }
@@ -1593,42 +1603,105 @@ async fn test_index_build_type_manual_duplicate_in_flight() {
     assert_eq!(gate.finish_count(), 0);
     assert_eq!(gate.abort_count(), 0);
 
-    // Issue the second manual BuildIndex for the same region/file.
-    // Since the file is already in building_files (from the first manual build),
-    // schedule_build detects the duplicate and calls on_index_build_abort.
-    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
-    engine.handle_request(region_id, request).await.unwrap();
-
-    // The second request should have been aborted as duplicate.
-    assert_eq!(gate.abort_count(), 1, "duplicate request should be aborted");
-    assert_eq!(gate.begin_count(), 2, "no new begin for duplicate");
-    assert_eq!(gate.finish_count(), 0, "first build hasn't finished yet");
-
-    // Release the gate to let the first manual build proceed.
-    gate.release_begin();
-    tokio::time::timeout(std::time::Duration::from_secs(5), gate.wait_finish(1))
+    // The second manual BuildIndex for the same file waits for the active build
+    // instead of returning before the index exists.
+    let received = gate.recv_count();
+    let engine_clone = engine.clone();
+    let second_handle = tokio::spawn(async move {
+        let request = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
+        engine_clone.handle_request(region_id, request).await
+    });
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_recv(received + 1))
         .await
-        .unwrap(); // first manual build completes
-
-    // Final counts: only one successful build, one aborted duplicate.
-    assert_eq!(gate.begin_count(), 2); // flush + first manual
-    assert_eq!(gate.finish_count(), 1); // first manual only
-    assert_eq!(gate.abort_count(), 1); // second manual duplicate abort
-
-    // Await the first build's handle_request to ensure it completed cleanly.
-    tokio::time::timeout(std::time::Duration::from_secs(5), first_handle)
-        .await
-        .unwrap()
-        .unwrap()
         .unwrap();
 
-    // Verify exactly one SST and one index file.
+    // Release the first manual build and the second one queued behind it.
+    gate.release_begin();
+    gate.release_begin();
+    for handle in [first_handle, second_handle] {
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    // The queued build starts from the published index and skips the rebuild.
+    assert_eq!(gate.finish_count(), 1);
     let scanner = engine
         .scanner(region_id, ScanRequest::default())
         .await
         .unwrap();
     assert_eq!(scanner.num_files(), 1);
     assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
+}
+
+#[tokio::test]
+async fn test_index_build_type_manual_waits_for_in_flight_flush_build() {
+    let mut env =
+        TestEnv::with_prefix("test_index_build_type_manual_waits_for_in_flight_flush_build_").await;
+    let gate = Arc::new(GateIndexBuildListener::default());
+    let engine = Arc::new(
+        env.create_engine_with(
+            async_build_mode_config(false), // Flush-triggered builds create no index.
+            None,
+            Some(gate.clone()),
+            None,
+        )
+        .await,
+    );
+
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let request = CreateRequestBuilder::new().build_with_index();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    put_and_flush(&engine, region_id, &column_schemas, 10..20).await;
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_begin(1))
+        .await
+        .unwrap();
+
+    // The manual build arrives while the no-op flush build of the same file is
+    // active. Returning at this point would leave the file without an index.
+    let received = gate.recv_count();
+    let engine_clone = engine.clone();
+    let manual_handle = tokio::spawn(async move {
+        let request = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
+        engine_clone.handle_request(region_id, request).await
+    });
+    tokio::time::timeout(Duration::from_secs(5), gate.wait_recv(received + 1))
+        .await
+        .unwrap();
+
+    gate.release_begin();
+    gate.release_begin();
+    tokio::time::timeout(Duration::from_secs(5), manual_handle)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+    // The index is visible to scans as soon as the manual build returns.
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(scanner.num_files(), 1);
+    assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
+    assert_eq!(gate.finish_count(), 1);
 }
 
 #[tokio::test]
@@ -1723,12 +1796,18 @@ async fn test_reopen_waits_for_active_index_build_of_previous_incarnation() {
     assert_eq!(gate.begin_count(), 2);
     assert_eq!(gate.abort_count(), aborts_before_rebuild);
 
+    // The closed incarnation cannot publish its build, so its caller must not
+    // be told the index exists.
     gate.release_begin();
-    tokio::time::timeout(Duration::from_secs(10), old_build)
+    let err = tokio::time::timeout(Duration::from_secs(10), old_build)
         .await
         .expect("old index build request did not finish")
         .expect("old index build task panicked")
-        .unwrap();
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("Index build did not complete"),
+        "{err:?}"
+    );
     tokio::time::timeout(Duration::from_secs(10), gate.wait_begin(3))
         .await
         .expect("reopened index build did not start after the old build stopped");
