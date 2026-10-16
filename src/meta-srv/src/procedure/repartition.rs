@@ -30,6 +30,7 @@ use std::fmt::{Debug, Display};
 use std::time::{Duration, Instant};
 
 use common_error::ext::BoxedError;
+use common_meta::affinity::{AffinityFallback, AffinityResolverRef};
 use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::DdlContext;
 use common_meta::ddl::allocator::region_routes::RegionRoutesAllocatorRef;
@@ -148,6 +149,8 @@ impl PersistentContext {
 
 #[derive(Clone)]
 pub struct Context {
+    pub affinity_resolver: Option<AffinityResolverRef>,
+    pub affinity_fallback: AffinityFallback,
     pub persistent_ctx: PersistentContext,
     pub volatile_ctx: VolatileContext,
     pub table_metadata_manager: TableMetadataManagerRef,
@@ -248,6 +251,8 @@ impl Context {
         persistent_ctx: PersistentContext,
     ) -> Self {
         Self {
+            affinity_resolver: ddl_ctx.affinity_resolver.clone(),
+            affinity_fallback: ddl_ctx.affinity_fallback,
             persistent_ctx,
             table_metadata_manager: ddl_ctx.table_metadata_manager.clone(),
             memory_region_keeper: ddl_ctx.memory_region_keeper.clone(),

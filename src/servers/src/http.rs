@@ -169,7 +169,8 @@ pub const AUTHORIZATION_HEADER: &str = "x-greptime-auth";
 
 // TODO(fys): This is a temporary workaround, it will be improved later
 // these APIs will bypass authentication.
-pub static PUBLIC_API_PREFIX: [&str; 4] = [
+pub static PUBLIC_API_PREFIX: [&str; 5] = [
+    "/v1/auth/config",
     "/v1/influxdb/ping",
     "/v1/influxdb/health",
     "/v1/health",
@@ -978,8 +979,12 @@ impl HttpServer {
     /// on both listeners automatically, and the API guard decides exposure.
     pub fn make_app(&self) -> Router {
         let mut router = self.router.lock().unwrap().clone();
+        let auth_router = Router::new()
+            .route("/v1/auth/config", routing::get(authorize::auth_config))
+            .with_state(AuthState::new(self.user_provider.clone()));
 
         router = router
+            .merge(auth_router)
             .route(
                 &format!("/{HTTP_API_VERSION}/health"),
                 routing::get(handler::health).post(handler::health),
@@ -1840,6 +1845,40 @@ mod test {
         // The API server is disabled by default.
         assert!(!opts.enable_api_server);
         assert_eq!(opts.api_server_addr, "127.0.0.1:4006");
+    }
+
+    #[tokio::test]
+    async fn test_auth_config_without_provider_disables_auth() {
+        let server = HttpServerBuilder::new(HttpOptions::default()).build();
+        let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+        let response = client.get("/v1/auth/config").send().await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.json::<serde_json::Value>().await,
+            serde_json::json!({"auth_required": false, "methods": []})
+        );
+    }
+
+    #[tokio::test]
+    async fn test_auth_config_with_provider_is_public() {
+        let provider =
+            auth::static_user_provider_from_option("static_user_provider:cmd:user=password")
+                .unwrap();
+        let server = HttpServerBuilder::new(HttpOptions::default())
+            .with_user_provider(Arc::new(provider))
+            .build();
+        let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+        let response = client.get("/v1/auth/config").send().await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.json::<serde_json::Value>().await,
+            serde_json::json!({
+                "auth_required": true,
+                "methods": [{"type": "password"}]
+            })
+        );
     }
 
     #[tokio::test]

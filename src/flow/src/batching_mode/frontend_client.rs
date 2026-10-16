@@ -95,8 +95,12 @@ pub enum FrontendClient {
         control_channel_manager: ChannelManager,
         query: QueryOptions,
         batch_opts: BatchingModeOptions,
+        #[cfg(feature = "enterprise")]
+        tracked_writes: bool,
     },
     Standalone {
+        #[cfg(feature = "enterprise")]
+        tracked_writes: bool,
         /// for the sake of simplicity still use grpc even in standalone mode
         /// notice the client here should all be lazy, so that can wait after frontend is booted then make conn
         database_client: HandlerMutable,
@@ -105,6 +109,26 @@ pub enum FrontendClient {
 }
 
 impl FrontendClient {
+    #[cfg(feature = "enterprise")]
+    pub fn with_tracked_writes(&self) -> Self {
+        let mut client = self.clone();
+        match &mut client {
+            Self::Distributed { tracked_writes, .. } | Self::Standalone { tracked_writes, .. } => {
+                *tracked_writes = true;
+            }
+        }
+        client
+    }
+
+    #[cfg(feature = "enterprise")]
+    fn tracked_writes_enabled(&self) -> bool {
+        match self {
+            Self::Distributed { tracked_writes, .. } | Self::Standalone { tracked_writes, .. } => {
+                *tracked_writes
+            }
+        }
+    }
+
     /// Create a new empty frontend client, with a `HandlerMutable` to set the grpc handler later
     pub fn from_empty_grpc_handler(query: QueryOptions) -> (Self, HandlerMutable) {
         let is_initialized = Arc::new(SetOnce::new());
@@ -116,6 +140,8 @@ impl FrontendClient {
             Self::Standalone {
                 database_client: handler.clone(),
                 query,
+                #[cfg(feature = "enterprise")]
+                tracked_writes: false,
             },
             handler,
         )
@@ -152,6 +178,8 @@ impl FrontendClient {
             control_channel_manager,
             query,
             batch_opts,
+            #[cfg(feature = "enterprise")]
+            tracked_writes: false,
         })
     }
 
@@ -168,6 +196,8 @@ impl FrontendClient {
         Self::Standalone {
             database_client: handler,
             query,
+            #[cfg(feature = "enterprise")]
+            tracked_writes: false,
         }
     }
 }
@@ -205,7 +235,39 @@ impl DatabaseWithPeer {
     }
 }
 
+#[cfg(feature = "enterprise")]
+pub(crate) mod flow_write;
+
 impl FrontendClient {
+    /// Preflight tracked-write support by opening and closing a capability without writing.
+    #[cfg(feature = "enterprise")]
+    pub async fn check_tracked_writes(&self, catalog: &str, schema: &str) -> Result<(), Error> {
+        if !self.tracked_writes_enabled() {
+            return UnexpectedSnafu {
+                reason: "Tracked writes are not enabled on this frontend client",
+            }
+            .fail();
+        }
+        flow_write::check_tracked_writes(self, catalog, schema).await
+    }
+
+    /// Execute a finite SQL write with receiver-issued completion tracking.
+    #[cfg(feature = "enterprise")]
+    pub async fn tracked_sql_write(
+        &self,
+        catalog: &str,
+        schema: &str,
+        sql: &str,
+    ) -> Result<OutputWithMetrics, Error> {
+        if !self.tracked_writes_enabled() {
+            return UnexpectedSnafu {
+                reason: "Tracked writes are not enabled on this frontend client",
+            }
+            .fail();
+        }
+        flow_write::tracked_sql_write(self, catalog, schema, sql).await
+    }
+
     /// scan for available frontend from metadata
     pub(crate) async fn scan_for_frontend(&self) -> Result<Vec<Peer>, Error> {
         let Self::Distributed { meta_client, .. } = self else {
@@ -295,6 +357,7 @@ impl FrontendClient {
             control_channel_manager,
             query: _,
             batch_opts,
+            ..
         } = self
         else {
             return UnexpectedSnafu {
@@ -495,6 +558,33 @@ impl FrontendClient {
         peer_desc: &mut Option<PeerDesc>,
     ) -> Result<OutputWithMetrics, Error> {
         let flow_extensions = build_flow_extensions(extensions)?;
+        #[cfg(feature = "enterprise")]
+        if self.tracked_writes_enabled() && is_tracked_insert_request(&request) {
+            let effective_extensions: HashMap<String, String> = extensions
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect();
+            if effective_extensions.contains_key(common_grpc::flow_write::COMMAND_KEY) {
+                return UnexpectedSnafu {
+                    reason: "Client-supplied tracked Flow command is forbidden",
+                }
+                .fail();
+            }
+            let effective_extension_refs: Vec<(&str, &str)> = effective_extensions
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect();
+            return flow_write::tracked_query(
+                self,
+                catalog,
+                schema,
+                Some(request),
+                &effective_extension_refs,
+                snapshot_seqs,
+                peer_desc,
+            )
+            .await;
+        }
         match self {
             FrontendClient::Distributed {
                 query, batch_opts, ..
@@ -522,6 +612,7 @@ impl FrontendClient {
             FrontendClient::Standalone {
                 database_client,
                 query,
+                ..
             } => {
                 *peer_desc = Some(PeerDesc::Standalone);
                 let mut extensions_map = HashMap::new();
@@ -603,6 +694,7 @@ impl FrontendClient {
             FrontendClient::Standalone {
                 database_client,
                 query,
+                ..
             } => {
                 let ctx = QueryContextBuilder::default()
                     .current_catalog(catalog.to_string())
@@ -690,6 +782,7 @@ impl FrontendClient {
             FrontendClient::Standalone {
                 database_client,
                 query,
+                ..
             } => {
                 let ctx = QueryContextBuilder::default()
                     .current_catalog(catalog.to_string())
@@ -739,6 +832,15 @@ impl FrontendClient {
                 }
             }
         }
+    }
+}
+
+#[cfg(feature = "enterprise")]
+fn is_tracked_insert_request(request: &QueryRequest) -> bool {
+    match request.query.as_ref() {
+        Some(Query::InsertIntoPlan(_)) => true,
+        Some(Query::Sql(sql)) => sql.trim_start().to_ascii_uppercase().starts_with("INSERT "),
+        _ => false,
     }
 }
 

@@ -23,7 +23,6 @@ use auth::{
 use client::Output;
 use common_error::ext::BoxedError;
 use datatypes::timestamp::TimestampNanosecond;
-use pipeline::pipeline_operator::PipelineOperator;
 use pipeline::{Pipeline, PipelineInfo, PipelineVersion};
 use servers::error::{
     AuthSnafu, Error as ServerError, ExecuteGrpcRequestSnafu, PipelineSnafu, Result as ServerResult,
@@ -148,7 +147,9 @@ impl PipelineHandler for Instance {
     }
 
     fn build_pipeline(&self, pipeline: &str) -> ServerResult<Pipeline> {
-        PipelineOperator::build_pipeline(pipeline).context(PipelineSnafu)
+        self.pipeline_operator
+            .build_pipeline(pipeline)
+            .context(PipelineSnafu)
     }
 
     async fn get_pipeline_str(

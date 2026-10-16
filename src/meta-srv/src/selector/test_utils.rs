@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use common_meta::affinity::NoopAffinity;
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
 use rand::prelude::SliceRandom;
@@ -34,6 +35,8 @@ pub fn new_test_selector_context() -> SelectorContext {
         .unwrap();
 
     SelectorContext {
+        affinity_fallback: Default::default(),
+        affinity: Arc::new(NoopAffinity),
         peer_discovery: meta_peer_client,
     }
 }
@@ -54,7 +57,11 @@ impl Selector for RandomNodeSelector {
     type Context = SelectorContext;
     type Output = Vec<Peer>;
 
-    async fn select(&self, _ctx: &Self::Context, _opts: SelectorOptions) -> Result<Self::Output> {
+    async fn select(
+        &self,
+        _ctx: &Self::Context,
+        _opts: SelectorOptions<'_>,
+    ) -> Result<Self::Output> {
         let mut rng = rand::rng();
         let mut nodes = self.nodes.clone();
         nodes.shuffle(&mut rng);

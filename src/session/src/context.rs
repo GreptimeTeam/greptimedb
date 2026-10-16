@@ -449,6 +449,11 @@ impl QueryContext {
         self.extensions.insert(key.into(), value.into());
     }
 
+    #[cfg(feature = "enterprise")]
+    pub fn remove_extension(&mut self, key: &str) {
+        self.extensions.remove(key);
+    }
+
     pub fn extension<S: AsRef<str>>(&self, key: S) -> Option<&str> {
         self.extensions.get(key.as_ref()).map(|v| v.as_str())
     }
