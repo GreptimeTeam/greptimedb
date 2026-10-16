@@ -185,8 +185,29 @@ line (ask the user; some prefer to keep it).
 
 ## 6. Human-curated sections (insert after the `Release date:` line)
 
+**Style.** Follow the Google developer documentation style guide (apply the
+`tech-doc-style-english` skill if it is installed): sentence-case headings, active voice, present
+tense for behavior, American spelling, serial comma, code font for identifiers, bold only for UI
+names. Keep it short:
+- Intro: two sentences at most, what the release covers and its main theme.
+- Highlight: one paragraph of up to four sentences, plus an example if it earns one (see below).
+- Upgrade note or breaking change: one bullet, one or two sentences: what changes, who is
+  affected, what to do.
+- Every sentence states a fact the reader acts on or checks. Delete sentences that restate the
+  heading or the previous sentence, transitions, and summaries.
+- No marketing words (`significantly`, `powerful`, `seamless`, `robust`, `enhanced`), no vague
+  verbs (`supports`, `handles`, `improves`; say what happens), no `several`/`many` when the number
+  is known. Keep the source's hedges; don't add new ones.
+
+Example:
+> Bad: This release significantly enhances write reliability by introducing a robust retry
+> mechanism that seamlessly handles transient failures.
+>
+> Good: In distributed clusters, the frontend retries a failed write up to three times with
+> exponential backoff. Set `max_retries = 0` to disable retries.
+
 Mirror past release bodies (`gh release view v1.0.0 --repo GreptimeTeam/greptimedb`):
-- **Short intro**, terse, engineer-written tone (no marketing adjectives).
+- **Short intro** (see Style).
 - **`### 👍 Highlights`** — *few, deep* highlights, ranked by user impact. Fixes for silently
   wrong query results, lost or invisible data, and security issues rank with new features and
   can be highlights.
