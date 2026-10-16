@@ -1963,6 +1963,126 @@ GROUP BY l.number, time_window
     }
 
     #[tokio::test]
+    async fn test_flow_check_task_routing_map_orphan() {
+        const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+        let batching_engine = Arc::new(new_test_engine().await);
+        let (task, shutdown_tx) = new_test_task(9422).await;
+        let drop_rx = install_abort_observed_handle(&task).await;
+        batching_engine
+            .runtime
+            .write()
+            .await
+            .insert(9422, task, shutdown_tx);
+
+        let streaming_engine = Arc::new(crate::adapter::StreamingEngine::new(
+            None,
+            batching_engine.query_engine.clone(),
+            batching_engine.table_meta.clone(),
+            batching_engine.frontend_client.clone(),
+        ));
+        let dual_engine = Arc::new(crate::adapter::flownode_impl::FlowDualEngine::new(
+            streaming_engine,
+            batching_engine.clone(),
+            batching_engine.flow_metadata_manager.clone(),
+            batching_engine.catalog_manager.clone(),
+            common_base::Plugins::new(),
+        ));
+        dual_engine
+            .start_flow_consistent_check_task()
+            .await
+            .unwrap();
+
+        tokio::time::timeout(TEST_TIMEOUT, async {
+            while !dual_engine.is_recover_done() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("flow recovery should finish");
+
+        tokio::time::timeout(
+            TEST_TIMEOUT,
+            crate::engine::FlowEngine::remove_flow(dual_engine.as_ref(), 9422),
+        )
+        .await
+        .expect("removing a batching orphan must not await the checker itself")
+        .expect("orphan flow removal should succeed");
+
+        tokio::time::timeout(TEST_TIMEOUT, drop_rx)
+            .await
+            .expect("removed orphan task should stop")
+            .expect("task drop notifier should fire");
+        assert!(!batching_engine.flow_exist_inner(9422).await);
+
+        let (checker_orphan, checker_shutdown_tx) = new_test_task(9423).await;
+        let checker_drop_rx = install_abort_observed_handle(&checker_orphan).await;
+        batching_engine
+            .runtime
+            .write()
+            .await
+            .insert(9423, checker_orphan, checker_shutdown_tx);
+        tokio::time::timeout(TEST_TIMEOUT, dual_engine.reconcile_flows_from_metadata())
+            .await
+            .expect("metadata reconciliation should not await its own checker")
+            .expect("orphan reconciliation should succeed");
+        tokio::time::timeout(TEST_TIMEOUT, checker_drop_rx)
+            .await
+            .expect("checker cleanup should stop the orphan task")
+            .expect("task drop notifier should fire");
+        assert!(!batching_engine.flow_exist_inner(9423).await);
+
+        let (detached_orphan, detached_shutdown_tx) = new_test_task(9425).await;
+        let detached_drop_rx = install_abort_observed_handle(&detached_orphan).await;
+        batching_engine
+            .runtime
+            .write()
+            .await
+            .insert(9425, detached_orphan, detached_shutdown_tx);
+        batching_engine
+            .runtime
+            .write()
+            .await
+            .shutdown_txs
+            .remove(&9425);
+        let detach_error = tokio::time::timeout(
+            TEST_TIMEOUT,
+            crate::engine::FlowEngine::remove_flow(dual_engine.as_ref(), 9425),
+        )
+        .await
+        .expect("DROP after detach should return an error, not wait on its checker")
+        .expect_err("missing shutdown sender should be reported");
+        assert!(matches!(detach_error, Error::Unexpected { .. }));
+        tokio::time::timeout(TEST_TIMEOUT, detached_drop_rx)
+            .await
+            .expect("detached task should still be stopped")
+            .expect("task drop notifier should fire");
+        assert!(!batching_engine.flow_exist_inner(9425).await);
+
+        for flow_id in [9422, 9425] {
+            tokio::time::timeout(
+                TEST_TIMEOUT,
+                crate::engine::FlowEngine::remove_flow(dual_engine.as_ref(), flow_id),
+            )
+            .await
+            .expect("repeated orphan removal should return")
+            .expect("repeated removal should be idempotent");
+        }
+        let flush = tokio::time::timeout(
+            TEST_TIMEOUT,
+            crate::engine::FlowEngine::flush_flow(dual_engine.as_ref(), 9422),
+        )
+        .await
+        .expect("flush after removal should return");
+        assert_eq!(flush.unwrap(), 0);
+
+        tokio::time::timeout(TEST_TIMEOUT, dual_engine.stop_flow_consistent_check_task())
+            .await
+            .expect("checker shutdown should return")
+            .expect("checker shutdown should succeed");
+    }
+
+    #[tokio::test]
     async fn test_remove_flow_inner_aborts_registered_task() {
         let engine = new_test_engine().await;
         let (task, shutdown_tx) = new_test_task(42).await;
