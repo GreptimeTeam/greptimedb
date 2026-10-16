@@ -28,18 +28,18 @@ pub(crate) const METADATA_SCHEMA: &str = "schema";
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use ::auth::UserProviderRef;
+use ::auth::{UserInfoRef, UserProviderRef};
 use derive_builder::Builder;
-use pgwire::api::auth::{ServerParameterProvider, StartupHandler};
+use pgwire::api::auth::{AuthDriver, ServerParameterProvider, StartupHandler};
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::{ClientInfo, ErrorHandler, PgWireServerHandlers};
 pub use server::PostgresServer;
 use session::Session;
 use session::context::Channel;
 
-use self::auth_handler::PgLoginVerifier;
+use self::auth_handler::ZeroPidSecretKeyGenerator;
 use self::handler::DefaultQueryParser;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
@@ -76,9 +76,11 @@ impl ServerParameterProvider for GreptimeDBStartupParameters {
 
 pub struct PostgresServerHandlerInner {
     query_handler: ServerSqlQueryHandlerRef,
-    login_verifier: PgLoginVerifier,
+    user_provider: Option<UserProviderRef>,
     force_tls: bool,
-    param_provider: Arc<GreptimeDBStartupParameters>,
+    auth_driver: AuthDriver<Arc<GreptimeDBStartupParameters>>,
+    /// Set by the auth mechanism, read by the startup handler on completion.
+    auth_outcome: Arc<OnceLock<UserInfoRef>>,
 
     batching_enabled: bool,
     session: Arc<Session>,
@@ -129,9 +131,11 @@ impl MakePostgresServerHandler {
         ));
         let handler = PostgresServerHandlerInner {
             query_handler: self.query_handler.clone(),
-            login_verifier: PgLoginVerifier::new(self.user_provider.clone()),
+            user_provider: self.user_provider.clone(),
             force_tls: self.force_tls,
-            param_provider: self.param_provider.clone(),
+            auth_driver: AuthDriver::new(self.param_provider.clone())
+                .with_pid_secret_key_generator(Arc::new(ZeroPidSecretKeyGenerator)),
+            auth_outcome: Arc::new(OnceLock::new()),
 
             batching_enabled,
             session: session.clone(),
