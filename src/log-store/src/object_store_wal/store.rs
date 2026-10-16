@@ -126,6 +126,13 @@ const READ_PREFETCH_BYTES: usize = 64 * 1024 * 1024;
 /// 48 bytes each, so a second request for the footer is rare, and usually the
 /// segment of release records, which is the last segment.
 const RECOVERY_TAIL_WINDOW: usize = 64 * 1024;
+/// Largest segment of release records that recovery keeps from the bytes it
+/// read for a footer. It keeps them before it knows which objects are on the
+/// chain, so the bound caps what objects off the chain hold until recovery
+/// ends; a larger segment is read again if its object is on the chain. A
+/// release seals its record at once, so a segment usually holds the records of
+/// one or a few regions, 16 bytes each.
+const MAX_KEPT_RELEASE_BYTES: u64 = 4 * 1024;
 
 /// A log store over the immutable WAL objects under one prefix.
 ///
@@ -3395,7 +3402,8 @@ fn is_not_found(error: &Error) -> bool {
 /// header must carry the sequence of the key, the trailer must be well formed,
 /// the footer must match the checksum the trailer holds and its segments must
 /// tile the object body. Also returns a copy of the segment of release records
-/// when the bytes read hold it, which is not decoded here.
+/// when the bytes read hold it and it is at most [`MAX_KEPT_RELEASE_BYTES`],
+/// which is not decoded here.
 ///
 /// A short object is read whole. Otherwise the header and a window at the end
 /// of the object are read concurrently, and the footer is read separately only
@@ -3465,7 +3473,9 @@ async fn fetch_footer(
     let releases = footer
         .iter()
         .find(|entry| entry.region_id == RELEASE_REGION_ID)
-        .filter(|entry| entry.segment_offset >= tail_start as u64)
+        .filter(|entry| {
+            entry.segment_offset >= tail_start as u64 && entry.segment_len <= MAX_KEPT_RELEASE_BYTES
+        })
         .map(|entry| {
             let start = entry.segment_offset as usize - tail_start;
             Bytes::copy_from_slice(&tail[start..start + entry.segment_len as usize])
@@ -9263,6 +9273,83 @@ mod tests {
                 ),
             ],
             reads
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_recovery_takes_a_release_segment_from_the_tail_window() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        // A segment longer than the window comes first, so the object is read
+        // as its header and its tail, and the segment of release records, the
+        // last one, lies inside the tail but not at its start.
+        let records = [
+            Record {
+                region_id: region(1),
+                entry_id: id(0, 1),
+                payload: Bytes::from(vec![0; RECOVERY_TAIL_WINDOW * 2]),
+            },
+            Record {
+                region_id: RELEASE_REGION_ID,
+                entry_id: id(0, 1),
+                payload: encode_releases(&BTreeMap::from([(region(2), 7)])),
+            },
+        ];
+        put_records(&object_store, 0, &records).await;
+        let (io, reads) = RecordingIo::over(object_store);
+        let object = io.list().await.unwrap().remove(0);
+        let tail_start = object.size - RECOVERY_TAIL_WINDOW as u64;
+        let (_, footer) = footer_of(&io.get(0).await.unwrap());
+        let segment = footer
+            .iter()
+            .find(|entry| entry.region_id == RELEASE_REGION_ID)
+            .unwrap();
+        assert!(segment.segment_offset > tail_start);
+
+        let store = open_over(io, &eager()).await;
+        assert_eq!(Some(7), watermark(&store, region(2)));
+        let mut reads = reads.lock().unwrap().clone();
+        reads.sort_unstable();
+        assert_eq!(
+            vec![
+                (0, 0, HEADER_LEN as u64),
+                (0, tail_start, RECOVERY_TAIL_WINDOW as u64)
+            ],
+            reads
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_recovery_reads_a_release_segment_above_the_kept_size_again() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        // The object is read whole, but its segment of release records is
+        // larger than recovery keeps.
+        let releases = (1..=300)
+            .map(|number| (region(number), id(0, 1)))
+            .collect::<BTreeMap<_, _>>();
+        let record = Record {
+            region_id: RELEASE_REGION_ID,
+            entry_id: id(0, 1),
+            payload: encode_releases(&releases),
+        };
+        put_records(&object_store, 0, &[record]).await;
+        let (io, reads) = RecordingIo::over(object_store);
+        let object = io.list().await.unwrap().remove(0);
+        let (_, footer) = footer_of(&io.get(0).await.unwrap());
+        let segment = &footer[0];
+        assert!(object.size <= RECOVERY_TAIL_WINDOW as u64);
+        assert!(segment.segment_len > MAX_KEPT_RELEASE_BYTES);
+
+        let store = open_over(io, &eager()).await;
+        for number in [1, 300] {
+            assert_eq!(Some(id(0, 1)), watermark(&store, region(number)));
+        }
+        assert_eq!(
+            vec![(0, segment.segment_offset, segment.segment_len)],
+            *reads.lock().unwrap()
         );
         store.stop().await.unwrap();
     }
