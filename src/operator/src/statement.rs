@@ -100,7 +100,7 @@ use crate::error::{
 };
 use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
-use crate::statement::set::set_allow_query_fallback;
+use crate::statement::set::{set_allow_query_fallback, set_experimental_dist_join};
 
 /// A configurator that customizes or enhances a [`StatementExecutor`].
 #[async_trait::async_trait]
@@ -554,6 +554,9 @@ impl StatementExecutor {
 
             // Allow query to fallback when failed to push down.
             "ALLOW_QUERY_FALLBACK" => set_allow_query_fallback(set_var.value, query_ctx)?,
+
+            // Opt into the cost heuristic of the nested broadcast join rewrite.
+            "EXPERIMENTAL_DIST_JOIN" => set_experimental_dist_join(set_var.value, query_ctx)?,
 
             "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
             "@@SESSION.MAX_EXECUTION_TIME" | "MAX_EXECUTION_TIME" => match query_ctx.channel() {
