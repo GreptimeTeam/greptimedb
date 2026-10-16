@@ -10706,7 +10706,7 @@ dependencies = [
 [[package]]
 name = "pgwire"
 version = "0.41.1"
-source = "git+https://github.com/sunng87/pgwire?branch=refactor%2Fstartup-handler-new-api#098516c35d1debbe3cf99ed11e98488780d193d0"
+source = "git+https://github.com/sunng87/pgwire?branch=master#2389926332062022aec944e926e8725614c69af3"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
