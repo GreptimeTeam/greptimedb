@@ -224,7 +224,11 @@ impl ObjectCatalog {
     }
 
     /// Returns the objects that hold entries of `region_id` overlapping
-    /// `start_entry_id..=end_entry_id`, ordered by object sequence.
+    /// `start_entry_id..=end_entry_id`, ordered by object sequence. The
+    /// segments of a region are ordered by entry id, so the lookup seeks to
+    /// the first segment that ends at or after `start_entry_id` and stops
+    /// before the first that starts after `end_entry_id`, whatever the number
+    /// of objects the region holds.
     pub(crate) fn objects_for_entry_range(
         &self,
         region_id: RegionId,
@@ -244,11 +248,9 @@ impl ObjectCatalog {
             return Ok(Vec::new());
         };
         Ok(objects
-            .values()
-            .filter(|(_, entry)| {
-                entry.max_entry_id >= start_entry_id && entry.min_entry_id <= end_entry_id
-            })
-            .map(|(object_seq, entry)| (*object_seq, entry))
+            .range(start_entry_id..)
+            .map(|(_, (object_seq, entry))| (*object_seq, entry))
+            .take_while(|(_, entry)| entry.min_entry_id <= end_entry_id)
             .collect())
     }
 
@@ -654,9 +656,10 @@ mod tests {
 
     /// Random appends, watermark moves, releases, drops, collections and
     /// recoveries give the reclaim boundary that a scan of the footers from
-    /// `from` gives, whatever `from` is.
+    /// `from` gives, whatever `from` is, and the objects of a region that a
+    /// scan finds for a range of entry ids.
     #[test]
-    fn test_catalog_reclaim_boundary_matches_a_scan_of_the_footers() {
+    fn test_catalog_matches_a_scan_of_the_footers() {
         let regions = (1..=6)
             .map(|number| RegionId::new(1, number))
             .collect::<Vec<_>>();
@@ -764,6 +767,32 @@ mod tests {
                     "seed {seed}, step {step}, from {from}"
                 );
                 boundary = expected;
+
+                for region_id in regions.iter().chain([&RELEASE_REGION_ID]) {
+                    let ceiling = written.get(region_id).copied().unwrap_or(0) + 2;
+                    let start = rng.random_range(0..=ceiling);
+                    let end = rng.random_range(start..=ceiling);
+                    let scanned = catalog
+                        .objects_in_order()
+                        .filter(|(_, footer)| {
+                            footer.iter().any(|entry| {
+                                entry.region_id == *region_id
+                                    && entry.max_entry_id >= start
+                                    && entry.min_entry_id <= end
+                            })
+                        })
+                        .map(|(object_seq, _)| object_seq)
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        scanned,
+                        object_seqs(
+                            &catalog
+                                .objects_for_entry_range(*region_id, start, end)
+                                .unwrap()
+                        ),
+                        "seed {seed}, step {step}, region {region_id}, {start}..={end}"
+                    );
+                }
             }
         }
     }
