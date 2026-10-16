@@ -211,10 +211,10 @@ fn validate_labels_types(
         }
         // All remaining columns are emitted as labels, including non-key columns.
         ensure!(
-            !matches!(column.data_type, ConcreteDataType::Binary(_)),
+            matches!(column.data_type, ConcreteDataType::String(_)),
             error::InvalidPromRemoteRequestSnafu {
                 msg: format!(
-                    "Prometheus remote read does not support binary label column '{}' (type {:?})",
+                    "Prometheus remote read only supports string labels: column '{}' has type {:?}",
                     column.name, column.data_type
                 ),
             }
@@ -853,9 +853,16 @@ mod tests {
     fn test_remote_read_label_types() {
         use datatypes::schema::ColumnSchema;
 
-        for binary_type in [
-            ConcreteDataType::binary_datatype(),
-            ConcreteDataType::binary_view_datatype(),
+        for (label_type, supported) in [
+            (ConcreteDataType::string_datatype(), true),
+            (ConcreteDataType::large_string_datatype(), true),
+            (ConcreteDataType::utf8_view_datatype(), true),
+            (ConcreteDataType::binary_datatype(), false),
+            (ConcreteDataType::binary_view_datatype(), false),
+            (ConcreteDataType::json_datatype(), false),
+            (ConcreteDataType::vector_datatype(3), false),
+            (ConcreteDataType::int64_datatype(), false),
+            (ConcreteDataType::boolean_datatype(), false),
         ] {
             let schema = Schema::new(vec![
                 ColumnSchema::new(
@@ -863,16 +870,21 @@ mod tests {
                     ConcreteDataType::timestamp_millisecond_datatype(),
                     false,
                 ),
-                ColumnSchema::new("value", binary_type.clone(), true),
+                ColumnSchema::new("value", label_type.clone(), true),
                 ColumnSchema::new("label", ConcreteDataType::string_datatype(), true),
             ]);
-            // The selected value column is not a label; its validation is separate.
+            // Value columns are validated separately, regardless of their type.
             validate_labels_types(&schema, "ts", "value").unwrap();
 
-            // The same column becomes a label when another value column is selected.
-            let err = validate_labels_types(&schema, "ts", "label").unwrap_err();
-            assert!(matches!(err, error::Error::InvalidPromRemoteRequest { .. }));
-            assert!(err.to_string().contains("binary label column 'value'"));
+            let result = validate_labels_types(&schema, "ts", "label");
+            assert_eq!(supported, result.is_ok(), "{label_type:?}");
+            if let Err(err) = result {
+                assert!(matches!(err, error::Error::InvalidPromRemoteRequest { .. }));
+                assert!(
+                    err.to_string()
+                        .contains("only supports string labels: column 'value'")
+                );
+            }
         }
     }
 

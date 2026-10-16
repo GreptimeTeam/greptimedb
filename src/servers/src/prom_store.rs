@@ -39,7 +39,7 @@ use common_telemetry::{tracing, warn};
 use datafusion::dataframe::DataFrame;
 use datafusion::prelude::{Expr, ident, lit, regexp_match};
 use datafusion_common::ScalarValue;
-use datafusion_expr::{ExprSchemable, LogicalPlan};
+use datafusion_expr::LogicalPlan;
 use snafu::{OptionExt, ResultExt, ensure};
 use snap::raw::{Decoder, Encoder};
 
@@ -206,7 +206,7 @@ pub fn query_to_plan(
         };
 
         // Like PromQL, include NULL when the matcher accepts the empty string.
-        // Keep EQ/NEQ on the original column for index and numeric comparisons.
+        // Keep EQ/NEQ on the original column for index recognition.
         let condition = match m_type {
             MatcherType::Eq => {
                 if value.is_empty() {
@@ -232,11 +232,7 @@ pub fn query_to_plan(
                         .build()
                     })?
                     .is_match("");
-                let string_label = label
-                    .clone()
-                    .cast_to(&DataType::Utf8, dataframe.schema())
-                    .context(error::DataFrameSnafu)?;
-                let matched = regexp_match(string_label, lit(pattern), None);
+                let matched = regexp_match(label.clone(), lit(pattern), None);
                 if m_type == MatcherType::Re {
                     let condition = matched.is_not_null();
                     if matches_empty {
@@ -1262,10 +1258,6 @@ mod tests {
             ("missing", MatcherType::Nre, ".+", vec![0, 1, 2, 3, 4, 5]),
             ("missing", MatcherType::Re, "", vec![0, 1, 2, 3, 4, 5]),
             ("missing", MatcherType::Nre, "", vec![]),
-            ("id", MatcherType::Eq, "0", vec![0]),
-            ("id", MatcherType::Neq, "0", vec![1, 2, 3, 4, 5]),
-            ("id", MatcherType::Re, "0|1", vec![0, 1]),
-            ("id", MatcherType::Nre, "0|1", vec![2, 3, 4, 5]),
         ] {
             let query = Query {
                 start_timestamp_ms: 1000,
