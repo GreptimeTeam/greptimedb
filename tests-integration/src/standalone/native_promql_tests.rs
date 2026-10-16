@@ -74,15 +74,15 @@ fn rows(batches: &RecordBatches) -> Vec<(i64, Option<String>, Option<f64>)> {
             .as_any()
             .downcast_ref::<TimestampMillisecondArray>()
             .unwrap();
-        let val = batch
+        let host = batch
             .column(1)
             .as_any()
-            .downcast_ref::<Float64Array>()
+            .downcast_ref::<StringArray>()
             .unwrap();
-        let host = batch
+        let val = batch
             .column(2)
             .as_any()
-            .downcast_ref::<StringArray>()
+            .downcast_ref::<Float64Array>()
             .unwrap();
         for index in 0..batch.num_rows() {
             rows.push((
@@ -147,14 +147,14 @@ async fn test_native_promql_standalone_executes_with_real_tql_query() {
             .iter()
             .map(|field| field.name().as_str())
             .collect::<Vec<_>>(),
-        vec!["ts", "val", "host"]
+        vec!["ts", "host", "val"]
     );
     assert_eq!(
         arrow_schema.field(0).data_type(),
         &DataType::Timestamp(TimeUnit::Millisecond, None)
     );
-    assert_eq!(arrow_schema.field(1).data_type(), &DataType::Float64);
-    assert_eq!(arrow_schema.field(2).data_type(), &DataType::Utf8);
+    assert_eq!(arrow_schema.field(1).data_type(), &DataType::Utf8);
+    assert_eq!(arrow_schema.field(2).data_type(), &DataType::Float64);
     assert_eq!(rows(&enabled_batches), rows(&ordinary_batches));
     assert_eq!(
         vec![
