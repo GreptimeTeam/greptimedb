@@ -394,8 +394,10 @@ impl ObjectStoreLogStore {
         METRIC_OBJECT_STORE_WAL_INDEXED_OBJECTS.inc();
         METRIC_OBJECT_STORE_WAL_INDEXED_BYTES.add(object_len(&[]) as i64);
         // The release records are the only watermarks recorded yet.
-        let writer_reclaim_boundary =
-            catalog.reclaim_boundary(reclaim_boundary, &released_entry_ids);
+        for (&region_id, &entry_id) in &released_entry_ids {
+            catalog.obsolete(region_id, entry_id);
+        }
+        let writer_reclaim_boundary = catalog.reclaim_boundary(reclaim_boundary);
         let catalog = Arc::new(RwLock::new(catalog));
         let obsolete_entry_ids = Arc::new(Mutex::new(released_entry_ids));
         let wal_holes = WalHoles::default();
@@ -710,14 +712,24 @@ fn injected_create_failure(io: &dyn WalObjectIo, object_seq: u64) -> Result<PutR
     })
 }
 
-/// Records the obsolete watermark of `region_id`, which never moves down.
-fn record_obsolete(obsolete_entry_ids: &ObsoleteEntryIds, region_id: RegionId, entry_id: EntryId) {
+/// Records the obsolete watermark of `region_id`, which never moves down, for
+/// reads and in the catalog for the reclaim boundary.
+fn record_obsolete(
+    obsolete_entry_ids: &ObsoleteEntryIds,
+    catalog: &RwLock<ObjectCatalog>,
+    region_id: RegionId,
+    entry_id: EntryId,
+) {
     obsolete_entry_ids
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .entry(region_id)
         .and_modify(|current| *current = (*current).max(entry_id))
         .or_insert(entry_id);
+    catalog
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .obsolete(region_id, entry_id);
 }
 
 fn positive_bytes(bytes: u64, name: &str) -> Result<usize> {
@@ -1130,7 +1142,12 @@ impl LogStore for ObjectStoreLogStore {
             // still queued behind the stop: nothing is assigned an id any
             // more, so the watermark alone is consistent.
             None => {
-                record_obsolete(&self.obsolete_entry_ids, region_id, watermark);
+                record_obsolete(
+                    &self.obsolete_entry_ids,
+                    &self.catalog,
+                    region_id,
+                    watermark,
+                );
                 Ok(())
             }
         }
@@ -2412,7 +2429,12 @@ impl Actor {
         response: oneshot::Sender<Result<()>>,
     ) {
         let result = self.raise_sequence_floor(region_id, entry_id).map(|_| {
-            record_obsolete(&self.obsolete_entry_ids, region_id, watermark);
+            record_obsolete(
+                &self.obsolete_entry_ids,
+                &self.catalog,
+                region_id,
+                watermark,
+            );
         });
         if result.is_ok() {
             self.update_reclaim_boundary();
@@ -2451,7 +2473,7 @@ impl Actor {
         } else {
             self.issued_entry_ids.get(&region_id).copied().unwrap_or(0)
         };
-        record_obsolete(&self.obsolete_entry_ids, region_id, entry_id);
+        record_obsolete(&self.obsolete_entry_ids, &self.catalog, region_id, entry_id);
         self.update_reclaim_boundary();
         self.collect();
         let release = Release {
@@ -2481,17 +2503,11 @@ impl Actor {
     /// Raises the reclaim boundary to what the catalog and the obsolete
     /// watermarks allow.
     fn update_reclaim_boundary(&mut self) {
-        let boundary = {
-            let obsolete_entry_ids = self
-                .obsolete_entry_ids
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            self.catalog
-                .read()
-                .unwrap_or_else(PoisonError::into_inner)
-                .reclaim_boundary(self.reclaim_boundary, &obsolete_entry_ids)
-        };
-        self.reclaim_boundary = boundary;
+        self.reclaim_boundary = self
+            .catalog
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reclaim_boundary(self.reclaim_boundary);
     }
 
     /// Starts a collection, which also attempts the deletes that failed since
@@ -9926,13 +9942,156 @@ mod tests {
         }
     }
 
-    /// Measurements of costs that grow with the prefix, taken through the
-    /// store. They are ignored by default and print what they measure; run
-    /// them with `--run-ignored only` and `--no-capture`, preferably with
-    /// `--cargo-profile release`.
+    /// Measurements of costs that grow with the catalog or the prefix,
+    /// taken through the store. They are ignored by default and print what
+    /// they measure; run them with `--run-ignored only` and `--no-capture`,
+    /// preferably with `--cargo-profile release`.
     #[allow(clippy::print_stdout)]
     mod measurements {
         use super::*;
+
+        /// Times every watermark update while one object holds a segment of
+        /// each region and the regions are flushed in region id order, so
+        /// each update leaves the next region as the first live segment of
+        /// that object. An update is timed as the caller of `obsolete` sees
+        /// it, which includes the round trip of its command to the actor.
+        #[tokio::test]
+        #[ignore]
+        async fn measure_watermark_updates_over_one_shared_object() {
+            let _serialized = SERIALIZED.lock().await;
+            for regions in [1_000, 5_000, 10_000, 20_000] {
+                let store = open_with_one_shared_object(regions).await;
+                let mut pauses = Vec::with_capacity(regions as usize);
+                for number in 1..=regions {
+                    let region_id = region(number);
+                    let started_at = Instant::now();
+                    store
+                        .obsolete(&provider(region_id), region_id, id(1, 1))
+                        .await
+                        .unwrap();
+                    pauses.push(started_at.elapsed());
+                }
+                // The next object carries the boundary past every flushed
+                // object.
+                append(&store, region(regions + 1), "b").await.unwrap();
+                assert_eq!(vec![2], collected_object_seqs(&store).await);
+                print_pauses("watermark updates", regions, pauses);
+                store.stop().await.unwrap();
+            }
+        }
+
+        /// Times the steps the actor takes for each of the same watermark
+        /// updates that depend on the catalog, recording the watermark and
+        /// recomputing the reclaim boundary, without the round trip: the
+        /// store is stopped first and the steps run on its catalog.
+        #[tokio::test]
+        #[ignore]
+        async fn measure_actor_watermark_steps_over_one_shared_object() {
+            let _serialized = SERIALIZED.lock().await;
+            for regions in [1_000, 5_000, 10_000, 20_000] {
+                let store = open_with_one_shared_object(regions).await;
+                store.stop().await.unwrap();
+                let mut boundary = 0;
+                let mut pauses = Vec::with_capacity(regions as usize);
+                for number in 1..=regions {
+                    let started_at = Instant::now();
+                    record_obsolete(
+                        &store.obsolete_entry_ids,
+                        &store.catalog,
+                        region(number),
+                        id(1, 1),
+                    );
+                    boundary = store.catalog.read().unwrap().reclaim_boundary(boundary);
+                    pauses.push(started_at.elapsed());
+                }
+                assert_eq!(2, boundary);
+                print_pauses("actor watermark steps", regions, pauses);
+            }
+        }
+
+        /// Opens a store whose object 1 holds one segment of each of
+        /// `regions` regions.
+        async fn open_with_one_shared_object(regions: u32) -> Arc<ObjectStoreLogStore> {
+            let store = open(memory_store(), &eager()).await;
+            let entries = (1..=regions)
+                .map(|number| entry(&store, region(number), "a"))
+                .collect();
+            store.append_batch(entries).await.unwrap();
+            store
+        }
+
+        fn print_pauses(label: &str, regions: u32, mut pauses: Vec<Duration>) {
+            let total = pauses.iter().sum::<Duration>();
+            pauses.sort_unstable();
+            let micros = |pause: Duration| pause.as_secs_f64() * 1e6;
+            println!(
+                "{label}: regions={regions} total_ms={:.3} mean_us={:.3} p50_us={:.3} p99_us={:.3} max_us={:.3}",
+                total.as_secs_f64() * 1e3,
+                micros(total) / pauses.len() as f64,
+                micros(pauses[pauses.len() / 2]),
+                micros(pauses[pauses.len() * 99 / 100]),
+                micros(pauses[pauses.len() - 1]),
+            );
+        }
+
+        /// Times 100 reads of the last ten objects of a region that holds a
+        /// segment in every retained object, and 100 lookups of those objects
+        /// in the catalog alone.
+        #[tokio::test]
+        #[ignore]
+        async fn measure_tail_reads_over_retained_objects() {
+            let _serialized = SERIALIZED.lock().await;
+            let region_id = region(1);
+            for objects in [10_000, 100_000, 1_000_000] {
+                let object_store = memory_store();
+                let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+                futures::stream::iter(0..objects)
+                    .for_each_concurrent(RECOVERY_CONCURRENCY, |object_seq| {
+                        let io = &io;
+                        async move {
+                            let header = Header {
+                                object_seq,
+                                epoch: 1,
+                                prev: object_seq.checked_sub(1).map(|prev| ChainLink {
+                                    object_seq: prev,
+                                    epoch: 1,
+                                }),
+                                reclaim_boundary: 0,
+                            };
+                            let record = Record {
+                                region_id,
+                                entry_id: id(object_seq, 1),
+                                payload: Bytes::from_static(b"a"),
+                            };
+                            put_object_with_header(io, header, &[record]).await;
+                        }
+                    })
+                    .await;
+                let store = open(object_store, &eager()).await;
+                let start = id(objects - 10, 1);
+
+                let started_at = Instant::now();
+                for _ in 0..100 {
+                    assert_eq!(10, read_entries(&store, region_id, start).await.len());
+                }
+                let reads = started_at.elapsed();
+                let started_at = Instant::now();
+                for _ in 0..100 {
+                    let catalog = store.catalog.read().unwrap();
+                    let found = catalog
+                        .objects_for_entry_range(region_id, start, EntryId::MAX)
+                        .unwrap();
+                    assert_eq!(10, found.len());
+                }
+                let lookups = started_at.elapsed();
+                println!(
+                    "tail reads: objects={objects} read_100_ms={:.3} lookup_100_ms={:.3}",
+                    reads.as_secs_f64() * 1e3,
+                    lookups.as_secs_f64() * 1e3,
+                );
+                store.stop().await.unwrap();
+            }
+        }
 
         /// Object access that counts the reads of whole objects and of byte
         /// ranges.
