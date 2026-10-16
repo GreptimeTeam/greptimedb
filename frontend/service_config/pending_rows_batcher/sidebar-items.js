@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["deserialize_logical_options"],"struct":["BatcherOptions","PendingRowsBatcherOptions"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["filter_deleted_from_batch","find_boundaries","maybe_filter_deleted","primary_key_at","timestamp_value"],"struct":["BatchLastRow","FlatDedupIterator","FlatDedupReader","FlatLastNonNull","FlatLastRow"],"trait":["RecordBatchDedupStrategy"]};

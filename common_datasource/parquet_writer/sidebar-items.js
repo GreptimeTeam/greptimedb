@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ParquetCreationPolicy","ParquetSink"],"fn":["build_encoder","check_cancelled"],"struct":["AsyncWriter","ParquetFileWriter","ParquetWriterLimits"]};

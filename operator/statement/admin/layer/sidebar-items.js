@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["AdminEventRecorderHandle","AdminFunctionRecordingGuard","AdminFunctionRecordingLayer","AdminFunctionRecordingService"],"trait":["AdminFunctionLayer"],"type":["AdminFunctionLayerRef"]};

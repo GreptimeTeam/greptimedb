@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PACKED_LAYOUT","PACK_INDEX_FILE"],"enum":["ObjectKind"],"struct":["PackIndex","PackObject","PackTable"]};

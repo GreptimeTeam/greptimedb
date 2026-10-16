@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["NAME"],"enum":["ValueColumn"],"struct":["JsonObjectFunction"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AllocateRegion"],"fn":["collect_allocation_sources","group_allocations","resolve_allocation_affinity"],"struct":["AllocationAffinity","AllocationGroup","BuildPlan","ExecutePlan"]};

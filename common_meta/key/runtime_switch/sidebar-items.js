@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CACHE_TTL","MAX_CAPACITY"],"struct":["RuntimeSwitchManager"],"type":["RuntimeSwitchManagerRef"]};

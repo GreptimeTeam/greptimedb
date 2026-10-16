@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CommentOnState"],"fn":["sync_table_comment_option","update_column_comment_metadata"],"struct":["CommentOnData","CommentOnProcedure"]};

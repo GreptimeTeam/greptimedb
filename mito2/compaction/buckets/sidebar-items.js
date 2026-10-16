@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["TIME_BUCKETS"],"fn":["infer_time_bucket"],"struct":["TimeBuckets"]};
