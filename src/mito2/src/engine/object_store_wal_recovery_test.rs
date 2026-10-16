@@ -2319,25 +2319,17 @@ async fn test_close_of_a_stopping_engine_flushes_a_region_whose_wal_is_durable(
     assert_eq!(5, engine.get_region_statistic(REGION_A).unwrap().num_rows);
 }
 
-/// With a healthy WAL, a flush of a stopping engine keeps waiting for the
-/// last entries to become durable within the grace period of the stop: a
-/// region holding writes that skipped the WAL and a WAL write still in the
-/// open batch when the stop begins is flushed when it closes, and no row is
-/// lost.
+/// With a healthy WAL, a flush of a stopping engine asks the WAL to drain and
+/// waits for the last entries to become durable: a region holding writes
+/// that skipped the WAL and a WAL write still in the open batch when the stop
+/// begins is flushed when it closes, well before the grace period of the stop
+/// ends although the seal interval is longer, and no row is lost.
 #[tokio::test]
 async fn test_close_of_a_stopping_engine_keeps_writes_while_the_wal_is_healthy() {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::with_prefix("object-store-wal-stop-healthy-flush").await;
     let object_store = memory_store();
-    // The open batch is sealed by the timer, within the grace period.
-    let config = ObjectStoreWalConfig {
-        flush_interval: Duration::from_secs(1),
-        ..store_config(AckMode::Enqueued)
-    };
-    let store =
-        ObjectStoreLogStore::try_new(object_store.clone(), &config, 0, STANDALONE_GENERATION)
-            .await
-            .unwrap();
+    let store = open_store(&object_store, AckMode::Enqueued).await;
     let engine = new_engine(&mut env, store.clone()).await;
     let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
 
@@ -2345,6 +2337,7 @@ async fn test_close_of_a_stopping_engine_keeps_writes_while_the_wal_is_healthy()
     put_rows_skipping_wal(&engine, REGION_A, rows(&schema, 3, 5)).await;
     assert_eq!(0, latest(&store, REGION_A));
 
+    let began = Instant::now();
     engine.begin_stop();
     tokio::time::timeout(
         WAIT,
@@ -2356,6 +2349,11 @@ async fn test_close_of_a_stopping_engine_keeps_writes_while_the_wal_is_healthy()
     .await
     .expect("the close must not wait past the grace period")
     .unwrap();
+    assert!(
+        began.elapsed() < STOP_DURABILITY_GRACE,
+        "{:?}",
+        began.elapsed()
+    );
     engine.stop().await.unwrap();
     assert_eq!(1, sst_files(&env, &table_dir).await.len());
     store.stop().await.unwrap();
@@ -2366,4 +2364,41 @@ async fn test_close_of_a_stopping_engine_keeps_writes_while_the_wal_is_healthy()
     assert_eq!(entry_id(1, 1), state.manifest_flushed_entry_id);
     assert_eq!(0, state.memtable_rows);
     assert_eq!(5, engine.get_region_statistic(REGION_A).unwrap().num_rows);
+}
+
+/// A flush of a stopping engine whose WAL already stopped, so that its wait
+/// fails at once, fails as cancelled like a wait that gives up, and leaves no
+/// SST behind; the WAL write was never uploaded, so no row comes back.
+#[tokio::test]
+async fn test_close_of_a_stopping_engine_cancels_a_flush_on_a_stopped_wal() {
+    let mut env = TestEnv::with_prefix("object-store-wal-stop-stopped-wal").await;
+    let object_store = memory_store();
+    let store = open_store(&object_store, AckMode::Enqueued).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
+
+    put_rows(&engine, REGION_A, rows(&schema, 0, 3)).await;
+    put_rows_skipping_wal(&engine, REGION_A, rows(&schema, 3, 5)).await;
+    store.crash().await;
+
+    engine.begin_stop();
+    let error = tokio::time::timeout(
+        WAIT,
+        engine.handle_request(
+            REGION_A,
+            RegionRequest::Close(RegionCloseRequest::default()),
+        ),
+    )
+    .await
+    .expect("the close must not wait for the WAL")
+    .unwrap_err();
+    assert_eq!(StatusCode::Cancelled, error.status_code(), "{error:?}");
+    engine.stop().await.unwrap();
+    assert_eq!(Vec::<String>::new(), sst_files(&env, &table_dir).await);
+    drop(engine);
+    drop(store);
+
+    let (_engine, state) = reopen(&mut env, &object_store, REGION_A, &table_dir).await;
+    assert_eq!(0, state.manifest_flushed_entry_id);
+    assert_eq!(0, state.memtable_rows);
 }

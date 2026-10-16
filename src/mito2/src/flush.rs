@@ -298,12 +298,14 @@ pub(crate) struct RegionFlushTask {
 /// durable, counted from when the engine began to stop, unless the log store
 /// reports that it fails to make entries durable, see [wait_for_durable_wal].
 ///
-/// The object store WAL seals its open batch every 100 ms by default, and a
-/// create on S3 takes about 50 ms at the median and 130 ms at the 99th
-/// percentile, so a healthy store makes the last entries durable well within
-/// this bound, also with a seal interval of a second or two. Every flush counts
-/// from the same instant, so the stop waits for the WAL at most this long in
-/// all, well inside the 30 s an orchestrator commonly grants a stop.
+/// The flush asks the log store to drain first, so the object store WAL seals
+/// the entries the flush waits for at once instead of after its seal
+/// interval, however long that is, and a create on S3 takes about 50 ms at
+/// the median and 130 ms at the 99th percentile: a healthy store makes the
+/// last entries durable well within this bound, which would also cover the
+/// default seal interval of 100 ms many times over. Every flush counts from
+/// the same instant, so the stop waits for the WAL at most this long in all,
+/// well inside the 30 s an orchestrator commonly grants a stop.
 pub(crate) const STOP_DURABILITY_GRACE: Duration = Duration::from_secs(5);
 /// How often a flush of a stopping engine asks the log store whether it fails
 /// while it keeps waiting for the WAL.
@@ -321,6 +323,11 @@ impl StopSignal {
     pub(crate) fn raise(&self) {
         self.began_at.get_or_init(Instant::now);
         self.token.cancel();
+    }
+
+    /// Returns whether the signal is raised.
+    fn is_raised(&self) -> bool {
+        self.token.is_cancelled()
     }
 
     /// Returns once the signal is raised, with the instant the stop began.
@@ -949,17 +956,18 @@ impl RegionFlushTask {
 
 /// Waits until the WAL of the region is durable through `entry_id`, and fails
 /// with [Error::FlushCancelled] when the flush is cancelled, or when the
-/// engine is stopping and the wait gives up first.
+/// engine is stopping and the wait gives up first or fails.
 ///
 /// A DDL that cancels the flush must not wait behind an upload, and neither
 /// must a stopping engine for long: the log store stops only after the
 /// engine, so a wait for uploads that keep failing would hold the stop up for
 /// good. Once the engine begins to stop, the wait gives up at once while the
-/// log store reports that it fails to make entries durable, and otherwise
-/// [STOP_DURABILITY_GRACE] after the stop began, which lets a healthy store
-/// upload its last entries so that a close-time flush keeps the writes that
-/// skipped the WAL. The barrier is polled first, so a flush whose entries are
-/// already durable commits while the engine stops.
+/// log store reports that it fails to make entries durable. Otherwise it asks
+/// the log store to drain and gives up [STOP_DURABILITY_GRACE] after the stop
+/// began, which lets a healthy store upload its last entries so that a
+/// close-time flush keeps the writes that skipped the WAL. The barrier is
+/// polled first, so a flush whose entries are already durable commits while
+/// the engine stops.
 pub(crate) async fn wait_for_durable_wal(
     region_id: RegionId,
     barrier: &DurabilityBarrier,
@@ -975,6 +983,11 @@ pub(crate) async fn wait_for_durable_wal(
         }
     };
     match CancellableFuture::new(durable_or_given_up, state.cancel_handle()).await {
+        // A log store that is poisoned or stopped fails the wait at once.
+        Ok(Ok(Err(e))) if stopping.is_raised() => {
+            warn!(e; "Flush of region {region_id} stops waiting for the WAL to become durable through entry {entry_id} because the engine is stopping and the wait failed");
+            FlushCancelledSnafu.fail()
+        }
         Ok(Ok(result)) => result,
         Ok(Err(reason)) => {
             warn!(
@@ -989,9 +1002,12 @@ pub(crate) async fn wait_for_durable_wal(
 /// Returns once a flush of a stopping engine gives up waiting for the WAL, with
 /// the reason: at once while the log store fails to make entries durable,
 /// otherwise once [STOP_DURABILITY_GRACE] passed since the engine began to
-/// stop.
+/// stop. A log store that does not fail is asked to drain first.
 async fn give_up_once_stopping(barrier: &DurabilityBarrier, stopping: &StopSignal) -> &'static str {
     let deadline = stopping.raised().await + STOP_DURABILITY_GRACE;
+    if !barrier.is_failing() {
+        let _ = tokio::time::timeout_at(deadline.into(), barrier.begin_drain()).await;
+    }
     loop {
         if barrier.is_failing() {
             return "the WAL fails to make entries durable";
@@ -2669,5 +2685,27 @@ mod tests {
             .expect("pending DDL must be notified")
             .unwrap_err();
         assert_eq!(err.status_code(), StatusCode::RegionBusy);
+    }
+
+    /// A wait for the WAL that fails at once, as on a poisoned or stopped log
+    /// store, fails the flush with its error, and as cancelled once the engine
+    /// is stopping.
+    #[tokio::test]
+    async fn test_failed_wait_for_the_wal_of_a_stopping_engine_is_cancelled() {
+        let region_id = RegionId::new(1, 1);
+        let barrier = DurabilityBarrier::failed();
+        let state = CancellableTaskState::new();
+        let stopping = StopSignal::default();
+
+        let error = wait_for_durable_wal(region_id, &barrier, 1, &state, &stopping)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::Unexpected { .. }), "{error:?}");
+
+        stopping.raise();
+        let error = wait_for_durable_wal(region_id, &barrier, 1, &state, &stopping)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::FlushCancelled { .. }), "{error:?}");
     }
 }

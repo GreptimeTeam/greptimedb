@@ -129,9 +129,11 @@ const RECOVERY_TAIL_WINDOW: usize = 64 * 1024;
 /// A log store over the immutable WAL objects under one prefix.
 ///
 /// Appends are admitted into an open batch. A background actor seals the batch
-/// when it reaches the size limit or the flush interval elapses and creates
-/// the object under the next sequence while it keeps admitting entries into
-/// the next batch; up to [`MAX_IN_FLIGHT_CREATES`] creates run at a time.
+/// when it reaches the size limit or the flush interval elapses, or, once a
+/// caller asked the store to drain, as soon as a caller waits for a region it
+/// holds, and creates the object under the next sequence while it keeps
+/// admitting entries into the next batch; up to [`MAX_IN_FLIGHT_CREATES`]
+/// creates run at a time.
 /// Objects are indexed in the catalog in sequence order. In the `durable`
 /// acknowledgement mode an append returns once its object is durable and
 /// indexed, so an acknowledged entry never has a missing predecessor; in the
@@ -445,6 +447,7 @@ impl ObjectStoreLogStore {
             stalled: None,
             failing: None,
             durable_waiters: Vec::new(),
+            draining: false,
             stop: Vec::new(),
             stop_error: None,
             next_object_seq: start
@@ -1239,6 +1242,14 @@ impl LogStore for ObjectStoreLogStore {
             || self.stopped.load(Ordering::Acquire)
     }
 
+    /// Seals the open batch now and, until the store stops, as soon as a
+    /// [`wait_durable`](LogStore::wait_durable) waits for a region it holds,
+    /// instead of on the next tick of `flush_interval`.
+    async fn begin_drain(&self) {
+        // A closed channel means the actor already exited.
+        let _ = self.command_tx.send(Command::Drain).await;
+    }
+
     /// Fails with [`Error::MissingWalHistory`] when the prefix cannot hold
     /// the history of the provider's region through `entry_id`, unless
     /// `accept_missing_history` is set: then the region's writes that were
@@ -1317,6 +1328,9 @@ enum Command {
     /// Answered once the store keeps its start object, or once the delete
     /// of the start object it gave up settled.
     Withdraw { response: oneshot::Sender<()> },
+    /// Seals the open batch, and from then on whenever a caller waits for an
+    /// entry of a region it holds.
+    Drain,
     Stop {
         response: oneshot::Sender<Result<()>>,
     },
@@ -1530,6 +1544,9 @@ struct Actor {
     /// error that requires intervention.
     failing: Option<Failing>,
     durable_waiters: Vec<DurableWaiter>,
+    /// Set by `begin_drain`: the open batch is sealed as soon as a caller
+    /// waits for an entry of a region it holds, not on the next tick.
+    draining: bool,
     /// Callers of `stop`, answered once nothing is in flight.
     stop: Vec<oneshot::Sender<Result<()>>>,
     /// The failure `stop` reports in the `enqueued` mode once an
@@ -1622,6 +1639,9 @@ impl Actor {
                     }
                     Some(Command::Withdraw { response }) => {
                         self.handle_withdraw(response);
+                    }
+                    Some(Command::Drain) => {
+                        self.handle_drain();
                     }
                     Some(Command::Stop { response }) => {
                         self.handle_stop(response);
@@ -2388,6 +2408,19 @@ impl Actor {
         });
         #[cfg(any(test, feature = "testing"))]
         self.durability_waits.send_modify(|count| *count += 1);
+        if self.draining && !self.is_stopped() && self.open_batch.holds_region(region_id) {
+            self.flush_open_batch();
+        }
+    }
+
+    /// Starts draining: the open batch is sealed now, and from then on
+    /// whenever a caller waits for an entry of a region it holds. Nothing
+    /// starts after stop began, which sealed the `enqueued` backlog.
+    fn handle_drain(&mut self) {
+        self.draining = true;
+        if !self.is_stopped() {
+            self.flush_open_batch();
+        }
     }
 
     /// Gives up the start object while it is the only object this store
@@ -7827,6 +7860,42 @@ mod tests {
         ));
         release.send(true).unwrap();
         timeout(WAIT, response_rx).await.unwrap().unwrap().unwrap();
+    }
+
+    /// Once a caller asks the store to drain, the open batch is sealed at
+    /// once and, from then on, as soon as a caller waits for a region it
+    /// holds, so neither wait depends on the seal interval.
+    #[tokio::test]
+    async fn test_store_drain_seals_the_batches_callers_wait_for() {
+        let _serialized = SERIALIZED.lock().await;
+        let store = open(memory_store(), &enqueued(manual())).await;
+        let region_id = region(1);
+
+        append(&store, region_id, "a1").await.unwrap();
+        let waiting = {
+            let store = store.clone();
+            tokio::spawn(async move { store.wait_durable(&provider(region_id), id(1, 1)).await })
+        };
+        timeout(WAIT, store.wait_for_durability_waits(1))
+            .await
+            .unwrap()
+            .unwrap();
+        store.begin_drain().await;
+        timeout(WAIT, waiting).await.unwrap().unwrap().unwrap();
+
+        let response = append(&store, region_id, "a2").await.unwrap();
+        assert_eq!(
+            HashMap::from([(region_id, id(2, 1))]),
+            response.last_entry_ids
+        );
+        timeout(WAIT, store.wait_durable(&provider(region_id), id(2, 1)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            id(2, 1),
+            store.durable_entry_id(&provider(region_id)).unwrap()
+        );
     }
 
     #[tokio::test]

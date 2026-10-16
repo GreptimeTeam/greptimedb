@@ -58,6 +58,7 @@ pub type WalEntryStream<'a> = BoxStream<'a, Result<(EntryId, WalEntry)>>;
 pub(crate) struct DurabilityBarrier {
     wait: Arc<dyn Fn(EntryId) -> BoxFuture<'static, Result<()>> + Send + Sync>,
     failing: Arc<dyn Fn() -> bool + Send + Sync>,
+    drain: Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>,
 }
 
 impl DurabilityBarrier {
@@ -72,12 +73,37 @@ impl DurabilityBarrier {
         (self.failing)()
     }
 
+    /// Asks the log store to make entries durable as soon as it can, see
+    /// [LogStore::begin_drain].
+    pub(crate) async fn begin_drain(&self) {
+        (self.drain)().await
+    }
+
     /// A barrier that never waits, for tests without a log store.
     #[cfg(test)]
     pub(crate) fn noop() -> Self {
         Self {
             wait: Arc::new(|_| Box::pin(async { Ok(()) })),
             failing: Arc::new(|| false),
+            drain: Arc::new(|| Box::pin(async {})),
+        }
+    }
+
+    /// A barrier whose wait fails at once, as on a log store that is
+    /// poisoned or stopped, for tests.
+    #[cfg(test)]
+    pub(crate) fn failed() -> Self {
+        Self {
+            wait: Arc::new(|_| {
+                Box::pin(async {
+                    crate::error::UnexpectedSnafu {
+                        reason: "the WAL is poisoned",
+                    }
+                    .fail()
+                })
+            }),
+            failing: Arc::new(|| true),
+            drain: Arc::new(|| Box::pin(async {})),
         }
     }
 }
@@ -155,6 +181,7 @@ impl<S: LogStore> Wal<S> {
     ) -> DurabilityBarrier {
         let store = self.store.clone();
         let failing_store = self.store.clone();
+        let drain_store = self.store.clone();
         let provider = provider.clone();
         DurabilityBarrier {
             wait: Arc::new(move |entry_id| {
@@ -172,6 +199,10 @@ impl<S: LogStore> Wal<S> {
                 })
             }),
             failing: Arc::new(move || failing_store.is_failing()),
+            drain: Arc::new(move || {
+                let store = drain_store.clone();
+                Box::pin(async move { store.begin_drain().await })
+            }),
         }
     }
 
