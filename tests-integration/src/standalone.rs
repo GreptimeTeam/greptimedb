@@ -92,6 +92,7 @@ pub struct GreptimeDbStandaloneBuilder {
     logical_batcher: Option<BatcherOptions>,
     table_batcher: BatcherOptions,
     mito_config: Option<mito2::config::MitoConfig>,
+    pipeline_options: pipeline::PipelineOptions,
 }
 
 impl GreptimeDbStandaloneBuilder {
@@ -115,6 +116,7 @@ impl GreptimeDbStandaloneBuilder {
             logical_batcher: None,
             table_batcher: BatcherOptions::default(),
             mito_config: None,
+            pipeline_options: pipeline::PipelineOptions::default(),
         }
     }
 
@@ -129,6 +131,13 @@ impl GreptimeDbStandaloneBuilder {
     #[must_use]
     pub fn with_experimental_metric_export(mut self) -> Self {
         self.experimental_metric_export = true;
+        self
+    }
+
+    /// Configures pipeline compilation and caching for this test instance.
+    #[must_use]
+    pub fn with_pipeline_options(mut self, options: pipeline::PipelineOptions) -> Self {
+        self.pipeline_options = options;
         self
     }
 
@@ -405,6 +414,7 @@ impl GreptimeDbStandaloneBuilder {
             event_recorder: self.event_recorder_options.clone(),
             auto_create_table: self.auto_create_table,
             experimental_metric_export: self.experimental_metric_export,
+            pipeline: self.pipeline_options.clone(),
             pending_rows_batcher: PendingRowsBatcherOptions {
                 logical_table: self.logical_batcher.clone(),
                 table: self.table_batcher.clone(),

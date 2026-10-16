@@ -24,12 +24,17 @@ pub struct PipelineOptions {
     /// duration. Default: "10s".
     #[serde(with = "humantime_serde")]
     pub cache_ttl: Duration,
+    /// Allows VRL programs to access the server environment, filesystem, hostname,
+    /// local timezone, network, and logs. Enable only for trusted pipeline authors.
+    /// Defaults to false. Changes require a restart.
+    pub allow_vrl_host_access: bool,
 }
 
 impl Default for PipelineOptions {
     fn default() -> Self {
         Self {
             cache_ttl: Duration::from_secs(10),
+            allow_vrl_host_access: false,
         }
     }
 }
