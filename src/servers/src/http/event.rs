@@ -877,11 +877,6 @@ impl<'a> TryFrom<&'a ContentType> for EventPayloadResolver<'a> {
 impl EventPayloadResolver<'_> {
     fn parse_payload(&self, payload: Bytes, ignore_errors: bool) -> Result<Vec<VrlValue>> {
         match self.inner {
-            // `application/json` accepts a single JSON value or a top-level
-            // array; `application/x-json-stream` additionally accepts values
-            // placed back-to-back without a separator. The streaming
-            // deserializer yields every top-level value in order, and
-            // `transform_ndjson_array_factory` flattens top-level arrays.
             EventPayloadResolverInner::Json | EventPayloadResolverInner::JsonStream => {
                 transform_ndjson_array_factory(
                     Deserializer::from_slice(&payload).into_iter(),
