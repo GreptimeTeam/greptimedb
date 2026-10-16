@@ -389,13 +389,15 @@ impl Samples {
             SampleStorage::Mixed(mixed) => Some(&mixed.histograms.batch),
             SampleStorage::Float(_) | SampleStorage::Chunks(_, _) => None,
         });
+        let mut first_data = None;
         let shared_batch = histogram_batches.next().filter(|first| {
             histogram_batches.all(|batch| {
-                Arc::ptr_eq(first, batch)
-                    || first
-                        .as_arrow()
-                        .to_data()
-                        .ptr_eq(&batch.as_arrow().to_data())
+                if Arc::ptr_eq(first, batch) {
+                    return true;
+                }
+                first_data
+                    .get_or_insert_with(|| first.as_arrow().to_data())
+                    .ptr_eq(&batch.as_arrow().to_data())
             })
         });
         let needs_float = chunks.iter().any(|chunk| {
