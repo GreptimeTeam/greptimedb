@@ -308,6 +308,17 @@ impl RegionServer {
         };
 
         let region_id = RegionId::from_u64(request.region_id);
+        let engine_ctx = self
+            .inner
+            .query_engine
+            .engine_context(query_ctx)
+            .map_err(|error| {
+                crate::error::InvalidQueryContextSnafu {
+                    reason: error.to_string(),
+                }
+                .build()
+            })?;
+        let query_ctx = engine_ctx.query_ctx();
         let catalog_list = Arc::new(NameAwareCatalogList::new(
             self.clone(),
             region_id,
@@ -318,12 +329,7 @@ impl RegionServer {
             common_telemetry::info!("Handle remote read for region: {}", region_id);
         }
 
-        let decoder = self
-            .inner
-            .query_engine
-            .engine_context(query_ctx.clone())
-            .new_plan_decoder()
-            .context(NewPlanDecoderSnafu)?;
+        let decoder = engine_ctx.new_plan_decoder().context(NewPlanDecoderSnafu)?;
 
         let plan = decoder
             .decode(Bytes::from(request.plan), catalog_list, false)

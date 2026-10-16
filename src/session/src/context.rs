@@ -78,6 +78,8 @@ pub struct QueryContext {
     sql_dialect: Arc<dyn Dialect + Send + Sync>,
     #[builder(default)]
     extensions: HashMap<String, String>,
+    #[builder(setter(skip))]
+    query_options_snapshotted: bool,
     /// The configuration parameter are used to store the parameters that are set by the user
     #[builder(default)]
     configuration_parameter: Arc<ConfigurationVariables>,
@@ -481,6 +483,71 @@ impl QueryContext {
         self.extensions.clone()
     }
 
+    /// Returns normalized query options from the request over session defaults.
+    pub fn effective_query_options(
+        &self,
+    ) -> Result<HashMap<String, String>, crate::session_config::Error> {
+        let mut request_options = HashMap::new();
+        for (key, value) in &self.extensions {
+            if crate::hints::is_reserved_extension_key(key) {
+                continue;
+            }
+            // Older Frontends and Flownodes forward `query_parallelism=0` (their
+            // "use the server default" encoding) untouched inside the wire
+            // query context, so accept it as unset instead of failing the
+            // query on the Datanode side. The canonical
+            // `query.parallelism = 0` stays rejected.
+            if key.eq_ignore_ascii_case("query_parallelism") && value == "0" {
+                continue;
+            }
+            // Wire decoding preserves legacy frontend nonzero values; public entry points enforce the limit.
+            if let Some((canonical, normalized)) =
+                crate::query_options::parse_query_option(key, value, u16::MAX)?
+            {
+                if request_options
+                    .get(&canonical)
+                    .is_some_and(|previous| previous != &normalized)
+                {
+                    return crate::session_config::InvalidConfigValueSnafu {
+                        name: key,
+                        value,
+                        hint: "Conflicting aliases for the same query option",
+                    }
+                    .fail();
+                }
+                request_options.insert(canonical, normalized);
+            }
+        }
+        let mut effective = if self.query_options_snapshotted {
+            HashMap::new()
+        } else {
+            self.configuration_parameter.query_options()
+        };
+        effective.extend(request_options);
+        Ok(effective)
+    }
+
+    /// Creates a per-query immutable option snapshot while retaining shared mutable session data.
+    pub fn query_option_snapshot(&self) -> Result<Self, crate::session_config::Error> {
+        let mut snapshot = self.clone();
+        let options = snapshot.effective_query_options()?;
+        snapshot
+            .extensions
+            .retain(|key, _| crate::query_options::canonical_query_option_name(key).is_none());
+        // Older Datanodes only understand the legacy `query_parallelism` hint key, so
+        // mirror the canonical parallelism override for the wire format while keeping
+        // the canonical key for in-process consumers.
+        let legacy_parallelism = options
+            .get("query.parallelism")
+            .map(|parallelism| ("query_parallelism".to_string(), parallelism.clone()));
+        snapshot.extensions.extend(options);
+        if let Some((key, value)) = legacy_parallelism {
+            snapshot.extensions.entry(key).or_insert(value);
+        }
+        snapshot.query_options_snapshotted = true;
+        Ok(snapshot)
+    }
+
     /// Default to double quote and fallback to back quote
     pub fn quote_style(&self) -> char {
         if self.sql_dialect().is_delimited_identifier_start('"') {
@@ -676,6 +743,7 @@ impl QueryContextBuilder {
                 .sql_dialect
                 .unwrap_or_else(|| Arc::new(GreptimeDbDialect {})),
             extensions,
+            query_options_snapshotted: false,
             configuration_parameter: self
                 .configuration_parameter
                 .unwrap_or_else(|| Arc::new(ConfigurationVariables::default())),
@@ -740,7 +808,7 @@ pub struct ConfigurationVariables {
     postgres_bytea_output: ArcSwap<PGByteaOutputValue>,
     pg_datestyle_format: ArcSwap<(PGDateTimeStyle, PGDateOrder)>,
     pg_intervalstyle_format: ArcSwap<PGIntervalStyle>,
-    allow_query_fallback: ArcSwap<bool>,
+    query_options: RwLock<HashMap<String, String>>,
 }
 
 impl Clone for ConfigurationVariables {
@@ -749,7 +817,7 @@ impl Clone for ConfigurationVariables {
             postgres_bytea_output: ArcSwap::new(self.postgres_bytea_output.load().clone()),
             pg_datestyle_format: ArcSwap::new(self.pg_datestyle_format.load().clone()),
             pg_intervalstyle_format: ArcSwap::new(self.pg_intervalstyle_format.load().clone()),
-            allow_query_fallback: ArcSwap::new(self.allow_query_fallback.load().clone()),
+            query_options: RwLock::new(self.query_options.read().unwrap().clone()),
         }
     }
 }
@@ -784,11 +852,43 @@ impl ConfigurationVariables {
     }
 
     pub fn allow_query_fallback(&self) -> bool {
-        **self.allow_query_fallback.load()
+        self.query_options().get("query.allow_query_fallback") == Some(&"true".to_string())
     }
 
     pub fn set_allow_query_fallback(&self, allow: bool) {
-        self.allow_query_fallback.swap(Arc::new(allow));
+        self.query_options
+            .write()
+            .unwrap()
+            .insert("query.allow_query_fallback".to_string(), allow.to_string());
+    }
+
+    /// Validates and stores one canonicalized per-session query option.
+    pub fn set_query_option(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<(), crate::session_config::Error> {
+        let (canonical, normalized) = crate::query_options::parse_query_option(
+            key,
+            value,
+            crate::query_options::MAX_PUBLIC_PARALLELISM,
+        )?
+        .ok_or_else(|| crate::session_config::Error::InvalidConfigValue {
+            name: key.to_string(),
+            value: value.to_string(),
+            hint: "Not a supported query option".to_string(),
+            location: snafu::Location::new(file!(), line!(), column!()),
+        })?;
+        self.query_options
+            .write()
+            .unwrap()
+            .insert(canonical, normalized);
+        Ok(())
+    }
+
+    /// Returns the session's canonical query option overrides.
+    pub fn query_options(&self) -> HashMap<String, String> {
+        self.query_options.read().unwrap().clone()
     }
 }
 
@@ -800,6 +900,37 @@ mod test {
 
     use crate::Session;
     use crate::context::{Channel, *};
+
+    #[test]
+    fn test_query_parallelism_wire_accepts_legacy_value() {
+        let mut context = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        context.set_extension("query_parallelism", "2048");
+
+        assert_eq!(
+            context
+                .effective_query_options()
+                .unwrap()
+                .get("query.parallelism"),
+            Some(&"2048".to_string())
+        );
+    }
+
+    #[test]
+    fn test_set_query_parallelism_public_limit() {
+        let context = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        assert!(
+            context
+                .configuration_parameter()
+                .set_query_option("query.parallelism", "1025")
+                .is_err()
+        );
+        assert!(
+            context
+                .configuration_parameter()
+                .set_query_option("query.parallelism", "1024")
+                .is_ok()
+        );
+    }
 
     #[test]
     fn test_session() {
