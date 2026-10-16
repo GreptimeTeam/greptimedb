@@ -209,42 +209,34 @@ pub fn query_to_plan(
         // and numeric-column compatibility; include NULL only when "" matches.
         match m_type {
             MatcherType::Eq => {
-                let comparison = label.clone().eq(lit(value));
-                conditions.push(if value.is_empty() {
-                    comparison.or(label.is_null())
+                let condition = if value.is_empty() {
+                    label.clone().eq(lit(value)).or(label.is_null())
                 } else {
-                    comparison
-                });
+                    label.eq(lit(value))
+                };
+                conditions.push(condition);
             }
             MatcherType::Neq => {
-                let comparison = label.clone().not_eq(lit(value));
-                conditions.push(if value.is_empty() {
-                    comparison
+                let condition = if value.is_empty() {
+                    label.not_eq(lit(value))
                 } else {
-                    comparison.or(label.is_null())
-                });
+                    label.clone().not_eq(lit(value)).or(label.is_null())
+                };
+                conditions.push(condition);
             }
             MatcherType::Re | MatcherType::Nre => {
                 let pattern = anchored_label_regex(value);
-                let label = match label
-                    .get_type(dataframe.schema())
-                    .context(error::DataFrameSnafu)?
-                {
-                    // Preserve DataFusion's existing type handling for binary labels.
-                    DataType::Binary | DataType::LargeBinary | DataType::BinaryView => label,
-                    _ => {
-                        let label = label
-                            .cast_to(&DataType::Utf8, dataframe.schema())
-                            .context(error::DataFrameSnafu)?;
-                        coalesce(vec![label, lit("")])
-                    }
-                };
+                let label = label
+                    .cast_to(&DataType::Utf8, dataframe.schema())
+                    .context(error::DataFrameSnafu)?;
+                let label = coalesce(vec![label, lit("")]);
                 let matched = regexp_match(label, lit(pattern), None);
-                conditions.push(if m_type == MatcherType::Re {
+                let condition = if m_type == MatcherType::Re {
                     matched.is_not_null()
                 } else {
                     matched.is_null()
-                });
+                };
+                conditions.push(condition);
             }
         }
     }
