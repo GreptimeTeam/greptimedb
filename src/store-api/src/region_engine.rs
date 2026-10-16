@@ -606,10 +606,18 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
 
     /// Scans a partition as raw series when this source supports that path.
     ///
-    /// Implementations may return `None` when raw capability is absent before execution, permitting
-    /// a legacy scan instead. `Some` selects this entrypoint, including for an empty successful
-    /// stream. Errors propagate; callers must not replay a failed raw scan through the legacy path.
-    /// Use only one entrypoint for a given scanner partition per execution.
+    /// `None` means raw capability is absent before execution and permits a legacy scan instead.
+    /// `Some` selects this entrypoint, including for an empty successful stream. Errors propagate;
+    /// callers must not replay a failed raw scan through the legacy path. Use only one entrypoint
+    /// for a given scanner partition per execution. The explicit label source is owned by the
+    /// returned stream and must be bound to this scanner's metadata snapshot.
+    ///
+    /// Output preserves the ordinary storage reader's pushdown and MVCC semantics. Inexact
+    /// pushed-down predicates can leave false-positive candidates, just as in `scan_partition`.
+    /// Implementations must preserve typed residual-predicate semantics before any lossy value
+    /// conversion, or return `None` before execution when they cannot. Callers must retain
+    /// residual predicate columns until those predicates are evaluated and apply the final
+    /// projection afterward; raw capability does not mean filtering is complete.
     ///
     /// # Panics
     ///
@@ -620,6 +628,7 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
         _ctx: &QueryScanContext,
         _metrics_set: &ExecutionPlanMetricsSet,
         _partition: usize,
+        _label_source: &RawLabelSource,
     ) -> Result<Option<SendableRawSeriesStream>, BoxedError> {
         todo!()
     }
@@ -946,7 +955,7 @@ mod tests {
 
         // SinglePartitionScanner uses the default raw-scan implementation, which panics.
         let raw_scan = catch_unwind(AssertUnwindSafe(|| {
-            scanner.scan_series_partition(&ctx, &metrics, 0)
+            scanner.scan_series_partition(&ctx, &metrics, 0, &RawLabelSource::Explicit)
         }));
         assert!(raw_scan.is_err());
         let legacy = scanner.scan_partition(&ctx, &metrics, 0).unwrap();

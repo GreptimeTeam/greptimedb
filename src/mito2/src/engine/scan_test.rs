@@ -4759,3 +4759,672 @@ fn scan_field_values(batches: &[common_recordbatch::RecordBatch]) -> Vec<f64> {
         })
         .collect()
 }
+
+/// Raw Mito output contains candidates after projection, filtering, and MVCC read processing.
+#[tokio::test]
+async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
+    use std::collections::HashSet;
+
+    use api::v1::{Row, Value};
+    use common_recordbatch::filter;
+    use datatypes::arrow::array::Array;
+    use datatypes::series::SeriesOrdering;
+    use datatypes::series::samples::SampleRef;
+    use datatypes::value::Value as DatumValue;
+    use mito_codec::row_converter::build_primary_key_codec;
+    use store_api::region_engine::{BoundTag, QueryScanContext, RawLabelSource};
+    use store_api::region_request::RegionDeleteRequest;
+    use table::predicate::Predicate;
+
+    let mut env =
+        TestEnv::with_prefix("test_mito_handle_query_raw_series_candidate_projection_and_mvcc")
+            .await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().field_num(3).build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let row = |tag: &str, f0: Option<f64>, f1: Option<f64>, gate: f64, ts: i64| Row {
+        values: vec![
+            Value {
+                value_data: Some(ValueData::StringValue(tag.to_string())),
+            },
+            Value {
+                value_data: f0.map(ValueData::F64Value),
+            },
+            Value {
+                value_data: f1.map(ValueData::F64Value),
+            },
+            Value {
+                value_data: Some(ValueData::F64Value(gate)),
+            },
+            Value {
+                value_data: Some(ValueData::TimestampMillisecondValue(ts)),
+            },
+        ],
+    };
+    let put = |rows| {
+        RegionRequest::Put(RegionPutRequest {
+            rows: Rows {
+                schema: schema.clone(),
+                rows,
+            },
+            hint: None,
+            skip_wal: false,
+            partition_expr_version: None,
+        })
+    };
+    engine
+        .handle_request(
+            region_id,
+            put(vec![
+                row("A", Some(1.0), Some(10.0), 1.0, 1000),
+                row("A", Some(2.0), None, 1.0, 2000),
+                row("B", Some(5.0), Some(-0.0), 1.0, 1000),
+                row("B", Some(6.0), Some(60.0), 0.0, 2000),
+                row("B", None, Some(70.0), 1.0, 3000),
+            ]),
+        )
+        .await
+        .unwrap();
+    test_util::flush_region(&engine, region_id, None).await;
+    // Newer write supersedes A@1000; A@2000 is deleted. B@2000 fails the static field_2 predicate.
+    engine
+        .handle_request(
+            region_id,
+            put(vec![row("A", Some(3.0), Some(30.0), 1.0, 1000)]),
+        )
+        .await
+        .unwrap();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Delete(RegionDeleteRequest {
+                rows: Rows {
+                    schema: test_util::delete_rows_schema(
+                        &CreateRequestBuilder::new().field_num(3).build(),
+                    ),
+                    rows: vec![Row {
+                        values: vec![
+                            Value {
+                                value_data: Some(ValueData::StringValue("A".to_string())),
+                            },
+                            Value {
+                                value_data: Some(ValueData::TimestampMillisecondValue(2000)),
+                            },
+                        ],
+                    }],
+                },
+                hint: None,
+                partition_expr_version: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    let request = ScanRequest {
+        projection: Some(vec![2, 1, 4]),
+        filters: vec![col("field_2").gt(lit(0.0_f64))],
+        distribution: Some(TimeSeriesDistribution::PerSeries),
+        preserve_pk_dictionary_encoding: true,
+        ..Default::default()
+    };
+    let mut scanner = engine
+        .handle_query(region_id, request.clone())
+        .await
+        .unwrap();
+    let metadata = scanner.metadata();
+    let tags = metadata
+        .column_metadatas
+        .iter()
+        .filter(|c| c.semantic_type == SemanticType::Tag)
+        .map(|c| BoundTag {
+            column_id: c.column_id,
+            name: Arc::from(c.column_schema.name.as_str()),
+        })
+        .collect::<Vec<_>>();
+    let source = RawLabelSource::PrimaryKey {
+        metric_name: Arc::from("fixture_metric"),
+        physical_metadata: metadata.clone(),
+        logical_tags: tags.into(),
+    };
+    let ranges = scanner.properties().partitions.clone();
+    scanner
+        .prepare(PrepareRequest {
+            ranges: Some(ranges.clone()),
+            target_partitions: Some(ranges.len()),
+            ..Default::default()
+        })
+        .unwrap();
+    let metrics = ExecutionPlanMetricsSet::default();
+    let mut raw = Vec::new();
+    for partition in 0..ranges.len() {
+        let mut previous_times = HashMap::<Vec<u8>, i64>::new();
+        let mut stream = scanner
+            .scan_series_partition(&QueryScanContext::default(), &metrics, partition, &source)
+            .unwrap()
+            .expect("supported millisecond PerSeries scan");
+        assert_eq!(SeriesOrdering::Contiguous, stream.ordering());
+        assert!(stream.schema().eval_grid.is_none());
+        assert_eq!(
+            vec!["field_1", "field_0"],
+            stream
+                .schema()
+                .fields
+                .iter()
+                .map(|f| f.name.as_ref())
+                .collect::<Vec<_>>()
+        );
+        let mut closed_keys = HashSet::<Vec<u8>>::new();
+        while let Some(chunk) = stream.try_next().await.unwrap() {
+            assert!(chunk.metric.is_none());
+            assert!(
+                !closed_keys.contains(chunk.primary_key.as_slice()),
+                "no chunk may follow a key's is_last chunk"
+            );
+            let times = chunk.time.as_buffer().as_ref();
+            assert_eq!(2, chunk.fields.len());
+            assert_eq!(times.len(), chunk.fields.get(0).unwrap().len());
+            assert_eq!(times.len(), chunk.fields.get(1).unwrap().len());
+            for (index, time) in times.iter().enumerate() {
+                let SampleRef::Float(f1) = chunk.fields.get(0).unwrap().sample(index) else {
+                    panic!("f1 float")
+                };
+                let f0 = match chunk.fields.get(1).unwrap().sample(index) {
+                    SampleRef::Float(v) => Some(v),
+                    SampleRef::Missing => None,
+                    _ => panic!("f0 type"),
+                };
+                let key = chunk.primary_key.to_vec();
+                if let Some(previous) = previous_times.insert(key.clone(), *time) {
+                    assert!(
+                        previous < *time,
+                        "raw time must increase strictly across chunks"
+                    );
+                }
+                if chunk.is_last {
+                    closed_keys.insert(chunk.primary_key.to_vec());
+                }
+                raw.push((
+                    chunk.primary_key.clone(),
+                    *time,
+                    f1,
+                    f0,
+                    chunk.is_last && index + 1 == times.len(),
+                ));
+            }
+        }
+    }
+    raw.sort_by(|a, b| a.2.total_cmp(&b.2));
+    assert_eq!(3, raw.len());
+    assert!(
+        raw.iter()
+            .any(|(_, _, value, _, _)| value.to_bits() == (-0.0_f64).to_bits())
+    );
+    let codec = build_primary_key_codec(&metadata);
+    let mut expected_keys = Vec::new();
+    for tag in ["A", "B"] {
+        let mut key = Vec::new();
+        codec
+            .encode_values(
+                &[(metadata.primary_key[0], DatumValue::String(tag.into()))],
+                &mut key,
+            )
+            .unwrap();
+        expected_keys.push(key);
+    }
+    expected_keys.sort();
+    let mut actual_keys = raw
+        .iter()
+        .map(|(key, _, _, _, _)| key.to_vec())
+        .collect::<Vec<_>>();
+    actual_keys.sort();
+    actual_keys.dedup();
+    assert_eq!(expected_keys, actual_keys);
+    for key in &actual_keys {
+        assert_eq!(
+            1,
+            raw.iter()
+                .filter(|(k, _, _, _, last)| k.as_ref() == key && *last)
+                .count()
+        );
+    }
+    // Compare keyed visible tuples through a separately opened legacy scanner.
+    // A partition cannot be consumed through both paths.
+    let mut legacy_request = request;
+    legacy_request.projection = Some(vec![0, 3, 2, 1, 4]);
+    legacy_request.preserve_pk_dictionary_encoding = false;
+    let legacy = engine
+        .handle_query(region_id, legacy_request)
+        .await
+        .unwrap();
+    let mut batches = Vec::new();
+    for partition in 0..legacy.properties().num_partitions() {
+        batches.extend(
+            legacy
+                .scan_partition(&QueryScanContext::default(), &metrics, partition)
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap(),
+        );
+    }
+    let candidate_count: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+    assert_eq!(4, candidate_count);
+    let predicate = Predicate::to_physical_expr(
+        &col("field_2").gt(lit(0.0_f64)),
+        legacy.schema().arrow_schema(),
+    )
+    .unwrap();
+    let batches = batches
+        .into_iter()
+        .map(|batch| {
+            let batch = batch.into_df_record_batch();
+            let filtered = filter::batch_filter(&batch, &predicate).unwrap();
+            filtered.project(&[0, 2, 3, 4]).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let visible = batches
+        .iter()
+        .flat_map(|batch| {
+            (0..batch.num_rows()).map(move |r| {
+                let f1 = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                let f0 = batch
+                    .column(2)
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                (
+                    batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .unwrap()
+                        .value(r)
+                        .to_string(),
+                    batch
+                        .column(3)
+                        .as_any()
+                        .downcast_ref::<TimestampMillisecondArray>()
+                        .unwrap()
+                        .value(r),
+                    f1.value(r),
+                    if f0.is_null(r) {
+                        None
+                    } else {
+                        Some(f0.value(r))
+                    },
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        vec![
+            (1000, -0.0, Some(5.0)),
+            (1000, 30.0, Some(3.0)),
+            (3000, 70.0, None)
+        ],
+        raw.iter()
+            .map(|(_, t, a, b, _)| (*t, *a, *b))
+            .collect::<Vec<_>>()
+    );
+    let mut visible = visible;
+    visible.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    let mut raw_visible = raw
+        .iter()
+        .map(|(key, time, f1, f0, _)| {
+            let tag = if key.as_ref() == expected_keys[0].as_slice() {
+                "A"
+            } else {
+                "B"
+            };
+            (tag.to_string(), *time, *f1, *f0)
+        })
+        .collect::<Vec<_>>();
+    raw_visible.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    assert_eq!(raw_visible, visible);
+    // Apply the typed predicate and final projection through the ordinary legacy filter path.
+    assert_eq!(3, visible.len());
+    assert_eq!(
+        vec![
+            ("A".to_string(), 1000, 30.0, Some(3.0)),
+            ("B".to_string(), 1000, -0.0, Some(5.0)),
+            ("B".to_string(), 3000, 70.0, None)
+        ],
+        visible
+    );
+}
+
+#[tokio::test]
+async fn test_mito_raw_series_int64_predicate_uses_original_precision() {
+    use datatypes::series::samples::SampleRef;
+    use store_api::region_engine::{BoundTag, QueryScanContext, RawLabelSource};
+
+    let mut env =
+        TestEnv::with_prefix("test_mito_raw_series_int64_predicate_uses_original_precision").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .field_num(2)
+        .field_datatype(ConcreteDataType::int64_datatype())
+        .build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let boundary = 1_i64 << 53;
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: [boundary, boundary + 1]
+                .into_iter()
+                .enumerate()
+                .map(|(i, gate)| {
+                    row(vec![
+                        ValueData::StringValue("series".into()),
+                        ValueData::I64Value(gate),
+                        ValueData::I64Value((i as i64 + 1) * 10),
+                        ValueData::TimestampMillisecondValue(i as i64 + 1),
+                    ])
+                })
+                .collect(),
+        },
+    )
+    .await;
+    let mut scanner = engine
+        .handle_query(
+            region_id,
+            ScanRequest {
+                projection: Some(vec![2, 3]),
+                filters: vec![
+                    col("tag_0").eq(lit("series")),
+                    col("field_0").gt(lit(boundary)),
+                ],
+                distribution: Some(TimeSeriesDistribution::PerSeries),
+                preserve_pk_dictionary_encoding: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let metadata = scanner.metadata();
+    let tags = metadata
+        .column_metadatas
+        .iter()
+        .filter(|c| c.semantic_type == SemanticType::Tag)
+        .map(|c| BoundTag {
+            column_id: c.column_id,
+            name: Arc::from(c.column_schema.name.as_str()),
+        })
+        .collect::<Vec<_>>();
+    let source = RawLabelSource::PrimaryKey {
+        metric_name: Arc::from("fixture_metric"),
+        physical_metadata: metadata,
+        logical_tags: tags.into(),
+    };
+    let ranges = scanner.properties().partitions.clone();
+    scanner
+        .prepare(PrepareRequest {
+            ranges: Some(ranges.clone()),
+            target_partitions: Some(ranges.len()),
+            ..Default::default()
+        })
+        .unwrap();
+    let metrics = ExecutionPlanMetricsSet::default();
+    let mut times = Vec::new();
+    let mut output_values = Vec::new();
+    for partition in 0..ranges.len() {
+        let stream = scanner
+            .scan_series_partition(&QueryScanContext::default(), &metrics, partition, &source)
+            .unwrap()
+            .expect("typed predicate is supported");
+        assert_eq!(
+            vec!["field_1"],
+            stream
+                .schema()
+                .fields
+                .iter()
+                .map(|f| f.name.as_ref())
+                .collect::<Vec<_>>()
+        );
+        let chunks = stream.try_collect::<Vec<_>>().await.unwrap();
+        for chunk in chunks {
+            let axis = chunk.time.as_buffer().as_ref();
+            times.extend(axis.iter().copied());
+            for (index, &time) in axis.iter().enumerate() {
+                output_values.push((
+                    time,
+                    match chunk.fields.get(0).unwrap().sample(index) {
+                        SampleRef::Float(value) => value,
+                        _ => panic!("expected float sample"),
+                    },
+                ));
+            }
+        }
+    }
+    assert_eq!(vec![2], times);
+    assert_eq!(vec![(2, 20.0)], output_values);
+}
+
+/// Invalid predicate bindings decline before consumption; explicit labels decline and legacy still reads.
+#[tokio::test]
+async fn test_mito_raw_series_invalid_binding_before_legacy_read() {
+    use datatypes::series::samples::SampleRef;
+    use store_api::region_engine::{BoundTag, QueryScanContext, RawLabelSource};
+    let mut env =
+        TestEnv::with_prefix("test_mito_raw_series_invalid_binding_before_legacy_read").await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema,
+            rows: test_util::build_rows(0, 2),
+        },
+    )
+    .await;
+    use datafusion_expr::{ColumnarValue, Expr, Volatility, create_udf};
+
+    let udf = |name, volatility| {
+        create_udf(
+            name,
+            vec![],
+            DataType::Boolean,
+            volatility,
+            Arc::new(|_| Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(true))))),
+        )
+        .call(vec![])
+    };
+    let scalar_variable = Expr::ScalarVariable(
+        Arc::new(Field::new("@@version", DataType::Boolean, false)),
+        vec!["@@version".to_string()],
+    );
+    let cases = vec![
+        (
+            "missing column",
+            col("missing_column").gt(lit(1_i64)),
+            false,
+        ),
+        (
+            "stable function",
+            udf("stable_guard", Volatility::Stable),
+            false,
+        ),
+        (
+            "volatile function",
+            udf("volatile_guard", Volatility::Volatile),
+            false,
+        ),
+        ("scalar variable", scalar_variable, false),
+        ("non-boolean predicate", col("field_0"), false),
+        (
+            "immutable function",
+            udf("immutable_guard", Volatility::Immutable),
+            true,
+        ),
+    ];
+    let metrics = ExecutionPlanMetricsSet::default();
+    let ctx = QueryScanContext::default();
+    for (name, filter, supported) in cases {
+        let scanner = engine
+            .handle_query(
+                region_id,
+                ScanRequest {
+                    filters: vec![filter],
+                    distribution: Some(TimeSeriesDistribution::PerSeries),
+                    preserve_pk_dictionary_encoding: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let metadata = scanner.metadata();
+        let valid_source = RawLabelSource::PrimaryKey {
+            metric_name: Arc::from("fixture_metric"),
+            physical_metadata: metadata.clone(),
+            logical_tags: Arc::from([BoundTag {
+                column_id: metadata.primary_key[0],
+                name: Arc::from("tag_0"),
+            }]),
+        };
+        let raw = scanner
+            .scan_series_partition(&ctx, &metrics, 0, &valid_source)
+            .unwrap();
+        assert_eq!(supported, raw.is_some(), "case: {name}");
+        if let Some(raw) = raw {
+            let chunks = raw.try_collect::<Vec<_>>().await.unwrap();
+            let tuples = chunks
+                .iter()
+                .map(|chunk| {
+                    let times = chunk.time.as_buffer().as_ref();
+                    let SampleRef::Float(value) = chunk.fields.get(0).unwrap().sample(0) else {
+                        panic!("expected raw float sample");
+                    };
+                    (times[0], value)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(vec![(0, 0.0), (1000, 1.0)], tuples, "case: {name}");
+        } else {
+            let batches = scanner.scan_partition(&ctx, &metrics, 0).unwrap();
+            let batches = RecordBatches::try_collect(batches).await.unwrap();
+            let rows = batches
+                .iter()
+                .flat_map(|batch| {
+                    (0..batch.num_rows()).map(move |row| {
+                        let tag = batch
+                            .column_by_name("tag_0")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .unwrap()
+                            .value(row)
+                            .to_string();
+                        let field = batch
+                            .column_by_name("field_0")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<Float64Array>()
+                            .unwrap()
+                            .value(row);
+                        let time = batch
+                            .column_by_name("ts")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<TimestampMillisecondArray>()
+                            .unwrap()
+                            .value(row);
+                        (tag, field, time)
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                vec![("0".to_string(), 0.0, 0), ("1".to_string(), 1.0, 1000)],
+                rows,
+                "case: {name}"
+            );
+        }
+    }
+    let scanner = engine
+        .handle_query(
+            region_id,
+            ScanRequest {
+                distribution: Some(TimeSeriesDistribution::PerSeries),
+                preserve_pk_dictionary_encoding: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let metadata = scanner.metadata();
+    let valid_shape_bad_tag = RawLabelSource::PrimaryKey {
+        metric_name: Arc::from("fixture_metric"),
+        physical_metadata: metadata.clone(),
+        logical_tags: Arc::from([BoundTag {
+            column_id: metadata.primary_key[0],
+            name: Arc::from("wrong_name"),
+        }]),
+    };
+    assert!(
+        scanner
+            .scan_series_partition(&ctx, &metrics, 0, &RawLabelSource::Explicit)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        scanner
+            .scan_series_partition(&ctx, &metrics, 0, &valid_shape_bad_tag)
+            .is_err()
+    );
+    let batches = scanner.scan_partition(&ctx, &metrics, 0).unwrap();
+    let batches = RecordBatches::try_collect(batches).await.unwrap();
+    let rows = batches
+        .iter()
+        .flat_map(|batch| {
+            (0..batch.num_rows()).map(move |row| {
+                let tag = batch
+                    .column_by_name("tag_0")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .value(row);
+                let field = batch
+                    .column_by_name("field_0")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .value(row);
+                let time = batch
+                    .column_by_name("ts")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .unwrap()
+                    .value(row);
+                (tag.to_string(), field, time)
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        vec![("0".to_string(), 0.0, 0), ("1".to_string(), 1.0, 1000)],
+        rows
+    );
+}

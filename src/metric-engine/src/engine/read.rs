@@ -306,16 +306,21 @@ impl MetricEngineInner {
 
 #[cfg(test)]
 mod test {
+    use std::collections::HashSet;
     use std::fmt;
 
-    use api::v1::Rows;
+    use api::v1::value::ValueData;
+    use api::v1::{ColumnSchema, Row, Rows, Value};
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use datafusion::physical_plan::DisplayFormatType;
     use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
+    use datatypes::series::samples::SampleRef;
     use futures_util::TryStreamExt;
     use futures_util::future::try_join_all;
+    use mito_codec::row_converter::{SparseOffsetsCache, SparsePrimaryKeyCodec};
     use mito2::config::MitoConfig;
+    use store_api::region_engine::{BoundTag, RawLabelSource};
     use store_api::region_engine::{PrepareRequest, QueryScanContext};
     use store_api::region_request::{RegionFlushRequest, RegionPutRequest, RegionRequest};
     use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
@@ -550,6 +555,303 @@ mod test {
 
         let explain = ScannerDisplay(scanner.as_ref()).to_string();
         assert!(explain.contains("\"mode\":\"two_phase\""), "{explain}");
+    }
+
+    #[tokio::test]
+    async fn test_raw_series_scan_uses_logical_metric_route_and_bound_metadata() {
+        let env = TestEnv::with_mito_config(
+            "test_logical_raw_series_scan",
+            MitoConfig {
+                experimental_series_scan_v2: true,
+                ..Default::default()
+            },
+            EngineConfig::default(),
+        )
+        .await;
+        env.init_metric_region().await;
+
+        let physical_region_id = env.default_physical_region_id();
+        let logical_a = env.default_logical_region_id();
+        let logical_b = RegionId::new(1024, logical_a.region_number());
+        let mut create_b = create_logical_region_request(
+            &["job", "private"],
+            physical_region_id,
+            "test_logical_raw_series_scan_b",
+        );
+        // Deliberately request ids different from A's assigned physical ids.
+        for (index, column) in create_b.column_metadatas.iter_mut().enumerate().skip(2) {
+            column.column_id = 100 + index as u32;
+        }
+        env.metric()
+            .handle_request(logical_b, RegionRequest::Create(create_b))
+            .await
+            .unwrap();
+
+        let write = |schema: Vec<ColumnSchema>, tag_values: &[&[&str]], start: i64| {
+            let rows = tag_values
+                .iter()
+                .enumerate()
+                .map(|(offset, tags)| {
+                    let mut values = vec![
+                        Value {
+                            value_data: Some(ValueData::TimestampMillisecondValue(
+                                start + offset as i64,
+                            )),
+                        },
+                        Value {
+                            value_data: Some(ValueData::F64Value((start + offset as i64) as f64)),
+                        },
+                    ];
+                    values.extend(tags.iter().map(|tag| Value {
+                        value_data: Some(ValueData::StringValue((*tag).to_string())),
+                    }));
+                    Row { values }
+                })
+                .collect();
+            RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
+                rows: Rows { schema, rows },
+                hint: None,
+                partition_expr_version: None,
+            })
+        };
+        env.metric()
+            .handle_request(
+                logical_a,
+                write(
+                    test_util::row_schema_with_tags(&["job"]),
+                    &[&["a-one"], &["a-two"]],
+                    10,
+                ),
+            )
+            .await
+            .unwrap();
+        env.metric()
+            .handle_request(
+                logical_b,
+                write(
+                    test_util::row_schema_with_tags(&["job", "private"]),
+                    &[&["b-one", "private-one"], &["b-two", "private-two"]],
+                    100,
+                ),
+            )
+            .await
+            .unwrap();
+        env.metric()
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Flush(RegionFlushRequest::default()),
+            )
+            .await
+            .unwrap();
+
+        let logical_metadata = env
+            .metric()
+            .inner
+            .logical_region_metadata(physical_region_id, logical_a)
+            .await
+            .unwrap();
+        let metric = env.metric();
+        let mut scanner = metric
+            .handle_query(
+                logical_a,
+                ScanRequest {
+                    distribution: Some(TimeSeriesDistribution::PerSeries),
+                    projection: Some(vec![0, 1]), // job is bound although not projected.
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let physical_metadata = scanner.metadata();
+        assert_eq!(logical_metadata.region_id, logical_a);
+        assert_eq!(
+            scanner
+                .schema()
+                .column_schemas()
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["greptime_timestamp", "greptime_value"]
+        );
+
+        let logical_tags = logical_metadata
+            .column_metadatas
+            .iter()
+            .filter(|column| column.semantic_type == SemanticType::Tag)
+            .map(|column| {
+                let physical = physical_metadata
+                    .column_by_name(&column.column_schema.name)
+                    .expect("logical tag must exist in scan metadata");
+                assert_eq!(physical.semantic_type, SemanticType::Tag);
+                assert_eq!(
+                    physical.column_schema.data_type,
+                    column.column_schema.data_type
+                );
+                BoundTag {
+                    column_id: physical.column_id,
+                    name: Arc::from(column.column_schema.name.as_str()),
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(logical_tags.len(), 1);
+        assert_eq!(logical_tags[0].name.as_ref(), "job");
+        assert!(
+            !logical_tags
+                .iter()
+                .any(|tag| tag.name.as_ref() == "private")
+        );
+        let assigned_job_id = physical_metadata.column_by_name("job").unwrap().column_id;
+        assert_ne!(assigned_job_id, 102);
+        let logical_tags: Arc<[BoundTag]> = logical_tags.into();
+        let source = RawLabelSource::PrimaryKey {
+            metric_name: Arc::from("fixture_metric"),
+            physical_metadata: physical_metadata.clone(),
+            logical_tags: logical_tags.clone(),
+        };
+
+        // The acquired scanner and source retain their immutable schema snapshot across an alter.
+        env.metric()
+            .handle_request(
+                logical_b,
+                RegionRequest::Alter(alter_logical_region_add_tag_columns(
+                    200,
+                    &["later_private"],
+                )),
+            )
+            .await
+            .unwrap();
+        let fresh_scanner = metric
+            .handle_query(
+                logical_a,
+                ScanRequest {
+                    distribution: Some(TimeSeriesDistribution::PerSeries),
+                    projection: Some(vec![0, 1]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let fresh_metadata = fresh_scanner.metadata();
+        assert!(!Arc::ptr_eq(&physical_metadata, &fresh_metadata));
+        assert!(fresh_metadata.schema_version > physical_metadata.schema_version);
+        assert!(fresh_metadata.column_by_name("later_private").is_some());
+        assert!(physical_metadata.column_by_name("later_private").is_none());
+        assert!(Arc::ptr_eq(
+            match &source {
+                RawLabelSource::PrimaryKey {
+                    physical_metadata, ..
+                } => physical_metadata,
+                RawLabelSource::Explicit => unreachable!(),
+            },
+            &scanner.metadata()
+        ));
+        let mismatched_source = RawLabelSource::PrimaryKey {
+            metric_name: Arc::from("fixture_metric"),
+            physical_metadata: fresh_metadata,
+            logical_tags: logical_tags.clone(),
+        };
+        assert!(
+            scanner
+                .scan_series_partition(
+                    &QueryScanContext::default(),
+                    &ExecutionPlanMetricsSet::default(),
+                    0,
+                    &mismatched_source
+                )
+                .is_err()
+        );
+        drop(fresh_scanner);
+
+        let ranges = scanner
+            .properties()
+            .partitions
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        let partitions = scanner.properties().partitions.len().max(1);
+        let mut prepared_ranges = vec![Vec::new(); partitions];
+        prepared_ranges[0] = ranges;
+        scanner
+            .prepare(
+                PrepareRequest::default()
+                    .with_ranges(prepared_ranges)
+                    .with_target_partitions(partitions),
+            )
+            .unwrap();
+        let scan_context = QueryScanContext::default();
+        let scan_metrics = ExecutionPlanMetricsSet::default();
+        let mut samples = Vec::new();
+        let mut keys = HashSet::new();
+        let mut decoded_jobs = HashSet::new();
+        let mut last_markers = 0;
+        for partition in 0..partitions {
+            let stream = scanner
+                .scan_series_partition(&scan_context, &scan_metrics, partition, &source)
+                .unwrap()
+                .expect("metric scanner should support raw series");
+            assert_eq!(
+                stream
+                    .schema()
+                    .fields
+                    .iter()
+                    .map(|field| field.name.as_ref())
+                    .collect::<Vec<_>>(),
+                vec!["greptime_value"]
+            );
+            match stream.label_source() {
+                RawLabelSource::PrimaryKey {
+                    metric_name,
+                    physical_metadata: bound_metadata,
+                    logical_tags: bound_tags,
+                } => {
+                    assert_eq!(metric_name.as_ref(), "fixture_metric");
+                    assert!(Arc::ptr_eq(bound_metadata, &physical_metadata));
+                    assert_eq!(bound_tags.len(), 1);
+                    assert_eq!(bound_tags[0].name.as_ref(), "job");
+                    assert_eq!(bound_tags[0].column_id, assigned_job_id);
+                }
+                RawLabelSource::Explicit => panic!("expected scan-bound primary-key source"),
+            }
+            let chunks = stream.try_collect::<Vec<_>>().await.unwrap();
+            for chunk in chunks {
+                assert!(chunk.metric.is_none());
+                assert!(!chunk.primary_key.is_empty());
+                let key_bytes = chunk.primary_key.as_slice();
+                let key_codec = SparsePrimaryKeyCodec::new(&physical_metadata);
+                let (table_id, _) = key_codec.decode_ids(key_bytes).unwrap();
+                assert_eq!(table_id, logical_a.table_id());
+                let mut offsets = SparseOffsetsCache::default();
+                let job_offset = key_codec.has_column(key_bytes, &mut offsets, assigned_job_id);
+                assert!(
+                    job_offset.is_some(),
+                    "complete identity must include job tag"
+                );
+                let job_value = key_codec
+                    .decode_value_at(key_bytes, job_offset.unwrap(), assigned_job_id)
+                    .unwrap();
+                decoded_jobs.insert(job_value.to_string());
+                keys.insert(key_bytes.to_vec());
+                last_markers += usize::from(chunk.is_last);
+                let times = chunk.time.as_buffer().as_ref();
+                samples.extend(times.iter().enumerate().map(|(index, time)| {
+                    let value = match chunk.fields.get(0).unwrap().sample(index) {
+                        SampleRef::Float(value) => value,
+                        _ => panic!("expected a float sample"),
+                    };
+                    (*time, value)
+                }));
+            }
+        }
+        samples.sort_by_key(|left| left.0);
+        assert_eq!(samples, vec![(10, 10.0), (11, 11.0)]);
+        assert_eq!(keys.len(), 2);
+        assert_eq!(
+            decoded_jobs,
+            ["a-one".to_string(), "a-two".to_string()].into()
+        );
+        assert_eq!(last_markers, 2);
     }
 
     #[tokio::test]
