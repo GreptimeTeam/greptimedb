@@ -172,10 +172,15 @@ sample_objects() {
 # against what was acknowledged. Nothing is cleaned between cycles.
 crash_cycles() {
     local writers rows cycles kill_min kill_max cycle cdir wpid spid= delay before after started restart_s query_s next=0 pin_count pin_args
-    local load_start complete sql_url=${OSWAL_SQL_URL:-http://127.0.0.1:4000/v1/sql?db=public}
+    local load_start complete pin_left pin_base deleted sql_url=${OSWAL_SQL_URL:-http://127.0.0.1:4000/v1/sql?db=public}
     writers=$(jq -r .concurrency <<< "$spec") rows=$(jq -r .batch_rows "$PLAN") cycles=$(jq -r .cycles <<< "$spec")
     kill_min=$(jq -r '.kill_after[0]' <<< "$spec") kill_max=$(jq -r '.kill_after[1]' <<< "$spec")
     if jq -e .pin <<< "$spec" >/dev/null; then
+        # Only the objects indexed before the pin row lie below it, such as the empty start object that
+        # the row's write lets the store collect at any later point; the servers may collect no more.
+        phase=-pin; scrape_retry indexed_objects || { echo "$id: metrics scrape failed" >&2; exit 4; }
+        read -r pin_left pin_base < <(awk '/^greptime_logstore_object_store_wal_indexed_objects / {i = $2}
+            /^greptime_logstore_object_store_wal_deleted_objects_total / {d = $2} END {printf "%d %d\n", i, d}' "$dir/metrics-pin.prom")
         # The pin table's own auto flush outlasts every cycle a crash group allows, so its row holds the WAL.
         sql "CREATE TABLE pin (v BIGINT, ts TIMESTAMP TIME INDEX) WITH ('auto_flush_interval' = '1d')" >/dev/null
         sql "INSERT INTO pin VALUES (1, 0)" >/dev/null
@@ -224,11 +229,13 @@ crash_cycles() {
         ((verdict == 0)) || { echo "$id: cycle $cycle failed its check" >&2; exit 6; }
         # A cycle without its scrapes is not a measurement, whatever the table held.
         [[ "$complete" == true ]] || { echo "$id: cycle $cycle lost a metrics scrape" >&2; exit 4; }
-        # While the pin holds, the server collects nothing between the scrape before the writers
-        # start and the one before the kill; an absent counter has not moved from zero.
-        if jq -e .pin <<< "$spec" >/dev/null && ! awk '/^greptime_logstore_object_store_wal_deleted_objects_total / {n[FILENAME] = $2}
-            END {exit !(n[ARGV[1]] + 0 == n[ARGV[2]] + 0)}' "$dir/metrics-start-$cycle.prom" "$dir/metrics-cycle-$cycle.prom"; then
-            echo "$id: cycle $cycle collected WAL objects while the pin held it" >&2; exit 11
+        # Each server counts its collections from its own start: the first one from its pin scrape,
+        # every restarted one from zero, and an absent counter has not moved.
+        if jq -e .pin <<< "$spec" >/dev/null; then
+            deleted=$(awk '/^greptime_logstore_object_store_wal_deleted_objects_total / {d = $2} END {printf "%d", d}' \
+                "$dir/metrics-cycle-$cycle.prom")
+            pin_left=$((pin_left - (deleted - pin_base))) pin_base=0
+            ((pin_left >= 0)) || { echo "$id: cycle $cycle collected WAL objects the pin held" >&2; exit 11; }
         fi
         next=$(cat "$cdir"/attempted-*.log | sort -n | tail -1); next=$((next + 1))
     done

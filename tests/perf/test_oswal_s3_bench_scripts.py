@@ -707,9 +707,14 @@ for arg in "$@"; do
             "greptime_logstore_object_store_wal_indexed_objects $FAKE_FULL_METRICS" \
             'greptime_logstore_object_store_wal_recovery_seconds_count 1' \
             "greptime_logstore_object_store_wal_recovered_objects_total ${FAKE_RECOVERED:-0}"
-        # With FAKE_COLLECTING every scrape reports one more collected object than the one before.
-        [[ -z "${FAKE_COLLECTING:-}" ]] || { n=$(($(cat "$FAKE_LOG.deleted" 2>/dev/null || echo 0) + 1))
-            echo "$n" > "$FAKE_LOG.deleted"; echo "greptime_logstore_object_store_wal_deleted_objects_total $n"; }
+        # Every server counts the objects it collects from its start: with FAKE_COLLECTING one more on
+        # every scrape; with FAKE_FIRST_COLLECTS_AFTER the first server collects one object once it has
+        # been scraped that many times.
+        run=$(cat "$FAKE_LOG.runs") n=$(($(cat "$FAKE_LOG.scrapes.$run" 2>/dev/null || echo 0) + 1))
+        echo "$n" > "$FAKE_LOG.scrapes.$run"
+        [[ -z "${FAKE_COLLECTING:-}" ]] || echo "greptime_logstore_object_store_wal_deleted_objects_total $((n - 1))"
+        [[ -z "${FAKE_FIRST_COLLECTS_AFTER:-}" || "$run" != 1 || "$n" -le "$FAKE_FIRST_COLLECTS_AFTER" ]] \
+            || echo 'greptime_logstore_object_store_wal_deleted_objects_total 1'
         exit 0;
     }
 done
@@ -923,15 +928,29 @@ class CellLifecycleTest(unittest.TestCase):  # the run script against fake docke
             self.assertIn("WITH ('auto_flush_interval' = '1d')", urllib.parse.unquote_plus(log))
             self.assertEqual(len((cell / "cycles.jsonl").read_text().splitlines()), 2)
 
-    def test_a_pinned_cycle_fails_when_objects_are_collected_even_without_samples(self):
+    def test_a_pinned_cell_fails_when_objects_the_pin_held_are_collected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            # The cycle ends before the first periodic sample; only its own two scrapes see the collection.
-            cells, _, _, _ = self.run_crash(root, pin=True, env={"FAKE_COUNT": "1", "FAKE_COLLECTING": "1",
-                                                                 "OSWAL_SAMPLE_SECONDS": "30"})
+            # One object lies below the pin; the first server collects more before its first periodic sample.
+            cells, _, _, _ = self.run_crash(root, pin=True, full_metrics="1", env={
+                "FAKE_COUNT": "1", "FAKE_COLLECTING": "1", "OSWAL_SAMPLE_SECONDS": "30"})
             cell = root / "results" / "cells" / "crash-1-8-D"
             self.assertEqual(json.loads((cell / "cell.json").read_text())["exit_code"], 11, cells.stdout + cells.stderr)
             self.assertFalse((cell / "objects.tsv").exists())
+            self.assertEqual(len((cell / "cycles.jsonl").read_text().splitlines()), 1)
+
+    def test_a_pinned_cell_may_collect_the_objects_below_its_pin_late(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # The start object, the one object indexed before the pin, goes only after the first cycle's
+            # baseline: the pin scrape and that baseline are the first server's first two scrapes.
+            cells, _, _, _ = self.run_crash(root, pin=True, full_metrics="1", env={
+                "FAKE_COUNT": "1", "FAKE_FIRST_COLLECTS_AFTER": "2", "OSWAL_SAMPLE_SECONDS": "30"})
+            cell = root / "results" / "cells" / "crash-1-8-D"
+            self.assertEqual(json.loads((cell / "cell.json").read_text())["exit_code"], 0, cells.stdout + cells.stderr)
+            self.assertNotIn("deleted_objects_total", (cell / "metrics-start-1.prom").read_text())
+            self.assertIn("deleted_objects_total 1", (cell / "metrics-cycle-1.prom").read_text())
+            self.assertEqual(len((cell / "cycles.jsonl").read_text().splitlines()), 2)
 
     def test_a_durable_pinned_cycle_fails_unless_its_pin_row_is_there_once(self):
         for count in ("0", "2"):
