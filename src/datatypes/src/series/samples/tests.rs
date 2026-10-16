@@ -15,8 +15,8 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use arrow::array::{Float64Array, UInt32Array};
-use arrow::buffer::{Buffer, ScalarBuffer};
+use arrow::array::{ArrayRef, Float64Array, Int64Array, StructArray, UInt32Array};
+use arrow::buffer::{BooleanBuffer, Buffer, NullBuffer, ScalarBuffer};
 
 use crate::series::histogram::{BucketSideView, CounterResetHint, HistogramBatchBuilder};
 
@@ -233,6 +233,308 @@ fn chunk_iterator_is_sequential_exact_and_handles_many_singletons() {
         assert_eq!(iter.len(), 255 - i);
     }
     assert!(iter.next().is_none());
+}
+
+#[test]
+fn densification_reuses_distinct_wrappers_of_the_same_arrow_table_view() {
+    let base_row = HistogramView {
+        schema: 2,
+        zero_threshold: 0.25,
+        sum: 7.0,
+        count: 8.0,
+        zero_count: 1.0,
+        reset_hint: CounterResetHint::Gauge,
+        start_timestamp: None,
+        custom_values: &[],
+        positive: BucketSideView {
+            span_offsets: &[0],
+            span_lengths: &[1],
+            buckets: &[9.0],
+        },
+        negative: BucketSideView {
+            span_offsets: &[],
+            span_lengths: &[],
+            buckets: &[],
+        },
+    };
+    let rows = [
+        HistogramView {
+            schema: 1,
+            zero_threshold: 0.0,
+            sum: 1.0,
+            count: 2.0,
+            zero_count: 0.0,
+            reset_hint: CounterResetHint::Unknown,
+            start_timestamp: Some(11),
+            custom_values: &[1.0],
+            positive: BucketSideView {
+                span_offsets: &[0],
+                span_lengths: &[1],
+                buckets: &[3.0],
+            },
+            negative: BucketSideView {
+                span_offsets: &[],
+                span_lengths: &[],
+                buckets: &[],
+            },
+        },
+        HistogramView {
+            sum: -0.0,
+            count: f64::NAN,
+            start_timestamp: Some(42),
+            custom_values: &[f64::from_bits(0x7ff8_0000_0000_0042)],
+            ..base_row
+        },
+    ];
+    let backing = histogram_batch(&[rows[0], rows[1], rows[1]]);
+    let original =
+        Arc::new(HistogramBatch::try_from_arrow(backing.as_arrow().slice(1, 1)).unwrap());
+    let wrapped = Arc::new(HistogramBatch::try_from_arrow(original.as_arrow().clone()).unwrap());
+    assert!(!Arc::ptr_eq(&original, &wrapped));
+    assert!(
+        original
+            .as_arrow()
+            .to_data()
+            .ptr_eq(&wrapped.as_arrow().to_data())
+    );
+
+    let mixed = Samples::try_from_mixed(
+        Float64Array::from(vec![
+            Some(-0.0),
+            Some(f64::from_bits(0x7ff8_0000_0000_0042)),
+            None,
+        ]),
+        HistogramSamples::try_new(UInt32Array::from(vec![None, None, Some(0)]), wrapped).unwrap(),
+    )
+    .unwrap();
+    let dense = Samples::try_from_chunks(vec![
+        Samples::try_from_histogram(UInt32Array::from(vec![Some(0), None]), original.clone())
+            .unwrap(),
+        mixed,
+    ])
+    .unwrap()
+    .into_dense()
+    .unwrap();
+    let DenseSamplesRef::Mixed(values) = dense.dense().unwrap() else {
+        panic!()
+    };
+    assert_eq!(values.histograms.batch().len(), 1);
+    assert!(Arc::ptr_eq(values.histograms.batch(), &original));
+    assert_eq!(values.histograms.indices().value(0), 0);
+    assert!(values.histograms.indices().is_null(1));
+    assert!(values.histograms.indices().is_null(2));
+    assert!(values.histograms.indices().is_null(3));
+    assert_eq!(values.histograms.indices().value(4), 0);
+    let expected = [
+        SampleRef::Histogram(original.view(0).unwrap()),
+        SampleRef::Missing,
+        SampleRef::Float(-0.0),
+        SampleRef::Float(f64::from_bits(0x7ff8_0000_0000_0042)),
+        SampleRef::Histogram(original.view(0).unwrap()),
+    ];
+    for (index, expected) in expected.into_iter().enumerate() {
+        assert!(
+            same_sample(dense.sample(index), expected),
+            "position {index}"
+        );
+    }
+}
+
+#[test]
+fn densification_does_not_merge_equal_content_distinct_buffers() {
+    let first = batch(2.0, 3.0, &[4.0]);
+    let equal = batch(2.0, 3.0, &[4.0]);
+    assert!(
+        !first
+            .as_arrow()
+            .to_data()
+            .ptr_eq(&equal.as_arrow().to_data())
+    );
+    let dense = Samples::try_from_chunks(vec![
+        Samples::try_from_histogram(UInt32Array::from(vec![Some(0)]), first.clone()).unwrap(),
+        Samples::try_from_histogram(UInt32Array::from(vec![Some(0)]), equal.clone()).unwrap(),
+    ])
+    .unwrap()
+    .into_dense()
+    .unwrap();
+    let DenseSamplesRef::Histogram(values) = dense.dense().unwrap() else {
+        panic!()
+    };
+    assert_eq!(values.batch().len(), 2);
+    assert_eq!(values.indices().value(0), 0);
+    assert_eq!(values.indices().value(1), 1);
+    assert!(same_sample(
+        dense.sample(0),
+        SampleRef::Histogram(first.view(0).unwrap())
+    ));
+    assert!(same_sample(
+        dense.sample(1),
+        SampleRef::Histogram(equal.view(0).unwrap())
+    ));
+}
+
+#[test]
+fn densification_does_not_merge_distinct_table_slices() {
+    let base_row = HistogramView {
+        schema: 1,
+        zero_threshold: 0.0,
+        sum: 2.0,
+        count: 3.0,
+        zero_count: 0.0,
+        reset_hint: CounterResetHint::Unknown,
+        start_timestamp: None,
+        custom_values: &[],
+        positive: BucketSideView {
+            span_offsets: &[0],
+            span_lengths: &[1],
+            buckets: &[4.0],
+        },
+        negative: BucketSideView {
+            span_offsets: &[],
+            span_lengths: &[],
+            buckets: &[],
+        },
+    };
+    let rows = [
+        base_row,
+        HistogramView {
+            start_timestamp: Some(42),
+            sum: 12.0,
+            ..base_row
+        },
+        HistogramView {
+            start_timestamp: Some(99),
+            sum: 19.0,
+            ..base_row
+        },
+    ];
+    let backing = histogram_batch(&rows);
+    let first = Arc::new(HistogramBatch::try_from_arrow(backing.as_arrow().slice(0, 1)).unwrap());
+    let equal_len_other_offset =
+        Arc::new(HistogramBatch::try_from_arrow(backing.as_arrow().slice(1, 1)).unwrap());
+    let longer_other_offset =
+        Arc::new(HistogramBatch::try_from_arrow(backing.as_arrow().slice(1, 2)).unwrap());
+
+    for (second, expected_table_len, second_expected) in [
+        (
+            equal_len_other_offset,
+            2,
+            SampleRef::Histogram(backing.view(1).unwrap()),
+        ),
+        (
+            longer_other_offset,
+            3,
+            SampleRef::Histogram(backing.view(1).unwrap()),
+        ),
+    ] {
+        let dense = Samples::try_from_chunks(vec![
+            Samples::try_from_histogram(UInt32Array::from(vec![Some(0)]), first.clone()).unwrap(),
+            Samples::try_from_histogram(UInt32Array::from(vec![Some(0)]), second).unwrap(),
+        ])
+        .unwrap()
+        .into_dense()
+        .unwrap();
+        let DenseSamplesRef::Histogram(values) = dense.dense().unwrap() else {
+            panic!()
+        };
+        assert_eq!(values.batch().len(), expected_table_len);
+        assert_eq!(values.indices().value(0), 0);
+        assert_eq!(values.indices().value(1), 1);
+        assert!(same_sample(
+            dense.sample(0),
+            SampleRef::Histogram(first.view(0).unwrap())
+        ));
+        assert!(same_sample(dense.sample(1), second_expected));
+    }
+}
+
+#[test]
+fn densification_does_not_merge_shared_value_buffer_with_different_null_bitmap_offsets() {
+    let source = batch(2.0, 3.0, &[4.0]);
+    let start_values = ScalarBuffer::from(vec![42_i64]);
+    let bitmap = Buffer::from(vec![0b10_u8]);
+    let missing_starts = Int64Array::new(
+        start_values.clone(),
+        Some(NullBuffer::new(BooleanBuffer::new(bitmap.clone(), 0, 1))),
+    );
+    let present_starts = Int64Array::new(
+        start_values.clone(),
+        Some(NullBuffer::new(BooleanBuffer::new(bitmap.clone(), 1, 1))),
+    );
+    assert_eq!(
+        missing_starts.values().inner().as_ptr(),
+        present_starts.values().inner().as_ptr()
+    );
+    let missing_nulls = missing_starts.nulls().unwrap();
+    let present_nulls = present_starts.nulls().unwrap();
+    assert_eq!(
+        missing_nulls.buffer().as_ptr(),
+        present_nulls.buffer().as_ptr()
+    );
+    assert_ne!(missing_nulls.offset(), present_nulls.offset());
+    assert!(missing_starts.is_null(0));
+    assert_eq!(present_starts.value(0), 42);
+
+    let with_start = |starts: Int64Array| {
+        let mut columns = source.as_arrow().columns().to_vec();
+        columns[6] = Arc::new(starts) as ArrayRef;
+        Arc::new(
+            HistogramBatch::try_from_arrow(
+                StructArray::try_new(source.as_arrow().fields().clone(), columns, None).unwrap(),
+            )
+            .unwrap(),
+        )
+    };
+    let missing = with_start(missing_starts);
+    let present = with_start(present_starts);
+    let missing_starts = missing
+        .as_arrow()
+        .column(6)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    let present_starts = present
+        .as_arrow()
+        .column(6)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(
+        missing_starts.values().inner().as_ptr(),
+        present_starts.values().inner().as_ptr()
+    );
+    assert_eq!(
+        missing_starts.nulls().unwrap().buffer().as_ptr(),
+        present_starts.nulls().unwrap().buffer().as_ptr()
+    );
+    assert_ne!(
+        missing_starts.nulls().unwrap().offset(),
+        present_starts.nulls().unwrap().offset()
+    );
+    assert!(missing_starts.is_null(0));
+    assert_eq!(present_starts.value(0), 42);
+    assert!(
+        !missing
+            .as_arrow()
+            .to_data()
+            .ptr_eq(&present.as_arrow().to_data())
+    );
+    let dense = Samples::try_from_chunks(vec![
+        Samples::try_from_histogram(UInt32Array::from(vec![Some(0)]), missing.clone()).unwrap(),
+        Samples::try_from_histogram(UInt32Array::from(vec![Some(0)]), present.clone()).unwrap(),
+    ])
+    .unwrap()
+    .into_dense()
+    .unwrap();
+    assert_eq!(dense.len(), 2);
+    assert!(same_sample(
+        dense.sample(0),
+        SampleRef::Histogram(missing.view(0).unwrap())
+    ));
+    assert!(same_sample(
+        dense.sample(1),
+        SampleRef::Histogram(present.view(0).unwrap())
+    ));
 }
 
 #[test]

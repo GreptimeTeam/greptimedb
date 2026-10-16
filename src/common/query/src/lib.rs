@@ -20,6 +20,7 @@ pub mod prelude;
 pub mod prometheus;
 pub mod promql_annotations;
 pub mod request;
+pub mod series_frame;
 pub mod stream;
 #[cfg(any(test, feature = "testing"))]
 pub mod test_util;

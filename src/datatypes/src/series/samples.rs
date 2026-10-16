@@ -199,6 +199,46 @@ impl Samples {
             storage: SampleStorage::Chunks(flat.into(), total),
         })
     }
+    /// Returns the dense segments in logical order without allocating, copying payloads, or
+    /// densifying the samples.
+    ///
+    /// Chunked samples expose their retained segment boundaries; different fields may therefore
+    /// have different boundaries. The logical start of each segment is the sum of the lengths of
+    /// all preceding segments, and the total length is [`Self::len`]. For non-chunked samples,
+    /// including empty samples, this returns a singleton slice containing `self`. Chunk
+    /// construction flattens nested chunks and drops empty segments; an all-empty input becomes
+    /// one empty float segment. Each segment is dense: [`Self::dense`] returns `Some` with its
+    /// typed Arrow view. Clone the samples cheaply if they need to outlive this borrow.
+    ///
+    /// ```
+    /// use arrow::array::Float64Array;
+    /// use datatypes::series::samples::{DenseSamplesRef, Samples};
+    ///
+    /// let samples = Samples::try_from_chunks(vec![
+    ///     Samples::from_float(Float64Array::from(vec![1.0, 2.0])),
+    ///     Samples::from_float(Float64Array::from(vec![3.0])),
+    /// ])
+    /// .unwrap();
+    ///
+    /// let mut logical_start = 0;
+    /// let mut starts = Vec::new();
+    /// for segment in samples.segments() {
+    ///     starts.push(logical_start);
+    ///     match segment.dense().unwrap() {
+    ///         DenseSamplesRef::Float(values) => assert_eq!(values.len(), segment.len()),
+    ///         _ => unreachable!("these segments contain floats"),
+    ///     }
+    ///     logical_start += segment.len();
+    /// }
+    /// assert_eq!(starts, vec![0, 2]);
+    /// assert_eq!(logical_start, samples.len());
+    /// ```
+    pub fn segments(&self) -> &[Samples] {
+        match &self.storage {
+            SampleStorage::Chunks(chunks, _) => chunks,
+            _ => std::slice::from_ref(self),
+        }
+    }
     /// Number of sample positions.
     pub fn len(&self) -> usize {
         match &self.storage {
@@ -315,8 +355,7 @@ impl Samples {
         }
     }
     /// Materialize chunks into one dense array. When all histogram-bearing chunks reference the
-    /// same table, reuse it; otherwise concatenate tables per chunk and remap indices, including
-    /// unused rows.
+    /// same Arrow table view, reuse it; otherwise concatenate tables per chunk and remap indices.
     pub fn into_dense(self) -> Result<Self> {
         let SampleStorage::Chunks(chunks, total_len) = self.storage else {
             return Ok(self);
@@ -350,9 +389,17 @@ impl Samples {
             SampleStorage::Mixed(mixed) => Some(&mixed.histograms.batch),
             SampleStorage::Float(_) | SampleStorage::Chunks(_, _) => None,
         });
-        let shared_batch = histogram_batches
-            .next()
-            .filter(|first| histogram_batches.all(|batch| Arc::ptr_eq(first, batch)));
+        let mut first_data = None;
+        let shared_batch = histogram_batches.next().filter(|first| {
+            histogram_batches.all(|batch| {
+                if Arc::ptr_eq(first, batch) {
+                    return true;
+                }
+                first_data
+                    .get_or_insert_with(|| first.as_arrow().to_data())
+                    .ptr_eq(&batch.as_arrow().to_data())
+            })
+        });
         let needs_float = chunks.iter().any(|chunk| {
             matches!(
                 chunk.storage,
