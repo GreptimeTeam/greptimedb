@@ -20,11 +20,12 @@ use store_api::storage::SequenceNumber;
 
 use crate::compaction::CompactionOutput;
 use crate::compaction::compactor::CompactionRegion;
-use crate::compaction::overlap::FileOverlapIndex;
+use crate::compaction::overlap::{self, FileOverlapIndex};
 use crate::compaction::picker::{Picker, PickerOutput};
 use crate::compaction::twcs::TwcsPicker;
 use crate::error::{JoinSnafu, Result};
 use crate::sst::file::{FileHandle, RegionFileId};
+use crate::sst::primary_key::PrimaryKeyRangeMapper;
 
 /// Picker for [`MergeMode::LastNonNull`](crate::region::options::MergeMode).
 ///
@@ -133,14 +134,18 @@ fn build_closed_outputs(
         .collect();
     // `None` marks a seed already absorbed by an earlier closure.
     let mut seeds: Vec<_> = seeds.into_iter().map(Some).collect();
-    let mut remaining = FileOverlapIndex::new(files, metadata);
+    let mapper = PrimaryKeyRangeMapper::new(metadata.clone());
+    let overlaps = |lhs: &FileHandle, rhs: &FileHandle| {
+        overlap::files_may_overlap(lhs, rhs, metadata, &mapper)
+    };
+    let mut remaining = FileOverlapIndex::new(files);
     let mut outputs = Vec::new();
     // The compactor pops from the end; retain TWCS's seed priority.
     for seed_index in (0..seeds.len()).rev() {
         let Some(output) = seeds[seed_index].take() else {
             continue;
         };
-        let output = expand_closure(output, &mut seeds, &seed_by_file, &mut remaining);
+        let output = expand_closure(output, &mut seeds, &seed_by_file, &mut remaining, &overlaps);
         // Defer the entire closure rather than truncate it around busy files.
         if !output.inputs.iter().any(FileHandle::compacting) {
             outputs.push(output);
@@ -157,7 +162,8 @@ fn expand_closure(
     mut output: CompactionOutput,
     seeds: &mut [Option<CompactionOutput>],
     seed_by_file: &HashMap<RegionFileId, usize>,
-    remaining_files: &mut FileOverlapIndex<'_>,
+    remaining_files: &mut FileOverlapIndex,
+    overlaps: &impl Fn(&FileHandle, &FileHandle) -> bool,
 ) -> CompactionOutput {
     let mut selected = HashSet::new();
     let inputs = std::mem::take(&mut output.inputs);
@@ -173,7 +179,7 @@ fn expand_closure(
             output.filter_deleted &= seed.filter_deleted;
             extend_inputs(&mut output, seed.inputs, &mut selected, remaining_files);
         }
-        let dependencies = remaining_files.drain_overlaps(&input);
+        let dependencies = remaining_files.drain_overlaps(&input, overlaps);
         extend_inputs(&mut output, dependencies, &mut selected, remaining_files);
         cursor += 1;
     }
@@ -186,7 +192,7 @@ fn extend_inputs(
     output: &mut CompactionOutput,
     inputs: Vec<FileHandle>,
     selected: &mut HashSet<RegionFileId>,
-    remaining: &mut FileOverlapIndex<'_>,
+    remaining: &mut FileOverlapIndex,
 ) {
     for input in inputs {
         if selected.insert(input.file_id()) {
