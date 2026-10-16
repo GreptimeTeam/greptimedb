@@ -239,8 +239,9 @@ def write_lines(path, lines):
     path.write_text("".join(f"{line}\n" for line in lines))
 
 
-def crash_cycle(root, cycle, stripes, acked, requests, exits):
-    """One cycle of two writers: attempted stripes, acked batches, requests and exit times per writer."""
+def crash_cycle(root, cycle, stripes, acked, requests, exits, found=None):
+    """One cycle of two writers: attempted stripes, acked batches, requests and exit times per
+    writer, and what the restart after its kill found, if given."""
     directory = root / f"cycle-{cycle}"
     directory.mkdir(parents=True)
     for index in range(2):
@@ -248,6 +249,9 @@ def crash_cycle(root, cycle, stripes, acked, requests, exits):
         write_lines(directory / f"acked-{index}.log", acked[index])
         write_lines(directory / f"requests-{index}.log", requests[index])
         (directory / f"exit-{index}.log").write_text(f"{exits[index]}\n")
+    if found is not None:
+        (directory / "found.json").write_text(json.dumps(
+            {"output": [{"records": {"rows": [[seq, count] for seq, count in found.items()]}}]}))
     return directory
 
 
@@ -294,6 +298,36 @@ class CrashOracleTest(unittest.TestCase):
             result = crash.verify(root, {0: 10, 10: 10, 11: 10}, 10, True, 2)
             self.assertEqual((result["cycle_acked_batches"], result["cycle_lost_batches"],
                               result["total_lost_batches"], result["total_acked_batches"]), (2, 0, 2, 5))
+
+    def later_cycle(self, root):
+        """Cycle 1's restart recovered batches 0, 1 and 2 and the in-flight 4; cycle 2 acknowledged
+        10 and 11 and had 12 in flight."""
+        crash_cycle(root, 1, self.STRIPES, self.ACKED, self.REQUESTS, (106, 102), found={0: 10, 1: 10, 2: 10, 4: 10})
+        crash_cycle(root, 2, ([10, 12], [11]), ([10], [11]), (["10 200 210", "12 000 305"], ["11 200 215"]),
+                    (306, 302))
+
+    def test_a_batch_an_earlier_restart_recovered_must_stay_present(self):
+        for mode in ("enqueued", "durable"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.later_cycle(root)
+                # Acknowledged batch 1 and the in-flight 4 vanished after cycle 1's restart found them.
+                result = crash.verify(root, {0: 10, 2: 10, 10: 10, 11: 10}, 10, mode == "enqueued", 2)
+                self.assertIn("recovered by an earlier restart but absent: [1, 4]", result["verify_errors"])
+                self.assertEqual(result["cycle_lost_batches"], 0)
+
+    def test_only_the_current_cycle_may_lose_acknowledged_batches_in_enqueued_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.later_cycle(root)
+            found = {0: 10, 1: 10, 2: 10, 4: 10, 10: 10}
+            result = crash.verify(root, found, 10, True, 2)
+            self.assertEqual(result["verify_errors"], [])
+            self.assertEqual((result["cycle_lost_batches"], result["total_lost_batches"]), (1, 1))
+            durable = crash.verify(root, found, 10, False, 2)
+            self.assertEqual(durable["verify_errors"], ["acknowledged but absent: [11]"])
+            duplicated = crash.verify(root, found | {10: 20}, 10, True, 2)
+            self.assertEqual(duplicated["verify_errors"], ["batches present more than once: [10]"])
 
     def test_a_connection_lost_before_the_kill_fails(self):
         with tempfile.TemporaryDirectory() as directory:

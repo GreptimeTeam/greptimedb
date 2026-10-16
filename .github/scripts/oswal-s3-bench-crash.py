@@ -100,6 +100,11 @@ def lines(path: Path) -> list:
     return [line.split() for line in path.read_text().splitlines() if line.strip()] if path.exists() else []
 
 
+def found_batches(path: Path) -> dict:
+    """GreptimeDB's JSON answer to SELECT seq, count(*) ... GROUP BY seq, as batch -> row count."""
+    return {int(seq): int(count) for seq, count in json.loads(path.read_text())["output"][0]["records"]["rows"]}
+
+
 def check_kill(directory: Path, writers: int, before_ns: int, after_ns: int, window_max_ms: int) -> dict:
     """A dropped connection is in flight when it ended at or after the stamp taken before the kill."""
     errors, in_flight, running = [], 0, 0
@@ -127,11 +132,15 @@ def check_kill(directory: Path, writers: int, before_ns: int, after_ns: int, win
 
 
 def verify(run_dir: Path, found: dict, rows: int, enqueued: bool, cycle: int) -> dict:
-    """Checks the table, read as batch -> row count, against every cycle's writers so far, and
-    counts what the given cycle's writers acknowledged, left and lost on their own."""
+    """Checks the table, read as batch -> row count, against every cycle's writers so far and
+    against what every earlier restart recovered, and counts what the given cycle's writers
+    acknowledged, left and lost on their own."""
     acked, stripes, cycle_attempted, cycle_acked = [], collections.OrderedDict(), set(), set()
+    recovered_before = set()
     for cycle_dir in sorted(run_dir.glob("cycle-*"), key=lambda p: int(p.name.split("-")[1])):
         current = cycle_dir.name == f"cycle-{cycle}"
+        if int(cycle_dir.name.split("-")[1]) < cycle and (cycle_dir / "found.json").exists():
+            recovered_before.update(found_batches(cycle_dir / "found.json"))
         for path in sorted(cycle_dir.glob("attempted-*.log")):
             stripes[(cycle_dir.name, path.name)] = [int(seq) for (seq,) in lines(path)]
             if current:
@@ -152,6 +161,11 @@ def verify(run_dir: Path, found: dict, rows: int, enqueued: bool, cycle: int) ->
     missing = sorted(acked_set - set(found))
     if missing and not enqueued:
         errors.append(f"acknowledged but absent: {missing[:20]}")
+    # A batch an earlier restart recovered was durable then, so in either mode only the
+    # current cycle's backlog that was not durable at its kill may be missing.
+    vanished = sorted(recovered_before - set(found))
+    if vanished:
+        errors.append(f"recovered by an earlier restart but absent: {vanished[:20]}")
     unattempted = sorted(set(found) - attempted)
     if unattempted:
         errors.append(f"present but never attempted: {unattempted[:20]}")
@@ -199,11 +213,10 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == "write":
         return write(args)
-    rows = json.loads(args.found.read_text())["output"][0]["records"]["rows"]
     result = {"cycle": args.cycle}
     result |= check_kill(args.run_dir / f"cycle-{args.cycle}", args.writers, args.before_ns, args.after_ns,
                          args.window_max_ms)
-    result |= verify(args.run_dir, {int(seq): int(count) for seq, count in rows}, args.rows,
+    result |= verify(args.run_dir, found_batches(args.found), args.rows,
                      args.mode == "enqueued", args.cycle)
     if args.pin_rows is not None and (args.pin_rows > 1 or args.mode == "durable" and args.pin_rows != 1):
         result["verify_errors"].append(f"the pin table holds {args.pin_rows} rows, not 1")
