@@ -19,8 +19,9 @@ use std::task::{Context, Poll};
 use common_error::ext::BoxedError;
 use datatypes::arrow::array::{Array, Float64Array, UInt32Array};
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
+use datatypes::series::SeriesOrdering;
 use datatypes::series::histogram::{BucketSideView, CounterResetHint, HistogramBatchBuilder};
-use datatypes::series::raw::{RawSeriesChunk, RawSeriesOrdering, RawTimeAxis};
+use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
     DenseSamplesRef, FieldSpec, HistogramSamples, SampleRef, Samples, SeriesFields, SeriesSchema,
 };
@@ -53,8 +54,8 @@ impl RawSeriesStream for RawFixture {
         &self.binding
     }
 
-    fn ordering(&self) -> RawSeriesOrdering {
-        RawSeriesOrdering::Contiguous
+    fn ordering(&self) -> SeriesOrdering {
+        SeriesOrdering::Contiguous
     }
 }
 
@@ -128,7 +129,7 @@ async fn streaming_round_trip_preserves_sliced_multifield_payload_and_owners() {
         eval_grid: None,
     });
     let time_owner = ScalarBuffer::from(vec![0, 11, 22, 33, 44]);
-    let times = RawTimeAxis::try_new(time_owner.slice(1, 3)).unwrap();
+    let times = RawTimestamps::try_new(time_owner.slice(1, 3)).unwrap();
     let float_owner = Float64Array::from(vec![
         Some(90.0),
         None,
@@ -180,7 +181,7 @@ async fn streaming_round_trip_preserves_sliced_multifield_payload_and_owners() {
         true,
     )
     .unwrap();
-    let input_times_ptr = chunk.time.as_explicit().unwrap().as_ptr();
+    let input_times_ptr = chunk.time.as_buffer().as_ptr();
     let input_float_ptr = float_a.values().as_ptr();
     let input_hist_indices_ptr = indices.values().as_ptr();
     let input_mixed_float_ptr = mixed_float_owner.values().as_ptr();
@@ -196,7 +197,7 @@ async fn streaming_round_trip_preserves_sliced_multifield_payload_and_owners() {
         frames,
         schema,
         RawLabelSource::Explicit,
-        RawSeriesOrdering::Contiguous,
+        SeriesOrdering::Contiguous,
     )
     .unwrap();
     let mut output = Vec::new();
@@ -206,55 +207,86 @@ async fn streaming_round_trip_preserves_sliced_multifield_payload_and_owners() {
     assert_eq!(
         output.len(),
         2,
-        "the float field's segment boundary yields two frames"
+        "one bounded batch still decodes one chunk per union-of-segment row"
+    );
+    assert_eq!(output[0].time.len(), 2);
+    assert!(
+        !output[0].is_last,
+        "a chunk that stops at the field segment boundary is not final"
+    );
+    assert_eq!(output[1].time.len(), 1);
+    assert!(output[1].is_last);
+    assert_eq!(
+        output[0].fields.get(0).unwrap().segments().len(),
+        1,
+        "the decoded chunk is dense again after the frame round trip"
     );
 
-    // Validate buffer sharing while the source owners are still alive.
-    let DenseSamplesRef::Float(decoded_float) = output[0].fields.get(0).unwrap().segments()[0]
-        .dense()
-        .unwrap()
+    // The batch now holds both rows, so its per-row Arrow constituents are concatenated: multi-row
+    // values are copied rather than aliasing the source slices. Multi-row copying is expected and
+    // does not change contents, offsets, or owner cleanup; only genuinely single-row frames keep
+    // the buffers by pointer (see the single-row zero-copy test below).
+    let DenseSamplesRef::Float(decoded_float) = output[0].fields.get(0).unwrap().dense().unwrap()
     else {
         panic!("expected float")
     };
-    assert_eq!(decoded_float.values().as_ptr(), input_float_ptr);
+    assert_ne!(
+        decoded_float.values().as_ptr(),
+        input_float_ptr,
+        "multi-row concatenation copies float values"
+    );
+    assert_eq!(decoded_float.len(), 2);
+    assert!(!decoded_float.is_valid(0));
+    assert_eq!(
+        decoded_float.value(1).to_bits(),
+        f64::from_bits(0x7ff8_0000_0000_0042).to_bits()
+    );
     let DenseSamplesRef::Histogram(decoded_hist) =
         output[0].fields.get(1).unwrap().dense().unwrap()
     else {
         panic!("expected histogram")
     };
-    assert_eq!(
+    assert_ne!(
         decoded_hist.indices().values().as_ptr(),
-        input_hist_indices_ptr
+        input_hist_indices_ptr,
+        "multi-row concatenation copies histogram indices"
     );
     assert!(
-        decoded_hist
+        !decoded_hist
             .batch()
             .as_arrow()
             .to_data()
-            .ptr_eq(&sliced_table.as_arrow().to_data())
+            .ptr_eq(&sliced_table.as_arrow().to_data()),
+        "multi-row concatenation copies the histogram table"
     );
     let DenseSamplesRef::Mixed(decoded_mixed) = output[0].fields.get(2).unwrap().dense().unwrap()
     else {
         panic!("expected mixed")
     };
-    assert_eq!(
+    assert_ne!(
         decoded_mixed.floats().values().as_ptr(),
         input_mixed_float_ptr
     );
-    assert_eq!(
+    assert_ne!(
         decoded_mixed.histograms().indices().values().as_ptr(),
         input_mixed_indices_ptr
     );
     assert!(
-        decoded_mixed
+        !decoded_mixed
             .histograms()
             .batch()
             .as_arrow()
             .to_data()
-            .ptr_eq(&sliced_table.as_arrow().to_data())
+            .ptr_eq(&sliced_table.as_arrow().to_data()),
+        "multi-row concatenation copies the mixed histogram table"
     );
-    let first_times = output[0].time.as_explicit().unwrap();
-    assert_eq!(first_times.as_ptr(), input_times_ptr);
+    let first_times = output[0].time.as_buffer();
+    assert_ne!(
+        first_times.as_ptr(),
+        input_times_ptr,
+        "multi-row concatenation copies timestamps"
+    );
+    assert_eq!(&first_times[..], &[11_i64, 22]);
 
     drop(decoded);
     drop(time_owner);
@@ -277,9 +309,10 @@ async fn streaming_round_trip_preserves_sliced_multifield_payload_and_owners() {
     let mut histogram_seen = Vec::new();
     let mut mixed_seen = Vec::new();
     for chunk in &output {
-        assert_eq!(chunk.read_key.as_slice(), [0xaa, 0x10, 0xbb]);
+        assert_eq!(chunk.primary_key.as_slice(), [0xaa, 0x10, 0xbb]);
         assert_eq!(chunk.metric.as_ref().unwrap().name(), Some("cpu"));
         assert_eq!(chunk.metric.as_ref().unwrap().get("host"), Some("a"));
+        // Only the row that ends the chunk in the source stream is final.
         assert_eq!(chunk.is_last, times_seen.len() + chunk.time.len() == 3);
         for i in 0..chunk.time.len() {
             let position = times_seen.len();
@@ -317,4 +350,176 @@ async fn streaming_round_trip_preserves_sliced_multifield_payload_and_owners() {
     );
     assert_eq!(histogram_seen, [-9.5, 7.25, -9.5]);
     assert_eq!(mixed_seen, [Some(1.25_f64.to_bits()), None, None]);
+}
+
+/// One row of one sample, with every array a nonzero-offset slice of a larger owner: the decoded
+/// chunk keeps the source buffers by pointer, and the values stay readable and bit-exact after
+/// every source owner is dropped.
+#[tokio::test]
+async fn single_row_sliced_payload_keeps_zero_copy_buffers_and_releases_owners() {
+    let schema = Arc::new(SeriesSchema {
+        fields: vec!["float", "histogram", "mixed"]
+            .into_iter()
+            .map(|name| FieldSpec {
+                name: Arc::from(name),
+            })
+            .collect::<Vec<_>>()
+            .into(),
+        eval_grid: None,
+    });
+    let metric = MetricName::try_new(
+        Some(Arc::from("cpu")),
+        vec![Label {
+            name: Arc::from("host"),
+            value: Arc::from("a"),
+        }],
+    )
+    .unwrap();
+
+    let time_owner = ScalarBuffer::from(vec![0_i64, 11, 22]);
+    let times = RawTimestamps::try_new(time_owner.slice(1, 1)).unwrap();
+    let float_owner = Float64Array::from(vec![
+        Some(90.0),
+        Some(f64::from_bits(0x7ff8_0000_0000_0042)),
+    ]);
+    let float = float_owner.slice(1, 1);
+    let table_owner = histogram_batch();
+    let table_weak = Arc::downgrade(&table_owner);
+    let source_table = table_owner.as_arrow().clone();
+    let sliced_table = Arc::new(
+        datatypes::series::histogram::HistogramBatch::try_from_arrow(source_table.slice(1, 1))
+            .unwrap(),
+    );
+    let sliced_weak = Arc::downgrade(&sliced_table);
+    let index_owner = UInt32Array::from(vec![Some(3), Some(0)]);
+    let indices = index_owner.slice(1, 1);
+    let hist = Samples::try_from_histogram(indices.clone(), sliced_table.clone()).unwrap();
+    let mixed_float_owner = Float64Array::from(vec![Some(0.0), Some(-0.0)]);
+    let mixed_floats = mixed_float_owner.slice(1, 1);
+    let mixed_index_owner = UInt32Array::from(vec![Some(0), None]);
+    let mixed_indices = mixed_index_owner.slice(1, 1);
+    let mixed = Samples::try_from_mixed(
+        mixed_floats.clone(),
+        HistogramSamples::try_new(mixed_indices.clone(), sliced_table.clone()).unwrap(),
+    )
+    .unwrap();
+    let chunk = RawSeriesChunk::try_new(
+        &schema,
+        Buffer::from(vec![0xaa_u8, 0x10, 0xbb]),
+        Some(metric),
+        times,
+        SeriesFields::try_from_vec(vec![Samples::from_float(float.clone()), hist, mixed]).unwrap(),
+        true,
+    )
+    .unwrap();
+
+    let input_times_ptr = chunk.time.as_buffer().as_ptr();
+    let input_float_ptr = float.values().as_ptr();
+    let input_hist_indices_ptr = indices.values().as_ptr();
+    let input_mixed_float_ptr = mixed_floats.values().as_ptr();
+    let input_mixed_indices_ptr = mixed_indices.values().as_ptr();
+
+    let input: SendableRawSeriesStream = Box::pin(RawFixture {
+        schema: schema.clone(),
+        binding: RawLabelSource::Explicit,
+        chunk: Some(chunk),
+    });
+    let frames = pack_raw_series(input).unwrap();
+    let mut decoded = unpack_raw_series(
+        frames,
+        schema,
+        RawLabelSource::Explicit,
+        SeriesOrdering::Contiguous,
+    )
+    .unwrap();
+    let mut output = Vec::new();
+    while let Some(item) = decoded.next().await {
+        output.push(item.unwrap());
+    }
+    assert_eq!(output.len(), 1, "one sample packs as one row");
+    assert_eq!(output[0].time.len(), 1);
+    assert!(output[0].is_last);
+
+    let DenseSamplesRef::Float(decoded_float) = output[0].fields.get(0).unwrap().dense().unwrap()
+    else {
+        panic!("expected float")
+    };
+    assert_eq!(decoded_float.values().as_ptr(), input_float_ptr);
+    let DenseSamplesRef::Histogram(decoded_hist) =
+        output[0].fields.get(1).unwrap().dense().unwrap()
+    else {
+        panic!("expected histogram")
+    };
+    assert_eq!(
+        decoded_hist.indices().values().as_ptr(),
+        input_hist_indices_ptr
+    );
+    assert!(
+        decoded_hist
+            .batch()
+            .as_arrow()
+            .to_data()
+            .ptr_eq(&sliced_table.as_arrow().to_data()),
+        "a single row keeps the sliced histogram table by pointer"
+    );
+    let DenseSamplesRef::Mixed(decoded_mixed) = output[0].fields.get(2).unwrap().dense().unwrap()
+    else {
+        panic!("expected mixed")
+    };
+    assert_eq!(
+        decoded_mixed.floats().values().as_ptr(),
+        input_mixed_float_ptr
+    );
+    assert_eq!(
+        decoded_mixed.histograms().indices().values().as_ptr(),
+        input_mixed_indices_ptr
+    );
+    assert!(
+        decoded_mixed
+            .histograms()
+            .batch()
+            .as_arrow()
+            .to_data()
+            .ptr_eq(&sliced_table.as_arrow().to_data())
+    );
+    assert_eq!(output[0].time.as_buffer().as_ptr(), input_times_ptr);
+
+    // The decoded chunk owns the slices, so the source owners can go while the values remain
+    // valid and bit-exact.
+    drop(decoded);
+    drop(time_owner);
+    drop(float_owner);
+    drop(float);
+    drop(index_owner);
+    drop(indices);
+    drop(mixed_float_owner);
+    drop(mixed_floats);
+    drop(mixed_index_owner);
+    drop(mixed_indices);
+    drop(source_table);
+    drop(table_owner);
+    drop(sliced_table);
+    assert!(table_weak.upgrade().is_none());
+    assert!(sliced_weak.upgrade().is_none());
+
+    let chunk = &output[0];
+    assert_eq!(chunk.primary_key.as_slice(), [0xaa, 0x10, 0xbb]);
+    assert_eq!(chunk.metric.as_ref().unwrap().name(), Some("cpu"));
+    assert_eq!(chunk.metric.as_ref().unwrap().get("host"), Some("a"));
+    assert_eq!(chunk.time.timestamp(0), Some(11));
+    match chunk.fields.get(0).unwrap().sample(0) {
+        SampleRef::Float(value) => assert_eq!(
+            value.to_bits(),
+            f64::from_bits(0x7ff8_0000_0000_0042).to_bits()
+        ),
+        SampleRef::Missing | SampleRef::Histogram(_) => panic!("expected float field"),
+    }
+    let SampleRef::Histogram(value) = chunk.fields.get(1).unwrap().sample(0) else {
+        panic!("expected histogram")
+    };
+    assert_histogram(value, -9.5, Some(456));
+    match chunk.fields.get(2).unwrap().sample(0) {
+        SampleRef::Float(value) => assert_eq!(value.to_bits(), (-0.0_f64).to_bits()),
+        SampleRef::Missing | SampleRef::Histogram(_) => panic!("expected mixed float"),
+    }
 }
