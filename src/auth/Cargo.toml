@@ -24,6 +24,7 @@ hex.workspace = true
 hmac = "0.12"
 pbkdf2 = "0.12"
 rand.workspace = true
+serde.workspace = true
 sha1 = "0.10"
 sha2 = "0.10"
 snafu.workspace = true

@@ -199,6 +199,7 @@ pub fn new_ddl_context_with_kv_backend(
         )));
     DdlContext {
         affinity_resolver: None,
+        affinity_fallback: Default::default(),
         peer_alloc_context_provider: None,
         node_manager,
         cache_invalidator: Arc::new(DummyCacheInvalidator),

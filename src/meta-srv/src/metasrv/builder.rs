@@ -423,6 +423,11 @@ impl MetasrvBuilder {
                 leader_cached_kv_backend.clone(),
             )
             .with_state(state.clone());
+            let region_supervisor = if let Some(resolver) = &affinity_resolver {
+                region_supervisor.with_affinity_resolver(resolver.clone())
+            } else {
+                region_supervisor
+            };
 
             Some(RegionFailureHandler::new(
                 region_supervisor,
@@ -437,6 +442,7 @@ impl MetasrvBuilder {
 
         let ddl_context = DdlContext {
             peer_alloc_context_provider: None,
+            affinity_fallback: selector_ctx.affinity_fallback,
             affinity_resolver,
             node_manager: node_manager.clone(),
             cache_invalidator: cache_invalidator.clone(),
@@ -817,6 +823,7 @@ mod tests {
             .await
             .unwrap();
         let context = metasrv.ddl_manager().create_context();
+        assert_eq!(context.affinity_fallback, AffinityFallback::Error);
         assert!(context.affinity_resolver.is_none());
         assert!(context.peer_alloc_context_provider.is_none());
     }
@@ -892,6 +899,10 @@ mod tests {
 
         assert_eq!(
             metasrv.selector_ctx().affinity_fallback,
+            AffinityFallback::Unconstrained
+        );
+        assert_eq!(
+            metasrv.ddl_manager().create_context().affinity_fallback,
             AffinityFallback::Unconstrained
         );
         assert_eq!(calls.load(Ordering::Relaxed), 1);

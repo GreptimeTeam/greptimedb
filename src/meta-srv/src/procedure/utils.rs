@@ -536,6 +536,7 @@ pub mod test_data {
         ));
         DdlContext {
             peer_alloc_context_provider: None,
+            affinity_fallback: Default::default(),
             affinity_resolver: None,
             node_manager,
             cache_invalidator: Arc::new(MetasrvCacheInvalidator::new(

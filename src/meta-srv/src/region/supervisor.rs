@@ -18,7 +18,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use common_error::ext::BoxedError;
 use common_meta::DatanodeId;
+use common_meta::affinity::{AffinityFallback, AffinityReference, AffinityResolverRef};
 use common_meta::datanode::Stat;
 use common_meta::ddl::{DetectingRegion, RegionFailureDetectorController};
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
@@ -290,6 +292,8 @@ pub struct RegionSupervisor {
     selector_context: SelectorContext,
     /// Candidate node selector.
     selector: RegionSupervisorSelector,
+    /// Resolves the failed node attributes before selection.
+    affinity_resolver: Option<AffinityResolverRef>,
     /// Region migration manager.
     region_migration_manager: RegionMigrationManagerRef,
     /// The maintenance mode manager.
@@ -408,12 +412,19 @@ impl RegionSupervisor {
             receiver: event_receiver,
             selector_context,
             selector,
+            affinity_resolver: None,
             region_migration_manager,
             runtime_switch_manager,
             peer_resolver,
             kv_backend,
             state: None,
         }
+    }
+
+    /// Sets the resolver used to prepare failover affinity requirements.
+    pub(crate) fn with_affinity_resolver(mut self, resolver: AffinityResolverRef) -> Self {
+        self.affinity_resolver = Some(resolver);
+        self
     }
 
     /// Sets the meta state.
@@ -659,17 +670,41 @@ impl RegionSupervisor {
         regions: &[RegionId],
         failure_datanodes: &[DatanodeId],
     ) -> Result<Vec<(RegionId, Peer)>> {
-        let exclude_peer_ids = HashSet::from_iter(failure_datanodes.iter().cloned());
+        let affinity = if let Some(resolver) = &self.affinity_resolver {
+            let mut resolved = resolver
+                .resolve(&[AffinityReference::Datanode(from_peer_id)])
+                .await
+                .map_err(BoxedError::new)
+                .context(error::OtherSnafu)?;
+            ensure!(
+                resolved.len() == 1,
+                error::UnexpectedSnafu {
+                    violated: "affinity resolution must preserve the number and order of references",
+                }
+            );
+            let affinity = resolved.pop().flatten();
+            ensure!(
+                affinity.is_some()
+                    || self.selector_context.affinity_fallback == AffinityFallback::Unconstrained,
+                error::UnexpectedSnafu {
+                    violated: "source affinity requirements are unavailable"
+                }
+            );
+            affinity
+        } else {
+            None
+        };
+        let exclude_peer_ids = HashSet::from_iter(failure_datanodes.iter().copied());
         match &self.selector {
             RegionSupervisorSelector::NaiveSelector(selector) => {
-                let opt = SelectorOptions {
+                let opts = SelectorOptions {
+                    affinity: affinity.as_ref(),
                     min_required_items: regions.len(),
                     allow_duplication: true,
                     exclude_peer_ids,
                     workload_filter: Some(accept_ingest_workload),
-                    affinity: None,
                 };
-                let peers = selector.select(&self.selector_context, opt).await?;
+                let peers = selector.select(&self.selector_context, opts).await?;
                 ensure!(
                     peers.len() == regions.len(),
                     error::NoEnoughAvailableNodeSnafu {
@@ -693,6 +728,7 @@ impl RegionSupervisor {
                         from_peer_id,
                         regions,
                         exclude_peer_ids,
+                        affinity.as_ref(),
                     )
                     .await?;
                 ensure!(
@@ -960,6 +996,280 @@ pub(crate) mod tests {
             ),
             tx,
         )
+    }
+
+    #[tokio::test]
+    async fn test_failover_passes_affinity_and_propagates_errors() {
+        use std::collections::HashSet;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use common_meta::affinity::{
+            AffinityFallback, AffinityReference, AffinityRequirements, AffinityResolver,
+        };
+        use common_meta::error::{self as meta_error, Result as MetaResult};
+
+        use crate::error::{self, Result};
+        use crate::metasrv::{SelectTarget, SelectorContext};
+        use crate::selector::{RegionStatAwareSelector, Selector, SelectorOptions};
+
+        #[derive(Clone, Copy, PartialEq)]
+        enum Resolution {
+            Disabled,
+            Available,
+            Missing,
+            Error,
+        }
+
+        struct Resolver {
+            result: Resolution,
+            calls: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl AffinityResolver for Resolver {
+            async fn resolve(
+                &self,
+                references: &[AffinityReference],
+            ) -> MetaResult<Vec<Option<AffinityRequirements>>> {
+                assert_eq!(references, &[AffinityReference::Datanode(7)]);
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                match self.result {
+                    Resolution::Available => {
+                        Ok(vec![AffinityRequirements::new(HashMap::from([(
+                            "pool".into(),
+                            "a".into(),
+                        )]))])
+                    }
+                    Resolution::Disabled => unreachable!(),
+                    Resolution::Missing => Ok(vec![None]),
+                    Resolution::Error => meta_error::UnexpectedSnafu {
+                        err_msg: "source lookup failed",
+                    }
+                    .fail(),
+                }
+            }
+        }
+
+        #[derive(Clone, Copy)]
+        enum Outcome {
+            Success,
+            Short,
+            Exhausted,
+            Error,
+        }
+        struct FailoverSelector {
+            outcome: Outcome,
+            expected_fallback: AffinityFallback,
+            calls: Mutex<Vec<Option<AffinityRequirements>>>,
+        }
+        impl FailoverSelector {
+            fn select_peers(&self, affinity: Option<&AffinityRequirements>) -> Result<Vec<Peer>> {
+                self.calls.lock().unwrap().push(affinity.cloned());
+                if affinity.is_some() {
+                    match self.outcome {
+                        Outcome::Success => {}
+                        Outcome::Short => return Ok(vec![Peer::empty(9)]),
+                        Outcome::Exhausted => {
+                            return error::NoEnoughAvailableNodeSnafu {
+                                required: 2usize,
+                                available: 0usize,
+                                select_target: SelectTarget::Datanode,
+                            }
+                            .fail();
+                        }
+                        Outcome::Error => {
+                            return error::UnexpectedSnafu {
+                                violated: "selection backend failed",
+                            }
+                            .fail();
+                        }
+                    }
+                }
+                Ok(vec![Peer::empty(9); 2])
+            }
+        }
+        #[async_trait::async_trait]
+        impl Selector for FailoverSelector {
+            type Context = SelectorContext;
+            type Output = Vec<Peer>;
+            async fn select(
+                &self,
+                ctx: &SelectorContext,
+                opts: SelectorOptions<'_>,
+            ) -> Result<Self::Output> {
+                assert_eq!(ctx.affinity_fallback, self.expected_fallback);
+                assert_eq!(opts.exclude_peer_ids, HashSet::from([8]));
+                assert!(opts.workload_filter.is_some());
+                assert!(opts.allow_duplication);
+                assert_eq!(opts.min_required_items, 2);
+                self.select_peers(opts.affinity)
+            }
+        }
+        #[async_trait::async_trait]
+        impl RegionStatAwareSelector for FailoverSelector {
+            type Context = SelectorContext;
+            type Output = Vec<(RegionId, Peer)>;
+            async fn select(
+                &self,
+                ctx: &SelectorContext,
+                source: u64,
+                regions: &[RegionId],
+                excluded: HashSet<u64>,
+                affinity: Option<&AffinityRequirements>,
+            ) -> Result<Self::Output> {
+                assert_eq!(ctx.affinity_fallback, self.expected_fallback);
+                assert_eq!(source, 7);
+                assert_eq!(excluded, HashSet::from([8]));
+                Ok(regions
+                    .iter()
+                    .copied()
+                    .zip(self.select_peers(affinity)?)
+                    .collect())
+            }
+        }
+        for stat_aware in [false, true] {
+            for (resolution, fallback, outcome, expected_calls, succeeds) in [
+                (
+                    Resolution::Available,
+                    AffinityFallback::Error,
+                    Outcome::Success,
+                    1,
+                    true,
+                ),
+                (
+                    Resolution::Available,
+                    AffinityFallback::Error,
+                    Outcome::Short,
+                    1,
+                    false,
+                ),
+                (
+                    Resolution::Available,
+                    AffinityFallback::Error,
+                    Outcome::Exhausted,
+                    1,
+                    false,
+                ),
+                (
+                    Resolution::Available,
+                    AffinityFallback::Error,
+                    Outcome::Error,
+                    1,
+                    false,
+                ),
+                (
+                    Resolution::Missing,
+                    AffinityFallback::Error,
+                    Outcome::Success,
+                    0,
+                    false,
+                ),
+                (
+                    Resolution::Error,
+                    AffinityFallback::Error,
+                    Outcome::Success,
+                    0,
+                    false,
+                ),
+                (
+                    Resolution::Available,
+                    AffinityFallback::Unconstrained,
+                    Outcome::Short,
+                    1,
+                    false,
+                ),
+                (
+                    Resolution::Available,
+                    AffinityFallback::Unconstrained,
+                    Outcome::Exhausted,
+                    1,
+                    false,
+                ),
+                (
+                    Resolution::Available,
+                    AffinityFallback::Unconstrained,
+                    Outcome::Error,
+                    1,
+                    false,
+                ),
+                (
+                    Resolution::Missing,
+                    AffinityFallback::Unconstrained,
+                    Outcome::Success,
+                    1,
+                    true,
+                ),
+                (
+                    Resolution::Error,
+                    AffinityFallback::Unconstrained,
+                    Outcome::Success,
+                    0,
+                    false,
+                ),
+                (
+                    Resolution::Disabled,
+                    AffinityFallback::Unconstrained,
+                    Outcome::Success,
+                    1,
+                    true,
+                ),
+            ] {
+                let resolver = Arc::new(Resolver {
+                    result: resolution,
+                    calls: AtomicUsize::new(0),
+                });
+                let selector = Arc::new(FailoverSelector {
+                    outcome,
+                    expected_fallback: fallback,
+                    calls: Mutex::new(vec![]),
+                });
+                let (mut supervisor, _sender) = new_test_supervisor();
+                supervisor.selector_context.affinity_fallback = fallback;
+                if resolution != Resolution::Disabled {
+                    supervisor = supervisor.with_affinity_resolver(resolver.clone());
+                }
+                supervisor.selector = if stat_aware {
+                    RegionSupervisorSelector::RegionStatAwareSelector(selector.clone())
+                } else {
+                    RegionSupervisorSelector::NaiveSelector(selector.clone())
+                };
+                let regions = [RegionId::new(1, 1), RegionId::new(1, 2)];
+                // Preserve the caller's exclusion set without adding the source.
+                let result = supervisor.select_peers(7, &regions, &[8]).await;
+                if succeeds {
+                    assert_eq!(
+                        result.unwrap(),
+                        vec![(regions[0], Peer::empty(9)), (regions[1], Peer::empty(9))]
+                    );
+                } else {
+                    let error = result.unwrap_err();
+                    if resolution == Resolution::Error {
+                        assert!(matches!(error, error::Error::Other { .. }));
+                    } else if resolution == Resolution::Missing {
+                        assert!(matches!(error, error::Error::Unexpected { .. }));
+                    } else {
+                        match outcome {
+                            Outcome::Short | Outcome::Exhausted => {
+                                assert!(matches!(error, error::Error::NoEnoughAvailableNode { .. }))
+                            }
+                            Outcome::Error => {
+                                assert!(matches!(error, error::Error::Unexpected { .. }))
+                            }
+                            Outcome::Success => unreachable!(),
+                        }
+                    }
+                }
+                assert_eq!(
+                    resolver.calls.load(Ordering::Relaxed),
+                    usize::from(resolution != Resolution::Disabled)
+                );
+                let calls = selector.calls.lock().unwrap();
+                assert_eq!(calls.len(), expected_calls);
+                if let Some(affinity) = calls.first() {
+                    assert_eq!(affinity.is_some(), resolution == Resolution::Available);
+                }
+            }
+        }
     }
 
     fn filler_heartbeat() -> DatanodeHeartbeat {
