@@ -545,21 +545,26 @@ class SummaryTest(unittest.TestCase):
             metrics = summary.parse_metrics("greptime_logstore_object_store_wal_read_seconds_sum 95.15\n"
                                             "greptime_logstore_object_store_wal_read_seconds_count 3\n")
             result = summary.replay(path / "server-restart.log", metrics)
-            self.assertEqual((result["rows"], result["objects"], result["read_seconds"], result["reads"]),
+            self.assertEqual((result["rows"], result["object_span"], result["read_seconds"], result["reads"]),
                              (12_625_005, 3158 + 1, 95.15, 3))
             self.assertAlmostEqual(result["seconds"], 95.150155247)
-            self.assertEqual([(r["region"], r["rows"], r["objects"]) for r in result["regions"]],
+            self.assertEqual([(r["region"], r["rows"], r["object_span"]) for r in result["regions"]],
                              [(4398046511104, 0, 0), (4402341478400, 12_625_000, 3158), (4402341478401, 5, 1)])
             self.assertEqual((result["regions"][1]["first_entry_id"], result["regions"][1]["last_entry_id"]),
                              (4853858306, 8164212737))
             self.assertAlmostEqual(result["regions"][0]["seconds"], 60.581e-6)
             self.assertEqual(summary.replayed(result["regions"]),
-                             "4402341478400: 12,625,000 rows, objects 4,629–7,786, 95.15 s; "
-                             "4402341478401: 5 rows, objects 7,786–7,786, 0.01 s")
+                             "4402341478400: 12,625,000 rows, object sequences 4,629–7,786, 95.15 s; "
+                             "4402341478401: 5 rows, object sequences 7,786–7,786, 0.01 s")
             self.assertIsNone(summary.replay(path / "absent.log", metrics))
             raft = log.replace("ObjectStore(", "RaftEngine(")
             (path / "server-restart.log").write_text(raft)
-            self.assertIsNone(summary.replay(path / "server-restart.log", metrics)["objects"])
+            self.assertIsNone(summary.replay(path / "server-restart.log", metrics)["object_span"])
+            # A region flushed in object 100 that next wrote in object 200 reads one object but spans 101.
+            gap = log.replace("replay from entry id: 4853858306", f"replay from entry id: {(100 << 20) + 2}") \
+                .replace("last entry id: 8164212737", f"last entry id: {(200 << 20) + 1}")
+            (path / "server-restart.log").write_text(gap)
+            self.assertEqual(summary.replay(path / "server-restart.log", metrics)["regions"][1]["object_span"], 101)
 
     def test_a_drop_cell_reports_the_objects_collected_after_its_restart(self):
         with tempfile.TemporaryDirectory() as directory:
