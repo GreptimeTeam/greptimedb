@@ -1,0 +1,224 @@
+CREATE TABLE session_skip_wal(host STRING, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+-- MYSQL: SET persists across statements on the same connection.
+-- SQLNESS PROTOCOL MYSQL
+SET skip_wal = true;
+
+affected_rows: 0
+
+-- Invalid SET must leave the enabled policy unchanged.
+-- SQLNESS PROTOCOL MYSQL
+SET skip_wal = 'invalid';
+
+Failed to execute query, err: MySqlError { ERROR 1235 (42000): (Unsupported): Not supported: Invalid skip_wal value "invalid": expected true or false }
+
+-- SQLNESS PROTOCOL MYSQL
+SET skip_wal = 1;
+
+Failed to execute query, err: MySqlError { ERROR 1235 (42000): (Unsupported): Not supported: SET skip_wal requires true or false }
+
+-- SQLNESS PROTOCOL MYSQL
+SET skip_wal = NULL;
+
+Failed to execute query, err: MySqlError { ERROR 1235 (42000): (Unsupported): Not supported: SET skip_wal requires true or false }
+
+-- SQLNESS PROTOCOL MYSQL
+SET skip_wal = false, true;
+
+Failed to execute query, err: MySqlError { ERROR 1235 (42000): (Unsupported): Not supported: SET skip_wal requires exactly one boolean value }
+
+-- SQLNESS PROTOCOL MYSQL
+INSERT INTO session_skip_wal VALUES ('skipped', 1000);
+
+affected_rows: 1
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT * FROM session_skip_wal ORDER BY ts;
+
++---------+---------------------+
+| host    | ts                  |
++---------+---------------------+
+| skipped | 1970-01-01 00:00:01 |
++---------+---------------------+
+
+-- SQLNESS ARG restart=true
+-- SQLNESS PROTOCOL MYSQL
+SELECT * FROM session_skip_wal ORDER BY ts;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SET skip_wal = false;
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SET skip_wal = 'true';
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+SET skip_wal = 'false';
+
+affected_rows: 0
+
+-- SQLNESS PROTOCOL MYSQL
+INSERT INTO session_skip_wal VALUES ('persisted', 2000);
+
+affected_rows: 1
+
+-- SQLNESS PROTOCOL MYSQL
+SELECT * FROM session_skip_wal ORDER BY ts;
+
++-----------+---------------------+
+| host      | ts                  |
++-----------+---------------------+
+| persisted | 1970-01-01 00:00:02 |
++-----------+---------------------+
+
+-- SQLNESS ARG restart=true
+-- SQLNESS PROTOCOL MYSQL
+SELECT * FROM session_skip_wal ORDER BY ts;
+
++-----------+---------------------+
+| host      | ts                  |
++-----------+---------------------+
+| persisted | 1970-01-01 00:00:02 |
++-----------+---------------------+
+
+TRUNCATE TABLE session_skip_wal;
+
+Affected Rows: 0
+
+-- POSTGRES: SET persists across statements on the same connection.
+-- SQLNESS PROTOCOL POSTGRES
+SET skip_wal = true;
+
+Affected Rows: 0
+
+-- Invalid SET must leave the enabled policy unchanged.
+-- SQLNESS PROTOCOL POSTGRES
+SET skip_wal = 'invalid';
+
+Failed to execute query, encountered: Error { kind: Db, cause: Some(DbError { severity: "ERROR", parsed_severity: None, code: SqlState(E0A000), message: "Not supported: Invalid skip_wal value \"invalid\": expected true or false", detail: None, hint: None, position: None, where_: None, schema: None, table: None, column: None, datatype: None, constraint: None, file: None, line: None, routine: None }) }
+
+-- SQLNESS PROTOCOL POSTGRES
+SET skip_wal = 1;
+
+Failed to execute query, encountered: Error { kind: Db, cause: Some(DbError { severity: "ERROR", parsed_severity: None, code: SqlState(E0A000), message: "Not supported: SET skip_wal requires true or false", detail: None, hint: None, position: None, where_: None, schema: None, table: None, column: None, datatype: None, constraint: None, file: None, line: None, routine: None }) }
+
+-- SQLNESS PROTOCOL POSTGRES
+SET skip_wal = NULL;
+
+Failed to execute query, encountered: Error { kind: Db, cause: Some(DbError { severity: "ERROR", parsed_severity: None, code: SqlState(E0A000), message: "Not supported: SET skip_wal requires true or false", detail: None, hint: None, position: None, where_: None, schema: None, table: None, column: None, datatype: None, constraint: None, file: None, line: None, routine: None }) }
+
+-- SQLNESS PROTOCOL POSTGRES
+SET skip_wal = false, true;
+
+Failed to execute query, encountered: Error { kind: Db, cause: Some(DbError { severity: "ERROR", parsed_severity: None, code: SqlState(E0A000), message: "Not supported: SET skip_wal requires exactly one boolean value", detail: None, hint: None, position: None, where_: None, schema: None, table: None, column: None, datatype: None, constraint: None, file: None, line: None, routine: None }) }
+
+-- SQLNESS PROTOCOL POSTGRES
+INSERT INTO session_skip_wal VALUES ('skipped', 1000);
+
+Affected Rows: 1
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT * FROM session_skip_wal ORDER BY ts;
+
++---------+----------------------------+
+| host    | ts                         |
++---------+----------------------------+
+| skipped | 1970-01-01 00:00:01.000000 |
++---------+----------------------------+
+
+-- SQLNESS ARG restart=true
+-- SQLNESS PROTOCOL POSTGRES
+SELECT * FROM session_skip_wal ORDER BY ts;
+
++------+----+
+| host | ts |
++------+----+
++------+----+
+
+-- SQLNESS PROTOCOL POSTGRES
+SET skip_wal = false;
+
+Affected Rows: 0
+
+-- SQLNESS PROTOCOL POSTGRES
+SET skip_wal = 'true';
+
+Affected Rows: 0
+
+-- SQLNESS PROTOCOL POSTGRES
+SET skip_wal = 'false';
+
+Affected Rows: 0
+
+-- SQLNESS PROTOCOL POSTGRES
+INSERT INTO session_skip_wal VALUES ('persisted', 2000);
+
+Affected Rows: 1
+
+-- SQLNESS PROTOCOL POSTGRES
+SELECT * FROM session_skip_wal ORDER BY ts;
+
++-----------+----------------------------+
+| host      | ts                         |
++-----------+----------------------------+
+| persisted | 1970-01-01 00:00:02.000000 |
++-----------+----------------------------+
+
+-- SQLNESS ARG restart=true
+-- SQLNESS PROTOCOL POSTGRES
+SELECT * FROM session_skip_wal ORDER BY ts;
+
++-----------+----------------------------+
+| host      | ts                         |
++-----------+----------------------------+
+| persisted | 1970-01-01 00:00:02.000000 |
++-----------+----------------------------+
+
+TRUNCATE TABLE session_skip_wal;
+
+Affected Rows: 0
+
+DROP TABLE session_skip_wal;
+
+Affected Rows: 0
+
+-- The default gRPC protocol has request-scoped contexts, not a persistent SQL session.
+SET skip_wal = true;
+
+Affected Rows: 0
+
+SET skip_wal = false;
+
+Affected Rows: 0
+
+SET skip_wal = 'true';
+
+Affected Rows: 0
+
+SET skip_wal = 'false';
+
+Affected Rows: 0
+
+SET skip_wal = 'invalid';
+
+Error: 1001(Unsupported), Not supported: Invalid skip_wal value "invalid": expected true or false
+
+SET skip_wal = 1;
+
+Error: 1001(Unsupported), Not supported: SET skip_wal requires true or false
+
+SET skip_wal = NULL;
+
+Error: 1001(Unsupported), Not supported: SET skip_wal requires true or false
+
+SET skip_wal = false, true;
+
+Error: 1001(Unsupported), Not supported: SET skip_wal requires exactly one boolean value
+

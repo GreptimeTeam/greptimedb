@@ -700,6 +700,7 @@ fn build_bulk_insert_request(
     let (schema, record_batch) = encode_to_flight_data(payload.clone());
 
     RegionBulkInsertsRequest {
+        skip_wal: false,
         region_id,
         payload,
         raw_data: ArrowIpc {

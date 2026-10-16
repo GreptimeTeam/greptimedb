@@ -159,7 +159,7 @@ fs2 = "0.4"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "b74667d17827481dbb6222fa0326163627211557" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "0c4beffaa2b3968034915867593a717c6ab0c6b4" }
 hex = "0.4"
 hostname = "0.4.0"
 http = "1"
@@ -228,7 +228,7 @@ rstest = "0.25"
 rstest_reuse = "0.7"
 rust_decimal = "1.33"
 rustc-hash = "2.0"
-rustls = { version = "0.23.25", default-features = false }
+rustls = { version = "0.23.46", default-features = false }
 ryu = "1.0"
 sea-query = "0.32"
 serde = { version = "1.0", features = ["derive"] }

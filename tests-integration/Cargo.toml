@@ -106,6 +106,7 @@ hex.workspace = true
 http.workspace = true
 itertools.workspace = true
 jsonb.workspace = true
+mito2 = { workspace = true, features = ["test"] }
 mysql_async = { version = "0.37", default-features = false, features = [
     "time",
     "default-rustls-ring",

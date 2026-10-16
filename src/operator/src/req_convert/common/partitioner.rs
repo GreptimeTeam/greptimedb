@@ -181,7 +181,7 @@ impl TablePartitioner {
             .rule
             .split_record_batch(&batch)
             .context(SplitInsertSnafu)?;
-        self.build_bulk_insert_requests(batch, masks, original_ipc)
+        self.build_bulk_insert_requests(batch, masks, original_ipc, false)
     }
 
     fn build_bulk_insert_requests(
@@ -189,6 +189,7 @@ impl TablePartitioner {
         batch: RecordBatch,
         masks: HashMap<RegionNumber, RegionMask>,
         mut original_ipc: Option<ArrowIpc>,
+        skip_wal: bool,
     ) -> Result<Vec<BulkInsertRequest>> {
         let mut requests = Vec::with_capacity(masks.len());
         for (region, mask) in masks {
@@ -219,6 +220,7 @@ impl TablePartitioner {
                 }
             };
             requests.push(BulkInsertRequest {
+                skip_wal,
                 region_id: RegionId::new(self.table_id, region).as_u64(),
                 partition_expr_version: self.version(region),
                 // The destination datanode validates against its current schema.
@@ -296,7 +298,7 @@ impl TablePartitioner {
             .split_record_batch(routing_batch.as_ref().unwrap_or(&batch))
             .context(SplitInsertSnafu)?;
         Ok(self
-            .build_bulk_insert_requests(batch, masks, Some(ipc))?
+            .build_bulk_insert_requests(batch, masks, Some(ipc), bulk.skip_wal)?
             .into_iter()
             .map(Body::BulkInsert)
             .collect())
@@ -937,7 +939,12 @@ mod tests {
         }
     }
 
-    fn build_bulk_request(region: u32, version: Option<u64>, values: Vec<i32>) -> RegionRequest {
+    fn build_bulk_request(
+        region: u32,
+        version: Option<u64>,
+        values: Vec<i32>,
+        skip_wal: bool,
+    ) -> RegionRequest {
         let batch = RecordBatch::try_new(
             Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)])),
             vec![Arc::new(Int32Array::from(values))],
@@ -945,6 +952,7 @@ mod tests {
         .unwrap();
         let (schema, data_header, payload) = flight::record_batch_to_ipc(batch).unwrap();
         build_request(Body::BulkInsert(BulkInsertRequest {
+            skip_wal,
             region_id: RegionId::new(1, region).as_u64(),
             partition_expr_version: version.map(|value| PartitionExprVersion { value }),
             aligned_schema_version: Some(AlignedSchemaVersion {
@@ -960,13 +968,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_rebuild_bulk_reencodes_only_changed_partitions() {
+        check_rebuild_bulk_reencodes_only_changed_partitions(false).await;
+        check_rebuild_bulk_reencodes_only_changed_partitions(true).await;
+    }
+
+    async fn check_rebuild_bulk_reencodes_only_changed_partitions(skip_wal: bool) {
         let (manager, cache) = create_fixture().await;
         let table_info = cache.get(1).await.unwrap().unwrap();
         let (_, versions) = manager
             .find_table_partition_rule(&table_info)
             .await
             .unwrap();
-        let request = build_bulk_request(99, Some(0), vec![1, 20, 70]);
+        let request = build_bulk_request(99, Some(0), vec![1, 20, 70], skip_wal);
         let header = request.header.clone();
         let rerouted = rebuild_with_cached_table(&manager, &cache, request)
             .await
@@ -980,6 +993,7 @@ mod tests {
             };
             let region = RegionId::from_u64(bulk.region_id);
             assert_eq!(region.table_id(), 1);
+            assert_eq!(bulk.skip_wal, skip_wal);
             assert_eq!(bulk.aligned_schema_version, None);
             assert_eq!(
                 bulk.partition_expr_version.map(|v| v.value),
@@ -1004,7 +1018,7 @@ mod tests {
         assert_eq!(actual, [(1, 70), (2, 20), (3, 1)]);
 
         // A leader-only change retains the original IPC buffers and schema hint.
-        let request = build_bulk_request(3, versions[&3], vec![1]);
+        let request = build_bulk_request(3, versions[&3], vec![1], skip_wal);
         let Some(Body::BulkInsert(bulk)) = request.body.as_ref() else {
             unreachable!()
         };
@@ -1023,6 +1037,7 @@ mod tests {
         let Some(Body::BulkInsert(bulk)) = rerouted[0].body.as_ref() else {
             unreachable!()
         };
+        assert_eq!(bulk.skip_wal, skip_wal);
         assert_eq!(
             bulk.aligned_schema_version,
             Some(AlignedSchemaVersion {

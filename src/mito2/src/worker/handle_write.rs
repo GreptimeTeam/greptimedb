@@ -563,7 +563,7 @@ impl<S> RegionWorkerLoop<S> {
             }
 
             // Collect requests by region.
-            if !region_ctx.push_bulk(bulk_req.sender, bulk_req.request, None) {
+            if !region_ctx.push_bulk(bulk_req.sender, bulk_req.request, None, bulk_req.skip_wal) {
                 return;
             }
         }
@@ -929,17 +929,33 @@ mod tests {
     async fn test_request_skip_wal_does_not_append_empty_batch() {
         // Only change the request flag. A failing log store demonstrates that
         // the all-skipped path never invokes append_batch, including empty appends.
-        check_request_skip_wal_does_not_append_empty_batch(false).await;
-        check_request_skip_wal_does_not_append_empty_batch(true).await;
+        check_request_skip_wal_does_not_append_empty_batch(false, false).await;
+        check_request_skip_wal_does_not_append_empty_batch(false, true).await;
+        check_request_skip_wal_does_not_append_empty_batch(true, false).await;
+        check_request_skip_wal_does_not_append_empty_batch(true, true).await;
     }
 
-    async fn check_request_skip_wal_does_not_append_empty_batch(skip_wal: bool) {
+    async fn check_request_skip_wal_does_not_append_empty_batch(skip_wal: bool, bulk: bool) {
         let region_id = RegionId::new(1, 1);
         let wal = Wal::new(Arc::new(MockLogStore {
             fail_append: true,
             ..Default::default()
         }));
-        let (ctx, rx) = new_region_ctx(region_id, skip_wal);
+        let (ctx, rx) = if bulk {
+            let version_control = Arc::new(VersionControlBuilder::new().build());
+            let mut ctx = RegionWriteCtx::new(
+                region_id,
+                &version_control,
+                Provider::raft_engine_provider(region_id.as_u64()),
+                None,
+                WriteSource::Request,
+            );
+            let (tx, rx) = oneshot::channel();
+            assert!(ctx.push_bulk(OptionOutputTx::from(tx), new_bulk_part(1), None, skip_wal));
+            (ctx, rx)
+        } else {
+            new_region_ctx(region_id, skip_wal)
+        };
         let version_control = ctx.version_control().clone();
         let mut contexts = HashMap::from([(region_id, ctx)]);
         assert_eq!(write_wal(&wal, &mut contexts).await, skip_wal);
@@ -1003,6 +1019,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_bulk_write_sequence_not_committed_before_install_worker_level() {
+        check_bulk_write_sequence_not_committed_before_install_worker_level(false).await;
+        check_bulk_write_sequence_not_committed_before_install_worker_level(true).await;
+    }
+
+    async fn check_bulk_write_sequence_not_committed_before_install_worker_level(skip_wal: bool) {
         let region_id = RegionId::new(1, 1);
         let version_control = Arc::new(VersionControlBuilder::new().build());
 
@@ -1015,7 +1036,7 @@ mod tests {
             WriteSource::Request,
         );
         let (tx, rx) = oneshot::channel();
-        assert!(ctx.push_bulk(OptionOutputTx::from(tx), new_bulk_part(3), None));
+        assert!(ctx.push_bulk(OptionOutputTx::from(tx), new_bulk_part(3), None, skip_wal));
         region_ctxs.insert(region_id, ctx);
 
         let wal = Wal::new(Arc::new(MockLogStore::default()));

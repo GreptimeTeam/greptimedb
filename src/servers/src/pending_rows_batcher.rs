@@ -214,6 +214,7 @@ struct BatchKey {
     catalog: String,
     schema: String,
     physical_table: String,
+    skip_wal: bool,
 }
 
 /// An aligned logical record batch and its timestamp column index.
@@ -318,8 +319,7 @@ enum WorkerCommand {
     Ack { ack_tx: oneshot::Sender<()> },
 }
 
-// Batch key is derived from QueryContext; it assumes catalog/schema/physical_table fully
-// define the write target and must remain consistent across the batch.
+// Requests can share a batch only when their write target and WAL policy match.
 fn batch_key_from_ctx(ctx: &QueryContextRef) -> BatchKey {
     let physical_table = ctx
         .extension(PHYSICAL_TABLE_KEY)
@@ -329,6 +329,7 @@ fn batch_key_from_ctx(ctx: &QueryContextRef) -> BatchKey {
         catalog: ctx.current_catalog().to_string(),
         schema: ctx.current_schema(),
         physical_table,
+        skip_wal: ctx.skip_wal(),
     }
 }
 
@@ -1538,7 +1539,8 @@ pub async fn flush_batch_physical(
     let planned_batches =
         plan_region_batches(combined_batch, physical_table_id, partition_rule.as_ref())?;
 
-    let mut region_writes = encode_region_write_requests(planned_batches, &partition_versions)?;
+    let mut region_writes =
+        encode_region_write_requests(planned_batches, &partition_versions, ctx.skip_wal())?;
     for request in &mut region_writes {
         if let Some(header) = &mut request.header {
             header.dbname = ctx.get_db_string();
@@ -1690,6 +1692,7 @@ fn plan_region_batches(
 fn encode_region_write_requests(
     planned_batches: Vec<PlannedRegionBatch>,
     partition_versions: &HashMap<u32, Option<u64>>,
+    skip_wal: bool,
 ) -> Result<Vec<RegionRequest>> {
     let mut region_writes = Vec::with_capacity(planned_batches.len());
     for planned in planned_batches {
@@ -1707,6 +1710,7 @@ fn encode_region_write_requests(
                 ..Default::default()
             }),
             body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
+                skip_wal,
                 region_id: region_id.as_u64(),
                 partition_expr_version: partition_versions
                     .get(&region_id.region_number())
@@ -1807,8 +1811,8 @@ mod tests {
         BatchKey, Error, FlushBatch, FlushWaiter, PendingBatch, PendingRowsBatcher, PendingWorker,
         PhysicalFlushCatalogProvider, PhysicalFlushPartitionProvider, PhysicalFlushWriteDispatcher,
         PhysicalTableMetadata, PlannedRegionBatch, RecordBatchWithTsIdx, TableBatch, WorkerCommand,
-        columns_taxonomy, drain_batch, encode_region_write_requests, extract_timestamps,
-        flush_batch, flush_batch_physical, greptime_timestamp,
+        batch_key_from_ctx, columns_taxonomy, drain_batch, encode_region_write_requests,
+        extract_timestamps, flush_batch, flush_batch_physical, greptime_timestamp,
         notify_flow_dirty_windows_after_flush, plan_region_batches, remove_worker_if_same_channel,
         should_close_worker_on_idle_timeout, start_flow_notification_worker, start_worker,
         transform_logical_batches_to_physical, try_enqueue_flow_notification,
@@ -2675,12 +2679,38 @@ mod tests {
     }
 
     #[test]
+    fn test_batch_key_groups_by_skip_wal() {
+        let wal_ctx = session::context::QueryContext::arc();
+        let skip_wal_ctx = session::context::QueryContext::arc();
+        skip_wal_ctx.set_skip_wal(true);
+        let another_skip_wal_ctx = session::context::QueryContext::arc();
+        another_skip_wal_ctx.set_skip_wal(true);
+
+        let mut batches = HashMap::new();
+        *batches.entry(batch_key_from_ctx(&wal_ctx)).or_insert(0) += 1;
+        *batches
+            .entry(batch_key_from_ctx(&skip_wal_ctx))
+            .or_insert(0) += 1;
+        *batches
+            .entry(batch_key_from_ctx(&another_skip_wal_ctx))
+            .or_insert(0) += 1;
+        *batches
+            .entry(batch_key_from_ctx(&session::context::QueryContext::arc()))
+            .or_insert(0) += 1;
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[&batch_key_from_ctx(&wal_ctx)], 2);
+        assert_eq!(batches[&batch_key_from_ctx(&skip_wal_ctx)], 2);
+    }
+
+    #[test]
     fn test_remove_worker_if_same_channel_removes_matching_entry() {
         let workers = DashMap::new();
         let key = BatchKey {
             catalog: "greptime".to_string(),
             schema: "public".to_string(),
             physical_table: "phy".to_string(),
+            skip_wal: false,
         };
 
         let (tx, _rx) = mpsc::channel::<WorkerCommand>(1);
@@ -2697,6 +2727,7 @@ mod tests {
             catalog: "greptime".to_string(),
             schema: "public".to_string(),
             physical_table: "phy".to_string(),
+            skip_wal: false,
         };
 
         let (stale_tx, _stale_rx) = mpsc::channel::<WorkerCommand>(1);
@@ -2788,6 +2819,7 @@ mod tests {
             catalog: "greptime".to_string(),
             schema: "public".to_string(),
             physical_table: "phy".to_string(),
+            skip_wal: false,
         };
         let workers = Arc::new(DashMap::new());
         let (worker_tx, worker_rx) = mpsc::channel(1);
@@ -3409,6 +3441,7 @@ mod tests {
         let writes = encode_region_write_requests(
             planned_batches,
             &HashMap::from([(1, Some(7)), (2, Some(8))]),
+            false,
         )
         .unwrap();
         for (index, write) in writes.into_iter().enumerate() {
@@ -3443,7 +3476,8 @@ mod tests {
 
     #[test]
     fn test_encode_region_write_requests_builds_bulk_insert_requests() {
-        check_encode_region_write_requests();
+        check_encode_region_write_requests(false);
+        check_encode_region_write_requests(true);
     }
 
     struct TwoRegionPartitionRule {
@@ -3482,7 +3516,7 @@ mod tests {
         }
     }
 
-    fn check_encode_region_write_requests() {
+    fn check_encode_region_write_requests(skip_wal: bool) {
         let planned_batch = PlannedRegionBatch {
             region_id: RegionId::new(1024, 1),
             batch: RecordBatch::try_new(
@@ -3503,15 +3537,19 @@ mod tests {
             )
             .unwrap(),
         };
-        let writes =
-            encode_region_write_requests(vec![planned_batch], &HashMap::from([(1, Some(7))]))
-                .unwrap();
+        let writes = encode_region_write_requests(
+            vec![planned_batch],
+            &HashMap::from([(1, Some(7))]),
+            skip_wal,
+        )
+        .unwrap();
 
         assert_eq!(1, writes.len());
         let Some(region_request::Body::BulkInsert(request)) = &writes[0].body else {
             panic!("expected bulk insert request");
         };
         assert_eq!(RegionId::new(1024, 1).as_u64(), request.region_id);
+        assert_eq!(skip_wal, request.skip_wal);
         assert_eq!(
             Some(PartitionExprVersion { value: 7 }),
             request.partition_expr_version
