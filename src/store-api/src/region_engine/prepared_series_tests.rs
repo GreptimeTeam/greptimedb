@@ -409,7 +409,11 @@ fn invalid_ordinals_and_ranges_fail_without_polling_samples() {
     let source = source(false);
     assert!(source.series_info(2).is_err());
     assert!(source.read_series(2..3).is_err());
-    assert!(source.read_series(2..1).is_err());
+    assert!(
+        source
+            .read_series(std::ops::Range { start: 2, end: 1 })
+            .is_err()
+    );
     assert_eq!(source.polls.load(Ordering::SeqCst), 0);
 }
 
