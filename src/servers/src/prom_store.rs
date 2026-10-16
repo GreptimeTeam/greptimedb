@@ -293,7 +293,6 @@ fn compare_timeseries_labels(left: &[Label], right: &[Label]) -> Ordering {
 
 enum LabelValues<'a> {
     Utf8(&'a StringArray),
-    OwnedUtf8(StringArray),
     LargeUtf8(&'a LargeStringArray),
     Utf8View(&'a StringViewArray),
     DictionaryUtf8 {
@@ -307,7 +306,6 @@ impl LabelValues<'_> {
     fn value(&self, row: usize) -> Option<&str> {
         match self {
             Self::Utf8(values) => values.is_valid(row).then(|| values.value(row)),
-            Self::OwnedUtf8(values) => values.is_valid(row).then(|| values.value(row)),
             Self::LargeUtf8(values) => values.is_valid(row).then(|| values.value(row)),
             Self::Utf8View(values) => values.is_valid(row).then(|| values.value(row)),
             Self::DictionaryUtf8 { dictionary, values } => dictionary
@@ -364,29 +362,6 @@ fn label_columns<'a>(
                         dictionary,
                         values: dictionary.values().as_string::<i32>(),
                     }
-                }
-                DataType::Binary | DataType::LargeBinary | DataType::BinaryView => {
-                    // Match the UTF-8 conversion used by remote-read label filters.
-                    let strings = casts::cast_with_options(
-                        array,
-                        &DataType::Utf8,
-                        &casts::CastOptions {
-                            // Reject invalid UTF-8 instead of silently producing NULL.
-                            safe: false,
-                            ..Default::default()
-                        },
-                    )
-                    .map_err(|e| {
-                        error::InvalidPromRemoteReadQueryResultSnafu {
-                            msg: format!(
-                                "cannot decode binary label column '{}' as UTF-8: {e}",
-                                column_schema.name
-                            ),
-                        }
-                        .build()
-                    })?;
-                    // TODO(fys): avoid clone in hot path.
-                    LabelValues::OwnedUtf8(strings.as_string::<i32>().clone())
                 }
                 _ => {
                     let values = recordbatch.iter_column_as_string(index).collect::<Vec<_>>();
@@ -1315,70 +1290,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_remote_read_binary_label_regex() {
-        for (bytes, op, pattern, expected) in [
-            (b"a".as_slice(), MatcherType::Re, "a", Some(vec![1000])),
-            (b"a".as_slice(), MatcherType::Nre, "a", Some(vec![1001])),
-            (b"".as_slice(), MatcherType::Re, "", Some(vec![1000, 1001])),
-            (b"".as_slice(), MatcherType::Nre, "", Some(vec![])),
-            (b"\xff".as_slice(), MatcherType::Re, ".*", None),
-            (b"\xff".as_slice(), MatcherType::Nre, ".*", None),
-        ] {
-            let ctx = SessionContext::new();
-            let batch = DfRecordBatch::try_from_iter(vec![
-                (
-                    greptime_timestamp(),
-                    Arc::new(TimestampMillisecondArray::from(vec![1000, 1001])) as ArrayRef,
-                ),
-                (
-                    "tag",
-                    Arc::new(arrow::array::BinaryArray::from(vec![Some(bytes), None])) as ArrayRef,
-                ),
-            ])
-            .unwrap();
-            ctx.register_batch("metrics", batch).unwrap();
-            let query = Query {
-                start_timestamp_ms: 1000,
-                end_timestamp_ms: 1001,
-                matchers: vec![LabelMatcher {
-                    name: "tag".into(),
-                    value: pattern.into(),
-                    r#type: op as i32,
-                }],
-                ..Default::default()
-            };
-            let plan = query_to_plan(
-                ctx.table("metrics").await.unwrap(),
-                &query,
-                greptime_timestamp(),
-            )
-            .unwrap();
-            let result = ctx
-                .execute_logical_plan(plan)
-                .await
-                .unwrap()
-                .collect()
-                .await;
-            let Some(expected) = expected else {
-                assert!(result.is_err(), "{op:?}: invalid UTF-8 must be rejected");
-                continue;
-            };
-            let actual: Vec<i64> = result
-                .unwrap()
-                .iter()
-                .flat_map(|batch| {
-                    batch
-                        .column(0)
-                        .as_primitive::<TimestampMillisecondType>()
-                        .values()
-                        .to_vec()
-                })
-                .collect();
-            assert_eq!(expected, actual, "{bytes:?}: {op:?} {pattern:?}");
-        }
-    }
-
-    #[tokio::test]
     async fn test_remote_read_matcher_combinations_and_label_types() {
         let labels = StringArray::from(vec![Some("api"), Some("api"), None, Some("api")]);
         for label_type in [
@@ -1962,151 +1873,6 @@ mod tests {
             ],
             timeseries[1].samples
         );
-    }
-
-    #[test]
-    fn test_binary_labels_use_utf8() {
-        for label_type in [
-            DataType::Binary,
-            DataType::LargeBinary,
-            DataType::BinaryView,
-        ] {
-            for invalid in [false, true] {
-                let bytes = if invalid {
-                    b"\xff".as_slice()
-                } else {
-                    "设备".as_bytes()
-                };
-                let labels = arrow::array::BinaryArray::from(vec![
-                    Some(b"a".as_slice()),
-                    Some(bytes),
-                    Some(b"".as_slice()),
-                    None,
-                ]);
-                let batch = DfRecordBatch::try_from_iter(vec![
-                    (
-                        greptime_timestamp(),
-                        Arc::new(TimestampMillisecondArray::from(vec![1000; 4])) as ArrayRef,
-                    ),
-                    (
-                        greptime_value(),
-                        Arc::new(Float64Array::from(vec![0.0, 1.0, 2.0, 3.0])) as ArrayRef,
-                    ),
-                    ("tag", casts::cast(&labels, &label_type).unwrap()),
-                ])
-                .unwrap();
-                let schema = Arc::new(Schema::try_from(batch.schema()).unwrap());
-                let batch = RecordBatch::from_df_record_batch(schema.clone(), batch);
-                let result = recordbatches_to_timeseries(
-                    "metrics",
-                    greptime_timestamp(),
-                    greptime_value(),
-                    RecordBatches::try_new(schema, vec![batch]).unwrap(),
-                );
-                if invalid {
-                    assert!(
-                        matches!(
-                            result,
-                            Err(error::Error::InvalidPromRemoteReadQueryResult { .. })
-                        ),
-                        "{label_type:?}: {result:?}"
-                    );
-                    continue;
-                }
-                let series = result.unwrap();
-                assert_eq!(series.len(), 4);
-                for series in series {
-                    let label = series
-                        .labels
-                        .iter()
-                        .find(|label| label.name == "tag")
-                        .map(|label| label.value.as_str());
-                    assert_eq!(
-                        [Some("a"), Some("设备"), Some(""), None][series.samples[0].value as usize],
-                        label,
-                        "{label_type:?}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_binary_label_matchers_agree_with_response() {
-        let ctx = SessionContext::new();
-        let batch = DfRecordBatch::try_from_iter(vec![
-            (
-                greptime_timestamp(),
-                Arc::new(TimestampMillisecondArray::from(vec![1000; 2])) as ArrayRef,
-            ),
-            (
-                greptime_value(),
-                Arc::new(Float64Array::from(vec![1.0, 2.0])) as ArrayRef,
-            ),
-            (
-                "tag",
-                Arc::new(arrow::array::BinaryArray::from(vec![
-                    b"a".as_slice(),
-                    b"b".as_slice(),
-                ])) as ArrayRef,
-            ),
-        ])
-        .unwrap();
-        ctx.register_batch("metrics", batch).unwrap();
-        for (op, pattern) in [
-            (MatcherType::Eq, "a"),
-            (MatcherType::Neq, "b"),
-            (MatcherType::Re, "^a$"),
-            (MatcherType::Nre, "^b$"),
-        ] {
-            let query = Query {
-                start_timestamp_ms: 1000,
-                end_timestamp_ms: 1000,
-                matchers: vec![LabelMatcher {
-                    name: "tag".into(),
-                    value: pattern.into(),
-                    r#type: op as i32,
-                }],
-                ..Default::default()
-            };
-            let plan = query_to_plan(
-                ctx.table("metrics").await.unwrap(),
-                &query,
-                greptime_timestamp(),
-            )
-            .unwrap();
-            let batches = ctx
-                .execute_logical_plan(plan)
-                .await
-                .unwrap()
-                .collect()
-                .await
-                .unwrap();
-            let schema = Arc::new(Schema::try_from(batches[0].schema()).unwrap());
-            let batches = batches
-                .into_iter()
-                .map(|batch| RecordBatch::from_df_record_batch(schema.clone(), batch))
-                .collect();
-            let series = recordbatches_to_timeseries(
-                "metrics",
-                greptime_timestamp(),
-                greptime_value(),
-                RecordBatches::try_new(schema, batches).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(series.len(), 1, "{op:?}");
-            assert_eq!(
-                series[0]
-                    .labels
-                    .iter()
-                    .find(|label| label.name == "tag")
-                    .unwrap()
-                    .value,
-                "a",
-                "{op:?}"
-            );
-            assert_eq!(series[0].samples[0].value, 1.0);
-        }
     }
 
     #[test]

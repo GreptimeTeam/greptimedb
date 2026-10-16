@@ -35,6 +35,8 @@ use common_query::Output;
 use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_value};
 use common_recordbatch::RecordBatches;
 use common_telemetry::{debug, tracing};
+use datatypes::data_type::ConcreteDataType;
+use datatypes::schema::Schema;
 use operator::insert::{
     AutoCreateTableType, InserterRef, PerTableSemanticIndex, apply_per_table_semantic_options,
     build_create_table_expr, fill_table_options_for_create, parse_per_table_semantic_index,
@@ -52,7 +54,7 @@ use servers::query_handler::{
     PromStoreProtocolHandler, PromStoreProtocolHandlerRef, PromStoreResponse,
 };
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
 use store_api::mito_engine_options::SST_FORMAT_KEY;
 use table::TableRef;
@@ -172,7 +174,7 @@ async fn to_query_result(
     })
 }
 
-fn resolve_column_names(table_name: &str, table: &TableRef) -> Result<String> {
+fn resolve_value_column_name(table_name: &str, table: &TableRef) -> Result<String> {
     let columns = table
         .field_columns()
         .map(|column| column.name)
@@ -196,6 +198,29 @@ fn resolve_column_names(table_name: &str, table: &TableRef) -> Result<String> {
         }
         .fail(),
     }
+}
+
+fn validate_labels_types(
+    schema: &Schema,
+    timestamp_column_name: &str,
+    value_column_name: &str,
+) -> ServerResult<()> {
+    for column in schema.column_schemas() {
+        if column.name == timestamp_column_name || column.name == value_column_name {
+            continue;
+        }
+        // All remaining columns are emitted as labels, including non-key columns.
+        ensure!(
+            !matches!(column.data_type, ConcreteDataType::Binary(_)),
+            error::InvalidPromRemoteRequestSnafu {
+                msg: format!(
+                    "Prometheus remote read does not support binary label column '{}' (type {:?})",
+                    column.name, column.data_type
+                ),
+            }
+        );
+    }
+    Ok(())
 }
 
 impl Instance {
@@ -232,7 +257,10 @@ impl Instance {
             .name
             .clone();
 
-        let value_column_name = resolve_column_names(table_name, &table)?;
+        let value_column_name = resolve_value_column_name(table_name, &table)?;
+
+        validate_labels_types(&table.schema(), &timestamp_column_name, &value_column_name)
+            .context(PromStoreRemoteQueryPlanSnafu)?;
 
         let dataframe = self
             .query_engine
@@ -820,6 +848,33 @@ mod tests {
     use session::context::QueryContext;
 
     use super::*;
+
+    #[test]
+    fn test_remote_read_label_types() {
+        use datatypes::schema::ColumnSchema;
+
+        for binary_type in [
+            ConcreteDataType::binary_datatype(),
+            ConcreteDataType::binary_view_datatype(),
+        ] {
+            let schema = Schema::new(vec![
+                ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                ColumnSchema::new("value", binary_type.clone(), true),
+                ColumnSchema::new("label", ConcreteDataType::string_datatype(), true),
+            ]);
+            // The selected value column is not a label; its validation is separate.
+            validate_labels_types(&schema, "ts", "value").unwrap();
+
+            // The same column becomes a label when another value column is selected.
+            let err = validate_labels_types(&schema, "ts", "label").unwrap_err();
+            assert!(matches!(err, error::Error::InvalidPromRemoteRequest { .. }));
+            assert!(err.to_string().contains("binary label column 'value'"));
+        }
+    }
 
     #[test]
     fn test_auto_create_table_type_for_prom_remote_write_metric_engine() {
