@@ -19,7 +19,7 @@ flowchart TD
     A["POST /v1/otlp/v1/traces<br/>OTLP protobuf"] --> B["HTTP handler<br/>decode, select table and pipeline"]
     B --> C["Instance::traces<br/>permission and interceptor"]
     C --> D["Derive trace conventions<br/>parse resource/scope groups"]
-    D --> E["Chunk spans within each group"]
+    D --> E["Chunk spans across groups"]
     E --> F{"Trace pipeline"}
 
     F -->|greptime_trace_v0| G["v0 conversion<br/>fixed columns and JSON attributes"]
@@ -72,8 +72,10 @@ After permission checks, admission counts all spans in the request once per
 database. Chunks, schema retries, and derived lookup-table writes retain that
 admission; their actual writes still contribute WCU accounting.
 
-`ingest_trace_spans` in [`trace_ingest.rs`](trace_ingest.rs) splits the spans in
-each group into owned chunks. `trace_ingest_chunk_size` defaults to 512; setting
+`ingest_trace_spans` in [`trace_ingest.rs`](trace_ingest.rs) splits the spans of
+all resource/scope groups in the request into owned chunks; a chunk can mix
+groups because every span carries its own resource and scope attributes.
+`trace_ingest_chunk_size` defaults to 512; setting
 it to 0 disables splitting. The option is defined in
 [`service_config/otlp.rs`](../../service_config/otlp.rs).
 
